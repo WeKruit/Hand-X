@@ -1470,6 +1470,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			matches = re.finditer(pattern, task_without_emails)
 			for match in matches:
 				url = match.group(0)
+				original_position = match.start()  # Store original position before URL modification
 
 				# Remove trailing punctuation that's not part of URLs
 				url = re.sub(r'[.,;:!?()\[\]]+$', '', url)
@@ -1486,15 +1487,18 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					self.logger.debug(f'Excluding URL with file extension from auto-navigation: {url}')
 					continue
 
-				# Add https:// if missing
+				# If in the 20 characters before the url position is a word in excluded_words skip to avoid "Never go to this url"
+				context_start = max(0, original_position - 20)
+				context_text = task_without_emails[context_start:original_position]
+				if any(word in context_text for word in excluded_words):
+					self.logger.debug(
+						f'Excluding URL with word in excluded words from auto-navigation: {url} (context: "{context_text.strip()}")'
+					)
+					continue
+
+				# Add https:// if missing (after excluded words check to avoid position calculation issues)
 				if not url.startswith(('http://', 'https://')):
 					url = 'https://' + url
-
-				# If in the 20 characters before the url position is a word in excluded_words skip to avoid "Never go to this url"
-				position = task_without_emails.find(url)
-				if any(word in task_without_emails[max(0, position - 20) : position] for word in excluded_words):
-					self.logger.debug(f'Excluding URL with word in excluded words from auto-navigation: {url}')
-					continue
 
 				found_urls.append(url)
 
