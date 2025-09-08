@@ -314,7 +314,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# only load url if no initial actions are provided
 		if self.directly_open_url and not self.state.follow_up_task and not initial_actions:
-			initial_url = self._extract_url_from_task(self.task)
+			initial_url = self._extract_start_url(self.task)
 			if initial_url:
 				self.logger.info(f'🔗 Found URL in task: {initial_url}, adding as initial action...')
 				initial_actions = [{'navigate': {'url': initial_url, 'new_tab': False}}]
@@ -1371,8 +1371,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		return False, False
 
-	def _extract_url_from_task(self, task: str) -> str | None:
+	def _extract_start_url(self, task: str) -> str | None:
 		"""Extract URL from task string using naive pattern matching."""
+
 		import re
 
 		# Remove email addresses from task before looking for URLs
@@ -1457,6 +1458,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			'iso',
 		}
 
+		excluded_words = {
+			'never',
+			'dont',
+			'not',
+			"don't",
+		}
+
 		found_urls = []
 		for pattern in patterns:
 			matches = re.finditer(pattern, task_without_emails)
@@ -1481,6 +1489,15 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				# Add https:// if missing
 				if not url.startswith(('http://', 'https://')):
 					url = 'https://' + url
+
+				# If in the 20 characters before the url position is a word in excluded_words skip to avoid "Never go to this url"
+				position = task_without_emails.find(url)
+				if any(word in task_without_emails[max(0, position - 20) : position] for word in excluded_words):
+					self.logger.debug(f'Excluding URL with word in excluded words from auto-navigation: {url}')
+					continue
+
+				position = task_without_emails.find(url)
+
 				found_urls.append(url)
 
 		unique_urls = list(set(found_urls))
