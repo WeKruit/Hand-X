@@ -1384,6 +1384,27 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			r'(?:www\.)?[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,}(?:/[^\s<>"\']*)?',  # Domain names with subdomains and optional paths
 		]
 
+		# File extensions that should be excluded from URL detection
+		# These are likely files rather than web pages to navigate to
+		excluded_extensions = {
+			# Documents
+			'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp',
+			# Text files
+			'txt', 'md', 'csv', 'json', 'xml', 'yaml', 'yml',
+			# Archives
+			'zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz',
+			# Images
+			'jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg', 'webp', 'ico',
+			# Audio/Video
+			'mp3', 'mp4', 'avi', 'mkv', 'mov', 'wav', 'flac', 'ogg',
+			# Code/Data
+			'py', 'js', 'css', 'html', 'htm', 'php', 'java', 'cpp', 'c', 'h',
+			# Academic/Research
+			'bib', 'bibtex', 'tex', 'latex', 'cls', 'sty',
+			# Other common file types
+			'exe', 'msi', 'dmg', 'pkg', 'deb', 'rpm', 'iso',
+		}
+
 		found_urls = []
 		for pattern in patterns:
 			matches = re.finditer(pattern, task_without_emails)
@@ -1392,6 +1413,19 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 				# Remove trailing punctuation that's not part of URLs
 				url = re.sub(r'[.,;:!?()\[\]]+$', '', url)
+				
+				# Check if URL ends with a file extension that should be excluded
+				url_lower = url.lower()
+				should_exclude = False
+				for ext in excluded_extensions:
+					if url_lower.endswith(f'.{ext}'):
+						should_exclude = True
+						break
+				
+				if should_exclude:
+					self.logger.debug(f'Excluding URL with file extension from auto-navigation: {url}')
+					continue
+				
 				# Add https:// if missing
 				if not url.startswith(('http://', 'https://')):
 					url = 'https://' + url
