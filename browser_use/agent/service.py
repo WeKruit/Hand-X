@@ -1488,7 +1488,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				# If in the 20 characters before the url position is a word in excluded_words skip to avoid "Never go to this url"
 				context_start = max(0, original_position - 20)
 				context_text = task_without_emails[context_start:original_position]
-				if any(word in context_text for word in excluded_words):
+				if any(word.lower() in context_text.lower() for word in excluded_words):
 					self.logger.debug(
 						f'Excluding URL with word in excluded words from auto-navigation: {url} (context: "{context_text.strip()}")'
 					)
