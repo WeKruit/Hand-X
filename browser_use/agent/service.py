@@ -1439,8 +1439,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			'css',
 			'java',
 			'cpp',
-			'c',
-			'h',
 			# Academic/Research
 			'bib',
 			'bibtex',
