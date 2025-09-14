@@ -4,6 +4,7 @@ import pytest
 from pydantic import BaseModel
 
 from browser_use.llm import ChatAnthropic, ChatGoogle, ChatGroq, ChatOpenAI, ChatOpenRouter
+from browser_use.llm.oci_raw.chat import ChatOCIRaw
 from browser_use.llm.messages import ContentPartTextParam
 
 
@@ -241,6 +242,51 @@ class TestChatModels:
 
 		chat = ChatOpenRouter(model='openai/gpt-4o-mini', api_key=os.getenv('OPENROUTER_API_KEY'), temperature=0)
 		response = await chat.ainvoke(self.STRUCTURED_MESSAGES, output_format=CapitalResponse)
+		completion = response.completion
+
+		assert isinstance(completion, CapitalResponse)
+		assert completion.country.lower() == self.EXPECTED_FRANCE_COUNTRY
+		assert completion.capital.lower() == self.EXPECTED_FRANCE_CAPITAL
+
+	# OCI Raw Tests
+	@pytest.fixture
+	def oci_raw_chat(self):
+		"""Provides an initialized ChatOCIRaw client for tests."""
+		# Skip if OCI credentials not available - check for config file existence
+		try:
+			import oci
+			oci.config.from_file('~/.oci/config', 'DEFAULT')
+		except Exception:
+			pytest.skip('OCI credentials not available')
+		
+		return ChatOCIRaw(
+			model_id='ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyarojgfh6msa452vziycwfymle5gxdvpwwxzara53topmq',
+			service_endpoint='https://inference.generativeai.us-chicago-1.oci.oraclecloud.com',
+			compartment_id='ocid1.tenancy.oc1..aaaaaaaayeiis5uk2nuubznrekd6xsm56k3m4i7tyvkxmr2ftojqfkpx2ura',
+			provider='meta',
+			temperature=0.7,
+			max_tokens=800,
+			frequency_penalty=0.0,
+			presence_penalty=0.0,
+			top_p=0.9,
+			auth_type='API_KEY',
+			auth_profile='DEFAULT'
+		)
+
+	@pytest.mark.asyncio
+	async def test_oci_raw_ainvoke_normal(self, oci_raw_chat):
+		"""Test normal text response from OCI Raw"""
+		response = await oci_raw_chat.ainvoke(self.CONVERSATION_MESSAGES)
+
+		completion = response.completion
+
+		assert isinstance(completion, str)
+		assert self.EXPECTED_GERMANY_CAPITAL in completion.lower()
+
+	@pytest.mark.asyncio
+	async def test_oci_raw_ainvoke_structured(self, oci_raw_chat):
+		"""Test structured output from OCI Raw"""
+		response = await oci_raw_chat.ainvoke(self.STRUCTURED_MESSAGES, output_format=CapitalResponse)
 		completion = response.completion
 
 		assert isinstance(completion, CapitalResponse)
