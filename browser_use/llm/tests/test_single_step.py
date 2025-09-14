@@ -13,6 +13,7 @@ from browser_use.llm.azure.chat import ChatAzureOpenAI
 from browser_use.llm.base import BaseChatModel
 from browser_use.llm.google.chat import ChatGoogle
 from browser_use.llm.groq.chat import ChatGroq
+from browser_use.llm.oci_raw.chat import ChatOCIRaw
 from browser_use.llm.openai.chat import ChatOpenAI
 
 # Set logging level to INFO for this module
@@ -112,11 +113,32 @@ def create_mock_state_message(temp_dir: str):
 		(ChatOpenAI, 'gpt-4.1-mini'),
 		(ChatAnthropic, 'claude-3-5-sonnet-latest'),
 		(ChatAzureOpenAI, 'gpt-4.1-mini'),
+		pytest.param(
+			ChatOCIRaw, 
+			{
+				'model_id': 'ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyarojgfh6msa452vziycwfymle5gxdvpwwxzara53topmq',
+				'service_endpoint': 'https://inference.generativeai.us-chicago-1.oci.oraclecloud.com',
+				'compartment_id': 'ocid1.tenancy.oc1..aaaaaaaayeiis5uk2nuubznrekd6xsm56k3m4i7tyvkxmr2ftojqfkpx2ura',
+				'provider': 'meta',
+				'temperature': 0.7,
+				'max_tokens': 800,
+				'frequency_penalty': 0.0,
+				'presence_penalty': 0.0,
+				'top_p': 0.9,
+				'auth_type': 'API_KEY',
+				'auth_profile': 'DEFAULT'
+			},
+			marks=pytest.mark.skipif(True, reason="OCI Raw requires valid credentials")
+		),
 	],
 )
 async def test_single_step_parametrized(llm_class, model_name):
 	"""Test single step with different LLM providers using pytest parametrize."""
-	llm = llm_class(model=model_name)
+	if isinstance(model_name, dict):
+		# Handle ChatOCIRaw which requires keyword arguments
+		llm = llm_class(**model_name)
+	else:
+		llm = llm_class(model=model_name)
 
 	agent = Agent(task='Click the button on the page', llm=llm)
 
@@ -131,6 +153,12 @@ async def test_single_step_parametrized(llm_class, model_name):
 
 		# Test with simple question
 		response = await llm.ainvoke(messages, agent.AgentOutput)
+
+		# Additional validation for OCI Raw
+		if isinstance(llm, ChatOCIRaw):
+			# Verify OCI Raw generates proper Agent actions
+			assert response.completion.action is not None
+			assert len(response.completion.action) > 0
 
 		# Basic assertions to ensure response is valid
 		assert response.completion is not None
