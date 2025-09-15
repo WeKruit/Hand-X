@@ -36,11 +36,13 @@ class SearchSummary(BaseModel):
 
 
 # Configuration examples for different providers
-compartment_id = "ocid1.tenancy.oc1..aaaaaaaayeiis5uk2nuubznrekd6xsm56k3m4i7tyvkxmr2ftojqfkpx2ura"
+# Replace these with your actual OCI values
+compartment_id = "ocid1.tenancy.oc1..aaaaaaaayour-compartment-id-here"
 endpoint = "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com"
 
 # Example 1: Meta Llama model (uses GenericChatRequest)
-meta_model_id="ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyarojgfh6msa452vziycwfymle5gxdvpwwxzara53topmq"
+# Replace with your actual Meta model OCID
+meta_model_id = "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyayour-meta-model-id-here"
 
 
 meta_llm = ChatOCIRaw(
@@ -56,10 +58,10 @@ meta_llm = ChatOCIRaw(
     auth_type="API_KEY",
     auth_profile="DEFAULT"
 )
-cohere_model_id="ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyanrlpnq5ybfu5hnzarg7jomak3q6kyhkzjsl4qj24fyoq"
+# Replace with your actual Cohere model OCID
+cohere_model_id = "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyayour-cohere-model-id-here"
 
 # Example 2: Cohere model (uses CohereChatRequest)
-# cohere_model_id = "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyapnibwg42qjhwaxrlqfpreueirtwghiwvv2whsnwmnlva"
 cohere_llm = ChatOCIRaw(
     model_id=cohere_model_id,
     service_endpoint=endpoint,
@@ -75,7 +77,8 @@ cohere_llm = ChatOCIRaw(
 )
 
 # Example 3: xAI model (uses GenericChatRequest)
-xai_model_id = "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3bsfz4ogiuv3yc7gcnlry7gi3zzx6tnikg6jltqszm2q"
+# Replace with your actual xAI model OCID
+xai_model_id = "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyayour-xai-model-id-here"
 xai_llm = ChatOCIRaw(
     model_id=xai_model_id,
     service_endpoint=endpoint,
