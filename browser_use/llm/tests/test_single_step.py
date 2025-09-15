@@ -21,6 +21,16 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
+def _check_oci_credentials() -> bool:
+	"""Check if OCI credentials are available."""
+	try:
+		import oci
+		oci.config.from_file('~/.oci/config', 'DEFAULT')
+		return True
+	except Exception:
+		return False
+
+
 def create_mock_state_message(temp_dir: str):
 	"""Create a mock state message with a single clickable element."""
 
@@ -128,7 +138,10 @@ def create_mock_state_message(temp_dir: str):
 				'auth_type': 'API_KEY',
 				'auth_profile': 'DEFAULT'
 			},
-			marks=pytest.mark.skipif(True, reason="OCI Raw requires valid credentials")
+			marks=pytest.mark.skipif(
+				not _check_oci_credentials(), 
+				reason="OCI credentials not available"
+			)
 		),
 	],
 )
