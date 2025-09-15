@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from browser_use.llm import ChatAnthropic, ChatGoogle, ChatGroq, ChatOpenAI, ChatOpenRouter
 from browser_use.llm.oci_raw.chat import ChatOCIRaw
 from browser_use.llm.messages import ContentPartTextParam
+from examples.models.oci_models import meta_llm, cohere_llm, xai_llm
 
 
 class CapitalResponse(BaseModel):
@@ -259,19 +260,7 @@ class TestChatModels:
 		except Exception:
 			pytest.skip('OCI credentials not available')
 		
-		return ChatOCIRaw(
-			model_id='ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyarojgfh6msa452vziycwfymle5gxdvpwwxzara53topmq',
-			service_endpoint='https://inference.generativeai.us-chicago-1.oci.oraclecloud.com',
-			compartment_id='ocid1.tenancy.oc1..aaaaaaaayeiis5uk2nuubznrekd6xsm56k3m4i7tyvkxmr2ftojqfkpx2ura',
-			provider='meta',
-			temperature=0.7,
-			max_tokens=800,
-			frequency_penalty=0.0,
-			presence_penalty=0.0,
-			top_p=0.9,
-			auth_type='API_KEY',
-			auth_profile='DEFAULT'
-		)
+		return  xai_llm #xai or cohere
 
 	@pytest.mark.asyncio
 	async def test_oci_raw_ainvoke_normal(self, oci_raw_chat):

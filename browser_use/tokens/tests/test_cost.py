@@ -10,6 +10,7 @@ import logging
 from browser_use.llm import ChatOpenAI
 from browser_use.llm.messages import AssistantMessage, SystemMessage, UserMessage
 from browser_use.tokens.service import TokenCost
+from examples.models.oci_models import cohere_llm, xai_llm, meta_llm
 
 # Optional OCI import for testing
 try:
@@ -30,19 +31,8 @@ def get_oci_model_if_available():
 	# Try to create OCI model with mock/test configuration
 	# These values should be replaced with real ones if testing with actual OCI
 	try:
-		return ChatOCIRaw(
-			model_id="ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyarojgfh6msa452vziycwfymle5gxdvpwwxzara53topmq",
-			service_endpoint="https://inference.generativeai.us-chicago-1.oci.oraclecloud.com",
-			compartment_id="ocid1.tenancy.oc1..aaaaaaaayeiis5uk2nuubznrekd6xsm56k3m4i7tyvkxmr2ftojqfkpx2ura",
-			provider="meta",
-			temperature=0.7,
-			max_tokens=800,
-			frequency_penalty=0.0,
-			presence_penalty=0.0,
-			top_p=0.9,
-			auth_type="API_KEY",
-			auth_profile="DEFAULT"
-		)
+		# get any of the llm xai_llm or cohere_llm
+		return meta_llm
 
 	except Exception as e:
 		logger.info(f"OCI model not available for testing: {e}")
@@ -64,7 +54,7 @@ Only output the country name, no numbers, no punctuation, just the name."""
 	# Test with different models
 	models = []
 	models.append(ChatOpenAI(model='gpt-4.1'))  # Commented out - requires OPENAI_API_KEY
-	# models.append(ChatGoogle(model='gemini-2.0-flash-exp'))
+	models.append(ChatGoogle(model='gemini-2.0-flash-exp'))
 	
 	# Add OCI model if available
 	oci_model = get_oci_model_if_available()
