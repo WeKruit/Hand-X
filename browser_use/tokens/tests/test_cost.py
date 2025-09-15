@@ -11,8 +11,42 @@ from browser_use.llm import ChatOpenAI
 from browser_use.llm.messages import AssistantMessage, SystemMessage, UserMessage
 from browser_use.tokens.service import TokenCost
 
+# Optional OCI import for testing
+try:
+	from browser_use.llm.oci_raw.chat import ChatOCIRaw
+	OCI_AVAILABLE = True
+except ImportError:
+	OCI_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+def get_oci_model_if_available():
+	"""Create OCI model for testing if credentials are available."""
+	if not OCI_AVAILABLE:
+		return None
+	
+	# Try to create OCI model with mock/test configuration
+	# These values should be replaced with real ones if testing with actual OCI
+	try:
+		return ChatOCIRaw(
+			model_id="ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyarojgfh6msa452vziycwfymle5gxdvpwwxzara53topmq",
+			service_endpoint="https://inference.generativeai.us-chicago-1.oci.oraclecloud.com",
+			compartment_id="ocid1.tenancy.oc1..aaaaaaaayeiis5uk2nuubznrekd6xsm56k3m4i7tyvkxmr2ftojqfkpx2ura",
+			provider="meta",
+			temperature=0.7,
+			max_tokens=800,
+			frequency_penalty=0.0,
+			presence_penalty=0.0,
+			top_p=0.9,
+			auth_type="API_KEY",
+			auth_profile="DEFAULT"
+		)
+
+	except Exception as e:
+		logger.info(f"OCI model not available for testing: {e}")
+		return None
 
 
 async def test_iterative_country_generation():
@@ -28,10 +62,17 @@ Keep track of which countries you've already said and don't repeat them.
 Only output the country name, no numbers, no punctuation, just the name."""
 
 	# Test with different models
-	models = [
-		ChatOpenAI(model='gpt-4.1'),
-		# ChatGoogle(model='gemini-2.0-flash-exp'),
-	]
+	models = []
+	models.append(ChatOpenAI(model='gpt-4.1'))  # Commented out - requires OPENAI_API_KEY
+	# models.append(ChatGoogle(model='gemini-2.0-flash-exp'))
+	
+	# Add OCI model if available
+	oci_model = get_oci_model_if_available()
+	if oci_model:
+		models.append(oci_model)
+		print(f'✅ OCI model added to test: {oci_model.name}')
+	else:
+		print('ℹ️  OCI model not available (install with pip install browser-use[oci] and configure credentials)')
 
 	print('\n🌍 Iterative Country Generation Test')
 	print('=' * 80)
