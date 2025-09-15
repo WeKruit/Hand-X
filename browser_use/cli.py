@@ -23,7 +23,6 @@ from dotenv import load_dotenv
 
 from browser_use.llm.anthropic.chat import ChatAnthropic
 from browser_use.llm.google.chat import ChatGoogle
-from browser_use.llm.oci_raw.chat import ChatOCIRaw
 from browser_use.llm.openai.chat import ChatOpenAI
 
 load_dotenv()
@@ -248,7 +247,9 @@ def get_llm(config: dict[str, Any]):
 			return ChatGoogle(model=model_name, temperature=temperature)
 		elif model_name.startswith('oci'):
 			# OCI models require additional configuration
-			print('⚠️  OCI models require manual configuration. Please use the ChatOCIRaw class directly with your OCI credentials.')
+			print(
+				'⚠️  OCI models require manual configuration. Please use the ChatOCIRaw class directly with your OCI credentials.'
+			)
 			sys.exit(1)
 
 	# Auto-detect based on available API keys

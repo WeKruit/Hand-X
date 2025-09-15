@@ -25,6 +25,7 @@ def _check_oci_credentials() -> bool:
 	"""Check if OCI credentials are available."""
 	try:
 		import oci
+
 		oci.config.from_file('~/.oci/config', 'DEFAULT')
 		return True
 	except Exception:
@@ -124,11 +125,11 @@ def create_mock_state_message(temp_dir: str):
 		(ChatAnthropic, 'claude-3-5-sonnet-latest'),
 		(ChatAzureOpenAI, 'gpt-4.1-mini'),
 		pytest.param(
-			ChatOCIRaw, 
+			ChatOCIRaw,
 			{
 				'model_id': 'ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyarojgfh6msa452vziycwfymle5gxdvpwwxzara53topmq',
 				'service_endpoint': 'https://inference.generativeai.us-chicago-1.oci.oraclecloud.com',
-				'compartment_id': 'ocid1.tenancy.oc1..aaaaaaaayeiis5uk2..your_compartment_id',
+				'compartment_id': 'ocid1.tenancy.oc1..aaaaaaaayeiis5uk2nuubznrekd6xsm56k3m4i7tyvkxmr2ftojqfkpx2ura',
 				'provider': 'meta',
 				'temperature': 0.7,
 				'max_tokens': 800,
@@ -136,12 +137,9 @@ def create_mock_state_message(temp_dir: str):
 				'presence_penalty': 0.0,
 				'top_p': 0.9,
 				'auth_type': 'API_KEY',
-				'auth_profile': 'DEFAULT'
+				'auth_profile': 'DEFAULT',
 			},
-			marks=pytest.mark.skipif(
-				not _check_oci_credentials(), 
-				reason="OCI credentials not available"
-			)
+			marks=pytest.mark.skipif(not _check_oci_credentials(), reason='OCI credentials not available'),
 		),
 	],
 )

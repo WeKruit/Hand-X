@@ -113,7 +113,7 @@ def get_llm_by_name(model_name: str):
 	elif provider == 'oci':
 		# OCI requires more complex configuration that can't be easily inferred from env vars
 		# Users should use ChatOCIRaw directly with proper configuration
-		raise ValueError(f"OCI models require manual configuration. Use ChatOCIRaw directly with your OCI credentials.")
+		raise ValueError('OCI models require manual configuration. Use ChatOCIRaw directly with your OCI credentials.')
 
 	else:
 		available_providers = ['openai', 'azure', 'google', 'oci']

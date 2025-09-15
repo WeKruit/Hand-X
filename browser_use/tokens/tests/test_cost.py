@@ -11,12 +11,13 @@ from browser_use import ChatGoogle
 from browser_use.llm import ChatOpenAI
 from browser_use.llm.messages import AssistantMessage, SystemMessage, UserMessage
 from browser_use.tokens.service import TokenCost
-from examples.models.oci_models import cohere_llm, xai_llm, meta_llm
+from examples.models.oci_models import meta_llm
 
 # Optional OCI import for testing
 try:
-	from browser_use.llm.oci_raw.chat import ChatOCIRaw
-	OCI_AVAILABLE = True
+	import importlib.util
+
+	OCI_AVAILABLE = importlib.util.find_spec('browser_use.llm.oci_raw.chat') is not None
 except ImportError:
 	OCI_AVAILABLE = False
 
@@ -28,7 +29,7 @@ def get_oci_model_if_available():
 	"""Create OCI model for testing if credentials are available."""
 	if not OCI_AVAILABLE:
 		return None
-	
+
 	# Try to create OCI model with mock/test configuration
 	# These values should be replaced with real ones if testing with actual OCI
 	try:
@@ -36,7 +37,7 @@ def get_oci_model_if_available():
 		return meta_llm
 
 	except Exception as e:
-		logger.info(f"OCI model not available for testing: {e}")
+		logger.info(f'OCI model not available for testing: {e}')
 		return None
 
 
@@ -56,7 +57,7 @@ Only output the country name, no numbers, no punctuation, just the name."""
 	models = []
 	models.append(ChatOpenAI(model='gpt-4.1'))  # Commented out - requires OPENAI_API_KEY
 	models.append(ChatGoogle(model='gemini-2.0-flash-exp'))
-	
+
 	# Add OCI model if available
 	oci_model = get_oci_model_if_available()
 	if oci_model:
