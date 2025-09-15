@@ -5,8 +5,6 @@ This module handles the conversion between browser-use message formats
 and the OCI Raw API message format using proper OCI SDK models.
 """
 
-from typing import List
-
 from oci.generative_ai_inference.models import ImageContent, ImageUrl, Message, TextContent
 
 from browser_use.llm.messages import (
@@ -61,7 +59,7 @@ class OCIRawMessageSerializer:
 		return ImageContent(image_url=image_url)
 
 	@staticmethod
-	def serialize_messages(messages: List[BaseMessage]) -> List[Message]:
+	def serialize_messages(messages: list[BaseMessage]) -> list[Message]:
 		"""
 		Serialize a list of browser-use messages to OCI Raw API Message objects.
 
@@ -156,7 +154,7 @@ class OCIRawMessageSerializer:
 		return oci_messages
 
 	@staticmethod
-	def serialize_messages_for_cohere(messages: List[BaseMessage]) -> str:
+	def serialize_messages_for_cohere(messages: list[BaseMessage]) -> str:
 		"""
 		Serialize messages for Cohere models which expect a single message string.
 
