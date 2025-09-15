@@ -4,9 +4,8 @@ import pytest
 from pydantic import BaseModel
 
 from browser_use.llm import ChatAnthropic, ChatGoogle, ChatGroq, ChatOpenAI, ChatOpenRouter
-from browser_use.llm.oci_raw.chat import ChatOCIRaw
 from browser_use.llm.messages import ContentPartTextParam
-from examples.models.oci_models import meta_llm, cohere_llm, xai_llm
+from examples.models.oci_models import xai_llm
 
 
 class CapitalResponse(BaseModel):
@@ -256,11 +255,12 @@ class TestChatModels:
 		# Skip if OCI credentials not available - check for config file existence
 		try:
 			import oci
+
 			oci.config.from_file('~/.oci/config', 'DEFAULT')
 		except Exception:
 			pytest.skip('OCI credentials not available')
-		
-		return  xai_llm #xai or cohere
+
+		return xai_llm  # xai or cohere
 
 	@pytest.mark.asyncio
 	async def test_oci_raw_ainvoke_normal(self, oci_raw_chat):
