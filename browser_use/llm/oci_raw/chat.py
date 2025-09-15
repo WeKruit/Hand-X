@@ -15,6 +15,7 @@ from oci.generative_ai_inference import GenerativeAiInferenceClient
 from oci.generative_ai_inference.models import (
     ChatDetails,
     GenericChatRequest,
+    CohereChatRequest,
     OnDemandServingMode,
     BaseChatRequest
 )
@@ -42,12 +43,13 @@ class ChatOCIRaw(BaseChatModel):
         model_id: The OCI GenAI model OCID
         service_endpoint: The OCI service endpoint URL
         compartment_id: The OCI compartment OCID
-        provider: The model provider (e.g., "meta", "cohere" ,"grok")
-        temperature: Temperature for response generation (0.0-2.0)
-        max_tokens: Maximum tokens in response
-        frequency_penalty: Frequency penalty for response generation
-        presence_penalty: Presence penalty for response generation
-        top_p: Top-p sampling parameter
+        provider: The model provider (e.g., "meta", "cohere", "xai")
+        temperature: Temperature for response generation (0.0-2.0) - supported by all providers
+        max_tokens: Maximum tokens in response - supported by all providers
+        frequency_penalty: Frequency penalty for response generation - supported by Meta and Cohere only
+        presence_penalty: Presence penalty for response generation - supported by Meta only
+        top_p: Top-p sampling parameter - supported by all providers
+        top_k: Top-k sampling parameter - supported by Cohere and xAI only
         auth_type: Authentication type (e.g., "API_KEY")
         auth_profile: Authentication profile name
         timeout: Request timeout in seconds
@@ -65,6 +67,7 @@ class ChatOCIRaw(BaseChatModel):
     frequency_penalty: float | None = 0.0
     presence_penalty: float | None = 0.0
     top_p: float | None = 0.75
+    top_k: int | None = 0  # Used by Cohere models
     
     # Authentication
     auth_type: str = "API_KEY"
@@ -105,6 +108,51 @@ class ChatOCIRaw(BaseChatModel):
             else:
                 return f"oci-{self.provider}-model"
         return self.model_id
+
+    def _uses_cohere_format(self) -> bool:
+        """Check if the provider uses Cohere chat request format."""
+        return self.provider.lower() == "cohere"
+
+    def _get_supported_parameters(self) -> dict[str, bool]:
+        """Get which parameters are supported by the current provider."""
+        provider = self.provider.lower()
+        if provider == "meta":
+            return {
+                "temperature": True,
+                "max_tokens": True,
+                "frequency_penalty": True,
+                "presence_penalty": True,
+                "top_p": True,
+                "top_k": False
+            }
+        elif provider == "cohere":
+            return {
+                "temperature": True,
+                "max_tokens": True,
+                "frequency_penalty": True,
+                "presence_penalty": False,
+                "top_p": True,
+                "top_k": True
+            }
+        elif provider == "xai":
+            return {
+                "temperature": True,
+                "max_tokens": True,
+                "frequency_penalty": False,
+                "presence_penalty": False,
+                "top_p": True,
+                "top_k": True
+            }
+        else:
+            # Default: assume all parameters are supported
+            return {
+                "temperature": True,
+                "max_tokens": True,
+                "frequency_penalty": True,
+                "presence_penalty": True,
+                "top_p": True,
+                "top_k": True
+            }
 
     def _get_oci_client(self) -> GenerativeAiInferenceClient:
         """Get the OCI GenerativeAiInferenceClient following your working example."""
@@ -182,24 +230,30 @@ class ChatOCIRaw(BaseChatModel):
                 )
             
             chat_response = response.data.chat_response
-            if not hasattr(chat_response, 'choices') or not chat_response.choices:
+            
+            # Handle different response types based on provider
+            if hasattr(chat_response, 'text'):
+                # Cohere response format - has direct text attribute
+                return chat_response.text or ''
+            elif hasattr(chat_response, 'choices') and chat_response.choices:
+                # Generic response format - has choices array (Meta, xAI)
+                choice = chat_response.choices[0]
+                message = choice.message
+                content_parts = message.content
+                
+                # Extract text from content parts
+                text_parts = []
+                for part in content_parts:
+                    if hasattr(part, 'text'):
+                        text_parts.append(part.text)
+                
+                return '\n'.join(text_parts) if text_parts else ''
+            else:
                 raise ModelProviderError(
-                    message="No choices in response",
+                    message=f"Unsupported response format: {type(chat_response).__name__}",
                     status_code=500,
                     model=self.name
                 )
-            
-            choice = chat_response.choices[0]
-            message = choice.message
-            content_parts = message.content
-            
-            # Extract text from content parts
-            text_parts = []
-            for part in content_parts:
-                if hasattr(part, 'text'):
-                    text_parts.append(part.text)
-            
-            return '\n'.join(text_parts) if text_parts else ''
             
         except Exception as e:
             raise ModelProviderError(
@@ -210,18 +264,42 @@ class ChatOCIRaw(BaseChatModel):
 
     async def _make_request(self, messages: list[BaseMessage]):
         """Make async request to OCI API using proper OCI SDK models."""
-        # Serialize messages to OCI Message objects
-        oci_messages = OCIRawMessageSerializer.serialize_messages(messages)
         
-        # Create chat request using proper OCI SDK models (following your working example)
-        chat_request = GenericChatRequest()
-        chat_request.api_format = BaseChatRequest.API_FORMAT_GENERIC
-        chat_request.messages = oci_messages
-        chat_request.max_tokens = self.max_tokens
-        chat_request.temperature = self.temperature
-        chat_request.frequency_penalty = self.frequency_penalty
-        chat_request.presence_penalty = self.presence_penalty
-        chat_request.top_p = self.top_p
+        # Create chat request based on provider type
+        if self._uses_cohere_format():
+            # Cohere models use CohereChatRequest with single message string
+            message_text = OCIRawMessageSerializer.serialize_messages_for_cohere(messages)
+            
+            chat_request = CohereChatRequest()
+            chat_request.message = message_text
+            chat_request.max_tokens = self.max_tokens
+            chat_request.temperature = self.temperature
+            chat_request.frequency_penalty = self.frequency_penalty
+            chat_request.top_p = self.top_p
+            chat_request.top_k = self.top_k
+        else:
+            # Meta, xAI and other models use GenericChatRequest with messages array
+            oci_messages = OCIRawMessageSerializer.serialize_messages(messages)
+            
+            chat_request = GenericChatRequest()
+            chat_request.api_format = BaseChatRequest.API_FORMAT_GENERIC
+            chat_request.messages = oci_messages
+            chat_request.max_tokens = self.max_tokens
+            chat_request.temperature = self.temperature
+            chat_request.top_p = self.top_p
+            
+            # Provider-specific parameters
+            if self.provider.lower() == "meta":
+                # Meta models support frequency_penalty and presence_penalty
+                chat_request.frequency_penalty = self.frequency_penalty
+                chat_request.presence_penalty = self.presence_penalty
+            elif self.provider.lower() == "xai":
+                # xAI models support top_k but not frequency_penalty or presence_penalty
+                chat_request.top_k = self.top_k
+            else:
+                # Default: include all parameters for unknown providers
+                chat_request.frequency_penalty = self.frequency_penalty
+                chat_request.presence_penalty = self.presence_penalty
         
         # Create serving mode
         serving_mode = OnDemandServingMode(model_id=self.model_id)
