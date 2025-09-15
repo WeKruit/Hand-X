@@ -48,6 +48,52 @@ agent = Agent(
 history = await agent.run()
 ```
 
+### Provider-Specific Configuration Examples
+
+#### Meta Llama Model
+```python
+meta_model = ChatOCIRaw(
+    model_id="ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya...",
+    service_endpoint="https://inference.generativeai.us-chicago-1.oci.oraclecloud.com",
+    compartment_id="ocid1.tenancy.oc1..aaaaaaaayeiis5uk2nuubznrekd...",
+    provider="meta",  # Uses GenericChatRequest
+    temperature=0.7,
+    max_tokens=800,
+    frequency_penalty=0.0,
+    presence_penalty=0.0,
+    top_p=0.9
+)
+```
+
+#### Cohere Model
+```python
+cohere_model = ChatOCIRaw(
+    model_id="ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya...",
+    service_endpoint="https://inference.generativeai.us-chicago-1.oci.oraclecloud.com",
+    compartment_id="ocid1.tenancy.oc1..aaaaaaaayeiis5uk2nuubznrekd...",
+    provider="cohere",  # Uses CohereChatRequest
+    temperature=1.0,
+    max_tokens=600,
+    frequency_penalty=0.0,
+    top_p=0.75,
+    top_k=0  # Cohere-specific parameter
+)
+```
+
+#### xAI Model
+```python
+xai_model = ChatOCIRaw(
+    model_id="ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya...",
+    service_endpoint="https://inference.generativeai.us-chicago-1.oci.oraclecloud.com",
+    compartment_id="ocid1.tenancy.oc1..aaaaaaaayeiis5uk2nuubznrekd...",
+    provider="xai",  # Uses GenericChatRequest
+    temperature=1.0,
+    max_tokens=20000,
+    top_p=1.0,
+    top_k=0
+)
+```
+
 ### Structured Output
 
 ```python
@@ -63,7 +109,53 @@ response = await model.ainvoke(messages, output_format=SearchResult)
 result = response.completion  # This is a SearchResult instance
 ```
 
+## Available Models
+
+For the complete list of available models in Oracle Cloud Infrastructure Generative AI, refer to the official documentation: [OCI Generative AI Pretrained Models](https://docs.oracle.com/en-us/iaas/Content/generative-ai/pretrained-models.htm)
+
+### Tool Calling Support
+
+**Important**: Only models that support tool calling/function calling are compatible with browser-use. Tool calling is essential for browser-use as the agent needs to call browser automation functions (click, type, scroll, etc.) to interact with web pages.
+
+According to Oracle's documentation, tool calling functionality is available exclusively through the API and is not supported for browser-based use. However, when using browser-use with OCI models through this integration, the tool calling happens at the application level (not browser-based), making it compatible.
+
+### Image Support Models
+
+Several OCI models support image processing capabilities, which are useful when browser-use needs to analyze webpage screenshots:
+
+#### Vision-Enabled Chat Models
+- **Meta Llama 3.2 90B Vision**: Supports both text and image inputs
+- **Meta Llama 3.2 11B Vision**: Supports both text and image inputs
+
+#### Image Embedding Models
+- **Cohere Embed English Image 3**: Supports image inputs for semantic searches
+- **Cohere Embed Multilingual Image 3**: Supports multilingual image processing
+- **Cohere Embed English Light Image 3**: Lightweight version with image support
+- **Cohere Embed Multilingual Light Image 3**: Lightweight multilingual version with image support
+
+These vision-enabled models are particularly useful for browser-use tasks that require understanding webpage content through screenshots, such as:
+- Identifying UI elements and buttons
+- Reading text from images
+- Understanding page layouts and visual context
+- Processing charts, graphs, and visual data
+
 ## Configuration
+
+### Provider-Specific API Formats
+
+Different model providers in OCI use different API request formats:
+
+#### Meta and xAI Models
+- Use `GenericChatRequest` with messages array
+- Support structured conversations with multiple message types
+- Parameters: `temperature`, `max_tokens`, `frequency_penalty`, `presence_penalty`, `top_p`
+
+#### Cohere Models  
+- Use `CohereChatRequest` with single message string
+- Convert conversation history to a single formatted string
+- Parameters: `temperature`, `max_tokens`, `frequency_penalty`, `top_p`, `top_k`
+
+The integration automatically detects the correct format based on the `provider` parameter and handles the conversion transparently.
 
 ### Authentication Types
 
@@ -78,12 +170,13 @@ The integration supports multiple OCI authentication methods:
 - `model_id`: The OCID of your OCI GenAI model
 - `service_endpoint`: The OCI service endpoint URL
 - `compartment_id`: The OCID of your OCI compartment
-- `provider`: Model provider ("meta" or "cohere")
+- `provider`: Model provider ("meta", "cohere", or "xai")
 - `temperature`: Response randomness (0.0-2.0)
 - `max_tokens`: Maximum tokens in response
 - `top_p`: Top-p sampling parameter
 - `frequency_penalty`: Frequency penalty for repetition
 - `presence_penalty`: Presence penalty for repetition
+- `top_k`: Top-k sampling parameter (used by Cohere models)
 
 ## Error Handling
 
@@ -141,6 +234,10 @@ The OCI GenAI API returns responses in this format:
 1. **Authentication Errors**: Ensure your OCI configuration is correct and you have the necessary permissions
 2. **Model Not Found**: Verify your model OCID and ensure it's available in your compartment
 3. **Rate Limiting**: The integration handles rate limits automatically with proper error types
+4. **API Format Mismatch**: If you get "Chat request's apiFormat must match serving model's apiFormat" error, ensure you're using the correct `provider` parameter:
+   - Use `provider="meta"` for Meta Llama models
+   - Use `provider="cohere"` for Cohere models  
+   - Use `provider="xai"` for xAI models
 
 ### Debug Mode
 
