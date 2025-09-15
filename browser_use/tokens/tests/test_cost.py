@@ -7,6 +7,7 @@ Tests ChatOpenAI and ChatGoogle by iteratively generating countries.
 import asyncio
 import logging
 
+from browser_use import ChatGoogle
 from browser_use.llm import ChatOpenAI
 from browser_use.llm.messages import AssistantMessage, SystemMessage, UserMessage
 from browser_use.tokens.service import TokenCost
