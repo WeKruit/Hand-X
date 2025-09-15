@@ -85,6 +85,7 @@ _LAZY_IMPORTS = {
 	'ChatAnthropic': ('browser_use.llm.anthropic.chat', 'ChatAnthropic'),
 	'ChatGroq': ('browser_use.llm.groq.chat', 'ChatGroq'),
 	'ChatAzureOpenAI': ('browser_use.llm.azure.chat', 'ChatAzureOpenAI'),
+	'ChatOCIRaw': ('browser_use.llm.oci_raw.chat', 'ChatOCIRaw'),
 	'ChatOllama': ('browser_use.llm.ollama.chat', 'ChatOllama'),
 	# LLM models module
 	'models': ('browser_use.llm.models', None),
@@ -130,6 +131,7 @@ __all__ = [
 	'ChatAnthropic',
 	'ChatGroq',
 	'ChatAzureOpenAI',
+	'ChatOCIRaw',
 	'ChatOllama',
 	'Tools',
 	'Controller',

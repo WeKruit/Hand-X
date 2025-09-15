@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from browser_use.llm.azure.chat import ChatAzureOpenAI
 from browser_use.llm.google.chat import ChatGoogle
+from browser_use.llm.oci_raw.chat import ChatOCIRaw
 from browser_use.llm.openai.chat import ChatOpenAI
 
 if TYPE_CHECKING:
@@ -108,8 +109,14 @@ def get_llm_by_name(model_name: str):
 		api_key = os.getenv('GOOGLE_API_KEY')
 		return ChatGoogle(model=model, api_key=api_key)
 
+	# OCI Models
+	elif provider == 'oci':
+		# OCI requires more complex configuration that can't be easily inferred from env vars
+		# Users should use ChatOCIRaw directly with proper configuration
+		raise ValueError(f"OCI models require manual configuration. Use ChatOCIRaw directly with your OCI credentials.")
+
 	else:
-		available_providers = ['openai', 'azure', 'google']
+		available_providers = ['openai', 'azure', 'google', 'oci']
 		raise ValueError(f"Unknown provider: '{provider}'. Available providers: {', '.join(available_providers)}")
 
 
@@ -123,6 +130,8 @@ def __getattr__(name: str) -> 'BaseChatModel':
 		return ChatAzureOpenAI  # type: ignore
 	elif name == 'ChatGoogle':
 		return ChatGoogle  # type: ignore
+	elif name == 'ChatOCIRaw':
+		return ChatOCIRaw  # type: ignore
 
 	# Handle model instances - these are the main use case
 	try:
@@ -135,6 +144,7 @@ __all__ = [
 	'ChatOpenAI',
 	'ChatAzureOpenAI',
 	'ChatGoogle',
+	'ChatOCIRaw',
 	'get_llm_by_name',
 	# OpenAI instances - created on demand
 	'openai_gpt_4o',
