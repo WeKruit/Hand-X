@@ -128,7 +128,7 @@ def create_mock_state_message(temp_dir: str):
 			{
 				'model_id': 'ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyarojgfh6msa452vziycwfymle5gxdvpwwxzara53topmq',
 				'service_endpoint': 'https://inference.generativeai.us-chicago-1.oci.oraclecloud.com',
-				'compartment_id': 'ocid1.tenancy.oc1..aaaaaaaayeiis5uk2nuubznrekd6xsm56k3m4i7tyvkxmr2ftojqfkpx2ura',
+				'compartment_id': 'ocid1.tenancy.oc1..aaaaaaaayeiis5uk2..your_compartment_id',
 				'provider': 'meta',
 				'temperature': 0.7,
 				'max_tokens': 800,
