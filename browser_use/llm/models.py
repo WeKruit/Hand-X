@@ -149,47 +149,83 @@ def __getattr__(name: str) -> 'BaseChatModel':
 		raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 
-_base_all = [
-	'ChatOpenAI',
-	'ChatAzureOpenAI',
-	'ChatGoogle',
-	'get_llm_by_name',
-	# OpenAI instances - created on demand
-	'openai_gpt_4o',
-	'openai_gpt_4o_mini',
-	'openai_gpt_4_1_mini',
-	'openai_o1',
-	'openai_o1_mini',
-	'openai_o1_pro',
-	'openai_o3',
-	'openai_o3_mini',
-	'openai_o3_pro',
-	'openai_o4_mini',
-	'openai_gpt_5',
-	'openai_gpt_5_mini',
-	'openai_gpt_5_nano',
-	# Azure instances - created on demand
-	'azure_gpt_4o',
-	'azure_gpt_4o_mini',
-	'azure_gpt_4_1_mini',
-	'azure_o1',
-	'azure_o1_mini',
-	'azure_o1_pro',
-	'azure_o3',
-	'azure_o3_mini',
-	'azure_o3_pro',
-	'azure_gpt_5',
-	'azure_gpt_5_mini',
-	# Google instances - created on demand
-	'google_gemini_2_0_flash',
-	'google_gemini_2_0_pro',
-	'google_gemini_2_5_pro',
-	'google_gemini_2_5_flash',
-	'google_gemini_2_5_flash_lite',
-]
-
-# Add ChatOCIRaw to __all__ if available
+# Define __all__ conditionally based on OCI availability
 if OCI_AVAILABLE:
-	_base_all.insert(3, 'ChatOCIRaw')  # Insert after ChatGoogle
-
-__all__ = _base_all
+	__all__ = [
+		'ChatOpenAI',
+		'ChatAzureOpenAI',
+		'ChatGoogle',
+		'ChatOCIRaw',
+		'get_llm_by_name',
+		# OpenAI instances - created on demand
+		'openai_gpt_4o',
+		'openai_gpt_4o_mini',
+		'openai_gpt_4_1_mini',
+		'openai_o1',
+		'openai_o1_mini',
+		'openai_o1_pro',
+		'openai_o3',
+		'openai_o3_mini',
+		'openai_o3_pro',
+		'openai_o4_mini',
+		'openai_gpt_5',
+		'openai_gpt_5_mini',
+		'openai_gpt_5_nano',
+		# Azure instances - created on demand
+		'azure_gpt_4o',
+		'azure_gpt_4o_mini',
+		'azure_gpt_4_1_mini',
+		'azure_o1',
+		'azure_o1_mini',
+		'azure_o1_pro',
+		'azure_o3',
+		'azure_o3_mini',
+		'azure_o3_pro',
+		'azure_gpt_5',
+		'azure_gpt_5_mini',
+		# Google instances - created on demand
+		'google_gemini_2_0_flash',
+		'google_gemini_2_0_pro',
+		'google_gemini_2_5_pro',
+		'google_gemini_2_5_flash',
+		'google_gemini_2_5_flash_lite',
+	]
+else:
+	__all__ = [
+		'ChatOpenAI',
+		'ChatAzureOpenAI',
+		'ChatGoogle',
+		'get_llm_by_name',
+		# OpenAI instances - created on demand
+		'openai_gpt_4o',
+		'openai_gpt_4o_mini',
+		'openai_gpt_4_1_mini',
+		'openai_o1',
+		'openai_o1_mini',
+		'openai_o1_pro',
+		'openai_o3',
+		'openai_o3_mini',
+		'openai_o3_pro',
+		'openai_o4_mini',
+		'openai_gpt_5',
+		'openai_gpt_5_mini',
+		'openai_gpt_5_nano',
+		# Azure instances - created on demand
+		'azure_gpt_4o',
+		'azure_gpt_4o_mini',
+		'azure_gpt_4_1_mini',
+		'azure_o1',
+		'azure_o1_mini',
+		'azure_o1_pro',
+		'azure_o3',
+		'azure_o3_mini',
+		'azure_o3_pro',
+		'azure_gpt_5',
+		'azure_gpt_5_mini',
+		# Google instances - created on demand
+		'google_gemini_2_0_flash',
+		'google_gemini_2_0_pro',
+		'google_gemini_2_5_pro',
+		'google_gemini_2_5_flash',
+		'google_gemini_2_5_flash_lite',
+	]
