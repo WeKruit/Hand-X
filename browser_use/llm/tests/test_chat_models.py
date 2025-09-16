@@ -5,9 +5,11 @@ from pydantic import BaseModel
 
 from browser_use.llm import ChatAnthropic, ChatGoogle, ChatGroq, ChatOpenAI, ChatOpenRouter
 from browser_use.llm.messages import ContentPartTextParam
+
 # Optional OCI import
 try:
 	from examples.models.oci_models import xai_llm
+
 	OCI_MODELS_AVAILABLE = True
 except ImportError:
 	xai_llm = None
@@ -261,7 +263,7 @@ class TestChatModels:
 		# Skip if OCI models not available
 		if not OCI_MODELS_AVAILABLE:
 			pytest.skip('OCI models not available - install with pip install "browser-use[oci]"')
-			
+
 		# Skip if OCI credentials not available - check for config file existence
 		try:
 			import oci

@@ -20,6 +20,7 @@ from browser_use.llm.openai.chat import ChatOpenAI
 # Optional OCI import
 try:
 	from browser_use.llm.oci_raw.chat import ChatOCIRaw
+
 	OCI_AVAILABLE = True
 except ImportError:
 	ChatOCIRaw = None
