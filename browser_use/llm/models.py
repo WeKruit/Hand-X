@@ -15,8 +15,15 @@ from typing import TYPE_CHECKING
 
 from browser_use.llm.azure.chat import ChatAzureOpenAI
 from browser_use.llm.google.chat import ChatGoogle
-from browser_use.llm.oci_raw.chat import ChatOCIRaw
 from browser_use.llm.openai.chat import ChatOpenAI
+
+# Optional OCI import
+try:
+	from browser_use.llm.oci_raw.chat import ChatOCIRaw
+	OCI_AVAILABLE = True
+except ImportError:
+	ChatOCIRaw = None
+	OCI_AVAILABLE = False
 
 if TYPE_CHECKING:
 	from browser_use.llm.base import BaseChatModel
@@ -131,6 +138,8 @@ def __getattr__(name: str) -> 'BaseChatModel':
 	elif name == 'ChatGoogle':
 		return ChatGoogle  # type: ignore
 	elif name == 'ChatOCIRaw':
+		if not OCI_AVAILABLE:
+			raise ImportError('OCI integration not available. Install with: pip install "browser-use[oci]"')
 		return ChatOCIRaw  # type: ignore
 
 	# Handle model instances - these are the main use case
@@ -140,11 +149,10 @@ def __getattr__(name: str) -> 'BaseChatModel':
 		raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 
-__all__ = [
+_base_all = [
 	'ChatOpenAI',
 	'ChatAzureOpenAI',
 	'ChatGoogle',
-	'ChatOCIRaw',
 	'get_llm_by_name',
 	# OpenAI instances - created on demand
 	'openai_gpt_4o',
@@ -179,3 +187,9 @@ __all__ = [
 	'google_gemini_2_5_flash',
 	'google_gemini_2_5_flash_lite',
 ]
+
+# Add ChatOCIRaw to __all__ if available
+if OCI_AVAILABLE:
+	_base_all.insert(3, 'ChatOCIRaw')  # Insert after ChatGoogle
+
+__all__ = _base_all

@@ -7,19 +7,18 @@ Tests ChatOpenAI and ChatGoogle by iteratively generating countries.
 import asyncio
 import logging
 
-from browser_use import ChatGoogle
-from browser_use.llm import ChatOpenAI
+from browser_use.llm import ChatGoogle, ChatOpenAI
 from browser_use.llm.messages import AssistantMessage, SystemMessage, UserMessage
 from browser_use.tokens.service import TokenCost
-from examples.models.oci_models import meta_llm
 
-# Optional OCI import for testing
+# Optional OCI import
 try:
-	import importlib.util
-
-	OCI_AVAILABLE = importlib.util.find_spec('browser_use.llm.oci_raw.chat') is not None
+	from examples.models.oci_models import meta_llm
+	OCI_MODELS_AVAILABLE = True
 except ImportError:
-	OCI_AVAILABLE = False
+	meta_llm = None
+	OCI_MODELS_AVAILABLE = False
+
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -27,7 +26,7 @@ logger.setLevel(logging.INFO)
 
 def get_oci_model_if_available():
 	"""Create OCI model for testing if credentials are available."""
-	if not OCI_AVAILABLE:
+	if not OCI_MODELS_AVAILABLE:
 		return None
 
 	# Try to create OCI model with mock/test configuration
