@@ -45,7 +45,9 @@ agent = Agent(
     llm=model
 )
 
-history = await agent.run()
+# Run with asyncio
+import asyncio
+history = asyncio.run(agent.run())
 ```
 
 ### Provider-Specific Configuration Examples

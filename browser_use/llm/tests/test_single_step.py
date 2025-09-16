@@ -1,4 +1,5 @@
 import logging
+import os
 import tempfile
 
 import pytest
@@ -13,7 +14,13 @@ from browser_use.llm.azure.chat import ChatAzureOpenAI
 from browser_use.llm.base import BaseChatModel
 from browser_use.llm.google.chat import ChatGoogle
 from browser_use.llm.groq.chat import ChatGroq
-from browser_use.llm.oci_raw.chat import ChatOCIRaw
+# Optional OCI import
+try:
+	from browser_use.llm.oci_raw.chat import ChatOCIRaw
+	OCI_AVAILABLE = True
+except ImportError:
+	ChatOCIRaw = None
+	OCI_AVAILABLE = False
 from browser_use.llm.openai.chat import ChatOpenAI
 
 # Set logging level to INFO for this module
@@ -23,6 +30,8 @@ logger.setLevel(logging.INFO)
 
 def _check_oci_credentials() -> bool:
 	"""Check if OCI credentials are available."""
+	if not OCI_AVAILABLE:
+		return False
 	try:
 		import oci
 
@@ -127,9 +136,9 @@ def create_mock_state_message(temp_dir: str):
 		pytest.param(
 			ChatOCIRaw,
 			{
-				'model_id': 'ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyarojgfh6msa452vziycwfymle5gxdvpwwxzara53topmq',
-				'service_endpoint': 'https://inference.generativeai.us-chicago-1.oci.oraclecloud.com',
-				'compartment_id': 'ocid1.tenancy.oc1..aaaaaaaayeiis5uk2nuubznrekd6xsm56k3m4i7tyvkxmr2ftojqfkpx2ura',
+				'model_id': os.getenv('OCI_MODEL_ID', 'placeholder'),
+				'service_endpoint': os.getenv('OCI_SERVICE_ENDPOINT', 'https://inference.generativeai.us-chicago-1.oci.oraclecloud.com'),
+				'compartment_id': os.getenv('OCI_COMPARTMENT_ID', 'placeholder'),
 				'provider': 'meta',
 				'temperature': 0.7,
 				'max_tokens': 800,
@@ -139,7 +148,12 @@ def create_mock_state_message(temp_dir: str):
 				'auth_type': 'API_KEY',
 				'auth_profile': 'DEFAULT',
 			},
-			marks=pytest.mark.skipif(not _check_oci_credentials(), reason='OCI credentials not available'),
+			marks=pytest.mark.skipif(
+				not _check_oci_credentials() or 
+				not os.getenv('OCI_MODEL_ID') or 
+				not os.getenv('OCI_COMPARTMENT_ID'), 
+				reason='OCI credentials or environment variables not available'
+			),
 		),
 	],
 )
@@ -166,7 +180,7 @@ async def test_single_step_parametrized(llm_class, model_name):
 		response = await llm.ainvoke(messages, agent.AgentOutput)
 
 		# Additional validation for OCI Raw
-		if isinstance(llm, ChatOCIRaw):
+		if ChatOCIRaw is not None and isinstance(llm, ChatOCIRaw):
 			# Verify OCI Raw generates proper Agent actions
 			assert response.completion.action is not None
 			assert len(response.completion.action) > 0

@@ -134,6 +134,7 @@ class OCIRawMessageSerializer:
 							contents.append(text_content)
 						elif part.type == 'image_url':
 							# Assistant messages can have images in responses
+							# Note: This is currently unreachable in browser-use but kept for completeness
 							image_content = OCIRawMessageSerializer._create_image_content(part)
 							contents.append(image_content)
 						elif part.type == 'refusal':
@@ -149,7 +150,9 @@ class OCIRawMessageSerializer:
 				text_content.text = str(message)
 				oci_message.content = [text_content]
 
-			oci_messages.append(oci_message)
+			# Only append messages that have content
+			if hasattr(oci_message, 'content') and oci_message.content:
+				oci_messages.append(oci_message)
 
 		return oci_messages
 
@@ -182,8 +185,12 @@ class OCIRawMessageSerializer:
 						if part.type == 'text':
 							text_parts.append(part.text)
 						elif part.type == 'image_url':
-							# Cohere may not support images in all models, but include a placeholder
-							text_parts.append(f'[Image: {part.image_url.url}]')
+							# Cohere may not support images in all models, use a short placeholder
+							# to avoid massive token usage from base64 data URIs
+							if part.image_url.url.startswith('data:image/'):
+								text_parts.append('[Image: base64_data]')
+							else:
+								text_parts.append('[Image: external_url]')
 					content = ' '.join(text_parts)
 
 				conversation_parts.append(f'User: {content}')

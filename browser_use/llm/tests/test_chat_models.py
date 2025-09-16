@@ -5,7 +5,13 @@ from pydantic import BaseModel
 
 from browser_use.llm import ChatAnthropic, ChatGoogle, ChatGroq, ChatOpenAI, ChatOpenRouter
 from browser_use.llm.messages import ContentPartTextParam
-from examples.models.oci_models import xai_llm
+# Optional OCI import
+try:
+	from examples.models.oci_models import xai_llm
+	OCI_MODELS_AVAILABLE = True
+except ImportError:
+	xai_llm = None
+	OCI_MODELS_AVAILABLE = False
 
 
 class CapitalResponse(BaseModel):
@@ -252,6 +258,10 @@ class TestChatModels:
 	@pytest.fixture
 	def oci_raw_chat(self):
 		"""Provides an initialized ChatOCIRaw client for tests."""
+		# Skip if OCI models not available
+		if not OCI_MODELS_AVAILABLE:
+			pytest.skip('OCI models not available - install with pip install "browser-use[oci]"')
+			
 		# Skip if OCI credentials not available - check for config file existence
 		try:
 			import oci
@@ -259,6 +269,10 @@ class TestChatModels:
 			oci.config.from_file('~/.oci/config', 'DEFAULT')
 		except Exception:
 			pytest.skip('OCI credentials not available')
+
+		# Skip if using placeholder config
+		if xai_llm and hasattr(xai_llm, 'compartment_id') and 'example' in xai_llm.compartment_id.lower():
+			pytest.skip('OCI model using placeholder configuration - set real credentials')
 
 		return xai_llm  # xai or cohere
 
