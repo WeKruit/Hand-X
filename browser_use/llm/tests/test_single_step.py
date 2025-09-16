@@ -14,9 +14,11 @@ from browser_use.llm.azure.chat import ChatAzureOpenAI
 from browser_use.llm.base import BaseChatModel
 from browser_use.llm.google.chat import ChatGoogle
 from browser_use.llm.groq.chat import ChatGroq
+
 # Optional OCI import
 try:
 	from browser_use.llm.oci_raw.chat import ChatOCIRaw
+
 	OCI_AVAILABLE = True
 except ImportError:
 	ChatOCIRaw = None
@@ -137,7 +139,9 @@ def create_mock_state_message(temp_dir: str):
 			ChatOCIRaw,
 			{
 				'model_id': os.getenv('OCI_MODEL_ID', 'placeholder'),
-				'service_endpoint': os.getenv('OCI_SERVICE_ENDPOINT', 'https://inference.generativeai.us-chicago-1.oci.oraclecloud.com'),
+				'service_endpoint': os.getenv(
+					'OCI_SERVICE_ENDPOINT', 'https://inference.generativeai.us-chicago-1.oci.oraclecloud.com'
+				),
 				'compartment_id': os.getenv('OCI_COMPARTMENT_ID', 'placeholder'),
 				'provider': 'meta',
 				'temperature': 0.7,
@@ -149,10 +153,8 @@ def create_mock_state_message(temp_dir: str):
 				'auth_profile': 'DEFAULT',
 			},
 			marks=pytest.mark.skipif(
-				not _check_oci_credentials() or 
-				not os.getenv('OCI_MODEL_ID') or 
-				not os.getenv('OCI_COMPARTMENT_ID'), 
-				reason='OCI credentials or environment variables not available'
+				not _check_oci_credentials() or not os.getenv('OCI_MODEL_ID') or not os.getenv('OCI_COMPARTMENT_ID'),
+				reason='OCI credentials or environment variables not available',
 			),
 		),
 	],
