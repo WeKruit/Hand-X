@@ -14,13 +14,13 @@ import os
 from typing import TYPE_CHECKING
 
 from browser_use.llm.azure.chat import ChatAzureOpenAI
+from browser_use.llm.cerebras.chat import ChatCerebras
 from browser_use.llm.google.chat import ChatGoogle
 from browser_use.llm.openai.chat import ChatOpenAI
 
 # Optional OCI import
 try:
 	from browser_use.llm.oci_raw.chat import ChatOCIRaw
-
 	OCI_AVAILABLE = True
 except ImportError:
 	ChatOCIRaw = None
@@ -62,6 +62,16 @@ google_gemini_2_5_pro: 'BaseChatModel'
 google_gemini_2_5_flash: 'BaseChatModel'
 google_gemini_2_5_flash_lite: 'BaseChatModel'
 
+cerebras_llama3_1_8b: 'BaseChatModel'
+cerebras_llama3_3_70b: 'BaseChatModel'
+cerebras_gpt_oss_120b: 'BaseChatModel'
+cerebras_llama_4_scout_17b_16e_instruct: 'BaseChatModel'
+cerebras_llama_4_maverick_17b_128e_instruct: 'BaseChatModel'
+cerebras_qwen_3_32b: 'BaseChatModel'
+cerebras_qwen_3_235b_a22b_instruct_2507: 'BaseChatModel'
+cerebras_qwen_3_235b_a22b_thinking_2507: 'BaseChatModel'
+cerebras_qwen_3_coder_480b: 'BaseChatModel'
+
 
 def get_llm_by_name(model_name: str):
 	"""
@@ -98,6 +108,30 @@ def get_llm_by_name(model_name: str):
 		model = model_part.replace('gemini_2_0', 'gemini-2.0').replace('_', '-')
 	elif 'gemini_2_5' in model_part:
 		model = model_part.replace('gemini_2_5', 'gemini-2.5').replace('_', '-')
+	elif 'llama3_1' in model_part:
+		model = model_part.replace('llama3_1', 'llama3.1').replace('_', '-')
+	elif 'llama3_3' in model_part:
+		model = model_part.replace('llama3_3', 'llama-3.3').replace('_', '-')
+	elif 'llama_4_scout' in model_part:
+		model = model_part.replace('llama_4_scout', 'llama-4-scout').replace('_', '-')
+	elif 'llama_4_maverick' in model_part:
+		model = model_part.replace('llama_4_maverick', 'llama-4-maverick').replace('_', '-')
+	elif 'gpt_oss_120b' in model_part:
+		model = model_part.replace('gpt_oss_120b', 'gpt-oss-120b')
+	elif 'qwen_3_32b' in model_part:
+		model = model_part.replace('qwen_3_32b', 'qwen-3-32b')
+	elif 'qwen_3_235b_a22b_instruct' in model_part:
+		if model_part.endswith('_2507'):
+			model = model_part.replace('qwen_3_235b_a22b_instruct_2507', 'qwen-3-235b-a22b-instruct-2507')
+		else:
+			model = model_part.replace('qwen_3_235b_a22b_instruct', 'qwen-3-235b-a22b-instruct-2507')
+	elif 'qwen_3_235b_a22b_thinking' in model_part:
+		if model_part.endswith('_2507'):
+			model = model_part.replace('qwen_3_235b_a22b_thinking_2507', 'qwen-3-235b-a22b-thinking-2507')
+		else:
+			model = model_part.replace('qwen_3_235b_a22b_thinking', 'qwen-3-235b-a22b-thinking-2507')
+	elif 'qwen_3_coder_480b' in model_part:
+		model = model_part.replace('qwen_3_coder_480b', 'qwen-3-coder-480b')
 	else:
 		model = model_part.replace('_', '-')
 
@@ -123,8 +157,13 @@ def get_llm_by_name(model_name: str):
 		# Users should use ChatOCIRaw directly with proper configuration
 		raise ValueError('OCI models require manual configuration. Use ChatOCIRaw directly with your OCI credentials.')
 
+	# Cerebras Models
+	elif provider == 'cerebras':
+		api_key = os.getenv('CEREBRAS_API_KEY')
+		return ChatCerebras(model=model, api_key=api_key)
+
 	else:
-		available_providers = ['openai', 'azure', 'google', 'oci']
+		available_providers = ['openai', 'azure', 'google', 'oci', 'cerebras']
 		raise ValueError(f"Unknown provider: '{provider}'. Available providers: {', '.join(available_providers)}")
 
 
@@ -142,6 +181,8 @@ def __getattr__(name: str) -> 'BaseChatModel':
 		if not OCI_AVAILABLE:
 			raise ImportError('OCI integration not available. Install with: pip install "browser-use[oci]"')
 		return ChatOCIRaw  # type: ignore
+	elif name == 'ChatCerebras':
+		return ChatCerebras  # type: ignore
 
 	# Handle model instances - these are the main use case
 	try:
@@ -150,83 +191,62 @@ def __getattr__(name: str) -> 'BaseChatModel':
 		raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 
-# Define __all__ conditionally based on OCI availability
+# Export all classes and preconfigured instances, conditionally including ChatOCIRaw
+__all__ = [
+	'ChatOpenAI',
+	'ChatAzureOpenAI',
+	'ChatGoogle',
+	'ChatCerebras',
+]
+
 if OCI_AVAILABLE:
-	__all__ = [
-		'ChatOpenAI',
-		'ChatAzureOpenAI',
-		'ChatGoogle',
-		'ChatOCIRaw',
-		'get_llm_by_name',
-		# OpenAI instances - created on demand
-		'openai_gpt_4o',
-		'openai_gpt_4o_mini',
-		'openai_gpt_4_1_mini',
-		'openai_o1',
-		'openai_o1_mini',
-		'openai_o1_pro',
-		'openai_o3',
-		'openai_o3_mini',
-		'openai_o3_pro',
-		'openai_o4_mini',
-		'openai_gpt_5',
-		'openai_gpt_5_mini',
-		'openai_gpt_5_nano',
-		# Azure instances - created on demand
-		'azure_gpt_4o',
-		'azure_gpt_4o_mini',
-		'azure_gpt_4_1_mini',
-		'azure_o1',
-		'azure_o1_mini',
-		'azure_o1_pro',
-		'azure_o3',
-		'azure_o3_mini',
-		'azure_o3_pro',
-		'azure_gpt_5',
-		'azure_gpt_5_mini',
-		# Google instances - created on demand
-		'google_gemini_2_0_flash',
-		'google_gemini_2_0_pro',
-		'google_gemini_2_5_pro',
-		'google_gemini_2_5_flash',
-		'google_gemini_2_5_flash_lite',
-	]
-else:
-	__all__ = [
-		'ChatOpenAI',
-		'ChatAzureOpenAI',
-		'ChatGoogle',
-		'get_llm_by_name',
-		# OpenAI instances - created on demand
-		'openai_gpt_4o',
-		'openai_gpt_4o_mini',
-		'openai_gpt_4_1_mini',
-		'openai_o1',
-		'openai_o1_mini',
-		'openai_o1_pro',
-		'openai_o3',
-		'openai_o3_mini',
-		'openai_o3_pro',
-		'openai_o4_mini',
-		'openai_gpt_5',
-		'openai_gpt_5_mini',
-		'openai_gpt_5_nano',
-		# Azure instances - created on demand
-		'azure_gpt_4o',
-		'azure_gpt_4o_mini',
-		'azure_gpt_4_1_mini',
-		'azure_o1',
-		'azure_o1_mini',
-		'azure_o1_pro',
-		'azure_o3',
-		'azure_o3_mini',
-		'azure_o3_pro',
-		'azure_gpt_5',
-		'azure_gpt_5_mini',
-		# Google instances - created on demand
-		'google_gemini_2_0_flash',
-		'google_gemini_2_0_pro',
-		'google_gemini_2_5_pro',
-		'google_gemini_2_5_flash',
-		'google_gemini_2_5_flash_lite',
-	]
+	__all__.append('ChatOCIRaw')
+
+__all__ += [
+	'get_llm_by_name',
+	# OpenAI instances - created on demand
+	'openai_gpt_4o',
+	'openai_gpt_4o_mini',
+	'openai_gpt_4_1_mini',
+	'openai_o1',
+	'openai_o1_mini',
+	'openai_o1_pro',
+	'openai_o3',
+	'openai_o3_mini',
+	'openai_o3_pro',
+	'openai_o4_mini',
+	'openai_gpt_5',
+	'openai_gpt_5_mini',
+	'openai_gpt_5_nano',
+	# Azure instances - created on demand
+	'azure_gpt_4o',
+	'azure_gpt_4o_mini',
+	'azure_gpt_4_1_mini',
+	'azure_o1',
+	'azure_o1_mini',
+	'azure_o1_pro',
+	'azure_o3',
+	'azure_o3_mini',
+	'azure_o3_pro',
+	'azure_gpt_5',
+	'azure_gpt_5_mini',
+	# Google instances - created on demand
+	'google_gemini_2_0_flash',
+	'google_gemini_2_0_pro',
+	'google_gemini_2_5_pro',
+	'google_gemini_2_5_flash',
+	'google_gemini_2_5_flash_lite',
+	# Cerebras instances - created on demand
+	'cerebras_llama3_1_8b',
+	'cerebras_llama3_3_70b',
+	'cerebras_gpt_oss_120b',
+	'cerebras_llama_4_scout_17b_16e_instruct',
+	'cerebras_llama_4_maverick_17b_128e_instruct',
+	'cerebras_qwen_3_32b',
+	'cerebras_qwen_3_235b_a22b_instruct_2507',
+	'cerebras_qwen_3_235b_a22b_thinking_2507',
+	'cerebras_qwen_3_coder_480b',
+]
+
+# NOTE: OCI backend is optional. The try/except ImportError and conditional __all__ are required
+# so this module can be imported without browser-use[oci] installed.
