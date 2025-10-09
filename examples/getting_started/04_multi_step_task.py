@@ -8,6 +8,10 @@ This example demonstrates how to:
 - Handle a realistic end-to-end scenario
 
 This is the most advanced getting started example, combining all previous concepts.
+
+Setup:
+1. Get your API key from https://cloud.browser-use.com/dashboard/api
+2. Set environment variable: export BROWSER_USE_API_KEY="your-key"
 """
 
 import asyncio
@@ -17,16 +21,13 @@ import sys
 # Add the parent directory to the path so we can import browser_use
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
-from browser_use import Agent, ChatOpenAI
+from browser_use import Agent
+from browser_use.llm import ChatBrowserUse
 
 
 async def main():
 	# Initialize the model
-	llm = ChatOpenAI(model='gpt-4.1-mini')
+	llm = ChatBrowserUse()
 
 	# Define a multi-step task
 	task = """
