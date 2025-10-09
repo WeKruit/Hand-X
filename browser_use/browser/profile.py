@@ -632,10 +632,10 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 	)
 	paint_order_filtering: bool = Field(default=True, description='Enable paint order filtering. Slightly experimental.')
 	interaction_highlight_color: str = Field(
-		default='rgba(255, 165, 0, 0.7)',
+		default='rgb(255, 127, 39)',
 		description='Color to use for highlighting elements during interactions (CSS color string).',
 	)
-	interaction_highlight_duration: float = Field(default=2.0, description='Duration in seconds to show interaction highlights.')
+	interaction_highlight_duration: float = Field(default=1.0, description='Duration in seconds to show interaction highlights.')
 
 	# --- Downloads ---
 	auto_download_pdfs: bool = Field(default=True, description='Automatically download PDFs when navigating to PDF viewer pages.')
