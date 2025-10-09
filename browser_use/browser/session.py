@@ -1882,36 +1882,96 @@ class BrowserSession(BaseModel):
 			color = self.browser_profile.interaction_highlight_color
 			duration_ms = int(self.browser_profile.interaction_highlight_duration * 1000)
 
-			# Create a temporary highlight overlay using fixed positioning
+			# Create animated corner brackets that start offset and animate inward
 			script = f"""
 			(function() {{
 				const rect = {json.dumps({'x': rect.x, 'y': rect.y, 'width': rect.width, 'height': rect.height})};
 				const color = {json.dumps(color)};
 				const duration = {duration_ms};
 
-				// Create highlight element
-				const highlight = document.createElement('div');
-				highlight.setAttribute('data-browser-use-interaction-highlight', 'true');
-				highlight.style.cssText = `
+				// Scale corner size based on element dimensions to ensure gaps between corners
+				const maxCornerSize = 20;
+				const minCornerSize = 8;
+				const cornerSize = Math.max(
+					minCornerSize,
+					Math.min(maxCornerSize, Math.min(rect.width, rect.height) * 0.35)
+				);
+				const borderWidth = 3;
+				const offset = 10; // Starting offset in pixels
+
+				// Create container for all corners
+				const container = document.createElement('div');
+				container.setAttribute('data-browser-use-interaction-highlight', 'true');
+				container.style.cssText = `
 					position: fixed;
 					left: ${{rect.x}}px;
 					top: ${{rect.y}}px;
 					width: ${{rect.width}}px;
 					height: ${{rect.height}}px;
-					border: 3px solid ${{color}};
-					box-shadow: 0 0 10px ${{color}};
 					pointer-events: none;
 					z-index: 2147483647;
-					box-sizing: border-box;
-					transition: opacity 0.3s ease-out;
 				`;
 
-				document.body.appendChild(highlight);
+				// Create 4 corner brackets
+				const corners = [
+					{{ pos: 'top-left', x: -offset, y: -offset }},
+					{{ pos: 'top-right', x: offset, y: -offset }},
+					{{ pos: 'bottom-left', x: -offset, y: offset }},
+					{{ pos: 'bottom-right', x: offset, y: offset }}
+				];
+
+				corners.forEach(corner => {{
+					const bracket = document.createElement('div');
+					bracket.style.cssText = `
+						position: absolute;
+						width: ${{cornerSize}}px;
+						height: ${{cornerSize}}px;
+						pointer-events: none;
+						transition: all 0.15s ease-out;
+					`;
+
+					// Position corners
+					if (corner.pos === 'top-left') {{
+						bracket.style.top = '0';
+						bracket.style.left = '0';
+						bracket.style.borderTop = `${{borderWidth}}px solid ${{color}}`;
+						bracket.style.borderLeft = `${{borderWidth}}px solid ${{color}}`;
+						bracket.style.transform = `translate(${{corner.x}}px, ${{corner.y}}px)`;
+					}} else if (corner.pos === 'top-right') {{
+						bracket.style.top = '0';
+						bracket.style.right = '0';
+						bracket.style.borderTop = `${{borderWidth}}px solid ${{color}}`;
+						bracket.style.borderRight = `${{borderWidth}}px solid ${{color}}`;
+						bracket.style.transform = `translate(${{corner.x}}px, ${{corner.y}}px)`;
+					}} else if (corner.pos === 'bottom-left') {{
+						bracket.style.bottom = '0';
+						bracket.style.left = '0';
+						bracket.style.borderBottom = `${{borderWidth}}px solid ${{color}}`;
+						bracket.style.borderLeft = `${{borderWidth}}px solid ${{color}}`;
+						bracket.style.transform = `translate(${{corner.x}}px, ${{corner.y}}px)`;
+					}} else if (corner.pos === 'bottom-right') {{
+						bracket.style.bottom = '0';
+						bracket.style.right = '0';
+						bracket.style.borderBottom = `${{borderWidth}}px solid ${{color}}`;
+						bracket.style.borderRight = `${{borderWidth}}px solid ${{color}}`;
+						bracket.style.transform = `translate(${{corner.x}}px, ${{corner.y}}px)`;
+					}}
+
+					container.appendChild(bracket);
+
+					// Animate inward after a tiny delay
+					setTimeout(() => {{
+						bracket.style.transform = 'translate(0, 0)';
+					}}, 10);
+				}});
+
+				document.body.appendChild(container);
 
 				// Auto-remove after duration
 				setTimeout(() => {{
-					highlight.style.opacity = '0';
-					setTimeout(() => highlight.remove(), 300);
+					container.style.opacity = '0';
+					container.style.transition = 'opacity 0.3s ease-out';
+					setTimeout(() => container.remove(), 300);
 				}}, duration);
 
 				return {{ created: true }};
