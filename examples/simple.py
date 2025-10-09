@@ -1,12 +1,14 @@
-from dotenv import load_dotenv
+"""
+Setup:
+1. Get your API key from https://cloud.browser-use.com/dashboard/api
+2. Set environment variable: export BROWSER_USE_API_KEY="your-key"
+"""
 
-from browser_use import Agent, ChatGoogle
-
-load_dotenv()
+from browser_use import Agent
+from browser_use.llm import ChatBrowserUse
 
 agent = Agent(
-	task='Find the number of stars of the browser-use repo',
-	llm=ChatGoogle(model='gemini-flash-latest'),
-	# browser=Browser(use_cloud=True),  # Uses Browser-Use cloud for the browser
+	task='Find the number of stars of the following repos: browser-use, playwright, stagehand, react, nextjs',
+	llm=ChatBrowserUse(),
 )
 agent.run_sync()
