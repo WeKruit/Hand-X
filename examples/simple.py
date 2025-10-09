@@ -4,11 +4,15 @@ Setup:
 2. Set environment variable: export BROWSER_USE_API_KEY="your-key"
 """
 
+from dotenv import load_dotenv
+
 from browser_use import Agent
 from browser_use.llm import ChatBrowserUse
 
+load_dotenv()
+
 agent = Agent(
-	task='Find the number of stars of the browser-use repo',
+	task='Find the number of stars of the following repos: browser-use, playwright, stagehand, react, nextjs',
 	llm=ChatBrowserUse(),
 )
 agent.run_sync()
