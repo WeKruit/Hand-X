@@ -201,6 +201,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				# No default LLM specified, use the original default
 				llm = ChatGoogle(model='gemini-flash-latest')
 
+		# set flashmode = True if llm is ChatBrowserUse
+		if llm.provider == 'browser-use':
+			flash_mode = True
+
 		if page_extraction_llm is None:
 			page_extraction_llm = llm
 		if available_file_paths is None:
@@ -253,8 +257,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		elif controller is not None:
 			self.tools = controller
 		else:
-			# Exclude take_screenshot tool when use_vision=False
-			exclude_actions = ['take_screenshot'] if use_vision is False else []
+			# Exclude screenshot tool when use_vision=False
+			exclude_actions = ['screenshot'] if use_vision is False else []
 			self.tools = Tools(exclude_actions=exclude_actions, display_files_in_done_text=display_files_in_done_text)
 
 		# Structured output
@@ -321,7 +325,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			initial_url = self._extract_url_from_task(self.task)
 			if initial_url:
 				self.logger.info(f'🔗 Found URL in task: {initial_url}, adding as initial action...')
-				initial_actions = [{'go_to_url': {'url': initial_url, 'new_tab': False}}]
+				initial_actions = [{'navigate': {'url': initial_url, 'new_tab': False}}]
 
 		self.initial_url = initial_url
 
@@ -346,16 +350,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			f'{" +file_system" if self.file_system else ""}'
 		)
 
-		# Initialize available actions for system prompt (only non-filtered actions)
-		# These will be used for the system prompt to maintain caching
-		self.unfiltered_actions = self.tools.registry.get_prompt_description()
-
 		# Initialize message manager with state
 		# Initial system prompt with all actions - will be updated during each step
 		self._message_manager = MessageManager(
 			task=task,
 			system_message=SystemPrompt(
-				action_description=self.unfiltered_actions,
 				max_actions_per_step=self.settings.max_actions_per_step,
 				override_system_message=override_system_message,
 				extend_system_message=extend_system_message,
@@ -835,7 +834,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			)
 
 			# Use _make_history_item like main branch
-			await self._make_history_item(self.state.last_model_output, browser_state_summary, self.state.last_result, metadata)
+			await self._make_history_item(
+				self.state.last_model_output,
+				browser_state_summary,
+				self.state.last_result,
+				metadata,
+				state_message=self._message_manager.last_state_message_text,
+			)
 
 		# Log step completion summary
 		self._log_step_completion_summary(self.step_start_time, self.state.last_result)
@@ -964,6 +969,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		browser_state_summary: BrowserStateSummary,
 		result: list[ActionResult],
 		metadata: StepMetadata | None = None,
+		state_message: str | None = None,
 	) -> None:
 		"""Create and store history item"""
 
@@ -996,6 +1002,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			result=result,
 			state=state_history,
 			metadata=metadata,
+			state_message=state_message,
 		)
 
 		self.history.add_item(history_item)
@@ -1168,9 +1175,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		urls_replaced = self._process_messsages_and_replace_long_urls_shorter_ones(input_messages)
 
+		# Build kwargs for ainvoke
+		# Note: ChatBrowserUse will automatically generate action descriptions from output_format schema
+		kwargs: dict = {'output_format': self.AgentOutput}
+
 		try:
-			response = await self.llm.ainvoke(input_messages, output_format=self.AgentOutput)
-			parsed = response.completion
+			response = await self.llm.ainvoke(input_messages, **kwargs)
+			parsed: AgentOutput = response.completion  # type: ignore[assignment]
 
 			# Replace any shortened URLs in the LLM response back to original URLs
 			if urls_replaced:

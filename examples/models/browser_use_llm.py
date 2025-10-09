@@ -1,4 +1,6 @@
 """
+Example of the fastest + smartest LLM for browser automation.
+
 Setup:
 1. Get your API key from https://cloud.browser-use.com/dashboard/api
 2. Set environment variable: export BROWSER_USE_API_KEY="your-key"
@@ -6,23 +8,25 @@ Setup:
 
 import asyncio
 import os
-import sys
-
-# Add the parent directory to the path so we can import browser_use
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from dotenv import load_dotenv
-
-load_dotenv()
 
 from browser_use import Agent
 from browser_use.llm import ChatBrowserUse
 
+load_dotenv()
+
+if not os.getenv('BROWSER_USE_API_KEY'):
+	raise ValueError('BROWSER_USE_API_KEY is not set')
+
 
 async def main():
-	llm = ChatBrowserUse()
-	task = "Search Google for 'what is browser automation' and tell me the top 3 results"
-	agent = Agent(task=task, llm=llm)
+	agent = Agent(
+		task='Find the number of stars of the browser-use repo',
+		llm=ChatBrowserUse(),
+	)
+
+	# Run the agent
 	await agent.run()
 
 
