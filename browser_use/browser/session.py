@@ -1860,6 +1860,75 @@ class BrowserSession(BaseModel):
 		except Exception as e:
 			self.logger.warning(f'Failed to remove highlights: {e}')
 
+	async def highlight_interaction_element(self, node: 'EnhancedDOMTreeNode') -> None:
+		"""Temporarily highlight an element during interaction for user visibility.
+
+		This creates a visual highlight on the browser that shows the user which element
+		is being interacted with. The highlight automatically fades after the configured duration.
+
+		Args:
+			node: The DOM node to highlight with absolute_position coordinates
+		"""
+		if not self.browser_profile.highlight_elements or not node.absolute_position:
+			return
+
+		try:
+			import asyncio
+			import json
+
+			cdp_session = await self.get_or_create_cdp_session()
+
+			rect = node.absolute_position
+			color = self.browser_profile.interaction_highlight_color
+			duration_ms = int(self.browser_profile.interaction_highlight_duration * 1000)
+
+			# Create a temporary highlight overlay using fixed positioning
+			script = f"""
+			(function() {{
+				const rect = {json.dumps({'x': rect.x, 'y': rect.y, 'width': rect.width, 'height': rect.height})};
+				const color = {json.dumps(color)};
+				const duration = {duration_ms};
+
+				// Create highlight element
+				const highlight = document.createElement('div');
+				highlight.setAttribute('data-browser-use-interaction-highlight', 'true');
+				highlight.style.cssText = `
+					position: fixed;
+					left: ${{rect.x}}px;
+					top: ${{rect.y}}px;
+					width: ${{rect.width}}px;
+					height: ${{rect.height}}px;
+					border: 3px solid ${{color}};
+					box-shadow: 0 0 10px ${{color}};
+					pointer-events: none;
+					z-index: 2147483647;
+					box-sizing: border-box;
+					transition: opacity 0.3s ease-out;
+				`;
+
+				document.body.appendChild(highlight);
+
+				// Auto-remove after duration
+				setTimeout(() => {{
+					highlight.style.opacity = '0';
+					setTimeout(() => highlight.remove(), 300);
+				}}, duration);
+
+				return {{ created: true }};
+			}})();
+			"""
+
+			# Fire and forget - don't wait for completion
+			asyncio.create_task(
+				cdp_session.cdp_client.send.Runtime.evaluate(
+					params={'expression': script, 'returnByValue': True}, session_id=cdp_session.session_id
+				)
+			)
+
+		except Exception as e:
+			# Don't fail the action if highlighting fails
+			self.logger.debug(f'Failed to highlight interaction element: {e}')
+
 	async def add_highlights(self, selector_map: dict[int, 'EnhancedDOMTreeNode']) -> None:
 		"""Add visual highlights to the browser DOM for user visibility."""
 		if not self.browser_profile.dom_highlight_elements or not selector_map:
