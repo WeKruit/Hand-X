@@ -1897,7 +1897,8 @@ class BrowserSession(BaseModel):
 					Math.min(maxCornerSize, Math.min(rect.width, rect.height) * 0.35)
 				);
 				const borderWidth = 3;
-				const offset = 10; // Starting offset in pixels
+				const startOffset = 10; // Starting offset in pixels
+				const finalOffset = -3; // Final position slightly outside the element
 
 				// Create container for all corners
 				const container = document.createElement('div');
@@ -1914,10 +1915,10 @@ class BrowserSession(BaseModel):
 
 				// Create 4 corner brackets
 				const corners = [
-					{{ pos: 'top-left', x: -offset, y: -offset }},
-					{{ pos: 'top-right', x: offset, y: -offset }},
-					{{ pos: 'bottom-left', x: -offset, y: offset }},
-					{{ pos: 'bottom-right', x: offset, y: offset }}
+					{{ pos: 'top-left', startX: -startOffset, startY: -startOffset, finalX: finalOffset, finalY: finalOffset }},
+					{{ pos: 'top-right', startX: startOffset, startY: -startOffset, finalX: -finalOffset, finalY: finalOffset }},
+					{{ pos: 'bottom-left', startX: -startOffset, startY: startOffset, finalX: finalOffset, finalY: -finalOffset }},
+					{{ pos: 'bottom-right', startX: startOffset, startY: startOffset, finalX: -finalOffset, finalY: -finalOffset }}
 				];
 
 				corners.forEach(corner => {{
@@ -1936,32 +1937,32 @@ class BrowserSession(BaseModel):
 						bracket.style.left = '0';
 						bracket.style.borderTop = `${{borderWidth}}px solid ${{color}}`;
 						bracket.style.borderLeft = `${{borderWidth}}px solid ${{color}}`;
-						bracket.style.transform = `translate(${{corner.x}}px, ${{corner.y}}px)`;
+						bracket.style.transform = `translate(${{corner.startX}}px, ${{corner.startY}}px)`;
 					}} else if (corner.pos === 'top-right') {{
 						bracket.style.top = '0';
 						bracket.style.right = '0';
 						bracket.style.borderTop = `${{borderWidth}}px solid ${{color}}`;
 						bracket.style.borderRight = `${{borderWidth}}px solid ${{color}}`;
-						bracket.style.transform = `translate(${{corner.x}}px, ${{corner.y}}px)`;
+						bracket.style.transform = `translate(${{corner.startX}}px, ${{corner.startY}}px)`;
 					}} else if (corner.pos === 'bottom-left') {{
 						bracket.style.bottom = '0';
 						bracket.style.left = '0';
 						bracket.style.borderBottom = `${{borderWidth}}px solid ${{color}}`;
 						bracket.style.borderLeft = `${{borderWidth}}px solid ${{color}}`;
-						bracket.style.transform = `translate(${{corner.x}}px, ${{corner.y}}px)`;
+						bracket.style.transform = `translate(${{corner.startX}}px, ${{corner.startY}}px)`;
 					}} else if (corner.pos === 'bottom-right') {{
 						bracket.style.bottom = '0';
 						bracket.style.right = '0';
 						bracket.style.borderBottom = `${{borderWidth}}px solid ${{color}}`;
 						bracket.style.borderRight = `${{borderWidth}}px solid ${{color}}`;
-						bracket.style.transform = `translate(${{corner.x}}px, ${{corner.y}}px)`;
+						bracket.style.transform = `translate(${{corner.startX}}px, ${{corner.startY}}px)`;
 					}}
 
 					container.appendChild(bracket);
 
-					// Animate inward after a tiny delay
+					// Animate to final position slightly outside the element
 					setTimeout(() => {{
-						bracket.style.transform = 'translate(0, 0)';
+						bracket.style.transform = `translate(${{corner.finalX}}px, ${{corner.finalY}}px)`;
 					}}, 10);
 				}});
 
