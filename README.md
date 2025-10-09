@@ -58,7 +58,7 @@ from browser_use import Agent
 from browser_use.llm import ChatBrowserUse
 
 agent = Agent(
-    task='Find the number of stars of the following repos: browser-use, playwright, stagehand, react, nextjs',
+    task='Find the number of stars of the following repos: browser-use, playwright, nextjs.',
     llm=ChatBrowserUse(),
 )
 agent.run_sync()
