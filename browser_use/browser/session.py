@@ -1900,13 +1900,17 @@ class BrowserSession(BaseModel):
 				const startOffset = 10; // Starting offset in pixels
 				const finalOffset = -3; // Final position slightly outside the element
 
+				// Get current scroll position
+				const scrollX = window.pageXOffset || document.documentElement.scrollLeft || 0;
+				const scrollY = window.pageYOffset || document.documentElement.scrollTop || 0;
+
 				// Create container for all corners
 				const container = document.createElement('div');
 				container.setAttribute('data-browser-use-interaction-highlight', 'true');
 				container.style.cssText = `
-					position: fixed;
-					left: ${{rect.x}}px;
-					top: ${{rect.y}}px;
+					position: absolute;
+					left: ${{rect.x + scrollX}}px;
+					top: ${{rect.y + scrollY}}px;
 					width: ${{rect.width}}px;
 					height: ${{rect.height}}px;
 					pointer-events: none;
@@ -2078,7 +2082,7 @@ class BrowserSession(BaseModel):
 				container.setAttribute('data-browser-use-highlight', 'container');
 				
 				container.style.cssText = `
-					position: fixed;
+					position: absolute;
 					top: 0;
 					left: 0;
 					width: 100vw;
