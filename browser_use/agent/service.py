@@ -1645,7 +1645,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 			# DOM synchronization check - verify element indexes are still valid AFTER first action
 			# This prevents stale element detection but doesn't refresh before execution
-			if action.get_index() is not None and i != 0:
+			if False and action.get_index() is not None and i != 0:
 				new_browser_state_summary = await self.browser_session.get_browser_state_summary(
 					include_screenshot=False,
 				)
