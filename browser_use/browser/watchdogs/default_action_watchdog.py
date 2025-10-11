@@ -288,95 +288,29 @@ class DefaultActionWatchdog(BaseWatchdog):
 			viewport_width = layout_metrics['layoutViewport']['clientWidth']
 			viewport_height = layout_metrics['layoutViewport']['clientHeight']
 
-			# Try multiple methods to get element geometry
+			# Get element coordinates using the unified method
+			element_rect = await self.browser_session.get_element_coordinates(backend_node_id, cdp_session)
+
+			# Convert rect to quads format if we got coordinates
 			quads = []
-
-			# Method 1: Try DOM.getContentQuads first (best for inline elements and complex layouts)
-			try:
-				content_quads_result = await cdp_session.cdp_client.send.DOM.getContentQuads(
-					params={'backendNodeId': backend_node_id}, session_id=session_id
+			if element_rect:
+				# Convert DOMRect to quad format
+				x, y, w, h = element_rect.x, element_rect.y, element_rect.width, element_rect.height
+				quads = [
+					[
+						x,
+						y,  # top-left
+						x + w,
+						y,  # top-right
+						x + w,
+						y + h,  # bottom-right
+						x,
+						y + h,  # bottom-left
+					]
+				]
+				self.logger.debug(
+					f'Got coordinates from unified method: {element_rect.x}, {element_rect.y}, {element_rect.width}x{element_rect.height}'
 				)
-				if 'quads' in content_quads_result and content_quads_result['quads']:
-					quads = content_quads_result['quads']
-					self.logger.debug(f'Got {len(quads)} quads from DOM.getContentQuads')
-			except Exception as e:
-				self.logger.debug(f'DOM.getContentQuads failed: {e}')
-
-			# Method 2: Fall back to DOM.getBoxModel
-			if not quads:
-				try:
-					box_model = await cdp_session.cdp_client.send.DOM.getBoxModel(
-						params={'backendNodeId': backend_node_id}, session_id=session_id
-					)
-					if 'model' in box_model and 'content' in box_model['model']:
-						content_quad = box_model['model']['content']
-						if len(content_quad) >= 8:
-							# Convert box model format to quad format
-							quads = [
-								[
-									content_quad[0],
-									content_quad[1],  # x1, y1
-									content_quad[2],
-									content_quad[3],  # x2, y2
-									content_quad[4],
-									content_quad[5],  # x3, y3
-									content_quad[6],
-									content_quad[7],  # x4, y4
-								]
-							]
-							self.logger.debug('Got quad from DOM.getBoxModel')
-				except Exception as e:
-					self.logger.debug(f'DOM.getBoxModel failed: {e}')
-
-			# Method 3: Fall back to JavaScript getBoundingClientRect
-			if not quads:
-				try:
-					result = await cdp_session.cdp_client.send.DOM.resolveNode(
-						params={'backendNodeId': backend_node_id},
-						session_id=session_id,
-					)
-					if 'object' in result and 'objectId' in result['object']:
-						object_id = result['object']['objectId']
-
-						# Get bounding rect via JavaScript
-						bounds_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
-							params={
-								'functionDeclaration': """
-									function() {
-										const rect = this.getBoundingClientRect();
-										return {
-											x: rect.left,
-											y: rect.top,
-											width: rect.width,
-											height: rect.height
-										};
-									}
-								""",
-								'objectId': object_id,
-								'returnByValue': True,
-							},
-							session_id=session_id,
-						)
-
-						if 'result' in bounds_result and 'value' in bounds_result['result']:
-							rect = bounds_result['result']['value']
-							# Convert rect to quad format
-							x, y, w, h = rect['x'], rect['y'], rect['width'], rect['height']
-							quads = [
-								[
-									x,
-									y,  # top-left
-									x + w,
-									y,  # top-right
-									x + w,
-									y + h,  # bottom-right
-									x,
-									y + h,  # bottom-left
-								]
-							]
-							self.logger.debug('Got quad from getBoundingClientRect')
-				except Exception as e:
-					self.logger.debug(f'JavaScript getBoundingClientRect failed: {e}')
 
 			# If we still don't have quads, fall back to JS click
 			if not quads:
