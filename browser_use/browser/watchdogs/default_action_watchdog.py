@@ -390,6 +390,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 					params={'backendNodeId': backend_node_id}, session_id=session_id
 				)
 				await asyncio.sleep(0.05)  # Wait for scroll to complete
+				self.logger.debug(f'Scrolled element into view: {center_x}px, {center_y}px')
 			except Exception as e:
 				self.logger.debug(f'Failed to scroll element into view: {e}')
 
@@ -971,16 +972,16 @@ class DefaultActionWatchdog(BaseWatchdog):
 			)
 			object_id = result['object']['objectId']
 
-			# Use element_node absolute_position coordinates (correct coordinates including iframe offsets)
-			if element_node.absolute_position:
-				center_x = element_node.absolute_position.x + element_node.absolute_position.width / 2
-				center_y = element_node.absolute_position.y + element_node.absolute_position.height / 2
+			# Get current coordinates using unified method
+			coords = await self.browser_session.get_element_coordinates(backend_node_id, cdp_session)
+			if coords:
+				center_x = coords.x + coords.width / 2
+				center_y = coords.y + coords.height / 2
 				input_coordinates = {'input_x': center_x, 'input_y': center_y}
-				self.logger.debug(f'Using absolute_position coordinates: x={center_x:.1f}, y={center_y:.1f}')
+				self.logger.debug(f'Using unified coordinates: x={center_x:.1f}, y={center_y:.1f}')
 			else:
 				input_coordinates = None
-				self.logger.warning('⚠️ No absolute_position available for element')
-
+				self.logger.debug('No coordinates found for element')
 			# Ensure we have a valid object_id before proceeding
 			if not object_id:
 				raise ValueError('Could not get object_id for element')
