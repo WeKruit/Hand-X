@@ -759,10 +759,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if self.state.last_model_output is None:
 			raise ValueError('No model output to execute actions from')
 
-		self.logger.debug(f'⚡ Step {self.state.n_steps}: Executing {len(self.state.last_model_output.action)} actions...')
 		result = await self.multi_act(self.state.last_model_output.action)
-		self.logger.debug(f'✅ Step {self.state.n_steps}: Actions completed')
-
 		self.state.last_result = result
 
 	async def _post_process(self) -> None:
@@ -778,8 +775,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.logger.debug(f'🔄 Step {self.state.n_steps}: Consecutive failures: {self.state.consecutive_failures}')
 			return
 
-		self.state.consecutive_failures = 0
-		self.logger.debug(f'🔄 Step {self.state.n_steps}: Consecutive failures reset to: {self.state.consecutive_failures}')
+		if self.state.consecutive_failures > 0:
+			self.state.consecutive_failures = 0
+			self.logger.debug(f'🔄 Step {self.state.n_steps}: Consecutive failures reset to: {self.state.consecutive_failures}')
 
 		# Log completion results
 		if self.state.last_result and len(self.state.last_result) > 0 and self.state.last_result[-1].is_done:
@@ -1737,7 +1735,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				action_params = str(action_params)
 				action_params = f'{action_params[:522]}...' if len(action_params) > 528 else action_params
 				time_start = time.time()
-				self.logger.info(f'  🦾 {blue}[ACTION {i + 1}/{total_actions}]{reset} {action_params}')
+				self.logger.info(f'  🦾 {blue}[ACTION {i + 1}/{total_actions}]{reset} {green}{action_params}{reset}')
 
 				result = await self.tools.act(
 					action=action,
@@ -1750,11 +1748,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 				time_end = time.time()
 				time_elapsed = time_end - time_start
-				results.append(result)
 
-				self.logger.debug(
-					f'☑️ Executed action {i + 1}/{total_actions}: {green}{action_params}{reset} in {time_elapsed:.2f}s'
-				)
+				results.append(result)
 
 				if results[-1].is_done or results[-1].error or i == total_actions - 1:
 					break
