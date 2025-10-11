@@ -1527,7 +1527,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					await on_step_end(self)
 
 				if self.history.is_done():
-					self.logger.debug(f'🎯 Task completed after {step + 1} steps!')
 					await self.log_completion()
 
 					if self.register_done_callback:
@@ -1558,14 +1557,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 				self.logger.info(f'❌ {agent_run_error}')
 
-			self.logger.debug('📊 Collecting usage summary...')
 			self.history.usage = await self.token_cost_service.get_usage_summary()
 
 			# set the model output schema and call it on the fly
 			if self.history._output_model_schema is None and self.output_model_schema is not None:
 				self.history._output_model_schema = self.output_model_schema
 
-			self.logger.debug('🏁 Agent.run() completed successfully')
 			return self.history
 
 		except KeyboardInterrupt:
@@ -2051,8 +2048,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				self.logger.debug(f'⚡ Remaining asyncio tasks ({len(other_tasks)}):')
 				for task in other_tasks[:10]:  # Limit to first 10 to avoid spam
 					self.logger.debug(f'  - {task.get_name()}: {task}')
-			else:
-				self.logger.debug('⚡ No remaining asyncio tasks')
 
 		except Exception as e:
 			self.logger.error(f'Error during cleanup: {e}')
