@@ -113,8 +113,6 @@ def log_response(response: AgentOutput, registry=None, logger=None) -> None:
 	if next_goal:
 		# Blue color for next goal
 		logger.info(f'  \033[34m🎯 Next goal: {next_goal}\033[0m')
-	else:
-		logger.info('')  # Add empty line for spacing
 
 
 Context = TypeVar('Context')
@@ -1259,15 +1257,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 			param_str = f'({", ".join(param_summary)})' if param_summary else ''
 			action_details.append(f'{action_name}{param_str}')
-
-		# Create summary based on single vs multi-action
-		if action_count == 1:
-			self.logger.info(f'☝️ Decided next action: {action_name}{param_str}')
-		else:
-			summary_lines = [f'✌️ Decided next {action_count} multi-actions:']
-			for i, detail in enumerate(action_details):
-				summary_lines.append(f'          {i + 1}. {detail}')
-			self.logger.info('\n'.join(summary_lines))
 
 	def _log_step_completion_summary(self, step_start_time: float, result: list[ActionResult]) -> None:
 		"""Log step completion summary with action count, timing, and success/failure stats"""
