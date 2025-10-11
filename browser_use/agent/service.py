@@ -1749,7 +1749,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		reset = '\033[0m'
 
 		# Format action number and name
-		action_header = f'🦾 [ACTION {action_num}/{total_actions}] {blue}{action_name}{reset}:'
+		if total_actions > 1:
+			action_header = f'🦾 [{action_num}/{total_actions}] {blue}{action_name}{reset}:'
+		else:
+			action_header = f'🦾 {blue}{action_name}{reset}:'
 
 		# Get action parameters
 		action_data = action.model_dump(exclude_unset=True)
