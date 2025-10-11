@@ -1178,8 +1178,6 @@ You will be given a query and the markdown of a webpage that has been filtered t
 					if self.display_files_in_done_text:
 						file_msg = ''
 						for file_name in params.files_to_display:
-							if file_name == 'todo.md':
-								continue
 							file_content = file_system.display_file(file_name)
 							if file_content:
 								file_msg += f'\n\n{file_name}:\n{file_content}'
@@ -1191,8 +1189,6 @@ You will be given a query and the markdown of a webpage that has been filtered t
 							logger.warning('Agent wanted to display files but none were found')
 					else:
 						for file_name in params.files_to_display:
-							if file_name == 'todo.md':
-								continue
 							file_content = file_system.display_file(file_name)
 							if file_content:
 								attachments.append(file_name)
