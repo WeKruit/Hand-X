@@ -23,7 +23,6 @@ from browser_use.agent.cloud_events import (
 )
 from browser_use.agent.message_manager.utils import save_conversation
 from browser_use.llm.base import BaseChatModel
-from browser_use.llm.google.chat import ChatGoogle
 from browser_use.llm.messages import BaseMessage, ContentPartImageParam, ContentPartTextParam, UserMessage
 from browser_use.tokens.service import TokenCost
 
@@ -185,19 +184,14 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if llm is None:
 			default_llm_name = CONFIG.DEFAULT_LLM
 			if default_llm_name:
-				try:
-					from browser_use.llm.models import get_llm_by_name
+				from browser_use.llm.models import get_llm_by_name
 
-					llm = get_llm_by_name(default_llm_name)
-				except (ImportError, ValueError) as e:
-					# Use the logger that's already imported at the top of the module
-					logger.warning(
-						f'Failed to create default LLM "{default_llm_name}": {e}. Falling back to ChatGoogle(model="gemini-flash-latest")'
-					)
-					llm = ChatGoogle(model='gemini-flash-latest')
+				llm = get_llm_by_name(default_llm_name)
 			else:
 				# No default LLM specified, use the original default
-				llm = ChatGoogle(model='gemini-flash-latest')
+				from browser_use.llm import ChatBrowserUse
+
+				llm = ChatBrowserUse()
 
 		# set flashmode = True if llm is ChatBrowserUse
 		if llm.provider == 'browser-use':
@@ -1213,7 +1207,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	def _log_first_step_startup(self) -> None:
 		"""Log startup message only on the first step"""
 		if len(self.history.history) == 0:
-			self.logger.info(f'Starting a browser-use agent with version {self.version} and model={self.llm.model}')
+			self.logger.info(
+				f'Starting a browser-use agent with version {self.version}, with provider={self.llm.provider} and model={self.llm.model}'
+			)
 
 	def _log_step_context(self, browser_state_summary: BrowserStateSummary) -> None:
 		"""Log step context information"""
