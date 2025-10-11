@@ -258,42 +258,6 @@ class DefaultActionWatchdog(BaseWatchdog):
 		try:
 			session_id = cdp_session.session_id
 
-			# Use document.elementFromPoint to find what element is actually at the coordinates
-			js_result = await cdp_session.cdp_client.send.Runtime.evaluate(
-				params={
-					'expression': f"""
-					(function() {{
-						const elementAtPoint = document.elementFromPoint({x}, {y});
-						if (!elementAtPoint) return null;
-						
-						// Get all attributes for comparison
-						const getElementInfo = (el) => {{
-							const info = {{
-								tagName: el.tagName,
-								id: el.id || '',
-								className: el.className || '',
-								textContent: (el.textContent || '').substring(0, 100)
-							}};
-							return info;
-						}};
-						
-						return getElementInfo(elementAtPoint);
-					}})()
-					""",
-					'returnByValue': True,
-				},
-				session_id=session_id,
-			)
-
-			if 'result' not in js_result or 'value' not in js_result['result']:
-				self.logger.debug('Could not determine element at point, assuming not occluded')
-				return False
-
-			element_at_point = js_result['result']['value']
-			if not element_at_point:
-				self.logger.debug('No element found at point, assuming not occluded')
-				return False
-
 			# Get target element info for comparison
 			target_result = await cdp_session.cdp_client.send.DOM.resolveNode(
 				params={'backendNodeId': backend_node_id}, session_id=session_id
@@ -320,15 +284,20 @@ class DefaultActionWatchdog(BaseWatchdog):
 							};
 						};
 						
-						// Check if target element contains the element at point  
 						const elementAtPoint = document.elementFromPoint(arguments[0], arguments[1]);
-						const isTargetOrDescendant = elementAtPoint && (
-							this === elementAtPoint || this.contains(elementAtPoint)
-						);
+						if (!elementAtPoint) {
+							return { targetInfo: getElementInfo(this), isClickable: false };
+						}
 						
+						// Simple containment-based clickability logic
+						const isClickable = this === elementAtPoint || 
+							this.contains(elementAtPoint) ||
+							elementAtPoint.contains(this);
+							
 						return {
 							targetInfo: getElementInfo(this),
-							isTargetOrDescendant: isTargetOrDescendant
+							elementAtPointInfo: getElementInfo(elementAtPoint), 
+							isClickable: isClickable
 						};
 					}
 					""",
@@ -343,18 +312,19 @@ class DefaultActionWatchdog(BaseWatchdog):
 				return True
 
 			target_data = target_info_result['result']['value']
-			is_target_or_descendant = target_data.get('isTargetOrDescendant', False)
+			is_clickable = target_data.get('isClickable', False)
 
-			if is_target_or_descendant:
-				self.logger.debug('Element is clickable (target or descendant at point)')
+			if is_clickable:
+				self.logger.debug('Element is clickable (target, contained, or semantically related)')
 				return False
 			else:
 				target_info = target_data.get('targetInfo', {})
+				element_at_point_info = target_data.get('elementAtPointInfo', {})
 				self.logger.debug(
 					f'Element is occluded. Target: {target_info.get("tagName", "unknown")} '
 					f'(id={target_info.get("id", "none")}), '
-					f'ElementAtPoint: {element_at_point.get("tagName", "unknown")} '
-					f'(id={element_at_point.get("id", "none")})'
+					f'ElementAtPoint: {element_at_point_info.get("tagName", "unknown")} '
+					f'(id={element_at_point_info.get("id", "none")})'
 				)
 				return True
 
