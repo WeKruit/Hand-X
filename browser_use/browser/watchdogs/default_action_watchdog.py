@@ -243,6 +243,125 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 	# ========== Implementation Methods ==========
 
+	async def _check_element_occlusion(self, backend_node_id: int, x: float, y: float, cdp_session) -> bool:
+		"""Check if an element is occluded by other elements at the given coordinates.
+
+		Args:
+			backend_node_id: The backend node ID of the target element
+			x: X coordinate to check
+			y: Y coordinate to check
+			cdp_session: CDP session to use
+
+		Returns:
+			True if element is occluded, False if clickable
+		"""
+		try:
+			session_id = cdp_session.session_id
+
+			# Use document.elementFromPoint to find what element is actually at the coordinates
+			js_result = await cdp_session.cdp_client.send.Runtime.evaluate(
+				params={
+					'expression': f"""
+					(function() {{
+						const elementAtPoint = document.elementFromPoint({x}, {y});
+						if (!elementAtPoint) return null;
+						
+						// Get all attributes for comparison
+						const getElementInfo = (el) => {{
+							const info = {{
+								tagName: el.tagName,
+								id: el.id || '',
+								className: el.className || '',
+								textContent: (el.textContent || '').substring(0, 100)
+							}};
+							return info;
+						}};
+						
+						return getElementInfo(elementAtPoint);
+					}})()
+					""",
+					'returnByValue': True,
+				},
+				session_id=session_id,
+			)
+
+			if 'result' not in js_result or 'value' not in js_result['result']:
+				self.logger.debug('Could not determine element at point, assuming not occluded')
+				return False
+
+			element_at_point = js_result['result']['value']
+			if not element_at_point:
+				self.logger.debug('No element found at point, assuming not occluded')
+				return False
+
+			# Get target element info for comparison
+			target_result = await cdp_session.cdp_client.send.DOM.resolveNode(
+				params={'backendNodeId': backend_node_id}, session_id=session_id
+			)
+
+			if 'object' not in target_result:
+				self.logger.debug('Could not resolve target element, assuming occluded')
+				return True
+
+			object_id = target_result['object']['objectId']
+
+			# Get target element info
+			target_info_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+				params={
+					'objectId': object_id,
+					'functionDeclaration': """
+					function() {
+						const getElementInfo = (el) => {
+							return {
+								tagName: el.tagName,
+								id: el.id || '',
+								className: el.className || '',
+								textContent: (el.textContent || '').substring(0, 100)
+							};
+						};
+						
+						// Check if target element contains the element at point  
+						const elementAtPoint = document.elementFromPoint(arguments[0], arguments[1]);
+						const isTargetOrDescendant = elementAtPoint && (
+							this === elementAtPoint || this.contains(elementAtPoint)
+						);
+						
+						return {
+							targetInfo: getElementInfo(this),
+							isTargetOrDescendant: isTargetOrDescendant
+						};
+					}
+					""",
+					'arguments': [{'value': x}, {'value': y}],
+					'returnByValue': True,
+				},
+				session_id=session_id,
+			)
+
+			if 'result' not in target_info_result or 'value' not in target_info_result['result']:
+				self.logger.debug('Could not get target element info, assuming occluded')
+				return True
+
+			target_data = target_info_result['result']['value']
+			is_target_or_descendant = target_data.get('isTargetOrDescendant', False)
+
+			if is_target_or_descendant:
+				self.logger.debug('Element is clickable (target or descendant at point)')
+				return False
+			else:
+				target_info = target_data.get('targetInfo', {})
+				self.logger.debug(
+					f'Element is occluded. Target: {target_info.get("tagName", "unknown")} '
+					f'(id={target_info.get("id", "none")}), '
+					f'ElementAtPoint: {element_at_point.get("tagName", "unknown")} '
+					f'(id={element_at_point.get("id", "none")})'
+				)
+				return True
+
+		except Exception as e:
+			self.logger.debug(f'Occlusion check failed: {e}, assuming not occluded')
+			return False
+
 	async def _click_element_node_impl(self, element_node, while_holding_ctrl: bool = False) -> dict | None:
 		"""
 		Click an element using pure CDP with multiple fallback methods for getting element geometry.
@@ -394,9 +513,35 @@ class DefaultActionWatchdog(BaseWatchdog):
 			center_x = max(0, min(viewport_width - 1, center_x))
 			center_y = max(0, min(viewport_height - 1, center_y))
 
-			# Perform the click using CDP
-			# TODO: do occlusion detection first, if element is not on the top, fire JS-based
-			# click event instead using xpath of x,y coordinate clicking, because we wont be able to click *through* occluding elements using x,y clicks
+			# Check for occlusion before attempting CDP click
+			is_occluded = await self._check_element_occlusion(backend_node_id, center_x, center_y, cdp_session)
+
+			if is_occluded:
+				self.logger.debug('🚫 Element is occluded, falling back to JavaScript click')
+				try:
+					result = await cdp_session.cdp_client.send.DOM.resolveNode(
+						params={'backendNodeId': backend_node_id},
+						session_id=session_id,
+					)
+					assert 'object' in result and 'objectId' in result['object'], (
+						'Failed to find DOM element based on backendNodeId'
+					)
+					object_id = result['object']['objectId']
+
+					await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+						params={
+							'functionDeclaration': 'function() { this.click(); }',
+							'objectId': object_id,
+						},
+						session_id=session_id,
+					)
+					await asyncio.sleep(0.05)
+					return None
+				except Exception as js_e:
+					self.logger.error(f'JavaScript click fallback failed: {js_e}')
+					raise Exception(f'Failed to click occluded element: {js_e}')
+
+			# Perform the click using CDP (element is not occluded)
 			try:
 				self.logger.debug(f'👆 Dragging mouse over element before clicking x: {center_x}px y: {center_y}px ...')
 				# Move mouse to element
