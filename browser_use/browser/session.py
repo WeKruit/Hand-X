@@ -1987,7 +1987,6 @@ class BrowserSession(BaseModel):
 			return
 
 		try:
-			import asyncio
 			import json
 
 			cdp_session = await self.get_or_create_cdp_session()
@@ -2104,10 +2103,9 @@ class BrowserSession(BaseModel):
 			"""
 
 			# Fire and forget - don't wait for completion
-			asyncio.create_task(
-				cdp_session.cdp_client.send.Runtime.evaluate(
-					params={'expression': script, 'returnByValue': True}, session_id=cdp_session.session_id
-				)
+
+			await cdp_session.cdp_client.send.Runtime.evaluate(
+				params={'expression': script, 'returnByValue': True}, session_id=cdp_session.session_id
 			)
 
 		except Exception as e:
