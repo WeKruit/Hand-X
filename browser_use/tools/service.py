@@ -227,7 +227,7 @@ class Tools(Generic[Context]):
 			# so I revert this.
 			actual_seconds = min(max(seconds - 3, 0), 30)
 			memory = f'Waited for {seconds} seconds'
-			logger.info(f'🕒 waited for {actual_seconds} seconds + 3 seconds for LLM call')
+			logger.info(f'🕒 waited for {seconds} second{"" if seconds == 1 else "s"}')
 			await asyncio.sleep(actual_seconds)
 			return ActionResult(extracted_content=memory, long_term_memory=memory)
 
