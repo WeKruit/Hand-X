@@ -106,7 +106,7 @@ def log_response(response: AgentOutput, registry=None, logger=None) -> None:
 
 	# Always log memory if present
 	if response.current_state.memory:
-		logger.debug(f'🧠 Memory: {response.current_state.memory}')
+		logger.info(f'  🧠 Memory: {response.current_state.memory}')
 
 	# Only log next goal if it's not empty
 	next_goal = response.current_state.next_goal
@@ -1706,25 +1706,16 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			if i > 0:
 				await asyncio.sleep(self.browser_profile.wait_between_actions)
 
-			red = '\033[91m'
-			green = '\033[92m'
-			cyan = '\033[96m'
-			blue = '\033[34m'
-			reset = '\033[0m'
-
 			try:
 				await self._check_stop_or_pause()
 				# Get action name from the action model
 				action_data = action.model_dump(exclude_unset=True)
 				action_name = next(iter(action_data.keys())) if action_data else 'unknown'
-				action_params = getattr(action, action_name, '') or str(action.model_dump(mode='json'))[:140].replace(
-					'"', ''
-				).replace('{', '').replace('}', '').replace("'", '').strip().strip(',')
-				# Ensure action_params is always a string before checking length
-				action_params = str(action_params)
-				action_params = f'{action_params[:522]}...' if len(action_params) > 528 else action_params
+
+				# Log action before execution
+				self._log_action(action, action_name, i + 1, total_actions)
+
 				time_start = time.time()
-				self.logger.info(f'  🦾 {blue}[ACTION {i + 1}/{total_actions}]{reset} {green}{action_params}{reset}')
 
 				result = await self.tools.act(
 					action=action,
@@ -1749,6 +1740,42 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				raise e
 
 		return results
+
+	def _log_action(self, action, action_name: str, action_num: int, total_actions: int) -> None:
+		"""Log the action before execution with colored formatting"""
+		# Color definitions
+		blue = '\033[34m'  # Action name
+		magenta = '\033[35m'  # Parameter names
+		reset = '\033[0m'
+
+		# Format action number and name
+		action_header = f'🦾 [ACTION {action_num}/{total_actions}] {blue}{action_name}{reset}:'
+
+		# Get action parameters
+		action_data = action.model_dump(exclude_unset=True)
+		params = action_data.get(action_name, {})
+
+		# Build parameter parts with colored formatting
+		param_parts = []
+
+		if params and isinstance(params, dict):
+			for param_name, value in params.items():
+				# Truncate long values for readability
+				if isinstance(value, str) and len(value) > 150:
+					display_value = value[:150] + '...'
+				elif isinstance(value, list) and len(str(value)) > 200:
+					display_value = str(value)[:200] + '...'
+				else:
+					display_value = value
+
+				param_parts.append(f'{magenta}{param_name}{reset}: {display_value}')
+
+		# Join all parts
+		if param_parts:
+			params_string = ', '.join(param_parts)
+			self.logger.info(f'  {action_header} {params_string}')
+		else:
+			self.logger.info(f'  {action_header}')
 
 	async def log_completion(self) -> None:
 		"""Log the completion of the task"""
