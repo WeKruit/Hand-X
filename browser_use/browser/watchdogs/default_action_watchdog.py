@@ -1122,11 +1122,20 @@ class DefaultActionWatchdog(BaseWatchdog):
 			if coords:
 				center_x = coords.x + coords.width / 2
 				center_y = coords.y + coords.height / 2
-				input_coordinates = {'input_x': center_x, 'input_y': center_y}
-				self.logger.debug(f'Using unified coordinates: x={center_x:.1f}, y={center_y:.1f}')
+
+				# Check for occlusion before using coordinates for focus
+				is_occluded = await self._check_element_occlusion(backend_node_id, center_x, center_y, cdp_session)
+
+				if is_occluded:
+					self.logger.debug('🚫 Input element is occluded, skipping coordinate-based focus')
+					input_coordinates = None  # Force fallback to CDP-only focus
+				else:
+					input_coordinates = {'input_x': center_x, 'input_y': center_y}
+					self.logger.debug(f'Using unified coordinates: x={center_x:.1f}, y={center_y:.1f}')
 			else:
 				input_coordinates = None
 				self.logger.debug('No coordinates found for element')
+
 			# Ensure we have a valid object_id before proceeding
 			if not object_id:
 				raise ValueError('Could not get object_id for element')
