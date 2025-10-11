@@ -1199,7 +1199,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	async def _log_agent_run(self) -> None:
 		"""Log the agent run"""
 		# Blue color for task
-		self.logger.info(f'\033[34m🚀 Task: {self.task}\033[0m')
+		self.logger.info(f'\033[34m🎯 Task: {self.task}\033[0m')
 
 		self.logger.debug(f'🤖 Browser-Use Library Version {self.version} ({self.source})')
 
@@ -1213,7 +1213,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	def _log_first_step_startup(self) -> None:
 		"""Log startup message only on the first step"""
 		if len(self.history.history) == 0:
-			self.logger.info(f'🧠 Starting a browser-use agent with version {self.version} and model={self.llm.model}')
+			self.logger.info(f'Starting a browser-use agent with version {self.version} and model={self.llm.model}')
 
 	def _log_step_context(self, browser_state_summary: BrowserStateSummary) -> None:
 		"""Log step context information"""
@@ -1750,9 +1750,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Format action number and name
 		if total_actions > 1:
-			action_header = f'🦾 [{action_num}/{total_actions}] {blue}{action_name}{reset}:'
+			action_header = f'▶️  [{action_num}/{total_actions}] {blue}{action_name}{reset}:'
 		else:
-			action_header = f'🦾 {blue}{action_name}{reset}:'
+			action_header = f'▶️   {blue}{action_name}{reset}:'
 
 		# Get action parameters
 		action_data = action.model_dump(exclude_unset=True)
