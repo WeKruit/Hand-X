@@ -288,7 +288,17 @@ class DefaultActionWatchdog(BaseWatchdog):
 			viewport_width = layout_metrics['layoutViewport']['clientWidth']
 			viewport_height = layout_metrics['layoutViewport']['clientHeight']
 
-			# Get element coordinates using the unified method
+			# Scroll element into view FIRST before getting coordinates
+			try:
+				await cdp_session.cdp_client.send.DOM.scrollIntoViewIfNeeded(
+					params={'backendNodeId': backend_node_id}, session_id=session_id
+				)
+				await asyncio.sleep(0.05)  # Wait for scroll to complete
+				self.logger.debug('Scrolled element into view before getting coordinates')
+			except Exception as e:
+				self.logger.debug(f'Failed to scroll element into view: {e}')
+
+			# Get element coordinates using the unified method AFTER scrolling
 			element_rect = await self.browser_session.get_element_coordinates(backend_node_id, cdp_session)
 
 			# Convert rect to quads format if we got coordinates
@@ -383,16 +393,6 @@ class DefaultActionWatchdog(BaseWatchdog):
 			# Ensure click point is within viewport bounds
 			center_x = max(0, min(viewport_width - 1, center_x))
 			center_y = max(0, min(viewport_height - 1, center_y))
-
-			# Scroll element into view
-			try:
-				await cdp_session.cdp_client.send.DOM.scrollIntoViewIfNeeded(
-					params={'backendNodeId': backend_node_id}, session_id=session_id
-				)
-				await asyncio.sleep(0.05)  # Wait for scroll to complete
-				self.logger.debug(f'Scrolled element into view: {center_x}px, {center_y}px')
-			except Exception as e:
-				self.logger.debug(f'Failed to scroll element into view: {e}')
 
 			# Perform the click using CDP
 			# TODO: do occlusion detection first, if element is not on the top, fire JS-based
