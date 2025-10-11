@@ -413,7 +413,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 			# If we still don't have quads, fall back to JS click
 			if not quads:
-				self.logger.warning('⚠️ Could not get element geometry from any method, falling back to JavaScript click')
+				self.logger.warning('Could not get element geometry from any method, falling back to JavaScript click')
 				try:
 					result = await cdp_session.cdp_client.send.DOM.resolveNode(
 						params={'backendNodeId': backend_node_id},
@@ -436,7 +436,10 @@ class DefaultActionWatchdog(BaseWatchdog):
 					return None
 				except Exception as js_e:
 					self.logger.error(f'CDP JavaScript click also failed: {js_e}')
-					raise Exception(f'Failed to click element: {js_e}')
+					if 'No node with given id found' in str(js_e):
+						raise Exception('Element with given id not found')
+					else:
+						raise Exception(f'Failed to click element: {js_e}')
 
 			# Find the largest visible quad within the viewport
 			best_quad = None
