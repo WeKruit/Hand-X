@@ -947,6 +947,10 @@ class DOMTreeSerializer:
 		if 'type' in attributes_to_include and attributes_to_include['type'].lower() == node.node_name.lower():
 			del attributes_to_include['type']
 
+		# Remove invalid attribute if it's false (only show when true)
+		if 'invalid' in attributes_to_include and attributes_to_include['invalid'].lower() == 'false':
+			del attributes_to_include['invalid']
+
 		attrs_to_remove_if_text_matches = ['aria-label', 'placeholder', 'title']
 		for attr in attrs_to_remove_if_text_matches:
 			if attributes_to_include.get(attr) and attributes_to_include.get(attr, '').strip().lower() == text.strip().lower():
