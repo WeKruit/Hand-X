@@ -284,7 +284,7 @@ Available tabs:
 
 		_todo_contents = self.file_system.get_todo_contents() if self.file_system else ''
 		if not len(_todo_contents):
-			_todo_contents = '[Current todo.md is empty, fill it with your plan when applicable]'
+			_todo_contents = '[empty todo.md, fill it when applicable]'
 
 		agent_state = f"""
 <user_request>
