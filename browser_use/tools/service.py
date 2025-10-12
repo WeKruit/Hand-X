@@ -703,7 +703,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 						return ActionResult(error=msg)
 
 				direction = 'down' if params.down else 'up'
-				target = 'the page' if params.index is None or params.index == 0 else f'element {params.index}'
+				target = '' if params.index is None or params.index == 0 else f'element {params.index}'
 
 				# Get actual viewport height for more accurate scrolling
 				try:
@@ -770,9 +770,9 @@ You will be given a query and the markdown of a webpage that has been filtered t
 							logger.warning(f'Fractional scroll failed: {e}')
 
 					if params.pages == 1.0:
-						long_term_memory = f'Scrolled {direction} {target} by one page ({viewport_height}px)'
+						long_term_memory = f'Scrolled {direction} {target} {viewport_height}px'
 					else:
-						long_term_memory = f'Scrolled {direction} {target} by {completed_scrolls:.1f} pages (requested: {params.pages}, {viewport_height}px per page)'
+						long_term_memory = f'Scrolled {direction} {target} {completed_scrolls:.1f} pages'
 				else:
 					# For fractional pages <1.0, do single scroll
 					pixels = int(params.pages * viewport_height)
@@ -781,7 +781,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 					)
 					await event
 					await event.event_result(raise_if_any=True, raise_if_none=False)
-					long_term_memory = f'Scrolled {direction} {target} by {params.pages} pages ({viewport_height}px per page)'
+					long_term_memory = f'Scrolled {direction} {target} {params.pages} pages'
 
 				msg = f'🔍 {long_term_memory}'
 				logger.info(msg)
