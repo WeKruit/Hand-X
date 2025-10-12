@@ -187,7 +187,7 @@ class AgentMessagePrompt:
 		if page_stats['images'] > 0:
 			stats_text += f', {page_stats["images"]} images'
 		stats_text += f', {page_stats["total_elements"]} total elements'
-		stats_text += '</page_stats>\n\n'
+		stats_text += '</page_stats>\n'
 
 		elements_text = self.browser_state.dom_state.llm_representation(include_attributes=self.include_attributes)
 
@@ -268,7 +268,7 @@ class AgentMessagePrompt:
 Available tabs:
 {tabs_text}
 {page_info_text}
-{recent_events_text}{pdf_message}Elements you can interact with inside the viewport{truncated_text}:
+{recent_events_text}{pdf_message}Interactive elements{truncated_text}:
 {elements_text}
 """
 		return browser_state
