@@ -189,7 +189,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				llm = get_llm_by_name(default_llm_name)
 			else:
 				# No default LLM specified, use the original default
-				from browser_use.llm import ChatBrowserUse
+				from browser_use import ChatBrowserUse
 
 				llm = ChatBrowserUse()
 
