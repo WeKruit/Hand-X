@@ -1609,11 +1609,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 	@observe_debug(ignore_input=True, ignore_output=True)
 	@time_execution_async('--multi_act')
-	async def multi_act(
-		self,
-		actions: list[ActionModel],
-		check_for_new_elements: bool = True,
-	) -> list[ActionResult]:
+	async def multi_act(self, actions: list[ActionModel]) -> list[ActionResult]:
 		"""Execute multiple actions"""
 		results: list[ActionResult] = []
 		time_elapsed = 0
@@ -1798,7 +1794,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Execute initial actions if provided
 		if self.initial_actions and not self.state.follow_up_task:
 			self.logger.debug(f'⚡ Executing {len(self.initial_actions)} initial actions...')
-			result = await self.multi_act(self.initial_actions, check_for_new_elements=False)
+			result = await self.multi_act(self.initial_actions)
 			# update result 1 to mention that its was automatically loaded
 			if result and self.initial_url and result[0].long_term_memory:
 				result[0].long_term_memory = f'Found initial url and automatically loaded it. {result[0].long_term_memory}'
