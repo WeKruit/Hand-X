@@ -239,7 +239,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self.available_file_paths = available_file_paths
 
 		# Core components
-		self.task = task
+		self.task = self._enhance_task_with_schema(task, output_model_schema)
 		self.llm = llm
 		self.directly_open_url = directly_open_url
 		self.include_recent_events = include_recent_events
@@ -443,6 +443,24 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Event-based pause control (kept out of AgentState for serialization)
 		self._external_pause_event = asyncio.Event()
 		self._external_pause_event.set()
+
+	def _enhance_task_with_schema(self, task: str, output_model_schema: type[AgentStructuredOutput] | None) -> str:
+		"""Enhance task description with output schema information if provided."""
+		if output_model_schema is None:
+			return task
+
+		try:
+			schema = output_model_schema.model_json_schema()
+			import json
+
+			schema_json = json.dumps(schema, indent=2)
+
+			enhancement = f'\nExpected output format: {output_model_schema.__name__}\n{schema_json}'
+			return task + enhancement
+		except Exception as e:
+			self.logger.debug(f'Could not parse output schema: {e}')
+
+		return task
 
 	@property
 	def logger(self) -> logging.Logger:
