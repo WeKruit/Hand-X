@@ -62,7 +62,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 			# Perform the actual click using internal implementation
 			click_metadata = None
-			click_metadata = await self._click_element_node_impl(element_node, while_holding_ctrl=event.while_holding_ctrl)
+			click_metadata = await self._click_element_node_impl(element_node)
 			download_path = None  # moved to downloads_watchdog.py
 
 			# Build success message
@@ -121,7 +121,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 					# Element not found or error - fall back to typing to the page
 					self.logger.warning(f'Failed to type to element {index_for_logging}: {e}. Falling back to page typing.')
 					try:
-						await asyncio.wait_for(self._click_element_node_impl(element_node, while_holding_ctrl=False), timeout=3.0)
+						await asyncio.wait_for(self._click_element_node_impl(element_node), timeout=3.0)
 					except Exception as e:
 						pass
 					await self._type_to_page(event.text)
@@ -282,13 +282,12 @@ class DefaultActionWatchdog(BaseWatchdog):
 			self.logger.debug(f'Occlusion check failed: {e}, assuming not occluded')
 			return False
 
-	async def _click_element_node_impl(self, element_node, while_holding_ctrl: bool = False) -> dict | None:
+	async def _click_element_node_impl(self, element_node) -> dict | None:
 		"""
 		Click an element using pure CDP with multiple fallback methods for getting element geometry.
 
 		Args:
 			element_node: The DOM element to click
-			new_tab: If True, open any resulting navigation in a new tab
 		"""
 
 		try:
@@ -478,20 +477,8 @@ class DefaultActionWatchdog(BaseWatchdog):
 				)
 				await asyncio.sleep(0.05)
 
-				# Calculate modifier bitmask for CDP
-				# CDP Modifier bits: Alt=1, Control=2, Meta/Command=4, Shift=8
-				modifiers = 0
-				if while_holding_ctrl:
-					# Use platform-appropriate modifier for "open in new tab"
-					if platform.system() == 'Darwin':
-						modifiers = 4  # Meta/Cmd key
-						self.logger.debug('⌘ Using Cmd modifier for new tab click...')
-					else:
-						modifiers = 2  # Control key
-						self.logger.debug('⌃ Using Ctrl modifier for new tab click...')
-
 				# Mouse down
-				self.logger.debug(f'👆🏾 Clicking x: {center_x}px y: {center_y}px with modifiers: {modifiers} ...')
+				self.logger.debug(f'👆🏾 Clicking x: {center_x}px y: {center_y}px ...')
 				try:
 					await asyncio.wait_for(
 						cdp_session.cdp_client.send.Input.dispatchMouseEvent(
@@ -501,7 +488,6 @@ class DefaultActionWatchdog(BaseWatchdog):
 								'y': center_y,
 								'button': 'left',
 								'clickCount': 1,
-								'modifiers': modifiers,
 							},
 							session_id=session_id,
 						),
@@ -522,7 +508,6 @@ class DefaultActionWatchdog(BaseWatchdog):
 								'y': center_y,
 								'button': 'left',
 								'clickCount': 1,
-								'modifiers': modifiers,
 							},
 							session_id=session_id,
 						),
