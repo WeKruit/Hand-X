@@ -258,10 +258,6 @@ class Tools(Generic[Context]):
 				click_metadata = await event.event_result(raise_if_any=True, raise_if_none=False)
 				memory = 'Clicked element'
 
-				# Check if a new tab was opened (from watchdog metadata)
-				if isinstance(click_metadata, dict) and click_metadata.get('new_tab_opened'):
-					memory += ' - which opened a new tab'
-
 				msg = f'🖱️ {memory}'
 				logger.info(msg)
 
