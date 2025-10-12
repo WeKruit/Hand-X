@@ -672,8 +672,8 @@ You will be given a query and the markdown of a webpage that has been filtered t
 					memory = extracted_content
 					include_extracted_content_only_once = False
 				else:
-					save_result = await file_system.save_extracted_content(extracted_content)
-					memory = f'Extracted content from {current_url} for query: {query}\nContent saved to file system: {save_result} and displayed in <read_state>.'
+					file_name = await file_system.save_extracted_content(extracted_content)
+					memory = f'Query: {query}\nContent in {file_name} and once in <read_state>.'
 					include_extracted_content_only_once = True
 
 				logger.info(f'📄 {memory}')
