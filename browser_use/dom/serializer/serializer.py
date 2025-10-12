@@ -943,6 +943,10 @@ class DOMTreeSerializer:
 		if role and node.node_name == role:
 			attributes_to_include.pop('role', None)
 
+		# Remove type attribute if it matches the tag name (e.g. <button type="button">)
+		if 'type' in attributes_to_include and attributes_to_include['type'].lower() == node.node_name.lower():
+			del attributes_to_include['type']
+
 		attrs_to_remove_if_text_matches = ['aria-label', 'placeholder', 'title']
 		for attr in attrs_to_remove_if_text_matches:
 			if attributes_to_include.get(attr) and attributes_to_include.get(attr, '').strip().lower() == text.strip().lower():
