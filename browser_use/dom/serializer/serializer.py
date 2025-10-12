@@ -951,6 +951,10 @@ class DOMTreeSerializer:
 		if 'invalid' in attributes_to_include and attributes_to_include['invalid'].lower() == 'false':
 			del attributes_to_include['invalid']
 
+		# Remove aria-expanded if we have expanded (prefer AX tree over HTML attribute)
+		if 'expanded' in attributes_to_include and 'aria-expanded' in attributes_to_include:
+			del attributes_to_include['aria-expanded']
+
 		attrs_to_remove_if_text_matches = ['aria-label', 'placeholder', 'title']
 		for attr in attrs_to_remove_if_text_matches:
 			if attributes_to_include.get(attr) and attributes_to_include.get(attr, '').strip().lower() == text.strip().lower():
