@@ -518,8 +518,6 @@ class BrowserSession(BaseModel):
 					# Use cloud browser service
 					try:
 						cloud_cdp_url = await get_cloud_browser_cdp_url()
-						await asyncio.sleep(10)
-
 						self.browser_profile.cdp_url = cloud_cdp_url
 						self.browser_profile.is_local = False
 						self.logger.info('🌤️ Successfully connected to cloud browser service')
