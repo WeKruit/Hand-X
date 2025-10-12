@@ -192,11 +192,6 @@ class DefaultActionWatchdog(BaseWatchdog):
 			# Positive pixels = scroll down, negative = scroll up
 			pixels = event.amount if event.direction == 'down' else -event.amount
 
-			# CRITICAL: CDP calls time out without this, even if the target is already active
-			await self.browser_session.agent_focus.cdp_client.send.Target.activateTarget(
-				params={'targetId': self.browser_session.agent_focus.target_id}
-			)
-
 			# Element-specific scrolling if node is provided
 			if event.node is not None:
 				element_node = event.node
@@ -212,7 +207,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 						f'📜 Scrolled element {index_for_logging} container {event.direction} by {event.amount} pixels'
 					)
 
-					# CRITICAL: For iframe scrolling, we need to force a full DOM refresh
+					# For iframe scrolling, we need to force a full DOM refresh
 					# because the iframe's content has changed position
 					if is_iframe:
 						self.logger.debug('🔄 Forcing DOM refresh after iframe scroll')
@@ -226,11 +221,6 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 			# Perform target-level scroll
 			await self._scroll_with_cdp_gesture(pixels)
-
-			# CRITICAL: CDP calls time out without this, even if the target is already active
-			await self.browser_session.agent_focus.cdp_client.send.Target.activateTarget(
-				params={'targetId': self.browser_session.agent_focus.target_id}
-			)
 
 			# Note: We don't clear cached state here - let multi_act handle DOM change detection
 			# by explicitly rebuilding and comparing when needed
@@ -614,7 +604,6 @@ class DefaultActionWatchdog(BaseWatchdog):
 			finally:
 				# always re-focus back to original top-level page session context in case click opened a new tab/popup/window/dialog/etc.
 				cdp_session = await self.browser_session.get_or_create_cdp_session(focus=True)
-				await cdp_session.cdp_client.send.Target.activateTarget(params={'targetId': cdp_session.target_id})
 				await cdp_session.cdp_client.send.Runtime.runIfWaitingForDebugger(session_id=cdp_session.session_id)
 
 		except URLNotAllowedError as e:
@@ -640,7 +629,6 @@ class DefaultActionWatchdog(BaseWatchdog):
 		try:
 			# Get CDP client and session
 			cdp_session = await self.browser_session.get_or_create_cdp_session(target_id=None, focus=True)
-			await cdp_session.cdp_client.send.Target.activateTarget(params={'targetId': cdp_session.target_id})
 
 			# Type the text character by character to the focused element
 			for char in text:
