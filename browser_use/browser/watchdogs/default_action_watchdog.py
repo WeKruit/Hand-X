@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import platform
 
 from browser_use.browser.events import (
 	ClickElementEvent,
