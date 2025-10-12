@@ -51,9 +51,6 @@ class DefaultActionWatchdog(BaseWatchdog):
 			index_for_logging = element_node.element_index or 'unknown'
 			starting_target_id = self.browser_session.agent_focus.target_id
 
-			# Track initial number of tabs to detect new tab opening
-			initial_target_ids = await self.browser_session._cdp_get_all_pages()
-
 			# Check if element is a file input (should not be clicked)
 			if self.browser_session.is_file_input(element_node):
 				msg = f'Index {index_for_logging} - has an element which opens file upload dialog. To upload files please use a specific function to upload files'
@@ -77,44 +74,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 				self.logger.debug(f'🖱️ {msg}')
 			self.logger.debug(f'Element xpath: {element_node.xpath}')
 
-			# Wait a bit for potential new tab to be created
-			# This is necessary because tab creation is async and might not be immediate
-			await asyncio.sleep(0.1)
-
-			# Note: We don't clear cached state here - let multi_act handle DOM change detection
-			# by explicitly rebuilding and comparing when needed
-			# Successfully clicked, always reset session back to parent page session context
-			self.browser_session.agent_focus = await self.browser_session.get_or_create_cdp_session(
-				target_id=starting_target_id, focus=True
-			)
-
-			# Check if a new tab was opened
-			after_target_ids = await self.browser_session._cdp_get_all_pages()
-			new_target_ids = {t['targetId'] for t in after_target_ids} - {t['targetId'] for t in initial_target_ids}
-			new_tab_opened = len(new_target_ids) > 0
-
-			if new_target_ids:
-				new_tab_msg = 'New tab opened - switching to it'
-				msg += f' - {new_tab_msg}'
-				self.logger.info(f'🔗 {new_tab_msg}')
-
-				if not event.while_holding_ctrl:
-					# if while_holding_ctrl=False it means agent was not expecting a new tab to be opened
-					# so we need to switch to the new tab to make the agent aware of the surprise new tab that was opened.
-					# when while_holding_ctrl=True we dont actually want to switch to it,
-					# we should match human expectations of ctrl+click which opens in the background,
-					# so in multi_act it usually already sends [click_element_by_index(123, while_holding_ctrl=True), switch(tab_id=None)] anyway
-					from browser_use.browser.events import SwitchTabEvent
-
-					new_target_id = new_target_ids.pop()
-					switch_event = await self.event_bus.dispatch(SwitchTabEvent(target_id=new_target_id))
-					await switch_event
-
-			# Return click metadata including new tab information
-			result_metadata = click_metadata if isinstance(click_metadata, dict) else {}
-			result_metadata['new_tab_opened'] = new_tab_opened
-
-			return result_metadata
+			return click_metadata if isinstance(click_metadata, dict) else None
 		except Exception as e:
 			raise
 
