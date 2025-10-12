@@ -457,10 +457,7 @@ class BrowserSession(BaseModel):
 	@observe_debug(ignore_input=True, ignore_output=True, name='browser_session_start')
 	async def start(self) -> None:
 		"""Start the browser session."""
-		start_event = self.event_bus.dispatch(BrowserStartEvent())
-		await start_event
-		# Ensure any exceptions from the event handler are propagated
-		await start_event.event_result(raise_if_any=True, raise_if_none=False)
+		self.event_bus.dispatch(BrowserStartEvent())
 
 	async def kill(self) -> None:
 		"""Kill the browser session and reset all state."""
@@ -521,6 +518,8 @@ class BrowserSession(BaseModel):
 					# Use cloud browser service
 					try:
 						cloud_cdp_url = await get_cloud_browser_cdp_url()
+						await asyncio.sleep(10)
+
 						self.browser_profile.cdp_url = cloud_cdp_url
 						self.browser_profile.is_local = False
 						self.logger.info('🌤️ Successfully connected to cloud browser service')
