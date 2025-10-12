@@ -894,6 +894,11 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 				'id': 'lckanjgmijmafbedllaakclkaicjfmnk',
 				'url': 'https://clients2.google.com/service/update2/crx?response=redirect&prodversion=133&acceptformat=crx3&x=id%3Dlckanjgmijmafbedllaakclkaicjfmnk%26uc',
 			},
+			{
+				'name': 'Force Background Tab',
+				'id': 'gidlfommnbibbmegmgajdbikelkdcmcl',
+				'url': 'https://clients2.google.com/service/update2/crx?response=redirect&prodversion=133&acceptformat=crx3&x=id%3Dgidlfommnbibbmegmgajdbikelkdcmcl%26uc',
+			},
 			# {
 			# 	'name': 'Captcha Solver: Auto captcha solving service',
 			# 	'id': 'pgojnojmmhpofjgdmaebadhbocahppod',
