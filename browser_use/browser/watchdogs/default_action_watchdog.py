@@ -539,8 +539,6 @@ class DefaultActionWatchdog(BaseWatchdog):
 						},
 						session_id=session_id,
 					)
-					await asyncio.sleep(0.1)
-					# Navigation is handled by BrowserSession via events
 					return None
 				except Exception as js_e:
 					self.logger.error(f'CDP JavaScript click also failed: {js_e}')
