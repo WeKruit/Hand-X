@@ -1,7 +1,9 @@
 import os
-from browser_use import Agent, Browser, Tools, ActionResult, ChatOpenAI
-from browser_use.browser.session import BrowserSession
+
 from onepassword.client import Client
+
+from browser_use import ActionResult, Agent, Browser, ChatOpenAI, Tools
+from browser_use.browser.session import BrowserSession
 
 """
 Use Case: Securely log into a website using credentials stored in 1Password vault.
@@ -70,7 +72,7 @@ async def main():
 
 			success = result.get('result', {}).get('value', False)
 			if success:
-				print(f'[BLUR] Applied CSS blur to page')
+				print('[BLUR] Applied CSS blur to page')
 				return ActionResult(extracted_content='Successfully applied CSS blur to page', include_in_memory=True)
 			else:
 				return ActionResult(error='Failed to apply blur', include_in_memory=True)
@@ -114,10 +116,10 @@ async def main():
 
 			removed = result.get('result', {}).get('value', False)
 			if removed:
-				print(f'[BLUR] Removed CSS blur from page')
+				print('[BLUR] Removed CSS blur from page')
 				return ActionResult(extracted_content='Successfully removed CSS blur from page', include_in_memory=True)
 			else:
-				print(f'[BLUR] Page was not blurred')
+				print('[BLUR] Page was not blurred')
 				return ActionResult(
 					extracted_content='Page was not blurred (may have already been removed)', include_in_memory=True
 				)
