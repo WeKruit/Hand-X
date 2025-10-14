@@ -71,6 +71,23 @@ class HTMLSerializer:
 			if tag_name in {'style', 'script', 'head', 'meta', 'link', 'title'}:
 				return ''
 
+			# Skip code tags with display:none - these often contain JSON state for SPAs
+			if tag_name == 'code' and node.attributes:
+				style = node.attributes.get('style', '')
+				# Check if element is hidden (display:none) - likely JSON data
+				if 'display:none' in style.replace(' ', '') or 'display: none' in style:
+					return ''
+				# Also check for bpr-guid IDs (LinkedIn's JSON data pattern)
+				element_id = node.attributes.get('id', '')
+				if 'bpr-guid' in element_id or 'data' in element_id or 'state' in element_id:
+					return ''
+
+			# Skip base64 inline images - these are usually placeholders or tracking pixels
+			if tag_name == 'img' and node.attributes:
+				src = node.attributes.get('src', '')
+				if src.startswith('data:image/'):
+					return ''
+
 			# Opening tag
 			parts.append(f'<{tag_name}')
 
@@ -156,6 +173,11 @@ class HTMLSerializer:
 		for key, value in attributes.items():
 			# Skip href if not extracting links
 			if not self.extract_links and key == 'href':
+				continue
+
+			# Skip data-* attributes as they often contain JSON payloads
+			# These are used by modern SPAs (React, Vue, Angular) for state management
+			if key.startswith('data-'):
 				continue
 
 			# Handle boolean attributes
