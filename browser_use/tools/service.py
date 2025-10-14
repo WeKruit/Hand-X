@@ -1080,6 +1080,12 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			strip=['script', 'style'],  # Remove these tags
 			bullets='-',  # Use - for unordered lists
 			code_language='',  # Don't add language to code blocks
+			escape_asterisks=False,  # Don't escape asterisks (cleaner output)
+			escape_underscores=False,  # Don't escape underscores (cleaner output)
+			escape_misc=False,  # Don't escape other characters (cleaner output)
+			autolinks=False,  # Don't convert URLs to <> format
+			default_title=False,  # Don't add default title attributes
+			keep_inline_images_in=[],  # Don't keep inline images in any tags (we already filter base64 in HTML)
 		)
 
 		initial_markdown_length = len(content)
@@ -1109,10 +1115,10 @@ You will be given a query and the markdown of a webpage that has been filtered t
 
 	def _preprocess_markdown_content(self, content: str, max_newlines: int = 3) -> tuple[str, int]:
 		"""
-		Light preprocessing of html2text output - minimal cleanup since html2text is already clean.
+		Light preprocessing of markdown output - minimal cleanup with JSON blob removal.
 
 		Args:
-			content: Markdown content from html2text to lightly filter
+			content: Markdown content to lightly filter
 			max_newlines: Maximum consecutive newlines to allow
 
 		Returns:
@@ -1122,6 +1128,14 @@ You will be given a query and the markdown of a webpage that has been filtered t
 
 		original_length = len(content)
 
+		# Remove JSON blobs (common in SPAs like LinkedIn, Facebook, etc.)
+		# These are often embedded as `{"key":"value",...}` and can be massive
+		# Match JSON objects/arrays that are at least 100 chars long
+		# This catches SPA state/config data without removing small inline JSON
+		content = re.sub(r'`\{["\w].*?\}`', '', content, flags=re.DOTALL)  # Remove JSON in code blocks
+		content = re.sub(r'\{"\$type":[^}]{100,}\}', '', content)  # Remove JSON with $type fields (common pattern)
+		content = re.sub(r'\{"[^"]{5,}":\{[^}]{100,}\}', '', content)  # Remove nested JSON objects
+
 		# Compress consecutive newlines (4+ newlines become max_newlines)
 		content = re.sub(r'\n{4,}', '\n' * max_newlines, content)
 
@@ -1130,8 +1144,11 @@ You will be given a query and the markdown of a webpage that has been filtered t
 		filtered_lines = []
 		for line in lines:
 			stripped = line.strip()
-			# Keep lines with substantial content (html2text output is already clean)
+			# Keep lines with substantial content
 			if len(stripped) > 2:
+				# Skip lines that look like JSON (start with { or [ and are very long)
+				if (stripped.startswith('{') or stripped.startswith('[')) and len(stripped) > 100:
+					continue
 				filtered_lines.append(line)
 
 		content = '\n'.join(filtered_lines)
