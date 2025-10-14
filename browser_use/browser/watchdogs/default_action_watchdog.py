@@ -2,7 +2,9 @@
 
 import asyncio
 import json
-import platform
+
+from cdp_use.cdp.input.commands import DispatchKeyEventParameters
+
 from browser_use.actor.page import get_key_info
 from browser_use.browser.events import (
 	ClickElementEvent,
@@ -22,7 +24,6 @@ from browser_use.browser.views import BrowserError, URLNotAllowedError
 from browser_use.browser.watchdog_base import BaseWatchdog
 from browser_use.dom.service import EnhancedDOMTreeNode
 from browser_use.observability import observe_debug
-from cdp_use.cdp.input.commands import DispatchKeyEventParameters
 
 # Import EnhancedDOMTreeNode and rebuild event models that have forward references to it
 # This must be done after all imports are complete
@@ -1525,9 +1526,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 		except Exception as e:
 			raise
 
-	async def _dispatch_key_event(
-		self, cdp_session, event_type: str, key: str, modifiers: int = 0
-	) -> None:
+	async def _dispatch_key_event(self, cdp_session, event_type: str, key: str, modifiers: int = 0) -> None:
 		"""Helper to dispatch a keyboard event with proper key codes."""
 		code, vk_code = get_key_info(key)
 		params: DispatchKeyEventParameters = {
@@ -1539,9 +1538,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 			params['modifiers'] = modifiers
 		if vk_code is not None:
 			params['windowsVirtualKeyCode'] = vk_code
-		await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-			params=params, session_id=cdp_session.session_id
-		)
+		await cdp_session.cdp_client.send.Input.dispatchKeyEvent(params=params, session_id=cdp_session.session_id)
 
 	async def on_SendKeysEvent(self, event: SendKeysEvent) -> None:
 		"""Handle send keys request with CDP."""
