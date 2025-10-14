@@ -1047,17 +1047,24 @@ You will be given a query and the markdown of a webpage that has been filtered t
 		"""
 		import re
 
-		# Get HTML content from current page
-		cdp_session = await browser_session.get_or_create_cdp_session()
-		try:
-			body_id = await cdp_session.cdp_client.send.DOM.getDocument(session_id=cdp_session.session_id)
-			page_html_result = await cdp_session.cdp_client.send.DOM.getOuterHTML(
-				params={'backendNodeId': body_id['root']['backendNodeId']}, session_id=cdp_session.session_id
-			)
-			page_html = page_html_result['outerHTML']
-			current_url = await browser_session.get_current_page_url()
-		except Exception as e:
-			raise RuntimeError(f"Couldn't extract page content: {e}")
+		current_url = await browser_session.get_current_page_url()
+
+		# Get the enhanced DOM tree from DOMWatchdog
+		# This captures the current state of the page including dynamic content, shadow roots, etc.
+		dom_watchdog = browser_session._dom_watchdog
+		assert dom_watchdog is not None, 'DOMWatchdog not available'
+
+		# Get or build the enhanced DOM tree
+		await dom_watchdog._build_dom_tree_without_highlights()
+		enhanced_dom_tree = dom_watchdog.enhanced_dom_tree
+		assert enhanced_dom_tree is not None, 'Enhanced DOM tree not available'
+
+		# Use the new HTML serializer with the enhanced DOM tree
+		# This serializer captures shadow roots and iframe content that getOuterHTML misses
+		from browser_use.dom.serializer.html_serializer import HTMLSerializer
+
+		html_serializer = HTMLSerializer(extract_links=extract_links)
+		page_html = html_serializer.serialize(enhanced_dom_tree)
 
 		original_html_length = len(page_html)
 
@@ -1086,6 +1093,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 		# Content statistics
 		stats = {
 			'url': current_url,
+			'method': 'enhanced_dom_tree',  # Mark this as using the enhanced DOM tree method
 			'original_html_chars': original_html_length,
 			'initial_markdown_chars': initial_markdown_length,
 			'filtered_chars_removed': chars_filtered,
