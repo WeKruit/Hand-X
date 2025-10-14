@@ -3,8 +3,6 @@
 import asyncio
 import json
 import platform
-from typing import TYPE_CHECKING
-
 from browser_use.actor.page import get_key_info
 from browser_use.browser.events import (
 	ClickElementEvent,
@@ -24,9 +22,7 @@ from browser_use.browser.views import BrowserError, URLNotAllowedError
 from browser_use.browser.watchdog_base import BaseWatchdog
 from browser_use.dom.service import EnhancedDOMTreeNode
 from browser_use.observability import observe_debug
-
-if TYPE_CHECKING:
-	from cdp_use.cdp.input.commands import DispatchKeyEventParameters
+from cdp_use.cdp.input.commands import DispatchKeyEventParameters
 
 # Import EnhancedDOMTreeNode and rebuild event models that have forward references to it
 # This must be done after all imports are complete
@@ -1541,7 +1537,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 	) -> None:
 		"""Helper to dispatch a keyboard event with proper key codes."""
 		code, vk_code = get_key_info(key)
-		params: 'DispatchKeyEventParameters' = {
+		params: DispatchKeyEventParameters = {
 			'type': event_type,
 			'key': key,
 			'code': code,
