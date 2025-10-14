@@ -971,7 +971,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			)
 
 		@self.registry.action(
-			"""Execute JS. MUST: wrap in IIFE (function(){...})() or (async function(){...})(), add try-catch, validate elements exist. Check null before accessing properties. Use for: hover, drag, custom selectors, forms, extract/filter links, iframes, shadow DOM, React/Vue/Angular. Limit output. Examples: (function(){try{const el=document.querySelector('#id');return el?el.value:'not found'}catch(e){return 'Error: '+e.message}})() ✓ | document.querySelector('#id').value ✗. Shadow: iterate hosts, check shadowRoot. Return JSON.stringify() for objects. Do not use comments""",
+			"""Execute browser JavaScript. MUST: wrap in IIFE (function(){...})(). Use ONLY browser APIs (document, window, DOM). NO Node.js APIs (fs, require, process). Add try-catch. Example: (function(){try{const el=document.querySelector('#id');return el?el.value:'not found'}catch(e){return 'Error: '+e.message}})() Never use comments. You are not allowed to use // in code. No human reads this. Use e.g. for hover, drag, zoom, custom selectors, extract/filter links, shadow DOM or to analyse page structure. Limit output.""",
 		)
 		async def evaluate(code: str, browser_session: BrowserSession):
 			# Execute JavaScript with proper error handling and promise support
@@ -979,9 +979,12 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			cdp_session = await browser_session.get_or_create_cdp_session()
 
 			try:
+				# Validate and potentially fix JavaScript code before execution
+				validated_code = self._validate_and_fix_javascript(code)
+
 				# Always use awaitPromise=True - it's ignored for non-promises
 				result = await cdp_session.cdp_client.send.Runtime.evaluate(
-					params={'expression': code, 'returnByValue': True, 'awaitPromise': True},
+					params={'expression': validated_code, 'returnByValue': True, 'awaitPromise': True},
 					session_id=cdp_session.session_id,
 				)
 
@@ -991,9 +994,17 @@ You will be given a query and the markdown of a webpage that has been filtered t
 					error_msg = f'JavaScript execution error: {exception.get("text", "Unknown error")}'
 					if 'lineNumber' in exception:
 						error_msg += f' at line {exception["lineNumber"]}'
-					msg = f'Code: {code}\n\nError: {error_msg}'
-					logger.info(msg)
-					return ActionResult(error=msg)
+
+					# Enhanced error message with debugging info
+					enhanced_msg = f"""JavaScript Execution Failed:
+{error_msg}
+
+Validated Code (after quote fixing):
+{validated_code[:500]}{'...' if len(validated_code) > 500 else ''}
+"""
+
+					logger.info(enhanced_msg)
+					return ActionResult(error=enhanced_msg)
 
 				# Get the result data
 				result_data = result.get('result', {})
@@ -1031,11 +1042,74 @@ You will be given a query and the markdown of a webpage that has been filtered t
 
 			except Exception as e:
 				# CDP communication or other system errors
-				error_msg = f'Code: {code}\n\nError: {error_msg} Failed to execute JavaScript: {type(e).__name__}: {e}'
+				error_msg = f'Code: {code}\n\nError: Failed to execute JavaScript: {type(e).__name__}: {e}'
 				logger.info(error_msg)
 				return ActionResult(error=error_msg)
 
-	# Custom done action for structured output
+	def _validate_and_fix_javascript(self, code: str) -> str:
+		"""Validate and fix common JavaScript issues before execution"""
+
+		import re
+
+		# Pattern 1: Fix double-escaped quotes (\\\" → \")
+		fixed_code = re.sub(r'\\"', '"', code)
+
+		# Pattern 2: Fix over-escaped regex patterns (\\\\d → \\d)
+		# Common issue: regex gets double-escaped during parsing
+		fixed_code = re.sub(r'\\\\([dDsSwWbBnrtfv])', r'\\\1', fixed_code)
+		fixed_code = re.sub(r'\\\\([.*+?^${}()|[\]])', r'\\\1', fixed_code)
+
+		# Pattern 3: Fix XPath expressions with mixed quotes
+		xpath_pattern = r'document\.evaluate\s*\(\s*"([^"]*\'[^"]*)"'
+
+		def fix_xpath_quotes(match):
+			xpath_with_quotes = match.group(1)
+			return f'document.evaluate(`{xpath_with_quotes}`,'
+
+		fixed_code = re.sub(xpath_pattern, fix_xpath_quotes, fixed_code)
+
+		# Pattern 4: Fix querySelector/querySelectorAll with mixed quotes
+		selector_pattern = r'(querySelector(?:All)?)\s*\(\s*"([^"]*\'[^"]*)"'
+
+		def fix_selector_quotes(match):
+			method_name = match.group(1)
+			selector_with_quotes = match.group(2)
+			return f'{method_name}(`{selector_with_quotes}`)'
+
+		fixed_code = re.sub(selector_pattern, fix_selector_quotes, fixed_code)
+
+		# Pattern 5: Fix closest() calls with mixed quotes
+		closest_pattern = r'\.closest\s*\(\s*"([^"]*\'[^"]*)"'
+
+		def fix_closest_quotes(match):
+			selector_with_quotes = match.group(1)
+			return f'.closest(`{selector_with_quotes}`)'
+
+		fixed_code = re.sub(closest_pattern, fix_closest_quotes, fixed_code)
+
+		# Pattern 6: Fix .matches() calls with mixed quotes (similar to closest)
+		matches_pattern = r'\.matches\s*\(\s*"([^"]*\'[^"]*)"'
+
+		def fix_matches_quotes(match):
+			selector_with_quotes = match.group(1)
+			return f'.matches(`{selector_with_quotes}`)'
+
+		fixed_code = re.sub(matches_pattern, fix_matches_quotes, fixed_code)
+
+		# Note: Removed getAttribute fix - attribute names rarely have mixed quotes
+		# getAttribute typically uses simple names like "data-value", not complex selectors
+
+		# Log changes made
+		changes_made = []
+		if r'\"' in code and r'\"' not in fixed_code:
+			changes_made.append('fixed escaped quotes')
+		if '`' in fixed_code and '`' not in code:
+			changes_made.append('converted mixed quotes to template literals')
+
+		if changes_made:
+			logger.debug(f'JavaScript fixes applied: {", ".join(changes_made)}')
+
+		return fixed_code
 
 	def _register_done_action(self, output_model: type[T] | None, display_files_in_done_text: bool = True):
 		if output_model is not None:
