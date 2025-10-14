@@ -111,8 +111,15 @@ class HTMLSerializer:
 					if child_html:
 						parts.append(child_html)
 			else:
-				# Process children and shadow roots
-				for child in node.children_and_shadow_roots:
+				# Serialize shadow roots FIRST (for declarative shadow DOM)
+				if node.shadow_roots:
+					for shadow_root in node.shadow_roots:
+						child_html = self.serialize(shadow_root, depth + 1)
+						if child_html:
+							parts.append(child_html)
+
+				# Then serialize light DOM children (for slot projection)
+				for child in node.children:
 					child_html = self.serialize(child, depth + 1)
 					if child_html:
 						parts.append(child_html)
