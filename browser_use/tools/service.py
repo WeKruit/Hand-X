@@ -1067,18 +1067,20 @@ You will be given a query and the markdown of a webpage that has been filtered t
 		page_html = html_serializer.serialize(enhanced_dom_tree)
 
 		original_html_length = len(page_html)
+		# save html to file
+		# with open('zzzpage_html.html', 'w') as f:
+		# 	f.write(page_html)
 
-		# Use html2text for clean markdown conversion
-		import html2text
+		# Use markdownify for clean markdown conversion
+		from markdownify import markdownify as md
 
-		h = html2text.HTML2Text()
-		h.ignore_links = not extract_links
-		h.ignore_images = True
-		h.ignore_emphasis = False
-		h.body_width = 0  # Don't wrap lines
-		h.unicode_snob = True
-		h.skip_internal_links = True
-		content = h.handle(page_html)
+		content = md(
+			page_html,
+			heading_style='ATX',  # Use # style headings
+			strip=['script', 'style'],  # Remove these tags
+			bullets='-',  # Use - for unordered lists
+			code_language='',  # Don't add language to code blocks
+		)
 
 		initial_markdown_length = len(content)
 
@@ -1089,6 +1091,9 @@ You will be given a query and the markdown of a webpage that has been filtered t
 		content, chars_filtered = self._preprocess_markdown_content(content)
 
 		final_filtered_length = len(content)
+		# save content to file
+		# with open('zzzcontent.md', 'w') as f:
+		# 	f.write(content)
 
 		# Content statistics
 		stats = {
