@@ -3,7 +3,9 @@
 import asyncio
 import json
 import platform
+from typing import TYPE_CHECKING
 
+from browser_use.actor.page import get_key_info
 from browser_use.browser.events import (
 	ClickElementEvent,
 	GetDropdownOptionsEvent,
@@ -22,6 +24,9 @@ from browser_use.browser.views import BrowserError, URLNotAllowedError
 from browser_use.browser.watchdog_base import BaseWatchdog
 from browser_use.dom.service import EnhancedDOMTreeNode
 from browser_use.observability import observe_debug
+
+if TYPE_CHECKING:
+	from cdp_use.cdp.input.commands import DispatchKeyEventParameters
 
 # Import EnhancedDOMTreeNode and rebuild event models that have forward references to it
 # This must be done after all imports are complete
@@ -1535,155 +1540,123 @@ class DefaultActionWatchdog(BaseWatchdog):
 		"""Handle send keys request with CDP."""
 		cdp_session = await self.browser_session.get_or_create_cdp_session(focus=True)
 		try:
-			# Parse key combination
-			keys = event.keys.lower()
+			# Normalize key names from common aliases
+			key_aliases = {
+				'ctrl': 'Control',
+				'control': 'Control',
+				'alt': 'Alt',
+				'option': 'Alt',
+				'meta': 'Meta',
+				'cmd': 'Meta',
+				'command': 'Meta',
+				'shift': 'Shift',
+				'enter': 'Enter',
+				'return': 'Enter',
+				'tab': 'Tab',
+				'delete': 'Delete',
+				'backspace': 'Backspace',
+				'escape': 'Escape',
+				'esc': 'Escape',
+				'space': 'Space',
+				'up': 'ArrowUp',
+				'down': 'ArrowDown',
+				'left': 'ArrowLeft',
+				'right': 'ArrowRight',
+				'pageup': 'PageUp',
+				'pagedown': 'PageDown',
+				'home': 'Home',
+				'end': 'End',
+			}
 
-			# Handle special key combinations
+			# Parse and normalize the key string
+			keys = event.keys
 			if '+' in keys:
-				# Handle modifier keys
+				# Handle key combinations like "ctrl+a"
 				parts = keys.split('+')
-				key = parts[-1]
-
-				# Calculate modifier bits inline
-				# CDP Modifier bits: Alt=1, Control=2, Meta/Command=4, Shift=8
-				modifiers = 0
-				for part in parts[:-1]:
-					part_lower = part.lower()
-					if part_lower in ['alt', 'option']:
-						modifiers |= 1  # Alt
-					elif part_lower in ['ctrl', 'control']:
-						modifiers |= 2  # Control
-					elif part_lower in ['meta', 'cmd', 'command']:
-						modifiers |= 4  # Meta/Command
-					elif part_lower in ['shift']:
-						modifiers |= 8  # Shift
-
-				# Send key with modifiers
-				# Use rawKeyDown for non-text keys (like shortcuts)
-				await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-					params={
-						'type': 'rawKeyDown',
-						'key': key.capitalize() if len(key) == 1 else key,
-						'modifiers': modifiers,
-					},
-					session_id=cdp_session.session_id,
-				)
-				await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-					params={
-						'type': 'keyUp',
-						'key': key.capitalize() if len(key) == 1 else key,
-						'modifiers': modifiers,
-					},
-					session_id=cdp_session.session_id,
-				)
+				normalized_parts = []
+				for part in parts:
+					part_lower = part.strip().lower()
+					normalized = key_aliases.get(part_lower, part)
+					normalized_parts.append(normalized)
+				normalized_keys = '+'.join(normalized_parts)
 			else:
 				# Single key
-				key_map = {
-					'enter': 'Enter',
-					'return': 'Enter',
-					'tab': 'Tab',
-					'delete': 'Delete',
-					'backspace': 'Backspace',
-					'escape': 'Escape',
-					'esc': 'Escape',
-					'space': ' ',
-					'up': 'ArrowUp',
-					'down': 'ArrowDown',
-					'left': 'ArrowLeft',
-					'right': 'ArrowRight',
-					'pageup': 'PageUp',
-					'pagedown': 'PageDown',
-					'home': 'Home',
-					'end': 'End',
+				keys_lower = keys.strip().lower()
+				normalized_keys = key_aliases.get(keys_lower, keys)
+
+			# Handle key combinations like "Control+A"
+			if '+' in normalized_keys:
+				parts = normalized_keys.split('+')
+				modifiers = parts[:-1]
+				main_key = parts[-1]
+
+				# Calculate modifier bitmask
+				modifier_value = 0
+				modifier_map = {'Alt': 1, 'Control': 2, 'Meta': 4, 'Shift': 8}
+				for mod in modifiers:
+					modifier_value |= modifier_map.get(mod, 0)
+
+				# Press modifier keys
+				for mod in modifiers:
+					code, vk_code = get_key_info(mod)
+					params: 'DispatchKeyEventParameters' = {'type': 'keyDown', 'key': mod, 'code': code}
+					if vk_code is not None:
+						params['windowsVirtualKeyCode'] = vk_code
+					await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
+						params=params, session_id=cdp_session.session_id
+					)
+
+				# Press main key with modifiers bitmask
+				main_code, main_vk_code = get_key_info(main_key)
+				main_down_params: 'DispatchKeyEventParameters' = {
+					'type': 'keyDown',
+					'key': main_key,
+					'code': main_code,
+					'modifiers': modifier_value,
 				}
+				if main_vk_code is not None:
+					main_down_params['windowsVirtualKeyCode'] = main_vk_code
+				await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
+					params=main_down_params, session_id=cdp_session.session_id
+				)
 
-				key = key_map.get(keys, keys)
-
-				# Keys that need 3-step sequence (produce characters)
-				keys_needing_char_event = ['enter', 'return', 'space']
-
-				# Virtual key codes for proper key identification
-				virtual_key_codes = {
-					'enter': 13,
-					'return': 13,
-					'tab': 9,
-					'escape': 27,
-					'esc': 27,
-					'space': 32,
-					'backspace': 8,
-					'delete': 46,
-					'up': 38,
-					'down': 40,
-					'left': 37,
-					'right': 39,
-					'home': 36,
-					'end': 35,
-					'pageup': 33,
-					'pagedown': 34,
+				main_up_params: 'DispatchKeyEventParameters' = {
+					'type': 'keyUp',
+					'key': main_key,
+					'code': main_code,
+					'modifiers': modifier_value,
 				}
+				if main_vk_code is not None:
+					main_up_params['windowsVirtualKeyCode'] = main_vk_code
+				await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
+					params=main_up_params, session_id=cdp_session.session_id
+				)
 
-				if keys in keys_needing_char_event:
-					# 3-step sequence for keys that produce characters
-					vk_code = virtual_key_codes.get(keys, 0)
-					char_text = '\r' if keys in ['enter', 'return'] else ' ' if keys == 'space' else ''
+				# Release modifier keys
+				for mod in reversed(modifiers):
+					code, vk_code = get_key_info(mod)
+					release_params: 'DispatchKeyEventParameters' = {'type': 'keyUp', 'key': mod, 'code': code}
+					if vk_code is not None:
+						release_params['windowsVirtualKeyCode'] = vk_code
+					await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
+						params=release_params, session_id=cdp_session.session_id
+					)
+			else:
+				# Simple key press
+				code, vk_code = get_key_info(normalized_keys)
+				key_down_params: 'DispatchKeyEventParameters' = {'type': 'keyDown', 'key': normalized_keys, 'code': code}
+				if vk_code is not None:
+					key_down_params['windowsVirtualKeyCode'] = vk_code
+				await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
+					params=key_down_params, session_id=cdp_session.session_id
+				)
 
-					await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-						params={
-							'type': 'rawKeyDown',
-							'windowsVirtualKeyCode': vk_code,
-							'code': key_map.get(keys, keys),
-							'key': key_map.get(keys, keys),
-						},
-						session_id=cdp_session.session_id,
-					)
-					await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-						params={'type': 'char', 'text': char_text, 'unmodifiedText': char_text},
-						session_id=cdp_session.session_id,
-					)
-					await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-						params={
-							'type': 'keyUp',
-							'windowsVirtualKeyCode': vk_code,
-							'code': key_map.get(keys, keys),
-							'key': key_map.get(keys, keys),
-						},
-						session_id=cdp_session.session_id,
-					)
-				else:
-					# 2-step sequence for other keys
-					key_type = 'rawKeyDown' if keys in key_map else 'keyDown'
-					vk_code = virtual_key_codes.get(keys)
-
-					if vk_code:
-						# Special keys with virtual key codes
-						await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-							params={
-								'type': key_type,
-								'key': key,
-								'windowsVirtualKeyCode': vk_code,
-								'code': key_map.get(keys, keys),
-							},
-							session_id=cdp_session.session_id,
-						)
-						await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-							params={
-								'type': 'keyUp',
-								'key': key,
-								'windowsVirtualKeyCode': vk_code,
-								'code': key_map.get(keys, keys),
-							},
-							session_id=cdp_session.session_id,
-						)
-					else:
-						# Regular characters without virtual key codes
-						await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-							params={'type': key_type, 'key': key},
-							session_id=cdp_session.session_id,
-						)
-						await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-							params={'type': 'keyUp', 'key': key},
-							session_id=cdp_session.session_id,
-						)
+				key_up_params: 'DispatchKeyEventParameters' = {'type': 'keyUp', 'key': normalized_keys, 'code': code}
+				if vk_code is not None:
+					key_up_params['windowsVirtualKeyCode'] = vk_code
+				await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
+					params=key_up_params, session_id=cdp_session.session_id
+				)
 
 			self.logger.info(f'⌨️ Sent keys: {event.keys}')
 
