@@ -45,7 +45,7 @@ Download chromium using playwright's shortcut:
 uvx playwright install chromium --with-deps --no-shell
 ```
 
-Get your API key from [Browser Use Cloud](https://cloud.browser-use.com/dashboard/api) and add it to your `.env` file:
+Get your API key from [Browser Use Cloud](https://cloud.browser-use.com/dashboard/api) and add it to your `.env` file (new signups get $10 free credits via OAuth or $1 via email):
 
 ```bash
 BROWSER_USE_API_KEY=your-key
