@@ -3,7 +3,7 @@ import enum
 import json
 import logging
 import os
-from typing import Any, Generic, TypeVar
+from typing import Generic, TypeVar
 
 try:
 	from lmnr import Laminar  # type: ignore
@@ -573,9 +573,13 @@ class Tools(Generic[Context]):
 			# Constants
 			MAX_CHAR_LIMIT = 30000
 
-			# Extract clean markdown using the new method
+			# Extract clean markdown using the unified method
 			try:
-				content, content_stats = await self.extract_clean_markdown(browser_session, extract_links)
+				from browser_use.dom.markdown_extractor import extract_clean_markdown
+
+				content, content_stats = await extract_clean_markdown(
+					browser_session=browser_session, extract_links=extract_links
+				)
 			except Exception as e:
 				raise RuntimeError(f'Could not extract clean markdown: {type(e).__name__}')
 
@@ -1032,100 +1036,6 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				return ActionResult(error=error_msg)
 
 	# Custom done action for structured output
-	@observe_debug(ignore_input=True, ignore_output=True, name='extract_clean_markdown')
-	async def extract_clean_markdown(
-		self, browser_session: BrowserSession, extract_links: bool = False
-	) -> tuple[str, dict[str, Any]]:
-		"""Extract clean markdown from the current page.
-
-		Args:
-			browser_session: Browser session to extract content from
-			extract_links: Whether to preserve links in markdown
-
-		Returns:
-			tuple: (clean_markdown_content, content_statistics)
-		"""
-		import re
-
-		# Get HTML content from current page
-		cdp_session = await browser_session.get_or_create_cdp_session()
-		try:
-			body_id = await cdp_session.cdp_client.send.DOM.getDocument(session_id=cdp_session.session_id)
-			page_html_result = await cdp_session.cdp_client.send.DOM.getOuterHTML(
-				params={'backendNodeId': body_id['root']['backendNodeId']}, session_id=cdp_session.session_id
-			)
-			page_html = page_html_result['outerHTML']
-			current_url = await browser_session.get_current_page_url()
-		except Exception as e:
-			raise RuntimeError(f"Couldn't extract page content: {e}")
-
-		original_html_length = len(page_html)
-
-		# Use html2text for clean markdown conversion
-		import html2text
-
-		h = html2text.HTML2Text()
-		h.ignore_links = not extract_links
-		h.ignore_images = True
-		h.ignore_emphasis = False
-		h.body_width = 0  # Don't wrap lines
-		h.unicode_snob = True
-		h.skip_internal_links = True
-		content = h.handle(page_html)
-
-		initial_markdown_length = len(content)
-
-		# Minimal cleanup - html2text already does most of the work
-		content = re.sub(r'%[0-9A-Fa-f]{2}', '', content)  # Remove any remaining URL encoding
-
-		# Apply light preprocessing to clean up excessive whitespace
-		content, chars_filtered = self._preprocess_markdown_content(content)
-
-		final_filtered_length = len(content)
-
-		# Content statistics
-		stats = {
-			'url': current_url,
-			'original_html_chars': original_html_length,
-			'initial_markdown_chars': initial_markdown_length,
-			'filtered_chars_removed': chars_filtered,
-			'final_filtered_chars': final_filtered_length,
-		}
-
-		return content, stats
-
-	def _preprocess_markdown_content(self, content: str, max_newlines: int = 3) -> tuple[str, int]:
-		"""
-		Light preprocessing of html2text output - minimal cleanup since html2text is already clean.
-
-		Args:
-			content: Markdown content from html2text to lightly filter
-			max_newlines: Maximum consecutive newlines to allow
-
-		Returns:
-			tuple: (filtered_content, chars_filtered)
-		"""
-		import re
-
-		original_length = len(content)
-
-		# Compress consecutive newlines (4+ newlines become max_newlines)
-		content = re.sub(r'\n{4,}', '\n' * max_newlines, content)
-
-		# Remove lines that are only whitespace or very short (likely artifacts)
-		lines = content.split('\n')
-		filtered_lines = []
-		for line in lines:
-			stripped = line.strip()
-			# Keep lines with substantial content (html2text output is already clean)
-			if len(stripped) > 2:
-				filtered_lines.append(line)
-
-		content = '\n'.join(filtered_lines)
-		content = content.strip()
-
-		chars_filtered = original_length - len(content)
-		return content, chars_filtered
 
 	def _register_done_action(self, output_model: type[T] | None, display_files_in_done_text: bool = True):
 		if output_model is not None:
