@@ -971,7 +971,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			)
 
 		@self.registry.action(
-			"""Execute JS. MUST: wrap in IIFE (function(){...})() or (async function(){...})(), add try-catch, validate elements exist. Check null before accessing properties. Use for: hover, drag, custom selectors, forms, extract/filter links, iframes, shadow DOM, React/Vue/Angular. Limit output. Examples: (function(){try{const el=document.querySelector('#id');return el?el.value:'not found'}catch(e){return 'Error: '+e.message}})() ✓ | document.querySelector('#id').value ✗. Shadow: iterate hosts, check shadowRoot. Return JSON.stringify() for objects. Do not use comments""",
+			"""Execute browser JavaScript. MUST: wrap in IIFE (function(){...})(). Use ONLY browser APIs (document, window, DOM). NO Node.js APIs (fs, require, process). Add try-catch. Example: (function(){try{const el=document.querySelector('#id');return el?el.value:'not found'}catch(e){return 'Error: '+e.message}})() Never use comments. Use e.g. for hover, drag, zoom, custom selectors, extract/filter links, shadow DOM or to analyse page structure. Limit output.""",
 		)
 		async def evaluate(code: str, browser_session: BrowserSession):
 			# Execute JavaScript with proper error handling and promise support
@@ -999,20 +999,9 @@ You will be given a query and the markdown of a webpage that has been filtered t
 					enhanced_msg = f"""JavaScript Execution Failed:
 {error_msg}
 
-Original Code:
-{code[:500]}{'...' if len(code) > 500 else ''}
-
 Validated Code (after quote fixing):
 {validated_code[:500]}{'...' if len(validated_code) > 500 else ''}
-
-Common Issues:
-1. Mixed quotes in XPath/selectors (we tried to fix this automatically)
-2. Undefined variables or functions
-3. DOM elements not found
-4. Security restrictions (CSP, CORS, etc.)
-5. Browser API not available in context
-
-Debug: Original and validated code {'differ' if code != validated_code else 'are identical'}"""
+"""
 
 					logger.info(enhanced_msg)
 					return ActionResult(error=enhanced_msg)
@@ -1063,10 +1052,14 @@ Debug: Original and validated code {'differ' if code != validated_code else 'are
 		import re
 
 		# Pattern 1: Fix double-escaped quotes (\\\" → \")
-		# This happens when quotes get double-escaped in the parsing process
 		fixed_code = re.sub(r'\\"', '"', code)
 
-		# Pattern 2: Fix XPath expressions with mixed quotes
+		# Pattern 2: Fix over-escaped regex patterns (\\\\d → \\d)
+		# Common issue: regex gets double-escaped during parsing
+		fixed_code = re.sub(r'\\\\([dDsSwWbBnrtfv])', r'\\\1', fixed_code)
+		fixed_code = re.sub(r'\\\\([.*+?^${}()|[\]])', r'\\\1', fixed_code)
+
+		# Pattern 3: Fix XPath expressions with mixed quotes
 		xpath_pattern = r'document\.evaluate\s*\(\s*"([^"]*\'[^"]*)"'
 
 		def fix_xpath_quotes(match):
@@ -1075,7 +1068,7 @@ Debug: Original and validated code {'differ' if code != validated_code else 'are
 
 		fixed_code = re.sub(xpath_pattern, fix_xpath_quotes, fixed_code)
 
-		# Pattern 3: Fix querySelector/querySelectorAll with mixed quotes
+		# Pattern 4: Fix querySelector/querySelectorAll with mixed quotes
 		selector_pattern = r'(querySelector(?:All)?)\s*\(\s*"([^"]*\'[^"]*)"'
 
 		def fix_selector_quotes(match):
@@ -1085,7 +1078,7 @@ Debug: Original and validated code {'differ' if code != validated_code else 'are
 
 		fixed_code = re.sub(selector_pattern, fix_selector_quotes, fixed_code)
 
-		# Pattern 4: Fix closest() calls with mixed quotes
+		# Pattern 5: Fix closest() calls with mixed quotes
 		closest_pattern = r'\.closest\s*\(\s*"([^"]*\'[^"]*)"'
 
 		def fix_closest_quotes(match):
@@ -1094,7 +1087,7 @@ Debug: Original and validated code {'differ' if code != validated_code else 'are
 
 		fixed_code = re.sub(closest_pattern, fix_closest_quotes, fixed_code)
 
-		# Pattern 5: Fix getAttribute calls with mixed quotes
+		# Pattern 6: Fix getAttribute calls with mixed quotes
 		get_attr_pattern = r'\.getAttribute\s*\(\s*"([^"]*\'[^"]*)"'
 
 		def fix_get_attr_quotes(match):
@@ -1103,27 +1096,12 @@ Debug: Original and validated code {'differ' if code != validated_code else 'are
 
 		fixed_code = re.sub(get_attr_pattern, fix_get_attr_quotes, fixed_code)
 
-		# Pattern 6: Fix CSS :has() selector (not supported in all browsers)
-		# Replace :has() with more compatible selectors where possible
-		has_pattern = r'(["\']?)([^"\']*):has\([^)]+\)([^"\']*)\1'
-
-		def fix_has_selector(match):
-			quote = match.group(1)
-			prefix = match.group(2)
-			suffix = match.group(3)
-			# Remove :has() part and just use the base selector
-			return f'{quote}{prefix}{suffix}{quote}'
-
-		fixed_code = re.sub(has_pattern, fix_has_selector, fixed_code)
-
 		# Log changes made
 		changes_made = []
 		if r'\"' in code and r'\"' not in fixed_code:
-			changes_made.append('fixed double-escaped quotes')
+			changes_made.append('fixed escaped quotes')
 		if '`' in fixed_code and '`' not in code:
 			changes_made.append('converted mixed quotes to template literals')
-		if ':has(' in code and ':has(' not in fixed_code:
-			changes_made.append('removed unsupported :has() selector')
 
 		if changes_made:
 			logger.debug(f'JavaScript fixes applied: {", ".join(changes_made)}')
