@@ -3,7 +3,7 @@ import enum
 import json
 import logging
 import os
-from typing import Any, Generic, TypeVar
+from typing import Generic, TypeVar
 
 try:
 	from lmnr import Laminar  # type: ignore
@@ -573,9 +573,13 @@ class Tools(Generic[Context]):
 			# Constants
 			MAX_CHAR_LIMIT = 30000
 
-			# Extract clean markdown using the new method
+			# Extract clean markdown using the unified method
 			try:
-				content, content_stats = await self.extract_clean_markdown(browser_session, extract_links)
+				from browser_use.dom.markdown_extractor import extract_clean_markdown
+
+				content, content_stats = await extract_clean_markdown(
+					browser_session=browser_session, extract_links=extract_links
+				)
 			except Exception as e:
 				raise RuntimeError(f'Could not extract clean markdown: {type(e).__name__}')
 
@@ -1032,130 +1036,6 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				return ActionResult(error=error_msg)
 
 	# Custom done action for structured output
-	@observe_debug(ignore_input=True, ignore_output=True, name='extract_clean_markdown')
-	async def extract_clean_markdown(
-		self, browser_session: BrowserSession, extract_links: bool = False
-	) -> tuple[str, dict[str, Any]]:
-		"""Extract clean markdown from the current page.
-
-		Args:
-			browser_session: Browser session to extract content from
-			extract_links: Whether to preserve links in markdown
-
-		Returns:
-			tuple: (clean_markdown_content, content_statistics)
-		"""
-		import re
-
-		current_url = await browser_session.get_current_page_url()
-
-		# Get the enhanced DOM tree from DOMWatchdog
-		# This captures the current state of the page including dynamic content, shadow roots, etc.
-		dom_watchdog = browser_session._dom_watchdog
-		assert dom_watchdog is not None, 'DOMWatchdog not available'
-
-		# Get or build the enhanced DOM tree
-		await dom_watchdog._build_dom_tree_without_highlights()
-		enhanced_dom_tree = dom_watchdog.enhanced_dom_tree
-		assert enhanced_dom_tree is not None, 'Enhanced DOM tree not available'
-
-		# Use the new HTML serializer with the enhanced DOM tree
-		# This serializer captures shadow roots and iframe content that getOuterHTML misses
-		from browser_use.dom.serializer.html_serializer import HTMLSerializer
-
-		html_serializer = HTMLSerializer(extract_links=extract_links)
-		page_html = html_serializer.serialize(enhanced_dom_tree)
-
-		original_html_length = len(page_html)
-		# save html to file
-		# with open('zzzpage_html.html', 'w') as f:
-		# 	f.write(page_html)
-
-		# Use markdownify for clean markdown conversion
-		from markdownify import markdownify as md
-
-		content = md(
-			page_html,
-			heading_style='ATX',  # Use # style headings
-			strip=['script', 'style'],  # Remove these tags
-			bullets='-',  # Use - for unordered lists
-			code_language='',  # Don't add language to code blocks
-			escape_asterisks=False,  # Don't escape asterisks (cleaner output)
-			escape_underscores=False,  # Don't escape underscores (cleaner output)
-			escape_misc=False,  # Don't escape other characters (cleaner output)
-			autolinks=False,  # Don't convert URLs to <> format
-			default_title=False,  # Don't add default title attributes
-			keep_inline_images_in=[],  # Don't keep inline images in any tags (we already filter base64 in HTML)
-		)
-
-		initial_markdown_length = len(content)
-
-		# Minimal cleanup - html2text already does most of the work
-		content = re.sub(r'%[0-9A-Fa-f]{2}', '', content)  # Remove any remaining URL encoding
-
-		# Apply light preprocessing to clean up excessive whitespace
-		content, chars_filtered = self._preprocess_markdown_content(content)
-
-		final_filtered_length = len(content)
-		# save content to file
-		# with open('zzzcontent.md', 'w') as f:
-		# 	f.write(content)
-
-		# Content statistics
-		stats = {
-			'url': current_url,
-			'method': 'enhanced_dom_tree',  # Mark this as using the enhanced DOM tree method
-			'original_html_chars': original_html_length,
-			'initial_markdown_chars': initial_markdown_length,
-			'filtered_chars_removed': chars_filtered,
-			'final_filtered_chars': final_filtered_length,
-		}
-
-		return content, stats
-
-	def _preprocess_markdown_content(self, content: str, max_newlines: int = 3) -> tuple[str, int]:
-		"""
-		Light preprocessing of markdown output - minimal cleanup with JSON blob removal.
-
-		Args:
-			content: Markdown content to lightly filter
-			max_newlines: Maximum consecutive newlines to allow
-
-		Returns:
-			tuple: (filtered_content, chars_filtered)
-		"""
-		import re
-
-		original_length = len(content)
-
-		# Remove JSON blobs (common in SPAs like LinkedIn, Facebook, etc.)
-		# These are often embedded as `{"key":"value",...}` and can be massive
-		# Match JSON objects/arrays that are at least 100 chars long
-		# This catches SPA state/config data without removing small inline JSON
-		content = re.sub(r'`\{["\w].*?\}`', '', content, flags=re.DOTALL)  # Remove JSON in code blocks
-		content = re.sub(r'\{"\$type":[^}]{100,}\}', '', content)  # Remove JSON with $type fields (common pattern)
-		content = re.sub(r'\{"[^"]{5,}":\{[^}]{100,}\}', '', content)  # Remove nested JSON objects
-
-		# Compress consecutive newlines (4+ newlines become max_newlines)
-		content = re.sub(r'\n{4,}', '\n' * max_newlines, content)
-
-		# Remove lines that are only whitespace or very short (likely artifacts)
-		lines = content.split('\n')
-		filtered_lines = []
-		for line in lines:
-			stripped = line.strip()
-			# Keep lines with substantial content
-			if len(stripped) > 2:
-				# Skip lines that look like JSON (start with { or [ and are very long)
-				if (stripped.startswith('{') or stripped.startswith('[')) and len(stripped) > 100:
-					continue
-				filtered_lines.append(line)
-
-		content = '\n'.join(filtered_lines)
-		content = content.strip()
-
-		chars_filtered = original_length - len(content)
-		return content, chars_filtered
 
 	def _register_done_action(self, output_model: type[T] | None, display_files_in_done_text: bool = True):
 		if output_model is not None:
