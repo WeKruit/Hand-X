@@ -45,12 +45,11 @@ class HTMLSerializer:
 
 		elif node.node_type == NodeType.DOCUMENT_FRAGMENT_NODE:
 			# Shadow DOM root - wrap in template with shadowrootmode attribute
-			# This is the declarative shadow DOM syntax that html2text can process
 			parts = []
 
 			# Add shadow root opening
 			shadow_type = node.shadow_root_type or 'open'
-			parts.append(f'<template shadowrootmode="{shadow_type.lower()}">')
+			parts.append(f'<template shadowroot="{shadow_type.lower()}">')
 
 			# Serialize shadow children
 			for child in node.children:
