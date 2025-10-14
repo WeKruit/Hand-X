@@ -979,9 +979,12 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			cdp_session = await browser_session.get_or_create_cdp_session()
 
 			try:
+				# Validate and potentially fix JavaScript code before execution
+				validated_code = self._validate_and_fix_javascript(code)
+
 				# Always use awaitPromise=True - it's ignored for non-promises
 				result = await cdp_session.cdp_client.send.Runtime.evaluate(
-					params={'expression': code, 'returnByValue': True, 'awaitPromise': True},
+					params={'expression': validated_code, 'returnByValue': True, 'awaitPromise': True},
 					session_id=cdp_session.session_id,
 				)
 
@@ -991,9 +994,28 @@ You will be given a query and the markdown of a webpage that has been filtered t
 					error_msg = f'JavaScript execution error: {exception.get("text", "Unknown error")}'
 					if 'lineNumber' in exception:
 						error_msg += f' at line {exception["lineNumber"]}'
-					msg = f'Code: {code}\n\nError: {error_msg}'
-					logger.info(msg)
-					return ActionResult(error=msg)
+
+					# Enhanced error message with debugging info
+					enhanced_msg = f"""JavaScript Execution Failed:
+{error_msg}
+
+Original Code:
+{code[:500]}{'...' if len(code) > 500 else ''}
+
+Validated Code (after quote fixing):
+{validated_code[:500]}{'...' if len(validated_code) > 500 else ''}
+
+Common Issues:
+1. Mixed quotes in XPath/selectors (we tried to fix this automatically)
+2. Undefined variables or functions
+3. DOM elements not found
+4. Security restrictions (CSP, CORS, etc.)
+5. Browser API not available in context
+
+Debug: Original and validated code {'differ' if code != validated_code else 'are identical'}"""
+
+					logger.info(enhanced_msg)
+					return ActionResult(error=enhanced_msg)
 
 				# Get the result data
 				result_data = result.get('result', {})
@@ -1036,6 +1058,59 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				return ActionResult(error=error_msg)
 
 	# Custom done action for structured output
+	def _validate_and_fix_javascript(self, code: str) -> str:
+		"""Validate and fix common JavaScript issues before execution"""
+
+		# Common issue: Mixed quotes in selectors and XPath expressions
+		# Strategy: Convert problematic quote patterns to use template literals
+		import re
+
+		# Pattern 1: Fix XPath expressions with mixed quotes
+		xpath_pattern = r'document\.evaluate\s*\(\s*"([^"]*\'[^"]*)"'
+
+		def fix_xpath_quotes(match):
+			xpath_with_quotes = match.group(1)
+			return f'document.evaluate(`{xpath_with_quotes}`'
+
+		fixed_code = re.sub(xpath_pattern, fix_xpath_quotes, code)
+
+		# Pattern 2: Fix querySelector/querySelectorAll with mixed quotes
+		# Handle both querySelector and querySelectorAll in one pattern
+		selector_pattern = r'(querySelector(?:All)?)\s*\(\s*"([^"]*\'[^"]*)"'
+
+		def fix_selector_quotes(match):
+			method_name = match.group(1)
+			selector_with_quotes = match.group(2)
+			return f'{method_name}(`{selector_with_quotes}`'
+
+		fixed_code = re.sub(selector_pattern, fix_selector_quotes, fixed_code)
+
+		# Pattern 3: Fix closest() calls with mixed quotes
+		closest_pattern = r'\.closest\s*\(\s*"([^"]*\'[^"]*)"'
+
+		def fix_closest_quotes(match):
+			selector_with_quotes = match.group(1)
+			return f'.closest(`{selector_with_quotes}`'
+
+		fixed_code = re.sub(closest_pattern, fix_closest_quotes, fixed_code)
+
+		# Pattern 4: Fix getAttribute calls with mixed quotes
+		get_attr_pattern = r'\.getAttribute\s*\(\s*"([^"]*\'[^"]*)"'
+
+		def fix_get_attr_quotes(match):
+			attr_with_quotes = match.group(1)
+			return f'.getAttribute(`{attr_with_quotes}`'
+
+		fixed_code = re.sub(get_attr_pattern, fix_get_attr_quotes, fixed_code)
+
+		# Log if we made changes
+		if fixed_code != code:
+			changes_made = []
+			if '`' in fixed_code and '`' not in code:
+				changes_made.append('converted quotes to template literals')
+			logger.debug(f'Fixed JavaScript issues: {", ".join(changes_made)}. Length: {len(code)} → {len(fixed_code)}')
+
+		return fixed_code
 
 	def _register_done_action(self, output_model: type[T] | None, display_files_in_done_text: bool = True):
 		if output_model is not None:
