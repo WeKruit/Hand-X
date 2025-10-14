@@ -345,7 +345,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Initialize message manager with state
 		# Initial system prompt with all actions - will be updated during each step
 		self._message_manager = MessageManager(
-			task=task,
+			task=self.task,
 			system_message=SystemPrompt(
 				max_actions_per_step=self.settings.max_actions_per_step,
 				override_system_message=override_system_message,
