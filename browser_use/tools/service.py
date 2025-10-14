@@ -1042,7 +1042,7 @@ Validated Code (after quote fixing):
 
 			except Exception as e:
 				# CDP communication or other system errors
-				error_msg = f'Code: {code}\n\nError: {error_msg} Failed to execute JavaScript: {type(e).__name__}: {e}'
+				error_msg = f'Code: {code}\n\nError: Failed to execute JavaScript: {type(e).__name__}: {e}'
 				logger.info(error_msg)
 				return ActionResult(error=error_msg)
 
@@ -1064,7 +1064,7 @@ Validated Code (after quote fixing):
 
 		def fix_xpath_quotes(match):
 			xpath_with_quotes = match.group(1)
-			return f'document.evaluate(`{xpath_with_quotes}`'
+			return f'document.evaluate(`{xpath_with_quotes}`,'
 
 		fixed_code = re.sub(xpath_pattern, fix_xpath_quotes, fixed_code)
 
@@ -1074,7 +1074,7 @@ Validated Code (after quote fixing):
 		def fix_selector_quotes(match):
 			method_name = match.group(1)
 			selector_with_quotes = match.group(2)
-			return f'{method_name}(`{selector_with_quotes}`'
+			return f'{method_name}(`{selector_with_quotes}`)'
 
 		fixed_code = re.sub(selector_pattern, fix_selector_quotes, fixed_code)
 
@@ -1083,18 +1083,21 @@ Validated Code (after quote fixing):
 
 		def fix_closest_quotes(match):
 			selector_with_quotes = match.group(1)
-			return f'.closest(`{selector_with_quotes}`'
+			return f'.closest(`{selector_with_quotes}`)'
 
 		fixed_code = re.sub(closest_pattern, fix_closest_quotes, fixed_code)
 
-		# Pattern 6: Fix getAttribute calls with mixed quotes
-		get_attr_pattern = r'\.getAttribute\s*\(\s*"([^"]*\'[^"]*)"'
+		# Pattern 6: Fix .matches() calls with mixed quotes (similar to closest)
+		matches_pattern = r'\.matches\s*\(\s*"([^"]*\'[^"]*)"'
 
-		def fix_get_attr_quotes(match):
-			attr_with_quotes = match.group(1)
-			return f'.getAttribute(`{attr_with_quotes}`'
+		def fix_matches_quotes(match):
+			selector_with_quotes = match.group(1)
+			return f'.matches(`{selector_with_quotes}`)'
 
-		fixed_code = re.sub(get_attr_pattern, fix_get_attr_quotes, fixed_code)
+		fixed_code = re.sub(matches_pattern, fix_matches_quotes, fixed_code)
+
+		# Note: Removed getAttribute fix - attribute names rarely have mixed quotes
+		# getAttribute typically uses simple names like "data-value", not complex selectors
 
 		# Log changes made
 		changes_made = []
