@@ -1536,6 +1536,24 @@ class DefaultActionWatchdog(BaseWatchdog):
 		except Exception as e:
 			raise
 
+	async def _dispatch_key_event(
+		self, cdp_session, event_type: str, key: str, modifiers: int = 0
+	) -> None:
+		"""Helper to dispatch a keyboard event with proper key codes."""
+		code, vk_code = get_key_info(key)
+		params: 'DispatchKeyEventParameters' = {
+			'type': event_type,
+			'key': key,
+			'code': code,
+		}
+		if modifiers:
+			params['modifiers'] = modifiers
+		if vk_code is not None:
+			params['windowsVirtualKeyCode'] = vk_code
+		await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
+			params=params, session_id=cdp_session.session_id
+		)
+
 	async def on_SendKeysEvent(self, event: SendKeysEvent) -> None:
 		"""Handle send keys request with CDP."""
 		cdp_session = await self.browser_session.get_or_create_cdp_session(focus=True)
@@ -1557,7 +1575,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 				'backspace': 'Backspace',
 				'escape': 'Escape',
 				'esc': 'Escape',
-				'space': 'Space',
+				'space': ' ',
 				'up': 'ArrowUp',
 				'down': 'ArrowDown',
 				'left': 'ArrowLeft',
@@ -1598,65 +1616,20 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 				# Press modifier keys
 				for mod in modifiers:
-					code, vk_code = get_key_info(mod)
-					params: 'DispatchKeyEventParameters' = {'type': 'keyDown', 'key': mod, 'code': code}
-					if vk_code is not None:
-						params['windowsVirtualKeyCode'] = vk_code
-					await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-						params=params, session_id=cdp_session.session_id
-					)
+					await self._dispatch_key_event(cdp_session, 'keyDown', mod)
 
 				# Press main key with modifiers bitmask
-				main_code, main_vk_code = get_key_info(main_key)
-				main_down_params: 'DispatchKeyEventParameters' = {
-					'type': 'keyDown',
-					'key': main_key,
-					'code': main_code,
-					'modifiers': modifier_value,
-				}
-				if main_vk_code is not None:
-					main_down_params['windowsVirtualKeyCode'] = main_vk_code
-				await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-					params=main_down_params, session_id=cdp_session.session_id
-				)
+				await self._dispatch_key_event(cdp_session, 'keyDown', main_key, modifier_value)
 
-				main_up_params: 'DispatchKeyEventParameters' = {
-					'type': 'keyUp',
-					'key': main_key,
-					'code': main_code,
-					'modifiers': modifier_value,
-				}
-				if main_vk_code is not None:
-					main_up_params['windowsVirtualKeyCode'] = main_vk_code
-				await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-					params=main_up_params, session_id=cdp_session.session_id
-				)
+				await self._dispatch_key_event(cdp_session, 'keyUp', main_key, modifier_value)
 
 				# Release modifier keys
 				for mod in reversed(modifiers):
-					code, vk_code = get_key_info(mod)
-					release_params: 'DispatchKeyEventParameters' = {'type': 'keyUp', 'key': mod, 'code': code}
-					if vk_code is not None:
-						release_params['windowsVirtualKeyCode'] = vk_code
-					await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-						params=release_params, session_id=cdp_session.session_id
-					)
+					await self._dispatch_key_event(cdp_session, 'keyUp', mod)
 			else:
 				# Simple key press
-				code, vk_code = get_key_info(normalized_keys)
-				key_down_params: 'DispatchKeyEventParameters' = {'type': 'keyDown', 'key': normalized_keys, 'code': code}
-				if vk_code is not None:
-					key_down_params['windowsVirtualKeyCode'] = vk_code
-				await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-					params=key_down_params, session_id=cdp_session.session_id
-				)
-
-				key_up_params: 'DispatchKeyEventParameters' = {'type': 'keyUp', 'key': normalized_keys, 'code': code}
-				if vk_code is not None:
-					key_up_params['windowsVirtualKeyCode'] = vk_code
-				await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-					params=key_up_params, session_id=cdp_session.session_id
-				)
+				await self._dispatch_key_event(cdp_session, 'keyDown', normalized_keys)
+				await self._dispatch_key_event(cdp_session, 'keyUp', normalized_keys)
 
 			self.logger.info(f'⌨️ Sent keys: {event.keys}')
 
