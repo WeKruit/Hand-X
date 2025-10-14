@@ -1057,59 +1057,77 @@ Debug: Original and validated code {'differ' if code != validated_code else 'are
 				logger.info(error_msg)
 				return ActionResult(error=error_msg)
 
-	# Custom done action for structured output
 	def _validate_and_fix_javascript(self, code: str) -> str:
 		"""Validate and fix common JavaScript issues before execution"""
-
-		# Common issue: Mixed quotes in selectors and XPath expressions
-		# Strategy: Convert problematic quote patterns to use template literals
+		
 		import re
-
-		# Pattern 1: Fix XPath expressions with mixed quotes
+		
+		# Pattern 1: Fix double-escaped quotes (\\\" → \")
+		# This happens when quotes get double-escaped in the parsing process
+		fixed_code = re.sub(r'\\\\"', '"', code)
+		
+		# Pattern 2: Fix XPath expressions with mixed quotes
 		xpath_pattern = r'document\.evaluate\s*\(\s*"([^"]*\'[^"]*)"'
 
 		def fix_xpath_quotes(match):
 			xpath_with_quotes = match.group(1)
 			return f'document.evaluate(`{xpath_with_quotes}`'
-
-		fixed_code = re.sub(xpath_pattern, fix_xpath_quotes, code)
-
-		# Pattern 2: Fix querySelector/querySelectorAll with mixed quotes
-		# Handle both querySelector and querySelectorAll in one pattern
+		
+		fixed_code = re.sub(xpath_pattern, fix_xpath_quotes, fixed_code)
+		
+		# Pattern 3: Fix querySelector/querySelectorAll with mixed quotes
 		selector_pattern = r'(querySelector(?:All)?)\s*\(\s*"([^"]*\'[^"]*)"'
 
 		def fix_selector_quotes(match):
 			method_name = match.group(1)
 			selector_with_quotes = match.group(2)
 			return f'{method_name}(`{selector_with_quotes}`'
-
+		
 		fixed_code = re.sub(selector_pattern, fix_selector_quotes, fixed_code)
-
-		# Pattern 3: Fix closest() calls with mixed quotes
+		
+		# Pattern 4: Fix closest() calls with mixed quotes
 		closest_pattern = r'\.closest\s*\(\s*"([^"]*\'[^"]*)"'
 
 		def fix_closest_quotes(match):
 			selector_with_quotes = match.group(1)
 			return f'.closest(`{selector_with_quotes}`'
-
+		
 		fixed_code = re.sub(closest_pattern, fix_closest_quotes, fixed_code)
-
-		# Pattern 4: Fix getAttribute calls with mixed quotes
+		
+		# Pattern 5: Fix getAttribute calls with mixed quotes
 		get_attr_pattern = r'\.getAttribute\s*\(\s*"([^"]*\'[^"]*)"'
 
 		def fix_get_attr_quotes(match):
 			attr_with_quotes = match.group(1)
 			return f'.getAttribute(`{attr_with_quotes}`'
-
+		
 		fixed_code = re.sub(get_attr_pattern, fix_get_attr_quotes, fixed_code)
-
-		# Log if we made changes
-		if fixed_code != code:
-			changes_made = []
-			if '`' in fixed_code and '`' not in code:
-				changes_made.append('converted quotes to template literals')
-			logger.debug(f'Fixed JavaScript issues: {", ".join(changes_made)}. Length: {len(code)} → {len(fixed_code)}')
-
+		
+		# Pattern 6: Fix CSS :has() selector (not supported in all browsers)
+		# Replace :has() with more compatible selectors where possible
+		has_pattern = r'(["\']?)([^"\']*):has\([^)]+\)([^"\']*)\1'
+		
+		def fix_has_selector(match):
+			quote = match.group(1)
+			prefix = match.group(2)
+			suffix = match.group(3)
+			# Remove :has() part and just use the base selector
+			return f'{quote}{prefix}{suffix}{quote}'
+		
+		fixed_code = re.sub(has_pattern, fix_has_selector, fixed_code)
+		
+		# Log changes made
+		changes_made = []
+		if '\\\"' in code and '\\\"' not in fixed_code:
+			changes_made.append('fixed double-escaped quotes')
+		if '`' in fixed_code and '`' not in code:
+			changes_made.append('converted mixed quotes to template literals')
+		if ':has(' in code and ':has(' not in fixed_code:
+			changes_made.append('removed unsupported :has() selector')
+		
+		if changes_made:
+			logger.debug(f'JavaScript fixes applied: {", ".join(changes_made)}')
+		
 		return fixed_code
 
 	def _register_done_action(self, output_model: type[T] | None, display_files_in_done_text: bool = True):
