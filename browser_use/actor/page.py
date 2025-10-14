@@ -523,6 +523,6 @@ You will be given a query and the markdown of a webpage that has been filtered t
 		Uses the shared markdown extractor for consistency with tools/service.py.
 		"""
 		from browser_use.dom.markdown_extractor import extract_clean_markdown
-		
+
 		dom_service = self.dom_service
 		return await extract_clean_markdown(dom_service=dom_service, target_id=self._target_id, extract_links=extract_links)

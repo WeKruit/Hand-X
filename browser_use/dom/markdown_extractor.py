@@ -6,7 +6,7 @@ used by both the tools service and page actor.
 """
 
 import re
-from typing import TYPE_CHECKING, Any, Dict, Tuple
+from typing import TYPE_CHECKING, Any
 
 from browser_use.dom.serializer.html_serializer import HTMLSerializer
 from browser_use.dom.service import DomService
@@ -21,7 +21,7 @@ async def extract_clean_markdown(
 	dom_service: DomService | None = None,
 	target_id: str | None = None,
 	extract_links: bool = False,
-) -> Tuple[str, Dict[str, Any]]:
+) -> tuple[str, dict[str, Any]]:
 	"""Extract clean markdown from browser content using enhanced DOM tree.
 
 	This unified function can extract markdown using either a browser session (for tools service)
@@ -126,7 +126,7 @@ async def _get_enhanced_dom_tree_from_browser_session(browser_session: 'BrowserS
 # Legacy aliases removed - all code now uses the unified extract_clean_markdown function
 
 
-def _preprocess_markdown_content(content: str, max_newlines: int = 3) -> Tuple[str, int]:
+def _preprocess_markdown_content(content: str, max_newlines: int = 3) -> tuple[str, int]:
 	"""
 	Light preprocessing of markdown output - minimal cleanup with JSON blob removal.
 
