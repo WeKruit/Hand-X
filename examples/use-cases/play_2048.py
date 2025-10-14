@@ -2,13 +2,14 @@
 
 import asyncio
 
-from browser_use import Agent, Browser, ChatOpenAI, ChatGoogle
+from dotenv import load_dotenv
+from game_2048_solver import Game2048Solver
+
+from browser_use import Agent, Browser
 from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
 from browser_use.llm.browser_use.chat import ChatBrowserUse
 from browser_use.tools.service import Tools
-from game_2048_solver import Game2048Solver
-from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
@@ -159,9 +160,7 @@ Example:
 
 		# Validate board structure
 		if not isinstance(board, list) or len(board) != 4:
-			print(
-				f'⚠️  Invalid board structure: expected 4 rows, got {len(board) if isinstance(board, list) else "not a list"}'
-			)
+			print(f'⚠️  Invalid board structure: expected 4 rows, got {len(board) if isinstance(board, list) else "not a list"}')
 			return ActionResult(error='Invalid board structure')
 
 		for i, row in enumerate(board):

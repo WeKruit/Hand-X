@@ -122,7 +122,7 @@ class CDPSession(BaseModel):
 		result = await self.cdp_client.send.Target.attachToTarget(
 			params={
 				'targetId': self.target_id,
-				'flatten': True, #removed filter as a param because it doesn't exist at https://chromedevtools.github.io/devtools-protocol/tot/Target/#method-attachToTarget
+				'flatten': True,  # removed filter as a param because it doesn't exist at https://chromedevtools.github.io/devtools-protocol/tot/Target/#method-attachToTarget
 			}
 		)
 		self.session_id = result['sessionId']
