@@ -249,7 +249,8 @@
                 "isDefaultOpen": false,
                 "pages": [
                   "development/monitoring/observability",
-                  "development/monitoring/telemetry"
+                  "development/monitoring/telemetry",
+                  "development/monitoring/costs"
                 ]
               },
               "development/get-help"
