@@ -101,7 +101,7 @@ agent = Agent(
 
 [Task](https://github.com/browser-use/browser-use/blob/main/examples/use-cases/find_and_apply_to_jobs.py): Read my CV & find ML jobs, save them to a file, and then start applying for them in new tabs, if you need help, ask me.
 
-https://github.com/user-attachments/assets/171fb4d6-0355-46f2-863e-edb04a828d04
+![Job Application Demo](https://github.com/user-attachments/assets/57865ee6-6004-49d5-b2c2-6dff39ec2ba9)
 
 <br/><br/>
 
