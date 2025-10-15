@@ -1156,6 +1156,13 @@ class BrowserSession(BaseModel):
 		assert result is not None and result.dom_state is not None
 		return result
 
+	async def get_state_as_text(self) -> str:
+		"""Get the browser state as text."""
+		state = await self.get_browser_state_summary()
+		assert state.dom_state is not None
+		dom_state = state.dom_state
+		return dom_state.llm_representation()
+
 	async def attach_all_watchdogs(self) -> None:
 		"""Initialize and attach all watchdogs with explicit handler registration."""
 		# Prevent duplicate watchdog attachment
