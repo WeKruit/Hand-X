@@ -1,11 +1,13 @@
 import ast
+import asyncio
 import base64
 import inspect
 import json
 import os
 import sys
+from collections.abc import Callable, Coroutine
 from functools import wraps
-from typing import Any, Callable, Coroutine, TypeVar, Union, cast, get_args, get_origin
+from typing import Any, TypeVar, Union, cast, get_args, get_origin
 
 import httpx
 
@@ -22,6 +24,215 @@ from browser_use.remote_execute.views import (
 T = TypeVar('T')
 
 
+class NonlocalToClosureTransformer(ast.NodeTransformer):
+	"""Transform nonlocal statements into closure-friendly dict patterns.
+
+	Transforms:
+		def outer():
+			var1 = value1
+			var2 = value2
+			def inner():
+				nonlocal var1, var2
+				var1 = ...
+
+	Into:
+		def outer():
+			_closure_vars = {'var1': value1, 'var2': value2}
+			def inner():
+				_closure_vars['var1'] = ...
+	"""
+
+	def __init__(self):
+		self.nonlocal_vars_by_func: dict[str, set[str]] = {}
+		self.current_function_stack: list[str] = []
+		self.enclosing_function: str | None = None
+
+	def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> Any:
+		"""Visit function definitions to track nesting and nonlocal variables."""
+		# Track function nesting
+		parent_func = self.current_function_stack[-1] if self.current_function_stack else None
+		self.current_function_stack.append(node.name)
+
+		# First pass: find all nonlocal statements in this function
+		nonlocal_vars = set()
+		for stmt in node.body:
+			if isinstance(stmt, ast.Nonlocal):
+				nonlocal_vars.update(stmt.names)
+
+		if nonlocal_vars:
+			# Store which variables are nonlocal for this function
+			self.nonlocal_vars_by_func[node.name] = nonlocal_vars
+			# Remember the enclosing function that needs transformation
+			if parent_func:
+				self.enclosing_function = parent_func
+
+		# Recursively visit children
+		self.generic_visit(node)
+
+		# Pop function from stack
+		self.current_function_stack.pop()
+
+		return node
+
+	visit_AsyncFunctionDef = visit_FunctionDef
+
+	def transform(self, tree: ast.Module) -> ast.Module:
+		"""Apply the transformation in two passes."""
+		# First pass: identify nonlocal variables and their enclosing functions
+		self.visit(tree)
+
+		if not self.nonlocal_vars_by_func:
+			# No nonlocal statements found, return unchanged
+			return tree
+
+		# Second pass: transform the enclosing function
+		tree = self._transform_enclosing_function(tree)
+
+		# Fix missing location info (lineno, col_offset, etc.) for all nodes
+		ast.fix_missing_locations(tree)
+
+		return tree
+
+	def _transform_enclosing_function(self, tree: ast.Module) -> ast.Module:
+		"""Transform the enclosing function to use _closure_vars dict."""
+		if not self.enclosing_function or not self.nonlocal_vars_by_func:
+			return tree
+
+		# Collect all nonlocal variables across all nested functions
+		all_nonlocal_vars = set()
+		for vars_set in self.nonlocal_vars_by_func.values():
+			all_nonlocal_vars.update(vars_set)
+
+		# Find and transform the enclosing function
+		transformer = _EnclosingFunctionTransformer(self.enclosing_function, all_nonlocal_vars, self.nonlocal_vars_by_func)
+		tree = transformer.visit(tree)
+
+		return tree
+
+
+class _EnclosingFunctionTransformer(ast.NodeTransformer):
+	"""Transform the enclosing function to use _closure_vars dict."""
+
+	def __init__(self, target_func: str, nonlocal_vars: set[str], nonlocal_vars_by_func: dict[str, set[str]]):
+		self.target_func = target_func
+		self.nonlocal_vars = nonlocal_vars
+		self.nonlocal_vars_by_func = nonlocal_vars_by_func
+		self.in_target_func = False
+		self.current_nested_func: str | None = None
+
+	def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> Any:
+		"""Transform the target function."""
+		if node.name == self.target_func and not self.in_target_func:
+			# Found the enclosing function, transform it
+			self.in_target_func = True
+
+			# Find variable assignments in the function body
+			var_assignments: dict[str, ast.expr] = {}
+			new_body: list[ast.stmt] = []
+
+			for stmt in node.body:
+				should_skip = False
+				if isinstance(stmt, ast.Assign):
+					# Check if this assigns to a nonlocal variable
+					for target in stmt.targets:
+						if isinstance(target, ast.Name) and target.id in self.nonlocal_vars:
+							# Store the assignment value
+							var_assignments[target.id] = stmt.value
+							# Skip this statement (don't include in new body)
+							should_skip = True
+							break
+
+				if not should_skip:
+					# Keep all non-matching statements
+					new_body.append(stmt)
+
+			# Create _closure_vars dict initialization
+			dict_items: list[tuple[ast.expr, ast.expr]] = []
+			for var_name in sorted(self.nonlocal_vars):
+				value = var_assignments.get(var_name, ast.Constant(value=None))
+				dict_items.append((ast.Constant(value=var_name), value))
+
+			closure_dict: ast.stmt = ast.Assign(
+				targets=[ast.Name(id='_closure_vars', ctx=ast.Store())],
+				value=ast.Dict(keys=[k for k, _ in dict_items], values=[v for _, v in dict_items]),
+			)
+
+			# Insert at the beginning of function body
+			node.body = [closure_dict] + new_body
+
+			# Recursively transform nested functions
+			for i, stmt in enumerate(node.body):
+				node.body[i] = self.visit(stmt)
+
+			self.in_target_func = False
+			return node
+
+		elif self.in_target_func and node.name in self.nonlocal_vars_by_func:
+			# We're inside a nested function that uses nonlocal
+			self.current_nested_func = node.name
+			nested_nonlocal_vars = self.nonlocal_vars_by_func[node.name]
+
+			# Remove nonlocal statements
+			nested_body: list[ast.stmt] = []
+			for stmt in node.body:
+				if isinstance(stmt, ast.Nonlocal):
+					# Skip nonlocal statements
+					continue
+				# Transform all other statements
+				transformed_stmt = self.visit(stmt)
+				if isinstance(transformed_stmt, ast.stmt):
+					nested_body.append(transformed_stmt)
+
+			node.body = nested_body
+
+			# Transform variable references in this function
+			var_transformer = _VariableReferenceTransformer(nested_nonlocal_vars)
+			node = var_transformer.visit(node)
+
+			self.current_nested_func = None
+			return node
+
+		# For other functions, just recurse
+		self.generic_visit(node)
+		return node
+
+	visit_AsyncFunctionDef = visit_FunctionDef
+
+
+class _VariableReferenceTransformer(ast.NodeTransformer):
+	"""Transform variable references to use _closure_vars dict access."""
+
+	def __init__(self, nonlocal_vars: set[str]):
+		self.nonlocal_vars = nonlocal_vars
+		self.in_nested_function = False
+
+	def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> Any:
+		"""Don't transform nested functions within nested functions."""
+		# Mark that we're in a nested function
+		was_in_nested = self.in_nested_function
+		self.in_nested_function = True
+
+		# But don't transform doubly-nested functions
+		if was_in_nested:
+			return node
+
+		self.generic_visit(node)
+
+		self.in_nested_function = was_in_nested
+		return node
+
+	visit_AsyncFunctionDef = visit_FunctionDef
+
+	def visit_Name(self, node: ast.Name) -> Any:
+		"""Transform variable references to dict access."""
+		if node.id in self.nonlocal_vars:
+			# Transform to _closure_vars['var_name']
+			return ast.Subscript(
+				value=ast.Name(id='_closure_vars', ctx=ast.Load()), slice=ast.Constant(value=node.id), ctx=node.ctx
+			)
+		return node
+
+
 def get_terminal_width() -> int:
 	"""Get terminal width, default to 80 if unable to detect"""
 	try:
@@ -30,15 +241,25 @@ def get_terminal_width() -> int:
 		return 80
 
 
+async def _call_callback(callback: Callable[..., Any], *args: Any) -> None:
+	"""Call a callback that can be either sync or async"""
+	result = callback(*args)
+	if asyncio.iscoroutine(result):
+		await result
+
+
 def remote_execute(
 	BROWSER_USE_API_KEY: str | None = None,
 	server_url: str | None = None,
 	log_level: str = 'INFO',
-	on_browser_created: Callable[[BrowserCreatedData], None] | None = None,
-	on_instance_ready: Callable[[], None] | None = None,
-	on_log: Callable[[LogData], None] | None = None,
-	on_result: Callable[[ResultData], None] | None = None,
-	on_error: Callable[[ErrorData], None] | None = None,
+	quiet: bool = False,
+	on_browser_created: Callable[[BrowserCreatedData], None]
+	| Callable[[BrowserCreatedData], Coroutine[Any, Any, None]]
+	| None = None,
+	on_instance_ready: Callable[[], None] | Callable[[], Coroutine[Any, Any, None]] | None = None,
+	on_log: Callable[[LogData], None] | Callable[[LogData], Coroutine[Any, Any, None]] | None = None,
+	on_result: Callable[[ResultData], None] | Callable[[ResultData], Coroutine[Any, Any, None]] | None = None,
+	on_error: Callable[[ErrorData], None] | Callable[[ErrorData], Coroutine[Any, Any, None]] | None = None,
 	**env_vars: str,
 ):
 	"""Decorator to execute browser automation code remotely.
@@ -51,11 +272,12 @@ def remote_execute(
 	        - "DEBUG": Shows all debug logs including internal browser operations
 	        - "WARNING": Shows only warnings and errors
 	        - "ERROR": Shows only errors
-	    on_browser_created: Callback when browser session is created. Receives BrowserCreatedData with live_url.
-	    on_instance_ready: Callback when instance is ready for execution.
-	    on_log: Callback for log events. Receives LogData.
-	    on_result: Callback when execution completes. Receives ResultData.
-	    on_error: Callback for error events. Receives ErrorData.
+	    quiet: If True, suppresses all console output (live URL, logs, credits, etc.). Errors are still raised.
+	    on_browser_created: Callback (sync or async) when browser session is created. Receives BrowserCreatedData with live_url.
+	    on_instance_ready: Callback (sync or async) when instance is ready for execution.
+	    on_log: Callback (sync or async) for log events. Receives LogData.
+	    on_result: Callback (sync or async) when execution completes. Receives ResultData.
+	    on_error: Callback (sync or async) for error events. Receives ErrorData.
 	    **env_vars: Additional environment variables to pass to remote execution
 
 	Example:
@@ -79,8 +301,34 @@ def remote_execute(
 	"""
 
 	def decorator(func: Callable[..., Coroutine[Any, Any, T]]) -> Callable[..., Coroutine[Any, Any, T]]:
+		# Validate function signature - must have exactly 1 parameter: browser: Browser
+		sig = inspect.signature(func)
+		params = list(sig.parameters.values())
+
+		if len(params) != 1:
+			raise TypeError(f'{func.__name__}() must have exactly 1 parameter (browser: Browser), got {len(params)} parameters')
+
+		param = params[0]
+		if param.name != 'browser':
+			raise TypeError(f'{func.__name__}() parameter must be named "browser", got "{param.name}"')
+
+		# Check type annotation if present
+		if param.annotation != inspect.Parameter.empty:
+			# Get the string representation of the annotation
+			annotation_str = str(param.annotation)
+			# Accept Browser, BrowserSession, or any annotation containing 'Browser'
+			if 'Browser' not in annotation_str:
+				raise TypeError(f'{func.__name__}() parameter must be typed as Browser, got {annotation_str}')
+
 		@wraps(func)
 		async def wrapper(*args, **kwargs) -> T:
+			# Validate no args/kwargs are passed (browser is provided by remote executor)
+			if args or kwargs:
+				raise TypeError(
+					f'{func.__name__}() takes no arguments (browser is provided by remote executor), '
+					f'but {len(args)} positional and {len(kwargs)} keyword arguments were given'
+				)
+
 			# Get API key
 			api_key = BROWSER_USE_API_KEY or os.getenv('BROWSER_USE_API_KEY')
 			if not api_key:
@@ -96,11 +344,30 @@ def remote_execute(
 					node.decorator_list = []  # Remove decorators
 					break
 
-			# Use cleaned source (without decorators) for extraction
-			cleaned_source = ast.unparse(tree)
+			# Get source before transformation for extraction
+			cleaned_source_before_transform = ast.unparse(tree)
 
-			# Extract imports and classes used in the function
-			local_classes = _extract_local_classes_from_source(func, cleaned_source)
+			# Extract imports and classes used in the function BEFORE transformation
+			# This gives us the AST nodes that we can then transform
+			local_classes = _extract_local_classes_from_source(func, cleaned_source_before_transform)
+
+			# Transform nonlocal statements into closure-friendly dict patterns
+			# This fixes issues with nested functions that use nonlocal variables
+			# Apply transformation to BOTH the main function tree AND extracted classes
+			transformer = NonlocalToClosureTransformer()
+			tree = transformer.transform(tree)
+
+			# Also transform any extracted local classes/functions
+			for i, cls_node in enumerate(local_classes):
+				# Create a new transformer instance for each class to avoid state issues
+				cls_transformer = NonlocalToClosureTransformer()
+				# Wrap each class/function in a Module to transform it
+				temp_tree = ast.Module(body=[cls_node], type_ignores=[])
+				transformed_temp = cls_transformer.transform(temp_tree)
+				local_classes[i] = transformed_temp.body[0]
+
+			# Use cleaned source (without decorators and with transformations) for extraction
+			cleaned_source = ast.unparse(tree)
 
 			# Get combined source (function + classes) for import detection
 			class_sources = [ast.unparse(cls) for cls in local_classes]
@@ -117,6 +384,26 @@ def remote_execute(
 			imports.extend(used_imports)
 
 			function_code = ast.unparse(ast.Module(body=imports + local_classes + tree.body, type_ignores=[]))
+
+			# Debug: Check if nonlocal is still in the code
+			if not quiet and 'nonlocal' in function_code:
+				print("\n⚠️  WARNING: 'nonlocal' found in transformed code!", file=sys.stderr)
+				print(f'Checking for _closure_vars: {"_closure_vars" in function_code}', file=sys.stderr)
+				print(f'Number of local_classes extracted: {len(local_classes)}', file=sys.stderr)
+
+				# Check each component
+				main_func_has_nonlocal = 'nonlocal' in cleaned_source
+				print(f'Main function has nonlocal: {main_func_has_nonlocal}', file=sys.stderr)
+
+				for idx, cls in enumerate(local_classes):
+					cls_src = ast.unparse(cls)
+					if 'nonlocal' in cls_src:
+						print(f'Local class/func {idx} ({cls.name}) has nonlocal!', file=sys.stderr)
+
+				# Find the line with nonlocal
+				for i, line in enumerate(function_code.split('\n')):
+					if 'nonlocal' in line:
+						print(f'Line {i + 1}: {line}', file=sys.stderr)
 
 			# Create execution wrapper that expects browser parameter
 			# The executor now captures the return value directly, no need for RESULT: marker
@@ -176,12 +463,13 @@ async def runner(browser):
 								# Call user callback if provided
 								if on_browser_created:
 									try:
-										on_browser_created(event.data)
+										await _call_callback(on_browser_created, event.data)
 									except Exception as e:
-										print(f'⚠️  Error in on_browser_created callback: {e}')
+										if not quiet:
+											print(f'⚠️  Error in on_browser_created callback: {e}')
 
-								# Show live URL in console (unless user wants to handle it)
-								if event.data.live_url and not live_url_shown:
+								# Show live URL in console (unless user wants to handle it or quiet mode is on)
+								if not quiet and event.data.live_url and not live_url_shown:
 									width = get_terminal_width()
 									print('\n' + '━' * width)
 									print('👁️  LIVE BROWSER VIEW (Click to watch)')
@@ -198,57 +486,64 @@ async def runner(browser):
 								# Call user callback if provided
 								if on_log:
 									try:
-										on_log(event.data)
+										await _call_callback(on_log, event.data)
 									except Exception as e:
-										print(f'⚠️  Error in on_log callback: {e}')
+										if not quiet:
+											print(f'⚠️  Error in on_log callback: {e}')
 
 								# Handle different log levels
 								if level == 'stdout':
 									# Print stdout with prefix to show it's from remote execution
-									if not execution_started:
-										width = get_terminal_width()
-										print('\n' + '─' * width)
-										print('⚡ Runtime Output')
-										print('─' * width)
-										execution_started = True
-									print(f'  {message}', end='')
+									if not quiet:
+										if not execution_started:
+											width = get_terminal_width()
+											print('\n' + '─' * width)
+											print('⚡ Runtime Output')
+											print('─' * width)
+											execution_started = True
+										print(f'  {message}', end='')
 								elif level == 'stderr':
 									# Print stderr with prefix
-									if not execution_started:
-										width = get_terminal_width()
-										print('\n' + '─' * width)
-										print('⚡ Runtime Output')
-										print('─' * width)
-										execution_started = True
-									print(
-										f'⚠️  {message}',
-										end='',
-										file=sys.stderr,
-									)
+									if not quiet:
+										if not execution_started:
+											width = get_terminal_width()
+											print('\n' + '─' * width)
+											print('⚡ Runtime Output')
+											print('─' * width)
+											execution_started = True
+										print(
+											f'⚠️  {message}',
+											end='',
+											file=sys.stderr,
+										)
 								elif level == 'info':
 									# System info messages (credit check, etc)
-									if 'credit' in message.lower():
-										# Extract amount from message
-										import re
+									if not quiet:
+										if 'credit' in message.lower():
+											# Extract amount from message
+											import re
 
-										match = re.search(r'\$[\d,]+\.?\d*', message)
-										if match:
-											print(f'💰 You have {match.group()} credits')
-									else:
-										print(f'ℹ️  {message}')
+											match = re.search(r'\$[\d,]+\.?\d*', message)
+											if match:
+												print(f'💰 You have {match.group()} credits')
+										else:
+											print(f'ℹ️  {message}')
 								else:
-									print(f'  {message}')
+									if not quiet:
+										print(f'  {message}')
 
 							elif event.type == SSEEventType.INSTANCE_READY:
 								# Call user callback if provided
 								if on_instance_ready:
 									try:
-										on_instance_ready()
+										await _call_callback(on_instance_ready)
 									except Exception as e:
-										print(f'⚠️  Error in on_instance_ready callback: {e}')
+										if not quiet:
+											print(f'⚠️  Error in on_instance_ready callback: {e}')
 
 								# Print separator before execution starts
-								print('✅ Browser ready, starting execution...\n')
+								if not quiet:
+									print('✅ Browser ready, starting execution...\n')
 
 							elif event.type == SSEEventType.RESULT:
 								# Type-safe access to ResultData
@@ -258,15 +553,16 @@ async def runner(browser):
 								# Call user callback if provided
 								if on_result:
 									try:
-										on_result(event.data)
+										await _call_callback(on_result, event.data)
 									except Exception as e:
-										print(f'⚠️  Error in on_result callback: {e}')
+										if not quiet:
+											print(f'⚠️  Error in on_result callback: {e}')
 
 								if exec_response.success:
 									# The result is now in the 'result' field, not stdout
 									execution_result = exec_response.result
 									# Print closing separator with spacing
-									if execution_started:
+									if not quiet and execution_started:
 										width = get_terminal_width()
 										print('\n' + '─' * width)
 										print()  # Extra newline for spacing
@@ -281,9 +577,10 @@ async def runner(browser):
 								# Call user callback if provided
 								if on_error:
 									try:
-										on_error(event.data)
+										await _call_callback(on_error, event.data)
 									except Exception as e:
-										print(f'⚠️  Error in on_error callback: {e}')
+										if not quiet:
+											print(f'⚠️  Error in on_error callback: {e}')
 
 								raise RemoteExecutionError(f'Execution failed: {event.data.error}')
 
@@ -479,8 +776,9 @@ def _extract_local_classes_from_source(func: Callable, cleaned_source: str) -> l
 		module_source = inspect.getsource(module)
 		module_tree = ast.parse(module_source)
 
-		# Find all class and function definitions in the current module
-		for node in ast.walk(module_tree):
+		# Find all TOP-LEVEL class and function definitions in the current module
+		# Use module_tree.body instead of ast.walk() to avoid extracting nested functions
+		for node in module_tree.body:
 			if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
 				# Skip the main function itself
 				if node.name == main_func_name:
@@ -518,11 +816,12 @@ def _extract_local_classes_from_source(func: Callable, cleaned_source: str) -> l
 		# Extract definitions from imported local files
 		for import_file, imported_names in import_files:
 			try:
-				with open(import_file, 'r') as f:
+				with open(import_file) as f:
 					imported_source = f.read()
 				imported_tree = ast.parse(imported_source)
 
-				for node in ast.walk(imported_tree):
+				# Only extract TOP-LEVEL definitions from imported files
+				for node in imported_tree.body:
 					if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
 						# Include if explicitly imported or used in source
 						if node.name in imported_names or node.name in source:
