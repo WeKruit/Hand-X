@@ -5,7 +5,7 @@ import json
 
 from cdp_use.cdp.input.commands import DispatchKeyEventParameters
 
-from browser_use.actor.page import get_key_info
+from browser_use.actor.utils import get_key_info
 from browser_use.browser.events import (
 	ClickElementEvent,
 	GetDropdownOptionsEvent,
