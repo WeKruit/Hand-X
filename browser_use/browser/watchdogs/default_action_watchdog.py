@@ -233,19 +233,21 @@ class DefaultActionWatchdog(BaseWatchdog):
 							};
 						};
 						
+
 						const elementAtPoint = document.elementFromPoint(arguments[0], arguments[1]);
 						if (!elementAtPoint) {
 							return { targetInfo: getElementInfo(this), isClickable: false };
 						}
 						
+
 						// Simple containment-based clickability logic
-						const isClickable = this === elementAtPoint || 
+						const isClickable = this === elementAtPoint ||
 							this.contains(elementAtPoint) ||
 							elementAtPoint.contains(this);
-							
+
 						return {
 							targetInfo: getElementInfo(this),
-							elementAtPointInfo: getElementInfo(elementAtPoint), 
+							elementAtPointInfo: getElementInfo(elementAtPoint),
 							isClickable: isClickable
 						};
 					}
@@ -766,10 +768,14 @@ class DefaultActionWatchdog(BaseWatchdog):
 			await cdp_session.cdp_client.send.Runtime.callFunctionOn(
 				params={
 					'functionDeclaration': """
-						function() { 
-							this.value = ""; 
-							this.dispatchEvent(new Event("input", { bubbles: true })); 
-							this.dispatchEvent(new Event("change", { bubbles: true })); 
+						function() {
+							// First select all text to ensure we're working with the whole field
+							this.select();
+							// Then set value to empty
+							this.value = "";
+							// Dispatch events to notify frameworks like React
+							this.dispatchEvent(new Event("input", { bubbles: true }));
+							this.dispatchEvent(new Event("change", { bubbles: true }));
 							return this.value;
 						}
 					""",
@@ -1049,7 +1055,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 			)
 
 			# Step 2: Clear existing text if requested
-			if clear and focused_successfully:
+			if clear:
 				cleared_successfully = await self._clear_text_field(object_id=object_id, cdp_session=cdp_session)
 				if not cleared_successfully:
 					self.logger.warning('⚠️ Text field clearing failed, typing may append to existing text')
@@ -1837,7 +1843,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 			options_script = """
 			function() {
 				const startElement = this;
-				
+
 				// Function to check if an element is a dropdown and extract options
 				function checkDropdownElement(element) {
 					// Check if it's a native select element
@@ -1855,14 +1861,14 @@ class DefaultActionWatchdog(BaseWatchdog):
 							source: 'target'
 						};
 					}
-					
+
 					// Check if it's an ARIA dropdown/menu
 					const role = element.getAttribute('role');
 					if (role === 'menu' || role === 'listbox' || role === 'combobox') {
 						// Find all menu items/options
 						const menuItems = element.querySelectorAll('[role="menuitem"], [role="option"]');
 						const options = [];
-						
+
 						menuItems.forEach((item, idx) => {
 							const text = item.textContent ? item.textContent.trim() : '';
 							if (text) {
@@ -1874,7 +1880,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 								});
 							}
 						});
-						
+
 						return {
 							type: 'aria',
 							options: options,
@@ -1883,12 +1889,12 @@ class DefaultActionWatchdog(BaseWatchdog):
 							source: 'target'
 						};
 					}
-					
+
 					// Check if it's a Semantic UI dropdown or similar
 					if (element.classList.contains('dropdown') || element.classList.contains('ui')) {
 						const menuItems = element.querySelectorAll('.item, .option, [data-value]');
 						const options = [];
-						
+
 						menuItems.forEach((item, idx) => {
 							const text = item.textContent ? item.textContent.trim() : '';
 							if (text) {
@@ -1900,7 +1906,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 								});
 							}
 						});
-						
+
 						if (options.length > 0) {
 							return {
 								type: 'custom',
@@ -1911,14 +1917,14 @@ class DefaultActionWatchdog(BaseWatchdog):
 							};
 						}
 					}
-					
+
 					return null;
 				}
-				
+
 				// Function to recursively search children up to specified depth
 				function searchChildrenForDropdowns(element, maxDepth, currentDepth = 0) {
 					if (currentDepth >= maxDepth) return null;
-					
+
 					// Check all direct children
 					for (let child of element.children) {
 						// Check if this child is a dropdown
@@ -1927,29 +1933,29 @@ class DefaultActionWatchdog(BaseWatchdog):
 							result.source = `child-depth-${currentDepth + 1}`;
 							return result;
 						}
-						
+
 						// Recursively check this child's children
 						const childResult = searchChildrenForDropdowns(child, maxDepth, currentDepth + 1);
 						if (childResult) {
 							return childResult;
 						}
 					}
-					
+
 					return null;
 				}
-				
+
 				// First check the target element itself
 				let dropdownResult = checkDropdownElement(startElement);
 				if (dropdownResult) {
 					return dropdownResult;
 				}
-				
+
 				// If target element is not a dropdown, search children up to depth 4
 				dropdownResult = searchChildrenForDropdowns(startElement, 4);
 				if (dropdownResult) {
 					return dropdownResult;
 				}
-				
+
 				return {
 					error: `Element and its children (depth 4) are not recognizable dropdown types (tag: ${startElement.tagName}, role: ${startElement.getAttribute('role')}, classes: ${startElement.className})`
 				};
@@ -2066,27 +2072,27 @@ class DefaultActionWatchdog(BaseWatchdog):
 				selection_script = """
 				function(targetText) {
 					const startElement = this;
-					
+
 					// Function to attempt selection on a dropdown element
 					function attemptSelection(element) {
 						// Handle native select elements
 						if (element.tagName.toLowerCase() === 'select') {
 							const options = Array.from(element.options);
 							const targetTextLower = targetText.toLowerCase();
-							
+
 							for (const option of options) {
 								const optionTextLower = option.text.trim().toLowerCase();
 								const optionValueLower = option.value.toLowerCase();
-								
+
 								// Match against both text and value (case-insensitive)
 								if (optionTextLower === targetTextLower || optionValueLower === targetTextLower) {
 									element.value = option.value;
 									option.selected = true;
-									
+
 									// Trigger change events
 									const changeEvent = new Event('change', { bubbles: true });
 									element.dispatchEvent(changeEvent);
-									
+
 									return {
 										success: true,
 										message: `Selected option: ${option.text.trim()} (value: ${option.value})`,
@@ -2094,31 +2100,31 @@ class DefaultActionWatchdog(BaseWatchdog):
 									};
 								}
 							}
-							
+
 							// Return available options as separate field
 							const availableOptions = options.map(opt => ({
 								text: opt.text.trim(),
 								value: opt.value
 							}));
-							
+
 							return {
 								success: false,
 								error: `Option with text or value '${targetText}' not found in select element`,
 								availableOptions: availableOptions
 							};
 						}
-						
+
 						// Handle ARIA dropdowns/menus
 						const role = element.getAttribute('role');
 						if (role === 'menu' || role === 'listbox' || role === 'combobox') {
 							const menuItems = element.querySelectorAll('[role="menuitem"], [role="option"]');
 							const targetTextLower = targetText.toLowerCase();
-							
+
 							for (const item of menuItems) {
 								if (item.textContent) {
 									const itemTextLower = item.textContent.trim().toLowerCase();
 									const itemValueLower = (item.getAttribute('data-value') || '').toLowerCase();
-									
+
 									// Match against both text and data-value (case-insensitive)
 									if (itemTextLower === targetTextLower || itemValueLower === targetTextLower) {
 										// Clear previous selections
@@ -2126,16 +2132,16 @@ class DefaultActionWatchdog(BaseWatchdog):
 											mi.setAttribute('aria-selected', 'false');
 											mi.classList.remove('selected');
 										});
-										
+
 										// Select this item
 										item.setAttribute('aria-selected', 'true');
 										item.classList.add('selected');
-										
+
 										// Trigger click and change events
 										item.click();
 										const clickEvent = new MouseEvent('click', { view: window, bubbles: true, cancelable: true });
 										item.dispatchEvent(clickEvent);
-										
+
 										return {
 											success: true,
 											message: `Selected ARIA menu item: ${item.textContent.trim()}`
@@ -2143,55 +2149,55 @@ class DefaultActionWatchdog(BaseWatchdog):
 									}
 								}
 							}
-							
+
 							// Return available options as separate field
 							const availableOptions = Array.from(menuItems).map(item => ({
 								text: item.textContent ? item.textContent.trim() : '',
 								value: item.getAttribute('data-value') || ''
 							})).filter(opt => opt.text || opt.value);
-							
+
 							return {
 								success: false,
 								error: `Menu item with text or value '${targetText}' not found`,
 								availableOptions: availableOptions
 							};
 						}
-						
+
 						// Handle Semantic UI or custom dropdowns
 						if (element.classList.contains('dropdown') || element.classList.contains('ui')) {
 							const menuItems = element.querySelectorAll('.item, .option, [data-value]');
 							const targetTextLower = targetText.toLowerCase();
-							
+
 							for (const item of menuItems) {
 								if (item.textContent) {
 									const itemTextLower = item.textContent.trim().toLowerCase();
 									const itemValueLower = (item.getAttribute('data-value') || '').toLowerCase();
-									
+
 									// Match against both text and data-value (case-insensitive)
 									if (itemTextLower === targetTextLower || itemValueLower === targetTextLower) {
 										// Clear previous selections
 										menuItems.forEach(mi => {
 											mi.classList.remove('selected', 'active');
 										});
-										
+
 										// Select this item
 										item.classList.add('selected', 'active');
-										
+
 										// Update dropdown text if there's a text element
 										const textElement = element.querySelector('.text');
 										if (textElement) {
 											textElement.textContent = item.textContent.trim();
 										}
-										
+
 										// Trigger click and change events
 										item.click();
 										const clickEvent = new MouseEvent('click', { view: window, bubbles: true, cancelable: true });
 										item.dispatchEvent(clickEvent);
-										
+
 										// Also dispatch on the main dropdown element
 										const dropdownChangeEvent = new Event('change', { bubbles: true });
 										element.dispatchEvent(dropdownChangeEvent);
-										
+
 										return {
 											success: true,
 											message: `Selected custom dropdown item: ${item.textContent.trim()}`
@@ -2199,27 +2205,27 @@ class DefaultActionWatchdog(BaseWatchdog):
 									}
 								}
 							}
-							
+
 							// Return available options as separate field
 							const availableOptions = Array.from(menuItems).map(item => ({
 								text: item.textContent ? item.textContent.trim() : '',
 								value: item.getAttribute('data-value') || ''
 							})).filter(opt => opt.text || opt.value);
-							
+
 							return {
 								success: false,
 								error: `Custom dropdown item with text or value '${targetText}' not found`,
 								availableOptions: availableOptions
 							};
 						}
-						
+
 						return null; // Not a dropdown element
 					}
-					
+
 					// Function to recursively search children for dropdowns
 					function searchChildrenForSelection(element, maxDepth, currentDepth = 0) {
 						if (currentDepth >= maxDepth) return null;
-						
+
 						// Check all direct children
 						for (let child of element.children) {
 							// Try selection on this child
@@ -2227,17 +2233,17 @@ class DefaultActionWatchdog(BaseWatchdog):
 							if (result && result.success) {
 								return result;
 							}
-							
+
 							// Recursively check this child's children
 							const childResult = searchChildrenForSelection(child, maxDepth, currentDepth + 1);
 							if (childResult && childResult.success) {
 								return childResult;
 							}
 						}
-						
+
 						return null;
 					}
-					
+
 					// First try the target element itself
 					let selectionResult = attemptSelection(startElement);
 					if (selectionResult) {
@@ -2245,13 +2251,13 @@ class DefaultActionWatchdog(BaseWatchdog):
 						// Don't search children if we found a dropdown element but selection failed
 						return selectionResult;
 					}
-					
+
 					// Only search children if target element is not a dropdown element
 					selectionResult = searchChildrenForSelection(startElement, 4);
 					if (selectionResult && selectionResult.success) {
 						return selectionResult;
 					}
-					
+
 					return {
 						success: false,
 						error: `Element and its children (depth 4) do not contain a dropdown with option '${targetText}' (tag: ${startElement.tagName}, role: ${startElement.getAttribute('role')}, classes: ${startElement.className})`
