@@ -837,9 +837,15 @@ class Element:
 				params={
 					'functionDeclaration': """
 						function() {
-							// First select all text to ensure we're working with the whole field
-							this.select();
-							// Then set value to empty
+							// Try to select all text first (only works on text-like inputs)
+							// This handles cases where cursor is in the middle of text
+							try {
+								this.select();
+							} catch (e) {
+								// Some input types (date, color, number, etc.) don't support select()
+								// That's fine, we'll just clear the value directly
+							}
+							// Set value to empty
 							this.value = "";
 							// Dispatch events to notify frameworks like React
 							this.dispatchEvent(new Event("input", { bubbles: true }));
