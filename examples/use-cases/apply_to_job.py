@@ -1,51 +1,53 @@
+import argparse
 import asyncio
-import os
-from dotenv import load_dotenv
-from browser_use import ActionResult, Agent, Browser, ChatOpenAI, ChatAnthropic, ChatGoogle, Tools
-from browser_use.tools.views import UploadFileAction
 import json
+import os
+
+from dotenv import load_dotenv
+
+from browser_use import Agent, Browser, ChatOpenAI, Tools
+from browser_use.tools.views import UploadFileAction
 
 load_dotenv()
 
-async def apply_to_rochester_regional_health(info: dict, llm: str, resume_path: str):
-    """
-    json format:
-    {
-        "first_name": "John",
-        "last_name": "Doe",
-        "email": "john.doe@example.com",
-        "phone": "555-555-5555",
-        "age": "21",
-        "US_citizen": boolean,
-        "sponsorship_needed": boolean,
 
-        "resume": "Link to resume",
-        "postal_code": "12345",
-        "country": "USA",
-        "city": "Rochester",
-        "address": "123 Main St",
+async def apply_to_rochester_regional_health(info: dict, resume_path: str):
+	"""
+	json format:
+	{
+	    "first_name": "John",
+	    "last_name": "Doe",
+	    "email": "john.doe@example.com",
+	    "phone": "555-555-5555",
+	    "age": "21",
+	    "US_citizen": boolean,
+	    "sponsorship_needed": boolean,
 
-        "gender": "Male",
-        "race": "Asian",
-        "Veteran_status": "Not a veteran",
-        "disability_status": "No disability"
-    }
-    """
+	    "resume": "Link to resume",
+	    "postal_code": "12345",
+	    "country": "USA",
+	    "city": "Rochester",
+	    "address": "123 Main St",
 
-    tools = Tools()
+	    "gender": "Male",
+	    "race": "Asian",
+	    "Veteran_status": "Not a veteran",
+	    "disability_status": "No disability"
+	}
+	"""
 
-    @tools.action(description='Upload resume file')
-    async def upload_resume(browser_session):
-        params = UploadFileAction(
-            path=resume_path
-        )
-        return "Ready to upload resume"
+	llm = ChatOpenAI(model='o3')
 
-    browser = Browser(
-        cross_origin_iframes=True
-    )
+	tools = Tools()
 
-    task = f"""
+	@tools.action(description='Upload resume file')
+	async def upload_resume(browser_session):
+		params = UploadFileAction(path=resume_path, index=0)
+		return 'Ready to upload resume'
+
+	browser = Browser(cross_origin_iframes=True)
+
+	task = f"""
     - Your goal is to fill out and submit a job application form with the provided information.
     - Navigate to https://apply.appcast.io/jobs/50590620606/applyboard/apply/
     - Scroll through the entire application and use extract_structured_data action to extract all the relevant information needed to fill out the job application form. use this information and return a structured output that can be used to fill out the entire form: {info}. Use the done action to finish the task. Fill out the job application form with the following information.
@@ -93,28 +95,40 @@ async def apply_to_rochester_regional_health(info: dict, llm: str, resume_path: 
         - At the end of the task, structure your final_result as 1) a human-readable summary of all detections and actions performed on the page with 2) a list with all questions encountered in the page. Do not say "see above." Include a fully written out, human-readable summary at the very end.
     """
 
-    available_file_paths = [resume_path]
+	available_file_paths = [resume_path]
 
-    agent = Agent(
-        task=task,
-        llm=llm,
-        browser=browser,
-        tools=tools,
-        available_file_paths=available_file_paths,
-    )
+	agent = Agent(
+		task=task,
+		llm=llm,
+		browser=browser,
+		tools=tools,
+		available_file_paths=available_file_paths,
+	)
 
-    history = await agent.run()
+	history = await agent.run()
 
-    return history.final_result()
+	return history.final_result()
 
-async def main():
-    llm = ChatOpenAI(model="o3")
 
-    with open('mock/test_data.json') as f:
-        mock_info = json.load(f)
+async def main(test_data_path: str, resume_path: str):
+	# Verify files exist
+	if not os.path.exists(test_data_path):
+		raise FileNotFoundError(f'Test data file not found at: {test_data_path}')
+	if not os.path.exists(resume_path):
+		raise FileNotFoundError(f'Resume file not found at: {resume_path}')
 
-    results = await apply_to_rochester_regional_health(mock_info, llm, resume_path="mock/test_CV.pdf")
-    print("Search Results:", results)
+	with open(test_data_path) as f:  # noqa: ASYNC230
+		mock_info = json.load(f)
+
+	results = await apply_to_rochester_regional_health(mock_info, resume_path=resume_path)
+	print('Search Results:', results)
+
 
 if __name__ == '__main__':
-  asyncio.run(main())
+	parser = argparse.ArgumentParser(description='Apply to Rochester Regional Health job')
+	parser.add_argument('--test-data', required=True, help='Path to test data JSON file')
+	parser.add_argument('--resume', required=True, help='Path to resume PDF file')
+
+	args = parser.parse_args()
+
+	asyncio.run(main(args.test_data, args.resume))
