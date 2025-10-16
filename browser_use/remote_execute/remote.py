@@ -1,6 +1,8 @@
 import ast
 import asyncio
 import base64
+import dataclasses
+import enum
 import inspect
 import json
 import os
@@ -475,7 +477,12 @@ async def run(browser):
 
 
 def _parse_with_type_annotation(data: Any, annotation: Any) -> Any:
-	"""Parse data with type annotation (FastAPI-style parsing)"""
+	"""Parse data with type annotation without validation, recursively handling nested types
+
+	This function reconstructs Pydantic models, dataclasses, and enums from JSON dicts
+	without running validation logic. It recursively parses nested fields to ensure
+	complete type fidelity.
+	"""
 	try:
 		if data is None:
 			return None
@@ -504,6 +511,20 @@ def _parse_with_type_annotation(data: Any, annotation: Any) -> Any:
 				return [_parse_with_type_annotation(item, args[0]) for item in data]
 			return data
 
+		# Handle Tuple types (JSON serializes tuples as lists)
+		if origin is tuple:
+			if not isinstance(data, (list, tuple)):
+				return data
+			if args:
+				# Parse each element according to its type annotation
+				parsed_items = []
+				for i, item in enumerate(data):
+					# Use the corresponding type arg, or the last one if fewer args than items
+					type_arg = args[i] if i < len(args) else args[-1] if args else Any
+					parsed_items.append(_parse_with_type_annotation(item, type_arg))
+				return tuple(parsed_items)
+			return tuple(data) if isinstance(data, list) else data
+
 		# Handle Dict types
 		if origin is dict:
 			if not isinstance(data, dict):
@@ -512,13 +533,55 @@ def _parse_with_type_annotation(data: Any, annotation: Any) -> Any:
 				return {_parse_with_type_annotation(k, args[0]): _parse_with_type_annotation(v, args[1]) for k, v in data.items()}
 			return data
 
-		# Handle Pydantic v2
-		if hasattr(annotation, 'model_validate'):
-			return annotation.model_validate(data)
+		# Handle Enum types
+		if inspect.isclass(annotation) and issubclass(annotation, enum.Enum):
+			if isinstance(data, str):
+				try:
+					return annotation[data]  # By name
+				except KeyError:
+					return annotation(data)  # By value
+			return annotation(data)  # By value
 
-		# Handle Pydantic v1
-		if hasattr(annotation, 'parse_obj'):
-			return annotation.parse_obj(data)
+		# Handle Pydantic v2 - use model_construct to skip validation and recursively parse nested fields
+		if hasattr(annotation, 'model_construct'):
+			if not isinstance(data, dict):
+				return data
+			# Recursively parse each field according to its type annotation
+			if hasattr(annotation, 'model_fields'):
+				parsed_fields = {}
+				for field_name, field_info in annotation.model_fields.items():
+					if field_name in data:
+						field_annotation = field_info.annotation
+						parsed_fields[field_name] = _parse_with_type_annotation(data[field_name], field_annotation)
+				return annotation.model_construct(**parsed_fields)
+			# Fallback if model_fields not available
+			return annotation.model_construct(**data)
+
+		# Handle Pydantic v1 - use construct to skip validation and recursively parse nested fields
+		if hasattr(annotation, 'construct'):
+			if not isinstance(data, dict):
+				return data
+			# Recursively parse each field if __fields__ is available
+			if hasattr(annotation, '__fields__'):
+				parsed_fields = {}
+				for field_name, field_obj in annotation.__fields__.items():
+					if field_name in data:
+						field_annotation = field_obj.outer_type_
+						parsed_fields[field_name] = _parse_with_type_annotation(data[field_name], field_annotation)
+				return annotation.construct(**parsed_fields)
+			# Fallback if __fields__ not available
+			return annotation.construct(**data)
+
+		# Handle dataclasses
+		if dataclasses.is_dataclass(annotation) and isinstance(data, dict):
+			# Get field type annotations
+			field_types = {f.name: f.type for f in dataclasses.fields(annotation)}
+			# Recursively parse each field
+			parsed_fields = {}
+			for field_name, field_type in field_types.items():
+				if field_name in data:
+					parsed_fields[field_name] = _parse_with_type_annotation(data[field_name], field_type)
+			return cast(type[Any], annotation)(**parsed_fields)
 
 		# Handle regular classes
 		if inspect.isclass(annotation) and isinstance(data, dict):
