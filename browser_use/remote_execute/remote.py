@@ -200,6 +200,7 @@ def remote_execute(
 	server_url: str | None = None,
 	log_level: str = 'INFO',
 	quiet: bool = False,
+	headers: dict[str, str] | None = None,
 	on_browser_created: Callable[[BrowserCreatedData], None]
 	| Callable[[BrowserCreatedData], Coroutine[Any, Any, None]]
 	| None = None,
@@ -219,6 +220,7 @@ def remote_execute(
 	    server_url: Remote server URL (defaults to https://remote.api.browser-use.com)
 	    log_level: Logging level (INFO, DEBUG, WARNING, ERROR)
 	    quiet: Suppress console output
+	    headers: Additional HTTP headers to send with the request
 	    on_browser_created: Callback when browser is created
 	    on_instance_ready: Callback when instance is ready
 	    on_log: Callback for log events
@@ -324,7 +326,9 @@ async def run(browser):
 
 			url = server_url or 'https://remote.api.browser-use.com/remote-execute-stream'
 
-			headers = {'X-API-Key': api_key}
+			request_headers = {'X-API-Key': api_key}
+			if headers:
+				request_headers.update(headers)
 
 			# 10. Handle SSE streaming
 			_NO_RESULT = object()
@@ -333,7 +337,7 @@ async def run(browser):
 			execution_started = False
 
 			async with httpx.AsyncClient(timeout=1800.0) as client:
-				async with client.stream('POST', url, json=payload, headers=headers) as response:
+				async with client.stream('POST', url, json=payload, headers=request_headers) as response:
 					response.raise_for_status()
 
 					async for line in response.aiter_lines():
