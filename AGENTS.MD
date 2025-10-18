@@ -591,7 +591,7 @@ Examples:
 Simply add `@tools.action(...)` to your function.
 
 ```python  theme={null}
-from browser_use import Tools, Agent
+from browser_use import Tools, Agent, ActionResult
 
 tools = Tools()
 
