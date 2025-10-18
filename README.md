@@ -52,9 +52,8 @@
 
 # 🤖 LLM Quickstart
 
-1. Clone this repo
-2. Direct your favorite coding agent (Cursor, ClaudeS, etc) to [Agents.md](https://docs.browser-use.com/llms-full.txt)
-3. Prompt away!
+1. Direct your favorite coding agent (Cursor, ClaudeS, etc) to [Agents.md](https://docs.browser-use.com/llms-full.txt)
+2. Prompt away!
 
 <br/>
 
