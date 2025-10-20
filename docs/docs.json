@@ -141,13 +141,13 @@
       {
         "group": "Customize",
         "pages": [
+          "customize/agent/supported-models",
           {
             "group": "Agent",
             "icon": "robot",
             "isDefaultOpen": true,
             "pages": [
               "customize/agent/basics",
-              "customize/agent/supported-models",
               "customize/agent/prompting-guide",
               "customize/agent/output-format",
               "customize/agent/all-parameters"
