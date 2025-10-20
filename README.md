@@ -91,7 +91,8 @@ async def example():
     browser = Browser(
         """
         Optional: Run agent on Browser Use Cloud.
-        Use our hosted stealth browsers to bypass anti-bot detection or run a fleet of agents on the cloud!
+        Use our hosted stealth browsers to bypass anti-bot detection 
+        or run a fleet of agents on the cloud!
         """
         # use_cloud=True,  # Uncomment to use a browser on Browser Use Cloud
 
