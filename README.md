@@ -89,17 +89,7 @@ import asyncio
 
 async def example():
     browser = Browser(
-        """
-        Optional: Run agent on Browser Use Cloud.
-        Use our hosted stealth browsers to bypass anti-bot detection 
-        or run a fleet of agents on the cloud!
-        """
-        # use_cloud=True,  # Uncomment to use a browser on Browser Use Cloud
-
-        """
-        Optional: Run agent on existing local browser.
-        """
-        # cdp_url="http://localhost:9222",  # Uncomment to connect to your own browser
+        # use_cloud=True,  # Uncomment to use a stealth browser on Browser Use Cloud
     )
 
     llm = ChatBrowserUse()
