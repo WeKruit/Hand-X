@@ -1174,7 +1174,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 		try:
 			# Execute JavaScript to trigger comprehensive event sequence
 			framework_events_script = """
-			(function() {
+			function() {
 				// Find the target element (available as 'this' when using objectId)
 				const element = this;
 				if (!element) return false;
@@ -1251,7 +1251,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 				}
 
 				return success;
-			})();
+			}
 			"""
 
 			# Execute the framework events script
