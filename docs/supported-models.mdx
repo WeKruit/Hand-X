@@ -5,17 +5,9 @@ icon: "microchip-ai"
 
 ---
 
-### Recommendations
-
-- Best accuracy: `O3`
-- Fastest: `llama4` on groq
-- Balanced: fast + cheap + clever: `BU 1.0`
-
-`BU 1.0` is our in-house model trained on millions of browser automation tasks, matching the accuracy of top models while completing tasks **3-5x** faster. [See our blog post→](https://browser-use.com/posts/speed-matters)
-
 ### Browser Use [example](https://github.com/browser-use/browser-use/blob/main/examples/models/browser_use_llm.py)
 
-Fastest and smartest option, optimized specifically for browser automation.
+`ChatBrowserUse()` is our in-house model trained on millions of browser automation tasks, matching the accuracy of top models while completing tasks **3-5x** faster. [See our blog post→](https://browser-use.com/posts/speed-matters)
 
 ```python
 from browser_use import Agent, ChatBrowserUse
@@ -36,7 +28,7 @@ Required environment variables:
 BROWSER_USE_API_KEY=
 ```
 
-Get your API key from the [Browser Use Cloud](https://cloud.browser-use.com/dashboard/api). New signups get \$10 free credit via OAuth or \$1 via email. 
+Get your API key from the [Browser Use Cloud](https://cloud.browser-use.com/dashboard/api). New signups get \$10 free credit via OAuth or \$1 via email.
 
 ### OpenAI [example](https://github.com/browser-use/browser-use/blob/main/examples/models/gpt-4.1.py)
 
@@ -264,7 +256,7 @@ Authentication methods supported:
 ## Ollama
 
 1. Install Ollama: https://github.com/ollama/ollama
-2. Run `ollama serve` to start the server 
+2. Run `ollama serve` to start the server
 3. In a new terminal, install the model you want to use: `ollama pull llama3.1:8b` (this has 4.9GB)
 
 ```python
