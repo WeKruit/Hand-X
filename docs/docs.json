@@ -25,7 +25,11 @@
   "redirects": [
     {
       "source": "/customize/supported-models",
-      "destination": "/customize/agent/supported-models"
+      "destination": "/supported-models"
+    },
+    {
+      "source": "/customize/agent/supported-models",
+      "destination": "/supported-models"
     },
     {
       "source": "/customize/agent-settings",
@@ -135,13 +139,13 @@
         "pages": [
           "introduction",
           "quickstart",
-          "quickstart_llm"
+          "quickstart_llm",
+          "supported-models"
         ]
       },
       {
         "group": "Customize",
         "pages": [
-          "customize/agent/supported-models",
           {
             "group": "Agent",
             "icon": "robot",
