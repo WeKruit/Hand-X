@@ -72,6 +72,10 @@
       "destination": "/customize/hooks"
     },
     {
+      "source": "/customize/mcp-server",
+      "destination": "/customize/integrations/mcp-server"
+    },
+    {
       "source": "/customize/examples/chain-agents",
       "destination": "/customize/examples/follow-up-tasks"
     },
@@ -191,7 +195,8 @@
             "icon": "plug",
             "isDefaultOpen": false,
             "pages": [
-              "customize/mcp-server"
+              "customize/integrations/docs-mcp",
+              "customize/integrations/mcp-server"
             ]
           }
         ]
