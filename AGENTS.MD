@@ -365,7 +365,7 @@ task = """
 """
 ```
 
-See [Available Tools](/customize/tools/available) for the complete list of actions.
+See [Available Tools](https://docs.browser-use.com/customize/tools/available) for the complete list of actions.
 
 ### 3. Handle interaction problems via keyboard navigation
 
