@@ -205,7 +205,7 @@ async def test_assumption_4_click_action_specific_issue(browser_session, tools, 
 		)
 
 	# Test with index 1 (elements start at 1, not 0)
-	result = await tools.registry.execute_action('test_debug_click_logic', {'index': 1}, browser_session=browser_session)
+	result = await tools.registry.execute_action('test_debug_click_logic', browser_session=browser_session)
 
 	print(f'Debug click result: {result.extracted_content or result.error}')
 
