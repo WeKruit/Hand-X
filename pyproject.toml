@@ -2,7 +2,7 @@
 name = "browser-use"
 description = "Make websites accessible for AI agents"
 authors = [{ name = "Gregor Zunic" }]
-version = "0.8.1"
+version = "0.8.2"
 readme = "README.md"
 requires-python = ">=3.11,<4.0"
 classifiers = [
@@ -91,9 +91,9 @@ eval = [
     "lmnr[all]==0.7.17",
     "anyio>=4.9.0",
     "psutil>=7.0.0",
-    "datamodel-code-generator>=0.26.0",
-    "hyperbrowser==0.47.0",
-    "browserbase==1.4.0",
+    "datamodel-code-generator>=0.26.0"
+   # "hyperbrowser==0.47.0",
+   # "browserbase==1.4.0",
 ]
 cli-oci = [
     "browser-use[cli,oci]",
