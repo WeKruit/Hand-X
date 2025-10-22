@@ -157,7 +157,7 @@ class DOMEvalSerializer:
 			if tag == 'svg':
 				line = f'{depth_str}'
 				# Add [i_X] for interactive SVG elements only
-				if node.interactive_index is not None:
+				if node.is_interactive:
 					line += f'[i_{node.original_node.backend_node_id}] '
 				line += '<svg'
 				attributes_str = DOMEvalSerializer._build_compact_attributes(node.original_node)
@@ -182,7 +182,7 @@ class DOMEvalSerializer:
 			# Build compact element representation
 			line = f'{depth_str}'
 			# Add backend node ID notation - [i_X] for interactive elements only
-			if node.interactive_index is not None:
+			if node.is_interactive:
 				line += f'[i_{node.original_node.backend_node_id}] '
 			# Non-interactive elements don't get an index notation
 			line += f'<{tag}'
