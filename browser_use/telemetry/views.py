@@ -41,6 +41,9 @@ class AgentTelemetryEvent(BaseTelemetryEvent):
 	# end details
 	steps: int
 	total_input_tokens: int
+	total_output_tokens: int
+	prompt_cached_tokens: int
+	total_tokens: int
 	total_duration_seconds: float
 	success: bool | None
 	final_result_response: str | None
