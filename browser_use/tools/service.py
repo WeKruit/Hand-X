@@ -1024,8 +1024,8 @@ Validated Code (after quote fixing):
 
 				# Check for wasThrown flag (backup error detection)
 				if result_data.get('wasThrown'):
-					msg = 'JavaScript execution failed (wasThrown=true)'
-					logger.debug(f'Code: {code[:200]}...')
+					msg = f'JavaScript code: {code} execution failed (wasThrown=true)'
+					logger.debug(msg)
 					return ActionResult(error=msg)
 
 				# Get the actual value
@@ -1047,8 +1047,8 @@ Validated Code (after quote fixing):
 					result_text = str(value)
 
 				# Apply length limit with better truncation
-				if len(result_text) > 50000:
-					result_text = result_text[:49950] + '\n... [Truncated after 50000 characters]'
+				if len(result_text) > 20000:
+					result_text = result_text[:19950] + '\n... [Truncated after 20000 characters]'
 				# Don't log the code - it's already visible in the user's cell
 				logger.debug(f'JavaScript executed successfully, result length: {len(result_text)}')
 				# Return only the result, not the code (code is already in user's cell)
@@ -1057,7 +1057,7 @@ Validated Code (after quote fixing):
 			except Exception as e:
 				# CDP communication or other system errors
 				error_msg = f'Failed to execute JavaScript: {type(e).__name__}: {e}'
-				logger.debug(f'Code that failed: {code[:200]}...')
+				logger.debug(f'JavaScript code that failed: {code[:200]}...')
 				return ActionResult(error=error_msg)
 
 	def _validate_and_fix_javascript(self, code: str) -> str:
