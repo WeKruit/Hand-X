@@ -161,7 +161,7 @@ class DOMWatchdog(BaseWatchdog):
 			const loadingDuration = now - entry.startTime;
 
 			// Skip requests that have been loading for >10 seconds (likely stuck/polling)
-			if (loadingDuration > 100000) continue;
+			if (loadingDuration > 10000) continue;
 
 			const resourceType = entry.initiatorType || 'unknown';
 
