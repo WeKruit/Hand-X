@@ -4,43 +4,35 @@ description: ""
 icon: "rocket"
 ---
 
+To get started with Browser Use you need to install the package and create an `.env` file with your API key.
 
-## 1. Fast setup
+<Note icon="key" color="#FFC107" iconType="regular">
+`ChatBrowserUse` offers the [fastest and most cost-effective models](https://browser-use.com/posts/speed-matters/), completing tasks 3-5x faster. Get started with $10 of [free LLM credits](https://cloud.browser-use.com/dashboard/api).
+</Note>
+
+## 1. Installing Browser-Use
 
 <Tabs>
 <Tab title="uv">
-```bash create environment 
+```bash create environment
 uv venv --python 3.12
 ```
-</Tab>
-<Tab title="pip">
-```bash create environment with python >= 3.11 
-python3.12 -m venv .venv
-```
-</Tab>
-</Tabs>
-
-<Tabs>
-<Tab title="Mac/Linux">
 ```bash activate environment
 source .venv/bin/activate
 ```
-</Tab>
-<Tab title="Windows">
-```bash activate environment
-.venv\Scripts\activate
-```
-</Tab>
-</Tabs>
-
-<Tabs>
-<Tab title="uv">
 ```bash install browser-use & chromium
 uv pip install browser-use
-uvx playwright install chromium --with-deps 
+uvx playwright install chromium --with-deps
+# Note: this does NOT install playwright, only chromium
 ```
 </Tab>
 <Tab title="pip">
+```bash create environment with python >= 3.11
+python3.12 -m venv .venv
+```
+```bash activate environment
+source .venv/bin/activate
+```
 ```bash install browser-use & chromium
 pip install browser-use
 pip install playwright && playwright install chromium --with-deps
@@ -48,31 +40,33 @@ pip install playwright && playwright install chromium --with-deps
 </Tab>
 </Tabs>
 
-## 2. Choose your favorite LLM
-Create a `.env` file and add your API key. Don't have one? Start with a [free Gemini key](https://aistudio.google.com/app/u/1/apikey?pli=1).
+<Info>On Windows, use `.venv\Scripts\activate` to activate the environment.</Info>
 
-<Tabs>
-<Tab title="Mac/Linux">
-```bash create .env file
+## 2. Choose your favorite LLM
+Create a `.env` file and add your API key. 
+
+<Callout icon="key" color="#FFC107" iconType="regular">
+Don't have one? Get **$10 free LLM credits** on [Browser Use Cloud 🔗](httpsL//cloud.browser-use.com/dashboard/api).
+</Callout>
+
+```bash .env
 touch .env
 ```
-</Tab>
-<Tab title="Windows">
-```cmd create .env file
-echo. > .env
-```
-</Tab>
-</Tabs>
+
+<Info>On Windows, use `echo. > .env`</Info>
+
+Then add your API key to the file.
 
 <CodeGroup>
 ```bash Browser Use
 # add your key to .env file
 BROWSER_USE_API_KEY=
-# Get your API key from https://cloud.browser-use.com/dashboard/api
+# Get 10$ of free credits at https://cloud.browser-use.com/dashboard/api
 ```
 ```bash Google
 # add your key to .env file
 GOOGLE_API_KEY=
+# Get your free Gemini API key from https://aistudio.google.com/app/u/1/apikey?pli=1.
 ```
 ```bash OpenAI
 # add your key to .env file
