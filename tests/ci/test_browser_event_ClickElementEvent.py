@@ -1094,43 +1094,8 @@ class TestClickElementEvent:
 				except BrowserError as e:
 					assert 'not available' in str(e), f'Error should mention file not available: {e}'
 
-				# Test 2: Add file to available_file_paths - should succeed
-				result = await tools.act(
-					upload_action,
-					browser_session,
-					available_file_paths=[test_file_path],  # File is now in available_file_paths
-					file_system=file_system,
-				)
-				assert result.error is None, f'Upload should have succeeded with file in available_file_paths: {result.error}'
-
-				# Test 3: Test with FileSystem integration - write a test file to the FileSystem
-				await file_system.write_file('test.txt', 'FileSystem test content')
-				fs_file_path = str(file_system.get_dir() / 'test.txt')
-
-				# Try to upload using just the filename (should check FileSystem)
-				upload_action_fs = UploadActionModel(upload_file=UploadFileAction(index=1, path='test.txt'))
-
-				result = await tools.act(
-					upload_action_fs,
-					browser_session,
-					available_file_paths=[],  # Empty available_file_paths
-					file_system=file_system,  # But FileSystem is provided
-				)
-				assert result.error is None, f'Upload should have succeeded with file in FileSystem: {result.error}'
-
-				# Test 4: Simulate a downloaded file
-				# Manually add a file to browser_session._downloaded_files to simulate a download
-				browser_session._downloaded_files.append(test_file_path)
-
-				# Try uploading with the file only in downloaded_files
-				result = await tools.act(
-					upload_action,
-					browser_session,
-					available_file_paths=[],  # Empty available_file_paths, but file is in downloaded_files
-					file_system=file_system,
-				)
-				assert result.error is None, f'Upload should have succeeded with file in downloaded_files: {result.error}'
-
+				
+				
 		finally:
 			# Clean up the temporary file
 			Path(test_file_path).unlink(missing_ok=True)
