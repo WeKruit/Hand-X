@@ -1,7 +1,7 @@
 """
 Example: Using code-use mode to extract products from multiple pages.
 
-This example demonstrates the new code-use mode, which works like a Jupiter notebook
+This example demonstrates the new code-use mode, which works like a Jupyter notebook
 where the LLM writes Python code that gets executed in a persistent namespace.
 
 The agent can:
