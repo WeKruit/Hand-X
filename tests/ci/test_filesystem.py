@@ -13,6 +13,7 @@ from browser_use.filesystem.file_system import (
 	FileSystem,
 	FileSystemState,
 	JsonFile,
+	JsonlFile,
 	MarkdownFile,
 	TxtFile,
 )
@@ -66,6 +67,18 @@ class TestBaseFile:
 		assert csv_file.full_name == 'users.csv'
 		assert csv_file.get_size == len(csv_content)
 		assert csv_file.get_line_count == 3
+
+	def test_jsonl_file_creation(self):
+		"""Test JsonlFile creation and basic properties."""
+		jsonl_content = '{"id": 1, "name": "John"}\n{"id": 2, "name": "Jane"}'
+		jsonl_file = JsonlFile(name='data', content=jsonl_content)
+
+		assert jsonl_file.name == 'data'
+		assert jsonl_file.content == jsonl_content
+		assert jsonl_file.extension == 'jsonl'
+		assert jsonl_file.full_name == 'data.jsonl'
+		assert jsonl_file.get_size == len(jsonl_content)
+		assert jsonl_file.get_line_count == 2
 
 	def test_file_content_operations(self):
 		"""Test content update and append operations."""
@@ -241,6 +254,7 @@ class TestFileSystem:
 		assert 'md' in extensions
 		assert 'txt' in extensions
 		assert 'json' in extensions
+		assert 'jsonl' in extensions
 		assert 'csv' in extensions
 
 	def test_filename_validation(self, temp_filesystem):
@@ -253,7 +267,9 @@ class TestFileSystem:
 		assert fs._is_valid_filename('file-name.md') is True
 		assert fs._is_valid_filename('file123.txt') is True
 		assert fs._is_valid_filename('data.json') is True
+		assert fs._is_valid_filename('data.jsonl') is True
 		assert fs._is_valid_filename('users.csv') is True
+		assert fs._is_valid_filename('WebVoyager_data.jsonl') is True  # with underscores
 
 		# Invalid filenames
 		assert fs._is_valid_filename('test.doc') is False  # wrong extension
@@ -263,6 +279,7 @@ class TestFileSystem:
 		assert fs._is_valid_filename('test@file.md') is False  # special chars
 		assert fs._is_valid_filename('.md') is False  # no name
 		assert fs._is_valid_filename('.json') is False  # no name
+		assert fs._is_valid_filename('.jsonl') is False  # no name
 		assert fs._is_valid_filename('.csv') is False  # no name
 
 	def test_filename_parsing(self, temp_filesystem):
