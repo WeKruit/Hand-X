@@ -78,7 +78,7 @@ print("Available functions: navigate, click, input, evaluate, search, extract, d
 		notebook_cell: dict = {
 			'cell_type': cell.cell_type.value,
 			'metadata': {},
-			'source': cell.source.split('\n'),
+			'source': cell.source.splitlines(keepends=True),
 		}
 
 		if cell.cell_type == CellType.CODE:
