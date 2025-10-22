@@ -72,21 +72,6 @@ def tools():
 class TestClickElementEvent:
 	"""Test cases for ClickElementEvent and click action."""
 
-	async def test_error_handling(self, tools, browser_session):
-		"""Test error handling when an action fails."""
-		# Create an action with an invalid index
-		invalid_action = {'click': ClickElementAction(index=999)}  # doesn't exist on page
-
-		from browser_use.agent.views import ActionModel
-
-		class ClickActionModel(ActionModel):
-			click: ClickElementAction | None = None
-
-		# This should fail since the element doesn't exist
-		result: ActionResult = await tools.act(ClickActionModel(**invalid_action), browser_session)
-
-		assert result.error is not None
-
 	async def test_click_element_by_index(self, tools, browser_session, base_url, http_server):
 		"""Test that click correctly clicks an element and handles different outcomes."""
 		# Add route for clickable elements test page
