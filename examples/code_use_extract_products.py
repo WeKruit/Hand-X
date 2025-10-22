@@ -1,0 +1,93 @@
+"""
+Example: Using code-use mode to extract products from multiple pages.
+
+This example demonstrates the new code-use mode, which works like a Jupiter notebook
+where the LLM writes Python code that gets executed in a persistent namespace.
+
+The agent can:
+- Navigate to pages
+- Extract data using JavaScript
+- Combine results from multiple pages
+- Save data to files
+- Export the session as a Jupyter notebook
+
+This solves the problem from the brainstorm where extraction of multiple items
+was difficult with the extract tool alone.
+"""
+
+import asyncio
+from pathlib import Path
+
+from lmnr import Laminar
+
+from browser_use.code_use import CodeAgent, export_to_ipynb, session_to_python_script
+
+Laminar.initialize()
+
+
+async def main():
+	"""
+	Task: Extract product listings from an e-commerce site.
+
+	The agent will:
+	1. Navigate to the products page
+	2. Extract products using JavaScript
+	3. Scroll to load more products
+	4. Combine all results
+	5. Save to a JSON file
+	"""
+
+	task = """
+
+Go to https://www.flipkart.com. Continue collecting products from Flipkart in the following categories. I need approximately 50 products from:\n\n1. Books & Media (books, stationery) - 15 products\n2. Sports & Fitness (equipment, clothing, accessories) - 15 products  \n3. Beauty & Personal Care (cosmetics, skincare, grooming) - 10 products\nAnd 2 other categories you find interesting.\nNavigate to these categories and collect products with:\n- Product URL (working link)\n- Product name/description\n- Actual price (MRP)\n- Deal price (current selling price)  \n- Discount percentage\n\nFocus on products with good discounts and clear pricing. Target around 40 products total from these three categories.
+
+	"""
+	task = "Usec requests to get GitHub's API for trending Python repos, then visit the top 3 repos in the browser and extract their README"
+
+	# Create code-use agent (uses ChatBrowserUse automatically)
+	agent = CodeAgent(
+		task=task,
+		max_steps=30,
+	)
+
+	try:
+		# Run the agent
+		print('Running code-use agent...')
+		session = await agent.run()
+
+		# Print summary
+		print(f'\n{"=" * 60}')
+		print('Session Summary')
+		print(f'{"=" * 60}')
+		print(f'Total cells executed: {len(session.cells)}')
+		print(f'Total execution count: {session.current_execution_count}')
+
+		# Print each cell
+		for i, cell in enumerate(session.cells):
+			print(f'\n{"-" * 60}')
+			print(f'Cell {i + 1} (Status: {cell.status.value})')
+			print(f'{"-" * 60}')
+			print('Code:')
+			print(cell.source)
+			if cell.output:
+				print('\nOutput:')
+				print(cell.output)
+			if cell.error:
+				print('\nError:')
+				print(cell.error)
+
+		# Export to Jupyter notebook
+		notebook_path = export_to_ipynb(session, 'product_extraction.ipynb')
+		print(f'\n✓ Exported session to Jupyter notebook: {notebook_path}')
+
+		# Export to Python script
+		script = session_to_python_script(session)
+		await asyncio.to_thread(Path('product_extraction.py').write_text, script)
+		print('✓ Exported session to Python script: product_extraction.py')
+
+	finally:
+		await agent.close()
+
+
+if __name__ == '__main__':
+	asyncio.run(main())
