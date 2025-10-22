@@ -493,6 +493,55 @@ class TestFileSystem:
 		expected_content = 'name,age,city\nJohn,30,New York\nJane,25,London\nBob,35,Paris'
 		assert file_obj.content == expected_content
 
+	async def test_write_jsonl_file(self, temp_filesystem):
+		"""Test writing JSONL (JSON Lines) files."""
+		fs = temp_filesystem
+
+		# Write valid JSONL content
+		jsonl_content = '{"id": 1, "name": "John", "age": 30}\n{"id": 2, "name": "Jane", "age": 25}'
+		result = await fs.write_file('data.jsonl', jsonl_content)
+		assert result == 'Data written to file data.jsonl successfully.'
+
+		# Verify content was written
+		content = await fs.read_file('data.jsonl')
+		assert jsonl_content in content
+
+		# Verify file object was created
+		assert 'data.jsonl' in fs.files
+		file_obj = fs.get_file('data.jsonl')
+		assert file_obj is not None
+		assert isinstance(file_obj, JsonlFile)
+		assert file_obj.content == jsonl_content
+
+		# Write to new JSONL file
+		result = await fs.write_file('WebVoyager_data.jsonl', '{"task": "test", "url": "https://example.com"}')
+		assert result == 'Data written to file WebVoyager_data.jsonl successfully.'
+		assert 'WebVoyager_data.jsonl' in fs.files
+
+	async def test_append_jsonl_file(self, temp_filesystem):
+		"""Test appending content to JSONL files."""
+		fs = temp_filesystem
+
+		# First write some JSONL content
+		await fs.write_file('data.jsonl', '{"id": 1, "name": "John", "age": 30}')
+
+		# Append additional JSONL record
+		result = await fs.append_file('data.jsonl', '\n{"id": 2, "name": "Jane", "age": 25}')
+		assert result == 'Data appended to file data.jsonl successfully.'
+
+		# Verify content was appended
+		file_obj = fs.get_file('data.jsonl')
+		assert file_obj is not None
+		expected_content = '{"id": 1, "name": "John", "age": 30}\n{"id": 2, "name": "Jane", "age": 25}'
+		assert file_obj.content == expected_content
+
+		# Append another record
+		await fs.append_file('data.jsonl', '\n{"id": 3, "name": "Bob", "age": 35}')
+		expected_content = (
+			'{"id": 1, "name": "John", "age": 30}\n{"id": 2, "name": "Jane", "age": 25}\n{"id": 3, "name": "Bob", "age": 35}'
+		)
+		assert file_obj.content == expected_content
+
 	async def test_save_extracted_content(self, temp_filesystem):
 		"""Test saving extracted content with auto-numbering."""
 		fs = temp_filesystem
