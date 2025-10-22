@@ -183,11 +183,12 @@ async def test_assumption_4_click_action_specific_issue(browser_session, tools, 
 
 	# Create a test action that replicates click logic
 	@tools.registry.action('Test: Debug click logic')
-	async def test_debug_click_logic(index: int, browser_session: BrowserSession):
+	async def test_debug_click_logic(browser_session: BrowserSession):
 		from browser_use import ActionResult
 
 		# This is the exact logic from click
 		selector_map = await browser_session.get_selector_map()
+		index = selector_map[0].backend_node_id
 
 		print(f'  - Action selector map size: {len(selector_map)}')
 		print(f'  - Action selector map keys: {list(selector_map.keys())[:10]}')  # First 10
