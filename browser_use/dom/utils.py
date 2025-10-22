@@ -14,7 +14,7 @@ def generate_css_selector_for_element(enhanced_node) -> str | None:
 
 	# Get base selector from tag name (simplified since we don't have xpath in EnhancedDOMTreeNode)
 	tag_name = enhanced_node.tag_name.lower().strip()
-	if not tag_name or not re.match(r'^[a-zA-Z][a-zA-Z0-9]*$', tag_name):
+	if not tag_name or not re.match(r'^[a-zA-Z][a-zA-Z0-9-]*$', tag_name):
 		return None
 
 	css_selector = tag_name
