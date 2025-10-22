@@ -1166,10 +1166,10 @@ __code_exec_coro__ = __code_exec__()
 		action_history_data: list[list[dict[str, Any]] | None] = []
 		for step in self.complete_history:
 			# Extract code from model_output if available (type-safe access)
-			if step.model_output and step.model_output.model_output:
-				code = step.model_output.model_output
+			if step.model_output and step.model_output.full_response:
+				code = step.model_output.full_response
 				# Represent each code cell as a simple action entry
-				action_history_data.append([{'code_cell': True, 'code_length': len(code)}])
+				action_history_data.append([{'llm_response': code}])
 			else:
 				action_history_data.append(None)
 
@@ -1214,6 +1214,9 @@ __code_exec_coro__ = __code_exec__()
 				urls_visited=urls_visited,
 				steps=len(self.complete_history),
 				total_input_tokens=token_summary.prompt_tokens,
+				total_output_tokens=token_summary.completion_tokens,
+				prompt_cached_tokens=token_summary.prompt_cached_tokens,
+				total_tokens=token_summary.total_tokens,
 				total_duration_seconds=sum(step.metadata.duration_seconds for step in self.complete_history if step.metadata),
 				success=self_reported_success,
 				final_result_response=final_result_str,
