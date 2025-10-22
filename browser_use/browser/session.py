@@ -2894,9 +2894,7 @@ class BrowserSession(BaseModel):
 				)
 				object_id = result.get('object', {}).get('objectId')
 				if not object_id:
-					raise ValueError(
-						f'Could not find backendNodeId={node.backend_node_id} in target_id={cdp_session.target_id}'
-					)
+					raise ValueError(f'Could not find backendNodeId={node.backend_node_id} in target_id={cdp_session.target_id}')
 				return cdp_session
 			except (ValueError, Exception) as e:
 				# Fall back to main session if frame not found
@@ -2911,9 +2909,7 @@ class BrowserSession(BaseModel):
 				)
 				object_id = result.get('object', {}).get('objectId')
 				if not object_id:
-					raise ValueError(
-						f'Could not find backendNodeId={node.backend_node_id} in target_id={cdp_session.target_id}'
-					)
+					raise ValueError(f'Could not find backendNodeId={node.backend_node_id} in target_id={cdp_session.target_id}')
 			except Exception as e:
 				self.logger.debug(f'Failed to get CDP client for target {node.target_id}: {e}, using main session')
 

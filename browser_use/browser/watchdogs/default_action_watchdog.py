@@ -300,9 +300,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 			element_type = element_node.attributes.get('type', '').lower() if element_node.attributes else ''
 
 			if tag_name == 'select':
-				msg = (
-					f'Cannot click on <select> elements. Use dropdown_options(index={element_node.backend_node_id}) action instead.'
-				)
+				msg = f'Cannot click on <select> elements. Use dropdown_options(index={element_node.backend_node_id}) action instead.'
 				self.logger.warning(msg)
 				raise BrowserError(
 					message=msg,
