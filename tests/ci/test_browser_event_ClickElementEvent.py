@@ -1094,8 +1094,6 @@ class TestClickElementEvent:
 				except BrowserError as e:
 					assert 'not available' in str(e), f'Error should mention file not available: {e}'
 
-				
-				
 		finally:
 			# Clean up the temporary file
 			Path(test_file_path).unlink(missing_ok=True)
