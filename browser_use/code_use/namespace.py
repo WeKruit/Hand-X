@@ -24,42 +24,42 @@ logger = logging.getLogger(__name__)
 
 # Try to import optional data science libraries
 try:
-	import numpy as np
+	import numpy as np # type: ignore
 
 	NUMPY_AVAILABLE = True
 except ImportError:
 	NUMPY_AVAILABLE = False
 
 try:
-	import pandas as pd
+	import pandas as pd # type: ignore
 
 	PANDAS_AVAILABLE = True
 except ImportError:
 	PANDAS_AVAILABLE = False
 
 try:
-	import matplotlib.pyplot as plt
+	import matplotlib.pyplot as plt # type: ignore
 
 	MATPLOTLIB_AVAILABLE = True
 except ImportError:
 	MATPLOTLIB_AVAILABLE = False
 
 try:
-	from bs4 import BeautifulSoup
+	from bs4 import BeautifulSoup # type: ignore
 
 	BS4_AVAILABLE = True
 except ImportError:
 	BS4_AVAILABLE = False
 
 try:
-	from pypdf import PdfReader
+	from pypdf import PdfReader # type: ignore
 
 	PYPDF_AVAILABLE = True
 except ImportError:
 	PYPDF_AVAILABLE = False
 
 try:
-	from tabulate import tabulate
+	from tabulate import tabulate # type: ignore
 
 	TABULATE_AVAILABLE = True
 except ImportError:
