@@ -1,7 +1,7 @@
 """Namespace initialization for code-use mode.
 
 This module creates a namespace with all browser tools available as functions,
-similar to a Jupiter notebook environment.
+similar to a Jupyter notebook environment.
 """
 
 import asyncio
@@ -265,7 +265,7 @@ def create_namespace(
 	Create a namespace with all browser tools available as functions.
 
 	This function creates a dictionary of functions that can be used to interact
-	with the browser, similar to a Jupiter notebook environment.
+	with the browser, similar to a Jupyter notebook environment.
 
 	Args:
 		browser_session: The browser session to use

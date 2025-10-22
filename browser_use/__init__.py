@@ -70,7 +70,7 @@ if TYPE_CHECKING:
 _LAZY_IMPORTS = {
 	# Agent service (heavy due to dependencies)
 	# 'Agent': ('browser_use.agent.service', 'Agent'),
-	# Code-use agent (Jupiter notebook-like execution)
+	# Code-use agent (Jupyter notebook-like execution)
 	'CodeAgent': ('browser_use.code_use.service', 'CodeAgent'),
 	'Agent': ('browser_use.agent.service', 'Agent'),
 	# System prompt (moderate weight due to agent.views imports)

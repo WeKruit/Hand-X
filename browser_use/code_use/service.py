@@ -1,4 +1,4 @@
-"""Code-use agent service - Jupiter notebook-like code execution for browser automation."""
+"""Code-use agent service - Jupyter notebook-like code execution for browser automation."""
 
 import asyncio
 import datetime
@@ -51,7 +51,7 @@ class CodeAgent:
 	"""
 	Agent that executes Python code in a notebook-like environment for browser automation.
 
-	This agent provides a Jupiter notebook-like interface where the LLM writes Python code
+	This agent provides a Jupyter notebook-like interface where the LLM writes Python code
 	that gets executed in a persistent namespace with browser control functions available.
 	"""
 
