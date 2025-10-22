@@ -83,7 +83,7 @@ class CodeAgent:
 			task: The task description for the agent
 			browser_session: Optional browser session (will be created if not provided) [DEPRECATED: use browser]
 			browser: Optional browser session (cleaner API)
-			tools: Optional Tools instance (will create default if not provided) 
+			tools: Optional Tools instance (will create default if not provided)
 			controller: Optional Tools instance
 			page_extraction_llm: Optional LLM for page extraction
 			file_system: Optional file system for file operations
@@ -109,8 +109,8 @@ class CodeAgent:
 				logger.debug('CodeAgent using ChatBrowserUse')
 			except Exception as e:
 				raise RuntimeError(f'Failed to initialize CodeAgent LLM: {e}')
-		
-		if "ChatBrowserUse" not in llm.__class__.__name__:
+
+		if 'ChatBrowserUse' not in llm.__class__.__name__:
 			raise ValueError('This agent works only with ChatBrowserUse.')
 
 		# Handle browser vs browser_session parameter (browser takes precedence)
