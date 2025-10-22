@@ -69,7 +69,7 @@ class CodeAgent:
 		available_file_paths: list[str] | None = None,
 		sensitive_data: dict[str, str | dict[str, str]] | None = None,
 		max_steps: int = 100,
-		max_failures: int = 3,
+		max_failures: int = 8,
 		max_validations: int = 0,
 		use_vision: bool = True,
 		calculate_cost: bool = False,
@@ -89,7 +89,7 @@ class CodeAgent:
 			available_file_paths: Optional list of available file paths
 			sensitive_data: Optional sensitive data dictionary
 			max_steps: Maximum number of execution steps
-			max_failures: Maximum consecutive errors before termination (default: 3)
+			max_failures: Maximum consecutive errors before termination (default: 8)
 			max_validations: Maximum number of times to run the validator agent (default: 0)
 			use_vision: Whether to include screenshots in LLM messages (default: True)
 			calculate_cost: Whether to calculate token costs (default: False)
