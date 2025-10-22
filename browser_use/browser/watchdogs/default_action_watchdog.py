@@ -563,9 +563,17 @@ class DefaultActionWatchdog(BaseWatchdog):
 			if element_node.element_index:
 				element_info += f' index={element_node.element_index}'
 			element_info += '>'
+
+			# Create helpful error message based on context
+			error_detail = f'Failed to click element {element_info}. The element may not be interactable or visible.'
+
+			# Add hint if element has index (common in code-use mode)
+			if element_node.element_index:
+				error_detail += f' If the page changed after navigation/interaction, the index [{element_node.element_index}] may be stale. Get fresh browser state before retrying.'
+
 			raise BrowserError(
 				message=f'Failed to click element: {e}',
-				long_term_memory=f'Failed to click element {element_info}. The element may not be interactable or visible.',
+				long_term_memory=error_detail,
 			)
 
 	async def _type_to_page(self, text: str):

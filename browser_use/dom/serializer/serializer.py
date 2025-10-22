@@ -530,33 +530,35 @@ class DOMTreeSerializer:
 		return None
 
 	def _collect_interactive_elements(self, node: SimplifiedNode, elements: list[SimplifiedNode]) -> None:
-		"""Recursively collect interactive elements that are also visible."""
+		"""Recursively collect all interactive elements (scroll-to-view on interaction)."""
 		is_interactive = self._is_interactive_cached(node.original_node)
-		is_visible = node.original_node.snapshot_node and node.original_node.is_visible
 
-		# Only collect elements that are both interactive AND visible
-		if is_interactive and is_visible:
+		# Collect all interactive elements regardless of viewport visibility
+		# Actions will scroll elements into view as needed
+		if is_interactive:
 			elements.append(node)
 
 		for child in node.children:
 			self._collect_interactive_elements(child, elements)
 
 	def _assign_interactive_indices_and_mark_new_nodes(self, node: SimplifiedNode | None) -> None:
-		"""Assign interactive indices to clickable elements that are also visible."""
+		"""Assign interactive indices to all clickable elements (scroll-to-view on click)."""
 		if not node:
 			return
 
 		# Skip assigning index to excluded nodes, or ignored by paint order
 		if not node.excluded_by_parent and not node.ignored_by_paint_order:
-			# Regular interactive element assignment (including enhanced compound controls)
-			is_interactive_assign = self._is_interactive_cached(node.original_node)
 			is_visible = node.original_node.snapshot_node and node.original_node.is_visible
 
-			# Only add to selector map if element is both interactive AND visible
-			if is_interactive_assign and is_visible:
+			# Add ALL visible elements to selector map (keyed by backend_node_id)
+			self._selector_map[node.original_node.backend_node_id] = node.original_node
+
+			# Assign interactive index to ALL interactive elements (visible or not)
+			# Since click actions scroll elements into view, we should expose all interactive elements
+			is_interactive_assign = self._is_interactive_cached(node.original_node)
+			if is_interactive_assign:
 				node.interactive_index = self._interactive_counter
 				node.original_node.element_index = self._interactive_counter
-				self._selector_map[self._interactive_counter] = node.original_node
 				self._interactive_counter += 1
 
 				# Mark compound components as new for visibility
@@ -823,8 +825,8 @@ class DOMTreeSerializer:
 				elif node.interactive_index is not None:
 					# Clickable (and possibly scrollable)
 					new_prefix = '*' if node.is_new else ''
-					scroll_prefix = '|SCROLL[' if should_show_scroll else '['
-					line = f'{depth_str}{shadow_prefix}{new_prefix}{scroll_prefix}{node.interactive_index}]<{node.original_node.tag_name}'
+					scroll_prefix = '|SCROLL|' if should_show_scroll else ''
+					line = f'{depth_str}{shadow_prefix}{new_prefix}{scroll_prefix}<{node.original_node.tag_name}'
 				elif node.original_node.tag_name.upper() == 'IFRAME':
 					# Iframe element (not interactive)
 					line = f'{depth_str}{shadow_prefix}|IFRAME|<{node.original_node.tag_name}'
@@ -836,6 +838,11 @@ class DOMTreeSerializer:
 
 				if attributes_html_str:
 					line += f' {attributes_html_str}'
+
+				# Add backend node ID notation - [i_X] for interactive elements only
+				if node.interactive_index is not None:
+					line += f' [i_{node.original_node.backend_node_id}]'
+				# Non-interactive elements don't get an index notation
 
 				line += ' />'
 
@@ -961,6 +968,6 @@ class DOMTreeSerializer:
 				del attributes_to_include[attr]
 
 		if attributes_to_include:
-			return ' '.join(f'{key}={cap_text_length(value, 100)}' for key, value in attributes_to_include.items())
+			return ' '.join(f'{key}={cap_text_length(value, 30)}' for key, value in attributes_to_include.items())
 
 		return ''

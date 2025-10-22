@@ -247,7 +247,9 @@ class Tools(Generic[Context]):
 				# Look up the node from the selector map
 				node = await browser_session.get_element_by_index(params.index)
 				if node is None:
-					raise ValueError(f'Element index {params.index} not found in browser state')
+					msg = f'Element index {params.index} not available - page may have changed. Try refreshing browser state.'
+					logger.warning(f'⚠️ {msg}')
+					return ActionResult(extracted_content=msg)
 
 				# Highlight the element being clicked (truly non-blocking)
 				asyncio.create_task(browser_session.highlight_interaction_element(node))
@@ -296,7 +298,9 @@ class Tools(Generic[Context]):
 			# Look up the node from the selector map
 			node = await browser_session.get_element_by_index(params.index)
 			if node is None:
-				raise ValueError(f'Element index {params.index} not found in browser state')
+				msg = f'Element index {params.index} not available - page may have changed. Try refreshing browser state.'
+				logger.warning(f'⚠️ {msg}')
+				return ActionResult(extracted_content=msg)
 
 			# Highlight the element being typed into (truly non-blocking)
 			asyncio.create_task(browser_session.highlight_interaction_element(node))
@@ -353,38 +357,47 @@ class Tools(Generic[Context]):
 			param_model=UploadFileAction,
 		)
 		async def upload_file(
-			params: UploadFileAction, browser_session: BrowserSession, available_file_paths: list[str], file_system: FileSystem
+			params: UploadFileAction,
+			browser_session: BrowserSession,
+			available_file_paths: list[str],
+			file_system: FileSystem,
 		):
-			# Check if file is in available_file_paths (user-provided or downloaded files)
-			# For remote browsers (is_local=False), we allow absolute remote paths even if not tracked locally
-			if params.path not in available_file_paths:
-				# Also check if it's a recently downloaded file that might not be in available_file_paths yet
-				downloaded_files = browser_session.downloaded_files
-				if params.path not in downloaded_files:
-					# Finally, check if it's a file in the FileSystem service
-					if file_system and file_system.get_dir():
-						# Check if the file is actually managed by the FileSystem service
-						# The path should be just the filename for FileSystem files
-						file_obj = file_system.get_file(params.path)
-						if file_obj:
-							# File is managed by FileSystem, construct the full path
-							file_system_path = str(file_system.get_dir() / params.path)
-							params = UploadFileAction(index=params.index, path=file_system_path)
+			# Path validation logic:
+			# 1. If available_file_paths provided (security mode), enforce it as a whitelist
+			# 2. If no whitelist, for local browsers just check file exists
+			# 3. For remote browsers, allow any path (assume it exists remotely)
+
+			# If whitelist provided, validate path is in it
+			if available_file_paths:
+				if params.path not in available_file_paths:
+					# Also check if it's a recently downloaded file
+					downloaded_files = browser_session.downloaded_files
+					if params.path not in downloaded_files:
+						# Finally, check if it's a file in the FileSystem service (if provided)
+						if file_system is not None and file_system.get_dir():
+							# Check if the file is actually managed by the FileSystem service
+							# The path should be just the filename for FileSystem files
+							file_obj = file_system.get_file(params.path)
+							if file_obj:
+								# File is managed by FileSystem, construct the full path
+								file_system_path = str(file_system.get_dir() / params.path)
+								params = UploadFileAction(index=params.index, path=file_system_path)
+							else:
+								# If browser is remote, allow passing a remote-accessible absolute path
+								if not browser_session.is_local:
+									pass
+								else:
+									msg = f'File path {params.path} is not available. Upload files must be in available_file_paths, downloaded_files, or a file managed by file_system.'
+									logger.error(f'❌ {msg}')
+									return ActionResult(error=msg)
 						else:
 							# If browser is remote, allow passing a remote-accessible absolute path
 							if not browser_session.is_local:
 								pass
 							else:
-								msg = f'File path {params.path} is not available. Upload files must be in available_file_paths, downloaded_files, or a file managed by file_system.'
+								msg = f'File path {params.path} is not available. Upload files must be in available_file_paths or downloaded_files.'
 								logger.error(f'❌ {msg}')
 								return ActionResult(error=msg)
-					else:
-						# If browser is remote, allow passing a remote-accessible absolute path
-						if not browser_session.is_local:
-							pass
-						else:
-							msg = f'File path {params.path} is not available. Upload files must be in available_file_paths, downloaded_files, or a file managed by file_system.'
-							raise BrowserError(message=msg, long_term_memory=msg)
 
 			# For local browsers, ensure the file exists on the local filesystem
 			if browser_session.is_local:
@@ -506,7 +519,10 @@ class Tools(Generic[Context]):
 
 		# Tab Management Actions
 
-		@self.registry.action('', param_model=SwitchTabAction)
+		@self.registry.action(
+			'Switch to another open tab by tab_id. Tab IDs are shown in browser state tabs list (last 4 chars of target_id). Use when you need to work with content in a different tab.',
+			param_model=SwitchTabAction,
+		)
 		async def switch(params: SwitchTabAction, browser_session: BrowserSession):
 			# Simple switch tab logic
 			try:
@@ -528,7 +544,10 @@ class Tools(Generic[Context]):
 				memory = f'Attempted to switch to tab #{params.tab_id}'
 				return ActionResult(extracted_content=memory, long_term_memory=memory)
 
-		@self.registry.action('', param_model=CloseTabAction)
+		@self.registry.action(
+			'Close a tab by tab_id. Tab IDs are shown in browser state tabs list (last 4 chars of target_id). Use to clean up tabs you no longer need.',
+			param_model=CloseTabAction,
+		)
 		async def close(params: CloseTabAction, browser_session: BrowserSession):
 			# Simple close tab logic
 			try:
@@ -638,7 +657,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 
 <instructions>
 - You are tasked to extract information from the webpage that is relevant to the query.
-- You should ONLY use the information available in the webpage to answer the query. Do not make up information or provide guess from your own knowledge. 
+- You should ONLY use the information available in the webpage to answer the query. Do not make up information or provide guess from your own knowledge.
 - If the information relevant to the query is not available in the page, your response should mention that.
 - If the query asks for all items, products, etc., make sure to directly list all of them.
 - If the content was truncated and you need more information, note that the user can use start_from_char parameter to continue from where truncation occurred.
@@ -854,7 +873,9 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			# Look up the node from the selector map
 			node = await browser_session.get_element_by_index(params.index)
 			if node is None:
-				raise ValueError(f'Element index {params.index} not found in browser state')
+				msg = f'Element index {params.index} not available - page may have changed. Try refreshing browser state.'
+				logger.warning(f'⚠️ {msg}')
+				return ActionResult(extracted_content=msg)
 
 			# Dispatch GetDropdownOptionsEvent to the event handler
 
@@ -880,7 +901,9 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			# Look up the node from the selector map
 			node = await browser_session.get_element_by_index(params.index)
 			if node is None:
-				raise ValueError(f'Element index {params.index} not found in browser state')
+				msg = f'Element index {params.index} not available - page may have changed. Try refreshing browser state.'
+				logger.warning(f'⚠️ {msg}')
+				return ActionResult(extracted_content=msg)
 
 			# Dispatch SelectDropdownOptionEvent to the event handler
 			from browser_use.browser.events import SelectDropdownOptionEvent
@@ -915,6 +938,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 					return ActionResult(error=error_msg)
 
 		# File System Actions
+
 		@self.registry.action('')
 		async def write_file(
 			file_name: str,
@@ -971,7 +995,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			)
 
 		@self.registry.action(
-			"""Execute browser JavaScript. MUST: wrap in IIFE (function(){...})(). Use ONLY browser APIs (document, window, DOM). NO Node.js APIs (fs, require, process). Add try-catch. Example: (function(){try{const el=document.querySelector('#id');return el?el.value:'not found'}catch(e){return 'Error: '+e.message}})() Never use comments. You are not allowed to use // in code. No human reads this. Use e.g. for hover, drag, zoom, custom selectors, extract/filter links, shadow DOM or to analyse page structure. Limit output.""",
+			"""Execute browser JavaScript. Best practice: wrap in IIFE (function(){...})() with try-catch for safety. Use ONLY browser APIs (document, window, DOM). NO Node.js APIs (fs, require, process). Example: (function(){try{const el=document.querySelector('#id');return el?el.value:'not found'}catch(e){return 'Error: '+e.message}})() Avoid comments. Use for hover, drag, zoom, custom selectors, extract/filter links, shadow DOM, or analysing page structure. Limit output size.""",
 		)
 		async def evaluate(code: str, browser_session: BrowserSession):
 			# Execute JavaScript with proper error handling and promise support
@@ -992,8 +1016,6 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				if result.get('exceptionDetails'):
 					exception = result['exceptionDetails']
 					error_msg = f'JavaScript execution error: {exception.get("text", "Unknown error")}'
-					if 'lineNumber' in exception:
-						error_msg += f' at line {exception["lineNumber"]}'
 
 					# Enhanced error message with debugging info
 					enhanced_msg = f"""JavaScript Execution Failed:
@@ -1003,7 +1025,7 @@ Validated Code (after quote fixing):
 {validated_code[:500]}{'...' if len(validated_code) > 500 else ''}
 """
 
-					logger.info(enhanced_msg)
+					logger.debug(enhanced_msg)
 					return ActionResult(error=enhanced_msg)
 
 				# Get the result data
@@ -1011,8 +1033,8 @@ Validated Code (after quote fixing):
 
 				# Check for wasThrown flag (backup error detection)
 				if result_data.get('wasThrown'):
-					msg = f'Code: {code}\n\nError: JavaScript execution failed (wasThrown=true)'
-					logger.info(msg)
+					msg = 'JavaScript execution failed (wasThrown=true)'
+					logger.debug(f'Code: {code[:200]}...')
 					return ActionResult(error=msg)
 
 				# Get the actual value
@@ -1034,16 +1056,17 @@ Validated Code (after quote fixing):
 					result_text = str(value)
 
 				# Apply length limit with better truncation
-				if len(result_text) > 20000:
-					result_text = result_text[:19950] + '\n... [Truncated after 20000 characters]'
-				msg = f'Code: {code}\n\nResult: {result_text}'
-				logger.info(msg)
-				return ActionResult(extracted_content=f'Code: {code}\n\nResult: {result_text}')
+				if len(result_text) > 50000:
+					result_text = result_text[:49950] + '\n... [Truncated after 50000 characters]'
+				# Don't log the code - it's already visible in the user's cell
+				logger.debug(f'JavaScript executed successfully, result length: {len(result_text)}')
+				# Return only the result, not the code (code is already in user's cell)
+				return ActionResult(extracted_content=result_text)
 
 			except Exception as e:
 				# CDP communication or other system errors
-				error_msg = f'Code: {code}\n\nError: Failed to execute JavaScript: {type(e).__name__}: {e}'
-				logger.info(error_msg)
+				error_msg = f'Failed to execute JavaScript: {type(e).__name__}: {e}'
+				logger.debug(f'Code that failed: {code[:200]}...')
 				return ActionResult(error=error_msg)
 
 	def _validate_and_fix_javascript(self, code: str) -> str:
@@ -1263,3 +1286,131 @@ Validated Code (after quote fixing):
 
 # Alias for backwards compatibility
 Controller = Tools
+
+
+class CodeAgentTools(Tools[Context]):
+	"""Specialized Tools for CodeAgent agent optimized for Python-based browser automation.
+
+	Includes:
+	- All browser interaction tools (click, input, scroll, navigate, etc.)
+	- JavaScript evaluation
+	- Tab management (switch, close)
+	- Navigation actions (go_back)
+	- Upload file support
+	- Dropdown interactions
+
+	Excludes (optimized for code-use mode):
+	- extract: Use Python + evaluate() instead
+	- find_text: Use Python string operations
+	- screenshot: Not needed in code-use mode
+	- search: Use navigate() directly
+	- File system actions (write_file, read_file, replace_file): Use Python file operations instead
+	"""
+
+	def __init__(
+		self,
+		exclude_actions: list[str] | None = None,
+		output_model: type[T] | None = None,
+		display_files_in_done_text: bool = True,
+	):
+		# Default exclusions for CodeAgent agent
+		if exclude_actions is None:
+			exclude_actions = [
+				# 'scroll',  # Keep for code-use
+				'extract',  # Exclude - use Python + evaluate()
+				'find_text',  # Exclude - use Python string ops
+				# 'select_dropdown',  # Keep for code-use
+				# 'dropdown_options',  # Keep for code-use
+				'screenshot',  # Exclude - not needed
+				'search',  # Exclude - use navigate() directly
+				# 'click',  # Keep for code-use
+				# 'input',  # Keep for code-use
+				# 'switch',  # Keep for code-use
+				# 'send_keys',  # Keep for code-use
+				# 'close',  # Keep for code-use
+				# 'go_back',  # Keep for code-use
+				# 'upload_file',  # Keep for code-use
+				# Exclude file system actions - CodeAgent should use Python file operations
+				'write_file',
+				'read_file',
+				'replace_file',
+			]
+
+		super().__init__(
+			exclude_actions=exclude_actions,
+			output_model=output_model,
+			display_files_in_done_text=display_files_in_done_text,
+		)
+
+		# Override done action for CodeAgent with enhanced file handling
+		self._register_code_use_done_action(output_model, display_files_in_done_text)
+
+	def _register_code_use_done_action(self, output_model: type[T] | None, display_files_in_done_text: bool = True):
+		"""Register enhanced done action for CodeAgent that can read files from disk."""
+		if output_model is not None:
+			# Structured output done - use parent's implementation
+			return
+
+		# Override the done action with enhanced version
+		@self.registry.action(
+			'Complete task.',
+			param_model=DoneAction,
+		)
+		async def done(params: DoneAction, file_system: FileSystem):
+			user_message = params.text
+
+			len_text = len(params.text)
+			len_max_memory = 100
+			memory = f'Task completed: {params.success} - {params.text[:len_max_memory]}'
+			if len_text > len_max_memory:
+				memory += f' - {len_text - len_max_memory} more characters'
+
+			attachments = []
+			if params.files_to_display:
+				if self.display_files_in_done_text:
+					file_msg = ''
+					for file_name in params.files_to_display:
+						file_content = file_system.display_file(file_name)
+						if file_content:
+							file_msg += f'\n\n{file_name}:\n{file_content}'
+							attachments.append(file_name)
+						elif os.path.exists(file_name):
+							# File exists on disk but not in FileSystem - just add to attachments
+							attachments.append(file_name)
+					if file_msg:
+						user_message += '\n\nAttachments:'
+						user_message += file_msg
+					else:
+						logger.warning('Agent wanted to display files but none were found')
+				else:
+					for file_name in params.files_to_display:
+						file_content = file_system.display_file(file_name)
+						if file_content:
+							attachments.append(file_name)
+						elif os.path.exists(file_name):
+							attachments.append(file_name)
+
+			# Convert relative paths to absolute paths - handle both FileSystem-managed and regular files
+			resolved_attachments = []
+			for file_name in attachments:
+				if os.path.isabs(file_name):
+					# Already absolute
+					resolved_attachments.append(file_name)
+				elif file_system.get_file(file_name):
+					# Managed by FileSystem
+					resolved_attachments.append(str(file_system.get_dir() / file_name))
+				elif os.path.exists(file_name):
+					# Regular file in current directory
+					resolved_attachments.append(os.path.abspath(file_name))
+				else:
+					# File doesn't exist, but include the path anyway for error visibility
+					resolved_attachments.append(str(file_system.get_dir() / file_name))
+			attachments = resolved_attachments
+
+			return ActionResult(
+				is_done=True,
+				success=params.success,
+				extracted_content=user_message,
+				long_term_memory=memory,
+				attachments=attachments,
+			)

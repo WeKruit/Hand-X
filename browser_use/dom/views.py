@@ -819,6 +819,29 @@ class SerializedDOMState:
 
 		return DOMTreeSerializer.serialize_tree(self._root, include_attributes)
 
+	@observe_debug(ignore_input=True, ignore_output=True, name='eval_representation')
+	def eval_representation(
+		self,
+		include_attributes: list[str] | None = None,
+	) -> str:
+		"""
+		Evaluation-focused DOM representation without interactive indexes.
+
+		This serializer is designed for evaluation/judge contexts where:
+		- No interactive indexes are needed (we're not clicking)
+		- Full HTML structure should be preserved for context
+		- More attribute information is helpful
+		- Text content is important for understanding page structure
+		"""
+		from browser_use.dom.serializer.eval_serializer import DOMEvalSerializer
+
+		if not self._root:
+			return 'Empty DOM tree (you might have to wait for the page to load)'
+
+		include_attributes = include_attributes or DEFAULT_INCLUDE_ATTRIBUTES
+
+		return DOMEvalSerializer.serialize_tree(self._root, include_attributes)
+
 
 @dataclass
 class DOMInteractedElement:
