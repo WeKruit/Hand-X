@@ -156,7 +156,7 @@ class SimplifiedNode:
 	original_node: 'EnhancedDOMTreeNode'
 	children: list['SimplifiedNode']
 	should_display: bool = True
-	interactive_index: int | None = None
+	is_interactive: bool = False  # True if element is in selector_map
 
 	is_new: bool = False
 
@@ -185,7 +185,7 @@ class SimplifiedNode:
 		cleaned_original_node_json = self._clean_original_node_json(original_node_json)
 		return {
 			'should_display': self.should_display,
-			'interactive_index': self.interactive_index,
+			'is_interactive': self.is_interactive,
 			'ignored_by_paint_order': self.ignored_by_paint_order,
 			'excluded_by_parent': self.excluded_by_parent,
 			'original_node': cleaned_original_node_json,
@@ -374,9 +374,6 @@ class EnhancedDOMTreeNode:
 	snapshot_node: EnhancedSnapshotNode | None
 
 	# endregion - Snapshot Node data
-
-	# Interactive element index
-	element_index: int | None = None
 
 	# Compound control child components information
 	_compound_children: list[dict[str, Any]] = field(default_factory=list)
@@ -746,7 +743,7 @@ class EnhancedDOMTreeNode:
 		return hash(self)
 
 	def __str__(self) -> str:
-		return f'[<{self.tag_name}>#{self.frame_id[-4:] if self.frame_id else "?"}:{self.element_index}]'
+		return f'[<{self.tag_name}>#{self.frame_id[-4:] if self.frame_id else "?"}:{self.backend_node_id}]'
 
 	def __hash__(self) -> int:
 		"""

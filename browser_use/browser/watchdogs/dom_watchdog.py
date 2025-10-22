@@ -673,7 +673,7 @@ class DOMWatchdog(BaseWatchdog):
 			pagination_buttons_data = [
 				PaginationButton(
 					button_type=btn['button_type'],  # type: ignore
-					element_index=btn['element_index'],  # type: ignore
+					backend_node_id=btn['backend_node_id'],  # type: ignore
 					text=btn['text'],  # type: ignore
 					selector=btn['selector'],  # type: ignore
 					is_disabled=btn['is_disabled'],  # type: ignore

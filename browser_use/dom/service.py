@@ -560,7 +560,6 @@ class DomService:
 				snapshot_node=snapshot_data,
 				is_visible=None,
 				absolute_position=absolute_position,
-				element_index=None,
 			)
 
 			enhanced_dom_tree_node_lookup[node['nodeId']] = dom_tree_node
@@ -759,7 +758,7 @@ class DomService:
 		Returns:
 			List of pagination button information dicts with:
 			- button_type: 'next', 'prev', 'first', 'last', 'page_number'
-			- element_index: Interactive element index for clicking
+			- backend_node_id: Backend node ID for clicking
 			- text: Button text/label
 			- selector: XPath selector
 			- is_disabled: Whether the button appears disabled
@@ -816,7 +815,7 @@ class DomService:
 				pagination_buttons.append(
 					{
 						'button_type': button_type,
-						'element_index': index,
+						'backend_node_id': index,
 						'text': node.get_all_children_text().strip() or aria_label or title,
 						'selector': node.xpath,
 						'is_disabled': is_disabled,

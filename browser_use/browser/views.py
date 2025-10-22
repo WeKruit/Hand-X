@@ -80,7 +80,7 @@ class PaginationButton:
 	"""Information about a pagination button detected on the page"""
 
 	button_type: str  # 'next', 'prev', 'first', 'last', 'page_number'
-	element_index: int  # Interactive element index for clicking
+	backend_node_id: int  # Backend node ID for clicking
 	text: str  # Button text/label
 	selector: str  # XPath or other selector to locate the element
 	is_disabled: bool = False  # Whether the button appears disabled
