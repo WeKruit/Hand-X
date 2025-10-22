@@ -356,21 +356,33 @@ def create_namespace(
 				code = f'(function(){{ const params = {vars_json}; return {stripped}(params); }})()'
 			else:
 				# Not a parameterized function, inject params in scope
-				# Check if already wrapped in IIFE
-				is_wrapped = (stripped.startswith('(function()') and '})()' in stripped[-10:]) or (
-					stripped.startswith('(async function()') and '})()' in stripped[-10:]
+				# Check if already wrapped in IIFE (including arrow function IIFEs)
+				is_wrapped = (
+					(stripped.startswith('(function()') and '})()' in stripped[-10:])
+					or (stripped.startswith('(async function()') and '})()' in stripped[-10:])
+					or (stripped.startswith('(() =>') and ')()' in stripped[-10:])
+					or (stripped.startswith('(async () =>') and ')()' in stripped[-10:])
 				)
 				if is_wrapped:
 					# Already wrapped, inject params at the start
-					# Find the opening brace of the function body
+					# Try to match regular function IIFE
 					match = re.match(r'(\((?:async\s+)?function\s*\(\s*\)\s*\{)', stripped)
 					if match:
 						prefix = match.group(1)
 						rest = stripped[len(prefix) :]
 						code = f'{prefix} const params = {vars_json}; {rest}'
 					else:
-						# Fallback: wrap in outer function
-						code = f'(function(){{ const params = {vars_json}; return {stripped}; }})()'
+						# Try to match arrow function IIFE
+						# Patterns: (() => expr)() or (() => { ... })() or (async () => ...)()
+						arrow_match = re.match(r'(\((?:async\s+)?\(\s*\)\s*=>\s*\{)', stripped)
+						if arrow_match:
+							# Arrow function with block body: (() => { ... })()
+							prefix = arrow_match.group(1)
+							rest = stripped[len(prefix) :]
+							code = f'{prefix} const params = {vars_json}; {rest}'
+						else:
+							# Arrow function with expression body or fallback: wrap in outer function
+							code = f'(function(){{ const params = {vars_json}; return {stripped}; }})()'
 				else:
 					# Not wrapped, wrap with params
 					code = f'(function(){{ const params = {vars_json}; {code} }})()'
@@ -380,8 +392,12 @@ def create_namespace(
 		# Auto-wrap in IIFE if not already wrapped (and no variables were injected)
 		if not variables:
 			stripped = code.strip()
-			is_wrapped = (stripped.startswith('(function()') and '})()' in stripped[-10:]) or (
-				stripped.startswith('(async function()') and '})()' in stripped[-10:]
+			# Check for regular function IIFEs, async function IIFEs, and arrow function IIFEs
+			is_wrapped = (
+				(stripped.startswith('(function()') and '})()' in stripped[-10:])
+				or (stripped.startswith('(async function()') and '})()' in stripped[-10:])
+				or (stripped.startswith('(() =>') and ')()' in stripped[-10:])
+				or (stripped.startswith('(async () =>') and ')()' in stripped[-10:])
 			)
 			if not is_wrapped:
 				code = f'(function(){{{code}}})()'
