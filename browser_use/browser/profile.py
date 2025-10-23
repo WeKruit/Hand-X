@@ -785,6 +785,16 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 			# Already using a temp directory, no need to copy
 			return
 
+		is_chrome = (
+			'chrome' in user_data_str.lower()
+			or (self.executable_path and 'chrome' in self.executable_path.name.lower())
+			or self.channel
+			in (BrowserChannel.CHROME, BrowserChannel.CHROME_BETA, BrowserChannel.CHROME_DEV, BrowserChannel.CHROME_CANARY)
+		)
+
+		if not is_chrome:
+			return
+
 		temp_dir = tempfile.mkdtemp(prefix='browser-use-user-data-dir-')
 		path_original_profile = Path(self.user_data_dir) / self.profile_directory
 		path_temp_profile = Path(temp_dir) / self.profile_directory
