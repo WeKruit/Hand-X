@@ -626,6 +626,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self._message_manager.add_new_task(new_task)
 		# Mark as follow-up task and recreate eventbus (gets shut down after each run)
 		self.state.follow_up_task = True
+		# Reset control flags so agent can continue
+		self.state.stopped = False
+		self.state.paused = False
 		agent_id_suffix = str(self.id)[-4:].replace('-', '_')
 		if agent_id_suffix and agent_id_suffix[0].isdigit():
 			agent_id_suffix = 'a' + agent_id_suffix
