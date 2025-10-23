@@ -149,16 +149,11 @@ https://github.com/user-attachments/assets/ac34f75c-057a-43ef-ad06-5b2c9d42bf06
 <details>
 <summary><b>What's the best model to use?</b></summary>
 
-**ChatBrowserUse()** is the fastest option with top SOTA accuracy - it's optimized specifically for browser automation tasks.
+We optimized **ChatBrowserUse()** specifically for browser automation tasks. On avg it completes tasks 3-5x faster than other models with SOTA accuracy.
 
 For other LLM providers, see our [supported models documentation](https://docs.browser-use.com/category/llm-integration).
 </details>
 
-<details>
-<summary><b>How do I solve CAPTCHAs?</b></summary>
-
-For CAPTCHA handling, you need better browser fingerprinting and proxies. Use [Browser Use Cloud](https://cloud.browser-use.com) which provides stealth browsers designed to avoid detection and CAPTCHA challenges.
-</details>
 
 <details>
 <summary><b>Can I use custom tools with the agent?</b></summary>
@@ -194,10 +189,17 @@ Yes! Browser-Use is open source and free to use. You only need to choose an LLM 
 <summary><b>How do I handle authentication?</b></summary>
 
 Check out our authentication examples:
-- [Using real browser profiles](https://github.com/browser-use/browser-use/blob/main/examples/integrations/real_browser.py) - Reuse your existing Chrome profile with saved logins
-- [1Password integration](https://github.com/browser-use/browser-use/blob/main/examples/integrations/one_password.py) - Automate password filling
+- [Using real browser profiles](https://github.com/browser-use/browser-use/blob/main/examples/browser/real_browser.py) - Reuse your existing Chrome profile with saved logins
+- If you want to use temporary accounts with inbox, choose AgentMail
+- To sync your auth profile with the remote browser, run `curl -fsSL https://browser-use.com/profile.sh | BROWSER_USE_API_KEY=XXXX sh` (replace XXXX with your API key)
 
 These examples show how to maintain sessions and handle authentication seamlessly.
+</details>
+
+<details>
+<summary><b>How do I solve CAPTCHAs?</b></summary>
+
+For CAPTCHA handling, you need better browser fingerprinting and proxies. Use [Browser Use Cloud](https://cloud.browser-use.com) which provides stealth browsers designed to avoid detection and CAPTCHA challenges.
 </details>
 
 <details>
