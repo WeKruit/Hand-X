@@ -796,14 +796,20 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 			return
 
 		temp_dir = tempfile.mkdtemp(prefix='browser-use-user-data-dir-')
-		path_original_profile = Path(self.user_data_dir) / self.profile_directory
+		path_original_user_data = Path(self.user_data_dir)
+		path_original_profile = path_original_user_data / self.profile_directory
 		path_temp_profile = Path(temp_dir) / self.profile_directory
 
 		if path_original_profile.exists():
 			import shutil
 
 			shutil.copytree(path_original_profile, path_temp_profile)
-			logger.info(f'Copied profile ({self.profile_directory}) to temp directory: {temp_dir}')
+			local_state_src = path_original_user_data / 'Local State'
+			local_state_dst = Path(temp_dir) / 'Local State'
+			if local_state_src.exists():
+				shutil.copy(local_state_src, local_state_dst)
+			logger.info(f'Copied profile ({self.profile_directory}) and Local State to temp directory: {temp_dir}')
+
 		else:
 			Path(temp_dir).mkdir(parents=True, exist_ok=True)
 			path_temp_profile.mkdir(parents=True, exist_ok=True)
