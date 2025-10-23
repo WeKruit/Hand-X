@@ -787,7 +787,7 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 
 		is_chrome = (
 			'chrome' in user_data_str.lower()
-			or (self.executable_path and 'chrome' in self.executable_path.name.lower())
+			or ('chrome' in str(self.executable_path).lower())
 			or self.channel
 			in (BrowserChannel.CHROME, BrowserChannel.CHROME_BETA, BrowserChannel.CHROME_DEV, BrowserChannel.CHROME_CANARY)
 		)
