@@ -1650,6 +1650,18 @@ class DefaultActionWatchdog(BaseWatchdog):
 					'Alt',
 					'Meta',
 					'Shift',
+					'F1',
+					'F2',
+					'F3',
+					'F4',
+					'F5',
+					'F6',
+					'F7',
+					'F8',
+					'F9',
+					'F10',
+					'F11',
+					'F12',
 				}
 
 				# If it's a special key, use original logic
@@ -1660,6 +1672,12 @@ class DefaultActionWatchdog(BaseWatchdog):
 					# It's text (single character or string) - send each character as text input
 					# This is crucial for text to appear in focused input fields
 					for char in normalized_keys:
+						# Special-case newline characters to dispatch as Enter
+						if char in ('\n', '\r'):
+							await self._dispatch_key_event(cdp_session, 'keyDown', 'Enter')
+							await self._dispatch_key_event(cdp_session, 'keyUp', 'Enter')
+							continue
+
 						# Get proper modifiers and key info for the character
 						modifiers, vk_code, base_key = self._get_char_modifiers_and_vk(char)
 						key_code = self._get_key_code_for_char(base_key)
