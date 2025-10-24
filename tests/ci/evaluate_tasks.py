@@ -15,12 +15,12 @@ import warnings
 
 import anyio
 import yaml
-from pydantic import BaseModel
 from dotenv import load_dotenv
+from pydantic import BaseModel
+
 load_dotenv()
 from browser_use import Agent, AgentHistoryList, BrowserProfile, BrowserSession, ChatBrowserUse
 from browser_use.llm.messages import UserMessage
-
 
 # --- CONFIG ---
 MAX_PARALLEL = 10
