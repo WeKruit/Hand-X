@@ -150,3 +150,26 @@ if __name__ == "__main__":
 </CodeGroup>
 
 <Note> Custom browsers can be configured in one line. Check out <a href = "customize/browser/basics">browsers</a> for more. </Note>
+
+## Advanced: CodeAgent for Local Code Execution
+
+For tasks that require combining browser automation with local code execution (like processing data, saving files, or running computations), use the `CodeAgent`:
+
+```python
+import asyncio
+from browser_use.code_use import CodeAgent
+
+async def main():
+    task = "Go to Hacker News, extract the top 10 posts, and save them to posts.json"
+    agent = CodeAgent(task=task, max_steps=25)
+
+    try:
+        session = await agent.run()
+    finally:
+        await agent.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+The `CodeAgent` executes Python code locally (like Claude Code) while having full access to browser automation capabilities. Learn more in the <a href="customize/agent/code-agent">CodeAgent documentation</a>.
