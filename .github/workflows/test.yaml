@@ -24,6 +24,27 @@ on:
   workflow_dispatch:
     
 jobs:
+  setup-chromium:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Cache chromium binaries
+        id: cache-chromium
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ms-playwright
+          key: ${{ runner.os }}-${{ runner.arch }}-chromium-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-chromium-
+
+      - name: Install Chromium if not cached
+        if: steps.cache-chromium.outputs.cache-hit != 'true'
+        run: uvx playwright install chromium --with-deps --no-shell
+
   find_tests:
     runs-on: ubuntu-latest
     timeout-minutes: 5  # Prevent hanging
@@ -41,7 +62,7 @@ jobs:
           echo "Git commit: $(git rev-parse HEAD)"
           echo "Git branch: $(git branch --show-current)"
           echo ""
-          
+
           TEST_FILENAMES="$(ls tests/ci/test_*.py | sed 's|^tests/ci/||' | sed 's|\.py$||' | jq -R -s -c 'split("\n")[:-1]')"
           echo "TEST_FILENAMES=${TEST_FILENAMES}" >> "$GITHUB_OUTPUT"
           echo "📋 Test matrix: $TEST_FILENAMES"
@@ -54,7 +75,7 @@ jobs:
           fi
 
   tests:
-    needs: find_tests
+    needs: [setup-chromium, find_tests]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # Prevent individual tests from hanging
     env:
@@ -129,6 +150,7 @@ jobs:
           fi
 
   evaluate-tasks:
+    needs: setup-chromium
     runs-on: ubuntu-latest
     env:
       IN_DOCKER: 'true'
