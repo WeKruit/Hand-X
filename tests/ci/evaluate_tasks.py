@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 load_dotenv()
 from browser_use import Agent, AgentHistoryList, BrowserProfile, BrowserSession, ChatBrowserUse
+from browser_use.llm.google.chat import ChatGoogle
 from browser_use.llm.messages import UserMessage
 
 # --- CONFIG ---
@@ -62,7 +63,7 @@ async def run_single_task(task_file):
 			raise ValueError('BROWSER_USE_API_KEY is not set')
 
 		agent_llm = ChatBrowserUse(api_key=api_key)
-		judge_llm = ChatBrowserUse(api_key=api_key)
+		judge_llm = ChatGoogle(model='gemini-flash-lite-latest')
 		print('[DEBUG] LLMs initialized', file=sys.stderr)
 
 		# Each subprocess gets its own profile and session
