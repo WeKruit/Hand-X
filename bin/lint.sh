@@ -5,12 +5,16 @@
 #
 # Options:
 #   --fail-fast    Exit immediately on first failure (faster feedback)
-#   --quick        Only check changed files (faster, doesn't match CI exactly)
+#   --quick        Fast mode: skips pyright type checking (~2s vs 5s)
+#   --staged       Check only staged files (for git pre-commit hook)
 #
 # Examples:
-#   $ ./bin/lint.sh                    # Full check (matches CI/CD)
-#   $ ./bin/lint.sh --quick            # Quick check of changed files only
-#   $ ./bin/lint.sh --quick --fail-fast # Fast iteration mode
+#   $ ./bin/lint.sh                    # Full check (matches CI/CD) - 5s
+#   $ ./bin/lint.sh --quick            # Quick iteration (no types) - 2s
+#   $ ./bin/lint.sh --staged           # Only staged files - varies
+#   $ ./bin/lint.sh --staged --quick   # Fast pre-commit - <2s
+#
+# Note: Quick mode skips type checking. Always run full mode before pushing to CI.
 
 set -o pipefail
 IFS=$'\n'
@@ -21,13 +25,15 @@ cd "$SCRIPT_DIR/.." || exit 1
 # Parse arguments
 FAIL_FAST=0
 QUICK_MODE=0
+STAGED_MODE=0
 for arg in "$@"; do
     case "$arg" in
         --fail-fast) FAIL_FAST=1 ;;
         --quick) QUICK_MODE=1 ;;
+        --staged) STAGED_MODE=1 ;;
         *)
             echo "Unknown option: $arg"
-            echo "Usage: $0 [--fail-fast] [--quick]"
+            echo "Usage: $0 [--fail-fast] [--quick] [--staged]"
             exit 1
             ;;
     esac
@@ -76,23 +82,38 @@ wait_for_job() {
     fi
 }
 
-# Build file list for quick mode
-if [ $QUICK_MODE -eq 1 ]; then
-    # Get all changed Python files (staged and unstaged)
-    CHANGED_FILES=$(git diff --name-only --diff-filter=ACMR HEAD 2>/dev/null | grep '\.py$' || echo "")
+# Build file list based on mode
+if [ $STAGED_MODE -eq 1 ]; then
+    # Get staged Python files (files being committed)
+    FILE_ARRAY=()
+    while IFS= read -r file; do
+        FILE_ARRAY+=("$file")
+    done < <(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null | grep '\.py$')
 
-    if [ -z "$CHANGED_FILES" ]; then
+    if [ ${#FILE_ARRAY[@]} -eq 0 ]; then
+        echo "[*] Staged mode: No Python files staged for commit"
+        echo "✅ All checks passed! (0s total)"
+        exit 0
+    fi
+
+    echo "[*] Staged mode: checking ${#FILE_ARRAY[@]} staged Python file(s)"
+elif [ $QUICK_MODE -eq 1 ]; then
+    # Get all changed Python files (staged and unstaged)
+    FILE_ARRAY=()
+    while IFS= read -r file; do
+        FILE_ARRAY+=("$file")
+    done < <(git diff --name-only --diff-filter=ACMR HEAD 2>/dev/null | grep '\.py$')
+
+    if [ ${#FILE_ARRAY[@]} -eq 0 ]; then
         echo "[*] Quick mode: No Python files changed"
         echo "✅ All checks passed! (0s total)"
         exit 0
     fi
 
-    FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l | tr -d ' ')
-    echo "[*] Quick mode: checking $FILE_COUNT changed Python file(s)"
-    FILE_ARGS="$CHANGED_FILES"
+    echo "[*] Quick mode: checking ${#FILE_ARRAY[@]} changed Python file(s)"
 else
     echo "[*] Full mode: checking all files (matches CI/CD exactly)"
-    FILE_ARGS=""
+    FILE_ARRAY=()
 fi
 
 echo ""
@@ -117,7 +138,7 @@ if [ -z "$FILE_ARGS" ]; then
     OTHER_PID=$!
     OTHER_START=$(date +%s)
 else
-    # Quick mode: check only changed files
+    # Quick mode: check only changed files (skip pyright for speed)
     uv run ruff check --fix $FILE_ARGS > "$TEMP_DIR/ruff-check.log" 2>&1 &
     RUFF_CHECK_PID=$!
     RUFF_CHECK_START=$(date +%s)
@@ -126,8 +147,9 @@ else
     RUFF_FORMAT_PID=$!
     RUFF_FORMAT_START=$(date +%s)
 
-    uv run pyright --threads 6 $FILE_ARGS > "$TEMP_DIR/pyright.log" 2>&1 &
-    PYRIGHT_PID=$!
+    # Skip pyright in quick mode (takes 4.6s) - run full check before pushing to CI
+    echo "" > "$TEMP_DIR/pyright.log"
+    PYRIGHT_PID=-1
     PYRIGHT_START=$(date +%s)
 
     SKIP=ruff-check,ruff-format,pyright uv run pre-commit run --files $FILE_ARGS > "$TEMP_DIR/other-checks.log" 2>&1 &
@@ -185,10 +207,14 @@ if ! wait_for_job $OTHER_PID "other pre-commit hooks" "$TEMP_DIR/other-checks.lo
 fi
 
 # Pyright is slowest (wait last for maximum parallelism)
-spinner $PYRIGHT_PID "pyright"
-if ! wait_for_job $PYRIGHT_PID "pyright" "$TEMP_DIR/pyright.log" $PYRIGHT_START; then
-    FAILED=1
-    FAILED_CHECKS="$FAILED_CHECKS pyright"
+if [ $PYRIGHT_PID -ne -1 ]; then
+    spinner $PYRIGHT_PID "pyright"
+    if ! wait_for_job $PYRIGHT_PID "pyright" "$TEMP_DIR/pyright.log" $PYRIGHT_START; then
+        FAILED=1
+        FAILED_CHECKS="$FAILED_CHECKS pyright"
+    fi
+else
+    printf "%-25s ⏭️  (skipped in quick mode)\n" "pyright"
 fi
 
 TOTAL_TIME=$(($(date +%s) - START_TIME))
