@@ -14,20 +14,6 @@
 
 </br>
 
-<div align="center">
-
-<!-- Keep these links. Translations will automatically update with the README. -->
-[Deutsch](https://www.readme-i18n.com/browser-use/browser-use?lang=de) |
-[Español](https://www.readme-i18n.com/browser-use/browser-use?lang=es) |
-[français](https://www.readme-i18n.com/browser-use/browser-use?lang=fr) |
-[日本語](https://www.readme-i18n.com/browser-use/browser-use?lang=ja) |
-[한국어](https://www.readme-i18n.com/browser-use/browser-use?lang=ko) |
-[Português](https://www.readme-i18n.com/browser-use/browser-use?lang=pt) |
-[Русский](https://www.readme-i18n.com/browser-use/browser-use?lang=ru) |
-[中文](https://www.readme-i18n.com/browser-use/browser-use?lang=zh)
-
-</div>
-
 ---
 
 <div align="center">
@@ -61,14 +47,14 @@
 
 **1. Create environment with [uv](https://docs.astral.sh/uv/) (Python>=3.11):**
 ```bash
-uv venv --python 3.12
-source .venv/bin/activate
+uv init
 ```
 
 **2. Install Browser-Use package:**
 ```bash
 #  We ship every day - use the latest version!
-uv pip install browser-use
+uv add browser-use
+uv sync
 ```
 
 **3. Get your API key from [Browser Use Cloud](https://cloud.browser-use.com/dashboard/api) and add it to your `.env` file (new signups get $10 free credits):**
@@ -84,41 +70,30 @@ uvx playwright install chromium --with-deps --no-shell
 
 **5. Run your first agent:**
 ```python
-from browser_use import Agent, ChatBrowserUse
-
-agent = Agent(
-    task="Find the number of stars of the browser-use repo",
-    llm=ChatBrowserUse(),
-)
-agent.run_sync()
-```
-
-Check out the [library docs](https://docs.browser-use.com) for more!
-
-<br/>
-
-# Stealth Browser Infrastructure
-
-Want to bypass anti-bot detection or run a fleet of agents on the cloud? Use our hosted stealth browsers.
-
-**Follow steps 1-3 above, and pass in a Browser made with the `use_cloud` parameter.**
-```python
 from browser_use import Agent, Browser, ChatBrowserUse
+import asyncio
 
-browser = Browser(
-    use_cloud=True,  # Automatically provisions a cloud browser
-)
-agent = Agent(
-    task="Find the number of stars of the browser-use repo",
-    llm=ChatBrowserUse(),
-    browser=browser,
-)
-agent.run_sync()
+async def example():
+    browser = Browser(
+        # use_cloud=True,  # Uncomment to use a stealth browser on Browser Use Cloud
+    )
+
+    llm = ChatBrowserUse()
+
+    agent = Agent(
+        task="Find the number of stars of the browser-use repo",
+        llm=llm,
+        browser=browser,
+    )
+
+    history = await agent.run()
+    return history
+
+if __name__ == "__main__":
+    history = asyncio.run(example())
 ```
 
-**Optional: Follow the link in the console to watch the remote browser.**
-
-Check out the [cloud docs](https://docs.cloud.browser-use.com) for more!
+Check out the [library docs](https://docs.browser-use.com) and the [cloud docs](https://docs.cloud.browser-use.com) for more!
 
 <br/>
 
@@ -152,6 +127,79 @@ https://github.com/user-attachments/assets/ac34f75c-057a-43ef-ad06-5b2c9d42bf06
 <br/>
 
 ## Integrations, hosting, custom tools, MCP, and more on our [Docs ↗](https://docs.browser-use.com)
+
+<br/>
+
+# FAQ
+
+<details>
+<summary><b>What's the best model to use?</b></summary>
+
+We optimized **ChatBrowserUse()** specifically for browser automation tasks. On avg it completes tasks 3-5x faster than other models with SOTA accuracy.
+
+For other LLM providers, see our [supported models documentation](https://docs.browser-use.com/category/llm-integration).
+</details>
+
+
+<details>
+<summary><b>Can I use custom tools with the agent?</b></summary>
+
+Yes! You can add custom tools to extend the agent's capabilities:
+
+```python
+from browser_use.tools import Tool
+
+@Tool()
+def custom_tool(param: str) -> str:
+    """Description of what this tool does."""
+    return f"Result: {param}"
+
+agent = Agent(
+    task="Your task",
+    llm=llm,
+    browser=browser,
+    use_custom_tools=[custom_tool],
+)
+```
+
+See our [Custom Tools documentation](https://docs.browser-use.com/custom-tools) for more examples.
+</details>
+
+<details>
+<summary><b>Can I use this for free?</b></summary>
+
+Yes! Browser-Use is open source and free to use. You only need to choose an LLM provider (like OpenAI, Google, ChatBrowserUse, or run local models with Ollama).
+</details>
+
+<details>
+<summary><b>How do I handle authentication?</b></summary>
+
+Check out our authentication examples:
+- [Using real browser profiles](https://github.com/browser-use/browser-use/blob/main/examples/browser/real_browser.py) - Reuse your existing Chrome profile with saved logins
+- If you want to use temporary accounts with inbox, choose AgentMail
+- To sync your auth profile with the remote browser, run `curl -fsSL https://browser-use.com/profile.sh | BROWSER_USE_API_KEY=XXXX sh` (replace XXXX with your API key)
+
+These examples show how to maintain sessions and handle authentication seamlessly.
+</details>
+
+<details>
+<summary><b>How do I solve CAPTCHAs?</b></summary>
+
+For CAPTCHA handling, you need better browser fingerprinting and proxies. Use [Browser Use Cloud](https://cloud.browser-use.com) which provides stealth browsers designed to avoid detection and CAPTCHA challenges.
+</details>
+
+<details>
+<summary><b>How do I go into production?</b></summary>
+
+Chrome can consume a lot of memory, and running many agents in parallel can be tricky to manage.
+
+For production use cases, use our [Browser Use Cloud API](https://cloud.browser-use.com) which handles:
+- Scalable browser infrastructure
+- Memory management
+- Proxy rotation
+- Stealth browser fingerprinting
+- High-performance parallel execution
+</details>
 
 <br/>
 
