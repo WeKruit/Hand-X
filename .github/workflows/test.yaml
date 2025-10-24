@@ -92,25 +92,14 @@ jobs:
 
       - run: uv sync --dev --all-extras
 
-      - name: Detect installed Playwright version
-        id: playwright-version
-        run: |
-          PLAYWRIGHT_VERSION=$(uv pip list --format json | jq -r '.[] | select(.name == "playwright") | .version')
-          if [ -z "$PLAYWRIGHT_VERSION" ]; then
-            echo "❌ ERROR: Failed to detect Playwright version" >&2
-            exit 1
-          fi
-          echo "version=$PLAYWRIGHT_VERSION" >> $GITHUB_OUTPUT
-          echo "✅ Playwright version: $PLAYWRIGHT_VERSION"
-
       - name: Cache chromium binaries
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/ms-playwright
-          key: ${{ runner.os }}-${{ runner.arch }}-playwright-${{ steps.playwright-version.outputs.version }}-chromium
+          key: ${{ runner.os }}-${{ runner.arch }}-chromium-${{ hashFiles('uv.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-playwright-
+            ${{ runner.os }}-${{ runner.arch }}-chromium-
 
       - name: Install Chromium browser
         run: uvx playwright install chromium --with-deps --no-shell
@@ -160,25 +149,14 @@ jobs:
 
       - run: uv sync --dev --all-extras
 
-      - name: Detect installed Playwright version
-        id: playwright-version
-        run: |
-          PLAYWRIGHT_VERSION=$(uv pip list --format json | jq -r '.[] | select(.name == "playwright") | .version')
-          if [ -z "$PLAYWRIGHT_VERSION" ]; then
-            echo "❌ ERROR: Failed to detect Playwright version" >&2
-            exit 1
-          fi
-          echo "version=$PLAYWRIGHT_VERSION" >> $GITHUB_OUTPUT
-          echo "✅ Playwright version: $PLAYWRIGHT_VERSION"
-
       - name: Cache chromium binaries
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/ms-playwright
-          key: ${{ runner.os }}-${{ runner.arch }}-playwright-${{ steps.playwright-version.outputs.version }}-chromium
+          key: ${{ runner.os }}-${{ runner.arch }}-chromium-${{ hashFiles('uv.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-playwright-
+            ${{ runner.os }}-${{ runner.arch }}-chromium-
 
       - name: Install Chromium browser
         run: uvx playwright install chromium --with-deps --no-shell
