@@ -1301,7 +1301,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Check if agent failed
 		is_successful = self.history.is_successful()
 
-		if is_successful is False:
+		if is_successful is False or is_successful is None:
 			# Get final result to check for specific failure reasons
 			final_result = self.history.final_result()
 			final_result_str = str(final_result).lower() if final_result else ''
@@ -1314,12 +1314,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				# Suggest use_cloud=True for captcha/cloudflare issues
 				task_preview = self.task[:10] if len(self.task) > 10 else self.task
 				self.logger.info('')
-				self.logger.info(f'💡 Detected captcha/bot protection. For better browser fingerprinting, try:')
+				self.logger.info('Failed because of CAPTCHA? For better browser stealth, try:')
 				self.logger.info(f'   agent = Agent(task="{task_preview}...", use_cloud=True)')
 
 			# General failure message
 			self.logger.info('')
-			self.logger.info('❌ Did the Agent fail your expectation? Let us fix this!')
+			self.logger.info('❌ Did the Agent not work as expected? Let us fix this!')
 			self.logger.info('   Please open a short issue here: https://github.com/browser-use/browser-use/issues')
 
 	def _log_agent_event(self, max_steps: int, agent_run_error: str | None = None) -> None:
