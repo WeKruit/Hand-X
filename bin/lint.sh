@@ -82,17 +82,18 @@ wait_for_job() {
     fi
 }
 
-# Build file list based on mode
+# Build file list based on mode (compatible with sh and bash)
 if [ $STAGED_MODE -eq 1 ]; then
     # Get staged Python files (files being committed)
     FILE_ARRAY=()
     while IFS= read -r file; do
-        FILE_ARRAY+=("$file")
-    done < <(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null | grep '\.py$')
+        [ -n "$file" ] && FILE_ARRAY+=("$file")
+    done <<EOF
+$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null | grep '\.py$')
+EOF
 
     if [ ${#FILE_ARRAY[@]} -eq 0 ]; then
         echo "[*] Staged mode: No Python files staged for commit"
-        echo "✅ All checks passed! (0s total)"
         exit 0
     fi
 
@@ -101,12 +102,13 @@ elif [ $QUICK_MODE -eq 1 ]; then
     # Get all changed Python files (staged and unstaged)
     FILE_ARRAY=()
     while IFS= read -r file; do
-        FILE_ARRAY+=("$file")
-    done < <(git diff --name-only --diff-filter=ACMR HEAD 2>/dev/null | grep '\.py$')
+        [ -n "$file" ] && FILE_ARRAY+=("$file")
+    done <<EOF
+$(git diff --name-only --diff-filter=ACMR HEAD 2>/dev/null | grep '\.py$')
+EOF
 
     if [ ${#FILE_ARRAY[@]} -eq 0 ]; then
         echo "[*] Quick mode: No Python files changed"
-        echo "✅ All checks passed! (0s total)"
         exit 0
     fi
 
@@ -120,7 +122,7 @@ echo ""
 START_TIME=$(date +%s)
 
 # Launch all checks in parallel
-if [ -z "$FILE_ARGS" ]; then
+if [ ${#FILE_ARRAY[@]} -eq 0 ]; then
     # Full mode: check everything
     uv run ruff check --fix > "$TEMP_DIR/ruff-check.log" 2>&1 &
     RUFF_CHECK_PID=$!
@@ -138,21 +140,27 @@ if [ -z "$FILE_ARGS" ]; then
     OTHER_PID=$!
     OTHER_START=$(date +%s)
 else
-    # Quick mode: check only changed files (skip pyright for speed)
-    uv run ruff check --fix $FILE_ARGS > "$TEMP_DIR/ruff-check.log" 2>&1 &
+    # Staged or quick mode: check only specific files
+    uv run ruff check --fix "${FILE_ARRAY[@]}" > "$TEMP_DIR/ruff-check.log" 2>&1 &
     RUFF_CHECK_PID=$!
     RUFF_CHECK_START=$(date +%s)
 
-    uv run ruff format $FILE_ARGS > "$TEMP_DIR/ruff-format.log" 2>&1 &
+    uv run ruff format "${FILE_ARRAY[@]}" > "$TEMP_DIR/ruff-format.log" 2>&1 &
     RUFF_FORMAT_PID=$!
     RUFF_FORMAT_START=$(date +%s)
 
-    # Skip pyright in quick mode (takes 4.6s) - run full check before pushing to CI
-    echo "" > "$TEMP_DIR/pyright.log"
-    PYRIGHT_PID=-1
-    PYRIGHT_START=$(date +%s)
+    # Pyright: skip in quick mode, run in staged mode
+    if [ $QUICK_MODE -eq 1 ]; then
+        echo "" > "$TEMP_DIR/pyright.log"
+        PYRIGHT_PID=-1
+        PYRIGHT_START=$(date +%s)
+    else
+        uv run pyright --threads 6 "${FILE_ARRAY[@]}" > "$TEMP_DIR/pyright.log" 2>&1 &
+        PYRIGHT_PID=$!
+        PYRIGHT_START=$(date +%s)
+    fi
 
-    SKIP=ruff-check,ruff-format,pyright uv run pre-commit run --files $FILE_ARGS > "$TEMP_DIR/other-checks.log" 2>&1 &
+    SKIP=ruff-check,ruff-format,pyright uv run pre-commit run --files "${FILE_ARRAY[@]}" > "$TEMP_DIR/other-checks.log" 2>&1 &
     OTHER_PID=$!
     OTHER_START=$(date +%s)
 fi
