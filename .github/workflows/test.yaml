@@ -123,6 +123,7 @@ jobs:
       - run: uv sync --dev --all-extras
 
       - name: Cache chromium binaries
+        id: cache-chromium
         uses: actions/cache@v4
         with:
           path: |
@@ -131,7 +132,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-chromium-
 
-      - name: Install Chromium browser
+      - name: Install Chromium browser if not cached
+        if: steps.cache-chromium.outputs.cache-hit != 'true'
         run: uvx playwright install chromium --with-deps --no-shell
 
       - name: Cache browser-use extensions
@@ -190,6 +192,7 @@ jobs:
       - run: uv sync --dev --all-extras
 
       - name: Cache chromium binaries
+        id: cache-chromium
         uses: actions/cache@v4
         with:
           path: |
@@ -198,7 +201,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-chromium-
 
-      - name: Install Chromium browser
+      - name: Install Chromium browser if not cached
+        if: steps.cache-chromium.outputs.cache-hit != 'true'
         run: uvx playwright install chromium --with-deps --no-shell
 
       - name: Cache browser-use extensions
