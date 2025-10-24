@@ -1,7 +1,7 @@
 """
 Runs all agent tasks in parallel (up to 10 at a time) using separate subprocesses.
 Each task gets its own Python process, preventing browser session interference.
-Does not fail on partial failures (always exits 0).
+Fails with exit code 1 if 0% of tasks pass.
 """
 
 import argparse
@@ -343,3 +343,8 @@ if __name__ == '__main__':
 		# Parent process mode: run all tasks in parallel subprocesses
 		passed, total = asyncio.run(main())
 		# Results already printed by main() function
+
+		# Fail if 0% pass rate (all tasks failed)
+		if total > 0 and passed == 0:
+			print('\n❌ CRITICAL: 0% pass rate - all tasks failed!')
+			sys.exit(1)
