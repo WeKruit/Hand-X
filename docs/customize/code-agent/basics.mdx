@@ -95,3 +95,35 @@ The agent has access to browser control functions:
 - `upload_file(path)` - Upload a file
 - `evaluate(code, variables={})` - Execute JavaScript and return results
 - `done(text, success, files_to_display=[])` - Mark task complete
+
+## Exporting Sessions
+
+CodeAgent automatically saves all executed code and JavaScript blocks during your session. You can export your complete automation workflow for sharing, version control, or re-running later.
+
+### Quick Export
+
+```python
+from browser_use.code_use.notebook_export import export_to_ipynb, session_to_python_script
+
+# After running your agent
+await agent.run()
+
+# Export to Jupyter notebook
+notebook_path = export_to_ipynb(agent, "my_automation.ipynb")
+
+# Export to Python script
+script = session_to_python_script(agent)
+with open("my_automation.py", "w") as f:
+    f.write(script)
+```
+
+### Export Formats
+
+- **Jupyter Notebook (.ipynb)**: Interactive development, sharing, documentation
+- **Python Script (.py)**: Production deployment, version control, automation
+
+Both formats include:
+- Setup code with browser initialization
+- JavaScript code blocks as Python variables
+- All executed Python cells with outputs
+- Ready-to-run automation workflows
