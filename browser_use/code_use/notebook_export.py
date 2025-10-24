@@ -81,14 +81,12 @@ print("Available functions: navigate, click, input, evaluate, search, extract, d
 
 	# Add JavaScript code blocks as variables FIRST
 	if hasattr(agent, 'namespace') and agent.namespace:
-
 		# Look for JavaScript variables in the namespace
 		code_block_vars = agent.namespace.get('_code_block_vars', set())
 
 		for var_name in sorted(code_block_vars):
 			var_value = agent.namespace.get(var_name)
 			if isinstance(var_value, str) and var_value.strip():
-
 				# Check if this looks like JavaScript code
 				# Look for common JS patterns
 				js_patterns = [
@@ -111,7 +109,6 @@ print("Available functions: navigate, click, input, evaluate, search, extract, d
 				is_js = any(re.search(pattern, var_value, re.IGNORECASE) for pattern in js_patterns)
 
 				if is_js:
-
 					# Create a code cell with the JavaScript variable
 					js_cell = {
 						'cell_type': 'code',
