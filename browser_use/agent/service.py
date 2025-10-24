@@ -1315,7 +1315,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				task_preview = self.task[:10] if len(self.task) > 10 else self.task
 				self.logger.info('')
 				self.logger.info('Failed because of CAPTCHA? For better browser stealth, try:')
-				self.logger.info(f'   agent = Agent(task="{task_preview}...", use_cloud=True)')
+				self.logger.info(f'   agent = Agent(task="{task_preview}...", browser=Browser(use_cloud=True))')
 
 			# General failure message
 			self.logger.info('')
