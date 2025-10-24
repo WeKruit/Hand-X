@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # This script is used to run the formatter, linter, and type checker pre-commit hooks.
 # Usage:
-#   $ ./bin/lint.sh [--fail-fast]
+#   $ ./bin/lint.sh [OPTIONS]
 #
 # Options:
 #   --fail-fast    Exit immediately on first failure (faster feedback)
+#   --quick        Only check changed files (faster, doesn't match CI exactly)
+#
+# Examples:
+#   $ ./bin/lint.sh                    # Full check (matches CI/CD)
+#   $ ./bin/lint.sh --quick            # Quick check of changed files only
+#   $ ./bin/lint.sh --quick --fail-fast # Fast iteration mode
 
 set -o pipefail
 IFS=$'\n'
@@ -14,9 +20,18 @@ cd "$SCRIPT_DIR/.." || exit 1
 
 # Parse arguments
 FAIL_FAST=0
-if [[ "$1" == "--fail-fast" ]]; then
-    FAIL_FAST=1
-fi
+QUICK_MODE=0
+for arg in "$@"; do
+    case "$arg" in
+        --fail-fast) FAIL_FAST=1 ;;
+        --quick) QUICK_MODE=1 ;;
+        *)
+            echo "Unknown option: $arg"
+            echo "Usage: $0 [--fail-fast] [--quick]"
+            exit 1
+            ;;
+    esac
+done
 
 # Create temp directory for logs
 TEMP_DIR=$(mktemp -d)
@@ -61,27 +76,64 @@ wait_for_job() {
     fi
 }
 
-echo "[*] Running linter, formatter, type checker, and pre-commit hooks in parallel..."
-echo ""
+# Build file list for quick mode
+if [ $QUICK_MODE -eq 1 ]; then
+    # Get all changed Python files (staged and unstaged)
+    CHANGED_FILES=$(git diff --name-only --diff-filter=ACMR HEAD 2>/dev/null | grep '\.py$' || echo "")
 
+    if [ -z "$CHANGED_FILES" ]; then
+        echo "[*] Quick mode: No Python files changed"
+        echo "✅ All checks passed! (0s total)"
+        exit 0
+    fi
+
+    FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l | tr -d ' ')
+    echo "[*] Quick mode: checking $FILE_COUNT changed Python file(s)"
+    FILE_ARGS="$CHANGED_FILES"
+else
+    echo "[*] Full mode: checking all files (matches CI/CD exactly)"
+    FILE_ARGS=""
+fi
+
+echo ""
 START_TIME=$(date +%s)
 
 # Launch all checks in parallel
-uv run ruff check --fix > "$TEMP_DIR/ruff-check.log" 2>&1 &
-RUFF_CHECK_PID=$!
-RUFF_CHECK_START=$(date +%s)
+if [ -z "$FILE_ARGS" ]; then
+    # Full mode: check everything
+    uv run ruff check --fix > "$TEMP_DIR/ruff-check.log" 2>&1 &
+    RUFF_CHECK_PID=$!
+    RUFF_CHECK_START=$(date +%s)
 
-uv run ruff format > "$TEMP_DIR/ruff-format.log" 2>&1 &
-RUFF_FORMAT_PID=$!
-RUFF_FORMAT_START=$(date +%s)
+    uv run ruff format > "$TEMP_DIR/ruff-format.log" 2>&1 &
+    RUFF_FORMAT_PID=$!
+    RUFF_FORMAT_START=$(date +%s)
 
-uv run pyright > "$TEMP_DIR/pyright.log" 2>&1 &
-PYRIGHT_PID=$!
-PYRIGHT_START=$(date +%s)
+    uv run pyright --threads 6 > "$TEMP_DIR/pyright.log" 2>&1 &
+    PYRIGHT_PID=$!
+    PYRIGHT_START=$(date +%s)
 
-SKIP=ruff-check,ruff-format,pyright uv run pre-commit run --all-files > "$TEMP_DIR/other-checks.log" 2>&1 &
-OTHER_PID=$!
-OTHER_START=$(date +%s)
+    SKIP=ruff-check,ruff-format,pyright uv run pre-commit run --all-files > "$TEMP_DIR/other-checks.log" 2>&1 &
+    OTHER_PID=$!
+    OTHER_START=$(date +%s)
+else
+    # Quick mode: check only changed files
+    uv run ruff check --fix $FILE_ARGS > "$TEMP_DIR/ruff-check.log" 2>&1 &
+    RUFF_CHECK_PID=$!
+    RUFF_CHECK_START=$(date +%s)
+
+    uv run ruff format $FILE_ARGS > "$TEMP_DIR/ruff-format.log" 2>&1 &
+    RUFF_FORMAT_PID=$!
+    RUFF_FORMAT_START=$(date +%s)
+
+    uv run pyright --threads 6 $FILE_ARGS > "$TEMP_DIR/pyright.log" 2>&1 &
+    PYRIGHT_PID=$!
+    PYRIGHT_START=$(date +%s)
+
+    SKIP=ruff-check,ruff-format,pyright uv run pre-commit run --files $FILE_ARGS > "$TEMP_DIR/other-checks.log" 2>&1 &
+    OTHER_PID=$!
+    OTHER_START=$(date +%s)
+fi
 
 # Track failures
 FAILED=0
