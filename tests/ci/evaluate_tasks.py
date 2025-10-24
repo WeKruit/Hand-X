@@ -15,8 +15,10 @@ import warnings
 
 import anyio
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel
 
+load_dotenv()
 from browser_use import Agent, AgentHistoryList, BrowserProfile, BrowserSession, ChatBrowserUse
 from browser_use.llm.messages import UserMessage
 
@@ -55,9 +57,12 @@ async def run_single_task(task_file):
 
 		print(f'[DEBUG] Task: {task[:100]}...', file=sys.stderr)
 		print(f'[DEBUG] Max steps: {max_steps}', file=sys.stderr)
+		api_key = os.getenv('BROWSER_USE_API_KEY')
+		if not api_key:
+			raise ValueError('BROWSER_USE_API_KEY is not set')
 
-		agent_llm = ChatBrowserUse()
-		judge_llm = ChatBrowserUse()
+		agent_llm = ChatBrowserUse(api_key=api_key)
+		judge_llm = ChatBrowserUse(api_key=api_key)
 		print('[DEBUG] LLMs initialized', file=sys.stderr)
 
 		# Each subprocess gets its own profile and session
