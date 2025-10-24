@@ -92,12 +92,21 @@ jobs:
 
       - run: uv sync --dev --all-extras
 
+      - name: Detect installed Playwright version
+        id: playwright-version
+        run: |
+          PLAYWRIGHT_VERSION=$(uv pip list --format json | jq -r '.[] | select(.name == "playwright") | .version')
+          echo "version=$PLAYWRIGHT_VERSION" >> $GITHUB_OUTPUT
+          echo "Playwright version: $PLAYWRIGHT_VERSION"
+
       - name: Cache chromium binaries
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/ms-playwright
-          key: ${{ runner.os }}-${{ runner.arch }}-chromium-browser
+          key: ${{ runner.os }}-${{ runner.arch }}-playwright-${{ steps.playwright-version.outputs.version }}-chromium
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-playwright-
 
       - name: Install Chromium browser
         run: uvx playwright install chromium --with-deps --no-shell
@@ -147,12 +156,21 @@ jobs:
 
       - run: uv sync --dev --all-extras
 
+      - name: Detect installed Playwright version
+        id: playwright-version
+        run: |
+          PLAYWRIGHT_VERSION=$(uv pip list --format json | jq -r '.[] | select(.name == "playwright") | .version')
+          echo "version=$PLAYWRIGHT_VERSION" >> $GITHUB_OUTPUT
+          echo "Playwright version: $PLAYWRIGHT_VERSION"
+
       - name: Cache chromium binaries
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/ms-playwright
-          key: ${{ runner.os }}-${{ runner.arch }}-chromium-browser
+          key: ${{ runner.os }}-${{ runner.arch }}-playwright-${{ steps.playwright-version.outputs.version }}-chromium
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-playwright-
 
       - name: Install Chromium browser
         run: uvx playwright install chromium --with-deps --no-shell
