@@ -96,8 +96,12 @@ jobs:
         id: playwright-version
         run: |
           PLAYWRIGHT_VERSION=$(uv pip list --format json | jq -r '.[] | select(.name == "playwright") | .version')
+          if [ -z "$PLAYWRIGHT_VERSION" ]; then
+            echo "❌ ERROR: Failed to detect Playwright version" >&2
+            exit 1
+          fi
           echo "version=$PLAYWRIGHT_VERSION" >> $GITHUB_OUTPUT
-          echo "Playwright version: $PLAYWRIGHT_VERSION"
+          echo "✅ Playwright version: $PLAYWRIGHT_VERSION"
 
       - name: Cache chromium binaries
         uses: actions/cache@v4
@@ -160,8 +164,12 @@ jobs:
         id: playwright-version
         run: |
           PLAYWRIGHT_VERSION=$(uv pip list --format json | jq -r '.[] | select(.name == "playwright") | .version')
+          if [ -z "$PLAYWRIGHT_VERSION" ]; then
+            echo "❌ ERROR: Failed to detect Playwright version" >&2
+            exit 1
+          fi
           echo "version=$PLAYWRIGHT_VERSION" >> $GITHUB_OUTPUT
-          echo "Playwright version: $PLAYWRIGHT_VERSION"
+          echo "✅ Playwright version: $PLAYWRIGHT_VERSION"
 
       - name: Cache chromium binaries
         uses: actions/cache@v4
