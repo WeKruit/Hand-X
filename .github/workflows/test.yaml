@@ -67,7 +67,7 @@ jobs:
           echo "Git branch: $(git branch --show-current)"
           echo ""
 
-          TEST_FILENAMES="$(ls tests/ci/test_*.py | sed 's|^tests/ci/||' | sed 's|\.py$||' | jq -R -s -c 'split("\n")[:-1]')"
+          TEST_FILENAMES="$(find tests/ci -name 'test_*.py' -type f | sed 's|^tests/ci/||' | sed 's|\.py$||' | jq -R -s -c 'split("\n")[:-1]')"
           echo "TEST_FILENAMES=${TEST_FILENAMES}" >> "$GITHUB_OUTPUT"
           echo "📋 Test matrix: $TEST_FILENAMES"
         # https://code.dblock.org/2021/09/03/generating-task-matrix-by-looping-over-repo-files-with-github-actions.html
@@ -164,7 +164,7 @@ jobs:
             echo "exists=false" >> $GITHUB_OUTPUT
             echo "❌ Test file not found: $TEST_FILE"
             echo "This file may have been renamed or removed. Current test files:"
-            ls -1 tests/ci/test_*.py | sed 's|tests/ci/||' | sed 's|\.py$||' | sort
+            find tests/ci -name 'test_*.py' -type f | sed 's|tests/ci/||' | sed 's|\.py$||' | sort
           fi
 
       - name: Run test with retry
