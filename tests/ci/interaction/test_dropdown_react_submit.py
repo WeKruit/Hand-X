@@ -5,7 +5,6 @@ This test verifies that dropdown selections work correctly with React's
 controlled components and state management.
 """
 
-import pytest
 
 
 class TestReactDropdownSubmit:
