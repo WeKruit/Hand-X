@@ -117,16 +117,17 @@ jobs:
           enable-cache: true
           activate-environment: true
 
-      - name: Cache uv packages
+      - name: Cache uv packages and venv
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/uv
-          key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock') }}
+            .venv
+          key: ${{ runner.os }}-uv-venv-${{ hashFiles('uv.lock') }}
           restore-keys: |
-            ${{ runner.os }}-uv-
+            ${{ runner.os }}-uv-venv-
 
-      - run: uv sync --dev --all-extras
+      - run: uv sync --frozen --dev --all-extras
 
       - name: Get week number for cache key
         id: week
@@ -200,16 +201,17 @@ jobs:
           enable-cache: true
           activate-environment: true
 
-      - name: Cache uv packages
+      - name: Cache uv packages and venv
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/uv
-          key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock') }}
+            .venv
+          key: ${{ runner.os }}-uv-venv-${{ hashFiles('uv.lock') }}
           restore-keys: |
-            ${{ runner.os }}-uv-
+            ${{ runner.os }}-uv-venv-
 
-      - run: uv sync --dev --all-extras
+      - run: uv sync --frozen --dev --all-extras
 
       - name: Get week number for cache key
         id: week
