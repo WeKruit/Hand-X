@@ -125,7 +125,7 @@ jobs:
           path: |
             ~/.cache/uv
             .venv
-          key: ${{ runner.os }}-uv-venv-${{ hashFiles('uv.lock') }}
+          key: ${{ runner.os }}-uv-venv-${{ hashFiles('pyproject.toml') }}
           restore-keys: |
             ${{ runner.os }}-uv-venv-
 
@@ -177,14 +177,14 @@ jobs:
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 4
-          max_attempts: 2
+          max_attempts: 1
           retry_on: error
           command: pytest "tests/ci/${{ matrix.test_filename }}.py"
 
   evaluate-tasks:
     needs: setup-chromium
     runs-on: ubuntu-latest
-    timeout-minutes: 8  # Allow more time for agent eval tasks
+    timeout-minutes: 8  # Allow more time for agent eval
     env:
       IN_DOCKER: 'true'
       BROWSER_USE_CLOUD_SYNC: 'false'
@@ -209,7 +209,7 @@ jobs:
           path: |
             ~/.cache/uv
             .venv
-          key: ${{ runner.os }}-uv-venv-${{ hashFiles('uv.lock') }}
+          key: ${{ runner.os }}-uv-venv-${{ hashFiles('pyproject.toml') }}
           restore-keys: |
             ${{ runner.os }}-uv-venv-
 
@@ -247,7 +247,7 @@ jobs:
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 4
-          max_attempts: 2
+          max_attempts: 1
           retry_on: error
           command: |
             python tests/ci/evaluate_tasks.py > result.txt
