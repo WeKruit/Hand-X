@@ -291,21 +291,29 @@ async def test_press_arrow_keys_game_simulation(browser_session, httpserver: HTT
 
 	import asyncio
 
-	await asyncio.sleep(0.5)
+	# Wait longer for page to be fully ready
+	await asyncio.sleep(1.0)
 
 	# Play the game with arrow keys (like 2048)
+	# Use longer delays for CI reliability
 	await page.press('ArrowLeft')
-	await asyncio.sleep(0.2)
+	await asyncio.sleep(0.5)
 	await page.press('ArrowUp')
-	await asyncio.sleep(0.2)
+	await asyncio.sleep(0.5)
 	await page.press('ArrowDown')
-	await asyncio.sleep(0.2)
+	await asyncio.sleep(0.5)
 	await page.press('ArrowRight')
-	await asyncio.sleep(0.2)
+	await asyncio.sleep(0.5)
 
 	# Get the score and moves
 	score_text = await page.evaluate('() => document.getElementById("score-value").textContent')
 	moves_text = await page.evaluate('() => document.getElementById("moves-log").textContent')
+
+	# Debug output
+	print('DEBUG: Evaluating JavaScript: \'(() => document.getElementById("score-value").textContent)()\'')
+	print(f'DEBUG: Score: {score_text}')
+	print('DEBUG: Evaluating JavaScript: \'(() => document.getElementById("moves-log").textContent)()\'')
+	print(f'DEBUG: Moves: {moves_text}')
 
 	# Verify the game registered all moves
 	assert score_text == '40', f'Expected score of 40, got {score_text}'
