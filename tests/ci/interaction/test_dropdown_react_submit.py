@@ -6,7 +6,6 @@ controlled components and state management.
 """
 
 
-
 class TestReactDropdownSubmit:
 	"""Test React dropdown with controlled components and form submission."""
 
@@ -216,9 +215,7 @@ class TestReactDropdownSubmit:
 		submitted = received_data[0]
 
 		# THIS IS THE KEY TEST: React state should have captured both selections
-		assert (
-			submitted['employmentStatus'] == 'partTime'
-		), f"Expected 'partTime', got {submitted['employmentStatus']}"
+		assert submitted['employmentStatus'] == 'partTime', f"Expected 'partTime', got {submitted['employmentStatus']}"
 		assert submitted['hireType'] == 'w-2', f"Expected 'w-2', got {submitted['hireType']}"
 
 		# Also verify the result is displayed on the page using CDP

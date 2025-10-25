@@ -6,7 +6,6 @@ and are correctly submitted with the form. This was the bug reported in issue #3
 """
 
 
-
 class TestVueDropdownSubmit:
 	"""Test Vue.js dropdown with v-model and form submission."""
 
