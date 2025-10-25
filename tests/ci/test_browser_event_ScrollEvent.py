@@ -3,14 +3,10 @@ import asyncio
 import pytest
 from pytest_httpserver import HTTPServer
 
-from browser_use.agent.views import ActionModel, ActionResult
+from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
 from browser_use.browser.profile import BrowserProfile
 from browser_use.tools.service import Tools
-from browser_use.tools.views import (
-	GoToUrlAction,
-	ScrollAction,
-)
 
 
 @pytest.fixture(scope='session')
@@ -83,20 +79,10 @@ class TestScrollActions:
 		"""Test basic scroll action functionality."""
 
 		# Navigate to scrollable page
-		goto_action = {'navigate': GoToUrlAction(url=f'{base_url}/scrollable', new_tab=False)}
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		await tools.act(NavigateActionModel(**goto_action), browser_session)
+		await tools.navigate(url=f'{base_url}/scrollable', new_tab=False, browser_session=browser_session)
 
 		# Test 1: Basic page scroll down
-		scroll_action = {'scroll': ScrollAction(down=True, pages=1.0)}
-
-		class ScrollActionModel(ActionModel):
-			scroll: ScrollAction | None = None
-
-		result = await tools.act(ScrollActionModel(**scroll_action), browser_session)
+		result = await tools.scroll(down=True, pages=1.0, browser_session=browser_session)
 
 		# Verify scroll down succeeded
 		assert isinstance(result, ActionResult)
@@ -106,8 +92,7 @@ class TestScrollActions:
 		assert 'px' in result.extracted_content
 
 		# Test 2: Basic page scroll up
-		scroll_up_action = {'scroll': ScrollAction(down=False, pages=0.5)}
-		result = await tools.act(ScrollActionModel(**scroll_up_action), browser_session)
+		result = await tools.scroll(down=False, pages=0.5, browser_session=browser_session)
 
 		assert isinstance(result, ActionResult)
 		assert result.error is None, f'Scroll up failed: {result.error}'
@@ -116,23 +101,11 @@ class TestScrollActions:
 		assert '0.5 pages' in result.extracted_content
 
 		# Test 3: Test with invalid element index (should error)
-		invalid_scroll_action = {'scroll': ScrollAction(down=True, pages=1.0, index=999)}
-		result = await tools.act(ScrollActionModel(**invalid_scroll_action), browser_session)
+		result = await tools.scroll(down=True, pages=1.0, index=999, browser_session=browser_session)
 
 		# This should fail with error about element not found
 		assert isinstance(result, ActionResult)
-		assert result.error is not None, 'Expected no error for invalid element index'
-
-		# Test 4: Model parameter validation
-		scroll_with_index = ScrollAction(down=True, pages=1.0, index=5)
-		assert scroll_with_index.down is True
-		assert scroll_with_index.pages == 1.0
-		assert scroll_with_index.index == 5
-
-		scroll_without_index = ScrollAction(down=False, pages=0.25)
-		assert scroll_without_index.down is False
-		assert scroll_without_index.pages == 0.25
-		assert scroll_without_index.index is None
+		assert result.error is not None, 'Expected error for invalid element index'
 
 	async def test_scroll_with_cross_origin_disabled(self, browser_session, base_url):
 		"""Test that scroll works when cross_origin_iframes is disabled."""
