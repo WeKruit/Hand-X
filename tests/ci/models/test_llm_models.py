@@ -32,9 +32,7 @@ MODELS_TO_TEST = [
 	# Google models (from gemini.py)
 	pytest.param(ChatGoogle, 'gemini-flash-latest', 'GOOGLE_API_KEY', {}, id='google_gemini_flash_latest'),
 	# Groq models (from llama4-groq.py)
-	pytest.param(
-		ChatGroq, 'meta-llama/llama-4-maverick-17b-128e-instruct', 'GROQ_API_KEY', {}, id='groq_llama_4_maverick'
-	),
+	pytest.param(ChatGroq, 'meta-llama/llama-4-maverick-17b-128e-instruct', 'GROQ_API_KEY', {}, id='groq_llama_4_maverick'),
 	# DeepSeek models (from deepseek-chat.py)
 	pytest.param(
 		ChatDeepSeek,
@@ -62,9 +60,7 @@ MODELS_TO_TEST = [
 		id='qwen_vl_max',
 	),
 	# Cerebras (from cerebras_example.py) - using the model from the example
-	pytest.param(
-		ChatCerebras, 'qwen-3-235b-a22b-thinking-2507', 'CEREBRAS_API_KEY', {}, id='cerebras_qwen_3_235b_thinking'
-	),
+	pytest.param(ChatCerebras, 'qwen-3-235b-a22b-thinking-2507', 'CEREBRAS_API_KEY', {}, id='cerebras_qwen_3_235b_thinking'),
 	# OpenRouter (from openrouter.py)
 	pytest.param(
 		ChatOpenAI,
