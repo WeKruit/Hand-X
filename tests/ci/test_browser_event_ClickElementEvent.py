@@ -9,11 +9,6 @@ from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
 from browser_use.browser.profile import BrowserProfile
 from browser_use.tools.service import Tools
-from browser_use.tools.views import (
-	ClickElementAction,
-	GoToUrlAction,
-	UploadFileAction,
-)
 
 
 @pytest.fixture(scope='session')
@@ -115,14 +110,7 @@ class TestClickElementEvent:
 		)
 
 		# Navigate to the clickable elements test page
-		goto_action = {'navigate': GoToUrlAction(url=f'{base_url}/clickable', new_tab=False)}
-
-		from browser_use.agent.views import ActionModel
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		await tools.act(NavigateActionModel(**goto_action), browser_session)
+		await tools.navigate(url=f'{base_url}/clickable', new_tab=False, browser_session=browser_session)
 
 		# Wait for the page to load
 		await asyncio.sleep(0.5)  # Give page time to load
@@ -130,40 +118,17 @@ class TestClickElementEvent:
 		# Initialize the DOM state to populate the selector map
 		await browser_session.get_browser_state_summary()
 
-		# Get the selector map
-		selector_map = await browser_session.get_selector_map()
-
-		# Find a clickable element in the selector map
-		button_index = None
-		button_text = None
-
-		for idx, element in selector_map.items():
-			# Look for the first div with class "clickable"
-			if element.tag_name.lower() == 'div' and 'clickable' in str(element.attributes.get('class', '')):
-				button_index = idx
-				button_text = element.get_all_children_text(max_depth=2).strip()
-				break
+		# Find the clickable button by ID
+		button_index = await browser_session.get_index_by_id('button1')
 
 		# Verify we found a clickable element
-		assert button_index is not None, (
-			f'Could not find clickable element in selector map. Available elements: {[f"{idx}: {element.tag_name}" for idx, element in selector_map.items()]}'
-		)
+		assert button_index is not None, 'Could not find button1 element'
 
 		# Define expected test data
-		expected_button_text = 'Button 1'
 		expected_result_text = 'Button 1 clicked'
 
-		# Verify the button text matches what we expect
-		assert button_text is not None and expected_button_text in button_text, (
-			f"Expected button text '{expected_button_text}' not found in '{button_text}'"
-		)
-
-		# Create a model for the click action
-		class ClickElementActionModel(ActionModel):
-			click: ClickElementAction | None = None
-
 		# Execute the action with the button index
-		result = await tools.act(ClickElementActionModel(click=ClickElementAction(index=button_index)), browser_session)
+		result = await tools.click(index=button_index, browser_session=browser_session)
 
 		# Verify the result structure
 		assert isinstance(result, ActionResult), 'Result should be an ActionResult instance'
@@ -222,34 +187,19 @@ class TestClickElementEvent:
 		)
 
 		# Navigate to the page
-		goto_action = {'navigate': GoToUrlAction(url=f'{base_url}/inline_offscreen', new_tab=False)}
-
-		from browser_use.agent.views import ActionModel
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		await tools.act(NavigateActionModel(**goto_action), browser_session)
+		await tools.navigate(url=f'{base_url}/inline_offscreen', new_tab=False, browser_session=browser_session)
 		await asyncio.sleep(0.5)
 
 		# Get the clickable elements
 		await browser_session.get_browser_state_summary()
-		selector_map = await browser_session.get_selector_map()
 
-		# Find the inline element
-		inline_index = None
-		for idx, element in selector_map.items():
-			if 'inline-link' in str(element.attributes.get('class', '')):
-				inline_index = idx
-				break
+		# Find the inline element by class
+		inline_index = await browser_session.get_index_by_class('inline-link')
 
 		assert inline_index is not None, 'Could not find inline element'
 
 		# Click the element - should click the visible portion
-		class ClickActionModel(ActionModel):
-			click: ClickElementAction | None = None
-
-		result = await tools.act(ClickActionModel(click=ClickElementAction(index=inline_index)), browser_session)
+		result = await tools.click(index=inline_index, browser_session=browser_session)
 
 		assert result.error is None, f'Click failed: {result.error}'
 
@@ -304,34 +254,19 @@ class TestClickElementEvent:
 		)
 
 		# Navigate to the page
-		goto_action = {'navigate': GoToUrlAction(url=f'{base_url}/block_in_inline', new_tab=False)}
-
-		from browser_use.agent.views import ActionModel
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		await tools.act(NavigateActionModel(**goto_action), browser_session)
+		await tools.navigate(url=f'{base_url}/block_in_inline', new_tab=False, browser_session=browser_session)
 		await asyncio.sleep(0.5)
 
 		# Get the clickable elements
 		await browser_session.get_browser_state_summary()
-		selector_map = await browser_session.get_selector_map()
 
-		# Find the block element inside inline
-		block_index = None
-		for idx, element in selector_map.items():
-			if 'block-inside' in str(element.attributes.get('class', '')):
-				block_index = idx
-				break
+		# Find the block element by class
+		block_index = await browser_session.get_index_by_class('block-inside')
 
 		assert block_index is not None, 'Could not find block element'
 
 		# Click the block element
-		class ClickActionModel(ActionModel):
-			click: ClickElementAction | None = None
-
-		result = await tools.act(ClickActionModel(click=ClickElementAction(index=block_index)), browser_session)
+		result = await tools.click(index=block_index, browser_session=browser_session)
 
 		assert result.error is None, f'Click failed: {result.error}'
 
@@ -392,34 +327,19 @@ class TestClickElementEvent:
 		)
 
 		# Navigate to the page
-		goto_action = {'navigate': GoToUrlAction(url=f'{base_url}/covered_element', new_tab=False)}
-
-		from browser_use.agent.views import ActionModel
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		await tools.act(NavigateActionModel(**goto_action), browser_session)
+		await tools.navigate(url=f'{base_url}/covered_element', new_tab=False, browser_session=browser_session)
 		await asyncio.sleep(0.5)
 
 		# Get the clickable elements
 		await browser_session.get_browser_state_summary()
-		selector_map = await browser_session.get_selector_map()
 
-		# Find the target element
-		target_index = None
-		for idx, element in selector_map.items():
-			if 'target' in str(element.attributes.get('class', '')):
-				target_index = idx
-				break
+		# Find the target element by class
+		target_index = await browser_session.get_index_by_class('target')
 
 		assert target_index is not None, 'Could not find target element'
 
 		# Click should still work on the visible portion
-		class ClickActionModel(ActionModel):
-			click: ClickElementAction | None = None
-
-		result = await tools.act(ClickActionModel(click=ClickElementAction(index=target_index)), browser_session)
+		result = await tools.click(index=target_index, browser_session=browser_session)
 
 		assert result.error is None, f'Click failed: {result.error}'
 
@@ -452,35 +372,19 @@ class TestClickElementEvent:
 		)
 
 		# Navigate to the page
-		goto_action = {'navigate': GoToUrlAction(url=f'{base_url}/file_input', new_tab=False)}
-
-		from browser_use.agent.views import ActionModel
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		await tools.act(NavigateActionModel(**goto_action), browser_session)
+		await tools.navigate(url=f'{base_url}/file_input', new_tab=False, browser_session=browser_session)
 		await asyncio.sleep(0.5)
 
 		# Get the clickable elements
 		await browser_session.get_browser_state_summary()
-		selector_map = await browser_session.get_selector_map()
 
-		# Find the file input
-		file_input_index = None
-		for idx, element in selector_map.items():
-			if element.tag_name and element.tag_name.lower() == 'input':
-				if element.attributes and element.attributes.get('type') == 'file':
-					file_input_index = idx
-					break
+		# Find the file input by ID
+		file_input_index = await browser_session.get_index_by_id('fileInput')
 
 		assert file_input_index is not None, 'Could not find file input element'
 
-		# Attempt to click should raise an exception
-		class ClickActionModel(ActionModel):
-			click: ClickElementAction | None = None
-
-		result = await tools.act(ClickActionModel(click=ClickElementAction(index=file_input_index)), browser_session)
+		# Attempt to click should raise an error
+		result = await tools.click(index=file_input_index, browser_session=browser_session)
 
 		# Should have an error about file inputs
 		assert result.error is not None, 'Expected error for file input click'
@@ -513,34 +417,19 @@ class TestClickElementEvent:
 		)
 
 		# Navigate to the page
-		goto_action = {'navigate': GoToUrlAction(url=f'{base_url}/select_dropdown', new_tab=False)}
-
-		from browser_use.agent.views import ActionModel
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		await tools.act(NavigateActionModel(**goto_action), browser_session)
+		await tools.navigate(url=f'{base_url}/select_dropdown', new_tab=False, browser_session=browser_session)
 		await asyncio.sleep(0.5)
 
 		# Get the clickable elements
 		await browser_session.get_browser_state_summary()
-		selector_map = await browser_session.get_selector_map()
 
-		# Find the select element
-		select_index = None
-		for idx, element in selector_map.items():
-			if element.tag_name and element.tag_name.lower() == 'select':
-				select_index = idx
-				break
+		# Find the select element by ID
+		select_index = await browser_session.get_index_by_id('testSelect')
 
 		assert select_index is not None, 'Could not find select element'
 
-		# Attempt to click should raise an exception
-		class ClickActionModel(ActionModel):
-			click: ClickElementAction | None = None
-
-		result = await tools.act(ClickActionModel(click=ClickElementAction(index=select_index)), browser_session)
+		# Attempt to click should provide dropdown options
+		result = await tools.click(index=select_index, browser_session=browser_session)
 
 		# Should automatically provide dropdown options instead of an error
 		assert result.error is None, 'Should not have error - should provide dropdown options automatically'
@@ -910,14 +799,7 @@ class TestClickElementEvent:
 			)
 
 			# Navigate to the file upload test page
-			goto_action = {'navigate': GoToUrlAction(url=f'{base_url}/fileupload', new_tab=False)}
-
-			from browser_use.agent.views import ActionModel
-
-			class NavigateActionModel(ActionModel):
-				navigate: GoToUrlAction | None = None
-
-			await tools.act(NavigateActionModel(**goto_action), browser_session)
+			await tools.navigate(url=f'{base_url}/fileupload', new_tab=False, browser_session=browser_session)
 
 			# Wait for the page to load
 			await asyncio.sleep(0.5)
@@ -925,21 +807,10 @@ class TestClickElementEvent:
 			# Initialize the DOM state to populate the selector map
 			await browser_session.get_browser_state_summary()
 
-			# Get the selector map
-			selector_map = await browser_session.get_selector_map()
-
-			# Find the label element that triggers the file input
-			label_index = None
-			for idx, element in selector_map.items():
-				if element.tag_name.lower() == 'label' and 'upload-label' in str(element.attributes.get('class', '')):
-					label_index = idx
-					break
+			# Find the label element that triggers the file input by class
+			label_index = await browser_session.get_index_by_class('upload-label')
 
 			assert label_index is not None, 'Could not find file upload label element'
-
-			# Create action model for file upload
-			class UploadFileActionModel(ActionModel):
-				upload_file: UploadFileAction | None = None
 
 			# Create a temporary FileSystem for the test
 			import tempfile
@@ -950,9 +821,10 @@ class TestClickElementEvent:
 				file_system = FileSystem(base_dir=temp_dir)
 
 				# Upload the file using the label index (should find the associated file input)
-				result = await tools.act(
-					UploadFileActionModel(upload_file=UploadFileAction(index=label_index, path=temp_file_path)),
-					browser_session,
+				result = await tools.upload_file(
+					index=label_index,
+					path=temp_file_path,
+					browser_session=browser_session,
 					available_file_paths=[temp_file_path],  # Pass the file path as available
 					file_system=file_system,  # Pass the required file_system parameter
 				)
@@ -1034,7 +906,6 @@ class TestClickElementEvent:
 
 		from browser_use.browser.views import BrowserError
 		from browser_use.filesystem.file_system import FileSystem
-		from browser_use.tools.views import UploadFileAction
 
 		# Create a temporary test file that's NOT in available_file_paths
 		with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as temp_file:
@@ -1056,13 +927,7 @@ class TestClickElementEvent:
 			)
 
 			# Navigate to the test page
-			goto_action = {'navigate': GoToUrlAction(url=f'{base_url}/upload-test', new_tab=False)}
-			from browser_use.agent.views import ActionModel
-
-			class NavigateActionModel(ActionModel):
-				navigate: GoToUrlAction | None = None
-
-			await tools.act(NavigateActionModel(**goto_action), browser_session)
+			await tools.navigate(url=f'{base_url}/upload-test', new_tab=False, browser_session=browser_session)
 			await asyncio.sleep(0.5)
 
 			# Get browser state to populate selector map
@@ -1071,21 +936,16 @@ class TestClickElementEvent:
 			event = browser_session.event_bus.dispatch(BrowserStateRequestEvent())
 			state = await event
 
-			# Test 1: Try to upload a file that's not in available_file_paths - should fail
-			class UploadActionModel(ActionModel):
-				upload_file: UploadFileAction | None = None
-
-			upload_action = UploadActionModel(upload_file=UploadFileAction(index=1, path=test_file_path))
-
 			# Create a temporary FileSystem for all tests
 			with tempfile.TemporaryDirectory() as temp_dir:
 				file_system = FileSystem(base_dir=temp_dir)
 
 				try:
 					# This should fail because the file is not in available_file_paths
-					result = await tools.act(
-						upload_action,
-						browser_session,
+					result = await tools.upload_file(
+						index=1,
+						path=test_file_path,
+						browser_session=browser_session,
 						available_file_paths=[],  # Empty available_file_paths
 						file_system=file_system,
 					)

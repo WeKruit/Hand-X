@@ -3,11 +3,10 @@ import asyncio
 import pytest
 from pytest_httpserver import HTTPServer
 
-from browser_use.agent.views import ActionModel, ActionResult
+from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
 from browser_use.browser.profile import BrowserProfile
 from browser_use.tools.service import Tools
-from browser_use.tools.views import GoToUrlAction
 
 
 @pytest.fixture(scope='session')
@@ -64,13 +63,7 @@ class TestNavigateToUrlEvent:
 	async def test_navigate_action(self, tools, browser_session: BrowserSession, base_url):
 		"""Test that GoToUrlAction navigates to the specified URL and test both state summary methods."""
 		# Test successful navigation to a valid page
-		action_data = {'navigate': GoToUrlAction(url=f'{base_url}/page1', new_tab=False)}
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		action_model = NavigateActionModel(**action_data)
-		result = await tools.act(action_model, browser_session)
+		result = await tools.navigate(url=f'{base_url}/page1', new_tab=False, browser_session=browser_session)
 
 		# Verify the successful navigation result
 		assert isinstance(result, ActionResult)
@@ -79,17 +72,8 @@ class TestNavigateToUrlEvent:
 
 	async def test_navigate_network_error(self, tools, browser_session: BrowserSession):
 		"""Test that navigate handles network errors gracefully instead of throwing hard errors."""
-		# Create action model for navigate with an invalid domain
-		action_data = {'navigate': GoToUrlAction(url='https://www.nonexistentdndbeyond.com/', new_tab=False)}
-
-		# Create the ActionModel instance
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		action_model = NavigateActionModel(**action_data)
-
 		# Execute the action - should return soft error instead of throwing
-		result = await tools.act(action_model, browser_session)
+		result = await tools.navigate(url='https://www.nonexistentdndbeyond.com/', new_tab=False, browser_session=browser_session)
 
 		# Verify the result
 		assert isinstance(result, ActionResult)
@@ -130,12 +114,7 @@ class TestNavigateToUrlEvent:
 		initial_tab_count = len(initial_tabs)
 
 		# Navigate to URL in new tab
-		action_data = {'navigate': GoToUrlAction(url=f'{base_url}/page2', new_tab=True)}
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		result = await tools.act(NavigateActionModel(**action_data), browser_session)
+		result = await tools.navigate(url=f'{base_url}/page2', new_tab=True, browser_session=browser_session)
 		await asyncio.sleep(0.5)
 
 		# Verify result
@@ -155,16 +134,10 @@ class TestNavigateToUrlEvent:
 	async def test_navigate_javascript_url(self, tools, browser_session, base_url):
 		"""Test that javascript: URLs are handled appropriately."""
 		# Navigate to a normal page first
-		action_data = {'navigate': GoToUrlAction(url=f'{base_url}/page1', new_tab=False)}
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		await tools.act(NavigateActionModel(**action_data), browser_session)
+		await tools.navigate(url=f'{base_url}/page1', new_tab=False, browser_session=browser_session)
 
 		# Try to navigate to javascript: URL (should be handled gracefully)
-		js_action = {'navigate': GoToUrlAction(url='javascript:alert("test")', new_tab=False)}
-		result = await tools.act(NavigateActionModel(**js_action), browser_session)
+		result = await tools.navigate(url='javascript:alert("test")', new_tab=False, browser_session=browser_session)
 
 		# Should either succeed or fail gracefully
 		assert isinstance(result, ActionResult)
@@ -174,12 +147,7 @@ class TestNavigateToUrlEvent:
 		# Create a simple data URL
 		data_url = 'data:text/html,<html><head><title>Data URL Test</title></head><body><h1>Data URL Content</h1></body></html>'
 
-		action_data = {'navigate': GoToUrlAction(url=data_url, new_tab=False)}
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		result = await tools.act(NavigateActionModel(**action_data), browser_session)
+		result = await tools.navigate(url=data_url, new_tab=False, browser_session=browser_session)
 
 		# Verify navigation
 		assert isinstance(result, ActionResult)
@@ -210,12 +178,9 @@ class TestNavigateToUrlEvent:
 		)
 
 		# Navigate to page with hash
-		action_data = {'navigate': GoToUrlAction(url=f'{base_url}/page-with-anchors#section1', new_tab=False)}
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		result = await tools.act(NavigateActionModel(**action_data), browser_session)
+		result = await tools.navigate(
+			url=f'{base_url}/page-with-anchors#section1', new_tab=False, browser_session=browser_session
+		)
 
 		# Verify navigation
 		assert isinstance(result, ActionResult)
@@ -247,12 +212,9 @@ class TestNavigateToUrlEvent:
 		)
 
 		# Navigate with query parameters
-		action_data = {'navigate': GoToUrlAction(url=f'{base_url}/search?q=test+query&page=1', new_tab=False)}
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		result = await tools.act(NavigateActionModel(**action_data), browser_session)
+		result = await tools.navigate(
+			url=f'{base_url}/search?q=test+query&page=1', new_tab=False, browser_session=browser_session
+		)
 
 		# Verify navigation
 		assert isinstance(result, ActionResult)
@@ -267,20 +229,13 @@ class TestNavigateToUrlEvent:
 	async def test_navigate_multiple_tabs(self, tools, browser_session, base_url):
 		"""Test navigating in multiple tabs sequentially."""
 		# Navigate to first page in current tab
-		action1 = {'navigate': GoToUrlAction(url=f'{base_url}/page1', new_tab=False)}
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		await tools.act(NavigateActionModel(**action1), browser_session)
+		await tools.navigate(url=f'{base_url}/page1', new_tab=False, browser_session=browser_session)
 
 		# Open second page in new tab
-		action2 = {'navigate': GoToUrlAction(url=f'{base_url}/page2', new_tab=True)}
-		await tools.act(NavigateActionModel(**action2), browser_session)
+		await tools.navigate(url=f'{base_url}/page2', new_tab=True, browser_session=browser_session)
 
 		# Open home page in yet another new tab
-		action3 = {'navigate': GoToUrlAction(url=base_url, new_tab=True)}
-		await tools.act(NavigateActionModel(**action3), browser_session)
+		await tools.navigate(url=base_url, new_tab=True, browser_session=browser_session)
 
 		# Should have 3 tabs now
 		tabs = await browser_session.get_tabs()
@@ -296,13 +251,8 @@ class TestNavigateToUrlEvent:
 		# Using a private IP that's unlikely to respond
 		timeout_url = 'http://192.0.2.1:8080/timeout'
 
-		action_data = {'navigate': GoToUrlAction(url=timeout_url, new_tab=False)}
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
 		# This should complete without hanging indefinitely
-		result = await tools.act(NavigateActionModel(**action_data), browser_session)
+		result = await tools.navigate(url=timeout_url, new_tab=False, browser_session=browser_session)
 
 		# Should get a result (possibly with error)
 		assert isinstance(result, ActionResult)
@@ -317,12 +267,7 @@ class TestNavigateToUrlEvent:
 		)
 
 		# Navigate to redirect URL
-		action_data = {'navigate': GoToUrlAction(url=f'{base_url}/redirect', new_tab=False)}
-
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		result = await tools.act(NavigateActionModel(**action_data), browser_session)
+		result = await tools.navigate(url=f'{base_url}/redirect', new_tab=False, browser_session=browser_session)
 
 		# Verify navigation succeeded
 		assert isinstance(result, ActionResult)
