@@ -88,11 +88,17 @@ async def test_llm_model_button_click(model_class, model_name, api_key_env, extr
 	3. Button click is verified by checking page state change
 	4. Completes within max 2 steps
 	"""
-	# Skip test if API key is not available (except Ollama which is local)
+	# Check if running in GitHub Actions
+	in_github_actions = os.getenv('GITHUB_ACTIONS') == 'true'
+
+	# Handle API key validation (except Ollama which is local)
 	if api_key_env is not None:
 		api_key = os.getenv(api_key_env)
 		if not api_key:
-			pytest.skip(f'{api_key_env} not set')
+			if in_github_actions:
+				pytest.fail(f'{api_key_env} not set - failing in GitHub Actions')
+			else:
+				pytest.skip(f'{api_key_env} not set')
 	else:
 		api_key = None
 
