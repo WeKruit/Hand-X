@@ -1281,8 +1281,17 @@ Validated Code (after quote fixing):
 		"""
 		# Check if this is a registered action
 		if name in self.registry.registry.actions:
-			# Create a wrapper that delegates to registry.execute_action
+			from typing import Union
+
+			from pydantic import create_model
+
+			action = self.registry.registry.actions[name]
+
+			# Create a wrapper that calls act() to ensure consistent error handling and result normalization
 			async def action_wrapper(**kwargs):
+				# Extract browser_session (required positional argument for act())
+				browser_session = kwargs.get('browser_session')
+
 				# Separate action params from special params (injected dependencies)
 				special_param_names = {
 					'browser_session',
@@ -1295,12 +1304,26 @@ Validated Code (after quote fixing):
 				# Extract action params (params for the action itself)
 				action_params = {k: v for k, v in kwargs.items() if k not in special_param_names}
 
-				# Extract special params (injected dependencies)
-				special_kwargs = {k: v for k, v in kwargs.items() if k in special_param_names}
+				# Extract special params (injected dependencies) - exclude browser_session as it's positional
+				special_kwargs = {k: v for k, v in kwargs.items() if k in special_param_names and k != 'browser_session'}
 
-				# Delegate to the existing registry.execute_action method
-				# This ensures all the logic (sensitive_data, page_url extraction, error handling, etc.) is centralized
-				return await self.registry.execute_action(action_name=name, params=action_params, **special_kwargs)
+				# Create the param instance
+				params_instance = action.param_model(**action_params)
+
+				# Dynamically create an ActionModel with this action
+				# Use Union for type compatibility with create_model
+				DynamicActionModel = create_model(
+					'DynamicActionModel',
+					__base__=ActionModel,
+					**{name: (Union[action.param_model, None], None)},  # type: ignore
+				)
+
+				# Create the action model instance
+				action_model = DynamicActionModel(**{name: params_instance})
+
+				# Call act() which has all the error handling, result normalization, and observability
+				# browser_session is passed as positional argument (required by act())
+				return await self.act(action=action_model, browser_session=browser_session, **special_kwargs)  # type: ignore
 
 			return action_wrapper
 
