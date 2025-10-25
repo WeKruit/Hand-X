@@ -116,4 +116,3 @@ async def run_model_button_click_test(
 	finally:
 		# Clean up browser session
 		await browser.kill()
-
