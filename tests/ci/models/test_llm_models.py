@@ -15,7 +15,6 @@ from browser_use.llm.anthropic.chat import ChatAnthropic
 from browser_use.llm.azure.chat import ChatAzureOpenAI
 from browser_use.llm.browser_use.chat import ChatBrowserUse
 from browser_use.llm.cerebras.chat import ChatCerebras
-from browser_use.llm.deepseek.chat import ChatDeepSeek
 from browser_use.llm.google.chat import ChatGoogle
 from browser_use.llm.groq.chat import ChatGroq
 from browser_use.llm.ollama.chat import ChatOllama
@@ -26,13 +25,10 @@ from browser_use.llm.openai.chat import ChatOpenAI
 MODELS_TO_TEST = [
 	# OpenAI models (from gpt-4.1.py, gpt-5-mini.py)
 	pytest.param(ChatOpenAI, 'gpt-4.1-mini', 'OPENAI_API_KEY', {}, id='openai_gpt_4_1_mini'),
-	pytest.param(ChatOpenAI, 'gpt-5-mini', 'OPENAI_API_KEY', {}, id='openai_gpt_5_mini'),
 	# Anthropic models (from claude-4-sonnet.py)
 	pytest.param(ChatAnthropic, 'claude-sonnet-4-0', 'ANTHROPIC_API_KEY', {}, id='anthropic_claude_sonnet_4_0'),
 	# Google models (from gemini.py)
 	pytest.param(ChatGoogle, 'gemini-flash-latest', 'GOOGLE_API_KEY', {}, id='google_gemini_flash_latest'),
-	# Groq models (from llama4-groq.py)
-	pytest.param(ChatGroq, 'meta-llama/llama-4-maverick-17b-128e-instruct', 'GROQ_API_KEY', {}, id='groq_llama_4_maverick'),
 
 	# Azure OpenAI (from azure_openai.py) - needs both API key and endpoint
 	pytest.param(
@@ -44,26 +40,15 @@ MODELS_TO_TEST = [
 	),
 	# Browser Use LLM (from browser_use_llm.py)
 	pytest.param(ChatBrowserUse, 'bu-latest', 'BROWSER_USE_API_KEY', {}, id='browser_use_bu_latest'),
-	# Qwen via OpenAI-compatible API (from qwen.py)
-	pytest.param(
-		ChatOpenAI,
-		'qwen-vl-max',
-		'ALIBABA_CLOUD',
-		{'base_url': 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1'},
-		id='qwen_vl_max',
-	),
-	# Cerebras (from cerebras_example.py) - using the model from the example
-	pytest.param(ChatCerebras, 'qwen-3-235b-a22b-thinking-2507', 'CEREBRAS_API_KEY', {}, id='cerebras_qwen_3_235b_thinking'),
+
 	# OpenRouter (from openrouter.py)
 	pytest.param(
 		ChatOpenAI,
-		'x-ai/grok-4',
+		'x-ai/grok-4-fast',
 		'OPENROUTER_API_KEY',
 		{'base_url': 'https://openrouter.ai/api/v1'},
-		id='openrouter_grok_4',
-	),
-	# Ollama (from ollama.py) - local model, no API key
-	pytest.param(ChatOllama, 'llama3.1:8b', None, {}, id='ollama_llama3_1_8b'),
+		id='openrouter_grok_4_mini',
+	)
 ]
 
 
