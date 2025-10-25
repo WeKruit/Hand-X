@@ -216,7 +216,6 @@ async def test_press_key_combinations(browser_session, httpserver: HTTPServer):
 	assert a_down_events[0]['ctrlKey'] is True, 'Control modifier should be active when pressing "a"'
 
 
-
 async def test_press_arrow_keys_game_simulation(browser_session, httpserver: HTTPServer):
 	"""Test arrow keys in a 2048-like game scenario."""
 	# Simulate a simple game that responds to arrow keys
