@@ -1284,7 +1284,13 @@ Validated Code (after quote fixing):
 			# Create a wrapper that delegates to registry.execute_action
 			async def action_wrapper(**kwargs):
 				# Separate action params from special params (injected dependencies)
-				special_param_names = {'browser_session', 'page_extraction_llm', 'file_system', 'available_file_paths', 'sensitive_data'}
+				special_param_names = {
+					'browser_session',
+					'page_extraction_llm',
+					'file_system',
+					'available_file_paths',
+					'sensitive_data',
+				}
 
 				# Extract action params (params for the action itself)
 				action_params = {k: v for k, v in kwargs.items() if k not in special_param_names}
@@ -1294,11 +1300,7 @@ Validated Code (after quote fixing):
 
 				# Delegate to the existing registry.execute_action method
 				# This ensures all the logic (sensitive_data, page_url extraction, error handling, etc.) is centralized
-				return await self.registry.execute_action(
-					action_name=name,
-					params=action_params,
-					**special_kwargs
-				)
+				return await self.registry.execute_action(action_name=name, params=action_params, **special_kwargs)
 
 			return action_wrapper
 
