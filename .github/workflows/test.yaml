@@ -22,7 +22,7 @@ on:
       - '*'
   pull_request:
   workflow_dispatch:
-    
+
 jobs:
   setup-chromium:
     runs-on: ubuntu-latest
@@ -276,12 +276,12 @@ jobs:
             const detailedResults = JSON.parse(process.env.DETAILED_RESULTS);
             const score = `${passed}/${total}`;
             const percentage = Math.round((passed / total) * 100);
-            
+
             // Fail the workflow if 0% pass rate
             if (percentage === 0) {
               core.setFailed(`Evaluation failed: 0% pass rate (${passed}/${total})`);
             }
-            
+
             // Create detailed table
             let tableRows = '';
             detailedResults.forEach(result => {
@@ -289,31 +289,31 @@ jobs:
               const status = result.success ? 'Pass' : 'Fail';
               tableRows += `| ${result.task} | ${emoji} ${status} | ${result.reason} |\n`;
             });
-            
+
             const comment = `## Agent Task Evaluation Results: ${score} (${percentage}%)
-            
+
             <details>
             <summary>View detailed results</summary>
-            
+
             | Task | Result | Reason |
             |------|--------|--------|
             ${tableRows}
-            
+
             Check the [evaluate-tasks job](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for detailed task execution logs.
             </details>`;
-            
+
             // Find existing comment to update or create new one
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
             });
-            
-            const botComment = comments.find(comment => 
-              comment.user.type === 'Bot' && 
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
               comment.body.includes('Agent Task Evaluation Results')
             );
-            
+
             if (botComment) {
               // Update existing comment
               await github.rest.issues.updateComment({
