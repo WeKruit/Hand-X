@@ -26,7 +26,6 @@ MODELS_TO_TEST = [
 	pytest.param(ChatAnthropic, 'claude-sonnet-4-0', 'ANTHROPIC_API_KEY', {}, id='anthropic_claude_sonnet_4_0'),
 	# Google models (from gemini.py)
 	pytest.param(ChatGoogle, 'gemini-flash-latest', 'GOOGLE_API_KEY', {}, id='google_gemini_flash_latest'),
-
 	# Azure OpenAI (from azure_openai.py) - needs both API key and endpoint
 	pytest.param(
 		ChatAzureOpenAI,
@@ -37,7 +36,6 @@ MODELS_TO_TEST = [
 	),
 	# Browser Use LLM (from browser_use_llm.py)
 	pytest.param(ChatBrowserUse, 'bu-latest', 'BROWSER_USE_API_KEY', {}, id='browser_use_bu_latest'),
-
 	# OpenRouter (from openrouter.py)
 	pytest.param(
 		ChatOpenAI,
@@ -45,7 +43,7 @@ MODELS_TO_TEST = [
 		'OPENROUTER_API_KEY',
 		{'base_url': 'https://openrouter.ai/api/v1'},
 		id='openrouter_grok_4_mini',
-	)
+	),
 ]
 
 
