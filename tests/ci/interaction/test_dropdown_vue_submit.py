@@ -5,7 +5,6 @@ This test verifies that dropdown selections persist through Vue's v-model
 and are correctly submitted with the form. This was the bug reported in issue #3415.
 """
 
-import pytest
 
 
 class TestVueDropdownSubmit:
