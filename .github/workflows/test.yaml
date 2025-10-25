@@ -174,7 +174,13 @@ jobs:
           timeout_minutes: 4
           max_attempts: 2
           retry_on: error
-          command: pytest "tests/ci/${{ matrix.test_filename }}.py"
+          command: |
+            if [[ "${{ matrix.test_filename }}" == "models/test_llm_models" ]]; then
+              # Run model tests in parallel using pytest-xdist
+              pytest "tests/ci/${{ matrix.test_filename }}.py" -n auto
+            else
+              pytest "tests/ci/${{ matrix.test_filename }}.py"
+            fi
 
   evaluate-tasks:
     needs: setup-chromium
