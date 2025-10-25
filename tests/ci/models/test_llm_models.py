@@ -21,7 +21,6 @@ from browser_use.llm.groq.chat import ChatGroq
 from browser_use.llm.ollama.chat import ChatOllama
 from browser_use.llm.openai.chat import ChatOpenAI
 
-
 # Define models to test based on the examples in examples/models/
 # Each tuple is (model_class, model_name, required_api_key_env_var, extra_kwargs)
 MODELS_TO_TEST = [
