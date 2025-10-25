@@ -91,8 +91,6 @@ async def test_assumption_1_dom_processing_works(browser_session, test_server):
 	await event.event_result(raise_if_any=True, raise_if_none=False)
 
 	# Trigger DOM processing
-	# sleep for 1 second
-	await asyncio.sleep(1)
 	state = await browser_session.get_browser_state_summary()
 
 	print('DOM processing result:')
