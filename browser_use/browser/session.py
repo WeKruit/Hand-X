@@ -1824,6 +1824,38 @@ class BrowserSession(BaseModel):
 		# Return empty dict if nothing available
 		return {}
 
+	async def get_index_by_id(self, element_id: str) -> int | None:
+		"""Find element index by its id attribute.
+
+		Args:
+			element_id: The id attribute value to search for
+
+		Returns:
+			Index of the element, or None if not found
+		"""
+		selector_map = await self.get_selector_map()
+		for idx, element in selector_map.items():
+			if element.attributes and element.attributes.get('id') == element_id:
+				return idx
+		return None
+
+	async def get_index_by_class(self, class_name: str) -> int | None:
+		"""Find element index by its class attribute (matches if class contains the given name).
+
+		Args:
+			class_name: The class name to search for
+
+		Returns:
+			Index of the first matching element, or None if not found
+		"""
+		selector_map = await self.get_selector_map()
+		for idx, element in selector_map.items():
+			if element.attributes:
+				element_class = element.attributes.get('class', '')
+				if class_name in element_class.split():
+					return idx
+		return None
+
 	async def remove_highlights(self) -> None:
 		"""Remove highlights from the page using CDP."""
 		if not self.browser_profile.highlight_elements:
