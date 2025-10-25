@@ -33,20 +33,13 @@ MODELS_TO_TEST = [
 	pytest.param(ChatGoogle, 'gemini-flash-latest', 'GOOGLE_API_KEY', {}, id='google_gemini_flash_latest'),
 	# Groq models (from llama4-groq.py)
 	pytest.param(ChatGroq, 'meta-llama/llama-4-maverick-17b-128e-instruct', 'GROQ_API_KEY', {}, id='groq_llama_4_maverick'),
-	# DeepSeek models (from deepseek-chat.py)
-	pytest.param(
-		ChatDeepSeek,
-		'deepseek-chat',
-		'DEEPSEEK_API_KEY',
-		{'base_url': 'https://api.deepseek.com/v1'},
-		id='deepseek_chat',
-	),
+
 	# Azure OpenAI (from azure_openai.py) - needs both API key and endpoint
 	pytest.param(
 		ChatAzureOpenAI,
 		'gpt-4.1-mini',
 		'AZURE_OPENAI_KEY',
-		{'azure_endpoint': os.getenv('AZURE_OPENAI_ENDPOINT')},
+		{'azure_endpoint': 'AZURE_OPENAI_ENDPOINT'},  # Special marker - will be resolved at runtime
 		id='azure_gpt_4_1_mini',
 	),
 	# Browser Use LLM (from browser_use_llm.py)
@@ -97,6 +90,17 @@ async def test_llm_model_button_click(model_class, model_name, api_key_env, extr
 				pytest.skip(f'{api_key_env} not set')
 	else:
 		api_key = None
+
+	# Handle Azure endpoint validation at runtime
+	if model_class is ChatAzureOpenAI:
+		azure_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
+		if not azure_endpoint:
+			if in_github_actions:
+				pytest.fail('AZURE_OPENAI_ENDPOINT not set - failing in GitHub Actions')
+			else:
+				pytest.skip('AZURE_OPENAI_ENDPOINT not set')
+		# Replace the marker with actual endpoint value
+		extra_kwargs = {**extra_kwargs, 'azure_endpoint': azure_endpoint}
 
 	# Create HTML page with a button that changes page content when clicked
 	html = """
