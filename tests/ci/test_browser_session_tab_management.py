@@ -7,7 +7,6 @@ from pytest_httpserver import HTTPServer
 
 load_dotenv()
 
-from browser_use.agent.views import ActionModel
 from browser_use.browser.events import NavigateToUrlEvent
 from browser_use.browser.profile import BrowserProfile
 from browser_use.browser.session import BrowserSession
@@ -93,27 +92,6 @@ class TestTabManagement:
 	"""Tests for the tab management system with separate page and page references."""
 
 	# Helper methods
-
-	async def _execute_action(self, tools, browser_session: BrowserSession, action_data):
-		"""Generic helper to execute any action via the tools."""
-		# Dynamically create an appropriate ActionModel class
-		action_type = list(action_data.keys())[0]
-		action_value = action_data[action_type]
-
-		# Create the ActionModel with the single action field
-		class DynamicActionModel(ActionModel):
-			pass
-
-		# Dynamically add the field with the right type annotation
-		setattr(DynamicActionModel, action_type, type(action_value) | None)
-
-		# Execute the action
-		result = await tools.act(DynamicActionModel(**action_data), browser_session)
-
-		# Give the browser a moment to process the action
-		await asyncio.sleep(0.5)
-
-		return result
 
 	async def _reset_tab_state(self, browser_session: BrowserSession, base_url: str):
 		# await browser_session.event_bus.dispatch(CloseTabEvent(target_id=browser_session.agent_focus.target_id))
