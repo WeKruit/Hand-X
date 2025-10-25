@@ -14,10 +14,7 @@ from browser_use.browser.session import BrowserSession
 from browser_use.llm.anthropic.chat import ChatAnthropic
 from browser_use.llm.azure.chat import ChatAzureOpenAI
 from browser_use.llm.browser_use.chat import ChatBrowserUse
-from browser_use.llm.cerebras.chat import ChatCerebras
 from browser_use.llm.google.chat import ChatGoogle
-from browser_use.llm.groq.chat import ChatGroq
-from browser_use.llm.ollama.chat import ChatOllama
 from browser_use.llm.openai.chat import ChatOpenAI
 
 # Define models to test based on the examples in examples/models/
