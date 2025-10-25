@@ -8,13 +8,11 @@ from pathlib import Path
 import pytest
 from pytest_httpserver import HTTPServer
 
-from browser_use.agent.views import ActionModel
 from browser_use.browser import BrowserSession
 from browser_use.browser.events import BrowserStateRequestEvent, FileDownloadedEvent
 from browser_use.browser.profile import BrowserProfile
 from browser_use.filesystem.file_system import FileSystem
 from browser_use.tools.service import Tools
-from browser_use.tools.views import ClickElementAction, GoToUrlAction, UploadFileAction
 
 
 @pytest.fixture(scope='function')
@@ -161,12 +159,7 @@ class TestDownloadUploadFullCircle:
 				base_url = f'http://{download_upload_server.host}:{download_upload_server.port}'
 
 				# Step 1: Navigate to download page
-				class NavigateActionModel(ActionModel):
-					navigate: GoToUrlAction | None = None
-
-				result = await tools.act(
-					NavigateActionModel(navigate=GoToUrlAction(url=f'{base_url}/download-page', new_tab=False)), browser_session
-				)
+				result = await tools.navigate(url=f'{base_url}/download-page', new_tab=False, browser_session=browser_session)
 				assert result.error is None, f'Navigation to download page failed: {result.error}'
 
 				await asyncio.sleep(0.5)
@@ -176,23 +169,13 @@ class TestDownloadUploadFullCircle:
 				state_result = await event.event_result()
 				assert state_result is not None
 				assert state_result.dom_state is not None
-				assert state_result.dom_state.selector_map is not None
 
-				# Find download link
-				download_link_index = None
-				for idx, element in state_result.dom_state.selector_map.items():
-					if element.attributes and element.attributes.get('id') == 'downloadLink':
-						download_link_index = idx
-						break
-
+				# Find download link by ID
+				download_link_index = await browser_session.get_index_by_id('downloadLink')
 				assert download_link_index is not None, 'Download link not found'
 
 				# Step 2: Click download link and wait for download
-				class ClickActionModel(ActionModel):
-					click: ClickElementAction | None = None
-
-				# Click the download link
-				result = await tools.act(ClickActionModel(click=ClickElementAction(index=download_link_index)), browser_session)
+				result = await tools.click(index=download_link_index, browser_session=browser_session)
 				assert result.error is None, f'Click on download link failed: {result.error}'
 
 				# Wait for the download event
@@ -227,9 +210,7 @@ class TestDownloadUploadFullCircle:
 				print(f'📑 Tabs before navigation: {len(tabs_before)} tabs')
 				for i, tab in enumerate(tabs_before):
 					print(f'  Tab {i}: {tab.url}')
-				result = await tools.act(
-					NavigateActionModel(navigate=GoToUrlAction(url=f'{base_url}/upload-page', new_tab=True)), browser_session
-				)
+				result = await tools.navigate(url=f'{base_url}/upload-page', new_tab=True, browser_session=browser_session)
 				assert result.error is None, f'Navigation to upload page failed: {result.error}'
 				print(f'✅ Navigation result: {result.extracted_content}')
 
@@ -269,13 +250,11 @@ class TestDownloadUploadFullCircle:
 				assert file_input_index is not None, 'File input not found'
 
 				# Step 4: Upload the downloaded file
-				class UploadActionModel(ActionModel):
-					upload_file: UploadFileAction | None = None
-
 				# The downloaded file should be automatically available for upload
-				result = await tools.act(
-					UploadActionModel(upload_file=UploadFileAction(index=file_input_index, path=downloaded_file_path)),
-					browser_session,
+				result = await tools.upload_file(
+					index=file_input_index,
+					path=downloaded_file_path,
+					browser_session=browser_session,
 					available_file_paths=[],  # Empty, but file is in downloaded_files
 					file_system=file_system,
 				)
@@ -302,7 +281,7 @@ class TestDownloadUploadFullCircle:
 				assert submit_button_index is not None, 'Submit button not found'
 
 				# Click the submit button
-				result = await tools.act(ClickActionModel(click=ClickElementAction(index=submit_button_index)), browser_session)
+				result = await tools.click(index=submit_button_index, browser_session=browser_session)
 				assert result.error is None, f'Click on submit button failed: {result.error}'
 
 				# Wait for JavaScript to process the upload

@@ -110,16 +110,9 @@ class TestVueDropdownSubmit:
 		httpserver.expect_request('/submit', method='POST').respond_with_handler(handle_submit)
 
 		# Navigate to the Vue.js form
-		from browser_use.agent.views import ActionModel
-		from browser_use.tools.views import GoToUrlAction
-
 		base_url = httpserver.url_for('/')
 
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		action = NavigateActionModel(navigate=GoToUrlAction(url=f'{base_url}vue-dropdown', new_tab=False))
-		result = await tools.act(action, browser_session)
+		result = await tools.navigate(url=f'{base_url}vue-dropdown', new_tab=False, browser_session=browser_session)
 		assert result.error is None
 
 		# Wait for Vue to initialize
@@ -129,37 +122,20 @@ class TestVueDropdownSubmit:
 
 		# Get browser state to find dropdown elements
 		await browser_session.get_browser_state_summary()
-		selector_map = await browser_session.get_selector_map()
 
-		# Find the pay frequency dropdown (should be index 3 or similar)
-		pay_freq_element = None
-		hire_type_element = None
-
-		for idx, element in selector_map.items():
-			if element.attributes.get('id') == 'pay-frequency':
-				pay_freq_element = idx
-			elif element.attributes.get('id') == 'hire-type':
-				hire_type_element = idx
+		# Find the dropdowns by ID
+		pay_freq_element = await browser_session.get_index_by_id('pay-frequency')
+		hire_type_element = await browser_session.get_index_by_id('hire-type')
 
 		assert pay_freq_element is not None, 'Could not find pay-frequency dropdown'
 		assert hire_type_element is not None, 'Could not find hire-type dropdown'
 
-		# Create a model for the standard select_dropdown action
-		class SelectDropdownModel(ActionModel):
-			select_dropdown: dict
-
 		# Select "per hour" from pay frequency dropdown
-		result = await tools.act(
-			SelectDropdownModel(select_dropdown={'index': pay_freq_element, 'text': 'per hour'}),
-			browser_session,
-		)
+		result = await tools.select_dropdown(index=pay_freq_element, text='per hour', browser_session=browser_session)
 		assert result.error is None, f'Failed to select pay frequency: {result.error}'
 
 		# Select "1099" from hire type dropdown
-		result = await tools.act(
-			SelectDropdownModel(select_dropdown={'index': hire_type_element, 'text': '1099'}),
-			browser_session,
-		)
+		result = await tools.select_dropdown(index=hire_type_element, text='1099', browser_session=browser_session)
 		assert result.error is None, f'Failed to select hire type: {result.error}'
 
 		# Find and click the submit button
@@ -174,14 +150,8 @@ class TestVueDropdownSubmit:
 
 		assert submit_button is not None, 'Could not find submit button'
 
-		# Create a model for the standard click action
-		class ClickModel(ActionModel):
-			click: dict
-
-		result = await tools.act(
-			ClickModel(click={'index': submit_button}),
-			browser_session,
-		)
+		# Click the submit button
+		result = await tools.click(index=submit_button, browser_session=browser_session)
 		assert result.error is None, f'Failed to click submit: {result.error}'
 
 		# Wait for submission

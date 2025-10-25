@@ -133,16 +133,9 @@ class TestReactDropdownSubmit:
 		httpserver.expect_request('/submit', method='POST').respond_with_handler(handle_submit)
 
 		# Navigate to the React form
-		from browser_use.agent.views import ActionModel
-		from browser_use.tools.views import GoToUrlAction
-
 		base_url = httpserver.url_for('/')
 
-		class NavigateActionModel(ActionModel):
-			navigate: GoToUrlAction | None = None
-
-		action = NavigateActionModel(navigate=GoToUrlAction(url=f'{base_url}react-dropdown', new_tab=False))
-		result = await tools.act(action, browser_session)
+		result = await tools.navigate(url=f'{base_url}react-dropdown', new_tab=False, browser_session=browser_session)
 		assert result.error is None
 
 		# Wait for React to initialize
@@ -152,37 +145,20 @@ class TestReactDropdownSubmit:
 
 		# Get browser state to find dropdown elements
 		await browser_session.get_browser_state_summary()
-		selector_map = await browser_session.get_selector_map()
 
-		# Find the dropdowns
-		employment_status_element = None
-		hire_type_element = None
-
-		for idx, element in selector_map.items():
-			if element.attributes.get('id') == 'employment-status':
-				employment_status_element = idx
-			elif element.attributes.get('id') == 'hire-type':
-				hire_type_element = idx
+		# Find the dropdowns by ID
+		employment_status_element = await browser_session.get_index_by_id('employment-status')
+		hire_type_element = await browser_session.get_index_by_id('hire-type')
 
 		assert employment_status_element is not None, 'Could not find employment-status dropdown'
 		assert hire_type_element is not None, 'Could not find hire-type dropdown'
 
-		# Create a model for the standard select_dropdown action
-		class SelectDropdownModel(ActionModel):
-			select_dropdown: dict
-
 		# Select "Part Time" from employment status dropdown
-		result = await tools.act(
-			SelectDropdownModel(select_dropdown={'index': employment_status_element, 'text': 'Part Time'}),
-			browser_session,
-		)
+		result = await tools.select_dropdown(index=employment_status_element, text='Part Time', browser_session=browser_session)
 		assert result.error is None, f'Failed to select employment status: {result.error}'
 
 		# Select "W-2" from hire type dropdown
-		result = await tools.act(
-			SelectDropdownModel(select_dropdown={'index': hire_type_element, 'text': 'W-2'}),
-			browser_session,
-		)
+		result = await tools.select_dropdown(index=hire_type_element, text='W-2', browser_session=browser_session)
 		assert result.error is None, f'Failed to select hire type: {result.error}'
 
 		# Find and click the submit button
@@ -197,14 +173,8 @@ class TestReactDropdownSubmit:
 
 		assert submit_button is not None, 'Could not find submit button'
 
-		# Create a model for the standard click action
-		class ClickModel(ActionModel):
-			click: dict
-
-		result = await tools.act(
-			ClickModel(click={'index': submit_button}),
-			browser_session,
-		)
+		# Click the submit button
+		result = await tools.click(index=submit_button, browser_session=browser_session)
 		assert result.error is None, f'Failed to click submit: {result.error}'
 
 		# Wait for submission
