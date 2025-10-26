@@ -25,7 +25,7 @@ jobs:
           echo "🚀 Triggering evaluation - PR #${{ github.event.pull_request.number }}"
           echo "Commit: ${{ github.event.pull_request.head.sha }}"
 
-          # You can customize the test
+          # You can customize the test here
           TEST_CASE="${{ vars.EVAL_TEST_CASE || 'InteractionTasks_v6' }}"
 
           response=$(curl -X POST \
