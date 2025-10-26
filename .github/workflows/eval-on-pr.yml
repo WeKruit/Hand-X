@@ -55,25 +55,4 @@ jobs:
             exit 1
           fi
 
-      - name: Post initial comment
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const triggerSuccess = '${{ steps.trigger.outcome }}' === 'success';
-            const commitSha = '${{ github.event.pull_request.head.sha }}';
-            const workflowUrl = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}';
 
-            let body;
-            if (triggerSuccess) {
-              body = `🚀 **Eval started** `;
-            } else {
-              body = `**Trigger failed**. Check [workflow logs](${workflowUrl}).`;
-            }
-
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: body
-            });
