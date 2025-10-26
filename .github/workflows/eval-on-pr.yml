@@ -18,7 +18,7 @@ jobs:
       github.event.pull_request.author_association == 'COLLABORATOR'
 
     steps:
-      - name: Trigger interactionTasks_v6 Evaluation
+      - name: Trigger Evaluation
         id: trigger
         continue-on-error: true
         run: |
