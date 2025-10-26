@@ -1029,41 +1029,54 @@ class BrowserSession(BaseModel):
 		# Get session from event-driven pool
 		session = await self._session_manager.get_session_for_target(target_id)
 
-		if session:
-			# Validate session is still active
-			is_valid = await self._session_manager.validate_session(target_id)
-			if not is_valid:
-				raise ValueError(f'Target {target_id} has detached - no active sessions')
+		if not session:
+			# Session not in pool yet - wait for attach event
+			self.logger.debug(f'[SessionManager] Waiting for target {target_id[:8]}... to attach...')
 
-			# Update focus if requested
-			if focus and self.agent_focus.target_id != target_id:
+			# Wait up to 2 seconds for the attach event
+			for attempt in range(20):
+				await asyncio.sleep(0.1)
+				session = await self._session_manager.get_session_for_target(target_id)
+				if session:
+					self.logger.debug(f'[SessionManager] Target appeared after {attempt * 100}ms')
+					break
+
+			if not session:
+				# Timeout - target doesn't exist
+				raise ValueError(f'Target {target_id} not found - may have detached or never existed')
+
+		# Validate session is still active
+		is_valid = await self._session_manager.validate_session(target_id)
+		if not is_valid:
+			raise ValueError(f'Target {target_id} has detached - no active sessions')
+
+		# Update focus if requested
+		# CRITICAL: Only allow focus change to 'page' type targets, not iframes/workers
+		if focus and self.agent_focus.target_id != target_id:
+			# Check target type before allowing focus change
+			targets = await self._cdp_client_root.send.Target.getTargets()
+			target_info = next((t for t in targets['targetInfos'] if t['targetId'] == target_id), None)
+			target_type = target_info.get('type') if target_info else 'unknown'
+
+			if target_type == 'page':
 				self.logger.debug(f'[SessionManager] Switching focus: {self.agent_focus.target_id[:8]}... → {target_id[:8]}...')
 				self.agent_focus = session
+			else:
+				# Ignore focus request for non-page targets (iframes, workers, etc.)
+				# These can detach at any time, causing agent_focus to point to dead target
+				self.logger.debug(
+					f'[SessionManager] Ignoring focus request for {target_type} target {target_id[:8]}... '
+					f'(agent_focus stays on {self.agent_focus.target_id[:8]}...)'
+				)
 
-			# Resume if waiting for debugger
-			if focus:
-				try:
-					await session.cdp_client.send.Runtime.runIfWaitingForDebugger(session_id=session.session_id)
-				except Exception:
-					pass  # May fail if not waiting
+		# Resume if waiting for debugger
+		if focus:
+			try:
+				await session.cdp_client.send.Runtime.runIfWaitingForDebugger(session_id=session.session_id)
+			except Exception:
+				pass  # May fail if not waiting
 
-			return session
-
-		# Session not in pool yet - wait for attach event
-		self.logger.debug(f'[SessionManager] Waiting for target {target_id[:8]}... to attach...')
-
-		# Wait up to 2 seconds for the attach event
-		for attempt in range(20):
-			await asyncio.sleep(0.1)
-			session = await self._session_manager.get_session_for_target(target_id)
-			if session:
-				self.logger.debug(f'[SessionManager] Target appeared after {attempt * 100}ms')
-				if focus:
-					self.agent_focus = session
-				return session
-
-		# Timeout - target doesn't exist
-		raise ValueError(f'Target {target_id} not found - may have detached or never existed')
+		return session
 
 	@property
 	def current_target_id(self) -> str | None:

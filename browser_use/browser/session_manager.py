@@ -166,6 +166,14 @@ class SessionManager:
 			self.logger.warning(f'[SessionManager] Session detached but target unknown (session={session_id[:8]}...)')
 			return
 
+		# CRITICAL: If agent_focus points to this target, clear it
+		# This prevents agent from using a dead target
+		if self.browser_session.agent_focus and self.browser_session.agent_focus.target_id == target_id:
+			self.logger.warning(
+				f'[SessionManager] Agent focus target {target_id[:8]}... is detaching! '
+				f'Clearing agent_focus to prevent using dead target.'
+			)
+
 		async with self._lock:
 			# Remove this session from target's session set
 			if target_id in self._target_sessions:
