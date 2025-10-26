@@ -26,7 +26,6 @@ jobs:
           echo "Commit: ${{ github.event.pull_request.head.sha }}"
 
           # You can customize the test case here
-          # Options: InteractionTasks_v6, poweruserCloud_v2, etc.
           TEST_CASE="${{ vars.EVAL_TEST_CASE || 'InteractionTasks_v6' }}"
 
           response=$(curl -X POST \
