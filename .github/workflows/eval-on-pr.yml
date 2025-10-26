@@ -1,5 +1,9 @@
 name: Evaluate PR
 
+permissions:
+  contents: read
+  pull-requests: write
+
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -15,6 +19,8 @@ jobs:
 
     steps:
       - name: Trigger interactionTasks_v6 Evaluation
+        id: trigger
+        continue-on-error: true
         run: |
           echo "🚀 Triggering evaluation for PR #${{ github.event.pull_request.number }}"
           echo "Commit: ${{ github.event.pull_request.head.sha }}"
@@ -43,14 +49,28 @@ jobs:
           fi
 
       - name: Post initial comment
+        if: always()
         uses: actions/github-script@v7
         with:
           script: |
+            const triggerSuccess = '${{ steps.trigger.outcome }}' === 'success';
+
+            let body;
+            if (triggerSuccess) {
+              body = '🚀 **Evaluation triggered** for commit `${{ github.event.pull_request.head.sha }}`\n\n' +
+                     'Results will be posted automatically when complete.';
+            } else {
+              body = '❌ **Failed to trigger evaluation** for commit `${{ github.event.pull_request.head.sha }}`\n\n' +
+                     'Please check the [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.\n\n' +
+                     'This may be due to:\n' +
+                     '- Missing or invalid secrets\n' +
+                     '- Evaluation platform unavailable\n' +
+                     '- Network issues';
+            }
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '🚀 **Evaluation triggered** for commit `${{ github.event.pull_request.head.sha }}`\n\n' +
-                    '⏳ Running evaluation (~3 minutes)\n\n' +
-                    'Results will be posted automatically when complete.'
-            })
+              body: body
+            });
