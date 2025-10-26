@@ -59,7 +59,7 @@ jobs:
 
             let body;
             if (triggerSuccess) {
-              body = `🚀 **Evaluation triggered** for commit \`${commitSha}\` `;
+              body = `🚀 **Evaluation started** for commit \`${commitSha}\` `;
             } else {
               body = `**Trigger evaluation failed** for commit \`${commitSha}\`. Check [workflow logs](${workflowUrl}).`;
             }
