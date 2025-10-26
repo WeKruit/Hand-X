@@ -62,8 +62,7 @@ jobs:
               body = `🚀 **Evaluation triggered** for commit \`${commitSha}\`\n\n` +
                      `Results will be posted automatically when complete.`;
             } else {
-              body = `❌ **Failed to trigger evaluation** for commit \`${commitSha}\`\n\n` +
-                     `Please check the [workflow logs](${workflowUrl}) for details.`;
+              body = `**Failed to trigger evaluation** for commit \`${commitSha}\`. Check [workflow logs](${workflowUrl}) for details.`;
             }
 
             await github.rest.issues.createComment({
