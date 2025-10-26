@@ -42,7 +42,7 @@ jobs:
             echo "✅ Evaluation triggered successfully"
             exit 0
           else
-            echo "❌ Failed to trigger"
+            echo "Failed to trigger"
             echo "$response"
             exit 1
           fi
