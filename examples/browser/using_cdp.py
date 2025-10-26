@@ -27,16 +27,16 @@ load_dotenv()
 
 from browser_use import Agent, Tools
 from browser_use.browser import BrowserProfile, BrowserSession
-from browser_use.llm import ChatBrowserUse
+from browser_use.llm import ChatOpenAI
 
-browser_session = BrowserSession(browser_profile=BrowserProfile(cdp_url='https://b6949893-1bef-4e5b-8e02-940f24215549.cdp0.browser-use.com', is_local=False))
+browser_session = BrowserSession(browser_profile=BrowserProfile(cdp_url='http://localhost:9222', is_local=True))
 tools = Tools()
 
 
 async def main():
 	agent = Agent(
-		task='Use the search functionality to locate pages detailing tuition and fees, then extract the published tuition fee information for undergraduate programs. website: https://columbia.edu',
-		llm=ChatBrowserUse(model='bu-latest'),
+		task='Visit https://duckduckgo.com and search for "browser-use founders"',
+		llm=ChatOpenAI(model='gpt-4.1-mini'),
 		tools=tools,
 		browser_session=browser_session,
 	)
