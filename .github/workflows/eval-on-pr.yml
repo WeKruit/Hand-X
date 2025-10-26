@@ -62,10 +62,6 @@ jobs:
             } else {
               body = '❌ **Failed to trigger evaluation** for commit `${{ github.event.pull_request.head.sha }}`\n\n' +
                      'Please check the [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.\n\n' +
-                     'This may be due to:\n' +
-                     '- Missing or invalid secrets\n' +
-                     '- Evaluation platform unavailable\n' +
-                     '- Network issues';
             }
 
             github.rest.issues.createComment({
