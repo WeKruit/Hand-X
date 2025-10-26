@@ -24,17 +24,11 @@ async def run_model_button_click_test(
 	3. Button click is verified by checking page state change
 	4. Completes within max 2 steps
 	"""
-	# Check if running in GitHub Actions
-	in_github_actions = os.getenv('GITHUB_ACTIONS') == 'true'
-
-	# Handle API key validation
+	# Handle API key validation - skip test if not available
 	if api_key_env is not None:
 		api_key = os.getenv(api_key_env)
 		if not api_key:
-			if in_github_actions:
-				pytest.fail(f'{api_key_env} not set - failing in GitHub Actions')
-			else:
-				pytest.skip(f'{api_key_env} not set')
+			pytest.skip(f'{api_key_env} not set - skipping test')
 	else:
 		api_key = None
 
@@ -44,10 +38,7 @@ async def run_model_button_click_test(
 	if model_class is ChatAzureOpenAI:
 		azure_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
 		if not azure_endpoint:
-			if in_github_actions:
-				pytest.fail('AZURE_OPENAI_ENDPOINT not set - failing in GitHub Actions')
-			else:
-				pytest.skip('AZURE_OPENAI_ENDPOINT not set')
+			pytest.skip('AZURE_OPENAI_ENDPOINT not set - skipping test')
 		# Add the azure_endpoint to extra_kwargs
 		extra_kwargs = {**extra_kwargs, 'azure_endpoint': azure_endpoint}
 
