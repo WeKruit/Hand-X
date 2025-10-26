@@ -2012,14 +2012,7 @@ def install():
 	print('📦 Installing Chromium browser + system dependencies...')
 	print('⏳ This may take a few minutes...\n')
 
-	result = subprocess.run([
-		'uvx',
-		'playwright',
-		'install',
-		'chromium',
-		'--with-deps',
-		'--no-shell'
-	])
+	result = subprocess.run(['uvx', 'playwright', 'install', 'chromium', '--with-deps', '--no-shell'])
 
 	if result.returncode == 0:
 		print('\n✅ Installation complete!')
