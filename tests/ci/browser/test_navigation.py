@@ -74,7 +74,7 @@ def base_url(http_server):
 	return f'http://{http_server.host}:{http_server.port}'
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture(scope='function')
 async def browser_session():
 	"""Create a browser session for navigation tests."""
 	session = BrowserSession(
