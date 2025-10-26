@@ -2125,9 +2125,20 @@ class DefaultActionWatchdog(BaseWatchdog):
 									element.value = option.value;
 									option.selected = true;
 
-									// Trigger change events
+									// Focus the element first (important for Vue.js and reactive frameworks)
+									element.focus();
+
+									// Trigger all necessary events for Vue.js and other reactive frameworks
+									// 1. input event - critical for Vue's v-model
+									const inputEvent = new Event('input', { bubbles: true });
+									element.dispatchEvent(inputEvent);
+
+									// 2. Trigger change events
 									const changeEvent = new Event('change', { bubbles: true });
 									element.dispatchEvent(changeEvent);
+									
+									// 3. blur event - helps with validation
+									element.blur();
 
 									return {
 										success: true,
