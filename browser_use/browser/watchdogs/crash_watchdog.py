@@ -168,10 +168,7 @@ class CrashWatchdog(BaseWatchdog):
 
 	async def _on_target_crash_cdp(self, target_id: TargetID) -> None:
 		"""Handle target crash detected via CDP."""
-		# Remove crashed session from pool
-		if session := self.browser_session._cdp_session_pool.pop(target_id, None):
-			await session.disconnect()
-			self.logger.debug(f'[CrashWatchdog] Removed crashed session from pool: {target_id}')
+		self.logger.debug(f'[CrashWatchdog] Target crashed: {target_id}, waiting for detach event')
 
 		# Get target info
 		cdp_client = self.browser_session.cdp_client
@@ -300,8 +297,9 @@ class CrashWatchdog(BaseWatchdog):
 				self.logger.debug(
 					f'[CrashWatchdog] Checking browser health for target {self.browser_session.agent_focus} error: {type(e).__name__}: {e}'
 				)
+				# With event-driven sessions, wait for re-attach instead of creating new socket
 				self.agent_focus = cdp_session = await self.browser_session.get_or_create_cdp_session(
-					target_id=self.agent_focus.target_id, new_socket=True, focus=True
+					target_id=self.agent_focus.target_id, focus=True
 				)
 
 			for target in (await self.browser_session.cdp_client.send.Target.getTargets()).get('targetInfos', []):
@@ -326,12 +324,9 @@ class CrashWatchdog(BaseWatchdog):
 			self.logger.error(
 				f'[CrashWatchdog] ❌ Crashed session detected for target {self.browser_session.agent_focus} error: {type(e).__name__}: {e}'
 			)
-			# Remove crashed session from pool
-			if self.browser_session.agent_focus and (target_id := self.browser_session.agent_focus.target_id):
-				if session := self.browser_session._cdp_session_pool.pop(target_id, None):
-					await session.disconnect()
-					self.logger.debug(f'[CrashWatchdog] Removed crashed session from pool: {target_id}')
-			self.browser_session.agent_focus.target_id = None  # type: ignore
+			# Chrome will send detach event, SessionManager will handle cleanup
+			if self.browser_session.agent_focus:
+				self.browser_session.agent_focus.target_id = None  # type: ignore
 
 		# Check browser process if we have PID
 		if self.browser_session._local_browser_watchdog and (proc := self.browser_session._local_browser_watchdog._subprocess):
