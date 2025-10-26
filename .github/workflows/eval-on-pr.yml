@@ -25,6 +25,10 @@ jobs:
           echo "🚀 Triggering evaluation for PR #${{ github.event.pull_request.number }}"
           echo "Commit: ${{ github.event.pull_request.head.sha }}"
 
+          # You can customize the test case here
+          # Options: InteractionTasks_v6, poweruserCloud_v2, etc.
+          TEST_CASE="${{ vars.EVAL_TEST_CASE || 'InteractionTasks_v6' }}"
+
           response=$(curl -X POST \
             "${{ secrets.EVAL_PLATFORM_URL }}/api/triggerInteractionTasksV6" \
             -H "Authorization: Bearer ${{ secrets.EVAL_PLATFORM_KEY }}" \
@@ -32,6 +36,7 @@ jobs:
             -d "{
               \"commitSha\": \"${{ github.event.pull_request.head.sha }}\",
               \"prNumber\": ${{ github.event.pull_request.number }},
+              \"testCase\": \"${TEST_CASE}\",
               \"githubRepo\": \"${{ github.repository }}\"
             }" -s)
 
