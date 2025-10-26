@@ -51,6 +51,6 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               body: '🚀 **Evaluation triggered** for commit `${{ github.event.pull_request.head.sha }}`\n\n' +
-                    '⏳ Running interactionTasks_v6 evaluation (~3 minutes)\n\n' +
+                    '⏳ Running evaluation (~3 minutes)\n\n' +
                     'Results will be posted automatically when complete.'
             })
