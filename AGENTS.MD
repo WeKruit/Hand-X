@@ -63,14 +63,14 @@ Source: (go to or request this content to learn more) https://docs.browser-use.c
   <Tab title="uv">
     ```bash install browser-use & chromium theme={null}
     uv pip install browser-use
-    uvx playwright install chromium --with-deps 
+    uvx browser-use install
     ```
   </Tab>
 
   <Tab title="pip">
     ```bash install browser-use & chromium theme={null}
     pip install browser-use
-    pip install playwright && playwright install chromium --with-deps
+    uvx browser-use install
     ```
   </Tab>
 </Tabs>
