@@ -44,7 +44,7 @@ jobs:
 
           echo "Response: $response"
 
-          # Check if trigger was successful
+          # Check if trigger  successful
           if echo "$response" | jq -e '.success == true' > /dev/null; then
             echo "✅ Evaluation triggered successfully"
             exit 0
