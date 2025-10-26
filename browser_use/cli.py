@@ -2004,5 +2004,30 @@ def auth():
 	asyncio.run(run_auth_command())
 
 
+@main.command()
+def install():
+	"""Install Chromium browser with system dependencies"""
+	import subprocess
+
+	print('📦 Installing Chromium browser + system dependencies...')
+	print('⏳ This may take a few minutes...\n')
+
+	result = subprocess.run([
+		'uvx',
+		'playwright',
+		'install',
+		'chromium',
+		'--with-deps',
+		'--no-shell'
+	])
+
+	if result.returncode == 0:
+		print('\n✅ Installation complete!')
+		print('🚀 Ready to use! Run: uvx browser-use')
+	else:
+		print('\n❌ Installation failed')
+		sys.exit(1)
+
+
 if __name__ == '__main__':
 	main()
