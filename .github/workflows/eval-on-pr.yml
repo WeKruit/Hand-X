@@ -38,6 +38,7 @@ jobs:
             -d "{
               \"commitSha\": \"${{ github.event.pull_request.head.sha }}\",
               \"prNumber\": ${{ github.event.pull_request.number }},
+              \"branchName\": \"${{ github.event.pull_request.head.ref }}\",
               \"testCase\": \"${TEST_CASE}\",
               \"githubRepo\": \"${{ github.repository }}\"
             }" -s)
@@ -65,9 +66,9 @@ jobs:
 
             let body;
             if (triggerSuccess) {
-              body = `🚀 **Eval started** for commit \`${commitSha}\`. `;
+              body = `🚀 **Eval started** `;
             } else {
-              body = `**Trigger failed** for commit \`${commitSha}\`. Check [workflow logs](${workflowUrl}).`;
+              body = `**Trigger failed**. Check [workflow logs](${workflowUrl}).`;
             }
 
             await github.rest.issues.createComment({
