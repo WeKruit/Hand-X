@@ -22,7 +22,7 @@ jobs:
         id: trigger
         continue-on-error: true
         run: |
-          echo "🚀 Triggering evaluation for PR #${{ github.event.pull_request.number }}"
+          echo "🚀 Triggering evaluation - PR #${{ github.event.pull_request.number }}"
           echo "Commit: ${{ github.event.pull_request.head.sha }}"
 
           # You can customize the test case here
