@@ -26,7 +26,10 @@ jobs:
           echo "Commit: ${{ github.event.pull_request.head.sha }}"
 
           # You can customize the test here
-          TEST_CASE="${{ vars.EVAL_TEST_CASE || 'InteractionTasks_v6' }}"
+          TEST_CASE="${{ vars.EVAL_TEST_CASE }}"
+          if [ -z "$TEST_CASE" ]; then
+            TEST_CASE="InteractionTasks_v6"
+          fi
 
           response=$(curl -X POST \
             "${{ secrets.EVAL_PLATFORM_URL }}/api/triggerInteractionTasksV6" \
@@ -62,7 +65,7 @@ jobs:
 
             let body;
             if (triggerSuccess) {
-              body = `🚀 **Eval started** for commit \`${commitSha}\` Check [workflow logs](${workflowUrl}) `;
+              body = `🚀 **Eval started** for commit \`${commitSha}\`. `;
             } else {
               body = `**Trigger failed** for commit \`${commitSha}\`. Check [workflow logs](${workflowUrl}).`;
             }
