@@ -11,6 +11,23 @@ if '--mcp' in sys.argv:
 	os.environ['BROWSER_USE_SETUP_LOGGING'] = 'false'
 	logging.disable(logging.CRITICAL)
 
+# Special case: install command doesn't need CLI dependencies
+if len(sys.argv) > 1 and sys.argv[1] == 'install':
+	import subprocess
+
+	print('📦 Installing Chromium browser + system dependencies...')
+	print('⏳ This may take a few minutes...\n')
+
+	result = subprocess.run(['uvx', 'playwright', 'install', 'chromium', '--with-deps', '--no-shell'])
+
+	if result.returncode == 0:
+		print('\n✅ Installation complete!')
+		print('🚀 Ready to use! Run: uvx browser-use')
+	else:
+		print('\n❌ Installation failed')
+		sys.exit(1)
+	sys.exit(0)
+
 import asyncio
 import json
 import logging
