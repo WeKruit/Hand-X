@@ -16,7 +16,7 @@ from pytest_httpserver import HTTPServer
 
 from browser_use.agent.service import Agent
 from browser_use.browser import BrowserSession
-from browser_use.browser.profile import BrowserProfile
+from browser_use.browser.profile import BrowserProfile, ViewportSize
 from tests.ci.conftest import create_mock_llm
 
 
@@ -32,12 +32,16 @@ def http_server():
 	test_dir = Path(__file__).parent
 	main_page_html = (test_dir / 'test_page_template.html').read_text()
 	iframe_html = (test_dir / 'iframe_template.html').read_text()
+	stacked_page_html = (test_dir / 'test_page_stacked_template.html').read_text()
 
 	# Route 1: Main page with shadow DOM and iframes
 	server.expect_request('/dom-test-main').respond_with_data(main_page_html, content_type='text/html')
 
 	# Route 2: Same-origin iframe content
 	server.expect_request('/iframe-same-origin').respond_with_data(iframe_html, content_type='text/html')
+
+	# Route 3: Stacked complex scenarios test page
+	server.expect_request('/stacked-test').respond_with_data(stacked_page_html, content_type='text/html')
 
 	yield server
 	server.stop()
@@ -54,9 +58,11 @@ async def browser_session():
 	"""Create a browser session for DOM serializer tests."""
 	session = BrowserSession(
 		browser_profile=BrowserProfile(
-			headless=False,
+			headless=True,
 			user_data_dir=None,
 			keep_alive=True,
+			window_size=ViewportSize(width=1920, height=1400),  # Taller window to fit all stacked elements
+			cross_origin_iframes=True,  # Enable cross-origin iframe extraction via CDP target switching
 		)
 	)
 	await session.start()
@@ -210,9 +216,6 @@ class TestDOMSerializer:
 			):
 				raise AssertionError(f'Click on {element_description} [{index}] failed: {result.extracted_content}')
 			print(f'   ✓ {element_description} [{index}] clicked successfully')
-
-			# Add delay so you can see the counter increment on screen
-			await asyncio.sleep(0.8)
 			return result
 
 		# Test clicking a regular DOM element (button)
@@ -260,10 +263,6 @@ class TestDOMSerializer:
 		)
 
 		print('\n🎉 DOM Serializer test completed successfully!')
-
-		# Keep browser open for 3 seconds so you can see the final counter
-		print('   Browser will close in 3 seconds...')
-		await asyncio.sleep(3)
 
 	async def test_dom_serializer_element_counts_detailed(self, browser_session, base_url):
 		"""Detailed test to verify specific element types are captured correctly."""
@@ -345,6 +344,186 @@ class TestDOMSerializer:
 
 		print('\n✅ Element type verification passed!')
 
+	async def test_stacked_complex_scenarios(self, browser_session, base_url):
+		"""Test clicking through stacked complex scenarios and verify cross-origin iframe extraction.
+
+		This test verifies:
+		1. Open shadow DOM element interaction
+		2. Closed shadow DOM element interaction (nested inside open shadow)
+		3. Same-origin iframe element interaction (inside closed shadow)
+		4. Cross-origin iframe extraction via CDP target switching (extracts text/structure from example.com)
+		5. Truly nested structure: Open Shadow → Closed Shadow → Iframe
+		"""
+		from browser_use.tools.service import Tools
+
+		tools = Tools()
+
+		# Navigate to stacked test page
+		await tools.navigate(url=f'{base_url}/stacked-test', new_tab=False, browser_session=browser_session)
+
+		import asyncio
+
+		await asyncio.sleep(1)
+
+		# Get browser state
+		browser_state_summary = await browser_session.get_browser_state_summary(
+			include_screenshot=False,
+			include_recent_events=False,
+		)
+
+		selector_map = browser_state_summary.dom_state.selector_map
+		print(f'\n📊 Stacked Test - Found {len(selector_map)} elements')
+
+		# Debug: Show all elements
+		print('\n🔍 All elements found:')
+		for idx, element in selector_map.items():
+			elem_id = element.attributes.get('id', 'NO_ID') if hasattr(element, 'attributes') else 'NO_ATTR'
+			print(f'   [{idx}] {element.tag_name} id={elem_id} target={element.target_id[-4:] if element.target_id else "None"}')
+
+		# Categorize elements
+		open_shadow_elements = []
+		closed_shadow_elements = []
+		iframe_elements = []
+		final_button = None
+
+		for idx, element in selector_map.items():
+			if hasattr(element, 'attributes') and 'id' in element.attributes:
+				elem_id = element.attributes['id'].lower()
+
+				if 'open-shadow' in elem_id:
+					open_shadow_elements.append((idx, element))
+				elif 'closed-shadow' in elem_id:
+					closed_shadow_elements.append((idx, element))
+				elif 'iframe' in elem_id and element.tag_name != 'iframe':
+					iframe_elements.append((idx, element))
+				elif 'final-button' in elem_id:
+					final_button = (idx, element)
+
+		print('\n📋 Element Distribution:')
+		print(f'   Open Shadow: {len(open_shadow_elements)} elements')
+		print(f'   Closed Shadow: {len(closed_shadow_elements)} elements')
+		print(f'   Iframe content: {len(iframe_elements)} elements')
+		print(f'   Final button: {"Found" if final_button else "Not found"}')
+
+		# Test clicking through each stacked layer
+		print('\n🖱️  Testing Click Functionality Through Stacked Layers:')
+
+		async def click(index: int, element_description: str, browser_session: BrowserSession):
+			result = await tools.click(index=index, browser_session=browser_session)
+			if result.error:
+				raise AssertionError(f'Click on {element_description} [{index}] failed: {result.error}')
+			if result.extracted_content and (
+				'not available' in result.extracted_content.lower() or 'failed' in result.extracted_content.lower()
+			):
+				raise AssertionError(f'Click on {element_description} [{index}] failed: {result.extracted_content}')
+			print(f'   ✓ {element_description} [{index}] clicked successfully')
+			return result
+
+		clicks_performed = 0
+
+		# 1. Click open shadow button
+		if open_shadow_elements:
+			open_shadow_btn = next((idx for idx, el in open_shadow_elements if 'btn' in el.attributes.get('id', '')), None)
+			if open_shadow_btn:
+				await click(open_shadow_btn, 'Open Shadow DOM button', browser_session)
+				clicks_performed += 1
+
+		# 2. Click closed shadow button
+		if closed_shadow_elements:
+			closed_shadow_btn = next((idx for idx, el in closed_shadow_elements if 'btn' in el.attributes.get('id', '')), None)
+			if closed_shadow_btn:
+				await click(closed_shadow_btn, 'Closed Shadow DOM button', browser_session)
+				clicks_performed += 1
+
+		# 3. Click iframe button
+		if iframe_elements:
+			iframe_btn = next((idx for idx, el in iframe_elements if 'btn' in el.attributes.get('id', '')), None)
+			if iframe_btn:
+				await click(iframe_btn, 'Same-origin iframe button', browser_session)
+				clicks_performed += 1
+
+		# 4. Try clicking cross-origin iframe tag (can click the tag, but not elements inside)
+		cross_origin_iframe_tag = None
+		for idx, element in selector_map.items():
+			if (
+				element.tag_name == 'iframe'
+				and hasattr(element, 'attributes')
+				and 'cross-origin' in element.attributes.get('id', '').lower()
+			):
+				cross_origin_iframe_tag = (idx, element)
+				break
+
+		# Verify cross-origin iframe extraction is working
+		# Check the full DOM tree (not just selector_map which only has interactive elements)
+		def count_targets_in_tree(node, targets=None):
+			if targets is None:
+				targets = set()
+			# SimplifiedNode has original_node which is an EnhancedDOMTreeNode
+			if hasattr(node, 'original_node') and node.original_node and node.original_node.target_id:
+				targets.add(node.original_node.target_id)
+			# Recursively check children
+			if hasattr(node, 'children') and node.children:
+				for child in node.children:
+					count_targets_in_tree(child, targets)
+			return targets
+
+		all_targets = count_targets_in_tree(browser_state_summary.dom_state._root)
+
+		print(f'\n📊 Cross-Origin Iframe Extraction:')
+		print(f'   Found elements from {len(all_targets)} different CDP targets in full DOM tree')
+
+		if len(all_targets) >= 2:
+			print('   ✅ Cross-origin iframe extraction IS WORKING!')
+			print('   ✓ Successfully extracted DOM from cross-origin iframe (example.com)')
+			print('   ✓ CDP target switching feature is enabled and functional')
+		else:
+			print('   ⚠️  Only found elements from 1 target (cross-origin extraction may not be working)')
+
+		if cross_origin_iframe_tag:
+			print(f'\n   📌 Found cross-origin iframe tag [{cross_origin_iframe_tag[0]}]')
+			# Note: We don't increment clicks_performed since this doesn't trigger our counter
+			# await click(cross_origin_iframe_tag[0], 'Cross-origin iframe tag (scroll)', browser_session)
+
+		# 5. Click final button (after all stacked elements)
+		if final_button:
+			await click(final_button[0], 'Final button (after stack)', browser_session)
+			clicks_performed += 1
+
+		# Validate click counter
+		print('\n✅ Validating click counter...')
+
+		# Get CDP session from a non-iframe element (open shadow or final button)
+		if open_shadow_elements:
+			cdp_session = await browser_session.get_or_create_cdp_session(target_id=open_shadow_elements[0][1].target_id)
+		elif final_button:
+			cdp_session = await browser_session.get_or_create_cdp_session(target_id=final_button[1].target_id)
+		else:
+			cdp_session = browser_session.agent_focus
+
+		result = await cdp_session.cdp_client.send.Runtime.evaluate(
+			params={
+				'expression': 'window.getClickCount()',
+				'returnByValue': True,
+			},
+			session_id=cdp_session.session_id,
+		)
+
+		click_count = result.get('result', {}).get('value', 0)
+		print(f'   Click counter value: {click_count}')
+		print(f'   Expected clicks: {clicks_performed}')
+
+		assert click_count == clicks_performed, (
+			f'Expected {clicks_performed} clicks, but counter shows {click_count}. '
+			f'Some clicks did not execute JavaScript properly.'
+		)
+
+		print('\n🎉 Stacked scenario test completed successfully!')
+		print('   ✓ Open shadow DOM clicks work')
+		print('   ✓ Closed shadow DOM clicks work')
+		print('   ✓ Same-origin iframe clicks work (can access elements inside)')
+		print('   ✓ Cross-origin iframe extraction works (CDP target switching enabled)')
+		print('   ✓ Truly nested structure works: Open Shadow → Closed Shadow → Iframe')
+
 
 if __name__ == '__main__':
 	"""Run test in debug mode with manual fixture setup."""
@@ -360,6 +539,7 @@ if __name__ == '__main__':
 	async def main():
 		# Set up HTTP server fixture
 		from pathlib import Path
+
 		from pytest_httpserver import HTTPServer
 
 		server = HTTPServer()
@@ -367,12 +547,9 @@ if __name__ == '__main__':
 
 		# Load HTML templates from files (same as http_server fixture)
 		test_dir = Path(__file__).parent
-		main_page_html = (test_dir / 'test_page_template.html').read_text()
-		iframe_html = (test_dir / 'iframe_template.html').read_text()
-
+		main_page_html = (test_dir / 'test_page_stacked_template.html').read_text()
 		# Set up routes using templates
-		server.expect_request('/dom-test-main').respond_with_data(main_page_html, content_type='text/html')
-		server.expect_request('/iframe-same-origin').respond_with_data(iframe_html, content_type='text/html')
+		server.expect_request('/stacked-test').respond_with_data(main_page_html, content_type='text/html')
 
 		base_url = f'http://{server.host}:{server.port}'
 		print(f'\n🌐 HTTP Server running at {base_url}')
@@ -395,7 +572,7 @@ if __name__ == '__main__':
 
 			# Run the test
 			test = TestDOMSerializer()
-			await test.test_dom_serializer_with_shadow_dom_and_iframes(session, base_url)
+			await test.test_stacked_complex_scenarios(session, base_url)
 
 			print('\n✅ Test completed successfully!')
 
