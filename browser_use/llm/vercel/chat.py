@@ -1,5 +1,6 @@
+import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias, TypeVar, overload
 
 import httpx
@@ -184,6 +185,8 @@ class ChatVercel(BaseChatModel):
 	    base_url: The Vercel AI Gateway endpoint (defaults to https://ai-gateway.vercel.sh/v1)
 	    temperature: Sampling temperature (0-2)
 	    max_tokens: Maximum tokens to generate
+	    reasoning_models: List of reasoning model patterns (e.g., 'o1', 'gpt-oss') that need
+	        prompt-based JSON extraction. Auto-detects common reasoning models by default.
 	    timeout: Request timeout in seconds
 	    max_retries: Maximum number of retries for failed requests
 	"""
@@ -195,6 +198,16 @@ class ChatVercel(BaseChatModel):
 	temperature: float | None = None
 	max_tokens: int | None = None
 	top_p: float | None = None
+	reasoning_models: list[str] | None = field(
+		default_factory=lambda: [
+			'o1',
+			'o3',
+			'o4',
+			'gpt-oss',
+			'deepseek-r1',
+			'qwen3-next-80b-a3b-thinking',
+		]
+	)
 
 	# Client initialization parameters
 	api_key: str | None = None
@@ -263,6 +276,83 @@ class ChatVercel(BaseChatModel):
 			total_tokens=response.usage.total_tokens,
 		)
 
+	def _fix_gemini_schema(self, schema: dict[str, Any]) -> dict[str, Any]:
+		"""
+		Convert a Pydantic model to a Gemini-compatible schema.
+
+		This function removes unsupported properties like 'additionalProperties' and resolves
+		$ref references that Gemini doesn't support.
+		"""
+
+		# Handle $defs and $ref resolution
+		if '$defs' in schema:
+			defs = schema.pop('$defs')
+
+			def resolve_refs(obj: Any) -> Any:
+				if isinstance(obj, dict):
+					if '$ref' in obj:
+						ref = obj.pop('$ref')
+						ref_name = ref.split('/')[-1]
+						if ref_name in defs:
+							# Replace the reference with the actual definition
+							resolved = defs[ref_name].copy()
+							# Merge any additional properties from the reference
+							for key, value in obj.items():
+								if key != '$ref':
+									resolved[key] = value
+							return resolve_refs(resolved)
+						return obj
+					else:
+						# Recursively process all dictionary values
+						return {k: resolve_refs(v) for k, v in obj.items()}
+				elif isinstance(obj, list):
+					return [resolve_refs(item) for item in obj]
+				return obj
+
+			schema = resolve_refs(schema)
+
+		# Remove unsupported properties
+		def clean_schema(obj: Any) -> Any:
+			if isinstance(obj, dict):
+				# Remove unsupported properties
+				cleaned = {}
+				for key, value in obj.items():
+					if key not in ['additionalProperties', 'title', 'default']:
+						cleaned_value = clean_schema(value)
+						# Handle empty object properties - Gemini doesn't allow empty OBJECT types
+						if (
+							key == 'properties'
+							and isinstance(cleaned_value, dict)
+							and len(cleaned_value) == 0
+							and isinstance(obj.get('type', ''), str)
+							and obj.get('type', '').upper() == 'OBJECT'
+						):
+							# Convert empty object to have at least one property
+							cleaned['properties'] = {'_placeholder': {'type': 'string'}}
+						else:
+							cleaned[key] = cleaned_value
+
+				# If this is an object type with empty properties, add a placeholder
+				if (
+					isinstance(cleaned.get('type', ''), str)
+					and cleaned.get('type', '').upper() == 'OBJECT'
+					and 'properties' in cleaned
+					and isinstance(cleaned['properties'], dict)
+					and len(cleaned['properties']) == 0
+				):
+					cleaned['properties'] = {'_placeholder': {'type': 'string'}}
+
+				# Also remove 'title' from the required list if it exists
+				if 'required' in cleaned and isinstance(cleaned.get('required'), list):
+					cleaned['required'] = [p for p in cleaned['required'] if p != 'title']
+
+				return cleaned
+			elif isinstance(obj, list):
+				return [clean_schema(item) for item in obj]
+			return obj
+
+		return clean_schema(schema)
+
 	@overload
 	async def ainvoke(self, messages: list[BaseMessage], output_format: None = None) -> ChatInvokeCompletion[str]: ...
 
@@ -309,41 +399,101 @@ class ChatVercel(BaseChatModel):
 				)
 
 			else:
-				# Create a JSON schema for structured output
-				schema = SchemaOptimizer.create_optimized_json_schema(output_format)
-
-				response_format_schema: JSONSchema = {
-					'name': 'agent_output',
-					'strict': True,
-					'schema': schema,
-				}
-
-				# Return structured response
-				response = await self.get_client().chat.completions.create(
-					model=self.model,
-					messages=vercel_messages,
-					response_format=ResponseFormatJSONSchema(
-						json_schema=response_format_schema,
-						type='json_schema',
-					),
-					**model_params,
+				is_google_model = self.model.startswith('google/')
+				is_reasoning_model = self.reasoning_models and any(
+					str(pattern).lower() in str(self.model).lower() for pattern in self.reasoning_models
 				)
 
-				if response.choices[0].message.content is None:
-					raise ModelProviderError(
-						message='Failed to parse structured output from model response',
-						status_code=500,
-						model=self.name,
+				if is_google_model or is_reasoning_model:
+					modified_messages = [m.model_copy(deep=True) for m in messages]
+
+					schema = SchemaOptimizer.create_gemini_optimized_schema(output_format)
+					json_instruction = f'\n\nIMPORTANT: You must respond with ONLY a valid JSON object (no markdown, no code blocks, no explanations) that exactly matches this schema:\n{json.dumps(schema, indent=2)}'
+
+					if modified_messages and modified_messages[0].role == 'system':
+						if isinstance(modified_messages[0].content, str):
+							modified_messages[0].content += json_instruction
+					elif modified_messages and modified_messages[-1].role == 'user':
+						if isinstance(modified_messages[-1].content, str):
+							modified_messages[-1].content += json_instruction
+
+					vercel_messages = VercelMessageSerializer.serialize_messages(modified_messages)
+
+					response = await self.get_client().chat.completions.create(
+						model=self.model,
+						messages=vercel_messages,
+						**model_params,
 					)
 
-				usage = self._get_usage(response)
-				parsed = output_format.model_validate_json(response.choices[0].message.content)
+					content = response.choices[0].message.content if response.choices else None
 
-				return ChatInvokeCompletion(
-					completion=parsed,
-					usage=usage,
-					stop_reason=response.choices[0].finish_reason if response.choices else None,
-				)
+					if not content:
+						raise ModelProviderError(
+							message='No response from model',
+							status_code=500,
+							model=self.name,
+						)
+
+					try:
+						text = content.strip()
+						if text.startswith('```json') and text.endswith('```'):
+							text = text[7:-3].strip()
+						elif text.startswith('```') and text.endswith('```'):
+							text = text[3:-3].strip()
+
+						parsed_data = json.loads(text)
+						parsed = output_format.model_validate(parsed_data)
+
+						usage = self._get_usage(response)
+						return ChatInvokeCompletion(
+							completion=parsed,
+							usage=usage,
+							stop_reason=response.choices[0].finish_reason if response.choices else None,
+						)
+
+					except (json.JSONDecodeError, ValueError) as e:
+						raise ModelProviderError(
+							message=f'Failed to parse JSON response: {str(e)}. Raw response: {content[:200]}',
+							status_code=500,
+							model=self.name,
+						) from e
+
+				else:
+					schema = SchemaOptimizer.create_optimized_json_schema(output_format)
+
+					response_format_schema: JSONSchema = {
+						'name': 'agent_output',
+						'strict': True,
+						'schema': schema,
+					}
+
+					response = await self.get_client().chat.completions.create(
+						model=self.model,
+						messages=vercel_messages,
+						response_format=ResponseFormatJSONSchema(
+							json_schema=response_format_schema,
+							type='json_schema',
+						),
+						**model_params,
+					)
+
+					content = response.choices[0].message.content if response.choices else None
+
+					if not content:
+						raise ModelProviderError(
+							message='Failed to parse structured output from model response - empty or null content',
+							status_code=500,
+							model=self.name,
+						)
+
+					usage = self._get_usage(response)
+					parsed = output_format.model_validate_json(content)
+
+					return ChatInvokeCompletion(
+						completion=parsed,
+						usage=usage,
+						stop_reason=response.choices[0].finish_reason if response.choices else None,
+					)
 
 		except RateLimitError as e:
 			raise ModelRateLimitError(message=e.message, model=self.name) from e
