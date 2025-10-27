@@ -6,15 +6,8 @@ class ClickableElementDetector:
 	def is_interactive(node: EnhancedDOMTreeNode) -> bool:
 		"""Check if this node is clickable/interactive using enhanced scoring."""
 
-		# Debug: Check ALL links that reach this function
-		if node.tag_name and node.tag_name.lower() == 'a':
-			target_short = node.target_id[-4:] if node.target_id else 'None'
-			print(f'🔗 ClickableDetector.is_interactive() called for link, target={target_short}, node_type={node.node_type}')
-
 		# Skip non-element nodes
 		if node.node_type != NodeType.ELEMENT_NODE:
-			if node.tag_name and node.tag_name.lower() == 'a':
-				print(f'🔗 ClickableDetector: Link is not ELEMENT_NODE, returning False')
 			return False
 
 		# # if ax ignored skip
@@ -75,18 +68,10 @@ class ClickableElementDetector:
 				try:
 					# aria disabled
 					if prop.name == 'disabled' and prop.value:
-						# Debug for links
-						if node.tag_name and node.tag_name.lower() == 'a':
-							target_short = node.target_id[-4:] if node.target_id else 'None'
-							print(f'🔗 ClickableDetector: Link target={target_short} has disabled=True, returning False')
 						return False
 
 					# aria hidden
 					if prop.name == 'hidden' and prop.value:
-						# Debug for links
-						if node.tag_name and node.tag_name.lower() == 'a':
-							target_short = node.target_id[-4:] if node.target_id else 'None'
-							print(f'🔗 ClickableDetector: Link target={target_short} has hidden=True, returning False')
 						return False
 
 					# Direct interactiveness indicators
@@ -122,13 +107,8 @@ class ClickableElementDetector:
 			'option',
 			'optgroup',
 		}
-		# Debug: Check if we're processing a link
-		if node.tag_name and node.tag_name.lower() == 'a':
-			elem_id = node.attributes.get('id', 'NO_ID') if node.attributes else 'NO_ATTRS'
-			href = node.attributes.get('href', 'NO_HREF') if node.attributes else 'NO_HREF'
-			target_short = node.target_id[-4:] if node.target_id else 'None'
-			print(f'🔗 ClickableDetector: Found <a> tag id={elem_id}, href={href}, target={target_short}, tag_name_in_set={node.tag_name in interactive_tags}')
-		if node.tag_name in interactive_tags:
+		# Check with case-insensitive comparison
+		if node.tag_name and node.tag_name.lower() in interactive_tags:
 			return True
 
 		# SVG elements need special handling - only interactive if they have explicit handlers
