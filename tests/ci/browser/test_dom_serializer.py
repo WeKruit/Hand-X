@@ -469,7 +469,7 @@ class TestDOMSerializer:
 
 		all_targets = count_targets_in_tree(browser_state_summary.dom_state._root)
 
-		print(f'\n📊 Cross-Origin Iframe Extraction:')
+		print('\n📊 Cross-Origin Iframe Extraction:')
 		print(f'   Found elements from {len(all_targets)} different CDP targets in full DOM tree')
 
 		if len(all_targets) >= 2:
