@@ -23,90 +23,21 @@ from tests.ci.conftest import create_mock_llm
 @pytest.fixture(scope='session')
 def http_server():
 	"""Create and provide a test HTTP server for DOM serializer tests."""
+	from pathlib import Path
+
 	server = HTTPServer()
 	server.start()
 
+	# Load HTML templates from files
+	test_dir = Path(__file__).parent
+	main_page_html = (test_dir / 'test_page_template.html').read_text()
+	iframe_html = (test_dir / 'iframe_template.html').read_text()
+
 	# Route 1: Main page with shadow DOM and iframes
-	server.expect_request('/dom-test-main').respond_with_data(
-		"""
-		<!DOCTYPE html>
-		<html>
-		<head>
-			<title>DOM Serializer Test - Main Page</title>
-			<style>
-				body { font-family: Arial; padding: 20px; }
-				.section { margin: 20px 0; padding: 15px; border: 1px solid #ccc; }
-			</style>
-		</head>
-		<body>
-			<h1>DOM Serializer Test Page</h1>
-
-			<!-- Regular DOM elements (3 interactive elements) -->
-			<div class="section">
-				<h2>Regular DOM Elements</h2>
-				<button id="regular-btn-1">Regular Button 1</button>
-				<input type="text" id="regular-input" placeholder="Regular input" />
-				<a href="#test" id="regular-link">Regular Link</a>
-			</div>
-
-			<!-- Shadow DOM elements (3 interactive elements inside shadow) -->
-			<div class="section">
-				<h2>Shadow DOM Elements</h2>
-				<div id="shadow-host"></div>
-			</div>
-
-			<!-- Same-origin iframe (2 interactive elements inside) -->
-			<div class="section">
-				<h2>Same-Origin Iframe</h2>
-				<iframe id="same-origin-iframe" src="/iframe-same-origin" style="width:100%; height:200px; border:1px solid #999;"></iframe>
-			</div>
-
-			<!-- Cross-origin iframe (should NOT be accessible) -->
-			<div class="section">
-				<h2>Cross-Origin Iframe</h2>
-				<iframe id="cross-origin-iframe" src="https://example.com" style="width:100%; height:200px; border:1px solid #999;"></iframe>
-			</div>
-
-			<script>
-				// Create shadow DOM with interactive elements
-				const shadowHost = document.getElementById('shadow-host');
-				const shadowRoot = shadowHost.attachShadow({mode: 'open'});
-
-				shadowRoot.innerHTML = `
-					<style>
-						.shadow-content { padding: 10px; background: #f0f0f0; }
-					</style>
-					<div class="shadow-content">
-						<p>Content inside Shadow DOM:</p>
-						<button id="shadow-btn-1">Shadow Button 1</button>
-						<input type="text" id="shadow-input" placeholder="Shadow input" />
-						<button id="shadow-btn-2">Shadow Button 2</button>
-					</div>
-				`;
-			</script>
-		</body>
-		</html>
-		""",
-		content_type='text/html',
-	)
+	server.expect_request('/dom-test-main').respond_with_data(main_page_html, content_type='text/html')
 
 	# Route 2: Same-origin iframe content
-	server.expect_request('/iframe-same-origin').respond_with_data(
-		"""
-		<!DOCTYPE html>
-		<html>
-		<head>
-			<title>Same-Origin Iframe</title>
-		</head>
-		<body style="padding: 10px; background: #fff;">
-			<h3>Same-Origin Iframe Content</h3>
-			<button id="iframe-btn">Iframe Button</button>
-			<input type="text" id="iframe-input" placeholder="Iframe input" />
-		</body>
-		</html>
-		""",
-		content_type='text/html',
-	)
+	server.expect_request('/iframe-same-origin').respond_with_data(iframe_html, content_type='text/html')
 
 	yield server
 	server.stop()
@@ -123,7 +54,7 @@ async def browser_session():
 	"""Create a browser session for DOM serializer tests."""
 	session = BrowserSession(
 		browser_profile=BrowserProfile(
-			headless=True,
+			headless=False,
 			user_data_dir=None,
 			keep_alive=True,
 		)
@@ -151,6 +82,9 @@ class TestDOMSerializer:
 		- Iframe tags: 2 elements (the iframe elements themselves)
 		Total: ~10-11 interactive elements
 		"""
+		from browser_use.tools.service import Tools
+
+		tools = Tools()
 
 		# Create mock LLM actions that will click elements from each category
 		# We'll generate actions dynamically after we know the indices
@@ -172,14 +106,8 @@ class TestDOMSerializer:
 			}}
 			"""
 		]
+		await tools.navigate(url=f'{base_url}/dom-test-main', new_tab=False, browser_session=browser_session)
 
-		# First, just navigate to the page
-		from browser_use.browser.events import NavigateToUrlEvent
-
-		nav = browser_session.event_bus.dispatch(NavigateToUrlEvent(url=f'{base_url}/dom-test-main', new_tab=False))
-		await nav
-
-		# Wait a moment for page to fully load
 		import asyncio
 
 		await asyncio.sleep(1)
@@ -194,15 +122,28 @@ class TestDOMSerializer:
 		assert browser_state_summary.dom_state is not None, 'DOM state should not be None'
 
 		selector_map = browser_state_summary.dom_state.selector_map
+		print(f'   Selector map: {selector_map.keys()}')
 
 		print('\n📊 DOM Serializer Analysis:')
 		print(f'   Total interactive elements found: {len(selector_map)}')
+		serilized_text = browser_state_summary.dom_state.llm_representation()
+		print(f'   Serialized text: {serilized_text}')
+		# assume all selector map keys are as text in the serialized text
+		# for idx, element in selector_map.items():
+		# 	assert str(idx) in serilized_text, f'Element {idx} should be in serialized text'
+		# 	print(f'   ✓ Element {idx} found in serialized text')
 
-		# Categorize elements by their actual ID ranges (based on observed patterns)
-		# Shadow DOM elements: IDs 180, 124, 184 (buttons and inputs inside shadow)
-		# Iframe elements: IDs 224, 132 (button and input inside same-origin iframe)
-		# Regular elements: IDs like 156, 123, 160 (main page elements)
-		# iframe tags themselves: IDs 196, 131
+		# assume at least 10 interactive elements are in the selector map
+		assert len(selector_map) >= 10, f'Should find at least 10 interactive elements, found {len(selector_map)}'
+
+		# assert all interactive elements marked with [123] from serialized text are in selector map
+		# find all [index] from serialized text with regex
+		import re
+
+		indices = re.findall(r'\[(\d+)\]', serilized_text)
+		for idx in indices:
+			assert int(idx) in selector_map.keys(), f'Element {idx} should be in selector map'
+			print(f'   ✓ Element {idx} found in selector map')
 
 		regular_elements = []
 		shadow_elements = []
@@ -231,22 +172,6 @@ class TestDOMSerializer:
 			else:
 				regular_elements.append((idx, element))
 
-		print(f'\n   Regular DOM elements: {len(regular_elements)}')
-		for idx, el in regular_elements[:5]:  # Show first 5
-			print(f'      [{idx}] {str(el)[:100]}...')
-
-		print(f'\n   Shadow DOM elements: {len(shadow_elements)}')
-		for idx, el in shadow_elements[:5]:  # Show first 5
-			print(f'      [{idx}] {str(el)[:100]}...')
-
-		print(f'\n   Iframe content elements: {len(iframe_content_elements)}')
-		for idx, el in iframe_content_elements[:5]:  # Show first 5
-			print(f'      [{idx}] {str(el)[:100]}...')
-
-		print(f'\n   Iframe tags: {len(iframe_tags)}')
-		for idx, el in iframe_tags[:5]:  # Show first 5
-			print(f'      [{idx}] {str(el)[:100]}...')
-
 		# Verify element counts based on our test page structure:
 		# - Regular DOM: 3-4 elements (button, input, link on main page + possible cross-origin content)
 		# - Shadow DOM: 3 elements (2 buttons, 1 input inside shadow root)
@@ -274,13 +199,9 @@ class TestDOMSerializer:
 		# Now test clicking elements from each category using tools.click(index)
 		print('\n🖱️  Testing Click Functionality:')
 
-		from browser_use.tools.service import Tools
-
-		tools = Tools()
-
 		# Helper to call tools.click(index) and verify it worked
-		async def click(index: int, element_description: str):
-			result = await tools.registry.execute_action('click', {'index': index}, browser_session=browser_session)
+		async def click(index: int, element_description: str, browser_session: BrowserSession):
+			result = await tools.click(index=index, browser_session=browser_session)
 			# Check both error field and extracted_content for failure messages
 			if result.error:
 				raise AssertionError(f'Click on {element_description} [{index}] failed: {result.error}')
@@ -289,37 +210,60 @@ class TestDOMSerializer:
 			):
 				raise AssertionError(f'Click on {element_description} [{index}] failed: {result.extracted_content}')
 			print(f'   ✓ {element_description} [{index}] clicked successfully')
+
+			# Add delay so you can see the counter increment on screen
+			await asyncio.sleep(0.8)
 			return result
 
 		# Test clicking a regular DOM element (button)
 		if regular_elements:
 			regular_button_idx = next((idx for idx, el in regular_elements if 'regular-btn' in el.attributes.get('id', '')), None)
 			if regular_button_idx:
-				await click(regular_button_idx, 'Regular DOM button')
+				await click(regular_button_idx, 'Regular DOM button', browser_session)
 
 		# Test clicking a shadow DOM element (button)
 		if shadow_elements:
 			shadow_button_idx = next((idx for idx, el in shadow_elements if 'btn' in el.attributes.get('id', '')), None)
 			if shadow_button_idx:
-				await click(shadow_button_idx, 'Shadow DOM button')
+				await click(shadow_button_idx, 'Shadow DOM button', browser_session)
 
 		# Test clicking a same-origin iframe element (button)
 		if iframe_content_elements:
 			iframe_button_idx = next((idx for idx, el in iframe_content_elements if 'btn' in el.attributes.get('id', '')), None)
 			if iframe_button_idx:
-				await click(iframe_button_idx, 'Same-origin iframe button')
+				await click(iframe_button_idx, 'Same-origin iframe button', browser_session)
 
-		# Test clicking a cross-origin iframe element (expected to fail)
-		cross_origin_elements = [
-			(idx, el)
-			for idx, el in regular_elements
-			if hasattr(el, 'attributes') and 'id' not in el.attributes and el.tag_name == 'a'
-		]
-		if cross_origin_elements:
-			cross_origin_link_idx = cross_origin_elements[0][0]
-			await click(cross_origin_link_idx, 'Cross-origin element')
+		# Validate click counter - verify all 3 clicks actually executed JavaScript
+		print('\n✅ Validating click counter...')
+
+		# Get the CDP session for the main page (use target from a regular DOM element)
+		# Note: browser_session.agent_focus may point to a different target than the page
+		if regular_elements and regular_elements[0][1].target_id:
+			cdp_session = await browser_session.get_or_create_cdp_session(target_id=regular_elements[0][1].target_id)
+		else:
+			cdp_session = browser_session.agent_focus
+
+		result = await cdp_session.cdp_client.send.Runtime.evaluate(
+			params={
+				'expression': 'window.getClickCount()',
+				'returnByValue': True,
+			},
+			session_id=cdp_session.session_id,
+		)
+
+		click_count = result.get('result', {}).get('value', 0)
+		print(f'   Click counter value: {click_count}')
+
+		assert click_count == 3, (
+			f'Expected 3 clicks (Regular DOM + Shadow DOM + Iframe), but counter shows {click_count}. '
+			f'This means some clicks did not execute JavaScript properly.'
+		)
 
 		print('\n🎉 DOM Serializer test completed successfully!')
+
+		# Keep browser open for 3 seconds so you can see the final counter
+		print('   Browser will close in 3 seconds...')
+		await asyncio.sleep(3)
 
 	async def test_dom_serializer_element_counts_detailed(self, browser_session, base_url):
 		"""Detailed test to verify specific element types are captured correctly."""
@@ -400,3 +344,65 @@ class TestDOMSerializer:
 		assert inputs >= 1, f'Should find at least 1 input, found {inputs}'
 
 		print('\n✅ Element type verification passed!')
+
+
+if __name__ == '__main__':
+	"""Run test in debug mode with manual fixture setup."""
+	import asyncio
+	import logging
+
+	# Set up debug logging
+	logging.basicConfig(
+		level=logging.DEBUG,
+		format='%(levelname)-8s [%(name)s] %(message)s',
+	)
+
+	async def main():
+		# Set up HTTP server fixture
+		from pathlib import Path
+		from pytest_httpserver import HTTPServer
+
+		server = HTTPServer()
+		server.start()
+
+		# Load HTML templates from files (same as http_server fixture)
+		test_dir = Path(__file__).parent
+		main_page_html = (test_dir / 'test_page_template.html').read_text()
+		iframe_html = (test_dir / 'iframe_template.html').read_text()
+
+		# Set up routes using templates
+		server.expect_request('/dom-test-main').respond_with_data(main_page_html, content_type='text/html')
+		server.expect_request('/iframe-same-origin').respond_with_data(iframe_html, content_type='text/html')
+
+		base_url = f'http://{server.host}:{server.port}'
+		print(f'\n🌐 HTTP Server running at {base_url}')
+
+		# Set up browser session
+		from browser_use.browser import BrowserSession
+		from browser_use.browser.profile import BrowserProfile
+
+		session = BrowserSession(
+			browser_profile=BrowserProfile(
+				headless=False,  # Set to False to see browser in action
+				user_data_dir=None,
+				keep_alive=True,
+			)
+		)
+
+		try:
+			await session.start()
+			print('🚀 Browser session started\n')
+
+			# Run the test
+			test = TestDOMSerializer()
+			await test.test_dom_serializer_with_shadow_dom_and_iframes(session, base_url)
+
+			print('\n✅ Test completed successfully!')
+
+		finally:
+			# Cleanup
+			await session.kill()
+			server.stop()
+			print('\n🧹 Cleanup complete')
+
+	asyncio.run(main())
