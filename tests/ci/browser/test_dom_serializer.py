@@ -281,8 +281,13 @@ class TestDOMSerializer:
 		# Helper to call tools.click(index) and verify it worked
 		async def click(index: int, element_description: str):
 			result = await tools.registry.execute_action('click', {'index': index}, browser_session=browser_session)
+			# Check both error field and extracted_content for failure messages
 			if result.error:
 				raise AssertionError(f'Click on {element_description} [{index}] failed: {result.error}')
+			if result.extracted_content and (
+				'not available' in result.extracted_content.lower() or 'failed' in result.extracted_content.lower()
+			):
+				raise AssertionError(f'Click on {element_description} [{index}] failed: {result.extracted_content}')
 			print(f'   ✓ {element_description} [{index}] clicked successfully')
 			return result
 
