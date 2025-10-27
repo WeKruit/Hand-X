@@ -50,8 +50,7 @@ source .venv/bin/activate
 ```
 ```bash install browser-use & chromium
 uv pip install browser-use
-uvx playwright install chromium --with-deps
-# Note: this does NOT install playwright, only chromium
+browser-use install
 ```
 </Tab>
 <Tab title="pip">
@@ -63,7 +62,7 @@ source .venv/bin/activate
 ```
 ```bash install browser-use & chromium
 pip install browser-use
-pip install playwright && playwright install chromium --with-deps
+browser-use install
 ```
 </Tab>
 </Tabs>
@@ -86,14 +85,14 @@ pip install playwright && playwright install chromium --with-deps
   <Tab title="uv">
     ```bash install browser-use & chromium theme={null}
     uv pip install browser-use
-    uvx browser-use install
+    browser-use install
     ```
   </Tab>
 
   <Tab title="pip">
     ```bash install browser-use & chromium theme={null}
     pip install browser-use
-    uvx browser-use install
+    browser-use install
     ```
   </Tab>
 </Tabs>
@@ -224,8 +223,7 @@ source .venv/bin/activate
 ```
 ```bash install browser-use & chromium
 uv pip install browser-use
-uvx playwright install chromium --with-deps
-# Note: this does NOT install playwright, only chromium
+browser-use install
 ```
 </Tab>
 <Tab title="pip">
@@ -237,7 +235,7 @@ source .venv/bin/activate
 ```
 ```bash install browser-use & chromium
 pip install browser-use
-pip install playwright && playwright install chromium --with-deps
+browser-use install
 ```
 </Tab>
 </Tabs>

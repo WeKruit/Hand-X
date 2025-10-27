@@ -13,12 +13,19 @@ if '--mcp' in sys.argv:
 
 # Special case: install command doesn't need CLI dependencies
 if len(sys.argv) > 1 and sys.argv[1] == 'install':
+	import platform
 	import subprocess
 
 	print('📦 Installing Chromium browser + system dependencies...')
 	print('⏳ This may take a few minutes...\n')
 
-	result = subprocess.run(['uvx', 'playwright', 'install', 'chromium', '--with-deps', '--no-shell'])
+	# Build command - only use --with-deps on Linux (it fails on Windows/macOS)
+	cmd = ['uvx', 'playwright', 'install', 'chromium']
+	if platform.system() == 'Linux':
+		cmd.append('--with-deps')
+	cmd.append('--no-shell')
+
+	result = subprocess.run(cmd)
 
 	if result.returncode == 0:
 		print('\n✅ Installation complete!')
@@ -2024,12 +2031,19 @@ def auth():
 @main.command()
 def install():
 	"""Install Chromium browser with system dependencies"""
+	import platform
 	import subprocess
 
 	print('📦 Installing Chromium browser + system dependencies...')
 	print('⏳ This may take a few minutes...\n')
 
-	result = subprocess.run(['uvx', 'playwright', 'install', 'chromium', '--with-deps', '--no-shell'])
+	# Build command - only use --with-deps on Linux (it fails on Windows/macOS)
+	cmd = ['uvx', 'playwright', 'install', 'chromium']
+	if platform.system() == 'Linux':
+		cmd.append('--with-deps')
+	cmd.append('--no-shell')
+
+	result = subprocess.run(cmd)
 
 	if result.returncode == 0:
 		print('\n✅ Installation complete!')
