@@ -2945,7 +2945,9 @@ class BrowserSession(BaseModel):
 				# SUCCESS - return the correct CDP session for this node's target
 				return cdp_session
 			except Exception as e:
-				self.logger.warning(f'⚠️ Failed to get CDP client for target ...{node.target_id[-4:]}: {e}, falling back to main session')
+				self.logger.warning(
+					f'⚠️ Failed to get CDP client for target ...{node.target_id[-4:]}: {e}, falling back to main session'
+				)
 
 		return await self.get_or_create_cdp_session()
 
