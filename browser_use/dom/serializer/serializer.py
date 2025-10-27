@@ -426,10 +426,6 @@ class DOMTreeSerializer:
 
 	def _is_interactive_cached(self, node: EnhancedDOMTreeNode) -> bool:
 		"""Cached version of clickable element detection to avoid redundant calls."""
-		# Debug for cross-origin iframe elements
-		if node.target_id and node.attributes and 'iana.org' in node.attributes.get('href', ''):
-			target_short = node.target_id[-4:] if node.target_id else 'None'
-			in_cache = node.node_id in self._clickable_cache
 
 		if node.node_id not in self._clickable_cache:
 			import time
