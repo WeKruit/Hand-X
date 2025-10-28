@@ -102,7 +102,7 @@ def handle_browser_error(e: BrowserError) -> ActionResult:
 class Tools(Generic[Context]):
 	def __init__(
 		self,
-		exclude_actions: list[str] = ["evaluate"],
+		exclude_actions: list[str] = [],
 		output_model: type[T] | None = None,
 		display_files_in_done_text: bool = True,
 	):
