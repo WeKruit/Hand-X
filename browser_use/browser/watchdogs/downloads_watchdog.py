@@ -164,7 +164,7 @@ class DownloadsWatchdog(BaseWatchdog):
 		"""Set up download monitoring for a specific target."""
 
 		# Define CDP event handlers outside of try to avoid indentation/scope issues
-		async def download_will_begin_handler(event: DownloadWillBeginEvent, session_id: SessionID | None):
+		def download_will_begin_handler(event: DownloadWillBeginEvent, session_id: SessionID | None) -> None:
 			self.logger.debug(f'[DownloadsWatchdog] Download will begin: {event}')
 			# Cache info for later completion event handling (esp. remote browsers)
 			guid = event.get('guid', '')
@@ -184,7 +184,7 @@ class DownloadsWatchdog(BaseWatchdog):
 			# Remove from set when done
 			task.add_done_callback(lambda t: self._cdp_event_tasks.discard(t))
 
-		async def download_progress_handler(event: DownloadProgressEvent, session_id: SessionID | None):
+		def download_progress_handler(event: DownloadProgressEvent, session_id: SessionID | None) -> None:
 			# Check if download is complete
 			if event.get('state') == 'completed':
 				file_path = event.get('filePath')
@@ -311,7 +311,7 @@ class DownloadsWatchdog(BaseWatchdog):
 			self.logger.debug(f'[DownloadsWatchdog] Enabled Network domain for target {target_id[-4:]}')
 
 			# Register callback for network responses
-			async def on_response_received(event: ResponseReceivedEvent, session_id: str | None) -> None:
+			def on_response_received(event: ResponseReceivedEvent, session_id: str | None) -> None:
 				"""Handle Network.responseReceived event to detect downloadable content."""
 				try:
 					response = event.get('response', {})
