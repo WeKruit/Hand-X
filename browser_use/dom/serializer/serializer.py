@@ -440,10 +440,6 @@ class DOMTreeSerializer:
 
 			self._clickable_cache[node.node_id] = result
 
-			# Debug for cross-origin iframe elements - show result of first check
-			if node.target_id and node.attributes and 'iana.org' in node.attributes.get('href', ''):
-				target_short = node.target_id[-4:] if node.target_id else 'None'
-
 		return self._clickable_cache[node.node_id]
 
 	def _create_simplified_tree(self, node: EnhancedDOMTreeNode, depth: int = 0) -> SimplifiedNode | None:
