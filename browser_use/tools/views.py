@@ -37,7 +37,7 @@ class InputTextAction(BaseModel):
 
 
 class DoneAction(BaseModel):
-	text: str = Field(description='summary for user in the format the user requested')
+	text: str = Field(description='Final user message in the format the user requested')
 	success: bool = Field(default=True, description='True if user_request completed successfully')
 	files_to_display: list[str] | None = Field(default=[])
 
