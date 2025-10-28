@@ -606,7 +606,7 @@ Complete reference for all browser configuration options
 
 ## Core Settings
 
-* `cdp_url`: CDP URL for connecting to existing browser instance (e.g., `"http://localhost:9222"`)
+* `cdp_url`: CDP URL for connecting to existing browser instance (e.g., `"http://localhost:9222"`) obtained from our hosted cloud browsers https://docs.cloud.browser-use.com/concepts/browser
 
 ## Display & Appearance
 
@@ -739,7 +739,7 @@ from browser_use import Agent, Browser, ChatOpenAI
 # Use Browser-Use cloud browser service
 browser = Browser(
     use_cloud=True,  # Automatically provisions a cloud browser
-    # cdp_url="http://remote-server:9222" # CDP URL from your favorite browser provider like Onkernel, AnchorBrowser, HyperBrowser, BrowserBase, Steel.dev, etc.
+    # cdp_url="http://remote-server:9222" # Get a CDP URL from our hosted cloud browsers https://docs.cloud.browser-use.com/concepts/browser
 )
 
 agent = Agent(
@@ -761,7 +761,7 @@ agent = Agent(
 - ✅ Optimized for browser automation
 
 ### Third-Party Cloud Browsers
-Get a CDP URL from your favorite browser provider like Onkernel, AnchorBrowser, HyperBrowser, BrowserBase, Steel.dev, etc.
+You can pass in a CDP URL from any remote browser
 
 
 ### Proxy Connection
