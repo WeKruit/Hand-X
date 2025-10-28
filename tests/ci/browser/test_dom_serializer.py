@@ -84,9 +84,9 @@ class TestDOMSerializer:
 		- Regular DOM: 3 elements (button, input, link on main page)
 		- Shadow DOM: 3 elements (2 buttons, 1 input inside shadow root)
 		- Same-origin iframe: 2 elements (button, input inside iframe)
-		- Cross-origin iframe: ~1 element (may extract some content from example.com)
+		- Cross-origin iframe placeholder: about:blank (no interactive elements)
 		- Iframe tags: 2 elements (the iframe elements themselves)
-		Total: ~10-11 interactive elements
+		Total: ~10 interactive elements
 		"""
 		from browser_use.tools.service import Tools
 
@@ -351,7 +351,7 @@ class TestDOMSerializer:
 		1. Open shadow DOM element interaction
 		2. Closed shadow DOM element interaction (nested inside open shadow)
 		3. Same-origin iframe element interaction (inside closed shadow)
-		4. Cross-origin iframe extraction via CDP target switching (extracts text/structure from example.com)
+		4. Cross-origin iframe placeholder with about:blank (no external dependencies)
 		5. Truly nested structure: Open Shadow → Closed Shadow → Iframe
 		"""
 		from browser_use.tools.service import Tools
@@ -473,8 +473,8 @@ class TestDOMSerializer:
 		print(f'   Found elements from {len(all_targets)} different CDP targets in full DOM tree')
 
 		if len(all_targets) >= 2:
-			print('   ✅ Cross-origin iframe extraction IS WORKING!')
-			print('   ✓ Successfully extracted DOM from cross-origin iframe (example.com)')
+			print('   ✅ Multi-target iframe extraction IS WORKING!')
+			print('   ✓ Successfully extracted DOM from multiple CDP targets')
 			print('   ✓ CDP target switching feature is enabled and functional')
 		else:
 			print('   ⚠️  Only found elements from 1 target (cross-origin extraction may not be working)')

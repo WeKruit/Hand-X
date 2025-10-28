@@ -576,10 +576,6 @@ class DOMTreeSerializer:
 
 	def _collect_interactive_elements(self, node: SimplifiedNode, elements: list[SimplifiedNode]) -> None:
 		"""Recursively collect interactive elements that are also visible."""
-		# Debug for cross-origin iframe elements
-		if node.original_node.attributes and 'iana.org' in node.original_node.attributes.get('href', ''):
-			target_short = node.original_node.target_id[-4:] if node.original_node.target_id else 'None'
-
 		is_interactive = self._is_interactive_cached(node.original_node)
 		is_visible = node.original_node.snapshot_node and node.original_node.is_visible
 
