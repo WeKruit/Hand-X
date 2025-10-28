@@ -60,6 +60,7 @@ class DownloadsWatchdog(BaseWatchdog):
 	_session_pdf_urls: dict[str, str] = PrivateAttr(default_factory=dict)  # URL -> path for PDFs downloaded this session
 	_network_monitored_targets: set[str] = PrivateAttr(default_factory=set)  # Track targets with network monitoring enabled
 	_detected_downloads: set[str] = PrivateAttr(default_factory=set)  # Track detected download URLs to avoid duplicates
+	_network_callback_registered: bool = PrivateAttr(default=False)  # Track if global network callback is registered
 
 	async def on_BrowserLaunchEvent(self, event: BrowserLaunchEvent) -> None:
 		self.logger.debug(f'[DownloadsWatchdog] Received BrowserLaunchEvent, EventBus ID: {id(self.event_bus)}')
@@ -130,6 +131,7 @@ class DownloadsWatchdog(BaseWatchdog):
 		self._session_pdf_urls.clear()
 		self._network_monitored_targets.clear()
 		self._detected_downloads.clear()
+		self._network_callback_registered = False
 
 	async def on_NavigationCompleteEvent(self, event: NavigationCompleteEvent) -> None:
 		"""Check for PDFs after navigation completes."""
@@ -303,84 +305,104 @@ class DownloadsWatchdog(BaseWatchdog):
 		try:
 			cdp_client = self.browser_session.cdp_client
 
+			# Register the global callback once
+			if not self._network_callback_registered:
+
+				def on_response_received(event: ResponseReceivedEvent, session_id: str | None) -> None:
+					"""Handle Network.responseReceived event to detect downloadable content.
+
+					This callback is registered globally and uses session_id to determine the correct target.
+					"""
+					try:
+						# Look up target_id from session_id
+						event_target_id = self.browser_session.get_target_id_from_session_id(session_id)
+						if not event_target_id:
+							# Session not in pool - might be a stale session or not yet tracked
+							return
+
+						# Only process events for targets we're monitoring
+						if event_target_id not in self._network_monitored_targets:
+							return
+
+						response = event.get('response', {})
+						url = response.get('url', '')
+						content_type = response.get('mimeType', '').lower()
+						headers = response.get('headers', {})
+
+						# Skip non-HTTP URLs (data:, about:, chrome-extension:, etc.)
+						if not url.startswith('http'):
+							return
+
+						# Check if it's a PDF
+						is_pdf = 'application/pdf' in content_type
+
+						# Check if it's marked as download via Content-Disposition header
+						content_disposition = headers.get('content-disposition', '').lower()
+						is_download_attachment = 'attachment' in content_disposition
+
+						# Only process if it's a PDF or download
+						if not (is_pdf or is_download_attachment):
+							return
+
+						# Check if we've already processed this URL in this session
+						if url in self._detected_downloads:
+							self.logger.debug(f'[DownloadsWatchdog] Already detected download: {url[:80]}...')
+							return
+
+						# Mark as detected to avoid duplicates
+						self._detected_downloads.add(url)
+
+						# Extract filename from Content-Disposition if available
+						suggested_filename = None
+						if 'filename=' in content_disposition:
+							# Parse filename from Content-Disposition header
+							import re
+
+							filename_match = re.search(r'filename[^;=\n]*=(([\'"]).*?\2|[^;\n]*)', content_disposition)
+							if filename_match:
+								suggested_filename = filename_match.group(1).strip('\'"')
+
+						self.logger.info(f'[DownloadsWatchdog] 🔍 Detected downloadable content via network: {url[:80]}...')
+						self.logger.debug(
+							f'[DownloadsWatchdog]   Content-Type: {content_type}, Is PDF: {is_pdf}, Is Attachment: {is_download_attachment}'
+						)
+
+						# Trigger download asynchronously in background (don't block event handler)
+						async def download_in_background():
+							try:
+								download_path = await self.download_file_from_url(
+									url=url,
+									target_id=event_target_id,  # Use target_id from session_id lookup
+									content_type=content_type,
+									suggested_filename=suggested_filename,
+								)
+
+								if download_path:
+									self.logger.info(f'[DownloadsWatchdog] ✅ Successfully downloaded: {download_path}')
+								else:
+									self.logger.warning(f'[DownloadsWatchdog] ⚠️  Failed to download: {url[:80]}...')
+							except Exception as e:
+								self.logger.error(f'[DownloadsWatchdog] Error downloading in background: {type(e).__name__}: {e}')
+
+						# Create background task
+						task = asyncio.create_task(download_in_background())
+						self._cdp_event_tasks.add(task)
+						task.add_done_callback(lambda t: self._cdp_event_tasks.discard(t))
+
+					except Exception as e:
+						self.logger.error(f'[DownloadsWatchdog] Error in network response handler: {type(e).__name__}: {e}')
+
+				# Register the callback globally (once)
+				cdp_client.register.Network.responseReceived(on_response_received)
+				self._network_callback_registered = True
+				self.logger.debug('[DownloadsWatchdog] ✅ Registered global network response callback')
+
 			# Get or create CDP session for this target
 			cdp_session = await self.browser_session.get_or_create_cdp_session(target_id, focus=False)
 
-			# Enable Network domain to monitor HTTP responses
+			# Enable Network domain to monitor HTTP responses (per-target/per-session)
 			await cdp_client.send.Network.enable(session_id=cdp_session.session_id)
 			self.logger.debug(f'[DownloadsWatchdog] Enabled Network domain for target {target_id[-4:]}')
-
-			# Register callback for network responses
-			def on_response_received(event: ResponseReceivedEvent, session_id: str | None) -> None:
-				"""Handle Network.responseReceived event to detect downloadable content."""
-				try:
-					response = event.get('response', {})
-					url = response.get('url', '')
-					content_type = response.get('mimeType', '').lower()
-					headers = response.get('headers', {})
-
-					# Skip non-HTTP URLs (data:, about:, chrome-extension:, etc.)
-					if not url.startswith('http'):
-						return
-
-					# Check if it's a PDF
-					is_pdf = 'application/pdf' in content_type
-
-					# Check if it's marked as download via Content-Disposition header
-					content_disposition = headers.get('content-disposition', '').lower()
-					is_download_attachment = 'attachment' in content_disposition
-
-					# Only process if it's a PDF or download
-					if not (is_pdf or is_download_attachment):
-						return
-
-					# Check if we've already processed this URL in this session
-					if url in self._detected_downloads:
-						self.logger.debug(f'[DownloadsWatchdog] Already detected download: {url[:80]}...')
-						return
-
-					# Mark as detected to avoid duplicates
-					self._detected_downloads.add(url)
-
-					# Extract filename from Content-Disposition if available
-					suggested_filename = None
-					if 'filename=' in content_disposition:
-						# Parse filename from Content-Disposition header
-						import re
-
-						filename_match = re.search(r'filename[^;=\n]*=(([\'"]).*?\2|[^;\n]*)', content_disposition)
-						if filename_match:
-							suggested_filename = filename_match.group(1).strip('\'"')
-
-					self.logger.info(f'[DownloadsWatchdog] 🔍 Detected downloadable content via network: {url[:80]}...')
-					self.logger.debug(
-						f'[DownloadsWatchdog]   Content-Type: {content_type}, Is PDF: {is_pdf}, Is Attachment: {is_download_attachment}'
-					)
-
-					# Trigger download asynchronously in background (don't block event handler)
-					async def download_in_background():
-						try:
-							download_path = await self.download_file_from_url(
-								url=url, target_id=target_id, content_type=content_type, suggested_filename=suggested_filename
-							)
-
-							if download_path:
-								self.logger.info(f'[DownloadsWatchdog] ✅ Successfully downloaded: {download_path}')
-							else:
-								self.logger.warning(f'[DownloadsWatchdog] ⚠️  Failed to download: {url[:80]}...')
-						except Exception as e:
-							self.logger.error(f'[DownloadsWatchdog] Error downloading in background: {type(e).__name__}: {e}')
-
-					# Create background task
-					task = asyncio.create_task(download_in_background())
-					self._cdp_event_tasks.add(task)
-					task.add_done_callback(lambda t: self._cdp_event_tasks.discard(t))
-
-				except Exception as e:
-					self.logger.error(f'[DownloadsWatchdog] Error in network response handler: {type(e).__name__}: {e}')
-
-			# Register the callback
-			cdp_client.register.Network.responseReceived(on_response_received)
 
 			# Mark this target as monitored
 			self._network_monitored_targets.add(target_id)
