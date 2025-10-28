@@ -257,7 +257,9 @@ class AgentMessagePrompt:
 			pdf_message = (
 				'PDF viewer cannot be rendered. In this page, DO NOT use the extract action as PDF content cannot be rendered. '
 			)
-			pdf_message += 'Use the read_file action on the downloaded PDF in available_file_paths to read the full text content.\n\n'
+			pdf_message += (
+				'Use the read_file action on the downloaded PDF in available_file_paths to read the full text content.\n\n'
+			)
 
 		# Add recent events if available and requested
 		recent_events_text = ''
