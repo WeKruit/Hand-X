@@ -50,7 +50,7 @@ source .venv/bin/activate
 ```
 ```bash install browser-use & chromium
 uv pip install browser-use
-browser-use install
+uvx browser-use install
 ```
 </Tab>
 <Tab title="pip">
@@ -85,7 +85,7 @@ browser-use install
   <Tab title="uv">
     ```bash install browser-use & chromium theme={null}
     uv pip install browser-use
-    browser-use install
+    uvx browser-use install
     ```
   </Tab>
 
@@ -223,7 +223,7 @@ source .venv/bin/activate
 ```
 ```bash install browser-use & chromium
 uv pip install browser-use
-browser-use install
+uvx browser-use install
 ```
 </Tab>
 <Tab title="pip">
