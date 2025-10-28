@@ -931,7 +931,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 		# File System Actions
 
 		@self.registry.action(
-			'Write content to a file. Supports multiple formats: .txt, .md, .json, .jsonl, .csv, .pdf. For PDF files, write content in markdown format and it will be automatically converted to a properly formatted PDF document.'
+			'Supports formats: .txt, .md, .json, .jsonl, .csv, .pdf. For PDF files, write content in markdown format and it will be automatically converted to a properly formatted PDF document.'
 		)
 		async def write_file(
 			file_name: str,
