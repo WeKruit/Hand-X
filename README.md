@@ -63,9 +63,9 @@ uv sync
 BROWSER_USE_API_KEY=your-key
 ```
 
-**4. Download chromium using playwright's shortcut:**
+**4. Install Chromium browser:**
 ```bash
-uvx playwright install chromium --with-deps --no-shell
+browser-use install
 ```
 
 **5. Run your first agent:**
