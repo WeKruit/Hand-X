@@ -2872,6 +2872,22 @@ class BrowserSession(BaseModel):
 	async def cdp_client_for_target(self, target_id: TargetID) -> CDPSession:
 		return await self.get_or_create_cdp_session(target_id, focus=False)
 
+	def get_target_id_from_session_id(self, session_id: SessionID | None) -> TargetID | None:
+		"""Look up target_id from a CDP session_id.
+
+		Args:
+			session_id: The CDP session ID to look up
+
+		Returns:
+			The target_id for this session, or None if not found
+		"""
+		if not session_id:
+			return None
+		for cdp_session in self._cdp_session_pool.values():
+			if cdp_session.session_id == session_id:
+				return cdp_session.target_id
+		return None
+
 	async def cdp_client_for_frame(self, frame_id: str) -> CDPSession:
 		"""Get a CDP client attached to the target containing the specified frame.
 
