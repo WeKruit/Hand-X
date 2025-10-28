@@ -493,10 +493,6 @@ class DOMTreeSerializer:
 			is_scrollable = node.is_actually_scrollable
 			has_shadow_content = bool(node.children_and_shadow_roots)
 
-			# Debug for <a> tags
-			if node.node_name and node.node_name.lower() == 'a':
-				target_short = node.target_id[-4:] if node.target_id else 'None'
-
 			# ENHANCED SHADOW DOM DETECTION: Include shadow hosts even if not visible
 			is_shadow_host = any(child.node_type == NodeType.DOCUMENT_FRAGMENT_NODE for child in node.children_and_shadow_roots)
 
@@ -509,10 +505,6 @@ class DOMTreeSerializer:
 			# Include if visible, scrollable, has children, or is shadow host
 			if is_visible or is_scrollable or has_shadow_content or is_shadow_host:
 				simplified = SimplifiedNode(original_node=node, children=[], is_shadow_host=is_shadow_host)
-
-				# Debug for <a> tags
-				if node.node_name and node.node_name.lower() == 'a':
-					target_short = node.target_id[-4:] if node.target_id else 'None'
 
 				# Process ALL children including shadow roots with enhanced logging
 				for child in node.children_and_shadow_roots:
@@ -530,15 +522,7 @@ class DOMTreeSerializer:
 
 				# Return if meaningful or has meaningful children
 				if is_visible or is_scrollable or simplified.children:
-					# Debug for <a> tags
-					if node.node_name and node.node_name.lower() == 'a':
-						target_short = node.target_id[-4:] if node.target_id else 'None'
 					return simplified
-				else:
-					# Debug for <a> tags that DON'T get returned
-					if node.node_name and node.node_name.lower() == 'a':
-						target_short = node.target_id[-4:] if node.target_id else 'None'
-
 		elif node.node_type == NodeType.TEXT_NODE:
 			# Include meaningful text nodes
 			is_visible = node.snapshot_node and node.is_visible
@@ -591,19 +575,11 @@ class DOMTreeSerializer:
 		if not node:
 			return
 
-		# Debug for <a> tags
-		if node.original_node.tag_name and node.original_node.tag_name.lower() == 'a':
-			target_short = node.original_node.target_id[-4:] if node.original_node.target_id else 'None'
-
 		# Skip assigning index to excluded nodes, or ignored by paint order
 		if not node.excluded_by_parent and not node.ignored_by_paint_order:
 			# Regular interactive element assignment (including enhanced compound controls)
 			is_interactive_assign = self._is_interactive_cached(node.original_node)
 			is_visible = node.original_node.snapshot_node and node.original_node.is_visible
-
-			# Debug for <a> tags
-			if node.original_node.tag_name and node.original_node.tag_name.lower() == 'a':
-				target_short = node.original_node.target_id[-4:] if node.original_node.target_id else 'None'
 
 			# Only add to selector map if element is both interactive AND visible
 			if is_interactive_assign and is_visible:
