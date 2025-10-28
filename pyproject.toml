@@ -93,8 +93,6 @@ eval = [
     "anyio>=4.9.0",
     "psutil>=7.0.0",
     "datamodel-code-generator>=0.26.0"
-   # "hyperbrowser==0.47.0",
-   # "browserbase==1.4.0",
 ]
 cli-oci = [
     "browser-use[cli,oci]",
