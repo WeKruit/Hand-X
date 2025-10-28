@@ -276,7 +276,7 @@ class Tools(Generic[Context]):
 						)
 					except Exception as dropdown_error:
 						logger.error(
-							f'Failed to get dropdown options as shortcut during click_element_by_index on dropdown: {type(dropdown_error).__name__}: {dropdown_error}'
+							f'Failed to get dropdown options as shortcut during click on dropdown: {type(dropdown_error).__name__}: {dropdown_error}'
 						)
 					return ActionResult(error='Can not click on select elements.')
 
@@ -930,7 +930,9 @@ You will be given a query and the markdown of a webpage that has been filtered t
 
 		# File System Actions
 
-		@self.registry.action('')
+		@self.registry.action(
+			'Supports formats: .txt, .md, .json, .jsonl, .csv, .pdf. For PDF files, write content in markdown format and it will be automatically converted to a properly formatted PDF document.'
+		)
 		async def write_file(
 			file_name: str,
 			content: str,
