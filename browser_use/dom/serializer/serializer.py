@@ -467,11 +467,6 @@ class DOMTreeSerializer:
 			return simplified if simplified.children else SimplifiedNode(original_node=node, children=[])
 
 		elif node.node_type == NodeType.ELEMENT_NODE:
-			# Debug: Check if we're processing <a> tags
-			if node.node_name and node.node_name.lower() == 'a':
-				target_short = node.target_id[-4:] if node.target_id else 'None'
-				href = node.attributes.get('href', 'NO_HREF') if node.attributes else 'NO_HREF'
-
 			# Skip non-content elements
 			if node.node_name.lower() in DISABLED_ELEMENTS:
 				return None
