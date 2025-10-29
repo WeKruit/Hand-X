@@ -223,6 +223,8 @@ class SessionManager:
 			return
 
 		agent_focus_lost = False
+		target_fully_removed = False
+		target_type = None
 
 		async with self._lock:
 			# Remove this session from target's session set
@@ -240,6 +242,8 @@ class SessionManager:
 				if remaining_sessions == 0:
 					self.logger.info(f'[SessionManager] No sessions remain for target {target_id[:8]}..., removing from pool')
 
+					target_fully_removed = True
+
 					# Check if agent_focus points to this target
 					agent_focus_lost = (
 						self.browser_session.agent_focus and self.browser_session.agent_focus.target_id == target_id
@@ -255,30 +259,35 @@ class SessionManager:
 
 					# Clean up tracking
 					del self._target_sessions[target_id]
+			else:
+				# Target not tracked - already removed or never attached
+				self.logger.debug(
+					f'[SessionManager] Session detached from untracked target: target={target_id[:8]}... '
+					f'session={session_id[:8]}... (target was already removed or attach event was missed)'
+				)
 
-					# Clean up target type cache
-					if target_id in self._target_types:
-						cached_target_type = self._target_types.pop(target_id)
-					else:
-						cached_target_type = None
+			# Get target type before cleaning up cache (needed for TabClosedEvent dispatch)
+			target_type = self._target_types.get(target_id)
+
+			# Clean up target type cache if target fully removed
+			if target_id not in self._target_sessions and target_id in self._target_types:
+				del self._target_types[target_id]
 
 			# Remove from reverse mapping
 			if session_id in self._session_to_target:
 				del self._session_to_target[session_id]
 
-		# Dispatch TabClosedEvent only for page/tab targets (not iframes/workers)
-		# Use cached target type to avoid extra CDP call
-		target_type = self._target_types.get(target_id) if target_id in self._target_types else cached_target_type
+		# Dispatch TabClosedEvent only for page/tab targets that are fully removed (not iframes/workers or partial detaches)
+		if target_fully_removed:
+			if target_type in ('page', 'tab'):
+				from browser_use.browser.events import TabClosedEvent
 
-		if target_type in ('page', 'tab'):
-			from browser_use.browser.events import TabClosedEvent
-
-			self.browser_session.event_bus.dispatch(TabClosedEvent(target_id=target_id))
-			self.logger.debug(f'[SessionManager] Dispatched TabClosedEvent for page target {target_id[:8]}...')
-		elif target_type:
-			self.logger.debug(
-				f'[SessionManager] Target {target_id[:8]}... detached (type={target_type}) - not dispatching TabClosedEvent'
-			)
+				self.browser_session.event_bus.dispatch(TabClosedEvent(target_id=target_id))
+				self.logger.debug(f'[SessionManager] Dispatched TabClosedEvent for page target {target_id[:8]}...')
+			elif target_type:
+				self.logger.debug(
+					f'[SessionManager] Target {target_id[:8]}... fully removed (type={target_type}) - not dispatching TabClosedEvent'
+				)
 
 		# Auto-recover agent_focus outside the lock to avoid blocking other operations
 		if agent_focus_lost:
