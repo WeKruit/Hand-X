@@ -158,8 +158,8 @@ class BaseWatchdog(BaseModel):
 								f'🚌 {watchdog_and_handler_str} ❌ CDP connected but failed to re-create CDP session after error "{type(original_error).__name__}: {original_error}" in {actual_handler.__name__}({event.event_type}#{event.event_id[-4:]}): due to {type(sub_error).__name__}: {sub_error}\n'
 							)
 
-					# Always re-raise the original error
-					raise original_error
+					# Always re-raise the original error with its traceback preserved
+					raise
 
 			return unique_handler
 
@@ -257,4 +257,4 @@ class BaseWatchdog(BaseModel):
 		except Exception as e:
 			from browser_use.utils import logger
 
-			logger.error(f'⚠️ Error during BrowserSession {self.__class__.__name__} gargabe collection __del__(): {type(e)}: {e}')
+			logger.error(f'⚠️ Error during BrowserSession {self.__class__.__name__} garbage collection __del__(): {type(e)}: {e}')
