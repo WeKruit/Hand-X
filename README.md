@@ -63,9 +63,9 @@ uv sync
 BROWSER_USE_API_KEY=your-key
 ```
 
-**4. Download chromium using playwright's shortcut:**
+**4. Install Chromium browser:**
 ```bash
-uvx playwright install chromium --with-deps --no-shell
+uvx browser-use install
 ```
 
 **5. Run your first agent:**
@@ -94,6 +94,26 @@ if __name__ == "__main__":
 ```
 
 Check out the [library docs](https://docs.browser-use.com) and the [cloud docs](https://docs.cloud.browser-use.com) for more!
+
+<br/>
+
+# 🚀 Template Quickstart
+
+**Want to get started even faster?** Generate a ready-to-run template:
+
+```bash
+uvx browser-use init --template default
+```
+
+This creates a `browser_use_default.py` file with a working example. Available templates:
+- `default` - Minimal setup to get started quickly
+- `advanced` - All configuration options with detailed comments
+- `tools` - Examples of custom tools and extending the agent
+
+You can also specify a custom output path:
+```bash
+uvx browser-use init --template default --output my_agent.py
+```
 
 <br/>
 
