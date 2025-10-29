@@ -343,10 +343,18 @@ class DownloadsWatchdog(BaseWatchdog):
 						# Filter out image/video/audio files even if marked as attachment
 						# These are likely resources, not intentional downloads
 						unwanted_content_types = [
-							'image/', 'video/', 'audio/',
-							'text/css', 'text/javascript', 'application/javascript',
-							'application/x-javascript', 'text/html', 'application/json',
-							'font/', 'application/font', 'application/x-font'
+							'image/',
+							'video/',
+							'audio/',
+							'text/css',
+							'text/javascript',
+							'application/javascript',
+							'application/x-javascript',
+							'text/html',
+							'application/json',
+							'font/',
+							'application/font',
+							'application/x-font',
 						]
 						is_unwanted_type = any(content_type.startswith(prefix) for prefix in unwanted_content_types)
 						if is_unwanted_type:
@@ -355,9 +363,24 @@ class DownloadsWatchdog(BaseWatchdog):
 						# Check URL extension to filter out obvious images/resources
 						url_lower = url.lower().split('?')[0]  # Remove query params
 						unwanted_extensions = [
-							'.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.ico',
-							'.css', '.js', '.woff', '.woff2', '.ttf', '.eot',
-							'.mp4', '.webm', '.mp3', '.wav', '.ogg'
+							'.jpg',
+							'.jpeg',
+							'.png',
+							'.gif',
+							'.webp',
+							'.svg',
+							'.ico',
+							'.css',
+							'.js',
+							'.woff',
+							'.woff2',
+							'.ttf',
+							'.eot',
+							'.mp4',
+							'.webm',
+							'.mp3',
+							'.wav',
+							'.ogg',
 						]
 						if any(url_lower.endswith(ext) for ext in unwanted_extensions):
 							return
