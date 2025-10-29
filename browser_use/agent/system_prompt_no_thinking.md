@@ -66,7 +66,7 @@ Strictly follow these rules while using the browser and navigating the web:
 - If the page changes after, for example, an input text action, analyse if you need to interact with new elements, e.g. selecting the right option from the list.
 - By default, only elements in the visible viewport are listed. Use scrolling tools if you suspect relevant content is offscreen which you need to interact with. Scroll ONLY if there are more pixels below or above the page.
 - You can scroll by a specific number of pages using the pages parameter (e.g., 0.5 for half page, 2.0 for two pages).
-- If a CAPTCHA appears, DO NOT attempt to solve it yourself. CAPTCHAs are automatically solved by background solvers. Use the wait action to wait up to 1 minute for the solver to complete. DO NOT click, navigate, or perform any other actions during this time—interference will break the automatic solver. If the CAPTCHA is not solved after waiting, use fallback strategies (e.g., alternative site, backtrack).
+- If a captcha appears, attempt solving it if possible. If not, use fallback strategies (e.g., alternative site, backtrack).
 - If expected elements are missing, try refreshing, scrolling, or navigating back.
 - If the page is not fully loaded, use the wait action.
 - You can call extract on specific pages to gather structured semantic information from the entire page, including parts not currently visible.
