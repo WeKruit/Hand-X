@@ -271,14 +271,9 @@ class DOMWatchdog(BaseWatchdog):
 		pending_requests_before_wait = []
 		if not not_a_meaningful_website:
 			try:
-				pending_requests_before_wait = await asyncio.wait_for(
-					self._get_pending_network_requests(),
-					timeout=3.0,  # 3 second timeout for network check
-				)
+				pending_requests_before_wait = await self._get_pending_network_requests()
 				if pending_requests_before_wait:
 					self.logger.debug(f'🔍 Found {len(pending_requests_before_wait)} pending requests before stability wait')
-			except TimeoutError:
-				self.logger.debug('⏱️ Network check timed out (page may be blocked by dialog). Continuing...')
 			except Exception as e:
 				self.logger.debug(f'Failed to get pending requests before wait: {e}')
 		pending_requests = pending_requests_before_wait
@@ -383,11 +378,8 @@ class DOMWatchdog(BaseWatchdog):
 
 			if dom_task:
 				try:
-					content = await asyncio.wait_for(dom_task, timeout=25.0)  # 25 second timeout for DOM build
+					content = await dom_task
 					self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: ✅ DOM tree build completed')
-				except TimeoutError:
-					self.logger.warning('⏱️ DOMWatchdog: DOM build timed out (page may be blocked by dialog), using minimal state')
-					content = SerializedDOMState(_root=None, selector_map={})
 				except Exception as e:
 					self.logger.warning(f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: DOM build failed: {e}, using minimal state')
 					content = SerializedDOMState(_root=None, selector_map={})
@@ -396,11 +388,8 @@ class DOMWatchdog(BaseWatchdog):
 
 			if screenshot_task:
 				try:
-					screenshot_b64 = await asyncio.wait_for(screenshot_task, timeout=10.0)  # 10 second timeout for screenshot
+					screenshot_b64 = await screenshot_task
 					self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: ✅ Clean screenshot captured')
-				except TimeoutError:
-					self.logger.warning('⏱️ DOMWatchdog: Screenshot timed out (page may be blocked by dialog)')
-					screenshot_b64 = None
 				except Exception as e:
 					self.logger.warning(f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: Clean screenshot failed: {e}')
 					screenshot_b64 = None
@@ -462,24 +451,8 @@ class DOMWatchdog(BaseWatchdog):
 			# Get comprehensive page info from CDP with timeout
 			try:
 				self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: Getting page info from CDP...')
-				page_info = await asyncio.wait_for(self._get_page_info(), timeout=3.0)  # Increased to 3s for more reliability
+				page_info = await asyncio.wait_for(self._get_page_info(), timeout=1.0)
 				self.logger.debug(f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: Got page info from CDP: {page_info}')
-			except TimeoutError:
-				self.logger.debug('⏱️ DOMWatchdog: Page info retrieval timed out (page may be blocked by dialog), using fallback')
-				# Fallback to default viewport dimensions
-				viewport = self.browser_session.browser_profile.viewport or {'width': 1280, 'height': 720}
-				page_info = PageInfo(
-					viewport_width=viewport['width'],
-					viewport_height=viewport['height'],
-					page_width=viewport['width'],
-					page_height=viewport['height'],
-					scroll_x=0,
-					scroll_y=0,
-					pixels_above=0,
-					pixels_below=0,
-					pixels_left=0,
-					pixels_right=0,
-				)
 			except Exception as e:
 				self.logger.debug(
 					f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: Failed to get page info from CDP: {e}, using fallback'
