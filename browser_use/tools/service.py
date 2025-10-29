@@ -33,6 +33,7 @@ from browser_use.llm.base import BaseChatModel
 from browser_use.llm.messages import SystemMessage, UserMessage
 from browser_use.observability import observe_debug
 from browser_use.tools.registry.service import Registry
+from browser_use.tools.utils import get_click_description
 from browser_use.tools.views import (
 	ClickElementAction,
 	CloseTabAction,
@@ -241,7 +242,7 @@ class Tools(Generic[Context]):
 			# Dispatch click event with node
 			try:
 				assert params.index != 0, (
-					'Cannot click on element with index 0. If there are no interactive elements use scroll(), wait(), refresh(), etc. to troubleshoot'
+					'Cannot click on element with index 0. If there are no interactive elements use wait(), refresh(), etc. to troubleshoot'
 				)
 
 				# Look up the node from the selector map
@@ -251,6 +252,9 @@ class Tools(Generic[Context]):
 					logger.warning(f'⚠️ {msg}')
 					return ActionResult(extracted_content=msg)
 
+				# Get description of clicked element
+				element_desc = get_click_description(node)
+
 				# Highlight the element being clicked (truly non-blocking)
 				asyncio.create_task(browser_session.highlight_interaction_element(node))
 
@@ -258,10 +262,10 @@ class Tools(Generic[Context]):
 				await event
 				# Wait for handler to complete and get any exception or metadata
 				click_metadata = await event.event_result(raise_if_any=True, raise_if_none=False)
-				memory = 'Clicked element'
 
-				msg = f'🖱️ {memory}'
-				logger.info(msg)
+				# Build memory with element info
+				memory = f'Clicked {element_desc}'
+				logger.info(f'🖱️ {memory}')
 
 				# Include click coordinates in metadata if available
 				return ActionResult(
@@ -570,7 +574,7 @@ class Tools(Generic[Context]):
 		# This action is temporarily disabled as it needs refactoring to use events
 
 		@self.registry.action(
-			"""LLM extracts structured data from page markdown. Use when: on right page, know what to extract, haven't called before on same page+query. Can't get interactive elements. Set extract_links=True for URLs. Use start_from_char if truncated. If fails, use find_text/scroll instead.""",
+			"""LLM extracts structured data from page markdown. Use when: on right page, know what to extract, haven't called before on same page+query. Can't get interactive elements. Set extract_links=True for URLs. Use start_from_char if truncated. If fails, use find_text instead.""",
 		)
 		async def extract(
 			query: str,
