@@ -383,7 +383,7 @@ class Tools(Generic[Context]):
 							if not browser_session.is_local:
 								pass
 							else:
-								msg = f'File path {params.path} is not available. Upload files must be in available_file_paths, downloaded_files, or a file managed by file_system.'
+								msg = f'File path {params.path} is not available. To fix: The user must add this file path to the available_file_paths parameter when creating the Agent. Example: Agent(task="...", llm=llm, browser=browser, available_file_paths=["{params.path}"])'
 								logger.error(f'❌ {msg}')
 								return ActionResult(error=msg)
 					else:
@@ -391,7 +391,7 @@ class Tools(Generic[Context]):
 						if not browser_session.is_local:
 							pass
 						else:
-							msg = f'File path {params.path} is not available. Upload files must be in available_file_paths, downloaded_files, or a file managed by file_system.'
+							msg = f'File path {params.path} is not available. To fix: The user must add this file path to the available_file_paths parameter when creating the Agent. Example: Agent(task="...", llm=llm, browser=browser, available_file_paths=["{params.path}"])'
 							raise BrowserError(message=msg, long_term_memory=msg)
 
 			# For local browsers, ensure the file exists on the local filesystem
@@ -1504,7 +1504,7 @@ class CodeAgentTools(Tools[Context]):
 								if not browser_session.is_local:
 									pass
 								else:
-									msg = f'File path {params.path} is not available. Upload files must be in available_file_paths, downloaded_files, or a file managed by file_system.'
+									msg = f'File path {params.path} is not available. To fix: add this file path to the available_file_paths parameter when creating the Agent. Example: Agent(task="...", llm=llm, browser=browser, available_file_paths=["{params.path}"])'
 									logger.error(f'❌ {msg}')
 									return ActionResult(error=msg)
 						else:
@@ -1512,7 +1512,7 @@ class CodeAgentTools(Tools[Context]):
 							if not browser_session.is_local:
 								pass
 							else:
-								msg = f'File path {params.path} is not available. Upload files must be in available_file_paths or downloaded_files.'
+								msg = f'File path {params.path} is not available. To fix: add this file path to the available_file_paths parameter when creating the Agent. Example: Agent(task="...", llm=llm, browser=browser, available_file_paths=["{params.path}"])'
 								logger.error(f'❌ {msg}')
 								return ActionResult(error=msg)
 
