@@ -648,6 +648,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 					self.logger.debug('⏱️ Mouse up timed out (possibly due to lag or dialog popup), continuing...')
 
 				self.logger.debug('🖱️ Clicked successfully using x,y coordinates')
+
 				# Return coordinates as dict for metadata
 				return {'click_x': center_x, 'click_y': center_y}
 
@@ -671,14 +672,27 @@ class DefaultActionWatchdog(BaseWatchdog):
 						},
 						session_id=session_id,
 					)
+
+					# Small delay for dialog dismissal
+					await asyncio.sleep(0.1)
+
 					return None
 				except Exception as js_e:
 					self.logger.error(f'CDP JavaScript click also failed: {js_e}')
 					raise Exception(f'Failed to click element: {e}')
 			finally:
-				# always re-focus back to original top-level page session context in case click opened a new tab/popup/window/dialog/etc.
-				cdp_session = await self.browser_session.get_or_create_cdp_session(focus=True)
-				await cdp_session.cdp_client.send.Runtime.runIfWaitingForDebugger(session_id=cdp_session.session_id)
+				# Always re-focus back to original top-level page session context in case click opened a new tab/popup/window/dialog/etc.
+				# Use timeout to prevent hanging if dialog is blocking
+				try:
+					cdp_session = await asyncio.wait_for(self.browser_session.get_or_create_cdp_session(focus=True), timeout=3.0)
+					await asyncio.wait_for(
+						cdp_session.cdp_client.send.Runtime.runIfWaitingForDebugger(session_id=cdp_session.session_id),
+						timeout=2.0,
+					)
+				except TimeoutError:
+					self.logger.debug('⏱️ Refocus after click timed out (page may be blocked by dialog). Continuing...')
+				except Exception as e:
+					self.logger.debug(f'⚠️ Refocus error (non-critical): {type(e).__name__}: {e}')
 
 		except URLNotAllowedError as e:
 			raise e
