@@ -280,7 +280,7 @@ class Tools(Generic[Context]):
 							params=GetDropdownOptionsAction(index=params.index), browser_session=browser_session
 						)
 					except Exception as dropdown_error:
-						logger.error(
+						logger.debug(
 							f'Failed to get dropdown options as shortcut during click on dropdown: {type(dropdown_error).__name__}: {dropdown_error}'
 						)
 					return ActionResult(error='Can not click on select elements.')
