@@ -1067,7 +1067,7 @@ Validated Code (after quote fixing):
 					# Replace image data in result text with shorter placeholder
 					modified_text = result_text
 					for i, img_data in enumerate(found_images, 1):
-						placeholder = f'[Image #{i}]'
+						placeholder = '[Image]'
 						modified_text = modified_text.replace(img_data, placeholder)
 					result_text = modified_text
 
