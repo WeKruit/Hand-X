@@ -585,9 +585,9 @@ class Tools(Generic[Context]):
 		):
 			# Constants
 			MAX_CHAR_LIMIT = 30000
-			query = params.query
-			extract_links = params.extract_links
-			start_from_char = params.start_from_char
+			query = params['query'] if isinstance(params, dict) else params.query
+			extract_links = params['extract_links'] if isinstance(params, dict) else params.extract_links
+			start_from_char = params['start_from_char'] if isinstance(params, dict) else params.start_from_char
 
 			# Extract clean markdown using the unified method
 			try:
