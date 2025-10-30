@@ -2903,27 +2903,6 @@ class BrowserSession(BaseModel):
 		# Frame not found
 		raise ValueError(f"Frame with ID '{frame_id}' not found in any target")
 
-	async def _validate_node_in_session(self, node: EnhancedDOMTreeNode, cdp_session: 'CDPSession') -> bool:
-		"""Validate that a node is accessible in a CDP session by trying to resolve and scroll to it."""
-		try:
-			# First, try to resolve the node
-			result = await cdp_session.cdp_client.send.DOM.resolveNode(
-				params={'backendNodeId': node.backend_node_id},
-				session_id=cdp_session.session_id,
-			)
-			object_id = result.get('object', {}).get('objectId')
-			if not object_id:
-				return False
-
-			# Second, validate it's actually accessible by trying to scroll to it
-			# This catches "detached" nodes that resolveNode doesn't catch
-			await cdp_session.cdp_client.send.DOM.scrollIntoViewIfNeeded(
-				params={'backendNodeId': node.backend_node_id},
-				session_id=cdp_session.session_id,
-			)
-			return True
-		except Exception:
-			return False
 
 	async def cdp_client_for_node(self, node: EnhancedDOMTreeNode) -> CDPSession:
 		"""Get CDP client for a specific DOM node based on its frame.
