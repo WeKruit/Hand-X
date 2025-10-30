@@ -445,9 +445,15 @@ class ChatGoogle(BaseChatModel):
 						status_code = 408
 				elif any(indicator in error_message.lower() for indicator in ['forbidden', '403']):
 					status_code = 403
-				elif any(indicator in error_message.lower() for indicator in ['rate limit', 'resource exhausted', 'quota exceeded', 'too many requests', '429']):
+				elif any(
+					indicator in error_message.lower()
+					for indicator in ['rate limit', 'resource exhausted', 'quota exceeded', 'too many requests', '429']
+				):
 					status_code = 429
-				elif any(indicator in error_message.lower() for indicator in ['service unavailable', 'internal server error', 'bad gateway', '503', '502', '500']):
+				elif any(
+					indicator in error_message.lower()
+					for indicator in ['service unavailable', 'internal server error', 'bad gateway', '503', '502', '500']
+				):
 					status_code = 503
 
 				raise ModelProviderError(
