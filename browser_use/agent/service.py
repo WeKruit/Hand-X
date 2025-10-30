@@ -150,7 +150,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		register_should_stop_callback: Callable[[], Awaitable[bool]] | None = None,
 		# Agent settings
 		output_model_schema: type[AgentStructuredOutput] | None = None,
-		use_vision: bool | Literal['auto'] = True,
+		use_vision: bool | Literal['auto'] = 'auto',
 		save_conversation_path: str | Path | None = None,
 		save_conversation_path_encoding: str | None = 'utf-8',
 		max_failures: int = 3,
