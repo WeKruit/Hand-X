@@ -99,7 +99,9 @@ class CloudBrowserClient:
 				raise
 			raise CloudBrowserError(f'Unexpected error creating cloud browser: {e}')
 
-	async def stop_browser(self, session_id: str | None = None) -> CloudBrowserResponse:
+	async def stop_browser(
+		self, session_id: str | None = None, extra_headers: dict[str, str] | None = None
+	) -> CloudBrowserResponse:
 		"""Stop a cloud browser session.
 
 		Args:
@@ -136,7 +138,7 @@ class CloudBrowserClient:
 				'No authentication token found. Please set BROWSER_USE_API_KEY environment variable to authenticate with the cloud service. You can also create an API key at https://cloud.browser-use.com/new-api-key'
 			)
 
-		headers = {'X-Browser-Use-API-Key': api_token, 'Content-Type': 'application/json'}
+		headers = {'X-Browser-Use-API-Key': api_token, 'Content-Type': 'application/json', **(extra_headers or {})}
 
 		request_body = {'action': 'stop'}
 
