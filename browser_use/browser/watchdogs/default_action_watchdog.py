@@ -1810,6 +1810,16 @@ class DefaultActionWatchdog(BaseWatchdog):
 				# If it's a special key, use original logic
 				if normalized_keys in special_keys:
 					await self._dispatch_key_event(cdp_session, 'keyDown', normalized_keys)
+					# For Enter key, also dispatch a char event to trigger keypress listeners
+					if normalized_keys == 'Enter':
+						await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
+							params={
+								'type': 'char',
+								'text': '\r',
+								'key': 'Enter',
+							},
+							session_id=cdp_session.session_id,
+						)
 					await self._dispatch_key_event(cdp_session, 'keyUp', normalized_keys)
 				else:
 					# It's text (single character or string) - send each character as text input
