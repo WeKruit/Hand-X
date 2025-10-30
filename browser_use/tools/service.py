@@ -38,6 +38,7 @@ from browser_use.tools.views import (
 	ClickElementAction,
 	CloseTabAction,
 	DoneAction,
+	ExtractAction,
 	GetDropdownOptionsAction,
 	InputTextAction,
 	NavigateAction,
@@ -577,15 +578,16 @@ class Tools(Generic[Context]):
 			"""LLM extracts structured data from page markdown. Use when: on right page, know what to extract, haven't called before on same page+query. Can't get interactive elements. Set extract_links=True for URLs. Use start_from_char if truncated. If fails, use find_text instead.""",
 		)
 		async def extract(
-			query: str,
+			params: ExtractAction,
 			browser_session: BrowserSession,
 			page_extraction_llm: BaseChatModel,
 			file_system: FileSystem,
-			extract_links: bool = False,
-			start_from_char: int = 0,
 		):
 			# Constants
 			MAX_CHAR_LIMIT = 30000
+			query = params.query
+			extract_links = params.extract_links
+			start_from_char = params.start_from_char
 
 			# Extract clean markdown using the unified method
 			try:
@@ -603,7 +605,7 @@ class Tools(Generic[Context]):
 			if start_from_char > 0:
 				if start_from_char >= len(content):
 					return ActionResult(
-						error=f'start_from_char ({start_from_char}) exceeds content length ({len(content)}). Content has {final_filtered_length} characters after filtering.'
+						error=f'start_from_char ({start_from_char}) exceeds content length {final_filtered_length} characters.'
 					)
 				content = content[start_from_char:]
 				content_stats['started_from_char'] = start_from_char
