@@ -43,6 +43,8 @@ DEFAULT_INCLUDE_ATTRIBUTES = [
 	'minlength',
 	'maxlength',
 	'step',
+	'accept',  # File input types (e.g., accept="image/*" or accept=".pdf")
+	'multiple',  # Whether multiple files/selections are allowed
 	# Webkit shadow DOM identifiers
 	'pseudo',
 	# Accessibility properties from ax_node (ordered by importance for automation)
@@ -90,6 +92,7 @@ STATIC_ATTRIBUTES = {
 	'checked',
 	'selected',
 	'multiple',
+	'accept',
 	'href',
 	'target',
 	'rel',
