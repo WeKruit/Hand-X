@@ -990,7 +990,7 @@ class DOMTreeSerializer:
 		if node.tag_name and node.tag_name.lower() == 'input' and node.attributes:
 			input_type = node.attributes.get('type', '').lower()
 			# Only add placeholder if it doesn't already exist
-			if 'placeholder' not in attributes_to_include:
+			if 'placeholder' in include_attributes and 'placeholder' not in attributes_to_include:
 				# Native HTML5 date/time inputs - ISO format required
 				if input_type == 'date':
 					attributes_to_include['placeholder'] = 'YYYY-MM-DD'
