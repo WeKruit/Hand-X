@@ -497,6 +497,14 @@ class DOMTreeSerializer:
 				if has_validation_attrs:
 					is_visible = True  # Force visibility for validation elements
 
+			# EXCEPTION: File inputs are often hidden with opacity:0 but are still functional
+			# Bootstrap and other frameworks use this pattern with custom-styled file pickers
+			is_file_input = (
+				node.tag_name and node.tag_name.lower() == 'input' and node.attributes and node.attributes.get('type') == 'file'
+			)
+			if not is_visible and is_file_input:
+				is_visible = True  # Force visibility for file inputs
+
 			# Include if visible, scrollable, has children, or is shadow host
 			if is_visible or is_scrollable or has_shadow_content or is_shadow_host:
 				simplified = SimplifiedNode(original_node=node, children=[], is_shadow_host=is_shadow_host)
@@ -543,11 +551,20 @@ class DOMTreeSerializer:
 		# Keep meaningful nodes
 		is_visible = node.original_node.snapshot_node and node.original_node.is_visible
 
+		# EXCEPTION: File inputs are often hidden with opacity:0 but are still functional
+		is_file_input = (
+			node.original_node.tag_name
+			and node.original_node.tag_name.lower() == 'input'
+			and node.original_node.attributes
+			and node.original_node.attributes.get('type') == 'file'
+		)
+
 		if (
 			is_visible  # Keep all visible nodes
 			or node.original_node.is_actually_scrollable
 			or node.original_node.node_type == NodeType.TEXT_NODE
 			or node.children
+			or is_file_input  # Keep file inputs even if not visible
 		):
 			return node
 
@@ -576,8 +593,18 @@ class DOMTreeSerializer:
 			is_interactive_assign = self._is_interactive_cached(node.original_node)
 			is_visible = node.original_node.snapshot_node and node.original_node.is_visible
 
+			# EXCEPTION: File inputs are often hidden with opacity:0 but are still functional
+			# Bootstrap and other frameworks use this pattern with custom-styled file pickers
+			is_file_input = (
+				node.original_node.tag_name
+				and node.original_node.tag_name.lower() == 'input'
+				and node.original_node.attributes
+				and node.original_node.attributes.get('type') == 'file'
+			)
+
 			# Only add to selector map if element is both interactive AND visible
-			if is_interactive_assign and is_visible:
+			# EXCEPT for file inputs which are often hidden but still functional
+			if is_interactive_assign and (is_visible or is_file_input):
 				# Mark node as interactive
 				node.is_interactive = True
 				# Store backend_node_id in selector map (model outputs backend_node_id)
