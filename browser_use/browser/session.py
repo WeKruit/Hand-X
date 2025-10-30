@@ -2903,7 +2903,6 @@ class BrowserSession(BaseModel):
 		# Frame not found
 		raise ValueError(f"Frame with ID '{frame_id}' not found in any target")
 
-
 	async def cdp_client_for_node(self, node: EnhancedDOMTreeNode) -> CDPSession:
 		"""Get CDP client for a specific DOM node based on its frame.
 
