@@ -1187,9 +1187,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 					return True
 
 				# Check for data attributes indicating datepickers
-				if any(
-					attr in element_node.attributes for attr in ['data-datepicker', 'data-date-format', 'data-provide']
-				):
+				if any(attr in element_node.attributes for attr in ['data-datepicker', 'data-date-format', 'data-provide']):
 					return True
 
 		return False
