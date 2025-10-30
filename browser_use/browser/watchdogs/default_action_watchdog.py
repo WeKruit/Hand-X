@@ -914,27 +914,54 @@ class DefaultActionWatchdog(BaseWatchdog):
 	async def _clear_text_field(self, object_id: str, cdp_session) -> bool:
 		"""Clear text field using multiple strategies, starting with the most reliable."""
 		try:
-			# Strategy 1: Direct JavaScript value setting (most reliable for modern web apps)
+			# Strategy 1: Direct JavaScript value/content setting (handles both inputs and contenteditable)
 			self.logger.debug('🧹 Clearing text field using JavaScript value setting')
 
-			await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+			clear_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
 				params={
 					'functionDeclaration': """
 						function() {
-							// Try to select all text first (only works on text-like inputs)
-							// This handles cases where cursor is in the middle of text
-							try {
-								this.select();
-							} catch (e) {
-								// Some input types (date, color, number, etc.) don't support select()
-								// That's fine, we'll just clear the value directly
+							// Check if it's a contenteditable element
+							const hasContentEditable = this.getAttribute('contenteditable') === 'true' ||
+													this.getAttribute('contenteditable') === '' ||
+													this.isContentEditable === true;
+
+							if (hasContentEditable) {
+								// For contenteditable elements, clear all content
+								while (this.firstChild) {
+									this.removeChild(this.firstChild);
+								}
+								this.textContent = "";
+								this.innerHTML = "";
+
+								// Focus and position cursor at the beginning
+								this.focus();
+								const selection = window.getSelection();
+								const range = document.createRange();
+								range.setStart(this, 0);
+								range.setEnd(this, 0);
+								selection.removeAllRanges();
+								selection.addRange(range);
+
+								// Dispatch events
+								this.dispatchEvent(new Event("input", { bubbles: true }));
+								this.dispatchEvent(new Event("change", { bubbles: true }));
+
+								return {cleared: true, method: 'contenteditable', finalText: this.textContent};
+							} else if (this.value !== undefined) {
+								// For regular inputs with value property
+								try {
+									this.select();
+								} catch (e) {
+									// ignore
+								}
+								this.value = "";
+								this.dispatchEvent(new Event("input", { bubbles: true }));
+								this.dispatchEvent(new Event("change", { bubbles: true }));
+								return {cleared: true, method: 'value', finalText: this.value};
+							} else {
+								return {cleared: false, method: 'none', error: 'Not a supported input type'};
 							}
-							// Set value to empty
-							this.value = "";
-							// Dispatch events to notify frameworks like React
-							this.dispatchEvent(new Event("input", { bubbles: true }));
-							this.dispatchEvent(new Event("change", { bubbles: true }));
-							return this.value;
 						}
 					""",
 					'objectId': object_id,
@@ -943,25 +970,25 @@ class DefaultActionWatchdog(BaseWatchdog):
 				session_id=cdp_session.session_id,
 			)
 
-			# Verify clearing worked by checking the value
-			verify_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
-				params={
-					'functionDeclaration': 'function() { return this.value; }',
-					'objectId': object_id,
-					'returnByValue': True,
-				},
-				session_id=cdp_session.session_id,
-			)
+			# Check the clear result
+			clear_info = clear_result.get('result', {}).get('value', {})
+			self.logger.debug(f'Clear result: {clear_info}')
 
-			current_value = verify_result.get('result', {}).get('value', '')
-			if not current_value:
-				self.logger.debug('✅ Text field cleared successfully using JavaScript')
-				return True
+			if clear_info.get('cleared'):
+				final_text = clear_info.get('finalText', '')
+				if not final_text or not final_text.strip():
+					self.logger.debug(f'✅ Text field cleared successfully using {clear_info.get("method")}')
+					return True
+				else:
+					self.logger.debug(f'⚠️ JavaScript clear partially failed, field still contains: "{final_text}"')
+					return False
 			else:
-				self.logger.debug(f'⚠️ JavaScript clear partially failed, field still contains: "{current_value}"')
+				self.logger.debug(f'❌ JavaScript clear failed: {clear_info.get("error", "Unknown error")}')
+				return False
 
 		except Exception as e:
-			self.logger.debug(f'JavaScript clear failed: {e}')
+			self.logger.debug(f'JavaScript clear failed with exception: {e}')
+			return False
 
 		# Strategy 2: Triple-click + Delete (fallback for stubborn fields)
 		try:
