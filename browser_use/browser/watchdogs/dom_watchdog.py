@@ -544,7 +544,7 @@ class DOMWatchdog(BaseWatchdog):
 				pending_network_requests=[],  # Error state has no pending requests
 				pagination_buttons=[],  # Error state has no pagination
 				closed_popup_messages=self.browser_session._closed_popup_messages.copy()
-				if hasattr(self, 'browser_session')
+				if hasattr(self, 'browser_session') and self.browser_session is not None
 				else [],
 			)
 
