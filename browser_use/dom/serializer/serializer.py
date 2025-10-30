@@ -1118,6 +1118,15 @@ class DOMTreeSerializer:
 				del attributes_to_include[attr]
 
 		if attributes_to_include:
-			return ' '.join(f'{key}={cap_text_length(value, 100)}' for key, value in attributes_to_include.items())
+			# Format attributes, wrapping empty values in quotes for clarity
+			formatted_attrs = []
+			for key, value in attributes_to_include.items():
+				capped_value = cap_text_length(value, 100)
+				# Show empty values as key='' instead of key=
+				if not capped_value:
+					formatted_attrs.append(f"{key}=''")
+				else:
+					formatted_attrs.append(f'{key}={capped_value}')
+			return ' '.join(formatted_attrs)
 
 		return ''
