@@ -1311,14 +1311,14 @@ class BrowserSession(BaseModel):
 
 			self._session_manager = SessionManager(self)
 			await self._session_manager.start_monitoring()
-			self.logger.info('Event-driven session manager started')
+			self.logger.debug('Event-driven session manager started')
 
 			# Enable auto-attach so Chrome automatically notifies us when NEW targets attach/detach
 			# This is the foundation of event-driven session management
 			await self._cdp_client_root.send.Target.setAutoAttach(
 				params={'autoAttach': True, 'waitForDebuggerOnStart': False, 'flatten': True}
 			)
-			self.logger.info('CDP client connected with auto-attach enabled')
+			self.logger.debug('CDP client connected with auto-attach enabled')
 
 			# Get browser targets to find available contexts/pages
 			targets = await self._cdp_client_root.send.Target.getTargets()
@@ -2190,32 +2190,32 @@ class BrowserSession(BaseModel):
 			(function() {{
 				// Interactive elements data
 				const interactiveElements = {json.dumps(elements_data)};
-				
+
 				console.log('=== BROWSER-USE HIGHLIGHTING ===');
 				console.log('Highlighting', interactiveElements.length, 'interactive elements');
-				
+
 				// Double-check: Remove any existing highlight container first
 				const existingContainer = document.getElementById('browser-use-debug-highlights');
 				if (existingContainer) {{
 					console.log('⚠️ Found existing highlight container, removing it first');
 					existingContainer.remove();
 				}}
-				
+
 				// Also remove any stray highlight elements
 				const strayHighlights = document.querySelectorAll('[data-browser-use-highlight]');
 				if (strayHighlights.length > 0) {{
 					console.log('⚠️ Found', strayHighlights.length, 'stray highlight elements, removing them');
 					strayHighlights.forEach(el => el.remove());
 				}}
-				
+
 				// Use maximum z-index for visibility
 				const HIGHLIGHT_Z_INDEX = 2147483647;
-				
+
 				// Create container for all highlights - use FIXED positioning (key insight from v0.6.0)
 				const container = document.createElement('div');
 				container.id = 'browser-use-debug-highlights';
 				container.setAttribute('data-browser-use-highlight', 'container');
-				
+
 				container.style.cssText = `
 					position: absolute;
 					top: 0;
@@ -2233,7 +2233,7 @@ class BrowserSession(BaseModel):
 					background: none;
 					font-family: inherit;
 				`;
-				
+
 				// Helper function to create text elements safely
 				function createTextElement(tag, text, styles) {{
 					const element = document.createElement(tag);
@@ -2241,7 +2241,7 @@ class BrowserSession(BaseModel):
 					if (styles) element.style.cssText = styles;
 					return element;
 				}}
-				
+
 				// Add highlights for each element
 				interactiveElements.forEach((element, index) => {{
 					const highlight = document.createElement('div');
@@ -2263,7 +2263,7 @@ class BrowserSession(BaseModel):
 						padding: 0;
 						border: none;
 					`;
-					
+
 					// Enhanced label with backend node ID
 					const label = createTextElement('div', element.backend_node_id, `
 						position: absolute;
@@ -2284,14 +2284,14 @@ class BrowserSession(BaseModel):
 						margin: 0;
 						line-height: 1.2;
 					`);
-					
+
 					highlight.appendChild(label);
 					container.appendChild(highlight);
 				}});
-				
+
 				// Add container to document
 				document.body.appendChild(container);
-				
+
 				console.log('Highlighting complete - added', interactiveElements.length, 'highlights');
 				return {{ added: interactiveElements.length }};
 			}})();
