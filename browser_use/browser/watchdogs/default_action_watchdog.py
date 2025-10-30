@@ -1140,11 +1140,72 @@ class DefaultActionWatchdog(BaseWatchdog):
 		self.logger.warning('⚠️ All focus strategies failed')
 		return False
 
+	def _requires_direct_value_assignment(self, element_node: EnhancedDOMTreeNode) -> bool:
+		"""
+		Check if an element requires direct value assignment instead of character-by-character typing.
+
+		Date/time inputs have compound components (spinbuttons) and typing character-by-character
+		doesn't work correctly. They require direct .value assignment in ISO format:
+		- date: YYYY-MM-DD
+		- time: HH:MM
+		- datetime-local: YYYY-MM-DDTHH:MM
+		"""
+		if element_node.tag_name and element_node.tag_name.lower() == 'input' and element_node.attributes:
+			input_type = element_node.attributes.get('type', '').lower()
+			# These input types require direct value assignment
+			return input_type in {'date', 'time', 'datetime-local', 'month', 'week'}
+		return False
+
+	async def _set_value_directly(
+		self, element_node: EnhancedDOMTreeNode, text: str, object_id: str, cdp_session
+	) -> None:
+		"""
+		Set element value directly using JavaScript for inputs that don't support typing.
+
+		This is used for date/time inputs where character-by-character typing doesn't work.
+		After setting the value, we dispatch input and change events to trigger any listeners.
+		"""
+		try:
+			# Set the value using JavaScript
+			# callFunctionOn expects a function body (not a self-invoking function)
+			set_value_js = f"""
+			function() {{
+				this.value = {json.dumps(text)};
+				// Dispatch input event (for live validation)
+				this.dispatchEvent(new Event('input', {{ bubbles: true }}));
+				// Dispatch change event (for form handling)
+				this.dispatchEvent(new Event('change', {{ bubbles: true }}));
+				return this.value;
+			}}
+			"""
+
+			result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+				params={
+					'objectId': object_id,
+					'functionDeclaration': set_value_js,
+					'returnByValue': True,
+				},
+				session_id=cdp_session.session_id,
+			)
+
+			# Verify the value was set correctly
+			if 'result' in result and 'value' in result['result']:
+				actual_value = result['result']['value']
+				self.logger.debug(f'✅ Value set directly to: "{actual_value}"')
+			else:
+				self.logger.warning('⚠️ Could not verify value was set correctly')
+
+		except Exception as e:
+			self.logger.error(f'❌ Failed to set value directly: {e}')
+			raise
+
 	async def _input_text_element_node_impl(
 		self, element_node: EnhancedDOMTreeNode, text: str, clear: bool = True, is_sensitive: bool = False
 	) -> dict | None:
 		"""
 		Input text into an element using pure CDP with improved focus fallbacks.
+
+		For date/time inputs, uses direct value assignment instead of typing.
 		"""
 
 		try:
@@ -1212,13 +1273,26 @@ class DefaultActionWatchdog(BaseWatchdog):
 				backend_node_id=backend_node_id, object_id=object_id, cdp_session=cdp_session, input_coordinates=input_coordinates
 			)
 
-			# Step 2: Clear existing text if requested
+			# Step 2: Check if this element requires direct value assignment (date/time inputs)
+			requires_direct_assignment = self._requires_direct_value_assignment(element_node)
+
+			if requires_direct_assignment:
+				# Date/time inputs: use direct value assignment instead of typing
+				self.logger.debug(
+					f'🎯 Element type={element_node.attributes.get("type")} requires direct value assignment, setting value directly'
+				)
+				await self._set_value_directly(element_node, text, object_id, cdp_session)
+
+				# Return input coordinates for metadata
+				return input_coordinates
+
+			# Step 3: Clear existing text if requested (only for regular inputs that support typing)
 			if clear:
 				cleared_successfully = await self._clear_text_field(object_id=object_id, cdp_session=cdp_session)
 				if not cleared_successfully:
 					self.logger.warning('⚠️ Text field clearing failed, typing may append to existing text')
 
-			# Step 3: Type the text character by character using proper human-like key events
+			# Step 4: Type the text character by character using proper human-like key events
 			# This emulates exactly how a human would type, which modern websites expect
 			if is_sensitive:
 				# Note: sensitive_key_name is not passed to this low-level method,
