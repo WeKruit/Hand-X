@@ -173,50 +173,14 @@ class DOMTreeSerializer:
 		input_type = node.attributes.get('type', '') if node.attributes else ''
 
 		if element_type == 'input':
-			if input_type == 'date':
-				node._compound_children.extend(
-					[
-						{'role': 'spinbutton', 'name': 'Day', 'valuemin': 1, 'valuemax': 31, 'valuenow': None},
-						{'role': 'spinbutton', 'name': 'Month', 'valuemin': 1, 'valuemax': 12, 'valuenow': None},
-						{'role': 'spinbutton', 'name': 'Year', 'valuemin': 1, 'valuemax': 275760, 'valuenow': None},
-					]
-				)
-				simplified.is_compound_component = True
-			elif input_type == 'time':
-				node._compound_children.extend(
-					[
-						{'role': 'spinbutton', 'name': 'Hour', 'valuemin': 0, 'valuemax': 23, 'valuenow': None},
-						{'role': 'spinbutton', 'name': 'Minute', 'valuemin': 0, 'valuemax': 59, 'valuenow': None},
-					]
-				)
-				simplified.is_compound_component = True
-			elif input_type == 'datetime-local':
-				node._compound_children.extend(
-					[
-						{'role': 'spinbutton', 'name': 'Day', 'valuemin': 1, 'valuemax': 31, 'valuenow': None},
-						{'role': 'spinbutton', 'name': 'Month', 'valuemin': 1, 'valuemax': 12, 'valuenow': None},
-						{'role': 'spinbutton', 'name': 'Year', 'valuemin': 1, 'valuemax': 275760, 'valuenow': None},
-						{'role': 'spinbutton', 'name': 'Hour', 'valuemin': 0, 'valuemax': 23, 'valuenow': None},
-						{'role': 'spinbutton', 'name': 'Minute', 'valuemin': 0, 'valuemax': 59, 'valuenow': None},
-					]
-				)
-				simplified.is_compound_component = True
-			elif input_type == 'month':
-				node._compound_children.extend(
-					[
-						{'role': 'spinbutton', 'name': 'Month', 'valuemin': 1, 'valuemax': 12, 'valuenow': None},
-						{'role': 'spinbutton', 'name': 'Year', 'valuemin': 1, 'valuemax': 275760, 'valuenow': None},
-					]
-				)
-				simplified.is_compound_component = True
-			elif input_type == 'week':
-				node._compound_children.extend(
-					[
-						{'role': 'spinbutton', 'name': 'Week', 'valuemin': 1, 'valuemax': 53, 'valuenow': None},
-						{'role': 'spinbutton', 'name': 'Year', 'valuemin': 1, 'valuemax': 275760, 'valuenow': None},
-					]
-				)
-				simplified.is_compound_component = True
+			# NOTE: For date/time inputs, we DON'T add compound components because:
+			# 1. They confuse the model (seeing "Day, Month, Year" suggests DD.MM.YYYY format)
+			# 2. HTML5 date/time inputs ALWAYS require ISO format (YYYY-MM-DD, HH:MM, etc.)
+			# 3. The placeholder attribute clearly shows the required format
+			# 4. These inputs use direct value assignment, not sequential typing
+			if input_type in ['date', 'time', 'datetime-local', 'month', 'week']:
+				# Skip compound components for date/time inputs - format is shown in placeholder
+				pass
 			elif input_type == 'range':
 				# Range slider with value indicator
 				min_val = node.attributes.get('min', '0') if node.attributes else '0'
@@ -989,6 +953,21 @@ class DOMTreeSerializer:
 		# Reference: https://developer.mozilla.org/en-US/docs/Web/HTML/Element/input/date
 		if node.tag_name and node.tag_name.lower() == 'input' and node.attributes:
 			input_type = node.attributes.get('type', '').lower()
+
+			# For HTML5 date/time inputs, add a highly visible "format" attribute
+			# This makes it IMPOSSIBLE for the model to miss the required format
+			if input_type in ['date', 'time', 'datetime-local', 'month', 'week']:
+				format_map = {
+					'date': 'YYYY-MM-DD',
+					'time': 'HH:MM',
+					'datetime-local': 'YYYY-MM-DDTHH:MM',
+					'month': 'YYYY-MM',
+					'week': 'YYYY-W##',
+				}
+				# Add format as a special attribute that appears prominently
+				# This appears BEFORE placeholder in the serialized output
+				attributes_to_include['format'] = format_map[input_type]
+
 			# Only add placeholder if it doesn't already exist
 			if 'placeholder' in include_attributes and 'placeholder' not in attributes_to_include:
 				# Native HTML5 date/time inputs - ISO format required
@@ -1014,16 +993,20 @@ class DOMTreeSerializer:
 						date_format = node.attributes.get('data-date-format', '')
 						if date_format:
 							attributes_to_include['placeholder'] = date_format
+							attributes_to_include['format'] = date_format  # Also add format for jQuery datepickers
 						else:
 							# Default to common US format for jQuery datepickers
 							attributes_to_include['placeholder'] = 'mm/dd/yyyy'
+							attributes_to_include['format'] = 'mm/dd/yyyy'
 					# Also detect by data-* attributes
 					elif any(attr in node.attributes for attr in ['data-datepicker']):
 						date_format = node.attributes.get('data-date-format', '')
 						if date_format:
 							attributes_to_include['placeholder'] = date_format
+							attributes_to_include['format'] = date_format
 						else:
 							attributes_to_include['placeholder'] = 'mm/dd/yyyy'
+							attributes_to_include['format'] = 'mm/dd/yyyy'
 
 		# Include accessibility properties
 		if node.ax_node and node.ax_node.properties:
