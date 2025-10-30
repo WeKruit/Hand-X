@@ -1162,7 +1162,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 				self.logger.debug(f'Click focus failed: {e}')
 
 		# Both strategies failed
-		self.logger.warning('⚠️ All focus strategies failed')
+		self.logger.debug('Focus strategies failed, will attempt typing anyway')
 		return False
 
 	def _requires_direct_value_assignment(self, element_node: EnhancedDOMTreeNode) -> bool:
@@ -1336,9 +1336,15 @@ class DefaultActionWatchdog(BaseWatchdog):
 				)
 				await asyncio.sleep(0.01)
 			except Exception as e:
-				self.logger.warning(
-					f'Failed to focus the page {cdp_session} and scroll element {element_node} into view before typing in text: {type(e).__name__}: {e}'
-				)
+				# Node detached errors are common with shadow DOM and dynamic content
+				# The element can still be interacted with even if scrolling fails
+				error_str = str(e)
+				if 'Node is detached from document' in error_str or 'detached from document' in error_str:
+					self.logger.debug(
+						f'Element node temporarily detached during scroll (common with shadow DOM), continuing: {element_node}'
+					)
+				else:
+					self.logger.debug(f'Failed to scroll element {element_node} into view before typing: {type(e).__name__}: {e}')
 
 			# Get object ID for the element
 			result = await cdp_client.send.DOM.resolveNode(
