@@ -227,6 +227,30 @@ class DOMTreeSerializer:
 			elif input_type == 'file':
 				# File input with browse button
 				multiple = 'multiple' in node.attributes if node.attributes else False
+
+				# Extract current file selection state from AX tree
+				current_value = 'None'  # Default to explicit "None" string for clarity
+				if node.ax_node and node.ax_node.properties:
+					for prop in node.ax_node.properties:
+						# Try valuetext first (human-readable display like "file.pdf")
+						if prop.name == 'valuetext' and prop.value:
+							value_str = str(prop.value).strip()
+							if value_str and value_str.lower() not in ['', 'no file chosen', 'no file selected']:
+								current_value = value_str
+							break
+						# Also try 'value' property (may include full path)
+						elif prop.name == 'value' and prop.value:
+							value_str = str(prop.value).strip()
+							if value_str:
+								# For file inputs, value might be a full path - extract just filename
+								if '\\' in value_str:
+									current_value = value_str.split('\\')[-1]
+								elif '/' in value_str:
+									current_value = value_str.split('/')[-1]
+								else:
+									current_value = value_str
+								break
+
 				node._compound_children.extend(
 					[
 						{'role': 'button', 'name': 'Browse Files', 'valuemin': None, 'valuemax': None, 'valuenow': None},
@@ -235,7 +259,7 @@ class DOMTreeSerializer:
 							'name': f'{"Files" if multiple else "File"} Selected',
 							'valuemin': None,
 							'valuemax': None,
-							'valuenow': None,
+							'valuenow': current_value,  # Always shows state: filename or "None"
 						},
 					]
 				)
