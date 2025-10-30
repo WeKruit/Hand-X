@@ -229,8 +229,8 @@ class FileSystem:
 		# Build extensions pattern from _file_types
 		extensions = '|'.join(self._file_types.keys())
 		pattern = rf'^[a-zA-Z0-9_\-\u4e00-\u9fff]+\.({extensions})$'
-		file_basename = os.path.basename(file_name)
-		return bool(re.match(pattern, file_basename))
+		file_name_base = os.path.basename(file_name)
+		return bool(re.match(pattern, file_name_base))
 
 	def _parse_filename(self, filename: str) -> tuple[str, str]:
 		"""Parse filename into name and extension. Always check _is_valid_filename first."""
