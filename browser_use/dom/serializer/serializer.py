@@ -1002,15 +1002,6 @@ class DOMTreeSerializer:
 					attributes_to_include['placeholder'] = 'YYYY-MM'
 				elif input_type == 'week':
 					attributes_to_include['placeholder'] = 'YYYY-W##'
-				# Color picker - hex format required
-				elif input_type == 'color':
-					attributes_to_include['placeholder'] = '#RRGGBB'
-				# Email validation hint
-				elif input_type == 'email':
-					attributes_to_include['placeholder'] = 'user@example.com'
-				# URL validation hint
-				elif input_type == 'url':
-					attributes_to_include['placeholder'] = 'https://example.com'
 				# Tel - suggest format if no pattern attribute
 				elif input_type == 'tel' and 'pattern' not in attributes_to_include:
 					attributes_to_include['placeholder'] = '123-456-7890'
