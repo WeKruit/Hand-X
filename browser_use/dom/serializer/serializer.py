@@ -397,17 +397,16 @@ class DOMTreeSerializer:
 		# Prepare first 4 options for display
 		first_options = []
 		for option in options[:4]:
-			if option['text'] and option['value'] and option['text'] != option['value']:
+			# Always use text if available, otherwise use value
+			display_text = option['text'] if option['text'] else option['value']
+			if display_text:
 				# Limit individual option text to avoid overly long attributes
-				text = option['text'][:20] + ('...' if len(option['text']) > 20 else '')
-				value = option['value'][:10] + ('...' if len(option['value']) > 10 else '')
-				first_options.append(f'{text} ({value})')
-			elif option['text']:
-				text = option['text'][:25] + ('...' if len(option['text']) > 25 else '')
+				text = display_text[:30] + ('...' if len(display_text) > 30 else '')
 				first_options.append(text)
-			elif option['value']:
-				value = option['value'][:25] + ('...' if len(option['value']) > 25 else '')
-				first_options.append(value)
+
+		# Add ellipsis indicator if there are more options than shown
+		if len(options) > 4:
+			first_options.append(f'... {len(options) - 4} more options...')
 
 		# Try to infer format hint from option values
 		format_hint = None
