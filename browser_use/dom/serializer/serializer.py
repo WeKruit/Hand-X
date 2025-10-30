@@ -1027,7 +1027,7 @@ class DOMTreeSerializer:
 							# Default to common US format for jQuery datepickers
 							attributes_to_include['placeholder'] = 'mm/dd/yyyy'
 					# Also detect by data-* attributes
-					elif any(attr in node.attributes for attr in ['data-datepicker', 'data-provide']):
+					elif any(attr in node.attributes for attr in ['data-datepicker']):
 						date_format = node.attributes.get('data-date-format', '')
 						if date_format:
 							attributes_to_include['placeholder'] = date_format
