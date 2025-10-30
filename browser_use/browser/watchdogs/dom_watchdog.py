@@ -543,7 +543,9 @@ class DOMWatchdog(BaseWatchdog):
 				recent_events=None,
 				pending_network_requests=[],  # Error state has no pending requests
 				pagination_buttons=[],  # Error state has no pagination
-				closed_popup_messages=self.browser_session._closed_popup_messages.copy() if hasattr(self, 'browser_session') else [],
+				closed_popup_messages=self.browser_session._closed_popup_messages.copy()
+				if hasattr(self, 'browser_session')
+				else [],
 			)
 
 	@time_execution_async('build_dom_tree_without_highlights')

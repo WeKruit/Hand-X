@@ -67,9 +67,9 @@ class PopupsWatchdog(BaseWatchdog):
 
 					# Store the popup message in browser session for inclusion in browser state
 					if message:
-						formatted_message = f"[{dialog_type}] {message}"
+						formatted_message = f'[{dialog_type}] {message}'
 						self.browser_session._closed_popup_messages.append(formatted_message)
-						self.logger.debug(f"📝 Stored popup message: {formatted_message[:100]}")
+						self.logger.debug(f'📝 Stored popup message: {formatted_message[:100]}')
 
 					# Choose action based on dialog type:
 					# - alert: accept=true (click OK to dismiss)
