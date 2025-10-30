@@ -332,14 +332,14 @@ class Tools(Generic[Context]):
 				# Create message with sensitive data handling
 				if has_sensitive_data:
 					if sensitive_key_name:
-						msg = f'Input {sensitive_key_name} into element {params.index}.'
-						log_msg = f'Input <{sensitive_key_name}> into element {params.index}.'
+						msg = f'Typed {sensitive_key_name}'
+						log_msg = f'Typed <{sensitive_key_name}>'
 					else:
-						msg = f'Input sensitive data into element {params.index}.'
-						log_msg = f'Input <sensitive> into element {params.index}.'
+						msg = 'Typed sensitive data'
+						log_msg = 'Typed <sensitive>'
 				else:
-					msg = f"Input '{params.text}' into element {params.index}."
-					log_msg = msg
+					msg = f"Typed '{params.text}'"
+					log_msg = f"Typed '{params.text}'"
 
 				logger.debug(log_msg)
 
@@ -354,7 +354,7 @@ class Tools(Generic[Context]):
 			except Exception as e:
 				# Log the full error for debugging
 				logger.error(f'Failed to dispatch TypeTextEvent: {type(e).__name__}: {e}')
-				error_msg = f'Failed to input text into element {params.index}: {e}'
+				error_msg = f'Failed to type text into element {params.index}: {e}'
 				return ActionResult(error=error_msg)
 
 		@self.registry.action(
@@ -585,9 +585,9 @@ class Tools(Generic[Context]):
 		):
 			# Constants
 			MAX_CHAR_LIMIT = 30000
-			query = params.query
-			extract_links = params.extract_links
-			start_from_char = params.start_from_char
+			query = params['query'] if isinstance(params, dict) else params.query
+			extract_links = params['extract_links'] if isinstance(params, dict) else params.extract_links
+			start_from_char = params['start_from_char'] if isinstance(params, dict) else params.start_from_char
 
 			# Extract clean markdown using the unified method
 			try:
@@ -1054,13 +1054,32 @@ Validated Code (after quote fixing):
 					# Primitive values (string, number, boolean)
 					result_text = str(value)
 
-				# Apply length limit with better truncation
+				import re
+
+				image_pattern = r'(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)'
+				found_images = re.findall(image_pattern, result_text)
+
+				metadata = None
+				if found_images:
+					# Store images in metadata so they can be added as ContentPartImageParam
+					metadata = {'images': found_images}
+
+					# Replace image data in result text with shorter placeholder
+					modified_text = result_text
+					for i, img_data in enumerate(found_images, 1):
+						placeholder = '[Image]'
+						modified_text = modified_text.replace(img_data, placeholder)
+					result_text = modified_text
+
+				# Apply length limit with better truncation (after image extraction)
 				if len(result_text) > 20000:
 					result_text = result_text[:19950] + '\n... [Truncated after 20000 characters]'
+
 				# Don't log the code - it's already visible in the user's cell
 				logger.debug(f'JavaScript executed successfully, result length: {len(result_text)}')
+
 				# Return only the result, not the code (code is already in user's cell)
-				return ActionResult(extracted_content=result_text)
+				return ActionResult(extracted_content=result_text, metadata=metadata)
 
 			except Exception as e:
 				# CDP communication or other system errors

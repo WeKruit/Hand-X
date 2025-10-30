@@ -2510,10 +2510,10 @@ class DefaultActionWatchdog(BaseWatchdog):
 								short_term_options.append(f'- {opt}')
 
 						if short_term_options:
-							short_term_memory = f'Available dropdown options at index {index_for_logging} are:\n' + '\n'.join(
-								short_term_options
+							short_term_memory = 'Available dropdown options  are:\n' + '\n'.join(short_term_options)
+							long_term_memory = (
+								f"Couldn't select the dropdown option as '{target_text}' is not one of the available options."
 							)
-							long_term_memory = f"Couldn't select the dropdown option at index {index_for_logging} as '{target_text}' is not one of the available options."
 
 							# Return error result with structured memory instead of raising exception
 							return {
