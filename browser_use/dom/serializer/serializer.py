@@ -965,6 +965,7 @@ class DOMTreeSerializer:
 			input_type = node.attributes.get('type', '').lower()
 			# Only add placeholder if it doesn't already exist
 			if 'placeholder' not in attributes_to_include:
+				# Native HTML5 date/time inputs - ISO format required
 				if input_type == 'date':
 					attributes_to_include['placeholder'] = 'YYYY-MM-DD'
 				elif input_type == 'time':
@@ -975,6 +976,37 @@ class DOMTreeSerializer:
 					attributes_to_include['placeholder'] = 'YYYY-MM'
 				elif input_type == 'week':
 					attributes_to_include['placeholder'] = 'YYYY-W##'
+				# Color picker - hex format required
+				elif input_type == 'color':
+					attributes_to_include['placeholder'] = '#RRGGBB'
+				# Email validation hint
+				elif input_type == 'email':
+					attributes_to_include['placeholder'] = 'user@example.com'
+				# URL validation hint
+				elif input_type == 'url':
+					attributes_to_include['placeholder'] = 'https://example.com'
+				# Tel - suggest format if no pattern attribute
+				elif input_type == 'tel' and 'pattern' not in attributes_to_include:
+					attributes_to_include['placeholder'] = '123-456-7890'
+				# jQuery/Bootstrap datepickers (text inputs with datepicker classes/attributes)
+				elif input_type in {'text', ''}:
+					class_attr = node.attributes.get('class', '').lower()
+					# Detect jQuery/Bootstrap datepickers by class names
+					if any(indicator in class_attr for indicator in ['datepicker', 'datetimepicker', 'daterangepicker']):
+						# Try to get format from data-date-format attribute
+						date_format = node.attributes.get('data-date-format', '')
+						if date_format:
+							attributes_to_include['placeholder'] = date_format
+						else:
+							# Default to common US format for jQuery datepickers
+							attributes_to_include['placeholder'] = 'mm/dd/yyyy'
+					# Also detect by data-* attributes
+					elif any(attr in node.attributes for attr in ['data-datepicker', 'data-provide']):
+						date_format = node.attributes.get('data-date-format', '')
+						if date_format:
+							attributes_to_include['placeholder'] = date_format
+						else:
+							attributes_to_include['placeholder'] = 'mm/dd/yyyy'
 
 		# Include accessibility properties
 		if node.ax_node and node.ax_node.properties:
