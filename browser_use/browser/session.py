@@ -639,7 +639,7 @@ class BrowserSession(BaseModel):
 			)
 
 			# # Wait a bit to ensure page starts loading
-			# await asyncio.sleep(0.5)
+			await asyncio.sleep(1)
 
 			# Close any extension options pages that might have opened
 			await self._close_extension_options_pages()
