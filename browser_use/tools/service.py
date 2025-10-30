@@ -332,14 +332,14 @@ class Tools(Generic[Context]):
 				# Create message with sensitive data handling
 				if has_sensitive_data:
 					if sensitive_key_name:
-						msg = f'Input {sensitive_key_name} into element {params.index}.'
-						log_msg = f'Input <{sensitive_key_name}> into element {params.index}.'
+						msg = f'Typed {sensitive_key_name}'
+						log_msg = f'Typed <{sensitive_key_name}>'
 					else:
-						msg = f'Input sensitive data into element {params.index}.'
-						log_msg = f'Input <sensitive> into element {params.index}.'
+						msg = 'Typed sensitive data'
+						log_msg = 'Typed <sensitive>'
 				else:
-					msg = f"Input '{params.text}' into element {params.index}."
-					log_msg = msg
+					msg = f"Typed '{params.text}'"
+					log_msg = f"Typed '{params.text}'"
 
 				logger.debug(log_msg)
 
@@ -354,7 +354,7 @@ class Tools(Generic[Context]):
 			except Exception as e:
 				# Log the full error for debugging
 				logger.error(f'Failed to dispatch TypeTextEvent: {type(e).__name__}: {e}')
-				error_msg = f'Failed to input text into element {params.index}: {e}'
+				error_msg = f'Failed to type text into element {params.index}: {e}'
 				return ActionResult(error=error_msg)
 
 		@self.registry.action(
