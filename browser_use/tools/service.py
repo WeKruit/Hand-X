@@ -1054,13 +1054,32 @@ Validated Code (after quote fixing):
 					# Primitive values (string, number, boolean)
 					result_text = str(value)
 
-				# Apply length limit with better truncation
+				import re
+
+				image_pattern = r'(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)'
+				found_images = re.findall(image_pattern, result_text)
+
+				metadata = None
+				if found_images:
+					# Store images in metadata so they can be added as ContentPartImageParam
+					metadata = {'images': found_images}
+
+					# Replace image data in result text with shorter placeholder
+					modified_text = result_text
+					for i, img_data in enumerate(found_images, 1):
+						placeholder = f'[Image #{i}]'
+						modified_text = modified_text.replace(img_data, placeholder)
+					result_text = modified_text
+
+				# Apply length limit with better truncation (after image extraction)
 				if len(result_text) > 20000:
 					result_text = result_text[:19950] + '\n... [Truncated after 20000 characters]'
+
 				# Don't log the code - it's already visible in the user's cell
 				logger.debug(f'JavaScript executed successfully, result length: {len(result_text)}')
+
 				# Return only the result, not the code (code is already in user's cell)
-				return ActionResult(extracted_content=result_text)
+				return ActionResult(extracted_content=result_text, metadata=metadata)
 
 			except Exception as e:
 				# CDP communication or other system errors
