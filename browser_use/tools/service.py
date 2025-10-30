@@ -264,6 +264,21 @@ class Tools(Generic[Context]):
 				# Wait for handler to complete and get any exception or metadata
 				click_metadata = await event.event_result(raise_if_any=True, raise_if_none=False)
 
+				# Check if result contains validation error (e.g., trying to click <select> or file input)
+				if isinstance(click_metadata, dict) and 'validation_error' in click_metadata:
+					error_msg = click_metadata['validation_error']
+					# If it's a select element, try to get dropdown options as a helpful shortcut
+					if 'Cannot click on <select> elements.' in error_msg:
+						try:
+							return await dropdown_options(
+								params=GetDropdownOptionsAction(index=params.index), browser_session=browser_session
+							)
+						except Exception as dropdown_error:
+							logger.debug(
+								f'Failed to get dropdown options as shortcut during click on dropdown: {type(dropdown_error).__name__}: {dropdown_error}'
+							)
+					return ActionResult(error=error_msg)
+
 				# Build memory with element info
 				memory = f'Clicked {element_desc}'
 				logger.info(f'🖱️ {memory}')
@@ -274,17 +289,6 @@ class Tools(Generic[Context]):
 					metadata=click_metadata if isinstance(click_metadata, dict) else None,
 				)
 			except BrowserError as e:
-				if 'Cannot click on <select> elements.' in str(e):
-					try:
-						return await dropdown_options(
-							params=GetDropdownOptionsAction(index=params.index), browser_session=browser_session
-						)
-					except Exception as dropdown_error:
-						logger.debug(
-							f'Failed to get dropdown options as shortcut during click on dropdown: {type(dropdown_error).__name__}: {dropdown_error}'
-						)
-					return ActionResult(error='Can not click on select elements.')
-
 				return handle_browser_error(e)
 			except Exception as e:
 				error_msg = f'Failed to click element {params.index}: {str(e)}'
