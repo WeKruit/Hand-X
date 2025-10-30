@@ -845,7 +845,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				)
 
 		@self.registry.action(
-			'Request screenshot of current viewport. Use when: visual inspection needed, layout unclear, element positions uncertain, debugging UI issues, or verifying page state. Screenshot is included in the next browser_state.',
+			'Get a screenshot of the current viewport. Use when: visual inspection needed, layout unclear, element positions uncertain, debugging UI issues, or verifying page state. Screenshot is included in the next browser_state No parameters are needed.',
 		)
 		async def screenshot(_: NoParamsAction):
 			"""Request that a screenshot be included in the next observation"""
