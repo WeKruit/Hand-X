@@ -168,11 +168,9 @@ class DefaultActionWatchdog(BaseWatchdog):
 			# Check if element is a file input (should not be clicked)
 			if self.browser_session.is_file_input(element_node):
 				msg = f'Index {index_for_logging} - has an element which opens file upload dialog. To upload files please use a specific function to upload files'
-				self.logger.info(msg)
-				raise BrowserError(
-					message=msg,
-					long_term_memory=msg,
-				)
+				self.logger.info(f'⚠️ {msg}')
+				# Return validation error instead of raising to avoid ERROR logs
+				return {'validation_error': msg}
 
 			# Detect print-related elements and handle them specially
 			is_print_element = self._is_print_related_element(element_node)
@@ -195,6 +193,11 @@ class DefaultActionWatchdog(BaseWatchdog):
 			# Perform the actual click using internal implementation
 			click_metadata = await self._click_element_node_impl(element_node)
 			download_path = None  # moved to downloads_watchdog.py
+
+			# Check for validation errors - return them without raising to avoid ERROR logs
+			if isinstance(click_metadata, dict) and 'validation_error' in click_metadata:
+				self.logger.info(f'⚠️ {click_metadata["validation_error"]}')
+				return click_metadata
 
 			# Build success message
 			if download_path:
@@ -430,17 +433,13 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 			if tag_name == 'select':
 				msg = f'Cannot click on <select> elements. Use dropdown_options(index={element_node.backend_node_id}) action instead.'
-				raise BrowserError(
-					message=msg,
-					long_term_memory=msg,
-				)
+				# Return error dict instead of raising to avoid ERROR logs
+				return {'validation_error': msg}
 
 			if tag_name == 'input' and element_type == 'file':
 				msg = f'Cannot click on file input element (index={element_node.backend_node_id}). File uploads must be handled using upload_file_to_element action.'
-				raise BrowserError(
-					message=msg,
-					long_term_memory=msg,
-				)
+				# Return error dict instead of raising to avoid ERROR logs
+				return {'validation_error': msg}
 
 			# Get CDP client
 			cdp_session = await self.browser_session.cdp_client_for_node(element_node)
