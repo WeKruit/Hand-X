@@ -1156,9 +1156,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 			return input_type in {'date', 'time', 'datetime-local', 'month', 'week'}
 		return False
 
-	async def _set_value_directly(
-		self, element_node: EnhancedDOMTreeNode, text: str, object_id: str, cdp_session
-	) -> None:
+	async def _set_value_directly(self, element_node: EnhancedDOMTreeNode, text: str, object_id: str, cdp_session) -> None:
 		"""
 		Set element value directly using JavaScript for inputs that don't support typing.
 
