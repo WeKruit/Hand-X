@@ -1339,7 +1339,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 				await asyncio.sleep(0.01)
 			except Exception as e:
 				self.logger.warning(
-					f'⚠️ Failed to focus the page {cdp_session} and scroll element {element_node} into view before typing in text: {type(e).__name__}: {e}'
+					f'Failed to focus the page {cdp_session} and scroll element {element_node} into view before typing in text: {type(e).__name__}: {e}'
 				)
 
 			# Get object ID for the element
