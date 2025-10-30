@@ -1038,9 +1038,9 @@ class DOMTreeSerializer:
 				# jQuery/Bootstrap/AngularJS datepickers (text inputs with datepicker classes/attributes)
 				elif input_type in {'text', ''}:
 					class_attr = node.attributes.get('class', '').lower()
-					date_format = None
 
 					# Check for AngularJS UI Bootstrap datepicker (uib-datepicker-popup attribute)
+					# This takes precedence as it's the most specific indicator
 					if 'uib-datepicker-popup' in node.attributes:
 						# Extract format from uib-datepicker-popup="MM/dd/yyyy"
 						date_format = node.attributes.get('uib-datepicker-popup', '')
@@ -1050,9 +1050,7 @@ class DOMTreeSerializer:
 							# Also keep format for consistency with HTML5 date inputs
 							attributes_to_include['format'] = date_format
 					# Detect jQuery/Bootstrap datepickers by class names
-					if not date_format and any(
-						indicator in class_attr for indicator in ['datepicker', 'datetimepicker', 'daterangepicker']
-					):
+					elif any(indicator in class_attr for indicator in ['datepicker', 'datetimepicker', 'daterangepicker']):
 						# Try to get format from data-date-format attribute
 						date_format = node.attributes.get('data-date-format', '')
 						if date_format:
@@ -1063,7 +1061,7 @@ class DOMTreeSerializer:
 							attributes_to_include['placeholder'] = 'mm/dd/yyyy'
 							attributes_to_include['format'] = 'mm/dd/yyyy'
 					# Also detect by data-* attributes
-					if not date_format and any(attr in node.attributes for attr in ['data-datepicker']):
+					elif any(attr in node.attributes for attr in ['data-datepicker']):
 						date_format = node.attributes.get('data-date-format', '')
 						if date_format:
 							attributes_to_include['placeholder'] = date_format
