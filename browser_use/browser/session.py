@@ -2903,45 +2903,76 @@ class BrowserSession(BaseModel):
 		# Frame not found
 		raise ValueError(f"Frame with ID '{frame_id}' not found in any target")
 
+	async def _validate_node_in_session(self, node: EnhancedDOMTreeNode, cdp_session: 'CDPSession') -> bool:
+		"""Validate that a node is accessible in a CDP session by trying to resolve and scroll to it."""
+		try:
+			# First, try to resolve the node
+			result = await cdp_session.cdp_client.send.DOM.resolveNode(
+				params={'backendNodeId': node.backend_node_id},
+				session_id=cdp_session.session_id,
+			)
+			object_id = result.get('object', {}).get('objectId')
+			if not object_id:
+				return False
+
+			# Second, validate it's actually accessible by trying to scroll to it
+			# This catches "detached" nodes that resolveNode doesn't catch
+			await cdp_session.cdp_client.send.DOM.scrollIntoViewIfNeeded(
+				params={'backendNodeId': node.backend_node_id},
+				session_id=cdp_session.session_id,
+			)
+			return True
+		except Exception:
+			return False
+
 	async def cdp_client_for_node(self, node: EnhancedDOMTreeNode) -> CDPSession:
-		"""Get CDP client for a specific DOM node based on its frame."""
+		"""Get CDP client for a specific DOM node based on its frame.
+
+		IMPORTANT: backend_node_id is only valid in the session where the DOM was captured.
+		We trust the node's session_id/frame_id/target_id instead of searching all sessions.
+		"""
+
+		# Strategy 1: If node has session_id, try to use that exact session (most specific)
+		if node.session_id:
+			try:
+				# Find the CDP session by session_id
+				for cdp_session in self._cdp_session_pool.values():
+					if cdp_session.session_id == node.session_id:
+						self.logger.debug(
+							f'✅ Using session from node.session_id for node {node.backend_node_id}: {cdp_session.url}'
+						)
+						return cdp_session
+			except Exception as e:
+				self.logger.debug(f'Failed to get session by session_id {node.session_id}: {e}')
+
+		# Strategy 2: If node has frame_id, use that frame's session
 		if node.frame_id:
-			# # If cross-origin iframes are disabled, always use the main session
-			# if not self.browser_profile.cross_origin_iframes:
-			# 	assert self.agent_focus is not None, 'No active CDP session'
-			# 	return self.agent_focus
-			# Otherwise, try to get the frame-specific session
 			try:
 				cdp_session = await self.cdp_client_for_frame(node.frame_id)
-				result = await cdp_session.cdp_client.send.DOM.resolveNode(
-					params={'backendNodeId': node.backend_node_id},
-					session_id=cdp_session.session_id,
-				)
-				object_id = result.get('object', {}).get('objectId')
-				if not object_id:
-					raise ValueError(f'Could not find backendNodeId={node.backend_node_id} in target_id={cdp_session.target_id}')
+				self.logger.debug(f'✅ Using session from node.frame_id for node {node.backend_node_id}: {cdp_session.url}')
 				return cdp_session
-			except (ValueError, Exception) as e:
-				# Fall back to main session if frame not found
-				self.logger.debug(f'Failed to get CDP client for frame {node.frame_id}: {e}, using main session')
+			except Exception as e:
+				self.logger.debug(f'Failed to get session for frame {node.frame_id}: {e}')
 
+		# Strategy 3: If node has target_id, use that target's session
 		if node.target_id:
 			try:
 				cdp_session = await self.get_or_create_cdp_session(target_id=node.target_id, focus=False)
-				result = await cdp_session.cdp_client.send.DOM.resolveNode(
-					params={'backendNodeId': node.backend_node_id},
-					session_id=cdp_session.session_id,
-				)
-				object_id = result.get('object', {}).get('objectId')
-				if not object_id:
-					raise ValueError(f'Could not find backendNodeId={node.backend_node_id} in target_id={cdp_session.target_id}')
-				# SUCCESS - return the correct CDP session for this node's target
+				self.logger.debug(f'✅ Using session from node.target_id for node {node.backend_node_id}: {cdp_session.url}')
 				return cdp_session
 			except Exception as e:
-				self.logger.warning(
-					f'⚠️ Failed to get CDP client for target ...{node.target_id[-4:]}: {e}, falling back to main session'
-				)
+				self.logger.debug(f'Failed to get session for target {node.target_id}: {e}')
 
+		# Strategy 4: Fallback to agent_focus (the page where agent is currently working)
+		if self.agent_focus:
+			self.logger.warning(
+				f'⚠️ Node {node.backend_node_id} has no session/frame/target info. '
+				f'Using agent_focus session: {self.agent_focus.url}'
+			)
+			return self.agent_focus
+
+		# Last resort: use main session
+		self.logger.error(f'❌ No session info for node {node.backend_node_id} and no agent_focus available. Using main session.')
 		return await self.get_or_create_cdp_session()
 
 	@observe_debug(ignore_input=True, ignore_output=True, name='take_screenshot')
