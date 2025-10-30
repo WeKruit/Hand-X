@@ -1144,35 +1144,108 @@ class DefaultActionWatchdog(BaseWatchdog):
 		"""
 		Check if an element requires direct value assignment instead of character-by-character typing.
 
-		Date/time inputs have compound components (spinbuttons) and typing character-by-character
-		doesn't work correctly. They require direct .value assignment in ISO format:
-		- date: YYYY-MM-DD
-		- time: HH:MM
-		- datetime-local: YYYY-MM-DDTHH:MM
+		Certain input types have compound components, custom plugins, or special requirements
+		that make character-by-character typing unreliable. These need direct .value assignment:
+
+		Native HTML5:
+		- date, time, datetime-local: Have spinbutton components (ISO format required)
+		- month, week: Similar compound structure
+		- color: Expects hex format #RRGGBB
+		- range: Needs numeric value within min/max
+
+		jQuery/Bootstrap Datepickers:
+		- Detected by class names or data attributes
+		- Often expect specific date formats (MM/DD/YYYY, DD/MM/YYYY, etc.)
+
+		Note: We use direct assignment because:
+		1. Typing triggers intermediate validation that might reject partial values
+		2. Compound components (like date spinbuttons) don't work with sequential typing
+		3. It's much faster and more reliable
+		4. We dispatch proper input/change events afterward to trigger listeners
 		"""
-		if element_node.tag_name and element_node.tag_name.lower() == 'input' and element_node.attributes:
+		if not element_node.tag_name or not element_node.attributes:
+			return False
+
+		tag_name = element_node.tag_name.lower()
+
+		# Check for native HTML5 inputs that need direct assignment
+		if tag_name == 'input':
 			input_type = element_node.attributes.get('type', '').lower()
-			# These input types require direct value assignment
-			return input_type in {'date', 'time', 'datetime-local', 'month', 'week'}
+
+			# Native HTML5 inputs with compound components or strict formats
+			if input_type in {'date', 'time', 'datetime-local', 'month', 'week', 'color', 'range'}:
+				return True
+
+			# Detect jQuery/Bootstrap datepickers (text inputs with datepicker plugins)
+			if input_type in {'text', ''}:
+				# Check for common datepicker indicators
+				class_attr = element_node.attributes.get('class', '').lower()
+				if any(
+					indicator in class_attr
+					for indicator in ['datepicker', 'daterangepicker', 'datetimepicker', 'bootstrap-datepicker']
+				):
+					return True
+
+				# Check for data attributes indicating datepickers
+				if any(
+					attr in element_node.attributes for attr in ['data-datepicker', 'data-date-format', 'data-provide']
+				):
+					return True
+
 		return False
 
 	async def _set_value_directly(self, element_node: EnhancedDOMTreeNode, text: str, object_id: str, cdp_session) -> None:
 		"""
 		Set element value directly using JavaScript for inputs that don't support typing.
 
-		This is used for date/time inputs where character-by-character typing doesn't work.
-		After setting the value, we dispatch input and change events to trigger any listeners.
+		This is used for:
+		- Date/time inputs where character-by-character typing doesn't work
+		- jQuery datepickers that need direct value assignment
+		- Color/range inputs that need specific formats
+		- Any input with custom plugins that intercept typing
+
+		After setting the value, we dispatch comprehensive events to ensure all frameworks
+		and plugins recognize the change (React, Vue, Angular, jQuery, etc.)
 		"""
 		try:
-			# Set the value using JavaScript
+			# Set the value using JavaScript with comprehensive event dispatching
 			# callFunctionOn expects a function body (not a self-invoking function)
 			set_value_js = f"""
 			function() {{
+				// Store old value for comparison
+				const oldValue = this.value;
+
+				// Set the new value
 				this.value = {json.dumps(text)};
-				// Dispatch input event (for live validation)
-				this.dispatchEvent(new Event('input', {{ bubbles: true }}));
-				// Dispatch change event (for form handling)
-				this.dispatchEvent(new Event('change', {{ bubbles: true }}));
+
+				// Dispatch comprehensive events to ensure all frameworks detect the change
+				// Order matters: focus -> input -> change -> blur (mimics user interaction)
+
+				// 1. Focus event (in case element isn't focused)
+				this.dispatchEvent(new FocusEvent('focus', {{ bubbles: true }}));
+
+				// 2. Input event (for live validation, React onChange, etc.)
+				this.dispatchEvent(new Event('input', {{ bubbles: true, cancelable: true }}));
+
+				// 3. Change event (for form handling, traditional listeners)
+				this.dispatchEvent(new Event('change', {{ bubbles: true, cancelable: true }}));
+
+				// 4. Blur event (triggers final validation in some libraries)
+				this.dispatchEvent(new FocusEvent('blur', {{ bubbles: true }}));
+
+				// 5. jQuery-specific events (if jQuery is present)
+				if (typeof jQuery !== 'undefined' && jQuery.fn) {{
+					try {{
+						jQuery(this).trigger('change');
+						// Trigger datepicker-specific events if it's a datepicker
+						if (jQuery(this).data('datepicker')) {{
+							jQuery(this).datepicker('update');
+						}}
+					}} catch (e) {{
+						// jQuery not available or error, continue anyway
+					}}
+				}}
+
 				return this.value;
 			}}
 			"""
