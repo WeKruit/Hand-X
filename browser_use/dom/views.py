@@ -50,7 +50,6 @@ DEFAULT_INCLUDE_ATTRIBUTES = [
 	'data-mask',  # Input mask format (e.g., phone numbers, credit cards)
 	'data-inputmask',  # Alternative input mask attribute
 	'data-datepicker',  # jQuery datepicker indicator
-	'data-date-format',  # Date format hint for datepickers
 	'contenteditable',  # Rich text editor detection
 	# Webkit shadow DOM identifiers
 	'pseudo',
