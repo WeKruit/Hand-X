@@ -2418,22 +2418,24 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 								// Match against both text and value (case-insensitive)
 								if (optionTextLower === targetTextLower || optionValueLower === targetTextLower) {
+									// Focus the element FIRST (important for Svelte/Vue/React and other reactive frameworks)
+									// This simulates the user focusing on the dropdown before changing it
+									element.focus();
+
+									// Then set the value
 									element.value = option.value;
 									option.selected = true;
 
-									// Focus the element first (important for Vue.js and reactive frameworks)
-									element.focus();
-
-									// Trigger all necessary events for Vue.js and other reactive frameworks
-									// 1. input event - critical for Vue's v-model
-									const inputEvent = new Event('input', { bubbles: true });
+									// Trigger all necessary events for reactive frameworks
+									// 1. input event - critical for Vue's v-model and Svelte's bind:value
+									const inputEvent = new Event('input', { bubbles: true, cancelable: true });
 									element.dispatchEvent(inputEvent);
 
-									// 2. Trigger change events
-									const changeEvent = new Event('change', { bubbles: true });
+									// 2. change event - traditional form validation and framework reactivity
+									const changeEvent = new Event('change', { bubbles: true, cancelable: true });
 									element.dispatchEvent(changeEvent);
 
-									// 3. blur event - helps with validation
+									// 3. blur event - completes the interaction, triggers validation
 									element.blur();
 
 									return {
