@@ -1213,8 +1213,16 @@ class DefaultActionWatchdog(BaseWatchdog):
 				// Store old value for comparison
 				const oldValue = this.value;
 
-				// Set the new value
-				this.value = {json.dumps(text)};
+				// REACT-COMPATIBLE VALUE SETTING:
+				// React uses Object.getOwnPropertyDescriptor to track input changes
+				// We need to use the native setter to bypass React's tracking and then trigger events
+				const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+					window.HTMLInputElement.prototype,
+					'value'
+				).set;
+
+				// Set the value using the native setter (bypasses React's control)
+				nativeInputValueSetter.call(this, {json.dumps(text)});
 
 				// Dispatch comprehensive events to ensure all frameworks detect the change
 				// Order matters: focus -> input -> change -> blur (mimics user interaction)
@@ -1222,11 +1230,14 @@ class DefaultActionWatchdog(BaseWatchdog):
 				// 1. Focus event (in case element isn't focused)
 				this.dispatchEvent(new FocusEvent('focus', {{ bubbles: true }}));
 
-				// 2. Input event (for live validation, React onChange, etc.)
-				this.dispatchEvent(new Event('input', {{ bubbles: true, cancelable: true }}));
+				// 2. Input event (CRITICAL for React onChange)
+				// React listens to 'input' events on the document and checks for value changes
+				const inputEvent = new Event('input', {{ bubbles: true, cancelable: true }});
+				this.dispatchEvent(inputEvent);
 
 				// 3. Change event (for form handling, traditional listeners)
-				this.dispatchEvent(new Event('change', {{ bubbles: true, cancelable: true }}));
+				const changeEvent = new Event('change', {{ bubbles: true, cancelable: true }});
+				this.dispatchEvent(changeEvent);
 
 				// 4. Blur event (triggers final validation in some libraries)
 				this.dispatchEvent(new FocusEvent('blur', {{ bubbles: true }}));
