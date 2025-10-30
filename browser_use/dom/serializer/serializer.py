@@ -953,6 +953,29 @@ class DOMTreeSerializer:
 				}
 			)
 
+		# Add format hints for date/time inputs to help LLMs use the correct format
+		# NOTE: These formats are standardized by HTML5 specification (ISO 8601), NOT locale-dependent
+		# The browser may DISPLAY dates in locale format (MM/DD/YYYY in US, DD/MM/YYYY in EU),
+		# but the .value attribute and programmatic setting ALWAYS uses these ISO formats:
+		# - date: YYYY-MM-DD (e.g., "2024-03-15")
+		# - time: HH:MM or HH:MM:SS (24-hour, e.g., "14:30")
+		# - datetime-local: YYYY-MM-DDTHH:MM (e.g., "2024-03-15T14:30")
+		# Reference: https://developer.mozilla.org/en-US/docs/Web/HTML/Element/input/date
+		if node.tag_name and node.tag_name.lower() == 'input' and node.attributes:
+			input_type = node.attributes.get('type', '').lower()
+			# Only add placeholder if it doesn't already exist
+			if 'placeholder' not in attributes_to_include:
+				if input_type == 'date':
+					attributes_to_include['placeholder'] = 'YYYY-MM-DD'
+				elif input_type == 'time':
+					attributes_to_include['placeholder'] = 'HH:MM'
+				elif input_type == 'datetime-local':
+					attributes_to_include['placeholder'] = 'YYYY-MM-DDTHH:MM'
+				elif input_type == 'month':
+					attributes_to_include['placeholder'] = 'YYYY-MM'
+				elif input_type == 'week':
+					attributes_to_include['placeholder'] = 'YYYY-W##'
+
 		# Include accessibility properties
 		if node.ax_node and node.ax_node.properties:
 			for prop in node.ax_node.properties:
@@ -1001,6 +1024,11 @@ class DOMTreeSerializer:
 		# Remove invalid attribute if it's false (only show when true)
 		if 'invalid' in attributes_to_include and attributes_to_include['invalid'].lower() == 'false':
 			del attributes_to_include['invalid']
+
+		boolean_attrs = {'required'}
+		for attr in boolean_attrs:
+			if attr in attributes_to_include and attributes_to_include[attr].lower() in {'false', '0', 'no'}:
+				del attributes_to_include[attr]
 
 		# Remove aria-expanded if we have expanded (prefer AX tree over HTML attribute)
 		if 'expanded' in attributes_to_include and 'aria-expanded' in attributes_to_include:
