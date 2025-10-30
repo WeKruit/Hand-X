@@ -24,7 +24,9 @@ class CloudBrowserClient:
 		self.client = httpx.AsyncClient(timeout=30.0)
 		self.current_session_id: str | None = None
 
-	async def create_browser(self, request: CreateBrowserRequest) -> CloudBrowserResponse:
+	async def create_browser(
+		self, request: CreateBrowserRequest, extra_headers: dict[str, str] | None = None
+	) -> CloudBrowserResponse:
 		"""Create a new cloud browser instance. For full docs refer to https://docs.cloud.browser-use.com/api-reference/v-2-api-current/browsers/create-browser-session-browsers-post
 
 		Args:
@@ -51,7 +53,7 @@ class CloudBrowserClient:
 				'No authentication token found. Please set BROWSER_USE_API_KEY environment variable to authenticate with the cloud service. You can also create an API key at https://cloud.browser-use.com/new-api-key'
 			)
 
-		headers = {'X-Browser-Use-API-Key': api_token, 'Content-Type': 'application/json'}
+		headers = {'X-Browser-Use-API-Key': api_token, 'Content-Type': 'application/json', **(extra_headers or {})}
 
 		# Convert request to dictionary and exclude unset fields
 		request_body = request.model_dump(exclude_unset=True)
