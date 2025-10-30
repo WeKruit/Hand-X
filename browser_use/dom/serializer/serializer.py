@@ -1052,22 +1052,21 @@ class DOMTreeSerializer:
 		# Special handling for form elements - ensure current value is shown
 		# For text inputs, textareas, and selects, prioritize showing the current value from AX tree
 		if node.tag_name and node.tag_name.lower() in ['input', 'textarea', 'select']:
-			# If value is not already set, try to get it from AX tree properties
-			if 'value' not in attributes_to_include or not attributes_to_include.get('value'):
-				if node.ax_node and node.ax_node.properties:
-					for prop in node.ax_node.properties:
-						# Try valuetext first (human-readable display value)
-						if prop.name == 'valuetext' and prop.value:
-							value_str = str(prop.value).strip()
-							if value_str:
-								attributes_to_include['value'] = value_str
-								break
-						# Also try 'value' property directly
-						elif prop.name == 'value' and prop.value:
-							value_str = str(prop.value).strip()
-							if value_str:
-								attributes_to_include['value'] = value_str
-								break
+		# ALWAYS check AX tree - it reflects actual typed value, DOM attribute may not update
+			if node.ax_node and node.ax_node.properties:
+				for prop in node.ax_node.properties:
+					# Try valuetext first (human-readable display value)
+					if prop.name == 'valuetext' and prop.value:
+						value_str = str(prop.value).strip()
+						if value_str:
+							attributes_to_include['value'] = value_str
+							break
+					# Also try 'value' property directly
+					elif prop.name == 'value' and prop.value:
+						value_str = str(prop.value).strip()
+						if value_str:
+							attributes_to_include['value'] = value_str
+							break
 
 		if not attributes_to_include:
 			return ''
