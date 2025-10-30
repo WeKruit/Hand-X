@@ -895,7 +895,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			)
 
 		@self.registry.action(
-			'',
+			'Set the option of a <select> element.',
 			param_model=SelectDropdownOptionAction,
 		)
 		async def select_dropdown(params: SelectDropdownOptionAction, browser_session: BrowserSession):

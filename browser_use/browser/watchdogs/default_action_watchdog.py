@@ -157,7 +157,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 			# Check if session is alive before attempting any operations
 			if not self.browser_session.agent_focus or not self.browser_session.agent_focus.target_id:
 				error_msg = 'Cannot execute click: browser session is corrupted (target_id=None). Session may have crashed.'
-				self.logger.error(f'⚠️ {error_msg}')
+				self.logger.error(f'{error_msg}')
 				raise BrowserError(error_msg)
 
 			# Use the provided node
@@ -168,7 +168,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 			# Check if element is a file input (should not be clicked)
 			if self.browser_session.is_file_input(element_node):
 				msg = f'Index {index_for_logging} - has an element which opens file upload dialog. To upload files please use a specific function to upload files'
-				self.logger.info(f'⚠️ {msg}')
+				self.logger.info(f'{msg}')
 				# Return validation error instead of raising to avoid ERROR logs
 				return {'validation_error': msg}
 
@@ -196,7 +196,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 			# Check for validation errors - return them without raising to avoid ERROR logs
 			if isinstance(click_metadata, dict) and 'validation_error' in click_metadata:
-				self.logger.info(f'⚠️ {click_metadata["validation_error"]}')
+				self.logger.info(f'{click_metadata["validation_error"]}')
 				return click_metadata
 
 			# Build success message
