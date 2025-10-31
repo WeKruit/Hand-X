@@ -88,7 +88,7 @@ class SessionManager:
 		self.browser_session._cdp_client_root.register.Target.attachedToTarget(on_attached)
 		self.browser_session._cdp_client_root.register.Target.detachedFromTarget(on_detached)
 
-		self.logger.info('[SessionManager] Event monitoring started')
+		self.logger.debug('[SessionManager] Event monitoring started')
 
 	async def get_session_for_target(self, target_id: TargetID) -> 'CDPSession | None':
 		"""Get the current valid session for a target.
@@ -240,7 +240,7 @@ class SessionManager:
 
 				# Only remove target when NO sessions remain
 				if remaining_sessions == 0:
-					self.logger.info(f'[SessionManager] No sessions remain for target {target_id[:8]}..., removing from pool')
+					self.logger.debug(f'[SessionManager] No sessions remain for target {target_id[:8]}..., removing from pool')
 
 					target_fully_removed = True
 
