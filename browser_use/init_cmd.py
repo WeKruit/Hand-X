@@ -278,125 +278,70 @@ def main(
 	if _write_init_file(output_path, content, force):
 		console.print(f'\n[green]✓[/green] Created [cyan]{output_path}[/cyan]')
 
-		# Generate additional files for shopping template
-		if template == 'shopping':
-			# Generate launch_chrome_debug.py
-			launcher_path = output_path.parent / 'launch_chrome_debug.py'
-			launcher_content = _get_template_content('shopping/launch_chrome_debug.py')
-			if _write_init_file(launcher_path, launcher_content, force):
-				console.print(f'[green]✓[/green] Created [cyan]{launcher_path.name}[/cyan]')
-				# Make executable on Unix systems
-				if sys.platform != 'win32':
-					import stat
+		# Generate additional files if template has a manifest
+		if 'files' in INIT_TEMPLATES[template]:
+			import stat
 
-					launcher_path.chmod(launcher_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+			for file_spec in INIT_TEMPLATES[template]['files']:
+				source_path = file_spec['source']
+				dest_name = file_spec['dest']
+				dest_path = output_path.parent / dest_name
+				is_binary = file_spec.get('binary', False)
+				is_executable = file_spec.get('executable', False)
 
-			# Generate pyproject.toml
-			pyproject_path = output_path.parent / 'pyproject.toml'
-			pyproject_content = _get_template_content('shopping/pyproject.toml.template')
-			if _write_init_file(pyproject_path, pyproject_content, force):
-				console.print(f'[green]✓[/green] Created [cyan]{pyproject_path.name}[/cyan]')
+				# Skip if we already wrote this file (main.py)
+				if dest_path == output_path:
+					continue
 
-			# Generate .gitignore
-			gitignore_path = output_path.parent / '.gitignore'
-			gitignore_content = _get_template_content('gitignore.template')
-			if _write_init_file(gitignore_path, gitignore_content, force):
-				console.print(f'[green]✓[/green] Created [cyan]{gitignore_path.name}[/cyan]')
-
-			# Generate .env.example
-			env_example_path = output_path.parent / '.env.example'
-			env_example_content = _get_template_content('shopping/.env.example.template')
-			if _write_init_file(env_example_path, env_example_content, force):
-				console.print(f'[green]✓[/green] Created [cyan]{env_example_path.name}[/cyan]')
-
-			# Generate README.md
-			readme_path = output_path.parent / 'README.md'
-			readme_content = _get_template_content('shopping/README.md')
-			if _write_init_file(readme_path, readme_content, force):
-				console.print(f'[green]✓[/green] Created [cyan]{readme_path.name}[/cyan]')
-
-		elif template == 'job-application':
-			# Generate pyproject.toml
-			pyproject_path = output_path.parent / 'pyproject.toml'
-			pyproject_content = _get_template_content('job-application/pyproject.toml.template')
-			if _write_init_file(pyproject_path, pyproject_content, force):
-				console.print(f'[green]✓[/green] Created [cyan]{pyproject_path.name}[/cyan]')
-
-			# Generate .gitignore
-			gitignore_path = output_path.parent / '.gitignore'
-			gitignore_content = _get_template_content('gitignore.template')
-			if _write_init_file(gitignore_path, gitignore_content, force):
-				console.print(f'[green]✓[/green] Created [cyan]{gitignore_path.name}[/cyan]')
-
-			# Generate .env.example
-			env_example_path = output_path.parent / '.env.example'
-			env_example_content = _get_template_content('job-application/.env.example.template')
-			if _write_init_file(env_example_path, env_example_content, force):
-				console.print(f'[green]✓[/green] Created [cyan]{env_example_path.name}[/cyan]')
-
-			# Generate README.md
-			readme_path = output_path.parent / 'README.md'
-			readme_content = _get_template_content('job-application/README.md')
-			if _write_init_file(readme_path, readme_content, force):
-				console.print(f'[green]✓[/green] Created [cyan]{readme_path.name}[/cyan]')
-
-			# Copy applicant_data.json
-			applicant_data_path = output_path.parent / 'applicant_data.json'
-			applicant_data_content = _get_template_content('job-application/applicant_data.json')
-			if _write_init_file(applicant_data_path, applicant_data_content, force):
-				console.print(f'[green]✓[/green] Created [cyan]{applicant_data_path.name}[/cyan]')
-
-			# Copy example resume PDF (binary file - fetch from GitHub)
-			resume_dst = output_path.parent / 'example_resume.pdf'
-			if not resume_dst.exists() or force:
-				resume_content = _fetch_binary_from_github('job-application/example_resume.pdf')
-				if resume_content:
-					resume_dst.write_bytes(resume_content)
-					console.print(f'[green]✓[/green] Created [cyan]{resume_dst.name}[/cyan]')
-				else:
-					console.print(f'[yellow]⚠[/yellow]  Could not fetch [cyan]{resume_dst.name}[/cyan] from GitHub')
+				# Fetch and write file
+				try:
+					if is_binary:
+						file_content = _fetch_binary_from_github(source_path)
+						if file_content:
+							if not dest_path.exists() or force:
+								dest_path.write_bytes(file_content)
+								console.print(f'[green]✓[/green] Created [cyan]{dest_name}[/cyan]')
+						else:
+							console.print(f'[yellow]⚠[/yellow]  Could not fetch [cyan]{dest_name}[/cyan] from GitHub')
+					else:
+						file_content = _get_template_content(source_path)
+						if _write_init_file(dest_path, file_content, force):
+							console.print(f'[green]✓[/green] Created [cyan]{dest_name}[/cyan]')
+							# Make executable if needed
+							if is_executable and sys.platform != 'win32':
+								dest_path.chmod(dest_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+				except Exception as e:
+					console.print(f'[yellow]⚠[/yellow]  Error generating [cyan]{dest_name}[/cyan]: {e}')
 
 		# Create a nice panel for next steps
 		next_steps = Text()
 
-		if template == 'shopping':
-			# Shopping template has different workflow (no uv init needed)
-			next_steps.append('\n1. Navigate to project directory:\n', style='bold')
-			next_steps.append(f'   cd {template}\n\n', style='dim')
-			next_steps.append('2. Set up your API key:\n', style='bold')
-			next_steps.append('   cp .env.example .env\n', style='dim')
-			next_steps.append('   # Edit .env and add your BROWSER_USE_API_KEY\n', style='dim')
-			next_steps.append(
-				'   (Get your key at https://cloud.browser-use.com/dashboard/settings?tab=api-keys&new)\n\n',
-				style='dim italic',
-			)
-			next_steps.append('3. Install dependencies:\n', style='bold')
-			next_steps.append('   uv sync\n\n', style='dim')
-			next_steps.append('4. Launch Chrome with debugging (in a separate terminal):\n', style='bold')
-			next_steps.append('   python launch_chrome_debug.py\n', style='dim')
-			next_steps.append('   (Run with --help to see options like --profile)\n', style='dim italic')
-			next_steps.append('   (Keep this terminal open!)\n\n', style='dim italic')
-			next_steps.append('5. Run your script (in a NEW terminal):\n', style='bold')
-			next_steps.append(f'   cd {template} && uv run {output_path.name}\n\n', style='dim')
-			next_steps.append('📖 See README.md for detailed instructions\n', style='dim italic')
-		elif template == 'job-application':
-			# Job application template workflow
-			next_steps.append('\n1. Navigate to project directory:\n', style='bold')
-			next_steps.append(f'   cd {template}\n\n', style='dim')
-			next_steps.append('2. Set up your API key:\n', style='bold')
-			next_steps.append('   cp .env.example .env\n', style='dim')
-			next_steps.append('   # Edit .env and add your OPENAI_API_KEY\n', style='dim')
-			next_steps.append('   (Get your key at https://platform.openai.com/api-keys)\n\n', style='dim italic')
-			next_steps.append('3. Install dependencies:\n', style='bold')
-			next_steps.append('   uv sync\n\n', style='dim')
-			next_steps.append('4. Customize your data:\n', style='bold')
-			next_steps.append('   # Edit applicant_data.json with your information\n', style='dim')
-			next_steps.append('   # Replace example_resume.pdf with your resume\n\n', style='dim')
-			next_steps.append('5. Run the application:\n', style='bold')
-			next_steps.append(f'   uv run {output_path.name} --resume example_resume.pdf\n\n', style='dim')
-			next_steps.append('📖 See README.md for customization and troubleshooting\n', style='dim italic')
+		# Display next steps from manifest if available
+		if 'next_steps' in INIT_TEMPLATES[template]:
+			steps = INIT_TEMPLATES[template]['next_steps']
+			for i, step in enumerate(steps, 1):
+				# Handle footer separately (no numbering)
+				if 'footer' in step:
+					next_steps.append(f'{step["footer"]}\n', style='dim italic')
+					continue
+
+				# Step title
+				next_steps.append(f'\n{i}. {step["title"]}:\n', style='bold')
+
+				# Step commands
+				for cmd in step.get('commands', []):
+					# Replace placeholders
+					cmd = cmd.replace('{template}', template)
+					cmd = cmd.replace('{output}', output_path.name)
+					next_steps.append(f'   {cmd}\n', style='dim')
+
+				# Optional note
+				if 'note' in step:
+					next_steps.append(f'   {step["note"]}\n', style='dim italic')
+
+				next_steps.append('\n')
 		else:
-			# Default workflow for other templates
+			# Default workflow for templates without custom next_steps
 			next_steps.append('\n1. Navigate to project directory:\n', style='bold')
 			next_steps.append(f'   cd {template}\n\n', style='dim')
 			next_steps.append('2. Initialize uv project:\n', style='bold')
