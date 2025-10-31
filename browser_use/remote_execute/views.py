@@ -20,6 +20,7 @@ class SSEEventType(str, Enum):
 	LOG = 'log'
 	RESULT = 'result'
 	ERROR = 'error'
+	STREAM_COMPLETE = 'stream_complete'
 
 
 class BrowserCreatedData(BaseModel):
