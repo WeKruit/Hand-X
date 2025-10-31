@@ -63,7 +63,7 @@ if TYPE_CHECKING:
 	from browser_use.llm.oci_raw.chat import ChatOCIRaw
 	from browser_use.llm.ollama.chat import ChatOllama
 	from browser_use.llm.openai.chat import ChatOpenAI
-	from browser_use.remote_execute import remote_execute
+	from browser_use.sandbox import sandbox
 	from browser_use.tools.service import Controller, Tools
 
 
@@ -99,8 +99,8 @@ _LAZY_IMPORTS = {
 	'ChatOllama': ('browser_use.llm.ollama.chat', 'ChatOllama'),
 	# LLM models module
 	'models': ('browser_use.llm.models', None),
-	# Remote execution
-	'remote_execute': ('browser_use.remote_execute', 'remote_execute'),
+	# Sandbox execution
+	'sandbox': ('browser_use.sandbox', 'sandbox'),
 }
 
 
@@ -152,6 +152,6 @@ __all__ = [
 	'Controller',
 	# LLM models module
 	'models',
-	# Remote execution
-	'remote_execute',
+	# Sandbox execution
+	'sandbox',
 ]

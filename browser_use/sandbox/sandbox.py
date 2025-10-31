@@ -10,22 +10,26 @@ import sys
 import textwrap
 from collections.abc import Callable, Coroutine
 from functools import wraps
-from typing import Any, TypeVar, Union, cast, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar, Union, cast, get_args, get_origin
 
 import cloudpickle
 import httpx
 
-from browser_use.remote_execute.views import (
+from browser_use.sandbox.views import (
 	BrowserCreatedData,
 	ErrorData,
 	LogData,
-	RemoteExecutionError,
 	ResultData,
+	SandboxError,
 	SSEEvent,
 	SSEEventType,
 )
 
+if TYPE_CHECKING:
+	from browser_use.browser import BrowserSession
+
 T = TypeVar('T')
+P = ParamSpec('P')
 
 
 def get_terminal_width() -> int:
@@ -195,7 +199,7 @@ def _extract_all_params(func: Callable, args: tuple, kwargs: dict) -> dict[str, 
 	return all_params
 
 
-def remote_execute(
+def sandbox(
 	BROWSER_USE_API_KEY: str | None = None,
 	cloud_profile_id: str | None = None,
 	cloud_proxy_country_code: str | None = None,
@@ -212,10 +216,11 @@ def remote_execute(
 	on_result: Callable[[ResultData], None] | Callable[[ResultData], Coroutine[Any, Any, None]] | None = None,
 	on_error: Callable[[ErrorData], None] | Callable[[ErrorData], Coroutine[Any, Any, None]] | None = None,
 	**env_vars: str,
-):
-	"""Decorator to execute browser automation code remotely.
+) -> Callable[[Callable[Concatenate['BrowserSession', P], Coroutine[Any, Any, T]]], Callable[P, Coroutine[Any, Any, T]]]:
+	"""Decorator to execute browser automation code in a sandbox environment.
 
-	The decorated function must have a 'browser: Browser' parameter.
+	The decorated function MUST have 'browser: Browser' as its first parameter.
+	The browser parameter will be automatically injected - do NOT pass it when calling the decorated function.
 	All other parameters (explicit or from closure) will be captured and sent via cloudpickle.
 
 	Args:
@@ -223,7 +228,7 @@ def remote_execute(
 	    cloud_profile_id: The ID of the profile to use for the browser session
 	    cloud_proxy_country_code: Country code for proxy location (e.g., 'us', 'uk', 'fr')
 	    cloud_timeout: The timeout for the browser session in minutes (max 240 = 4 hours)
-	    server_url: Remote server URL (defaults to https://remote.api.browser-use.com/remote-execute-stream)
+	    server_url: Sandbox server URL (defaults to https://sandbox.api.browser-use.com/sandbox-stream)
 	    log_level: Logging level (INFO, DEBUG, WARNING, ERROR)
 	    quiet: Suppress console output
 	    headers: Additional HTTP headers to send with the request
@@ -235,7 +240,7 @@ def remote_execute(
 	    **env_vars: Additional environment variables
 
 	Example:
-	    @remote_execute()
+	    @sandbox()
 	    async def task(browser: Browser, url: str, max_steps: int) -> str:
 	        agent = Agent(task=url, browser=browser)
 	        await agent.run(max_steps=max_steps)
@@ -245,12 +250,14 @@ def remote_execute(
 	    result = await task(url="https://example.com", max_steps=10)
 
 	    # With cloud parameters:
-	    @remote_execute(cloud_proxy_country_code='us', cloud_timeout=60)
+	    @sandbox(cloud_proxy_country_code='us', cloud_timeout=60)
 	    async def task_with_proxy(browser: Browser) -> str:
 	        ...
 	"""
 
-	def decorator(func: Callable[..., Coroutine[Any, Any, T]]) -> Callable[..., Coroutine[Any, Any, T]]:
+	def decorator(
+		func: Callable[Concatenate['BrowserSession', P], Coroutine[Any, Any, T]],
+	) -> Callable[P, Coroutine[Any, Any, T]]:
 		# Validate function has browser parameter
 		sig = inspect.signature(func)
 		if 'browser' not in sig.parameters:
@@ -267,7 +274,7 @@ def remote_execute(
 			# 1. Get API key
 			api_key = BROWSER_USE_API_KEY or os.getenv('BROWSER_USE_API_KEY')
 			if not api_key:
-				raise RemoteExecutionError('BROWSER_USE_API_KEY is required')
+				raise SandboxError('BROWSER_USE_API_KEY is required')
 
 			# 2. Extract all parameters (explicit + closure)
 			all_params = _extract_all_params(func, args, kwargs)
@@ -343,7 +350,7 @@ async def run(browser):
 			if cloud_timeout is not None:
 				payload['cloud_timeout'] = cloud_timeout
 
-			url = server_url or 'https://remote.api.browser-use.com/remote-execute-stream'
+			url = server_url or 'https://sandbox.api.browser-use.com/sandbox-stream'
 
 			request_headers = {'X-API-Key': api_key}
 			if headers:
@@ -462,7 +469,7 @@ async def run(browser):
 											print()
 									else:
 										error_msg = exec_response.error or 'Unknown error'
-										raise RemoteExecutionError(f'Execution failed: {error_msg}')
+										raise SandboxError(f'Execution failed: {error_msg}')
 
 								elif event.type == SSEEventType.ERROR:
 									assert isinstance(event.data, ErrorData)
@@ -475,7 +482,7 @@ async def run(browser):
 											if not quiet:
 												print(f'⚠️  Error in on_error callback: {e}')
 
-									raise RemoteExecutionError(f'Execution failed: {event.data.error}')
+									raise SandboxError(f'Execution failed: {event.data.error}')
 
 							except (json.JSONDecodeError, ValueError):
 								continue
@@ -483,7 +490,7 @@ async def run(browser):
 					except (httpx.RemoteProtocolError, httpx.ReadError, httpx.StreamClosed) as e:
 						# With deterministic handshake, these should never happen
 						# If they do, it's a real error
-						raise RemoteExecutionError(
+						raise SandboxError(
 							f'Stream error: {e.__class__.__name__}: {e or "connection closed unexpectedly"}'
 						) from e
 
@@ -495,7 +502,7 @@ async def run(browser):
 					return parsed_result
 				return execution_result  # type: ignore[return-value]
 
-			raise RemoteExecutionError('No result received from execution')
+			raise SandboxError('No result received from execution')
 
 		# Update wrapper signature to remove browser parameter
 		wrapper.__annotations__ = func.__annotations__.copy()
@@ -505,7 +512,7 @@ async def run(browser):
 		params = [p for p in sig.parameters.values() if p.name != 'browser']
 		wrapper.__signature__ = sig.replace(parameters=params)  # type: ignore[attr-defined]
 
-		return cast(Callable[..., Coroutine[Any, Any, T]], wrapper)
+		return cast(Callable[P, Coroutine[Any, Any, T]], wrapper)
 
 	return decorator
 
