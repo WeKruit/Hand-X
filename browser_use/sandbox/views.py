@@ -1,4 +1,4 @@
-"""Type-safe event models for remote execution SSE streaming"""
+"""Type-safe event models for sandbox execution SSE streaming"""
 
 import json
 from enum import Enum
@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import BaseModel
 
 
-class RemoteExecutionError(Exception):
+class SandboxError(Exception):
 	pass
 
 

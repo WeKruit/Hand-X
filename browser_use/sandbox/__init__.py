@@ -1,11 +1,11 @@
-"""Remote execution package for browser-use
+"""Sandbox execution package for browser-use
 
-This package provides type-safe remote code execution with SSE streaming.
+This package provides type-safe sandbox code execution with SSE streaming.
 
 Example:
-    from browser_use.remote_execute import remote_execute, SSEEvent, SSEEventType
+    from browser_use.sandbox import sandbox, SSEEvent, SSEEventType
 
-    @remote_execute(log_level="INFO")
+    @sandbox(log_level="INFO")
     async def my_task(browser: Browser) -> str:
         page = await browser.get_current_page()
         await page.goto("https://example.com")
@@ -14,8 +14,8 @@ Example:
     result = await my_task()
 """
 
-from browser_use.remote_execute.remote import RemoteExecutionError, remote_execute
-from browser_use.remote_execute.views import (
+from browser_use.sandbox.sandbox import SandboxError, sandbox
+from browser_use.sandbox.views import (
 	BrowserCreatedData,
 	ErrorData,
 	ExecutionResponse,
@@ -27,8 +27,8 @@ from browser_use.remote_execute.views import (
 
 __all__ = [
 	# Main decorator
-	'remote_execute',
-	'RemoteExecutionError',
+	'sandbox',
+	'SandboxError',
 	# Event types
 	'SSEEvent',
 	'SSEEventType',
