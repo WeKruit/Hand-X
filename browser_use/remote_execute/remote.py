@@ -462,27 +462,11 @@ async def run(browser):
 								continue
 
 					except (httpx.RemoteProtocolError, httpx.ReadError, httpx.StreamClosed) as e:
-						# Handle connection errors gracefully if we already got final event
-						# RemoteProtocolError: "incomplete chunked read"
-						# ReadError: socket closed during read
-						# StreamClosed: stream closed unexpectedly
-						error_msg = str(e).lower()
-						is_expected_shutdown_error = (
-							'incomplete chunked read' in error_msg
-							or 'read error' in error_msg
-							or 'stream closed' in error_msg
-							or not error_msg  # Empty error
-						)
-
-						if is_expected_shutdown_error and received_final_event:
-							if not quiet:
-								# This is expected during auto-shutdown after successful execution
-								pass
-						else:
-							# Re-raise with better error message if we didn't get a final event
-							raise RemoteExecutionError(
-								f'Stream error: {e.__class__.__name__}: {e or "connection closed unexpectedly"}'
-							) from e
+						# With deterministic handshake, these should never happen
+						# If they do, it's a real error
+						raise RemoteExecutionError(
+							f'Stream error: {e.__class__.__name__}: {e or "connection closed unexpectedly"}'
+						) from e
 
 			# 11. Parse result with type annotation
 			if execution_result is not _NO_RESULT:
