@@ -8,6 +8,7 @@ browser-use templates without requiring heavy TUI dependencies.
 import json
 import sys
 from pathlib import Path
+from typing import Any
 from urllib import request
 from urllib.error import URLError
 
@@ -25,8 +26,12 @@ console = Console()
 # GitHub template repository URL (for runtime fetching)
 TEMPLATE_REPO_URL = 'https://raw.githubusercontent.com/browser-use/template-library/main'
 
+# Export for backward compatibility with cli.py
+# Templates are fetched at runtime via _get_template_list()
+INIT_TEMPLATES: dict[str, Any] = {}
 
-def _fetch_template_list() -> dict[str, dict[str, str]] | None:
+
+def _fetch_template_list() -> dict[str, Any] | None:
 	"""
 	Fetch template list from GitHub templates.json.
 
@@ -41,7 +46,7 @@ def _fetch_template_list() -> dict[str, dict[str, str]] | None:
 		return None
 
 
-def _get_template_list() -> dict[str, dict[str, str]]:
+def _get_template_list() -> dict[str, Any]:
 	"""
 	Get template list from GitHub.
 
