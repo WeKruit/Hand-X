@@ -19,33 +19,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-# Hardcoded template metadata (fallback if GitHub fetch fails)
-FALLBACK_TEMPLATES = {
-	'default': {
-		'file': 'default_template.py',
-		'description': 'Simplest setup - capable of any web task with minimal configuration',
-	},
-	'advanced': {
-		'file': 'advanced_template.py',
-		'description': 'All configuration options shown with defaults',
-	},
-	'tools': {
-		'file': 'tools_template.py',
-		'description': 'Custom tool example - extend agent capabilities with your own functions',
-	},
-	'shopping': {
-		'file': 'shopping/main.py',
-		'description': 'E-commerce automation with structured output (Pydantic models)',
-	},
-	'job-application': {
-		'file': 'job-application/main.py',
-		'description': 'Automated job application form submission with resume upload',
-	},
-}
-
-# Export for backward compatibility with cli.py
-INIT_TEMPLATES = FALLBACK_TEMPLATES
-
 # Rich console for styled output
 console = Console()
 
@@ -70,12 +43,14 @@ def _fetch_template_list() -> dict[str, dict[str, str]] | None:
 
 def _get_template_list() -> dict[str, dict[str, str]]:
 	"""
-	Get template list - tries GitHub first, falls back to hardcoded.
+	Get template list from GitHub.
+
+	Raises FileNotFoundError if GitHub fetch fails.
 	"""
 	templates = _fetch_template_list()
 	if templates is not None:
 		return templates
-	return FALLBACK_TEMPLATES
+	raise FileNotFoundError('Could not fetch templates from GitHub. Check your internet connection.')
 
 
 def _fetch_from_github(file_path: str) -> str | None:
@@ -209,7 +184,11 @@ def main(
 	"""
 
 	# Fetch template list at runtime
-	INIT_TEMPLATES = _get_template_list()
+	try:
+		INIT_TEMPLATES = _get_template_list()
+	except FileNotFoundError as e:
+		console.print(f'[red]✗[/red] {e}')
+		sys.exit(1)
 
 	# Handle --list flag
 	if list_templates:
@@ -283,11 +262,11 @@ def main(
 
 	# Determine output path
 	if output:
-	output_path = template_dir / Path(output)
+		output_path = template_dir / Path(output)
 	else:
 		output_path = template_dir / 'main.py'
 
-	# Read template file (tries GitHub first, falls back to bundled)
+	# Read template file from GitHub
 	try:
 		template_file = INIT_TEMPLATES[template]['file']
 		content = _get_template_content(template_file)
