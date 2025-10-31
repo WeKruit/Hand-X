@@ -335,127 +335,154 @@ async def run(browser):
 			execution_result = _NO_RESULT
 			live_url_shown = False
 			execution_started = False
+			received_final_event = False
 
 			async with httpx.AsyncClient(timeout=1800.0) as client:
 				async with client.stream('POST', url, json=payload, headers=request_headers) as response:
 					response.raise_for_status()
 
-					async for line in response.aiter_lines():
-						if not line or not line.startswith('data: '):
-							continue
+					try:
+						async for line in response.aiter_lines():
+							if not line or not line.startswith('data: '):
+								continue
 
-						event_json = line[6:]
-						try:
-							event = SSEEvent.from_json(event_json)
+							event_json = line[6:]
+							try:
+								event = SSEEvent.from_json(event_json)
 
-							if event.type == SSEEventType.BROWSER_CREATED:
-								assert isinstance(event.data, BrowserCreatedData)
+								if event.type == SSEEventType.BROWSER_CREATED:
+									assert isinstance(event.data, BrowserCreatedData)
 
-								if on_browser_created:
-									try:
-										await _call_callback(on_browser_created, event.data)
-									except Exception as e:
-										if not quiet:
-											print(f'⚠️  Error in on_browser_created callback: {e}')
+									if on_browser_created:
+										try:
+											await _call_callback(on_browser_created, event.data)
+										except Exception as e:
+											if not quiet:
+												print(f'⚠️  Error in on_browser_created callback: {e}')
 
-								if not quiet and event.data.live_url and not live_url_shown:
-									width = get_terminal_width()
-									print('\n' + '━' * width)
-									print('👁️  LIVE BROWSER VIEW (Click to watch)')
-									print(f'🔗 {event.data.live_url}')
-									print('━' * width)
-									live_url_shown = True
-
-							elif event.type == SSEEventType.LOG:
-								assert isinstance(event.data, LogData)
-								message = event.data.message
-								level = event.data.level
-
-								if on_log:
-									try:
-										await _call_callback(on_log, event.data)
-									except Exception as e:
-										if not quiet:
-											print(f'⚠️  Error in on_log callback: {e}')
-
-								if level == 'stdout':
-									if not quiet:
-										if not execution_started:
-											width = get_terminal_width()
-											print('\n' + '─' * width)
-											print('⚡ Runtime Output')
-											print('─' * width)
-											execution_started = True
-										print(f'  {message}', end='')
-								elif level == 'stderr':
-									if not quiet:
-										if not execution_started:
-											width = get_terminal_width()
-											print('\n' + '─' * width)
-											print('⚡ Runtime Output')
-											print('─' * width)
-											execution_started = True
-										print(f'⚠️  {message}', end='', file=sys.stderr)
-								elif level == 'info':
-									if not quiet:
-										if 'credit' in message.lower():
-											import re
-
-											match = re.search(r'\$[\d,]+\.?\d*', message)
-											if match:
-												print(f'💰 You have {match.group()} credits')
-										else:
-											print(f'ℹ️  {message}')
-								else:
-									if not quiet:
-										print(f'  {message}')
-
-							elif event.type == SSEEventType.INSTANCE_READY:
-								if on_instance_ready:
-									try:
-										await _call_callback(on_instance_ready)
-									except Exception as e:
-										if not quiet:
-											print(f'⚠️  Error in on_instance_ready callback: {e}')
-
-								if not quiet:
-									print('✅ Browser ready, starting execution...\n')
-
-							elif event.type == SSEEventType.RESULT:
-								assert isinstance(event.data, ResultData)
-								exec_response = event.data.execution_response
-
-								if on_result:
-									try:
-										await _call_callback(on_result, event.data)
-									except Exception as e:
-										if not quiet:
-											print(f'⚠️  Error in on_result callback: {e}')
-
-								if exec_response.success:
-									execution_result = exec_response.result
-									if not quiet and execution_started:
+									if not quiet and event.data.live_url and not live_url_shown:
 										width = get_terminal_width()
-										print('\n' + '─' * width)
-										print()
-								else:
-									error_msg = exec_response.error or 'Unknown error'
-									raise RemoteExecutionError(f'Execution failed: {error_msg}')
+										print('\n' + '━' * width)
+										print('👁️  LIVE BROWSER VIEW (Click to watch)')
+										print(f'🔗 {event.data.live_url}')
+										print('━' * width)
+										live_url_shown = True
 
-							elif event.type == SSEEventType.ERROR:
-								assert isinstance(event.data, ErrorData)
+								elif event.type == SSEEventType.LOG:
+									assert isinstance(event.data, LogData)
+									message = event.data.message
+									level = event.data.level
 
-								if on_error:
-									try:
-										await _call_callback(on_error, event.data)
-									except Exception as e:
+									if on_log:
+										try:
+											await _call_callback(on_log, event.data)
+										except Exception as e:
+											if not quiet:
+												print(f'⚠️  Error in on_log callback: {e}')
+
+									if level == 'stdout':
 										if not quiet:
-											print(f'⚠️  Error in on_error callback: {e}')
+											if not execution_started:
+												width = get_terminal_width()
+												print('\n' + '─' * width)
+												print('⚡ Runtime Output')
+												print('─' * width)
+												execution_started = True
+											print(f'  {message}', end='')
+									elif level == 'stderr':
+										if not quiet:
+											if not execution_started:
+												width = get_terminal_width()
+												print('\n' + '─' * width)
+												print('⚡ Runtime Output')
+												print('─' * width)
+												execution_started = True
+											print(f'⚠️  {message}', end='', file=sys.stderr)
+									elif level == 'info':
+										if not quiet:
+											if 'credit' in message.lower():
+												import re
 
-								raise RemoteExecutionError(f'Execution failed: {event.data.error}')
+												match = re.search(r'\$[\d,]+\.?\d*', message)
+												if match:
+													print(f'💰 You have {match.group()} credits')
+											else:
+												print(f'ℹ️  {message}')
+									else:
+										if not quiet:
+											print(f'  {message}')
 
-						except (json.JSONDecodeError, ValueError):
-							continue
+								elif event.type == SSEEventType.INSTANCE_READY:
+									if on_instance_ready:
+										try:
+											await _call_callback(on_instance_ready)
+										except Exception as e:
+											if not quiet:
+												print(f'⚠️  Error in on_instance_ready callback: {e}')
+
+									if not quiet:
+										print('✅ Browser ready, starting execution...\n')
+
+								elif event.type == SSEEventType.RESULT:
+									assert isinstance(event.data, ResultData)
+									exec_response = event.data.execution_response
+									received_final_event = True
+
+									if on_result:
+										try:
+											await _call_callback(on_result, event.data)
+										except Exception as e:
+											if not quiet:
+												print(f'⚠️  Error in on_result callback: {e}')
+
+									if exec_response.success:
+										execution_result = exec_response.result
+										if not quiet and execution_started:
+											width = get_terminal_width()
+											print('\n' + '─' * width)
+											print()
+									else:
+										error_msg = exec_response.error or 'Unknown error'
+										raise RemoteExecutionError(f'Execution failed: {error_msg}')
+
+								elif event.type == SSEEventType.ERROR:
+									assert isinstance(event.data, ErrorData)
+									received_final_event = True
+
+									if on_error:
+										try:
+											await _call_callback(on_error, event.data)
+										except Exception as e:
+											if not quiet:
+												print(f'⚠️  Error in on_error callback: {e}')
+
+									raise RemoteExecutionError(f'Execution failed: {event.data.error}')
+
+							except (json.JSONDecodeError, ValueError):
+								continue
+					
+					except (httpx.RemoteProtocolError, httpx.ReadError, httpx.StreamClosed) as e:
+						# Handle connection errors gracefully if we already got final event
+						# RemoteProtocolError: "incomplete chunked read"
+						# ReadError: socket closed during read
+						# StreamClosed: stream closed unexpectedly
+						error_msg = str(e).lower()
+						is_expected_shutdown_error = (
+							'incomplete chunked read' in error_msg
+							or 'read error' in error_msg
+							or 'stream closed' in error_msg
+							or not error_msg  # Empty error
+						)
+						
+						if is_expected_shutdown_error and received_final_event:
+							if not quiet:
+								# This is expected during auto-shutdown after successful execution
+								pass
+						else:
+							# Re-raise with better error message if we didn't get a final event
+							raise RemoteExecutionError(
+								f'Stream error: {e.__class__.__name__}: {e or "connection closed unexpectedly"}'
+							) from e
 
 			# 11. Parse result with type annotation
 			if execution_result is not _NO_RESULT:
