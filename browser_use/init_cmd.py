@@ -362,14 +362,14 @@ def main(
 			next_steps.append('5. Run your script:\n', style='bold')
 			next_steps.append(f'   uv run {output_path.name}\n', style='dim')
 
-	console.print(
-		Panel(
-			next_steps,
-			title='[bold]Next steps[/bold]',
-			border_style='#fe750e',
-			padding=(1, 2),
+		console.print(
+			Panel(
+				next_steps,
+				title='[bold]Next steps[/bold]',
+				border_style='#fe750e',
+				padding=(1, 2),
+			)
 		)
-	)
 
 
 if __name__ == '__main__':
