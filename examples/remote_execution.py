@@ -25,10 +25,17 @@ def on_browser_ready(data):
 	print('   Click the link above to watch the AI agent work!\n')
 
 
-@remote_execute(log_level='INFO', on_browser_created=on_browser_ready)
+@remote_execute(
+	log_level='INFO',
+	on_browser_created=on_browser_ready,
+	# server_url='http://localhost:8080/remote-execute-stream',
+	# cloud_profile_id='21182245-590f-4712-8888-9611651a024c',
+	cloud_proxy_country_code='us',
+	# cloud_timeout=60,
+)
 async def pydantic_example(browser: Browser) -> AgentHistoryList:
 	agent = Agent(
-		"""got of to https://news.ycombinator.com/ and find the latest top 5 news and each top comment""",
+		"""go and check my ip address and the location. return the result in json format""",
 		browser=browser,
 		# output_model_schema=HackernewsPosts,
 		llm=ChatBrowserUse(),

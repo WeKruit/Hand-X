@@ -197,6 +197,9 @@ def _extract_all_params(func: Callable, args: tuple, kwargs: dict) -> dict[str, 
 
 def remote_execute(
 	BROWSER_USE_API_KEY: str | None = None,
+	cloud_profile_id: str | None = None,
+	cloud_proxy_country_code: str | None = None,
+	cloud_timeout: int | None = None,
 	server_url: str | None = None,
 	log_level: str = 'INFO',
 	quiet: bool = False,
@@ -217,7 +220,10 @@ def remote_execute(
 
 	Args:
 	    BROWSER_USE_API_KEY: API key (defaults to BROWSER_USE_API_KEY env var)
-	    server_url: Remote server URL (defaults to https://remote.api.browser-use.com)
+	    cloud_profile_id: The ID of the profile to use for the browser session
+	    cloud_proxy_country_code: Country code for proxy location (e.g., 'us', 'uk', 'fr')
+	    cloud_timeout: The timeout for the browser session in minutes (max 240 = 4 hours)
+	    server_url: Remote server URL (defaults to https://remote.api.browser-use.com/remote-execute-stream)
 	    log_level: Logging level (INFO, DEBUG, WARNING, ERROR)
 	    quiet: Suppress console output
 	    headers: Additional HTTP headers to send with the request
@@ -237,6 +243,11 @@ def remote_execute(
 
 	    # Call with:
 	    result = await task(url="https://example.com", max_steps=10)
+
+	    # With cloud parameters:
+	    @remote_execute(cloud_proxy_country_code='us', cloud_timeout=60)
+	    async def task_with_proxy(browser: Browser) -> str:
+	        ...
 	"""
 
 	def decorator(func: Callable[..., Coroutine[Any, Any, T]]) -> Callable[..., Coroutine[Any, Any, T]]:
@@ -323,6 +334,14 @@ async def run(browser):
 			combined_env: dict[str, str] = env_vars.copy() if env_vars else {}
 			combined_env['LOG_LEVEL'] = log_level.upper()
 			payload['env'] = combined_env
+
+			# Add cloud parameters if provided
+			if cloud_profile_id is not None:
+				payload['cloud_profile_id'] = cloud_profile_id
+			if cloud_proxy_country_code is not None:
+				payload['cloud_proxy_country_code'] = cloud_proxy_country_code
+			if cloud_timeout is not None:
+				payload['cloud_timeout'] = cloud_timeout
 
 			url = server_url or 'https://remote.api.browser-use.com/remote-execute-stream'
 
