@@ -460,7 +460,7 @@ async def run(browser):
 
 							except (json.JSONDecodeError, ValueError):
 								continue
-					
+
 					except (httpx.RemoteProtocolError, httpx.ReadError, httpx.StreamClosed) as e:
 						# Handle connection errors gracefully if we already got final event
 						# RemoteProtocolError: "incomplete chunked read"
@@ -473,7 +473,7 @@ async def run(browser):
 							or 'stream closed' in error_msg
 							or not error_msg  # Empty error
 						)
-						
+
 						if is_expected_shutdown_error and received_final_event:
 							if not quiet:
 								# This is expected during auto-shutdown after successful execution
