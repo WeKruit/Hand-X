@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from browser_use.llm.base import BaseChatModel
 from browser_use.llm.exceptions import ModelProviderError, ModelRateLimitError
-from browser_use.llm.messages import BaseMessage
+from browser_use.llm.messages import BaseMessage, ContentPartTextParam, SystemMessage
 from browser_use.llm.schema import SchemaOptimizer
 from browser_use.llm.vercel.serializer import VercelMessageSerializer
 from browser_use.llm.views import ChatInvokeCompletion, ChatInvokeUsage
@@ -410,12 +410,24 @@ class ChatVercel(BaseChatModel):
 					schema = SchemaOptimizer.create_gemini_optimized_schema(output_format)
 					json_instruction = f'\n\nIMPORTANT: You must respond with ONLY a valid JSON object (no markdown, no code blocks, no explanations) that exactly matches this schema:\n{json.dumps(schema, indent=2)}'
 
+					instruction_added = False
 					if modified_messages and modified_messages[0].role == 'system':
 						if isinstance(modified_messages[0].content, str):
 							modified_messages[0].content += json_instruction
+							instruction_added = True
+						elif isinstance(modified_messages[0].content, list):
+							modified_messages[0].content.append(ContentPartTextParam(text=json_instruction))
+							instruction_added = True
 					elif modified_messages and modified_messages[-1].role == 'user':
 						if isinstance(modified_messages[-1].content, str):
 							modified_messages[-1].content += json_instruction
+							instruction_added = True
+						elif isinstance(modified_messages[-1].content, list):
+							modified_messages[-1].content.append(ContentPartTextParam(text=json_instruction))
+							instruction_added = True
+
+					if not instruction_added:
+						modified_messages.insert(0, SystemMessage(content=json_instruction))
 
 					vercel_messages = VercelMessageSerializer.serialize_messages(modified_messages)
 
