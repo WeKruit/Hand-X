@@ -75,8 +75,8 @@ def construct_judge_messages(
 			encoded_images.append(
 				ContentPartImageParam(
 					image_url=ImageURL(
-						url=f'data:image/jpeg;base64,{encoded}',
-						media_type='image/jpeg',
+						url=f'data:image/png;base64,{encoded}',
+						media_type='image/png',
 					)
 				)
 			)
