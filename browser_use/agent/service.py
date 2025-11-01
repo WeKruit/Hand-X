@@ -1380,6 +1380,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		final_res = self.history.final_result()
 		final_result_str = json.dumps(final_res) if final_res is not None else None
 
+		# Extract judgement data if available
+		judgement_data = self.history.judgement()
+		judge_verdict = judgement_data.get('verdict') if judgement_data else None
+		judge_reasoning = judgement_data.get('reasoning') if judgement_data else None
+		judge_failure_reason = judgement_data.get('failure_reason') if judgement_data else None
+
 		self.telemetry.capture(
 			AgentTelemetryEvent(
 				task=self.task,
@@ -1406,6 +1412,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				success=self.history.is_successful(),
 				final_result_response=final_result_str,
 				error_message=agent_run_error,
+				judge_verdict=judge_verdict,
+				judge_reasoning=judge_reasoning,
+				judge_failure_reason=judge_failure_reason,
 			)
 		)
 
