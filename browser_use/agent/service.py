@@ -164,6 +164,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		flash_mode: bool = False,
 		max_history_items: int | None = None,
 		page_extraction_llm: BaseChatModel | None = None,
+		use_judge: bool = False,
+		judge_llm: BaseChatModel | None = None,
 		injected_agent_state: AgentState | None = None,
 		source: str | None = None,
 		file_system_path: str | None = None,
@@ -178,7 +180,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		include_recent_events: bool = False,
 		sample_images: list[ContentPartTextParam | ContentPartImageParam] | None = None,
 		final_response_after_failure: bool = True,
-		use_judge: bool = True,
 		_url_shortening_limit: int = 25,
 		**kwargs,
 	):
@@ -200,6 +201,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		if page_extraction_llm is None:
 			page_extraction_llm = llm
+		if judge_llm is None:
+			judge_llm = llm
 		if available_file_paths is None:
 			available_file_paths = []
 
@@ -242,6 +245,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Core components
 		self.task = self._enhance_task_with_schema(task, output_model_schema)
 		self.llm = llm
+		self.judge_llm = judge_llm
 		self.directly_open_url = directly_open_url
 		self.include_recent_events = include_recent_events
 		self._url_shortening_limit = _url_shortening_limit
@@ -290,6 +294,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self.token_cost_service = TokenCost(include_cost=calculate_cost)
 		self.token_cost_service.register_llm(llm)
 		self.token_cost_service.register_llm(page_extraction_llm)
+		self.token_cost_service.register_llm(judge_llm)
 
 		# Initialize state
 		self.state = injected_agent_state or AgentState()
@@ -907,7 +912,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self._message_manager._add_context_message(UserMessage(content=msg))
 			self.AgentOutput = self.DoneAgentOutput
 
-	async def _judge_trace(self) -> JudgementResult:
+	async def _judge_trace(self) -> JudgementResult | None:
 		"""Judge the trace of the agent"""
 		task = self.task
 		final_result = self.history.final_result() or ''
@@ -920,16 +925,20 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			final_result=final_result,
 			agent_steps=agent_steps,
 			screenshot_paths=screenshot_paths,
-			max_images=50,
+			max_images=10,
 		)
 
 		# Call LLM with JudgementResult as output format
 		kwargs: dict = {'output_format': JudgementResult}
 
-		response = await self.llm.ainvoke(input_messages, **kwargs)
-		judgement: JudgementResult = response.completion  # type: ignore[assignment]
-
-		return judgement
+		try:
+			response = await self.judge_llm.ainvoke(input_messages, **kwargs)
+			judgement: JudgementResult = response.completion  # type: ignore[assignment]
+			return judgement
+		except Exception as e:
+			self.logger.error(f'Judge trace failed: {e}')
+			# Return a default judgement on failure
+			return None
 
 	async def _get_model_output_with_retry(self, input_messages: list[BaseMessage]) -> AgentOutput:
 		"""Get model output with retry logic for empty actions"""
