@@ -232,13 +232,37 @@ class Tools(Generic[Context]):
 			return ActionResult(extracted_content=memory, long_term_memory=memory)
 
 		# Element Interaction Actions
+		async def _click_by_coordinate(params: ClickElementAction, browser_session: BrowserSession) -> ActionResult:
+			# Ensure coordinates are provided (type safety)
+			if params.coordinate_x is None or params.coordinate_y is None:
+				return ActionResult(error='Both coordinate_x and coordinate_y must be provided')
 
-		@self.registry.action(
-			'',
-			param_model=ClickElementAction,
-		)
-		async def click(params: ClickElementAction, browser_session: BrowserSession):
-			# Dispatch click event with node
+			try:
+				# Highlight the coordinate being clicked (truly non-blocking)
+				asyncio.create_task(browser_session.highlight_coordinate_click(params.coordinate_x, params.coordinate_y))
+
+				# Use Actor (page.mouse.click) for coordinate-based clicking
+				page = await browser_session.get_current_page()
+				if page is None:
+					return ActionResult(error='No active page found')
+
+				mouse = await page.mouse
+				await mouse.click(params.coordinate_x, params.coordinate_y)
+
+				memory = f'Clicked on coordinate {params.coordinate_x}, {params.coordinate_y}'
+				msg = f'🖱️ {memory}'
+				logger.info(msg)
+
+				return ActionResult(
+					extracted_content=memory,
+					metadata={'click_x': params.coordinate_x, 'click_y': params.coordinate_y},
+				)
+			except Exception as e:
+				error_msg = f'Failed to click at coordinates ({params.coordinate_x}, {params.coordinate_y}).'
+				return ActionResult(error=error_msg)
+
+		async def _click_by_index(params: ClickElementAction, browser_session: BrowserSession) -> ActionResult:
+			assert params.index is not None
 			try:
 				assert params.index != 0, (
 					'Cannot click on element with index 0. If there are no interactive elements use scroll(), wait(), refresh(), etc. to troubleshoot'
@@ -284,6 +308,22 @@ class Tools(Generic[Context]):
 			except Exception as e:
 				error_msg = f'Failed to click element {params.index}: {str(e)}'
 				return ActionResult(error=error_msg)
+
+		@self.registry.action(
+			'Click element by index or coordinates. Prefer index over coordinates when possible.',
+			param_model=ClickElementAction,
+		)
+		async def click(params: ClickElementAction, browser_session: BrowserSession):
+			# Validate that either index or coordinates are provided
+			if params.index is None and (params.coordinate_x is None or params.coordinate_y is None):
+				return ActionResult(error='Must provide either index or both coordinate_x and coordinate_y')
+
+			# Try index-based clicking first if index is provided
+			if params.index is not None:
+				return await _click_by_index(params, browser_session)
+			# Coordinate-based clicking when index is not provided
+			else:
+				return await _click_by_coordinate(params, browser_session)
 
 		@self.registry.action(
 			'',
@@ -563,11 +603,6 @@ class Tools(Generic[Context]):
 					extracted_content=memory,
 					long_term_memory=memory,
 				)
-
-		# Content Actions
-
-		# TODO: Refactor to use events instead of direct page access
-		# This action is temporarily disabled as it needs refactoring to use events
 
 		@self.registry.action(
 			"""LLM extracts structured data from page markdown. Use when: on right page, know what to extract, haven't called before on same page+query. Can't get interactive elements. Set extract_links=True for URLs. Use start_from_char if truncated. If fails, use find_text/scroll instead.""",
