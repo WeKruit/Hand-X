@@ -49,9 +49,9 @@ class AgentTelemetryEvent(BaseTelemetryEvent):
 	final_result_response: str | None
 	error_message: str | None
 	# judge details
-	judge_verdict: bool | None
-	judge_reasoning: str | None
-	judge_failure_reason: str | None
+	judge_verdict: bool | None = None
+	judge_reasoning: str | None = None
+	judge_failure_reason: str | None = None
 
 	name: str = 'agent_event'
 
