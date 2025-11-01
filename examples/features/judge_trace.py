@@ -19,9 +19,7 @@ from browser_use import Agent, ChatBrowserUse
 
 
 async def main():
-	llm = ChatBrowserUse(base_url='http://localhost:8080')
-	# Use gemini flash for judging since it supports vision + structured output
-	# judge_llm = ChatGoogle(model='gemini-flash-latest')
+	llm = ChatBrowserUse()
 	task = "Search Google for 'what is browser automation' and tell me the top 3 results"
 	agent = Agent(task=task, llm=llm, use_judge=True, judge_llm=llm)
 	history = await agent.run()

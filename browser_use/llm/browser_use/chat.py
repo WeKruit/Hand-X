@@ -79,10 +79,14 @@ class ChatBrowserUse(BaseChatModel):
 		return self.model
 
 	@overload
-	async def ainvoke(self, messages: list[BaseMessage], output_format: None = None) -> ChatInvokeCompletion[str]: ...
+	async def ainvoke(
+		self, messages: list[BaseMessage], output_format: None = None, request_type: str = 'browser_agent'
+	) -> ChatInvokeCompletion[str]: ...
 
 	@overload
-	async def ainvoke(self, messages: list[BaseMessage], output_format: type[T]) -> ChatInvokeCompletion[T]: ...
+	async def ainvoke(
+		self, messages: list[BaseMessage], output_format: type[T], request_type: str = 'browser_agent'
+	) -> ChatInvokeCompletion[T]: ...
 
 	@observe(name='chat_browser_use_ainvoke')
 	async def ainvoke(

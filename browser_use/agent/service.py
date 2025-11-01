@@ -929,7 +929,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		)
 
 		# Call LLM with JudgementResult as output format
-		kwargs: dict = {'output_format': JudgementResult, 'request_type': 'judge'}
+		kwargs: dict = {'output_format': JudgementResult}
+
+		# Only pass request_type for ChatBrowserUse (other providers don't support it)
+		if self.judge_llm.provider == 'browser-use':
+			kwargs['request_type'] = 'judge'
 
 		try:
 			response = await self.judge_llm.ainvoke(input_messages, **kwargs)
