@@ -97,26 +97,25 @@ Check out the [library docs](https://docs.browser-use.com) and the [cloud docs](
 
 <br/>
 
-# 🔥 Production with Sandboxes
+# 🔥 Deploy on Sandboxes
 
-**The easiest way to run Browser-Use in production.** We handle agents, browsers, persistence, auth, cookies, and LLMs. The agent runs right next to the browser for minimal latency.
+We handle agents, browsers, persistence, auth, cookies, and LLMs. The agent runs right next to the browser for minimal latency.
 
 ```python
 from browser_use import Browser, sandbox, ChatBrowserUse
 from browser_use.agent.service import Agent
+import asyncio
 
-@sandbox(
-    cloud_profile_id='your-profile-id',      # Your saved cookies/auth
-    cloud_proxy_country_code='us',           # Bypass captchas, cloudflare, geo-restrictions
-)
-async def production_task(browser: Browser):
-    agent = Agent(task="Your task", browser=browser, llm=ChatBrowserUse())
+@sandbox()
+async def my_task(browser: Browser):
+    agent = Agent(task="Find the top HN post", browser=browser, llm=ChatBrowserUse())
     await agent.run()
 
-await production_task()
+# Just call it like any async function
+asyncio.run(my_task())
 ```
 
-See [Going to Production](https://docs.browser-use.com/production) to sync your cookies to the cloud.
+See [Going to Production](https://docs.browser-use.com/production) for more details.
 
 <br/>
 
