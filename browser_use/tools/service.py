@@ -960,7 +960,11 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				result = await file_system.append_file(file_name, content)
 			else:
 				result = await file_system.write_file(file_name, content)
-			logger.info(f'💾 {result}')
+
+			# Log the full path where the file is stored
+			file_path = file_system.get_dir() / file_name
+			logger.info(f'💾 {result} File location: {file_path}')
+
 			return ActionResult(extracted_content=result, long_term_memory=result)
 
 		@self.registry.action(
