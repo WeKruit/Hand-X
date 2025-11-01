@@ -511,6 +511,29 @@ class AgentHistoryList(BaseModel, Generic[AgentStructuredOutput]):
 		"""Check if the agent has any non-None errors"""
 		return any(error is not None for error in self.errors())
 
+	def judgement(self) -> dict | None:
+		"""Get the judgement result as a dictionary if it exists"""
+		if self.history and len(self.history[-1].result) > 0:
+			last_result = self.history[-1].result[-1]
+			if last_result.judgement:
+				return last_result.judgement.model_dump()
+		return None
+
+	def is_judged(self) -> bool:
+		"""Check if the agent trace has been judged"""
+		if self.history and len(self.history[-1].result) > 0:
+			last_result = self.history[-1].result[-1]
+			return last_result.judgement is not None
+		return False
+
+	def is_validated(self) -> bool | None:
+		"""Check if the judge validated the agent execution (verdict is True). Returns None if not judged yet."""
+		if self.history and len(self.history[-1].result) > 0:
+			last_result = self.history[-1].result[-1]
+			if last_result.judgement:
+				return last_result.judgement.verdict
+		return None
+
 	def urls(self) -> list[str | None]:
 		"""Get all unique URLs from history"""
 		return [h.state.url if h.state.url is not None else None for h in self.history]

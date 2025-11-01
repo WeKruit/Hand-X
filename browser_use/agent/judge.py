@@ -44,7 +44,7 @@ def construct_judge_messages(
 	final_result: str,
 	agent_steps: list[str],
 	screenshot_paths: list[str],
-	max_images: int = 50,
+	max_images: int = 10,
 ) -> list[BaseMessage]:
 	"""
 	Construct messages for judge evaluation of agent trace.
