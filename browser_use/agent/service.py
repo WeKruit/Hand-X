@@ -1730,6 +1730,15 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 						# Modify the last action result (that should have is_done=True) to include the judgement
 						if self.history.history[-1].result[-1].is_done:
 							self.history.history[-1].result[-1].judgement = judgement
+							# Log the judgement verdict
+							if judgement:
+								verdict_color = '\033[32m' if judgement.verdict else '\033[31m'
+								verdict_text = '✅ PASS' if judgement.verdict else '❌ FAIL'
+								judge_log = f'\n⚖️  {verdict_color}Judge Verdict: {verdict_text}\033[0m\n'
+								if judgement.failure_reason:
+									judge_log += f'   Failure: {judgement.failure_reason}\n'
+								judge_log += f'   {judgement.reasoning}\n'
+								self.logger.info(judge_log)
 
 					break
 			else:

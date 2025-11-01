@@ -21,20 +21,15 @@ from browser_use.llm import ChatGoogle
 
 async def main():
 	llm = ChatBrowserUse()
-	# Use Claude for judging since it supports vision + structured output
+	# Use gemini flash for judging since it supports vision + structured output
 	judge_llm = ChatGoogle(model='gemini-flash-latest')
 	task = "Search Google for 'what is browser automation' and tell me the top 3 results"
-	agent = Agent(task=task, llm=llm, judge_llm=judge_llm)
+	agent = Agent(task=task, llm=llm, use_judge=True, judge_llm=judge_llm)
 	history = await agent.run()
 
-	# Print the judgement result
+	# Get the judgement result
 	if history.is_judged():
 		judgement = history.judgement()
-		print('\n' + '=' * 80)
-		print('JUDGE EVALUATION')
-		print(judgement)
-	else:
-		print('\nNo judgement available (task may not have completed or use_judge=False)')
 
 
 if __name__ == '__main__':
