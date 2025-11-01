@@ -64,6 +64,7 @@ if TYPE_CHECKING:
 	from browser_use.llm.ollama.chat import ChatOllama
 	from browser_use.llm.openai.chat import ChatOpenAI
 	from browser_use.llm.vercel.chat import ChatVercel
+	from browser_use.sandbox import sandbox
 	from browser_use.tools.service import Controller, Tools
 
 	# Lazy imports mapping - only import when actually accessed
@@ -99,6 +100,8 @@ _LAZY_IMPORTS = {
 	'ChatVercel': ('browser_use.llm.vercel.chat', 'ChatVercel'),
 	# LLM models module
 	'models': ('browser_use.llm.models', None),
+	# Sandbox execution
+	'sandbox': ('browser_use.sandbox', 'sandbox'),
 }
 
 
@@ -151,4 +154,6 @@ __all__ = [
 	'Controller',
 	# LLM models module
 	'models',
+	# Sandbox execution
+	'sandbox',
 ]
