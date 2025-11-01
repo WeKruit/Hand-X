@@ -12,15 +12,8 @@ To run this example:
 import asyncio
 import os
 
-from pydantic import BaseModel
-
 from browser_use import Browser, ChatBrowserUse, sandbox
 from browser_use.agent.service import Agent
-
-
-class IPAddress(BaseModel):
-	ip_address: str
-	location: str
 
 
 # Example with event callbacks to monitor execution
@@ -40,16 +33,15 @@ def on_browser_ready(data):
 	# cloud_proxy_country_code='us',
 	# cloud_timeout=60,
 )
-async def pydantic_example(browser: Browser) -> IPAddress | None:
+async def pydantic_example(browser: Browser):
 	agent = Agent(
 		"""go and check my ip address and the location. return the result in json format""",
 		browser=browser,
-		output_model_schema=IPAddress,
 		llm=ChatBrowserUse(),
 	)
 	res = await agent.run()
 
-	return res.structured_output
+	return res.final_result()
 
 
 async def main():
