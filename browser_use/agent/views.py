@@ -442,10 +442,7 @@ class AgentHistoryList(BaseModel, Generic[AgentStructuredOutput]):
 		}
 
 	@classmethod
-	def load_from_file(cls, filepath: str | Path, output_model: type[AgentOutput]) -> AgentHistoryList:
-		"""Load history from JSON file"""
-		with open(filepath, encoding='utf-8') as f:
-			data = json.load(f)
+	def load_from_dict(cls, data: dict[str, Any], output_model: type[AgentOutput]) -> AgentHistoryList:
 		# loop through history and validate output_model actions to enrich with custom actions
 		for h in data['history']:
 			if h['model_output']:
@@ -455,8 +452,16 @@ class AgentHistoryList(BaseModel, Generic[AgentStructuredOutput]):
 					h['model_output'] = None
 			if 'interacted_element' not in h['state']:
 				h['state']['interacted_element'] = None
+
 		history = cls.model_validate(data)
 		return history
+
+	@classmethod
+	def load_from_file(cls, filepath: str | Path, output_model: type[AgentOutput]) -> AgentHistoryList:
+		"""Load history from JSON file"""
+		with open(filepath, encoding='utf-8') as f:
+			data = json.load(f)
+		return cls.load_from_dict(data, output_model)
 
 	def last_action(self) -> None | dict:
 		"""Last action in history"""
