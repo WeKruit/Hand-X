@@ -912,6 +912,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self._message_manager._add_context_message(UserMessage(content=msg))
 			self.AgentOutput = self.DoneAgentOutput
 
+	@observe(ignore_input=True, ignore_output=False)
 	async def _judge_trace(self) -> JudgementResult | None:
 		"""Judge the trace of the agent"""
 		task = self.task
@@ -943,6 +944,24 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.logger.error(f'Judge trace failed: {e}')
 			# Return a default judgement on failure
 			return None
+
+	async def _judge_and_log(self) -> None:
+		"""Run judge evaluation and log the verdict"""
+		judgement = await self._judge_trace()
+
+		# Attach judgement to last action result
+		if self.history.history[-1].result[-1].is_done:
+			self.history.history[-1].result[-1].judgement = judgement
+
+			# Log the verdict
+			if judgement:
+				verdict_color = '\033[32m' if judgement.verdict else '\033[31m'
+				verdict_text = '✅ PASS' if judgement.verdict else '❌ FAIL'
+				judge_log = f'\n⚖️  {verdict_color}Judge Verdict: {verdict_text}\033[0m\n'
+				if judgement.failure_reason:
+					judge_log += f'   Failure: {judgement.failure_reason}\n'
+				judge_log += f'   {judgement.reasoning}\n'
+				self.logger.info(judge_log)
 
 	async def _get_model_output_with_retry(self, input_messages: list[BaseMessage]) -> AgentOutput:
 		"""Get model output with retry logic for empty actions"""
@@ -1739,20 +1758,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				if is_done:
 					# Agent has marked the task as done
 					if self.settings.use_judge:
-						judgement = await self._judge_trace()
-						# Modify the last action result (that should have is_done=True) to include the judgement
-						if self.history.history[-1].result[-1].is_done:
-							self.history.history[-1].result[-1].judgement = judgement
-							# Log the judgement verdict
-							if judgement:
-								verdict_color = '\033[32m' if judgement.verdict else '\033[31m'
-								verdict_text = '✅ PASS' if judgement.verdict else '❌ FAIL'
-								judge_log = f'\n⚖️  {verdict_color}Judge Verdict: {verdict_text}\033[0m\n'
-								if judgement.failure_reason:
-									judge_log += f'   Failure: {judgement.failure_reason}\n'
-								judge_log += f'   {judgement.reasoning}\n'
-								self.logger.info(judge_log)
-
+						await self._judge_and_log()
 					break
 			else:
 				agent_run_error = 'Failed to complete task in maximum steps'
