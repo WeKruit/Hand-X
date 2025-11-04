@@ -951,10 +951,27 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Attach judgement to last action result
 		if self.history.history[-1].result[-1].is_done:
-			self.history.history[-1].result[-1].judgement = judgement
+			last_result = self.history.history[-1].result[-1]
+			last_result.judgement = judgement
 
-			# Log the verdict
+			# Get self-reported success
+			self_reported_success = last_result.success
+
+			# Log the verdict based on self-reported success and judge verdict
 			if judgement:
+				# If both self-reported and judge agree on success, don't log
+				if self_reported_success is True and judgement.verdict is True:
+					return
+
+				# If agent reported success but judge thinks it failed, show warning
+				if self_reported_success is True and judgement.verdict is False:
+					judge_log = '\n⚠️  \033[33mAgent reported success but judge thinks task failed\033[0m\n'
+					if judgement.failure_reason:
+						judge_log += f'   Reason: {judgement.failure_reason}\n'
+					self.logger.info(judge_log)
+					return
+
+				# Otherwise, show full judge result
 				verdict_color = '\033[32m' if judgement.verdict else '\033[31m'
 				verdict_text = '✅ PASS' if judgement.verdict else '❌ FAIL'
 				judge_log = f'\n⚖️  {verdict_color}Judge Verdict: {verdict_text}\033[0m\n'
