@@ -963,18 +963,15 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				if self_reported_success is True and judgement.verdict is True:
 					return
 
+				judge_log = '\n'
 				# If agent reported success but judge thinks it failed, show warning
 				if self_reported_success is True and judgement.verdict is False:
-					judge_log = '\n⚠️  \033[33mAgent reported success but judge thinks task failed\033[0m\n'
-					if judgement.failure_reason:
-						judge_log += f'   Reason: {judgement.failure_reason}\n'
-					self.logger.info(judge_log)
-					return
+					judge_log += '⚠️  \033[33mAgent reported success but judge thinks task failed\033[0m\n'
 
 				# Otherwise, show full judge result
 				verdict_color = '\033[32m' if judgement.verdict else '\033[31m'
 				verdict_text = '✅ PASS' if judgement.verdict else '❌ FAIL'
-				judge_log = f'\n⚖️  {verdict_color}Judge Verdict: {verdict_text}\033[0m\n'
+				judge_log += f'⚖️  {verdict_color}Judge Verdict: {verdict_text}\033[0m\n'
 				if judgement.failure_reason:
 					judge_log += f'   Failure: {judgement.failure_reason}\n'
 				judge_log += f'   {judgement.reasoning}\n'
