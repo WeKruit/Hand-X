@@ -52,7 +52,7 @@ curl -X PATCH https://api.browser-use.com/api/v2/sessions/<session_id> \
 
 ## API (v2) Docs
 The best way to use Browser Use Cloud is with API v2. 
-Other options exist, namely API v2 and the SDK, but are give less comprehensive control.
+Other options exist, namely API v2 and the SDK, but give less comprehensive control.
 
 ### Billing
 ##### Get Account Billing
