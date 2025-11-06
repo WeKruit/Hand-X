@@ -1301,6 +1301,7 @@ class BrowserSession(BaseModel):
 		from browser_use.browser.watchdogs.permissions_watchdog import PermissionsWatchdog
 		from browser_use.browser.watchdogs.popups_watchdog import PopupsWatchdog
 		from browser_use.browser.watchdogs.recording_watchdog import RecordingWatchdog
+		from browser_use.browser.watchdogs.har_recording_watchdog import HarRecordingWatchdog
 		from browser_use.browser.watchdogs.screenshot_watchdog import ScreenshotWatchdog
 		from browser_use.browser.watchdogs.security_watchdog import SecurityWatchdog
 		from browser_use.browser.watchdogs.storage_state_watchdog import StorageStateWatchdog
@@ -1417,6 +1418,11 @@ class BrowserSession(BaseModel):
 		RecordingWatchdog.model_rebuild()
 		self._recording_watchdog = RecordingWatchdog(event_bus=self.event_bus, browser_session=self)
 		self._recording_watchdog.attach_to_session()
+
+		# Initialize HarRecordingWatchdog (handles HTTPS HAR capture)
+		HarRecordingWatchdog.model_rebuild()
+		self._har_recording_watchdog = HarRecordingWatchdog(event_bus=self.event_bus, browser_session=self)
+		self._har_recording_watchdog.attach_to_session()
 
 		# Mark watchdogs as attached to prevent duplicate attachment
 		self._watchdogs_attached = True
