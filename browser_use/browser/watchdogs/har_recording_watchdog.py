@@ -12,9 +12,16 @@ import json
 from dataclasses import dataclass, field
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import ClassVar, Dict, Optional
+from typing import ClassVar
 
 from bubus import BaseEvent
+from cdp_use.cdp.network.events import (
+	DataReceivedEvent,
+	LoadingFailedEvent,
+	LoadingFinishedEvent,
+	RequestWillBeSentEvent,
+	ResponseReceivedEvent,
+)
 
 from browser_use.browser.events import BrowserConnectedEvent, BrowserStopEvent
 from browser_use.browser.watchdog_base import BaseWatchdog
@@ -129,61 +136,103 @@ class HarRecordingWatchdog(BaseWatchdog):
 			self.logger.warning(f'Failed to write HAR: {e}')
 
 	# =============== CDP Event Handlers (sync) ==================
-	def _on_request_will_be_sent(self, params: dict, session_id: str | None) -> None:
+	def _on_request_will_be_sent(self, params: RequestWillBeSentEvent, session_id: str | None) -> None:
 		try:
-			req = params.get('request', {})
-			url = req.get('url')
+			req = params.get('request', {}) if hasattr(params, 'get') else getattr(params, 'request', {})
+			url = req.get('url') if isinstance(req, dict) else getattr(req, 'url', None)
 			if not _is_https(url):
-				return  # HTTPS-only requirement
+				return  # HTTPS-only requirement (only HTTPS requests are recorded for now)
 
-			request_id = params.get('requestId')
+			request_id = params.get('requestId') if hasattr(params, 'get') else getattr(params, 'requestId', None)
 			if not request_id:
 				return
 
 			entry = self._entries.setdefault(request_id, _HarEntryBuilder(request_id=request_id))
 			entry.url = url
-			entry.method = req.get('method')
-			entry.request_headers = (
-				{h['name'].lower(): h.get('value', '') for h in req.get('headers', [])}
-				if isinstance(req.get('headers'), list)
-				else req.get('headers', {}) or {}
+			entry.method = req.get('method') if isinstance(req, dict) else getattr(req, 'method', None)
+
+			# Convert headers to plain dict, handling various formats
+			headers_raw = req.get('headers') if isinstance(req, dict) else getattr(req, 'headers', None)
+			if headers_raw is None:
+				entry.request_headers = {}
+			elif isinstance(headers_raw, dict):
+				entry.request_headers = {k.lower(): str(v) for k, v in headers_raw.items()}
+			elif isinstance(headers_raw, list):
+				entry.request_headers = {
+					h.get('name', '').lower(): str(h.get('value') or '') for h in headers_raw if isinstance(h, dict)
+				}
+			else:
+				# Handle Headers type or other formats - convert to dict
+				try:
+					headers_dict = dict(headers_raw) if hasattr(headers_raw, '__iter__') else {}
+					entry.request_headers = {k.lower(): str(v) for k, v in headers_dict.items()}
+				except Exception:
+					entry.request_headers = {}
+
+			entry.frame_id = params.get('frameId') if hasattr(params, 'get') else getattr(params, 'frameId', None)
+			entry.document_url = (
+				params.get('documentURL')
+				if hasattr(params, 'get')
+				else getattr(params, 'documentURL', None) or entry.document_url
 			)
-			entry.frame_id = params.get('frameId')
-			entry.document_url = params.get('documentURL') or entry.document_url
 
 			# Timing anchors
-			entry.ts_request = params.get('timestamp')
-			entry.wall_time_request = params.get('wallTime')
+			entry.ts_request = params.get('timestamp') if hasattr(params, 'get') else getattr(params, 'timestamp', None)
+			entry.wall_time_request = params.get('wallTime') if hasattr(params, 'get') else getattr(params, 'wallTime', None)
 
 			# Track top-level navigations for page context
-			if params.get('type') == 'Document' and params.get('isSameDocument', False) is False:
+			req_type = params.get('type') if hasattr(params, 'get') else getattr(params, 'type', None)
+			is_same_doc = (
+				params.get('isSameDocument', False) if hasattr(params, 'get') else getattr(params, 'isSameDocument', False)
+			)
+			if req_type == 'Document' and not is_same_doc:
 				# best-effort: consider as navigation
-				if entry.frame_id:
-					self._top_level_pages[entry.frame_id] = url
+				if entry.frame_id and url:
+					self._top_level_pages[entry.frame_id] = str(url)
 		except Exception as e:
 			self.logger.debug(f'requestWillBeSent handling error: {e}')
 
-	def _on_response_received(self, params: dict, session_id: str | None) -> None:
+	def _on_response_received(self, params: ResponseReceivedEvent, session_id: str | None) -> None:
 		try:
-			request_id = params.get('requestId')
+			request_id = params.get('requestId') if hasattr(params, 'get') else getattr(params, 'requestId', None)
 			if not request_id or request_id not in self._entries:
 				return
-			response = params.get('response', {})
+			response = params.get('response', {}) if hasattr(params, 'get') else getattr(params, 'response', {})
 			entry = self._entries[request_id]
-			entry.status = response.get('status')
-			entry.status_text = response.get('statusText')
-			entry.response_headers = response.get('headers', {}) or {}
-			entry.mime_type = response.get('mimeType')
-			entry.ts_response = params.get('timestamp')
+			entry.status = response.get('status') if isinstance(response, dict) else getattr(response, 'status', None)
+			entry.status_text = (
+				response.get('statusText') if isinstance(response, dict) else getattr(response, 'statusText', None)
+			)
+
+			# Convert headers to plain dict, handling various formats
+			headers_raw = response.get('headers') if isinstance(response, dict) else getattr(response, 'headers', None)
+			if headers_raw is None:
+				entry.response_headers = {}
+			elif isinstance(headers_raw, dict):
+				entry.response_headers = {k.lower(): str(v) for k, v in headers_raw.items()}
+			elif isinstance(headers_raw, list):
+				entry.response_headers = {
+					h.get('name', '').lower(): str(h.get('value') or '') for h in headers_raw if isinstance(h, dict)
+				}
+			else:
+				# Handle Headers type or other formats - convert to dict
+				try:
+					headers_dict = dict(headers_raw) if hasattr(headers_raw, '__iter__') else {}
+					entry.response_headers = {k.lower(): str(v) for k, v in headers_dict.items()}
+				except Exception:
+					entry.response_headers = {}
+
+			entry.mime_type = response.get('mimeType') if isinstance(response, dict) else getattr(response, 'mimeType', None)
+			entry.ts_response = params.get('timestamp') if hasattr(params, 'get') else getattr(params, 'timestamp', None)
 		except Exception as e:
 			self.logger.debug(f'responseReceived handling error: {e}')
 
-	def _on_data_received(self, params: dict, session_id: str | None) -> None:
+	def _on_data_received(self, params: DataReceivedEvent, session_id: str | None) -> None:
 		try:
-			request_id = params.get('requestId')
+			request_id = params.get('requestId') if hasattr(params, 'get') else getattr(params, 'requestId', None)
 			if not request_id or request_id not in self._entries:
 				return
-			data = params.get('data')
+			data = params.get('data') if hasattr(params, 'get') else getattr(params, 'data', None)
 			if isinstance(data, str):
 				try:
 					self._entries[request_id].encoded_data.extend(data.encode('latin1'))
@@ -192,24 +241,27 @@ class HarRecordingWatchdog(BaseWatchdog):
 		except Exception as e:
 			self.logger.debug(f'dataReceived handling error: {e}')
 
-	def _on_loading_finished(self, params: dict, session_id: str | None) -> None:
+	def _on_loading_finished(self, params: LoadingFinishedEvent, session_id: str | None) -> None:
 		try:
-			request_id = params.get('requestId')
+			request_id = params.get('requestId') if hasattr(params, 'get') else getattr(params, 'requestId', None)
 			if not request_id or request_id not in self._entries:
 				return
 			entry = self._entries[request_id]
-			entry.ts_finished = params.get('timestamp')
-			if 'encodedDataLength' in params:
+			entry.ts_finished = params.get('timestamp') if hasattr(params, 'get') else getattr(params, 'timestamp', None)
+			encoded_length = (
+				params.get('encodedDataLength') if hasattr(params, 'get') else getattr(params, 'encodedDataLength', None)
+			)
+			if encoded_length is not None:
 				try:
-					entry.encoded_data_length = int(params.get('encodedDataLength') or 0)
+					entry.encoded_data_length = int(encoded_length)
 				except Exception:
 					entry.encoded_data_length = None
 		except Exception as e:
 			self.logger.debug(f'loadingFinished handling error: {e}')
 
-	def _on_loading_failed(self, params: dict, session_id: str | None) -> None:
+	def _on_loading_failed(self, params: LoadingFailedEvent, session_id: str | None) -> None:
 		try:
-			request_id = params.get('requestId')
+			request_id = params.get('requestId') if hasattr(params, 'get') else getattr(params, 'requestId', None)
 			if request_id and request_id in self._entries:
 				self._entries[request_id].failed = True
 		except Exception as e:
