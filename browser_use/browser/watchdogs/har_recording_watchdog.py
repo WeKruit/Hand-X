@@ -22,6 +22,7 @@ from cdp_use.cdp.network.events import (
 	RequestWillBeSentEvent,
 	ResponseReceivedEvent,
 )
+from cdp_use.cdp.page.events import FrameNavigatedEvent, LifecycleEventEvent
 
 from browser_use.browser.events import BrowserConnectedEvent, BrowserStopEvent
 from browser_use.browser.watchdog_base import BaseWatchdog
@@ -44,6 +45,7 @@ class _HarEntryBuilder:
 	method: str | None = None
 	request_headers: dict = field(default_factory=dict)
 	request_body: bytes | None = None
+	post_data: str | None = None  # CDP postData field
 	status: int | None = None
 	status_text: str | None = None
 	response_headers: dict = field(default_factory=dict)
@@ -56,6 +58,8 @@ class _HarEntryBuilder:
 	ts_response: float | None = None
 	ts_finished: float | None = None
 	encoded_data_length: int | None = None
+	response_body: bytes | None = None
+	content_length: int | None = None  # From Content-Length header
 
 
 def _is_https(url: str | None) -> bool:
@@ -85,7 +89,7 @@ class HarRecordingWatchdog(BaseWatchdog):
 		super().__init__(*args, **kwargs)
 		self._enabled: bool = False
 		self._entries: dict[str, _HarEntryBuilder] = {}
-		self._top_level_pages: dict[str, str] = {}  # frameId -> document URL
+		self._top_level_pages: dict[str, dict] = {}  # frameId -> {url, title, startedDateTime, onContentLoad, onLoad}
 
 	async def on_BrowserConnectedEvent(self, event: BrowserConnectedEvent) -> None:
 		profile = self.browser_session.browser_profile
@@ -100,9 +104,10 @@ class HarRecordingWatchdog(BaseWatchdog):
 		self._har_dir.mkdir(parents=True, exist_ok=True)
 
 		try:
-			# Enable Network domain and subscribe to events
+			# Enable Network and Page domains for events
 			cdp_session = await self.browser_session.get_or_create_cdp_session()
 			await cdp_session.cdp_client.send.Network.enable(session_id=cdp_session.session_id)
+			await cdp_session.cdp_client.send.Page.enable(session_id=cdp_session.session_id)
 
 			# Query browser version for HAR log.browser
 			try:
@@ -119,6 +124,8 @@ class HarRecordingWatchdog(BaseWatchdog):
 			cdp.Network.dataReceived(self._on_data_received)
 			cdp.Network.loadingFinished(self._on_loading_finished)
 			cdp.Network.loadingFailed(self._on_loading_failed)
+			cdp.Page.lifecycleEvent(self._on_lifecycle_event)
+			cdp.Page.frameNavigated(self._on_frame_navigated)
 
 			self._enabled = True
 			self.logger.info(f'📊 Starting HAR recording to {self._har_path}')
@@ -150,6 +157,7 @@ class HarRecordingWatchdog(BaseWatchdog):
 			entry = self._entries.setdefault(request_id, _HarEntryBuilder(request_id=request_id))
 			entry.url = url
 			entry.method = req.get('method') if isinstance(req, dict) else getattr(req, 'method', None)
+			entry.post_data = req.get('postData') if isinstance(req, dict) else getattr(req, 'postData', None)
 
 			# Convert headers to plain dict, handling various formats
 			headers_raw = req.get('headers') if isinstance(req, dict) else getattr(req, 'headers', None)
@@ -188,7 +196,21 @@ class HarRecordingWatchdog(BaseWatchdog):
 			if req_type == 'Document' and not is_same_doc:
 				# best-effort: consider as navigation
 				if entry.frame_id and url:
-					self._top_level_pages[entry.frame_id] = str(url)
+					if entry.frame_id not in self._top_level_pages:
+						self._top_level_pages[entry.frame_id] = {
+							'url': str(url),
+							'title': str(url),  # Default to URL, will be updated from DOM
+							'startedDateTime': entry.wall_time_request,
+							'onContentLoad': -1,
+							'onLoad': -1,
+						}
+					else:
+						# Update startedDateTime if this is earlier
+						page_info = self._top_level_pages[entry.frame_id]
+						if entry.wall_time_request and (
+							page_info['startedDateTime'] is None or entry.wall_time_request < page_info['startedDateTime']
+						):
+							page_info['startedDateTime'] = entry.wall_time_request
 		except Exception as e:
 			self.logger.debug(f'requestWillBeSent handling error: {e}')
 
@@ -204,8 +226,25 @@ class HarRecordingWatchdog(BaseWatchdog):
 				response.get('statusText') if isinstance(response, dict) else getattr(response, 'statusText', None)
 			)
 
-			# Convert headers to plain dict, handling various formats
+			# Extract Content-Length for compression calculation (before converting headers)
 			headers_raw = response.get('headers') if isinstance(response, dict) else getattr(response, 'headers', None)
+			if headers_raw:
+				if isinstance(headers_raw, dict):
+					cl_str = headers_raw.get('content-length') or headers_raw.get('Content-Length')
+				elif isinstance(headers_raw, list):
+					cl_header = next(
+						(h for h in headers_raw if isinstance(h, dict) and h.get('name', '').lower() == 'content-length'), None
+					)
+					cl_str = cl_header.get('value') if cl_header else None
+				else:
+					cl_str = None
+				if cl_str:
+					try:
+						entry.content_length = int(cl_str)
+					except Exception:
+						pass
+
+			# Convert headers to plain dict, handling various formats
 			if headers_raw is None:
 				entry.response_headers = {}
 			elif isinstance(headers_raw, dict):
@@ -247,7 +286,34 @@ class HarRecordingWatchdog(BaseWatchdog):
 			if not request_id or request_id not in self._entries:
 				return
 			entry = self._entries[request_id]
-			entry.ts_finished = params.get('timestamp') if hasattr(params, 'get') else getattr(params, 'timestamp', None)
+			entry.ts_finished = params.get('timestamp')
+			# Fetch response body via CDP as dataReceived may be incomplete
+			import asyncio as _asyncio
+
+			async def _fetch_body(self_ref, req_id, sess_id):
+				try:
+					resp = await self_ref.browser_session.cdp_client.send.Network.getResponseBody(
+						params={'requestId': req_id}, session_id=sess_id
+					)
+					data = resp.get('body', b'')
+					if resp.get('base64Encoded'):
+						import base64 as _b64
+
+						data = _b64.b64decode(data)
+					else:
+						# Ensure data is bytes even if CDP returns a string
+						if isinstance(data, str):
+							data = data.encode('utf-8', errors='replace')
+					# Ensure we always have bytes
+					if not isinstance(data, bytes):
+						data = bytes(data) if data else b''
+					entry.response_body = data
+				except Exception:
+					pass
+
+			_asyncio.create_task(_fetch_body(self, request_id, session_id)) if hasattr(params, 'get') else getattr(
+				params, 'timestamp', None
+			)
 			encoded_length = (
 				params.get('encodedDataLength') if hasattr(params, 'get') else getattr(params, 'encodedDataLength', None)
 			)
@@ -268,6 +334,58 @@ class HarRecordingWatchdog(BaseWatchdog):
 			self.logger.debug(f'loadingFailed handling error: {e}')
 
 	# ===================== HAR Writing ==========================
+	def _on_lifecycle_event(self, params: LifecycleEventEvent, session_id: str | None) -> None:
+		"""Handle Page.lifecycleEvent for tracking page load timings."""
+		try:
+			frame_id = params.get('frameId') if hasattr(params, 'get') else getattr(params, 'frameId', None)
+			name = params.get('name') if hasattr(params, 'get') else getattr(params, 'name', None)
+			timestamp = params.get('timestamp') if hasattr(params, 'get') else getattr(params, 'timestamp', None)
+
+			if not frame_id or not name or frame_id not in self._top_level_pages:
+				return
+
+			page_info = self._top_level_pages[frame_id]
+			page_start = page_info.get('startedDateTime')
+
+			if name == 'DOMContentLoaded' and page_start is not None:
+				# Calculate milliseconds since page start
+				try:
+					elapsed_ms = int(round((timestamp - page_start) * 1000))
+					page_info['onContentLoad'] = max(0, elapsed_ms)
+				except Exception:
+					pass
+			elif name == 'load' and page_start is not None:
+				try:
+					elapsed_ms = int(round((timestamp - page_start) * 1000))
+					page_info['onLoad'] = max(0, elapsed_ms)
+				except Exception:
+					pass
+		except Exception as e:
+			self.logger.debug(f'lifecycleEvent handling error: {e}')
+
+	def _on_frame_navigated(self, params: FrameNavigatedEvent, session_id: str | None) -> None:
+		"""Handle Page.frameNavigated to update page title from DOM."""
+		try:
+			frame = params.get('frame') if hasattr(params, 'get') else getattr(params, 'frame', None)
+			if not frame:
+				return
+
+			frame_id = frame.get('id') if isinstance(frame, dict) else getattr(frame, 'id', None)
+			title = (
+				frame.get('name') or frame.get('url')
+				if isinstance(frame, dict)
+				else getattr(frame, 'name', None) or getattr(frame, 'url', None)
+			)
+
+			if frame_id and frame_id in self._top_level_pages:
+				# Try to get actual page title via Runtime.evaluate if possible
+				# For now, use frame name or URL as fallback
+				if title:
+					self._top_level_pages[frame_id]['title'] = str(title)
+		except Exception as e:
+			self.logger.debug(f'frameNavigated handling error: {e}')
+
+	# ===================== HAR Writing ==========================
 	async def _write_har(self) -> None:
 		# Filter by mode and HTTPS already respected at collection time
 		entries = [e for e in self._entries.values() if self._include_entry(e)]
@@ -281,22 +399,60 @@ class HarRecordingWatchdog(BaseWatchdog):
 		for e in entries:
 			content_obj: dict = {'mimeType': e.mime_type or ''}
 
-			body_bytes: bytes = bytes(e.encoded_data)
+			# Get body data, preferring response_body over encoded_data
+			if e.response_body is not None:
+				body_data = e.response_body
+			else:
+				body_data = e.encoded_data
+
+			# Defensive conversion: ensure body_data is always bytes
+			if isinstance(body_data, str):
+				body_bytes = body_data.encode('utf-8', errors='replace')
+			elif isinstance(body_data, bytearray):
+				body_bytes = bytes(body_data)
+			elif isinstance(body_data, bytes):
+				body_bytes = body_data
+			else:
+				# Fallback: try to convert to bytes
+				try:
+					body_bytes = bytes(body_data) if body_data else b''
+				except (TypeError, ValueError):
+					body_bytes = b''
+
 			content_size = len(body_bytes)
 
+			# Calculate compression (bytes saved by compression)
+			compression = 0
+			if e.content_length is not None and e.encoded_data_length is not None:
+				compression = max(0, e.content_length - e.encoded_data_length)
+
 			if self._content_mode == 'embed' and content_size > 0:
-				content_obj['text'] = base64.b64encode(body_bytes).decode('ascii')
-				content_obj['encoding'] = 'base64'
-				content_obj['size'] = content_size
+				# Prefer plain text; fallback to base64 only if decoding fails
+				try:
+					text_decoded = body_bytes.decode('utf-8')
+					content_obj['text'] = text_decoded
+					content_obj['size'] = content_size
+					if compression > 0:
+						content_obj['compression'] = compression
+				except UnicodeDecodeError:
+					content_obj['text'] = base64.b64encode(body_bytes).decode('ascii')
+					content_obj['encoding'] = 'base64'
+					content_obj['size'] = content_size
+					if compression > 0:
+						content_obj['compression'] = compression
 			elif self._content_mode == 'attach' and content_size > 0 and sidecar_dir is not None:
 				# Use incremental index-based filenames for determinism
 				rel_name = f'{len(har_entries):06d}.bin'
 				(sidecar_dir / rel_name).write_bytes(body_bytes)
 				content_obj['_file'] = str(Path(sidecar_dir.name) / rel_name)
 				content_obj['size'] = content_size
+				if compression > 0:
+					content_obj['compression'] = compression
 			else:
 				# omit or empty
 				content_obj['size'] = content_size
+				if compression > 0:
+					content_obj['compression'] = compression
 
 			started_date_time, total_time_ms, timings = self._compute_timings(e)
 			req_headers_list = [{'name': k, 'value': str(v)} for k, v in (e.request_headers or {}).items()]
@@ -304,6 +460,17 @@ class HarRecordingWatchdog(BaseWatchdog):
 			request_headers_size = self._calc_headers_size(e.method or 'GET', e.url or '', req_headers_list)
 			response_headers_size = self._calc_headers_size(None, None, resp_headers_list)
 			request_body_size = self._calc_request_body_size(e)
+			request_post_data = None
+			if e.post_data and self._content_mode != 'omit':
+				if self._content_mode == 'embed':
+					request_post_data = {'mimeType': e.request_headers.get('content-type', ''), 'text': e.post_data}
+				elif self._content_mode == 'attach' and sidecar_dir is not None:
+					req_name = f'{len(har_entries):06d}_req.txt'
+					(sidecar_dir / req_name).write_text(e.post_data)
+					request_post_data = {
+						'mimeType': e.request_headers.get('content-type', ''),
+						'_file': str(Path(sidecar_dir.name) / req_name),
+					}
 
 			har_entries.append(
 				{
@@ -318,6 +485,7 @@ class HarRecordingWatchdog(BaseWatchdog):
 						'cookies': [],
 						'headersSize': request_headers_size,
 						'bodySize': request_body_size,
+						'postData': request_post_data,
 					},
 					'response': {
 						'status': e.status or 0,
@@ -328,7 +496,9 @@ class HarRecordingWatchdog(BaseWatchdog):
 						'content': content_obj,
 						'redirectURL': '',
 						'headersSize': response_headers_size,
-						'bodySize': content_size if content_size > 0 else -1,
+						'bodySize': e.encoded_data_length
+						if e.encoded_data_length is not None
+						else (content_size if content_size > 0 else -1),
 					},
 					'cache': {},
 					'timings': timings,
@@ -349,16 +519,38 @@ class HarRecordingWatchdog(BaseWatchdog):
 				'creator': {'name': 'browser-use', 'version': bu_version},
 				'browser': {'name': self._browser_name, 'version': self._browser_version},
 				'pages': [
-					{'id': pid, 'title': url, 'startedDateTime': '', 'pageTimings': {}}
-					for pid, url in self._top_level_pages.items()
+					{
+						'id': pid,
+						'title': page_info.get('title', page_info.get('url', '')),
+						'startedDateTime': self._format_page_started_datetime(page_info.get('startedDateTime')),
+						'pageTimings': (
+							(lambda _ocl, _ol: ({k: v for k, v in (('onContentLoad', _ocl), ('onLoad', _ol)) if v is not None}))(
+								(page_info.get('onContentLoad') if page_info.get('onContentLoad', -1) >= 0 else None),
+								(page_info.get('onLoad') if page_info.get('onLoad', -1) >= 0 else None),
+							)
+						),
+					}
+					for pid, page_info in self._top_level_pages.items()
 				],
 				'entries': har_entries,
 			}
 		}
 
 		tmp_path = self._har_path.with_suffix(self._har_path.suffix + '.tmp')
-		tmp_path.write_text(json.dumps(har_obj, indent=2))
+		# Write as bytes explicitly to avoid any text/binary mode confusion in different environments
+		tmp_path.write_bytes(json.dumps(har_obj, indent=2).encode('utf-8'))
 		tmp_path.replace(self._har_path)
+
+	def _format_page_started_datetime(self, timestamp: float | None) -> str:
+		"""Format page startedDateTime from timestamp."""
+		if timestamp is None:
+			return ''
+		try:
+			from datetime import datetime, timezone
+
+			return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
+		except Exception:
+			return ''
 
 	def _page_ref_for_entry(self, e: _HarEntryBuilder) -> str | None:
 		# Use frame_id as stable page id if known
@@ -373,7 +565,8 @@ class HarRecordingWatchdog(BaseWatchdog):
 			return True
 		# minimal: include main document and same-origin subresources
 		if e.frame_id and e.frame_id in self._top_level_pages:
-			page_url = self._top_level_pages[e.frame_id]
+			page_info = self._top_level_pages[e.frame_id]
+			page_url = page_info.get('url') if isinstance(page_info, dict) else page_info
 			return _origin(e.url or '') == _origin(page_url or '')
 		return False
 
@@ -414,15 +607,20 @@ class HarRecordingWatchdog(BaseWatchdog):
 			return -1
 
 	def _calc_request_body_size(self, e: _HarEntryBuilder) -> int:
-		# Try Content-Length header first; else, if request_body set, use its length; else -1
+		# Try Content-Length header first; else post_data; else request_body; else 0 for GET/HEAD, -1 if unknown
 		try:
 			cl = None
 			if e.request_headers:
 				cl = e.request_headers.get('content-length') or e.request_headers.get('Content-Length')
 			if cl is not None:
 				return int(cl)
+			if e.post_data:
+				return len(e.post_data.encode('utf-8'))
 			if e.request_body is not None:
 				return len(e.request_body)
+			# GET/HEAD requests typically have no body
+			if e.method and e.method.upper() in ('GET', 'HEAD'):
+				return 0
 		except Exception:
 			pass
 		return -1
