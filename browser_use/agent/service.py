@@ -974,6 +974,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				judge_log += f'⚖️  {verdict_color}Judge Verdict: {verdict_text}\033[0m\n'
 				if judgement.failure_reason:
 					judge_log += f'   Failure: {judgement.failure_reason}\n'
+				if judgement.impossible_task:
+					judge_log += '   🚫 Impossible Task: Task was fundamentally impossible to complete\n'
+				if judgement.reached_captcha:
+					judge_log += '   🤖 Captcha Detected: Agent encountered captcha challenges\n'
 				judge_log += f'   {judgement.reasoning}\n'
 				self.logger.info(judge_log)
 
