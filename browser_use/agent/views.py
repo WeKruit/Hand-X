@@ -93,7 +93,7 @@ class JudgementResult(BaseModel):
 
 	reasoning: str | None = Field(default=None, description='Explanation of the judgement')
 	verdict: bool = Field(description='Whether the trace was successful or not')
-	failure_reason: str | None = Field(default=None, description='If the trace was not successful, the reason why')
+	failure_reason: str | None = Field(default=None, description='If the trace was not successful, the reason why. Otherwise empty.')
 	impossible_task: bool = Field(
 		default=False,
 		description='True if the task was impossible to complete due to vague instructions, broken website, inaccessible links, missing login credentials, or other insurmountable obstacles',
