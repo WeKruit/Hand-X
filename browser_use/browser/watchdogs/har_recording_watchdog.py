@@ -89,7 +89,9 @@ class HarRecordingWatchdog(BaseWatchdog):
 		super().__init__(*args, **kwargs)
 		self._enabled: bool = False
 		self._entries: dict[str, _HarEntryBuilder] = {}
-		self._top_level_pages: dict[str, dict] = {}  # frameId -> {url, title, startedDateTime, onContentLoad, onLoad}
+		self._top_level_pages: dict[
+			str, dict
+		] = {}  # frameId -> {url, title, startedDateTime, monotonic_start, onContentLoad, onLoad}
 
 	async def on_BrowserConnectedEvent(self, event: BrowserConnectedEvent) -> None:
 		profile = self.browser_session.browser_profile
@@ -201,16 +203,18 @@ class HarRecordingWatchdog(BaseWatchdog):
 							'url': str(url),
 							'title': str(url),  # Default to URL, will be updated from DOM
 							'startedDateTime': entry.wall_time_request,
+							'monotonic_start': entry.ts_request,  # Track monotonic start time for timing calculations
 							'onContentLoad': -1,
 							'onLoad': -1,
 						}
 					else:
-						# Update startedDateTime if this is earlier
+						# Update startedDateTime and monotonic_start if this is earlier
 						page_info = self._top_level_pages[entry.frame_id]
 						if entry.wall_time_request and (
 							page_info['startedDateTime'] is None or entry.wall_time_request < page_info['startedDateTime']
 						):
 							page_info['startedDateTime'] = entry.wall_time_request
+							page_info['monotonic_start'] = entry.ts_request
 		except Exception as e:
 			self.logger.debug(f'requestWillBeSent handling error: {e}')
 
@@ -311,9 +315,9 @@ class HarRecordingWatchdog(BaseWatchdog):
 				except Exception:
 					pass
 
-			_asyncio.create_task(_fetch_body(self, request_id, session_id)) if hasattr(params, 'get') else getattr(
-				params, 'timestamp', None
-			)
+			# Always schedule the response body fetch task
+			_asyncio.create_task(_fetch_body(self, request_id, session_id))
+
 			encoded_length = (
 				params.get('encodedDataLength') if hasattr(params, 'get') else getattr(params, 'encodedDataLength', None)
 			)
@@ -345,18 +349,19 @@ class HarRecordingWatchdog(BaseWatchdog):
 				return
 
 			page_info = self._top_level_pages[frame_id]
-			page_start = page_info.get('startedDateTime')
+			# Use monotonic_start instead of startedDateTime (wall-clock) for timing calculations
+			monotonic_start = page_info.get('monotonic_start')
 
-			if name == 'DOMContentLoaded' and page_start is not None:
-				# Calculate milliseconds since page start
+			if name == 'DOMContentLoaded' and monotonic_start is not None:
+				# Calculate milliseconds since page start using monotonic timestamps
 				try:
-					elapsed_ms = int(round((timestamp - page_start) * 1000))
+					elapsed_ms = int(round((timestamp - monotonic_start) * 1000))
 					page_info['onContentLoad'] = max(0, elapsed_ms)
 				except Exception:
 					pass
-			elif name == 'load' and page_start is not None:
+			elif name == 'load' and monotonic_start is not None:
 				try:
-					elapsed_ms = int(round((timestamp - page_start) * 1000))
+					elapsed_ms = int(round((timestamp - monotonic_start) * 1000))
 					page_info['onLoad'] = max(0, elapsed_ms)
 				except Exception:
 					pass
