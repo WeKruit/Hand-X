@@ -805,7 +805,7 @@ class BrowserSession(BaseModel):
 				await self.event_bus.dispatch(AgentFocusChangedEvent(target_id=target_id, url=event.url))
 			raise
 
-	async def _navigate_and_wait(self, url: str, target_id: str, timeout: float = 4.0) -> None:
+	async def _navigate_and_wait(self, url: str, target_id: str, timeout: float | None = None) -> None:
 		"""Navigate to URL and wait for page readiness using CDP lifecycle events.
 
 		Two-strategy approach optimized for speed with robust fallback:
@@ -818,6 +818,18 @@ class BrowserSession(BaseModel):
 		We poll stored events instead to avoid handler accumulation.
 		"""
 		cdp_session = await self.get_or_create_cdp_session(target_id, focus=False)
+
+		if timeout is None:
+			current_url = cdp_session.url
+			same_domain = (
+				url.split('/')[2] == current_url.split('/')[2]
+				if url.startswith('http') and current_url.startswith('http')
+				else False
+			)
+			timeout = 2.0 if same_domain else 4.0
+
+		# Start performance tracking
+		nav_start_time = asyncio.get_event_loop().time()
 
 		# Start navigation first
 		nav_result = await cdp_session.cdp_client.send.Page.navigate(
@@ -833,7 +845,7 @@ class BrowserSession(BaseModel):
 		navigation_id = nav_result.get('loaderId')
 		start_time = asyncio.get_event_loop().time()
 		self.logger.debug(
-			f'[_navigate_and_wait] Started navigation to {url} (loaderId={navigation_id[:8] if navigation_id else "none"})'
+			f'[_navigate_and_wait] Started navigation to {url} (loaderId={navigation_id[:8] if navigation_id else "none"}, timeout={timeout}s)'
 		)
 
 		# Poll stored lifecycle events (handler registered once in SessionManager)
@@ -867,16 +879,20 @@ class BrowserSession(BaseModel):
 					if event_loader_id and navigation_id and event_loader_id != navigation_id:
 						continue
 
-					# networkIdle - fastest signal when no network requests for ~500ms (great for cache!)
-					if event_name == 'networkIdle':
-						readiness_reason = 'networkIdle'
-						self.logger.debug(f'✅ Page ready for {url} (signal: {readiness_reason}, saw events: {seen_events})')
-						return
-					# load - robust fallback when page has resources loading
-					elif event_name == 'load':
-						readiness_reason = 'load'
-						self.logger.debug(f'✅ Page ready for {url} (signal: {readiness_reason}, saw events: {seen_events})')
-						return
+				if event_name == 'networkIdle':
+					readiness_reason = 'networkIdle'
+					duration_ms = (asyncio.get_event_loop().time() - nav_start_time) * 1000
+					self.logger.debug(
+						f'✅ Page ready for {url} (signal: {readiness_reason}, {duration_ms:.0f}ms, saw events: {seen_events})'
+					)
+					return
+				elif event_name == 'load':
+					readiness_reason = 'load'
+					duration_ms = (asyncio.get_event_loop().time() - nav_start_time) * 1000
+					self.logger.debug(
+						f'✅ Page ready for {url} (signal: {readiness_reason}, {duration_ms:.0f}ms, saw events: {seen_events})'
+					)
+					return
 
 			except Exception as e:
 				self.logger.debug(f'Error polling lifecycle events: {e}')
@@ -885,15 +901,16 @@ class BrowserSession(BaseModel):
 			await asyncio.sleep(poll_interval)
 
 		# Timeout - continue anyway with detailed diagnostics
+		duration_ms = (asyncio.get_event_loop().time() - nav_start_time) * 1000
 		if not seen_events:
 			self.logger.error(
-				f'❌ No lifecycle events received for {url}! '
+				f'❌ No lifecycle events received for {url} after {duration_ms:.0f}ms! '
 				f'Monitoring may have failed. Target: {cdp_session.target_id[:8]}, '
 				f'LoaderId: {navigation_id[:8] if navigation_id else "none"}'
 			)
 		else:
 			self.logger.warning(
-				f'⚠️ Page readiness timeout ({timeout}s) for {url}, continuing anyway. '
+				f'⚠️ Page readiness timeout ({timeout}s, {duration_ms:.0f}ms) for {url}, continuing anyway. '
 				f'LoaderId={navigation_id[:8] if navigation_id else "none"}, saw events: {seen_events}'
 			)
 
@@ -1777,7 +1794,7 @@ class BrowserSession(BaseModel):
 			self.logger.debug(f'Skipping proxy auth setup: {type(e).__name__}: {e}')
 
 	async def get_tabs(self) -> list[TabInfo]:
-		"""Get information about all open tabs using CDP Target.getTargetInfo for speed."""
+		"""Get information about all open tabs using cached session data"""
 		tabs = []
 
 		# Safety check - return empty list if browser not connected yet
@@ -1791,12 +1808,11 @@ class BrowserSession(BaseModel):
 			target_id = page_target['targetId']
 			url = page_target['url']
 
-			# Try to get the title directly from Target.getTargetInfo - much faster!
-			# The initial getTargets() doesn't include title, but getTargetInfo does
+			# Get title from cached session (updated via targetInfoChanged events)
+			# This is MUCH faster than getTargetInfo() - zero CDP calls!
 			try:
-				target_info = await self.cdp_client.send.Target.getTargetInfo(params={'targetId': target_id})
-				# The title is directly available in targetInfo
-				title = target_info.get('targetInfo', {}).get('title', '')
+				session = await self.get_or_create_cdp_session(target_id, focus=False)
+				title = session.title if session else ''
 
 				# Skip JS execution for chrome:// pages and new tab pages
 				if is_new_tab_page(url) or url.startswith('chrome://'):
@@ -1844,29 +1860,29 @@ class BrowserSession(BaseModel):
 
 	# region - ========== ID Lookup Methods ==========
 	async def get_current_target_info(self) -> TargetInfo | None:
-		"""Get info about the current active target using CDP."""
+		"""Get info about the current active target (uses cached session data, zero CDP calls)."""
 		if not self.agent_focus or not self.agent_focus.target_id:
 			return None
 
-		targets = await self.cdp_client.send.Target.getTargets()
-		for target in targets.get('targetInfos', []):
-			if target.get('targetId') == self.agent_focus.target_id:
-				# Still return even if it's not a "valid" target since we're looking for a specific ID
-				return target
-		return None
+		return {
+			'targetId': self.agent_focus.target_id,
+			'url': self.agent_focus.url,
+			'title': self.agent_focus.title,
+			'type': 'page',
+			'attached': True,
+			'canAccessOpener': False,
+		}
 
 	async def get_current_page_url(self) -> str:
-		"""Get the URL of the current page using CDP."""
-		target = await self.get_current_target_info()
-		if target:
-			return target.get('url', '')
+		"""Get the URL of the current page."""
+		if self.agent_focus:
+			return self.agent_focus.url
 		return 'about:blank'
 
 	async def get_current_page_title(self) -> str:
-		"""Get the title of the current page using CDP."""
-		target_info = await self.get_current_target_info()
-		if target_info:
-			return target_info.get('title', 'Unknown page title')
+		"""Get the title of the current page."""
+		if self.agent_focus:
+			return self.agent_focus.title
 		return 'Unknown page title'
 
 	async def navigate_to(self, url: str, new_tab: bool = False) -> None:
@@ -1940,11 +1956,9 @@ class BrowserSession(BaseModel):
 
 	async def _is_target_valid(self, target_id: TargetID) -> bool:
 		"""Check if a target ID is still valid."""
-		try:
-			await self.cdp_client.send.Target.getTargetInfo(params={'targetId': target_id})
-			return True
-		except Exception:
-			return False
+		if self._session_manager:
+			return await self._session_manager.is_target_valid(target_id)
+		return target_id in self._cdp_session_pool
 
 	async def get_target_id_from_url(self, url: str) -> TargetID:
 		"""Get the TargetID from a URL."""
