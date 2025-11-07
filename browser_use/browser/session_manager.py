@@ -188,6 +188,10 @@ class SessionManager:
 					f'[SessionManager] Created session for target {target_id[:8]}... '
 					f'(pool size: {len(self.browser_session._cdp_session_pool)})'
 				)
+
+				# Enable lifecycle events and network monitoring for page targets
+				if target_type in ('page', 'tab'):
+					asyncio.create_task(self._enable_page_monitoring(cdp_session))
 			else:
 				# Update existing session with new session_id
 				existing = self.browser_session._cdp_session_pool[target_id]
@@ -397,3 +401,34 @@ class SessionManager:
 
 		except Exception as e:
 			self.logger.error(f'[SessionManager] ❌ Error during agent_focus recovery: {type(e).__name__}: {e}')
+
+	async def _enable_page_monitoring(self, cdp_session: 'CDPSession') -> None:
+		"""Enable lifecycle events and network monitoring for a page target.
+
+		This is called once per page when it's created, avoiding handler accumulation.
+
+		Args:
+			cdp_session: The CDP session to enable monitoring on
+		"""
+		try:
+			# Enable lifecycle events (load, DOMContentLoaded, networkIdle, etc.)
+			await cdp_session.cdp_client.send.Page.setLifecycleEventsEnabled(
+				params={'enabled': True}, session_id=cdp_session.session_id
+			)
+			self.logger.debug(f'[SessionManager] Enabled lifecycle events for target {cdp_session.target_id[:8]}...')
+
+			# Enable network monitoring for networkIdle detection
+			await cdp_session.cdp_client.send.Network.enable(session_id=cdp_session.session_id)
+			self.logger.debug(f'[SessionManager] Enabled network monitoring for target {cdp_session.target_id[:8]}...')
+
+		except Exception as e:
+			# Don't fail - target might be short-lived or already detached
+			error_str = str(e)
+			if '-32001' in error_str or 'Session with given id not found' in error_str:
+				self.logger.debug(
+					f'[SessionManager] Target {cdp_session.target_id[:8]}... detached before monitoring could be enabled (normal for short-lived targets)'
+				)
+			else:
+				self.logger.warning(
+					f'[SessionManager] Failed to enable monitoring for target {cdp_session.target_id[:8]}...: {e}'
+				)

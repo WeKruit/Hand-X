@@ -698,38 +698,24 @@ class BrowserSession(BaseModel):
 			return
 
 		target_id = None
+		current_target_id = self.agent_focus.target_id
 
 		# If new_tab=True but we're already in a new tab, set new_tab=False
-		if event.new_tab:
-			try:
-				current_url = await self.get_current_page_url()
-				from browser_use.utils import is_new_tab_page
-
-				if is_new_tab_page(current_url):
-					self.logger.debug(f'[on_NavigateToUrlEvent] Already in new tab ({current_url}), setting new_tab=False')
-					event.new_tab = False
-			except Exception as e:
-				self.logger.debug(f'[on_NavigateToUrlEvent] Could not check current URL: {e}')
-
-		# check if the url is already open in a tab somewhere that we're not currently on, if so, short-circuit and just switch to it
-		targets = await self._cdp_get_all_pages()
-		for target in targets:
-			if target.get('url') == event.url and target['targetId'] != self.agent_focus.target_id and not event.new_tab:
-				target_id = target['targetId']
-				event.new_tab = False
-				# await self.event_bus.dispatch(SwitchTabEvent(target_id=target_id))
+		# Use cached URL from agent_focus instead of CDP call for performance
+		if event.new_tab and is_new_tab_page(self.agent_focus.url):
+			self.logger.debug(f'[on_NavigateToUrlEvent] Already on blank tab ({self.agent_focus.url}), reusing')
+			event.new_tab = False
 
 		try:
 			# Find or create target for navigation
-
 			self.logger.debug(f'[on_NavigateToUrlEvent] Processing new_tab={event.new_tab}')
+
 			if event.new_tab:
-				# Look for existing about:blank tab that's not the current one
+				# Fetch targets once for all checks
 				targets = await self._cdp_get_all_pages()
 				self.logger.debug(f'[on_NavigateToUrlEvent] Found {len(targets)} existing tabs')
-				current_target_id = self.agent_focus.target_id if self.agent_focus else None
-				self.logger.debug(f'[on_NavigateToUrlEvent] Current target_id: {current_target_id}')
 
+				# Look for existing about:blank tab that's not the current one
 				for idx, target in enumerate(targets):
 					self.logger.debug(
 						f'[on_NavigateToUrlEvent] Tab {idx}: url={target.get("url")}, targetId={target["targetId"]}'
@@ -744,20 +730,17 @@ class BrowserSession(BaseModel):
 					self.logger.debug('[on_NavigateToUrlEvent] No reusable about:blank tab found, creating new tab...')
 					try:
 						target_id = await self._cdp_create_new_page('about:blank')
-						self.logger.debug(f'[on_NavigateToUrlEvent] Created new page with target_id: {target_id}')
-						targets = await self._cdp_get_all_pages()
-
 						self.logger.debug(f'Created new tab #{target_id[-4:]}')
 						# Dispatch TabCreatedEvent for new tab
 						await self.event_bus.dispatch(TabCreatedEvent(target_id=target_id, url='about:blank'))
 					except Exception as e:
 						self.logger.error(f'[on_NavigateToUrlEvent] Failed to create new tab: {type(e).__name__}: {e}')
 						# Fall back to using current tab
-						target_id = self.agent_focus.target_id
+						target_id = current_target_id
 						self.logger.warning(f'[on_NavigateToUrlEvent] Falling back to current tab #{target_id[-4:]}')
 			else:
 				# Use current tab
-				target_id = target_id or self.agent_focus.target_id
+				target_id = target_id or current_target_id
 
 			# Only switch tab if we're not already on the target tab
 			if self.agent_focus is None or self.agent_focus.target_id != target_id:
@@ -778,18 +761,8 @@ class BrowserSession(BaseModel):
 			# Dispatch navigation started
 			await self.event_bus.dispatch(NavigationStartedEvent(target_id=target_id, url=event.url))
 
-			# Navigate to URL
-			await self.agent_focus.cdp_client.send.Page.navigate(
-				params={
-					'url': event.url,
-					'transitionType': 'address_bar',
-					# 'referrer': 'https://www.google.com',
-				},
-				session_id=self.agent_focus.session_id,
-			)
-
-			# # Wait a bit to ensure page starts loading
-			await asyncio.sleep(1)
+			# Navigate to URL with proper lifecycle waiting
+			await self._navigate_and_wait(event.url, target_id)
 
 			# Close any extension options pages that might have opened
 			await self._close_extension_options_pages()
@@ -816,7 +789,8 @@ class BrowserSession(BaseModel):
 
 		except Exception as e:
 			self.logger.error(f'Navigation failed: {type(e).__name__}: {e}')
-			if target_id:
+			# target_id might be unbound if exception happens early
+			if 'target_id' in locals() and target_id:
 				await self.event_bus.dispatch(
 					NavigationCompleteEvent(
 						target_id=target_id,
@@ -826,6 +800,67 @@ class BrowserSession(BaseModel):
 				)
 				await self.event_bus.dispatch(AgentFocusChangedEvent(target_id=target_id, url=event.url))
 			raise
+
+	async def _navigate_and_wait(self, url: str, target_id: str, timeout: float = 30.0) -> None:
+		"""Navigate to URL and wait for page readiness using CDP lifecycle events.
+
+		Two-strategy approach optimized for speed with robust fallback:
+		1. networkIdle - Returns ASAP when no network activity (~50-200ms for cached pages)
+		2. load - Fallback when page has ongoing network activity (all resources loaded)
+
+		This gives us instant returns for cached content while being robust for dynamic pages.
+		"""
+		cdp_session = await self.get_or_create_cdp_session(target_id, focus=False)
+
+		# Track readiness signals
+		ready = asyncio.Event()
+		navigation_id = None
+		readiness_reason = None
+
+		# Listen to lifecycle events (already enabled globally by SessionManager)
+		def on_lifecycle_event(event, session_id=None):
+			nonlocal readiness_reason
+			if session_id != cdp_session.session_id:
+				return
+
+			event_name = event.get('name')
+			event_loader_id = event.get('loaderId')
+
+			# Only respond to events from our navigation
+			if event_loader_id and navigation_id and event_loader_id != navigation_id:
+				return
+
+			# networkIdle - fastest signal when no network requests for ~500ms (great for cache!)
+			if event_name == 'networkIdle' and not ready.is_set():
+				readiness_reason = 'networkIdle'
+				ready.set()
+			# load - robust fallback when page has resources loading
+			elif event_name == 'load' and not ready.is_set():
+				readiness_reason = 'load'
+				ready.set()
+
+		# Register lifecycle listener (SessionManager enabled these events globally)
+		cdp_session.cdp_client.register.Page.lifecycleEvent(on_lifecycle_event)
+
+		# Start navigation
+		nav_result = await cdp_session.cdp_client.send.Page.navigate(
+			params={'url': url, 'transitionType': 'address_bar'},
+			session_id=cdp_session.session_id,
+		)
+
+		# Check for immediate navigation errors
+		if nav_result.get('errorText'):
+			raise RuntimeError(f'Navigation failed: {nav_result["errorText"]}')
+
+		# Track this specific navigation
+		navigation_id = nav_result.get('loaderId')
+
+		# Wait for either networkIdle (fast) or load (fallback)
+		try:
+			await asyncio.wait_for(ready.wait(), timeout=timeout)
+			self.logger.debug(f'✅ Page ready for {url} (signal: {readiness_reason})')
+		except asyncio.TimeoutError:
+			self.logger.warning(f'⚠️ Page readiness timeout ({timeout}s) for {url}, continuing anyway')
 
 	async def on_SwitchTabEvent(self, event: SwitchTabEvent) -> TargetID:
 		"""Handle tab switching - core browser functionality."""
