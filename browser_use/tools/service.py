@@ -960,7 +960,11 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				result = await file_system.append_file(file_name, content)
 			else:
 				result = await file_system.write_file(file_name, content)
-			logger.info(f'💾 {result}')
+
+			# Log the full path where the file is stored
+			file_path = file_system.get_dir() / file_name
+			logger.info(f'💾 {result} File location: {file_path}')
+
 			return ActionResult(extracted_content=result, long_term_memory=result)
 
 		@self.registry.action(
@@ -972,16 +976,22 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			return ActionResult(extracted_content=result, long_term_memory=result)
 
 		@self.registry.action(
-			'Read the complete content of a file. Use this to view file contents before editing or to retrieve data from files.'
+			'Read the complete content of a file. Use this to view file contents before editing or to retrieve data from files. Supports text files (txt, md, json, csv, jsonl), documents (pdf, docx), and images (jpg, png).'
 		)
 		async def read_file(file_name: str, available_file_paths: list[str], file_system: FileSystem):
 			if available_file_paths and file_name in available_file_paths:
-				result = await file_system.read_file(file_name, external_file=True)
+				structured_result = await file_system.read_file_structured(file_name, external_file=True)
 			else:
-				result = await file_system.read_file(file_name)
+				structured_result = await file_system.read_file_structured(file_name)
+
+			result = structured_result['message']
+			images = structured_result.get('images')
 
 			MAX_MEMORY_SIZE = 1000
-			if len(result) > MAX_MEMORY_SIZE:
+			# For images, create a shorter memory message
+			if images:
+				memory = f'Read image file {file_name}'
+			elif len(result) > MAX_MEMORY_SIZE:
 				lines = result.splitlines()
 				display = ''
 				lines_count = 0
@@ -999,6 +1009,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			return ActionResult(
 				extracted_content=result,
 				long_term_memory=memory,
+				images=images,
 				include_extracted_content_only_once=True,
 			)
 
@@ -1249,7 +1260,6 @@ Validated Code (after quote fixing):
 		self,
 		action: ActionModel,
 		browser_session: BrowserSession,
-		#
 		page_extraction_llm: BaseChatModel | None = None,
 		sensitive_data: dict[str, str | dict[str, str]] | None = None,
 		available_file_paths: list[str] | None = None,
