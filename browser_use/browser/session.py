@@ -715,17 +715,15 @@ class BrowserSession(BaseModel):
 			self.logger.debug(f'[on_NavigateToUrlEvent] Processing new_tab={event.new_tab}')
 
 			if event.new_tab:
-				# Fetch targets once for all checks
-				targets = await self._cdp_get_all_pages()
-				self.logger.debug(f'[on_NavigateToUrlEvent] Found {len(targets)} existing tabs')
+				# Get all page sessions from SessionManager
+				page_sessions = self._session_manager.get_all_page_sessions()
+				self.logger.debug(f'[on_NavigateToUrlEvent] Found {len(page_sessions)} existing tabs')
 
 				# Look for existing about:blank tab that's not the current one
-				for idx, target in enumerate(targets):
-					self.logger.debug(
-						f'[on_NavigateToUrlEvent] Tab {idx}: url={target.get("url")}, targetId={target["targetId"]}'
-					)
-					if target.get('url') == 'about:blank' and target['targetId'] != current_target_id:
-						target_id = target['targetId']
+				for idx, session in enumerate(page_sessions):
+					self.logger.debug(f'[on_NavigateToUrlEvent] Tab {idx}: url={session.url}, targetId={session.target_id}')
+					if session.url == 'about:blank' and session.target_id != current_target_id:
+						target_id = session.target_id
 						self.logger.debug(f'Reusing existing about:blank tab #{target_id[-4:]}')
 						break
 
@@ -746,50 +744,50 @@ class BrowserSession(BaseModel):
 				# Use current tab
 				target_id = target_id or current_target_id
 
-			# Only switch tab if we're not already on the target tab
-			if self.agent_focus is None or self.agent_focus.target_id != target_id:
-				self.logger.debug(
-					f'[on_NavigateToUrlEvent] Switching to target tab {target_id[-4:]} (current: {self.agent_focus.target_id[-4:] if self.agent_focus else "none"})'
+				# Only switch tab if we're not already on the target tab
+				if self.agent_focus is None or self.agent_focus.target_id != target_id:
+					self.logger.debug(
+						f'[on_NavigateToUrlEvent] Switching to target tab {target_id[-4:]} (current: {self.agent_focus.target_id[-4:] if self.agent_focus else "none"})'
+					)
+					# Activate target (bring to foreground)
+					await self.event_bus.dispatch(SwitchTabEvent(target_id=target_id))
+					# which does this for us:
+					# self.agent_focus = await self.get_or_create_cdp_session(target_id)
+				else:
+					self.logger.debug(f'[on_NavigateToUrlEvent] Already on target tab {target_id[-4:]}, skipping SwitchTabEvent')
+
+				assert self.agent_focus is not None and self.agent_focus.target_id == target_id, (
+					'Agent focus not updated to new target_id after SwitchTabEvent should have switched to it'
 				)
-				# Activate target (bring to foreground)
-				await self.event_bus.dispatch(SwitchTabEvent(target_id=target_id))
-				# which does this for us:
-				# self.agent_focus = await self.get_or_create_cdp_session(target_id)
-			else:
-				self.logger.debug(f'[on_NavigateToUrlEvent] Already on target tab {target_id[-4:]}, skipping SwitchTabEvent')
 
-			assert self.agent_focus is not None and self.agent_focus.target_id == target_id, (
-				'Agent focus not updated to new target_id after SwitchTabEvent should have switched to it'
-			)
+				# Dispatch navigation started
+				await self.event_bus.dispatch(NavigationStartedEvent(target_id=target_id, url=event.url))
 
-			# Dispatch navigation started
-			await self.event_bus.dispatch(NavigationStartedEvent(target_id=target_id, url=event.url))
+				# Navigate to URL with proper lifecycle waiting
+				await self._navigate_and_wait(event.url, target_id)
 
-			# Navigate to URL with proper lifecycle waiting
-			await self._navigate_and_wait(event.url, target_id)
+				# Close any extension options pages that might have opened
+				await self._close_extension_options_pages()
 
-			# Close any extension options pages that might have opened
-			await self._close_extension_options_pages()
-
-			# Dispatch navigation complete
-			self.logger.debug(f'Dispatching NavigationCompleteEvent for {event.url} (tab #{target_id[-4:]})')
-			await self.event_bus.dispatch(
-				NavigationCompleteEvent(
-					target_id=target_id,
-					url=event.url,
-					status=None,  # CDP doesn't provide status directly
+				# Dispatch navigation complete
+				self.logger.debug(f'Dispatching NavigationCompleteEvent for {event.url} (tab #{target_id[-4:]})')
+				await self.event_bus.dispatch(
+					NavigationCompleteEvent(
+						target_id=target_id,
+						url=event.url,
+						status=None,  # CDP doesn't provide status directly
+					)
 				)
-			)
-			await self.event_bus.dispatch(
-				AgentFocusChangedEvent(target_id=target_id, url=event.url)
-			)  # do not await! AgentFocusChangedEvent calls SwitchTabEvent and it will deadlock, dispatch to enqueue and return
+				await self.event_bus.dispatch(
+					AgentFocusChangedEvent(target_id=target_id, url=event.url)
+				)  # do not await! AgentFocusChangedEvent calls SwitchTabEvent and it will deadlock, dispatch to enqueue and return
 
-			# Note: These should be handled by dedicated watchdogs:
-			# - Security checks (security_watchdog)
-			# - Page health checks (crash_watchdog)
-			# - Dialog handling (dialog_watchdog)
-			# - Download handling (downloads_watchdog)
-			# - DOM rebuilding (dom_watchdog)
+				# Note: These should be handled by dedicated watchdogs:
+				# - Security checks (security_watchdog)
+				# - Page health checks (crash_watchdog)
+				# - Dialog handling (dialog_watchdog)
+				# - Download handling (downloads_watchdog)
+				# - DOM rebuilding (dom_watchdog)
 
 		except Exception as e:
 			self.logger.error(f'Navigation failed: {type(e).__name__}: {e}')
@@ -844,13 +842,9 @@ class BrowserSession(BaseModel):
 		# Track this specific navigation
 		navigation_id = nav_result.get('loaderId')
 		start_time = asyncio.get_event_loop().time()
-		self.logger.debug(
-			f'[_navigate_and_wait] Started navigation to {url} (loaderId={navigation_id[:8] if navigation_id else "none"}, timeout={timeout}s)'
-		)
 
 		# Poll stored lifecycle events (handler registered once in SessionManager)
-		readiness_reason = None
-		seen_events = []  # Debug: track all lifecycle events we see
+		seen_events = []  # Track events for timeout diagnostics
 
 		# Check if session has lifecycle monitoring enabled
 		if not hasattr(cdp_session, '_lifecycle_events'):
@@ -879,21 +873,15 @@ class BrowserSession(BaseModel):
 					if event_loader_id and navigation_id and event_loader_id != navigation_id:
 						continue
 
-					if event_name == 'networkIdle':
-						readiness_reason = 'networkIdle'
-						duration_ms = (asyncio.get_event_loop().time() - nav_start_time) * 1000
-						self.logger.debug(
-							f'✅ Page ready for {url} (signal: {readiness_reason}, {duration_ms:.0f}ms, saw events: {seen_events})'
-						)
-						return
+				if event_name == 'networkIdle':
+					duration_ms = (asyncio.get_event_loop().time() - nav_start_time) * 1000
+					self.logger.debug(f'✅ Page ready for {url} (networkIdle, {duration_ms:.0f}ms)')
+					return
 
-					elif event_name == 'load':
-						readiness_reason = 'load'
-						duration_ms = (asyncio.get_event_loop().time() - nav_start_time) * 1000
-						self.logger.debug(
-							f'✅ Page ready for {url} (signal: {readiness_reason}, {duration_ms:.0f}ms, saw events: {seen_events})'
-						)
-						return
+				elif event_name == 'load':
+					duration_ms = (asyncio.get_event_loop().time() - nav_start_time) * 1000
+					self.logger.debug(f'✅ Page ready for {url} (load, {duration_ms:.0f}ms)')
+					return
 
 			except Exception as e:
 				self.logger.debug(f'Error polling lifecycle events: {e}')
@@ -906,26 +894,23 @@ class BrowserSession(BaseModel):
 		if not seen_events:
 			self.logger.error(
 				f'❌ No lifecycle events received for {url} after {duration_ms:.0f}ms! '
-				f'Monitoring may have failed. Target: {cdp_session.target_id[:8]}, '
-				f'LoaderId: {navigation_id[:8] if navigation_id else "none"}'
+				f'Monitoring may have failed. Target: {cdp_session.target_id[:8]}'
 			)
 		else:
-			self.logger.warning(
-				f'⚠️ Page readiness timeout ({timeout}s, {duration_ms:.0f}ms) for {url}, continuing anyway. '
-				f'LoaderId={navigation_id[:8] if navigation_id else "none"}, saw events: {seen_events}'
-			)
+			self.logger.warning(f'⚠️ Page readiness timeout ({timeout}s, {duration_ms:.0f}ms) for {url}')
 
 	async def on_SwitchTabEvent(self, event: SwitchTabEvent) -> TargetID:
 		"""Handle tab switching - core browser functionality."""
 		if not self.agent_focus:
 			raise RuntimeError('Cannot switch tabs - browser not connected')
 
-		all_pages = await self._cdp_get_all_pages()
+		# Get all page sessions from SessionManager
+		page_sessions = self._session_manager.get_all_page_sessions()
 		if event.target_id is None:
 			# most recently opened page
-			if all_pages:
+			if page_sessions:
 				# update the target id to be the id of the most recently opened page, then proceed to switch to it
-				event.target_id = all_pages[-1]['targetId']
+				event.target_id = page_sessions[-1].target_id
 			else:
 				# no pages open at all, create a new one (handles switching to it automatically)
 				assert self._cdp_client_root is not None, 'CDP client root not initialized - browser may not be connected yet'
@@ -937,6 +922,7 @@ class BrowserSession(BaseModel):
 				return target_id
 
 		# switch to the target
+		assert event.target_id is not None, 'target_id must be set at this point'
 		self.agent_focus = await self.get_or_create_cdp_session(target_id=event.target_id, focus=True)
 
 		# Visually switch to the tab in the browser
@@ -1039,11 +1025,10 @@ class BrowserSession(BaseModel):
 				else:
 					raise Exception('❌ Failed to execute test JS expression with Page.evaluate')
 			except Exception as e:
-				self.logger.error(
-					f'🔄 ❌ Target {self.agent_focus.target_id} seems closed/crashed, switching to fallback page {all_targets[0]}: {type(e).__name__}: {e}'
-				)
-				all_pages = await self._cdp_get_all_pages()
-				last_target_id = all_pages[-1]['targetId'] if all_pages else None
+				self.logger.error(f'🔄 ❌ Target {self.agent_focus.target_id} seems closed/crashed, switching to fallback')
+				# Get last page from SessionManager
+				page_sessions = self._session_manager.get_all_page_sessions()
+				last_target_id = page_sessions[-1].target_id if page_sessions else None
 				self.agent_focus = await self.get_or_create_cdp_session(target_id=last_target_id, focus=True)
 				raise
 
@@ -1795,26 +1780,22 @@ class BrowserSession(BaseModel):
 			self.logger.debug(f'Skipping proxy auth setup: {type(e).__name__}: {e}')
 
 	async def get_tabs(self) -> list[TabInfo]:
-		"""Get information about all open tabs using cached session data"""
+		"""Get information about all open tabs using cached session data."""
 		tabs = []
 
 		# Safety check - return empty list if browser not connected yet
-		if not self._cdp_client_root:
+		if not self._session_manager:
 			return tabs
 
-		# Get all page targets using CDP
-		pages = await self._cdp_get_all_pages()
+		# Get all page sessions from SessionManager
+		page_sessions = self._session_manager.get_all_page_sessions()
 
-		for i, page_target in enumerate(pages):
-			target_id = page_target['targetId']
-			url = page_target['url']
+		for i, session in enumerate(page_sessions):
+			target_id = session.target_id
+			url = session.url
+			title = session.title
 
-			# Get title from cached session (updated via targetInfoChanged events)
-			# This is MUCH faster than getTargetInfo() - zero CDP calls!
 			try:
-				session = await self.get_or_create_cdp_session(target_id, focus=False)
-				title = session.title if session else ''
-
 				# Skip JS execution for chrome:// pages and new tab pages
 				if is_new_tab_page(url) or url.startswith('chrome://'):
 					# Use URL as title for chrome pages, or mark new tabs as unusable
@@ -1861,7 +1842,7 @@ class BrowserSession(BaseModel):
 
 	# region - ========== ID Lookup Methods ==========
 	async def get_current_target_info(self) -> TargetInfo | None:
-		"""Get info about the current active target (uses cached session data, zero CDP calls)."""
+		"""Get info about the current active target using cached session data."""
 		if not self.agent_focus or not self.agent_focus.target_id:
 			return None
 
@@ -1976,9 +1957,12 @@ class BrowserSession(BaseModel):
 		raise ValueError(f'No TargetID found for url={url}')
 
 	async def get_most_recently_opened_target_id(self) -> TargetID:
-		"""Get the most recently opened target ID."""
-		all_targets = await self.cdp_client.send.Target.getTargets()
-		return (await self._cdp_get_all_pages())[-1]['targetId']
+		"""Get the most recently opened target ID using SessionManager."""
+		# Get all page sessions from SessionManager
+		page_sessions = self._session_manager.get_all_page_sessions()
+		if not page_sessions:
+			raise RuntimeError('No page sessions available')
+		return page_sessions[-1].target_id
 
 	def is_file_input(self, element: Any) -> bool:
 		"""Check if element is a file input.
@@ -2533,12 +2517,12 @@ class BrowserSession(BaseModel):
 	async def _close_extension_options_pages(self) -> None:
 		"""Close any extension options/welcome pages that have opened."""
 		try:
-			# Get all open pages
-			targets = await self._cdp_get_all_pages()
+			# Get all page sessions from SessionManager
+			page_sessions = self._session_manager.get_all_page_sessions()
 
-			for target in targets:
-				target_url = target.get('url', '')
-				target_id = target.get('targetId', '')
+			for session in page_sessions:
+				target_url = session.url
+				target_id = session.target_id
 
 				# Check if this is an extension options/welcome page
 				if 'chrome-extension://' in target_url and (
