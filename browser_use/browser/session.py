@@ -859,7 +859,7 @@ class BrowserSession(BaseModel):
 		try:
 			await asyncio.wait_for(ready.wait(), timeout=timeout)
 			self.logger.debug(f'✅ Page ready for {url} (signal: {readiness_reason})')
-		except asyncio.TimeoutError:
+		except TimeoutError:
 			self.logger.warning(f'⚠️ Page readiness timeout ({timeout}s) for {url}, continuing anyway')
 
 	async def on_SwitchTabEvent(self, event: SwitchTabEvent) -> TargetID:
