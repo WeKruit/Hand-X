@@ -71,6 +71,10 @@ class CDPSession(BaseModel):
 	title: str = 'Unknown title'
 	url: str = 'about:blank'
 
+	# Lifecycle monitoring (populated by SessionManager)
+	_lifecycle_events: Any = PrivateAttr(default=None)
+	_lifecycle_lock: Any = PrivateAttr(default=None)
+
 	@classmethod
 	async def for_target(
 		cls,
@@ -809,44 +813,13 @@ class BrowserSession(BaseModel):
 		2. load - Fallback when page has ongoing network activity (all resources loaded)
 
 		This gives us instant returns for cached content while being robust for dynamic pages.
+
+		NO handler registration here - handlers are registered ONCE per session in SessionManager.
+		We poll stored events instead to avoid handler accumulation.
 		"""
 		cdp_session = await self.get_or_create_cdp_session(target_id, focus=False)
 
-		# Track readiness signals
-		ready = asyncio.Event()
-		navigation_id = None
-		readiness_reason = None
-		seen_events = []  # Debug: track all lifecycle events
-
-		# Listen to lifecycle events (already enabled globally by SessionManager)
-		def on_lifecycle_event(event, session_id=None):
-			nonlocal readiness_reason
-			if session_id != cdp_session.session_id:
-				return
-
-			event_name = event.get('name')
-			event_loader_id = event.get('loaderId')
-
-			# Debug: track all events we see
-			seen_events.append(f'{event_name}(loader={event_loader_id[:8] if event_loader_id else "none"})')
-
-			# Only respond to events from our navigation (or accept all if no loaderId)
-			if event_loader_id and navigation_id and event_loader_id != navigation_id:
-				return
-
-			# networkIdle - fastest signal when no network requests for ~500ms (great for cache!)
-			if event_name == 'networkIdle' and not ready.is_set():
-				readiness_reason = 'networkIdle'
-				ready.set()
-			# load - robust fallback when page has resources loading
-			elif event_name == 'load' and not ready.is_set():
-				readiness_reason = 'load'
-				ready.set()
-
-		# Register lifecycle listener (SessionManager enabled these events globally)
-		cdp_session.cdp_client.register.Page.lifecycleEvent(on_lifecycle_event)
-
-		# Start navigation
+		# Start navigation first
 		nav_result = await cdp_session.cdp_client.send.Page.navigate(
 			params={'url': url, 'transitionType': 'address_bar'},
 			session_id=cdp_session.session_id,
@@ -858,15 +831,67 @@ class BrowserSession(BaseModel):
 
 		# Track this specific navigation
 		navigation_id = nav_result.get('loaderId')
+		start_time = asyncio.get_event_loop().time()
 		self.logger.debug(
 			f'[_navigate_and_wait] Started navigation to {url} (loaderId={navigation_id[:8] if navigation_id else "none"})'
 		)
 
-		# Wait for either networkIdle (fast) or load (fallback)
-		try:
-			await asyncio.wait_for(ready.wait(), timeout=timeout)
-			self.logger.debug(f'✅ Page ready for {url} (signal: {readiness_reason}, saw events: {seen_events})')
-		except (TimeoutError, asyncio.TimeoutError):
+		# Poll stored lifecycle events (handler registered once in SessionManager)
+		readiness_reason = None
+		seen_events = []  # Debug: track all lifecycle events we see
+
+		# Check if session has lifecycle monitoring enabled
+		if not hasattr(cdp_session, '_lifecycle_events'):
+			raise RuntimeError(
+				f'❌ Lifecycle monitoring not enabled for {cdp_session.target_id[:8]}! '
+				f'This is a bug - SessionManager should have initialized it. '
+				f'Session: {cdp_session}'
+			)
+
+		# Poll for lifecycle events until timeout
+		poll_interval = 0.05  # Poll every 50ms
+		while (asyncio.get_event_loop().time() - start_time) < timeout:
+			# Check stored events (populated by handler in SessionManager)
+			try:
+				# Get recent events matching our navigation
+				for event_data in list(cdp_session._lifecycle_events):
+					event_name = event_data.get('name')
+					event_loader_id = event_data.get('loaderId')
+
+					# Debug: track events
+					event_str = f'{event_name}(loader={event_loader_id[:8] if event_loader_id else "none"})'
+					if event_str not in seen_events:
+						seen_events.append(event_str)
+
+					# Only respond to events from our navigation (or accept all if no loaderId)
+					if event_loader_id and navigation_id and event_loader_id != navigation_id:
+						continue
+
+					# networkIdle - fastest signal when no network requests for ~500ms (great for cache!)
+					if event_name == 'networkIdle':
+						readiness_reason = 'networkIdle'
+						self.logger.debug(f'✅ Page ready for {url} (signal: {readiness_reason}, saw events: {seen_events})')
+						return
+					# load - robust fallback when page has resources loading
+					elif event_name == 'load':
+						readiness_reason = 'load'
+						self.logger.debug(f'✅ Page ready for {url} (signal: {readiness_reason}, saw events: {seen_events})')
+						return
+
+			except Exception as e:
+				self.logger.debug(f'Error polling lifecycle events: {e}')
+
+			# Wait before next poll
+			await asyncio.sleep(poll_interval)
+
+		# Timeout - continue anyway with detailed diagnostics
+		if not seen_events:
+			self.logger.error(
+				f'❌ No lifecycle events received for {url}! '
+				f'Monitoring may have failed. Target: {cdp_session.target_id[:8]}, '
+				f'LoaderId: {navigation_id[:8] if navigation_id else "none"}'
+			)
+		else:
 			self.logger.warning(
 				f'⚠️ Page readiness timeout ({timeout}s) for {url}, continuing anyway. '
 				f'LoaderId={navigation_id[:8] if navigation_id else "none"}, saw events: {seen_events}'
@@ -1500,6 +1525,11 @@ class BrowserSession(BaseModel):
 			await self._cdp_client_root.start()
 
 			# Initialize event-driven session manager FIRST (before enabling autoAttach)
+			# SessionManager will:
+			# 1. Register attach/detach event handlers
+			# 2. Discover and attach to all existing targets
+			# 3. Initialize sessions and enable lifecycle monitoring
+			# 4. Enable autoAttach for future targets
 			from browser_use.browser.session_manager import SessionManager
 
 			self._session_manager = SessionManager(self)
@@ -1515,30 +1545,6 @@ class BrowserSession(BaseModel):
 
 			# Get browser targets to find available contexts/pages
 			targets = await self._cdp_client_root.send.Target.getTargets()
-
-			# Manually attach to ALL EXISTING targets (autoAttach only fires for new ones)
-			# We attach to everything (pages, iframes, workers) for complete coverage
-			for target in targets['targetInfos']:
-				target_id = target['targetId']
-				target_type = target.get('type', 'unknown')
-
-				try:
-					# Attach to target - this triggers attachedToTarget event
-					result = await self._cdp_client_root.send.Target.attachToTarget(
-						params={'targetId': target_id, 'flatten': True}
-					)
-					session_id = result['sessionId']
-
-					# Enable auto-attach for this target's children
-					await self._cdp_client_root.send.Target.setAutoAttach(
-						params={'autoAttach': True, 'waitForDebuggerOnStart': False, 'flatten': True}, session_id=session_id
-					)
-
-					self.logger.debug(
-						f'Attached to existing target: {target_id[:8]}... (type={target_type}, session={session_id[:8]}...)'
-					)
-				except Exception as e:
-					self.logger.debug(f'Failed to attach to existing target {target_id[:8]}... (type={target_type}): {e}')
 
 			# Find main browser pages (avoiding iframes, workers, extensions, etc.)
 			page_targets: list[TargetInfo] = [
@@ -1558,14 +1564,13 @@ class BrowserSession(BaseModel):
 					target_id = target['targetId']
 					self.logger.debug(f'🔄 Redirecting {target_url} to about:blank for target {target_id}')
 					try:
-						# Sessions now exist from manual attachment above
+						# Sessions now exist from SessionManager initialization
 						session = await self._session_manager.get_session_for_target(target_id)
 						if session:
 							await session.cdp_client.send.Page.navigate(
 								params={'url': 'about:blank'}, session_id=session.session_id
 							)
 							target['url'] = 'about:blank'
-							await asyncio.sleep(0.05)  # Let navigation start
 					except Exception as e:
 						self.logger.warning(f'Failed to redirect {target_url}: {e}')
 
@@ -1579,27 +1584,20 @@ class BrowserSession(BaseModel):
 				self.logger.debug(f'📄 Using existing page: {target_id}')
 
 			# Wait for SessionManager to receive the attach event for this target
-			# (Chrome will fire Target.attachedToTarget event which SessionManager handles)
+			# (SessionManager already attached to existing targets in start_monitoring())
 			for _ in range(20):  # Wait up to 2 seconds
 				await asyncio.sleep(0.1)
 				session = await self._session_manager.get_session_for_target(target_id)
 				if session:
 					self.agent_focus = session
-					# SessionManager already added it to pool - no need to do it manually
 					self.logger.debug(f'📄 Agent focus set to {target_id[:8]}...')
 					break
 
 			if not self.agent_focus:
 				raise RuntimeError(f'Failed to get session for initial target {target_id}')
 
-			# Enable lifecycle events for all existing page sessions now that pool is populated
-			# This ensures pages created BEFORE SessionManager started get monitoring enabled
-			for tid, cdp_session in list(self._cdp_session_pool.items()):
-				target_info = await self._cdp_client_root.send.Target.getTargetInfo(params={'targetId': tid})
-				target_type = target_info.get('targetInfo', {}).get('type', 'unknown')
-				if target_type in ('page', 'tab'):
-					self.logger.debug(f'[connect] Enabling lifecycle monitoring for existing page {tid[:8]}...')
-					asyncio.create_task(self._session_manager._enable_page_monitoring(cdp_session))
+			# Note: Lifecycle monitoring is enabled automatically in SessionManager._handle_target_attached()
+			# when targets attach, so no manual enablement needed!
 
 			# Enable proxy authentication handling if configured
 			await self._setup_proxy_auth()

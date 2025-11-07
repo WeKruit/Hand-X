@@ -48,6 +48,7 @@ class SessionManager:
 		"""Start monitoring Target attach/detach events.
 
 		Registers CDP event handlers to keep the session pool synchronized with browser state.
+		Also discovers and initializes all existing targets on startup.
 		"""
 		if not self.browser_session._cdp_client_root:
 			raise RuntimeError('CDP client not initialized')
@@ -55,38 +56,13 @@ class SessionManager:
 		# Capture cdp_client_root in closure to avoid type errors
 		cdp_client = self.browser_session._cdp_client_root
 
-		# Enable lifecycle events for ALL existing page sessions in the pool
-		for target_id, cdp_session in list(self.browser_session._cdp_session_pool.items()):
-			target_type = self._target_types.get(target_id, 'unknown')
-			if target_type in ('page', 'tab'):
-				self.logger.debug(f'[SessionManager] Enabling monitoring for existing page {target_id[:8]}...')
-				asyncio.create_task(self._enable_page_monitoring(cdp_session))
-
 		# Register synchronous event handlers (CDP requirement)
 		def on_attached(event: AttachedToTargetEvent, session_id: SessionID | None = None):
-			event_session_id = event['sessionId']
-			target_type = event['targetInfo'].get('type', 'unknown')
-
-			# Enable auto-attach for this session's children
-			async def _enable_auto_attach():
-				try:
-					await cdp_client.send.Target.setAutoAttach(
-						params={'autoAttach': True, 'waitForDebuggerOnStart': False, 'flatten': True}, session_id=event_session_id
-					)
-					self.logger.debug(f'[SessionManager] Auto-attach enabled for {target_type} session {event_session_id[:8]}...')
-				except Exception as e:
-					error_str = str(e)
-					# Expected for short-lived targets (workers, temp iframes) that detach before task executes
-					if '-32001' in error_str or 'Session with given id not found' in error_str:
-						self.logger.debug(
-							f'[SessionManager] Auto-attach skipped for {target_type} session {event_session_id[:8]}... '
-							f'(already detached - normal for short-lived targets)'
-						)
-					else:
-						self.logger.debug(f'[SessionManager] Auto-attach failed for {target_type}: {e}')
-
-			# Schedule auto-attach and pool management
-			asyncio.create_task(_enable_auto_attach())
+			# _handle_target_attached() handles:
+			# - setAutoAttach for children
+			# - Create CDPSession
+			# - Enable monitoring (for pages/tabs)
+			# - Add to pool
 			asyncio.create_task(self._handle_target_attached(event))
 
 		def on_detached(event: DetachedFromTargetEvent, session_id: SessionID | None = None):
@@ -96,6 +72,9 @@ class SessionManager:
 		self.browser_session._cdp_client_root.register.Target.detachedFromTarget(on_detached)
 
 		self.logger.debug('[SessionManager] Event monitoring started')
+
+		# Discover and initialize ALL existing targets
+		await self._initialize_existing_targets()
 
 	async def get_session_for_target(self, target_id: TargetID) -> 'CDPSession | None':
 		"""Get the current valid session for a target.
@@ -163,6 +142,24 @@ class SessionManager:
 			f'type={target_type}, waitingForDebugger={waiting_for_debugger})'
 		)
 
+		# Enable auto-attach for this session's children (do this FIRST, outside lock)
+		assert self.browser_session._cdp_client_root is not None, 'Root CDP client required'
+		try:
+			await self.browser_session._cdp_client_root.send.Target.setAutoAttach(
+				params={'autoAttach': True, 'waitForDebuggerOnStart': False, 'flatten': True}, session_id=session_id
+			)
+			self.logger.debug(f'[SessionManager] Auto-attach enabled for {target_type} session {session_id[:8]}...')
+		except Exception as e:
+			error_str = str(e)
+			# Expected for short-lived targets (workers, temp iframes) that detach before this executes
+			if '-32001' in error_str or 'Session with given id not found' in error_str:
+				self.logger.debug(
+					f'[SessionManager] Auto-attach skipped for {target_type} session {session_id[:8]}... '
+					f'(already detached - normal for short-lived targets)'
+				)
+			else:
+				self.logger.debug(f'[SessionManager] Auto-attach failed for {target_type}: {e}')
+
 		async with self._lock:
 			# Track this session for the target
 			if target_id not in self._target_sessions:
@@ -198,7 +195,7 @@ class SessionManager:
 
 				# Enable lifecycle events and network monitoring for page targets
 				if target_type in ('page', 'tab'):
-					asyncio.create_task(self._enable_page_monitoring(cdp_session))
+					await self._enable_page_monitoring(cdp_session)
 			else:
 				# Update existing session with new session_id
 				existing = self.browser_session._cdp_session_pool[target_id]
@@ -409,10 +406,72 @@ class SessionManager:
 		except Exception as e:
 			self.logger.error(f'[SessionManager] ❌ Error during agent_focus recovery: {type(e).__name__}: {e}')
 
+	async def _initialize_existing_targets(self) -> None:
+		"""Discover and initialize all existing targets at startup.
+
+		Attaches to all existing targets. Chrome fires attachedToTarget events which the
+		on_attached handler processes via create_task(). We wait for all sessions to appear
+		in the pool to ensure initialization is complete before returning.
+		"""
+		cdp_client = self.browser_session._cdp_client_root
+		assert cdp_client is not None
+
+		# Get all existing targets
+		targets_result = await cdp_client.send.Target.getTargets()
+		existing_targets = targets_result.get('targetInfos', [])
+
+		self.logger.debug(f'[SessionManager] Discovered {len(existing_targets)} existing targets')
+
+		# Track target IDs we're attaching to
+		target_ids_to_initialize = []
+
+		# Attach to ALL existing targets - this triggers attachedToTarget events
+		for target in existing_targets:
+			target_id = target['targetId']
+			target_type = target.get('type', 'unknown')
+
+			try:
+				# Just attach - the on_attached handler does the rest via create_task()
+				await cdp_client.send.Target.attachToTarget(params={'targetId': target_id, 'flatten': True})
+				target_ids_to_initialize.append(target_id)
+				self.logger.debug(f'[SessionManager] Attached to existing target: {target_id[:8]}... (type={target_type})')
+			except Exception as e:
+				self.logger.debug(
+					f'[SessionManager] Failed to attach to existing target {target_id[:8]}... (type={target_type}): {e}'
+				)
+
+		# Wait for all attach handlers to complete by polling for sessions in pool
+		# This is more reliable than sleep - we wait exactly as long as needed
+		max_wait = 2.0  # 2 seconds max - most targets initialize in < 500ms
+		start_time = asyncio.get_event_loop().time()
+
+		while (asyncio.get_event_loop().time() - start_time) < max_wait:
+			# Check if all target sessions are in pool
+			session_checks = []
+			for tid in target_ids_to_initialize:
+				session = await self.get_session_for_target(tid)
+				session_checks.append(session is not None)
+
+			if all(session_checks):
+				self.logger.debug(
+					f'[SessionManager] All {len(self.browser_session._cdp_session_pool)} sessions initialized and ready'
+				)
+				return
+
+			await asyncio.sleep(0.05)  # Poll every 50ms
+
+		# Timeout - some sessions didn't initialize (likely short-lived targets that already detached)
+		initialized_count = sum(1 for tid in target_ids_to_initialize if tid in self.browser_session._cdp_session_pool)
+		self.logger.warning(
+			f'[SessionManager] Initialization timeout: {initialized_count}/{len(target_ids_to_initialize)} sessions ready '
+			f'(some targets may have detached during initialization)'
+		)
+
 	async def _enable_page_monitoring(self, cdp_session: 'CDPSession') -> None:
 		"""Enable lifecycle events and network monitoring for a page target.
 
 		This is called once per page when it's created, avoiding handler accumulation.
+		Registers a SINGLE lifecycle handler per session that stores events for navigations to consume.
 
 		Args:
 			cdp_session: The CDP session to enable monitoring on
@@ -427,6 +486,50 @@ class SessionManager:
 			# Enable network monitoring for networkIdle detection
 			await cdp_session.cdp_client.send.Network.enable(session_id=cdp_session.session_id)
 			self.logger.debug(f'[SessionManager] Enabled network monitoring for target {cdp_session.target_id[:8]}...')
+
+			# Initialize lifecycle event storage for this session (thread-safe)
+			from collections import deque
+
+			cdp_session._lifecycle_events = deque(maxlen=50)  # Keep last 50 events
+			cdp_session._lifecycle_lock = asyncio.Lock()
+
+			# Register ONE handler per session that stores events
+			def on_lifecycle_event(event, session_id=None):
+				if session_id == cdp_session.session_id:
+					# Store event for navigations to consume
+					event_data = {
+						'name': event.get('name'),
+						'loaderId': event.get('loaderId'),
+						'timestamp': asyncio.get_event_loop().time(),
+					}
+					# Append is atomic in CPython, but use lock for safety
+					try:
+						cdp_session._lifecycle_events.append(event_data)
+					except Exception:
+						pass  # Session might be detaching
+
+			# Register the handler ONCE (this is the only place we register)
+			cdp_session.cdp_client.register.Page.lifecycleEvent(on_lifecycle_event)
+			self.logger.debug(f'[SessionManager] Registered lifecycle handler for target {cdp_session.target_id[:8]}...')
+
+			# Keep session URL updated on every navigation
+			def on_frame_navigated(event, session_id=None):
+				if session_id == cdp_session.session_id:
+					frame = event.get('frame', {})
+					# Only update URL for main frame (not iframes)
+					if not frame.get('parentId'):
+						new_url = frame.get('url')
+						if new_url:
+							old_url = cdp_session.url
+							cdp_session.url = new_url
+							if old_url != new_url:
+								self.logger.debug(
+									f'[SessionManager] Updated URL for target {cdp_session.target_id[:8]}...: {old_url[:50]} → {new_url[:50]}'
+								)
+
+			# Register frame navigation handler to keep URL fresh
+			cdp_session.cdp_client.register.Page.frameNavigated(on_frame_navigated)
+			self.logger.debug(f'[SessionManager] Registered frame navigation handler for target {cdp_session.target_id[:8]}...')
 
 		except Exception as e:
 			# Don't fail - target might be short-lived or already detached
