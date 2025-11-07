@@ -97,6 +97,19 @@ class SessionManager:
 		async with self._lock:
 			return self.browser_session._cdp_session_pool.get(target_id)
 
+	def get_all_page_sessions(self) -> list['CDPSession']:
+		"""Get all page/tab sessions using cached pool.
+
+		Returns:
+			List of CDPSession objects for all page/tab targets
+		"""
+		page_sessions = []
+		for target_id, session in self.browser_session._cdp_session_pool.items():
+			target_type = self._target_types.get(target_id, 'unknown')
+			if target_type in ('page', 'tab'):
+				page_sessions.append(session)
+		return page_sessions
+
 	async def validate_session(self, target_id: TargetID) -> bool:
 		"""Check if a target still has active sessions.
 
@@ -360,14 +373,14 @@ class SessionManager:
 
 		try:
 			# Try to find another valid page target
-			all_pages = await self.browser_session._cdp_get_all_pages()
+			page_sessions = self.get_all_page_sessions()
 
 			new_target_id = None
 			is_existing_tab = False
 
-			if all_pages:
+			if page_sessions:
 				# Switch to most recent page that's not the crashed one
-				new_target_id = all_pages[-1]['targetId']
+				new_target_id = page_sessions[-1].target_id
 				is_existing_tab = True
 				self.logger.info(f'[SessionManager] Switching agent_focus to existing tab {new_target_id[:8]}...')
 			else:
