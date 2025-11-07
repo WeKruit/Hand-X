@@ -150,7 +150,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		register_should_stop_callback: Callable[[], Awaitable[bool]] | None = None,
 		# Agent settings
 		output_model_schema: type[AgentStructuredOutput] | None = None,
-		use_vision: bool | Literal['auto'] = 'auto',
+		use_vision: bool | Literal['auto'] = True,
 		save_conversation_path: str | Path | None = None,
 		save_conversation_path_encoding: str | None = 'utf-8',
 		max_failures: int = 3,
@@ -951,15 +951,32 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Attach judgement to last action result
 		if self.history.history[-1].result[-1].is_done:
-			self.history.history[-1].result[-1].judgement = judgement
+			last_result = self.history.history[-1].result[-1]
+			last_result.judgement = judgement
 
-			# Log the verdict
+			# Get self-reported success
+			self_reported_success = last_result.success
+
+			# Log the verdict based on self-reported success and judge verdict
 			if judgement:
+				# If both self-reported and judge agree on success, don't log
+				if self_reported_success is True and judgement.verdict is True:
+					return
+
+				judge_log = '\n'
+				# If agent reported success but judge thinks it failed, show warning
+				if self_reported_success is True and judgement.verdict is False:
+					judge_log += '⚠️  \033[33mAgent reported success but judge thinks task failed\033[0m\n'
+
+				# Otherwise, show full judge result
 				verdict_color = '\033[32m' if judgement.verdict else '\033[31m'
 				verdict_text = '✅ PASS' if judgement.verdict else '❌ FAIL'
-				judge_log = f'\n⚖️  {verdict_color}Judge Verdict: {verdict_text}\033[0m\n'
+				judge_log += f'⚖️  {verdict_color}Judge Verdict: {verdict_text}\033[0m\n'
 				if judgement.failure_reason:
-					judge_log += f'   Failure: {judgement.failure_reason}\n'
+					judge_log += f'   Failure Reason: {judgement.failure_reason}\n'
+				if judgement.reached_captcha:
+					judge_log += '   🤖 Captcha Detected: Agent encountered captcha challenges\n'
+					judge_log += '   👉 🥷 Use Browser Use Cloud for the most stealth browser infra: https://docs.browser-use.com/customize/browser/remote\n'
 				judge_log += f'   {judgement.reasoning}\n'
 				self.logger.info(judge_log)
 
