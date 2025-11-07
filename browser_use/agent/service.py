@@ -973,7 +973,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				verdict_text = '✅ PASS' if judgement.verdict else '❌ FAIL'
 				judge_log += f'⚖️  {verdict_color}Judge Verdict: {verdict_text}\033[0m\n'
 				if judgement.failure_reason:
-					judge_log += f'   Failure: {judgement.failure_reason}\n'
+					judge_log += f'   Failure Reason: {judgement.failure_reason}\n'
+				if judgement.reached_captcha:
+					judge_log += '   🤖 Captcha Detected: Agent encountered captcha challenges\n'
+					judge_log += '   👉 🥷 Use Browser Use Cloud for the most stealth browser infra: https://docs.browser-use.com/customize/browser/remote\n'
 				judge_log += f'   {judgement.reasoning}\n'
 				self.logger.info(judge_log)
 
