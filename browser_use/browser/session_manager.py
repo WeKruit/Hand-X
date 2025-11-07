@@ -59,7 +59,6 @@ class SessionManager:
 		# Enable target discovery to receive targetInfoChanged events automatically
 		# This eliminates the need for getTargetInfo() polling calls
 		await cdp_client.send.Target.setDiscoverTargets(params={'discover': True, 'filter': [{'type': 'page'}]})
-		self.logger.debug('[SessionManager] Enabled target discovery with page/tab filter')
 
 		# Register synchronous event handlers (CDP requirement)
 		def on_attached(event: AttachedToTargetEvent, session_id: SessionID | None = None):
@@ -136,6 +135,17 @@ class SessionManager:
 				return False
 			return len(self._target_sessions[target_id]) > 0
 
+	def get_target_id_from_session_id(self, session_id: SessionID) -> TargetID | None:
+		"""Look up which target a session belongs to (sync, no lock needed).
+
+		Args:
+			session_id: The session ID to look up
+
+		Returns:
+			Target ID if found, None otherwise
+		"""
+		return self._session_to_target.get(session_id)
+
 	async def _handle_target_attached(self, event: AttachedToTargetEvent) -> None:
 		"""Handle Target.attachedToTarget event.
 
@@ -159,16 +169,10 @@ class SessionManager:
 			await self.browser_session._cdp_client_root.send.Target.setAutoAttach(
 				params={'autoAttach': True, 'waitForDebuggerOnStart': False, 'flatten': True}, session_id=session_id
 			)
-			self.logger.debug(f'[SessionManager] Auto-attach enabled for {target_type} session {session_id[:8]}...')
 		except Exception as e:
 			error_str = str(e)
 			# Expected for short-lived targets (workers, temp iframes) that detach before this executes
-			if '-32001' in error_str or 'Session with given id not found' in error_str:
-				self.logger.debug(
-					f'[SessionManager] Auto-attach skipped for {target_type} session {session_id[:8]}... '
-					f'(already detached - normal for short-lived targets)'
-				)
-			else:
+			if '-32001' not in error_str and 'Session with given id not found' not in error_str:
 				self.logger.debug(f'[SessionManager] Auto-attach failed for {target_type}: {e}')
 
 		async with self._lock:
@@ -219,7 +223,6 @@ class SessionManager:
 			try:
 				assert self.browser_session._cdp_client_root is not None
 				await self.browser_session._cdp_client_root.send.Runtime.runIfWaitingForDebugger(session_id=session_id)
-				self.logger.debug(f'[SessionManager] Resumed execution for session {session_id[:8]}...')
 			except Exception as e:
 				self.logger.warning(f'[SessionManager] Failed to resume execution: {e}')
 
@@ -239,21 +242,9 @@ class SessionManager:
 			# Update session if it exists in pool
 			if target_id in self.browser_session._cdp_session_pool:
 				session = self.browser_session._cdp_session_pool[target_id]
-				old_title = session.title
-				old_url = session.url
 
 				session.title = target_info.get('title', session.title)
 				session.url = target_info.get('url', session.url)
-
-				# Log significant changes
-				if old_url != session.url:
-					self.logger.debug(
-						f'[SessionManager] Target {target_id[:8]}... URL changed: {old_url[:40]} → {session.url[:40]}'
-					)
-				if old_title != session.title and session.title not in ('', 'Unknown title'):
-					self.logger.debug(
-						f'[SessionManager] Target {target_id[:8]}... title changed: {old_title[:40]} → {session.title[:40]}'
-					)
 
 	async def _handle_target_detached(self, event: DetachedFromTargetEvent) -> None:
 		"""Handle Target.detachedFromTarget event.
@@ -480,7 +471,6 @@ class SessionManager:
 				# Just attach - event handler does everything
 				await cdp_client.send.Target.attachToTarget(params={'targetId': target_id, 'flatten': True})
 				target_ids_to_wait_for.append(target_id)
-				self.logger.debug(f'[SessionManager] Attached to existing target: {target_id[:8]}... (type={target_type})')
 			except Exception as e:
 				self.logger.debug(
 					f'[SessionManager] Failed to attach to existing target {target_id[:8]}... (type={target_type}): {e}'
@@ -518,9 +508,6 @@ class SessionManager:
 		try:
 			# Wait for completion with timeout
 			await asyncio.wait_for(ready_event.wait(), timeout=2.0)
-			self.logger.debug(
-				f'[SessionManager] All {len(self.browser_session._cdp_session_pool)} sessions initialized with monitoring ready'
-			)
 		except asyncio.TimeoutError:
 			# Timeout - count what's ready
 			ready_count = sum(
@@ -551,20 +538,17 @@ class SessionManager:
 		Args:
 			cdp_session: The CDP session to enable monitoring on
 		"""
-		self.logger.debug(f'[SessionManager] Starting page monitoring setup for target {cdp_session.target_id[:8]}...')
 		try:
+			# Enable Page domain first (required for lifecycle events)
 			await cdp_session.cdp_client.send.Page.enable(session_id=cdp_session.session_id)
-			self.logger.debug(f'[SessionManager] Enabled Page domain for target {cdp_session.target_id[:8]}...')
 
 			# Enable lifecycle events (load, DOMContentLoaded, networkIdle, etc.)
 			await cdp_session.cdp_client.send.Page.setLifecycleEventsEnabled(
 				params={'enabled': True}, session_id=cdp_session.session_id
 			)
-			self.logger.debug(f'[SessionManager] Enabled lifecycle events for target {cdp_session.target_id[:8]}...')
 
 			# Enable network monitoring for networkIdle detection
 			await cdp_session.cdp_client.send.Network.enable(session_id=cdp_session.session_id)
-			self.logger.debug(f'[SessionManager] Enabled network monitoring for target {cdp_session.target_id[:8]}...')
 
 			# Initialize lifecycle event storage for this session (thread-safe)
 			from collections import deque
@@ -574,24 +558,31 @@ class SessionManager:
 
 			# Register ONE handler per session that stores events
 			def on_lifecycle_event(event, session_id=None):
-				if session_id == cdp_session.session_id:
+				event_name = event.get('name', 'unknown')
+				event_loader_id = event.get('loaderId', 'none')
+
+				# Find which target this session belongs to
+				target_id_from_event = None
+				if session_id:
+					target_id_from_event = self.get_target_id_from_session_id(session_id)
+
+				# Check if this event is for our target
+				if target_id_from_event == cdp_session.target_id:
 					# Store event for navigations to consume
 					event_data = {
-						'name': event.get('name'),
-						'loaderId': event.get('loaderId'),
+						'name': event_name,
+						'loaderId': event_loader_id,
 						'timestamp': asyncio.get_event_loop().time(),
 					}
-					# Append is atomic in CPython, but use lock for safety
+					# Append is atomic in CPython
 					try:
 						cdp_session._lifecycle_events.append(event_data)
-					except Exception:
-						pass  # Session might be detaching
+					except Exception as e:
+						# Only log errors, not every event
+						self.logger.error(f'[SessionManager] Failed to store lifecycle event: {e}')
 
 			# Register the handler ONCE (this is the only place we register)
 			cdp_session.cdp_client.register.Page.lifecycleEvent(on_lifecycle_event)
-			self.logger.debug(f'[SessionManager] Registered lifecycle handler for target {cdp_session.target_id[:8]}...')
-
-			self.logger.debug(f'[SessionManager] ✅ Page monitoring fully enabled for target {cdp_session.target_id[:8]}...')
 
 		except Exception as e:
 			# Don't fail - target might be short-lived or already detached
