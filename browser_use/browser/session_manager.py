@@ -55,6 +55,13 @@ class SessionManager:
 		# Capture cdp_client_root in closure to avoid type errors
 		cdp_client = self.browser_session._cdp_client_root
 
+		# Enable lifecycle events for ALL existing page sessions in the pool
+		for target_id, cdp_session in list(self.browser_session._cdp_session_pool.items()):
+			target_type = self._target_types.get(target_id, 'unknown')
+			if target_type in ('page', 'tab'):
+				self.logger.debug(f'[SessionManager] Enabling monitoring for existing page {target_id[:8]}...')
+				asyncio.create_task(self._enable_page_monitoring(cdp_session))
+
 		# Register synchronous event handlers (CDP requirement)
 		def on_attached(event: AttachedToTargetEvent, session_id: SessionID | None = None):
 			event_session_id = event['sessionId']

@@ -801,7 +801,7 @@ class BrowserSession(BaseModel):
 				await self.event_bus.dispatch(AgentFocusChangedEvent(target_id=target_id, url=event.url))
 			raise
 
-	async def _navigate_and_wait(self, url: str, target_id: str, timeout: float = 30.0) -> None:
+	async def _navigate_and_wait(self, url: str, target_id: str, timeout: float = 4.0) -> None:
 		"""Navigate to URL and wait for page readiness using CDP lifecycle events.
 
 		Two-strategy approach optimized for speed with robust fallback:
@@ -816,6 +816,7 @@ class BrowserSession(BaseModel):
 		ready = asyncio.Event()
 		navigation_id = None
 		readiness_reason = None
+		seen_events = []  # Debug: track all lifecycle events
 
 		# Listen to lifecycle events (already enabled globally by SessionManager)
 		def on_lifecycle_event(event, session_id=None):
@@ -826,7 +827,10 @@ class BrowserSession(BaseModel):
 			event_name = event.get('name')
 			event_loader_id = event.get('loaderId')
 
-			# Only respond to events from our navigation
+			# Debug: track all events we see
+			seen_events.append(f'{event_name}(loader={event_loader_id[:8] if event_loader_id else "none"})')
+
+			# Only respond to events from our navigation (or accept all if no loaderId)
 			if event_loader_id and navigation_id and event_loader_id != navigation_id:
 				return
 
@@ -854,13 +858,19 @@ class BrowserSession(BaseModel):
 
 		# Track this specific navigation
 		navigation_id = nav_result.get('loaderId')
+		self.logger.debug(
+			f'[_navigate_and_wait] Started navigation to {url} (loaderId={navigation_id[:8] if navigation_id else "none"})'
+		)
 
 		# Wait for either networkIdle (fast) or load (fallback)
 		try:
 			await asyncio.wait_for(ready.wait(), timeout=timeout)
-			self.logger.debug(f'✅ Page ready for {url} (signal: {readiness_reason})')
-		except TimeoutError:
-			self.logger.warning(f'⚠️ Page readiness timeout ({timeout}s) for {url}, continuing anyway')
+			self.logger.debug(f'✅ Page ready for {url} (signal: {readiness_reason}, saw events: {seen_events})')
+		except (TimeoutError, asyncio.TimeoutError):
+			self.logger.warning(
+				f'⚠️ Page readiness timeout ({timeout}s) for {url}, continuing anyway. '
+				f'LoaderId={navigation_id[:8] if navigation_id else "none"}, saw events: {seen_events}'
+			)
 
 	async def on_SwitchTabEvent(self, event: SwitchTabEvent) -> TargetID:
 		"""Handle tab switching - core browser functionality."""
@@ -1581,6 +1591,15 @@ class BrowserSession(BaseModel):
 
 			if not self.agent_focus:
 				raise RuntimeError(f'Failed to get session for initial target {target_id}')
+
+			# Enable lifecycle events for all existing page sessions now that pool is populated
+			# This ensures pages created BEFORE SessionManager started get monitoring enabled
+			for tid, cdp_session in list(self._cdp_session_pool.items()):
+				target_info = await self._cdp_client_root.send.Target.getTargetInfo(params={'targetId': tid})
+				target_type = target_info.get('targetInfo', {}).get('type', 'unknown')
+				if target_type in ('page', 'tab'):
+					self.logger.debug(f'[connect] Enabling lifecycle monitoring for existing page {tid[:8]}...')
+					asyncio.create_task(self._session_manager._enable_page_monitoring(cdp_session))
 
 			# Enable proxy authentication handling if configured
 			await self._setup_proxy_auth()
