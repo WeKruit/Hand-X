@@ -879,20 +879,21 @@ class BrowserSession(BaseModel):
 					if event_loader_id and navigation_id and event_loader_id != navigation_id:
 						continue
 
-				if event_name == 'networkIdle':
-					readiness_reason = 'networkIdle'
-					duration_ms = (asyncio.get_event_loop().time() - nav_start_time) * 1000
-					self.logger.debug(
-						f'✅ Page ready for {url} (signal: {readiness_reason}, {duration_ms:.0f}ms, saw events: {seen_events})'
-					)
-					return
-				elif event_name == 'load':
-					readiness_reason = 'load'
-					duration_ms = (asyncio.get_event_loop().time() - nav_start_time) * 1000
-					self.logger.debug(
-						f'✅ Page ready for {url} (signal: {readiness_reason}, {duration_ms:.0f}ms, saw events: {seen_events})'
-					)
-					return
+					if event_name == 'networkIdle':
+						readiness_reason = 'networkIdle'
+						duration_ms = (asyncio.get_event_loop().time() - nav_start_time) * 1000
+						self.logger.debug(
+							f'✅ Page ready for {url} (signal: {readiness_reason}, {duration_ms:.0f}ms, saw events: {seen_events})'
+						)
+						return
+
+					elif event_name == 'load':
+						readiness_reason = 'load'
+						duration_ms = (asyncio.get_event_loop().time() - nav_start_time) * 1000
+						self.logger.debug(
+							f'✅ Page ready for {url} (signal: {readiness_reason}, {duration_ms:.0f}ms, saw events: {seen_events})'
+						)
+						return
 
 			except Exception as e:
 				self.logger.debug(f'Error polling lifecycle events: {e}')
