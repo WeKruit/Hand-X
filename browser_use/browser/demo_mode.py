@@ -687,7 +687,7 @@ _DEMO_PANEL_SCRIPT = r"""(function () {
     const messageHtml = messageText;
     const message = document.createElement('div');
     message.className = 'browser-use-markdown-content';
-    message.innerHTML = messageHtml;
+    message.textContent = messageHtml;
     messageWrapper.appendChild(message);
 
     if (messageText.length > 160) {
