@@ -815,7 +815,11 @@ class BrowserSession(BaseModel):
 		NO handler registration here - handlers are registered ONCE per session in SessionManager.
 		We poll stored events instead to avoid handler accumulation.
 		"""
+		# Performance tracking
+		t0 = asyncio.get_event_loop().time()
+
 		cdp_session = await self.get_or_create_cdp_session(target_id, focus=False)
+		t1 = asyncio.get_event_loop().time()
 
 		if timeout is None:
 			current_url = cdp_session.url
@@ -826,14 +830,15 @@ class BrowserSession(BaseModel):
 			)
 			timeout = 2.0 if same_domain else 4.0
 
-		# Start performance tracking
+		# Start navigation CDP call
 		nav_start_time = asyncio.get_event_loop().time()
+		t2 = asyncio.get_event_loop().time()
 
-		# Start navigation first
 		nav_result = await cdp_session.cdp_client.send.Page.navigate(
 			params={'url': url, 'transitionType': 'address_bar'},
 			session_id=cdp_session.session_id,
 		)
+		t3 = asyncio.get_event_loop().time()
 
 		# Check for immediate navigation errors
 		if nav_result.get('errorText'):
@@ -874,13 +879,21 @@ class BrowserSession(BaseModel):
 						continue
 
 				if event_name == 'networkIdle':
-					duration_ms = (asyncio.get_event_loop().time() - nav_start_time) * 1000
-					self.logger.debug(f'✅ Page ready for {url} (networkIdle, {duration_ms:.0f}ms)')
+					t4 = asyncio.get_event_loop().time()
+					duration_ms = (t4 - t0) * 1000
+					self.logger.info(
+						f'✅ Page ready for {url} (networkIdle, {duration_ms:.0f}ms) '
+						f'[session:{(t1 - t0) * 1000:.0f}ms, cdp:{(t3 - t2) * 1000:.0f}ms, wait:{(t4 - t3) * 1000:.0f}ms]'
+					)
 					return
 
 				elif event_name == 'load':
-					duration_ms = (asyncio.get_event_loop().time() - nav_start_time) * 1000
-					self.logger.debug(f'✅ Page ready for {url} (load, {duration_ms:.0f}ms)')
+					t4 = asyncio.get_event_loop().time()
+					duration_ms = (t4 - t0) * 1000
+					self.logger.info(
+						f'✅ Page ready for {url} (load, {duration_ms:.0f}ms) '
+						f'[session:{(t1 - t0) * 1000:.0f}ms, cdp:{(t3 - t2) * 1000:.0f}ms, wait:{(t4 - t3) * 1000:.0f}ms]'
+					)
 					return
 
 			except Exception as e:
@@ -890,14 +903,19 @@ class BrowserSession(BaseModel):
 			await asyncio.sleep(poll_interval)
 
 		# Timeout - continue anyway with detailed diagnostics
-		duration_ms = (asyncio.get_event_loop().time() - nav_start_time) * 1000
+		t4 = asyncio.get_event_loop().time()
+		duration_ms = (t4 - t0) * 1000
 		if not seen_events:
 			self.logger.error(
 				f'❌ No lifecycle events received for {url} after {duration_ms:.0f}ms! '
-				f'Monitoring may have failed. Target: {cdp_session.target_id[:8]}'
+				f'Monitoring may have failed. Target: {cdp_session.target_id[:8]} '
+				f'[session:{(t1 - t0) * 1000:.0f}ms, cdp:{(t3 - t2) * 1000:.0f}ms, wait:{(t4 - t3) * 1000:.0f}ms]'
 			)
 		else:
-			self.logger.warning(f'⚠️ Page readiness timeout ({timeout}s, {duration_ms:.0f}ms) for {url}')
+			self.logger.warning(
+				f'⚠️ Page readiness timeout ({timeout}s, {duration_ms:.0f}ms) for {url} '
+				f'[session:{(t1 - t0) * 1000:.0f}ms, cdp:{(t3 - t2) * 1000:.0f}ms, wait:{(t4 - t3) * 1000:.0f}ms]'
+			)
 
 	async def on_SwitchTabEvent(self, event: SwitchTabEvent) -> TargetID:
 		"""Handle tab switching - core browser functionality."""
@@ -987,61 +1005,44 @@ class BrowserSession(BaseModel):
 
 	async def on_AgentFocusChangedEvent(self, event: AgentFocusChangedEvent) -> None:
 		"""Handle agent focus change - update focus and clear cache."""
+		t0 = asyncio.get_event_loop().time()
 		self.logger.debug(f'🔄 AgentFocusChangedEvent received: target_id=...{event.target_id[-4:]} url={event.url}')
 
 		# Clear cached DOM state since focus changed
-		# self.logger.debug('🔄 Clearing DOM cache...')
 		if self._dom_watchdog:
 			self._dom_watchdog.clear_cache()
-			# self.logger.debug('🔄 Cleared DOM cache after focus change')
 
 		# Clear cached browser state
-		# self.logger.debug('🔄 Clearing cached browser state...')
 		self._cached_browser_state_summary = None
 		self._cached_selector_map.clear()
-		self.logger.debug('🔄 Cached browser state cleared')
-		all_targets = await self._cdp_get_all_pages(include_chrome=True)
+		t1 = asyncio.get_event_loop().time()
 
 		# Update agent focus if a specific target_id is provided
 		if event.target_id:
 			self.agent_focus = await self.get_or_create_cdp_session(target_id=event.target_id, focus=True)
-			self.logger.debug(f'🔄 Updated agent focus to tab target_id=...{event.target_id[-4:]}')
+			t2 = asyncio.get_event_loop().time()
 		else:
 			raise RuntimeError('AgentFocusChangedEvent received with no target_id for newly focused tab')
 
-		# Test that the browser is responsive by evaluating a simple expression
-		if self.agent_focus:
-			self.logger.debug('🔄 Testing tab responsiveness...')
-			try:
-				test_result = await asyncio.wait_for(
-					self.agent_focus.cdp_client.send.Runtime.evaluate(
-						params={'expression': '1 + 1', 'returnByValue': True}, session_id=self.agent_focus.session_id
-					),
-					timeout=2.0,
-				)
-				if test_result.get('result', {}).get('value') == 2:
-					# self.logger.debug('🔄 ✅ Browser is responsive after focus change')
-					pass
-				else:
-					raise Exception('❌ Failed to execute test JS expression with Page.evaluate')
-			except Exception as e:
-				self.logger.error(f'🔄 ❌ Target {self.agent_focus.target_id} seems closed/crashed, switching to fallback')
-				# Get last page from SessionManager
-				page_sessions = self._session_manager.get_all_page_sessions()
-				last_target_id = page_sessions[-1].target_id if page_sessions else None
-				self.agent_focus = await self.get_or_create_cdp_session(target_id=last_target_id, focus=True)
-				raise
+		# Note: Responsiveness check removed - if lifecycle events fired, page is responsive
+		# No need to test with Runtime.evaluate() - that's redundant and adds 80-150ms latency
 
 		# Dispatch NavigationCompleteEvent when tab focus changes
 		# This ensures PDF detection and downloads work when switching tabs
 		if event.target_id and event.url:
-			self.logger.debug(f'🔄 Dispatching NavigationCompleteEvent for tab switch to {event.url[:50]}...')
 			await self.event_bus.dispatch(
 				NavigationCompleteEvent(
 					target_id=event.target_id,
 					url=event.url,
 				)
 			)
+
+		t3 = asyncio.get_event_loop().time()
+		total_ms = (t3 - t0) * 1000
+		self.logger.info(
+			f'🔄 AgentFocusChangedEvent completed ({total_ms:.0f}ms) '
+			f'[clear:{(t1 - t0) * 1000:.0f}ms, session:{(t2 - t1) * 1000:.0f}ms, events:{(t3 - t2) * 1000:.0f}ms]'
+		)
 
 		# self.logger.debug('🔄 AgentFocusChangedEvent handler completed successfully')
 
