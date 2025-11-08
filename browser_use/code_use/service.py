@@ -2,6 +2,8 @@
 
 import asyncio
 import datetime
+import html
+import json
 import logging
 import re
 import traceback
@@ -35,6 +37,7 @@ from .formatting import format_browser_state_for_llm
 from .namespace import EvaluateError, create_namespace
 from .utils import detect_token_limit_issue, extract_code_blocks, extract_url_from_task, truncate_message_content
 from .views import (
+	CellType,
 	CodeAgentHistory,
 	CodeAgentModelOutput,
 	CodeAgentResult,
@@ -166,6 +169,7 @@ class CodeAgent:
 		self._last_llm_usage: Any | None = None  # Track last LLM call usage stats
 		self._step_start_time = 0.0  # Track step start time for duration calculation
 		self.usage_summary: UsageSummary | None = None  # Track usage summary across run for history property
+		self._sample_output_added = False  # Track whether preview cell already created
 
 		# Initialize screenshot service for eval tracking
 		self.id = uuid7str()
@@ -340,12 +344,17 @@ class CodeAgent:
 
 				# Get code from LLM (this also adds to self._llm_messages)
 				try:
-					code, full_llm_response = await self._get_code_from_llm()
+					code, full_llm_response = await self._get_code_from_llm(step_number=step + 1)
 				except Exception as llm_error:
 					# LLM call failed - count as consecutive error and retry
 					self._consecutive_errors += 1
 					logger.warning(
 						f'LLM call failed (consecutive errors: {self._consecutive_errors}/{self.max_failures}), retrying: {llm_error}'
+					)
+					await self._demo_mode_log(
+						f'LLM call failed: {llm_error}',
+						'error',
+						{'step': step + 1},
 					)
 
 					# Check if we've hit the consecutive error limit
@@ -532,6 +541,7 @@ class CodeAgent:
 					logger.info('Task completed successfully')
 					if final_result:
 						logger.info(f'Final result: {final_result}')
+						self._add_sample_output_cell(final_result)
 					if self._demo_mode_enabled:
 						await self._demo_mode_log(
 							f'Final Result: {final_result or "Task completed"}',
@@ -612,6 +622,7 @@ class CodeAgent:
 			final_result: str | None = self.namespace.get('_task_result')  # type: ignore[assignment]
 			if final_result:
 				logger.info(f'\nFinal Output:\n{final_result}')
+				self._add_sample_output_cell(final_result)
 
 			attachments: list[str] | None = self.namespace.get('_task_attachments')  # type: ignore[assignment]
 			if attachments:
@@ -627,7 +638,7 @@ class CodeAgent:
 
 		# Auto-close browser if keep_alive is False
 		if should_delay_close and self._demo_mode_enabled:
-			await asyncio.sleep(3)
+			await asyncio.sleep(30)
 		await self.close()
 
 		# Store usage summary for history property
@@ -644,7 +655,7 @@ class CodeAgent:
 
 		return self.session
 
-	async def _get_code_from_llm(self) -> tuple[str, str]:
+	async def _get_code_from_llm(self, step_number: int | None = None) -> tuple[str, str]:
 		"""Get Python code from the LLM.
 
 		Returns:
@@ -690,6 +701,11 @@ class CodeAgent:
 
 		# Log the LLM's raw output for debugging
 		logger.info(f'LLM Response:\n{response.completion}')
+		await self._demo_mode_log(
+			f'LLM Response:\n{response.completion}',
+			'thought',
+			{'step': step_number} if step_number else None,
+		)
 
 		# Check for token limit or repetition issues
 		max_tokens = getattr(self.llm, 'max_tokens', None)
@@ -1242,6 +1258,51 @@ __code_exec_coro__ = __code_exec__()
 			level,
 			{'step': step_number, 'url': history_entry.state.url if history_entry.state else None},
 		)
+
+	def _add_sample_output_cell(self, final_result: Any | None) -> None:
+		if self._sample_output_added or final_result is None:
+			return
+
+		sample_content: str | None = None
+
+		def _extract_sample(data: Any) -> Any | None:
+			if isinstance(data, list) and data:
+				return data[0]
+			if isinstance(data, dict) and data:
+				first_key = next(iter(data))
+				return {first_key: data[first_key]}
+			return data if isinstance(data, (str, int, float, bool)) else None
+
+		data: Any | None = None
+		if isinstance(final_result, str):
+			try:
+				data = json.loads(final_result)
+			except Exception:
+				sample_content = final_result.strip()
+		elif isinstance(final_result, (list, dict)):
+			data = final_result
+
+		if data is not None:
+			sample = _extract_sample(data)
+			if isinstance(sample, (dict, list)):
+				try:
+					sample_content = json.dumps(sample, indent=2, ensure_ascii=False)
+				except Exception:
+					sample_content = str(sample)
+			elif sample is not None:
+				sample_content = str(sample)
+
+		if not sample_content:
+			return
+
+		sample_cell = self.session.add_cell(source='# Sample output preview')
+		sample_cell.cell_type = CellType.MARKDOWN
+		sample_cell.status = ExecutionStatus.SUCCESS
+		sample_cell.execution_count = None
+		escaped = html.escape(sample_content)
+		sample_cell.output = f'<pre>{escaped}</pre>'
+
+		self._sample_output_added = True
 
 	def _log_agent_event(self, max_steps: int, agent_run_error: str | None = None) -> None:
 		"""Send the agent event for this run to telemetry."""
