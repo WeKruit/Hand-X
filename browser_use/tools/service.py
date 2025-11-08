@@ -38,7 +38,6 @@ from browser_use.tools.views import (
 	ClickElementAction,
 	CloseTabAction,
 	DoneAction,
-	ExtractAction,
 	GetDropdownOptionsAction,
 	InputTextAction,
 	NavigateAction,
@@ -206,7 +205,7 @@ class Tools(Generic[Context]):
 					# Return error in ActionResult instead of re-raising
 					return ActionResult(error=f'Navigation failed: {str(e)}')
 
-		@self.registry.action('', param_model=NoParamsAction)
+		@self.registry.action('Go back', param_model=NoParamsAction)
 		async def go_back(_: NoParamsAction, browser_session: BrowserSession):
 			try:
 				event = browser_session.event_bus.dispatch(GoBackEvent())
@@ -220,14 +219,14 @@ class Tools(Generic[Context]):
 				error_msg = f'Failed to go back: {str(e)}'
 				return ActionResult(error=error_msg)
 
-		@self.registry.action('')
+		@self.registry.action('Wait for x seconds.')
 		async def wait(seconds: int = 3):
 			# Cap wait time at maximum 30 seconds
 			# Reduce the wait time by 3 seconds to account for the llm call which takes at least 3 seconds
 			# So if the model decides to wait for 5 seconds, the llm call took at least 3 seconds, so we only need to wait for 2 seconds
 			# Note by Mert: the above doesnt make sense because we do the LLM call right after this or this could be followed by another action after which we would like to wait
 			# so I revert this.
-			actual_seconds = min(max(seconds - 3, 0), 30)
+			actual_seconds = min(max(seconds - 1, 0), 30)
 			memory = f'Waited for {seconds} seconds'
 			logger.info(f'🕒 waited for {seconds} second{"" if seconds == 1 else "s"}')
 			await asyncio.sleep(actual_seconds)
@@ -342,7 +341,7 @@ class Tools(Generic[Context]):
 				return ActionResult(error=error_msg)
 
 		@self.registry.action(
-			'Click element by index or coordinates. Prefer index over coordinates when possible.',
+			'Click element by index or coordinates. Prefer index over coordinates when possible. Either provide coordinates or index.',
 			param_model=ClickElementAction,
 		)
 		async def click(params: ClickElementAction, browser_session: BrowserSession):
@@ -358,7 +357,7 @@ class Tools(Generic[Context]):
 				return await _click_by_coordinate(params, browser_session)
 
 		@self.registry.action(
-			'',
+			'Input text into element with index.',
 			param_model=InputTextAction,
 		)
 		async def input(
@@ -637,19 +636,18 @@ class Tools(Generic[Context]):
 				)
 
 		@self.registry.action(
-			"""LLM extracts structured data from page markdown. Use when: on right page, know what to extract, haven't called before on same page+query. Can't get interactive elements. Set extract_links=True for URLs. Use start_from_char if truncated. If fails, use find_text instead.""",
+			"""LLM extracts structured data from page markdown. Use when: on right page, know what to extract, haven't called before on same page+query. Can't get interactive elements. Set extract_links=True for URLs. Use start_from_char if previous extraction was truncated to extract data further down the page.""",
 		)
 		async def extract(
-			params: ExtractAction,
+			query: str,
 			browser_session: BrowserSession,
 			page_extraction_llm: BaseChatModel,
 			file_system: FileSystem,
+			extract_links: bool = False,
+			start_from_char: int = 0,
 		):
 			# Constants
 			MAX_CHAR_LIMIT = 30000
-			query = params['query'] if isinstance(params, dict) else params.query
-			extract_links = params['extract_links'] if isinstance(params, dict) else params.extract_links
-			start_from_char = params['start_from_char'] if isinstance(params, dict) else params.start_from_char
 
 			# Extract clean markdown using the unified method
 			try:
