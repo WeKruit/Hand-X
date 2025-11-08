@@ -210,6 +210,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if llm.provider == 'browser-use':
 			flash_mode = True
 
+		# Auto-configure llm_screenshot_size for Claude Sonnet models
+		if llm_screenshot_size is None:
+			model_name = getattr(llm, 'model', '')
+			if isinstance(model_name, str) and model_name.startswith('claude-sonnet'):
+				llm_screenshot_size = (1400, 850)
+				logger.info('🖼️  Auto-configured LLM screenshot size for Claude Sonnet: 1400x850')
+
 		if page_extraction_llm is None:
 			page_extraction_llm = llm
 		if judge_llm is None:
