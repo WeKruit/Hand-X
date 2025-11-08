@@ -1024,27 +1024,13 @@ class BrowserSession(BaseModel):
 		else:
 			raise RuntimeError('AgentFocusChangedEvent received with no target_id for newly focused tab')
 
-		# Note: Responsiveness check removed - if lifecycle events fired, page is responsive
-		# No need to test with Runtime.evaluate() - that's redundant and adds 80-150ms latency
-
-		# Dispatch NavigationCompleteEvent when tab focus changes
-		# This ensures PDF detection and downloads work when switching tabs
-		if event.target_id and event.url:
-			await self.event_bus.dispatch(
-				NavigationCompleteEvent(
-					target_id=event.target_id,
-					url=event.url,
-				)
-			)
-
-		t3 = asyncio.get_event_loop().time()
-		total_ms = (t3 - t0) * 1000
+		total_ms = (t2 - t0) * 1000
 		self.logger.info(
 			f'🔄 AgentFocusChangedEvent completed ({total_ms:.0f}ms) '
-			f'[clear:{(t1 - t0) * 1000:.0f}ms, session:{(t2 - t1) * 1000:.0f}ms, events:{(t3 - t2) * 1000:.0f}ms]'
+			f'[clear:{(t1 - t0) * 1000:.0f}ms, session:{(t2 - t1) * 1000:.0f}ms]'
 		)
 
-		# self.logger.debug('🔄 AgentFocusChangedEvent handler completed successfully')
+	# self.logger.debug('🔄 AgentFocusChangedEvent handler completed successfully')
 
 	async def on_FileDownloadedEvent(self, event: FileDownloadedEvent) -> None:
 		"""Track downloaded files during this session."""
@@ -1276,10 +1262,8 @@ class BrowserSession(BaseModel):
 		# Update focus if requested
 		# CRITICAL: Only allow focus change to 'page' type targets, not iframes/workers
 		if focus and self.agent_focus.target_id != target_id:
-			# Check target type before allowing focus change
-			targets = await self._cdp_client_root.send.Target.getTargets()
-			target_info = next((t for t in targets['targetInfos'] if t['targetId'] == target_id), None)
-			target_type = target_info.get('type') if target_info else 'unknown'
+			# Get target type from SessionManager
+			target_type = self._session_manager._target_types.get(target_id, 'unknown')
 
 			if target_type == 'page':
 				self.logger.debug(f'[SessionManager] Switching focus: {self.agent_focus.target_id[:8]}... → {target_id[:8]}...')
