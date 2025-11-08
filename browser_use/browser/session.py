@@ -432,6 +432,15 @@ class BrowserSession(BaseModel):
 		description='BrowserProfile() options to use for the session, otherwise a default profile will be used',
 	)
 
+	# LLM screenshot resizing configuration
+	llm_screenshot_size: tuple[int, int] | None = Field(
+		default=None,
+		description='Target size (width, height) to resize screenshots before sending to LLM. Coordinates from LLM will be scaled back to original viewport size.',
+	)
+
+	# Cache of original viewport size for coordinate conversion (set when browser state is captured)
+	_original_viewport_size: tuple[int, int] | None = PrivateAttr(default=None)
+
 	# Convenience properties for common browser settings
 	@property
 	def cdp_url(self) -> str | None:

@@ -233,6 +233,24 @@ class Tools(Generic[Context]):
 			await asyncio.sleep(actual_seconds)
 			return ActionResult(extracted_content=memory, long_term_memory=memory)
 
+		# Helper function for coordinate conversion
+		def _convert_llm_coordinates_to_viewport(llm_x: int, llm_y: int, browser_session: BrowserSession) -> tuple[int, int]:
+			"""Convert coordinates from LLM screenshot size to original viewport size."""
+			if browser_session.llm_screenshot_size and browser_session._original_viewport_size:
+				original_width, original_height = browser_session._original_viewport_size
+				llm_width, llm_height = browser_session.llm_screenshot_size
+
+				# Convert coordinates using fractions
+				actual_x = int((llm_x / llm_width) * original_width)
+				actual_y = int((llm_y / llm_height) * original_height)
+
+				logger.info(
+					f'🔄 Converting coordinates: LLM ({llm_x}, {llm_y}) @ {llm_width}x{llm_height} '
+					f'→ Viewport ({actual_x}, {actual_y}) @ {original_width}x{original_height}'
+				)
+				return actual_x, actual_y
+			return llm_x, llm_y
+
 		# Element Interaction Actions
 		async def _click_by_coordinate(params: ClickElementAction, browser_session: BrowserSession) -> ActionResult:
 			# Ensure coordinates are provided (type safety)
@@ -240,8 +258,13 @@ class Tools(Generic[Context]):
 				return ActionResult(error='Both coordinate_x and coordinate_y must be provided')
 
 			try:
+				# Convert coordinates from LLM size to original viewport size if resizing was used
+				actual_x, actual_y = _convert_llm_coordinates_to_viewport(
+					params.coordinate_x, params.coordinate_y, browser_session
+				)
+
 				# Highlight the coordinate being clicked (truly non-blocking)
-				asyncio.create_task(browser_session.highlight_coordinate_click(params.coordinate_x, params.coordinate_y))
+				asyncio.create_task(browser_session.highlight_coordinate_click(actual_x, actual_y))
 
 				# Use Actor (page.mouse.click) for coordinate-based clicking
 				page = await browser_session.get_current_page()
@@ -249,15 +272,15 @@ class Tools(Generic[Context]):
 					return ActionResult(error='No active page found')
 
 				mouse = await page.mouse
-				await mouse.click(params.coordinate_x, params.coordinate_y)
+				await mouse.click(actual_x, actual_y)
 
-				memory = f'Clicked on coordinate {params.coordinate_x}, {params.coordinate_y}'
+				memory = f'Clicked on coordinate {actual_x}, {actual_y}'
 				msg = f'🖱️ {memory}'
 				logger.info(msg)
 
 				return ActionResult(
 					extracted_content=memory,
-					metadata={'click_x': params.coordinate_x, 'click_y': params.coordinate_y},
+					metadata={'click_x': actual_x, 'click_y': actual_y},
 				)
 			except Exception as e:
 				error_msg = f'Failed to click at coordinates ({params.coordinate_x}, {params.coordinate_y}).'

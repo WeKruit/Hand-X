@@ -511,6 +511,10 @@ class DOMWatchdog(BaseWatchdog):
 			# Cache the state
 			self.browser_session._cached_browser_state_summary = browser_state
 
+			# Cache viewport size for coordinate conversion (if llm_screenshot_size is enabled)
+			if self.browser_session.llm_screenshot_size and page_info:
+				self.browser_session._original_viewport_size = (page_info.viewport_width, page_info.viewport_height)
+
 			self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: ✅ COMPLETED - Returning browser state')
 			return browser_state
 
@@ -735,6 +739,10 @@ class DOMWatchdog(BaseWatchdog):
 		# Prioritize CSS layout viewport, then fall back to layout viewport
 		viewport_width = int(css_layout_viewport.get('clientWidth') or layout_viewport.get('clientWidth', 1280))
 		viewport_height = int(css_layout_viewport.get('clientHeight') or layout_viewport.get('clientHeight', 720))
+
+		self.logger.info(
+			f'📐 Viewport dimensions from CDP: {viewport_width}x{viewport_height} CSS pixels (device_pixel_ratio: {device_pixel_ratio:.2f})'
+		)
 
 		# For total page dimensions, content size is typically in device pixels, so convert to CSS pixels
 		# by dividing by device pixel ratio
