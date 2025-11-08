@@ -363,6 +363,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Store llm_screenshot_size in browser_session so tools can access it
 		self.browser_session.llm_screenshot_size = llm_screenshot_size
 
+		# Check if LLM is ChatAnthropic instance
+		from browser_use.llm.anthropic.chat import ChatAnthropic
+
+		is_anthropic = isinstance(self.llm, ChatAnthropic)
+
 		# Initialize message manager with state
 		# Initial system prompt with all actions - will be updated during each step
 		self._message_manager = MessageManager(
@@ -373,6 +378,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				extend_system_message=extend_system_message,
 				use_thinking=self.settings.use_thinking,
 				flash_mode=self.settings.flash_mode,
+				is_anthropic=is_anthropic,
 			).get_system_message(),
 			file_system=self.file_system,
 			state=self.state.message_manager_state,

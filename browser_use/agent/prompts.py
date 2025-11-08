@@ -21,10 +21,12 @@ class SystemPrompt:
 		extend_system_message: str | None = None,
 		use_thinking: bool = True,
 		flash_mode: bool = False,
+		is_anthropic: bool = False,
 	):
 		self.max_actions_per_step = max_actions_per_step
 		self.use_thinking = use_thinking
 		self.flash_mode = flash_mode
+		self.is_anthropic = is_anthropic
 		prompt = ''
 		if override_system_message is not None:
 			prompt = override_system_message
@@ -40,8 +42,10 @@ class SystemPrompt:
 	def _load_prompt_template(self) -> None:
 		"""Load the prompt template from the markdown file."""
 		try:
-			# Choose the appropriate template based on flash_mode and use_thinking settings
-			if self.flash_mode:
+			# Choose the appropriate template based on flash_mode, use_thinking, and is_anthropic
+			if self.flash_mode and self.is_anthropic:
+				template_filename = 'system_prompt_flash_anthropic.md'
+			elif self.flash_mode:
 				template_filename = 'system_prompt_flash.md'
 			elif self.use_thinking:
 				template_filename = 'system_prompt.md'
