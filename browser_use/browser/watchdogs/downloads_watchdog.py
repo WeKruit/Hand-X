@@ -956,15 +956,13 @@ class DownloadsWatchdog(BaseWatchdog):
 		"""
 		self.logger.debug(f'[DownloadsWatchdog] Checking if target {target_id} is PDF viewer...')
 
-		# Get target info to get URL
-		cdp_client = self.browser_session.cdp_client
-		targets = await cdp_client.send.Target.getTargets()
-		target_info = next((t for t in targets['targetInfos'] if t['targetId'] == target_id), None)
-		if not target_info:
-			self.logger.warning(f'[DownloadsWatchdog] No target info found for {target_id}')
+		# Get URL from session (zero CDP calls!)
+		session = await self.browser_session._session_manager.get_session_for_target(target_id)
+		if not session:
+			self.logger.warning(f'[DownloadsWatchdog] No session found for {target_id}')
 			return False
 
-		page_url = target_info.get('url', '')
+		page_url = session.url
 
 		# Check cache first
 		if page_url in self._pdf_viewer_cache:
