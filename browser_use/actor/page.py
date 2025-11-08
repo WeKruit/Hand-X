@@ -407,8 +407,9 @@ class Page:
 
 		enhanced_dom_tree = await dom_service.get_dom_tree(target_id=self._target_id)
 
+		session_id = self._browser_session.id
 		serialized_dom_state, _ = DOMTreeSerializer(
-			enhanced_dom_tree, None, paint_order_filtering=True
+			enhanced_dom_tree, None, paint_order_filtering=True, session_id=session_id
 		).serialize_accessible_elements()
 
 		llm_representation = serialized_dom_state.llm_representation()
