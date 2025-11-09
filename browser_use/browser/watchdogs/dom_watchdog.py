@@ -740,10 +740,6 @@ class DOMWatchdog(BaseWatchdog):
 		viewport_width = int(css_layout_viewport.get('clientWidth') or layout_viewport.get('clientWidth', 1280))
 		viewport_height = int(css_layout_viewport.get('clientHeight') or layout_viewport.get('clientHeight', 720))
 
-		self.logger.info(
-			f'📐 Viewport dimensions from CDP: {viewport_width}x{viewport_height} CSS pixels (device_pixel_ratio: {device_pixel_ratio:.2f})'
-		)
-
 		# For total page dimensions, content size is typically in device pixels, so convert to CSS pixels
 		# by dividing by device pixel ratio
 		raw_page_width = content_size.get('width', viewport_width * device_pixel_ratio)
