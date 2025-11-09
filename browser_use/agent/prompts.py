@@ -84,6 +84,7 @@ class AgentMessagePrompt:
 		vision_detail_level: Literal['auto', 'low', 'high'] = 'auto',
 		include_recent_events: bool = False,
 		sample_images: list[ContentPartTextParam | ContentPartImageParam] | None = None,
+		read_state_images: list[dict] | None = None,
 	):
 		self.browser_state: 'BrowserStateSummary' = browser_state_summary
 		self.file_system: 'FileSystem | None' = file_system
@@ -100,6 +101,7 @@ class AgentMessagePrompt:
 		self.vision_detail_level = vision_detail_level
 		self.include_recent_events = include_recent_events
 		self.sample_images = sample_images or []
+		self.read_state_images = read_state_images or []
 		assert self.browser_state
 
 	def _extract_page_statistics(self) -> dict[str, int]:
@@ -221,14 +223,14 @@ class AgentMessagePrompt:
 				if self.browser_state.page_info:
 					pi = self.browser_state.page_info
 					pages_above = pi.pixels_above / pi.viewport_height if pi.viewport_height > 0 else 0
-					elements_text = f'... {pages_above:.1f} pages above - scroll to see more or extract structured data if you are looking for specific information ...\n{elements_text}'
+					elements_text = f'... {pages_above:.1f} pages above ...\n{elements_text}'
 			else:
 				elements_text = f'[Start of page]\n{elements_text}'
 			if has_content_below:
 				if self.browser_state.page_info:
 					pi = self.browser_state.page_info
 					pages_below = pi.pixels_below / pi.viewport_height if pi.viewport_height > 0 else 0
-					elements_text = f'{elements_text}\n... {pages_below:.1f} pages below - scroll to see more or extract structured data if you are looking for specific information ...'
+					elements_text = f'{elements_text}\n... {pages_below:.1f} pages below ...'
 			else:
 				elements_text = f'{elements_text}\n[End of page]'
 		else:
@@ -257,18 +259,28 @@ class AgentMessagePrompt:
 			pdf_message = (
 				'PDF viewer cannot be rendered. In this page, DO NOT use the extract action as PDF content cannot be rendered. '
 			)
-			pdf_message += 'Use the read_file action on the downloaded PDF in available_file_paths to read the full text content or scroll in the page to see images/figures if needed.\n\n'
+			pdf_message += (
+				'Use the read_file action on the downloaded PDF in available_file_paths to read the full text content.\n\n'
+			)
 
 		# Add recent events if available and requested
 		recent_events_text = ''
 		if self.include_recent_events and self.browser_state.recent_events:
 			recent_events_text = f'Recent browser events: {self.browser_state.recent_events}\n'
 
+		# Add closed popup messages if any
+		closed_popups_text = ''
+		if self.browser_state.closed_popup_messages:
+			closed_popups_text = 'Auto-closed JavaScript dialogs:\n'
+			for popup_msg in self.browser_state.closed_popup_messages:
+				closed_popups_text += f'  - {popup_msg}\n'
+			closed_popups_text += '\n'
+
 		browser_state = f"""{stats_text}{current_tab_text}
 Available tabs:
 {tabs_text}
 {page_info_text}
-{recent_events_text}{pdf_message}Interactive elements{truncated_text}:
+{recent_events_text}{closed_popups_text}{pdf_message}Interactive elements{truncated_text}:
 {elements_text}
 """
 		return browser_state
@@ -336,7 +348,10 @@ Available tabs:
 			state_description += self.page_filtered_actions + '\n'
 			state_description += '</page_specific_actions>\n'
 
-		if use_vision is True and self.screenshots:
+		# Check if we have images to include (from read_file action)
+		has_images = bool(self.read_state_images)
+
+		if (use_vision is True and self.screenshots) or has_images:
 			# Start with text description
 			content_parts: list[ContentPartTextParam | ContentPartImageParam] = [ContentPartTextParam(text=state_description)]
 
@@ -358,8 +373,36 @@ Available tabs:
 				content_parts.append(
 					ContentPartImageParam(
 						image_url=ImageURL(
-							url=f'data:image/jpeg;base64,{screenshot}',
-							media_type='image/jpeg',
+							url=f'data:image/png;base64,{screenshot}',
+							media_type='image/png',
+							detail=self.vision_detail_level,
+						),
+					)
+				)
+
+			# Add read_state images (from read_file action) before screenshots
+			for img_data in self.read_state_images:
+				img_name = img_data.get('name', 'unknown')
+				img_base64 = img_data.get('data', '')
+
+				if not img_base64:
+					continue
+
+				# Detect image format from name
+				if img_name.lower().endswith('.png'):
+					media_type = 'image/png'
+				else:
+					media_type = 'image/jpeg'
+
+				# Add label
+				content_parts.append(ContentPartTextParam(text=f'Image from file: {img_name}'))
+
+				# Add the image
+				content_parts.append(
+					ContentPartImageParam(
+						image_url=ImageURL(
+							url=f'data:{media_type};base64,{img_base64}',
+							media_type=media_type,
 							detail=self.vision_detail_level,
 						),
 					)
