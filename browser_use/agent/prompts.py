@@ -352,6 +352,15 @@ Available tabs:
 			logging.getLogger(__name__).warning(f'Failed to resize screenshot: {e}, using original')
 			return screenshot_b64
 
+	@staticmethod
+	def _sanitize_surrogates(text: str) -> str:
+		"""Remove surrogate characters that can't be encoded in UTF-8.
+
+		Surrogate pairs (U+D800 to U+DFFF) are invalid in UTF-8 when unpaired.
+		These often appear in DOM content from mathematical symbols or emojis.
+		"""
+		return text.encode('utf-8', errors='ignore').decode('utf-8')
+
 	@observe_debug(ignore_input=True, ignore_output=True, name='get_user_message')
 	def get_user_message(self, use_vision: bool = True) -> UserMessage:
 		"""Get complete state as a single cached message"""
@@ -381,6 +390,9 @@ Available tabs:
 			state_description += '<page_specific_actions>\n'
 			state_description += self.page_filtered_actions + '\n'
 			state_description += '</page_specific_actions>\n'
+
+		# Sanitize surrogates from all text content
+		state_description = self._sanitize_surrogates(state_description)
 
 		# Check if we have images to include (from read_file action)
 		has_images = bool(self.read_state_images)
