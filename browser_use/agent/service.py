@@ -7,7 +7,6 @@ import re
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Generic, Literal, TypeVar
 from urllib.parse import urlparse
@@ -33,6 +32,7 @@ from pydantic import BaseModel, ValidationError
 from uuid_extensions import uuid7str
 
 from browser_use import Browser, BrowserProfile, BrowserSession
+from browser_use.agent.judge import construct_judge_messages
 
 # Lazy import for gif to avoid heavy agent.views import at startup
 # from browser_use.agent.gif import create_history_gif
@@ -51,6 +51,7 @@ from browser_use.agent.views import (
 	AgentStepInfo,
 	AgentStructuredOutput,
 	BrowserStateHistory,
+	JudgementResult,
 	StepMetadata,
 )
 from browser_use.browser.session import DEFAULT_BROWSER_PROFILE
@@ -68,7 +69,6 @@ from browser_use.utils import (
 	_log_pretty_path,
 	check_latest_browser_use_version,
 	get_browser_use_version,
-	get_git_info,
 	time_execution_async,
 	time_execution_sync,
 )
@@ -150,7 +150,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		register_should_stop_callback: Callable[[], Awaitable[bool]] | None = None,
 		# Agent settings
 		output_model_schema: type[AgentStructuredOutput] | None = None,
-		use_vision: bool | Literal['auto'] = 'auto',
+		use_vision: bool | Literal['auto'] = True,
 		save_conversation_path: str | Path | None = None,
 		save_conversation_path_encoding: str | None = 'utf-8',
 		max_failures: int = 3,
@@ -164,6 +164,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		flash_mode: bool = False,
 		max_history_items: int | None = None,
 		page_extraction_llm: BaseChatModel | None = None,
+		use_judge: bool = True,
+		judge_llm: BaseChatModel | None = None,
 		injected_agent_state: AgentState | None = None,
 		source: str | None = None,
 		file_system_path: str | None = None,
@@ -199,6 +201,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		if page_extraction_llm is None:
 			page_extraction_llm = llm
+		if judge_llm is None:
+			judge_llm = llm
 		if available_file_paths is None:
 			available_file_paths = []
 
@@ -241,6 +245,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Core components
 		self.task = self._enhance_task_with_schema(task, output_model_schema)
 		self.llm = llm
+		self.judge_llm = judge_llm
 		self.directly_open_url = directly_open_url
 		self.include_recent_events = include_recent_events
 		self._url_shortening_limit = _url_shortening_limit
@@ -282,12 +287,14 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			llm_timeout=llm_timeout,
 			step_timeout=step_timeout,
 			final_response_after_failure=final_response_after_failure,
+			use_judge=use_judge,
 		)
 
 		# Token cost service
 		self.token_cost_service = TokenCost(include_cost=calculate_cost)
 		self.token_cost_service.register_llm(llm)
 		self.token_cost_service.register_llm(page_extraction_llm)
+		self.token_cost_service.register_llm(judge_llm)
 
 		# Initialize state
 		self.state = injected_agent_state or AgentState()
@@ -314,7 +321,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# only load url if no initial actions are provided
 		if self.directly_open_url and not self.state.follow_up_task and not initial_actions:
-			initial_url = self._extract_url_from_task(self.task)
+			initial_url = self._extract_start_url(self.task)
 			if initial_url:
 				self.logger.info(f'🔗 Found URL in task: {initial_url}, adding as initial action...')
 				initial_actions = [{'navigate': {'url': initial_url, 'new_tab': False}}]
@@ -626,6 +633,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self._message_manager.add_new_task(new_task)
 		# Mark as follow-up task and recreate eventbus (gets shut down after each run)
 		self.state.follow_up_task = True
+		# Reset control flags so agent can continue
+		self.state.stopped = False
+		self.state.paused = False
 		agent_id_suffix = str(self.id)[-4:].replace('-', '_')
 		if agent_id_suffix and agent_id_suffix[0].isdigit():
 			agent_id_suffix = 'a' + agent_id_suffix
@@ -901,6 +911,74 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.logger.debug('Force done action, because we reached max_failures.')
 			self._message_manager._add_context_message(UserMessage(content=msg))
 			self.AgentOutput = self.DoneAgentOutput
+
+	@observe(ignore_input=True, ignore_output=False)
+	async def _judge_trace(self) -> JudgementResult | None:
+		"""Judge the trace of the agent"""
+		task = self.task
+		final_result = self.history.final_result() or ''
+		agent_steps = self.history.agent_steps()
+		screenshot_paths = [p for p in self.history.screenshot_paths() if p is not None]
+
+		# Construct input messages for judge evaluation
+		input_messages = construct_judge_messages(
+			task=task,
+			final_result=final_result,
+			agent_steps=agent_steps,
+			screenshot_paths=screenshot_paths,
+			max_images=10,
+		)
+
+		# Call LLM with JudgementResult as output format
+		kwargs: dict = {'output_format': JudgementResult}
+
+		# Only pass request_type for ChatBrowserUse (other providers don't support it)
+		if self.judge_llm.provider == 'browser-use':
+			kwargs['request_type'] = 'judge'
+
+		try:
+			response = await self.judge_llm.ainvoke(input_messages, **kwargs)
+			judgement: JudgementResult = response.completion  # type: ignore[assignment]
+			return judgement
+		except Exception as e:
+			self.logger.error(f'Judge trace failed: {e}')
+			# Return a default judgement on failure
+			return None
+
+	async def _judge_and_log(self) -> None:
+		"""Run judge evaluation and log the verdict"""
+		judgement = await self._judge_trace()
+
+		# Attach judgement to last action result
+		if self.history.history[-1].result[-1].is_done:
+			last_result = self.history.history[-1].result[-1]
+			last_result.judgement = judgement
+
+			# Get self-reported success
+			self_reported_success = last_result.success
+
+			# Log the verdict based on self-reported success and judge verdict
+			if judgement:
+				# If both self-reported and judge agree on success, don't log
+				if self_reported_success is True and judgement.verdict is True:
+					return
+
+				judge_log = '\n'
+				# If agent reported success but judge thinks it failed, show warning
+				if self_reported_success is True and judgement.verdict is False:
+					judge_log += '⚠️  \033[33mAgent reported success but judge thinks task failed\033[0m\n'
+
+				# Otherwise, show full judge result
+				verdict_color = '\033[32m' if judgement.verdict else '\033[31m'
+				verdict_text = '✅ PASS' if judgement.verdict else '❌ FAIL'
+				judge_log += f'⚖️  {verdict_color}Judge Verdict: {verdict_text}\033[0m\n'
+				if judgement.failure_reason:
+					judge_log += f'   Failure Reason: {judgement.failure_reason}\n'
+				if judgement.reached_captcha:
+					judge_log += '   🤖 Captcha Detected: Agent encountered captcha challenges\n'
+					judge_log += '   👉 🥷 Use Browser Use Cloud for the most stealth browser infra: https://docs.browser-use.com/customize/browser/remote\n'
+				judge_log += f'   {judgement.reasoning}\n'
+				self.logger.info(judge_log)
 
 	async def _get_model_output_with_retry(self, input_messages: list[BaseMessage]) -> AgentOutput:
 		"""Get model output with retry logic for empty actions"""
@@ -1293,6 +1371,32 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			f'📍 Step {self.state.n_steps}: Ran {action_count} action{"" if action_count == 1 else "s"} in {step_duration:.2f}s: {status_str}'
 		)
 
+	def _log_final_outcome_messages(self) -> None:
+		"""Log helpful messages to user based on agent run outcome"""
+		# Check if agent failed
+		is_successful = self.history.is_successful()
+
+		if is_successful is False or is_successful is None:
+			# Get final result to check for specific failure reasons
+			final_result = self.history.final_result()
+			final_result_str = str(final_result).lower() if final_result else ''
+
+			# Check for captcha/cloudflare related failures
+			captcha_keywords = ['captcha', 'cloudflare', 'recaptcha', 'challenge', 'bot detection', 'access denied']
+			has_captcha_issue = any(keyword in final_result_str for keyword in captcha_keywords)
+
+			if has_captcha_issue:
+				# Suggest use_cloud=True for captcha/cloudflare issues
+				task_preview = self.task[:10] if len(self.task) > 10 else self.task
+				self.logger.info('')
+				self.logger.info('Failed because of CAPTCHA? For better browser stealth, try:')
+				self.logger.info(f'   agent = Agent(task="{task_preview}...", browser=Browser(use_cloud=True))')
+
+			# General failure message
+			self.logger.info('')
+			self.logger.info('Did the Agent not work as expected? Let us fix this!')
+			self.logger.info('   Open a short issue on GitHub: https://github.com/browser-use/browser-use/issues')
+
 	def _log_agent_event(self, max_steps: int, agent_run_error: str | None = None) -> None:
 		"""Sent the agent event for this run to telemetry"""
 
@@ -1315,6 +1419,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		final_res = self.history.final_result()
 		final_result_str = json.dumps(final_res) if final_res is not None else None
+
+		# Extract judgement data if available
+		judgement_data = self.history.judgement()
+		judge_verdict = judgement_data.get('verdict') if judgement_data else None
+		judge_reasoning = judgement_data.get('reasoning') if judgement_data else None
+		judge_failure_reason = judgement_data.get('failure_reason') if judgement_data else None
 
 		self.telemetry.capture(
 			AgentTelemetryEvent(
@@ -1342,6 +1452,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				success=self.history.is_successful(),
 				final_result_response=final_result_str,
 				error_message=agent_run_error,
+				judge_verdict=judge_verdict,
+				judge_reasoning=judge_reasoning,
+				judge_failure_reason=judge_failure_reason,
 			)
 		)
 
@@ -1375,8 +1488,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		return False, False
 
-	def _extract_url_from_task(self, task: str) -> str | None:
+	def _extract_start_url(self, task: str) -> str | None:
 		"""Extract URL from task string using naive pattern matching."""
+
 		import re
 
 		# Remove email addresses from task before looking for URLs
@@ -1388,17 +1502,119 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			r'(?:www\.)?[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,}(?:/[^\s<>"\']*)?',  # Domain names with subdomains and optional paths
 		]
 
+		# File extensions that should be excluded from URL detection
+		# These are likely files rather than web pages to navigate to
+		excluded_extensions = {
+			# Documents
+			'pdf',
+			'doc',
+			'docx',
+			'xls',
+			'xlsx',
+			'ppt',
+			'pptx',
+			'odt',
+			'ods',
+			'odp',
+			# Text files
+			'txt',
+			'md',
+			'csv',
+			'json',
+			'xml',
+			'yaml',
+			'yml',
+			# Archives
+			'zip',
+			'rar',
+			'7z',
+			'tar',
+			'gz',
+			'bz2',
+			'xz',
+			# Images
+			'jpg',
+			'jpeg',
+			'png',
+			'gif',
+			'bmp',
+			'svg',
+			'webp',
+			'ico',
+			# Audio/Video
+			'mp3',
+			'mp4',
+			'avi',
+			'mkv',
+			'mov',
+			'wav',
+			'flac',
+			'ogg',
+			# Code/Data
+			'py',
+			'js',
+			'css',
+			'java',
+			'cpp',
+			# Academic/Research
+			'bib',
+			'bibtex',
+			'tex',
+			'latex',
+			'cls',
+			'sty',
+			# Other common file types
+			'exe',
+			'msi',
+			'dmg',
+			'pkg',
+			'deb',
+			'rpm',
+			'iso',
+		}
+
+		excluded_words = {
+			'never',
+			'dont',
+			'not',
+			"don't",
+		}
+
 		found_urls = []
 		for pattern in patterns:
 			matches = re.finditer(pattern, task_without_emails)
 			for match in matches:
 				url = match.group(0)
+				original_position = match.start()  # Store original position before URL modification
 
 				# Remove trailing punctuation that's not part of URLs
 				url = re.sub(r'[.,;:!?()\[\]]+$', '', url)
-				# Add https:// if missing
+
+				# Check if URL ends with a file extension that should be excluded
+				url_lower = url.lower()
+				should_exclude = False
+				for ext in excluded_extensions:
+					if f'.{ext}' in url_lower:
+						should_exclude = True
+						break
+
+				if should_exclude:
+					self.logger.debug(f'Excluding URL with file extension from auto-navigation: {url}')
+					continue
+
+				# If in the 20 characters before the url position is a word in excluded_words skip to avoid "Never go to this url"
+				context_start = max(0, original_position - 20)
+				context_text = task_without_emails[context_start:original_position]
+				if any(word.lower() in context_text.lower() for word in excluded_words):
+					self.logger.debug(
+						f'Excluding URL with word in excluded words from auto-navigation: {url} (context: "{context_text.strip()}")'
+					)
+					continue
+
+				# Add https:// if missing (after excluded words check to avoid position calculation issues)
 				if not url.startswith(('http://', 'https://')):
 					url = 'https://' + url
+
 				found_urls.append(url)
 
 		unique_urls = list(set(found_urls))
@@ -1461,7 +1677,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		return False
 
-	@observe(name='agent.run', metadata={'task': '{{task}}', 'debug': '{{debug}}'})
+	@observe(name='agent.run', ignore_input=True, ignore_output=True)
 	@time_execution_async('--run')
 	async def run(
 		self,
@@ -1557,7 +1773,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				is_done = await self._execute_step(step, max_steps, step_info, on_step_start, on_step_end)
 
 				if is_done:
-					# Task completed
+					# Agent has marked the task as done
+					if self.settings.use_judge:
+						await self._judge_and_log()
 					break
 			else:
 				agent_run_error = 'Failed to complete task in maximum steps'
@@ -1639,6 +1857,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				if Path(output_path).exists():
 					output_event = await CreateAgentOutputFileEvent.from_agent_and_file(self, output_path)
 					self.eventbus.dispatch(output_event)
+
+			# Log final messages to user based on outcome
+			self._log_final_outcome_messages()
 
 			# Stop the event bus gracefully, waiting for all events to be processed
 			# Use longer timeout to avoid deadlocks in tests with multiple agents
@@ -1763,8 +1984,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# self._task_duration = self._task_end_time - self._task_start_time TODO: this is not working when using take_step
 		if self.history.is_successful():
 			self.logger.info('✅ Task completed successfully')
-		else:
-			self.logger.info('❌ Task completed without success')
 
 	async def rerun_history(
 		self,
@@ -2071,82 +2290,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.DoneAgentOutput = AgentOutput.type_with_custom_actions(self.DoneActionModel)
 		else:
 			self.DoneAgentOutput = AgentOutput.type_with_custom_actions_no_thinking(self.DoneActionModel)
-
-	def get_trace_object(self) -> dict[str, Any]:
-		"""Get the trace and trace_details objects for the agent"""
-
-		def extract_task_website(task_text: str) -> str | None:
-			url_pattern = r'https?://[^\s<>"\']+|www\.[^\s<>"\']+|[^\s<>"\']+\.[a-z]{2,}(?:/[^\s<>"\']*)?'
-			match = re.search(url_pattern, task_text, re.IGNORECASE)
-			return match.group(0) if match else None
-
-		def _get_complete_history_without_screenshots(history_data: dict[str, Any]) -> str:
-			if 'history' in history_data:
-				for item in history_data['history']:
-					if 'state' in item and 'screenshot' in item['state']:
-						item['state']['screenshot'] = None
-
-			return json.dumps(history_data)
-
-		# Generate autogenerated fields
-		trace_id = uuid7str()
-		timestamp = datetime.now().isoformat()
-
-		# Only declare variables that are used multiple times
-		structured_output = self.history.structured_output
-		structured_output_json = json.dumps(structured_output.model_dump()) if structured_output else None
-		final_result = self.history.final_result()
-		git_info = get_git_info()
-		action_history = self.history.action_history()
-		action_errors = self.history.errors()
-		urls = self.history.urls()
-		usage = self.history.usage
-
-		return {
-			'trace': {
-				# Autogenerated fields
-				'trace_id': trace_id,
-				'timestamp': timestamp,
-				'browser_use_version': get_browser_use_version(),
-				'git_info': json.dumps(git_info) if git_info else None,
-				# Direct agent properties
-				'model': self.llm.model,
-				'settings': json.dumps(self.settings.model_dump()) if self.settings else None,
-				'task_id': self.task_id,
-				'task_truncated': self.task[:20000] if len(self.task) > 20000 else self.task,
-				'task_website': extract_task_website(self.task),
-				# AgentHistoryList methods
-				'structured_output_truncated': (
-					structured_output_json[:20000]
-					if structured_output_json and len(structured_output_json) > 20000
-					else structured_output_json
-				),
-				'action_history_truncated': json.dumps(action_history) if action_history else None,
-				'action_errors': json.dumps(action_errors) if action_errors else None,
-				'urls': json.dumps(urls) if urls else None,
-				'final_result_response_truncated': (
-					final_result[:20000] if final_result and len(final_result) > 20000 else final_result
-				),
-				'self_report_completed': 1 if self.history.is_done() else 0,
-				'self_report_success': 1 if self.history.is_successful() else 0,
-				'duration': self.history.total_duration_seconds(),
-				'steps_taken': self.history.number_of_steps(),
-				'usage': json.dumps(usage.model_dump()) if usage else None,
-			},
-			'trace_details': {
-				# Autogenerated fields (ensure same as trace)
-				'trace_id': trace_id,
-				'timestamp': timestamp,
-				# Direct agent properties
-				'task': self.task,
-				# AgentHistoryList methods
-				'structured_output': structured_output_json,
-				'final_result_response': final_result,
-				'complete_history': _get_complete_history_without_screenshots(
-					self.history.model_dump(sensitive_data=self.sensitive_data)
-				),
-			},
-		}
 
 	async def authenticate_cloud_sync(self, show_instructions: bool = True) -> bool:
 		"""
