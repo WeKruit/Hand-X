@@ -557,11 +557,12 @@ class SessionManager:
 
 				# Get target to access url (from owned data)
 				target = self.get_target(new_target_id)
+				target_url = target.url if target else 'about:blank'
 
 				# Dispatch focus changed event
 				from browser_use.browser.events import AgentFocusChangedEvent
 
-				self.browser_session.event_bus.dispatch(AgentFocusChangedEvent(target_id=new_target_id, url=target.url))
+				self.browser_session.event_bus.dispatch(AgentFocusChangedEvent(target_id=new_target_id, url=target_url))
 				return
 
 			# Recovery failed - create emergency fallback tab
