@@ -398,7 +398,7 @@ class BrowserSession(BaseModel):
 	_cdp_client_root: CDPClient | None = PrivateAttr(default=None)
 
 	# PUBLIC: SessionManager instance (OWNS all targets and sessions - single source of truth)
-	session_manager: Any = Field(default=None, exclude=True)  # SessionManager - not serialized
+	session_manager: Any = Field(default=None, exclude=True)  # SessionManager
 
 	_cached_browser_state_summary: Any = PrivateAttr(default=None)
 	_cached_selector_map: dict[int, EnhancedDOMTreeNode] = PrivateAttr(default_factory=dict)

@@ -100,18 +100,18 @@ class PopupsWatchdog(BaseWatchdog):
 							self.logger.debug(f'Approach 1 failed: {type(e).__name__}')
 
 					# Approach 2: Try with current agent focus session
-					if not dismissed and self.browser_session._cdp_client_root and self.browser_session.agent_focus:
+					if not dismissed and self.browser_session._cdp_client_root and self.browser_session.agent_focus_target_id:
 						try:
-							self.logger.debug(
-								f'🔄 Approach 2: Using agent focus session {self.browser_session.agent_focus.session_id[-8:]}'
-							)
-							await asyncio.wait_for(
-								self.browser_session._cdp_client_root.send.Page.handleJavaScriptDialog(
-									params={'accept': should_accept},
-									session_id=self.browser_session.agent_focus.session_id,
-								),
-								timeout=0.5,
-							)
+							cdp_session = await self.browser_session.session_manager.get_focused_session()
+							if cdp_session:
+								self.logger.debug(f'🔄 Approach 2: Using agent focus session {cdp_session.session_id[-8:]}')
+								await asyncio.wait_for(
+									self.browser_session._cdp_client_root.send.Page.handleJavaScriptDialog(
+										params={'accept': should_accept},
+										session_id=cdp_session.session_id,
+									),
+									timeout=0.5,
+								)
 							dismissed = True
 							self.logger.info('✅ Dialog handled successfully via agent focus session')
 						except (TimeoutError, Exception) as e:
