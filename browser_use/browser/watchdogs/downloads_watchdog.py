@@ -135,7 +135,6 @@ class DownloadsWatchdog(BaseWatchdog):
 
 	async def on_NavigationCompleteEvent(self, event: NavigationCompleteEvent) -> None:
 		"""Check for PDFs after navigation completes."""
-		t0 = asyncio.get_event_loop().time()
 		self.logger.debug(f'[DownloadsWatchdog] NavigationCompleteEvent received for {event.url}, tab #{event.target_id[-4:]}')
 
 		# Clear PDF cache for the navigated URL since content may have changed
@@ -152,24 +151,13 @@ class DownloadsWatchdog(BaseWatchdog):
 		target_id = event.target_id
 		self.logger.debug(f'[DownloadsWatchdog] Got target_id={target_id} for tab #{event.target_id[-4:]}')
 
-		t1 = asyncio.get_event_loop().time()
 		is_pdf = await self.check_for_pdf_viewer(target_id)
-		t2 = asyncio.get_event_loop().time()
 
 		if is_pdf:
 			self.logger.debug(f'[DownloadsWatchdog] 📄 PDF detected at {event.url}, triggering auto-download...')
 			download_path = await self.trigger_pdf_download(target_id)
-			t3 = asyncio.get_event_loop().time()
 			if not download_path:
 				self.logger.warning(f'[DownloadsWatchdog] ⚠️ PDF download failed for {event.url}')
-		else:
-			t3 = t2
-
-		total_ms = (t3 - t0) * 1000
-		self.logger.info(
-			f'[DownloadsWatchdog] NavigationCompleteEvent completed ({total_ms:.0f}ms) '
-			f'[check_pdf:{(t2 - t1) * 1000:.0f}ms, download:{(t3 - t2) * 1000:.0f}ms]'
-		)
 
 	def _is_auto_download_enabled(self) -> bool:
 		"""Check if auto-download PDFs is enabled in browser profile."""
@@ -956,7 +944,6 @@ class DownloadsWatchdog(BaseWatchdog):
 		"""
 		self.logger.debug(f'[DownloadsWatchdog] Checking if target {target_id} is PDF viewer...')
 
-		# Get URL from session (zero CDP calls!)
 		session = await self.browser_session._session_manager.get_session_for_target(target_id)
 		if not session:
 			self.logger.warning(f'[DownloadsWatchdog] No session found for {target_id}')
@@ -977,15 +964,6 @@ class DownloadsWatchdog(BaseWatchdog):
 				self.logger.debug(f'[DownloadsWatchdog] PDF detected via URL pattern: {page_url}')
 				self._pdf_viewer_cache[page_url] = True
 				return True
-
-			# Method 2: Check network response headers via CDP (safer than JavaScript)
-			header_is_pdf = await self._check_network_headers_for_pdf(target_id)
-			if header_is_pdf:
-				self.logger.debug(f'[DownloadsWatchdog] PDF detected via network headers: {page_url}')
-				self._pdf_viewer_cache[page_url] = True
-				return True
-
-			# Method 3: Check Chrome's PDF viewer specific URLs
 			chrome_pdf_viewer = self._is_chrome_pdf_viewer_url(page_url)
 			if chrome_pdf_viewer:
 				self.logger.debug(f'[DownloadsWatchdog] Chrome PDF viewer detected: {page_url}')
