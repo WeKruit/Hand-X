@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from cdp_use.cdp.target import AttachedToTargetEvent, DetachedFromTargetEvent, SessionID, TargetID
 
 if TYPE_CHECKING:
-	from browser_use.browser.session import BrowserSession, CDPSession
+	from browser_use.browser.session import BrowserSession, CDPSession, Target
 
 
 class SessionManager:
@@ -23,16 +23,24 @@ class SessionManager:
 	- Multiple sessions can attach to the same target
 	- Targets only removed when ALL sessions detach
 	- No stale sessions - pool always reflects browser reality
+
+	SessionManager is the SINGLE SOURCE OF TRUTH for all targets and sessions.
 	"""
 
 	def __init__(self, browser_session: 'BrowserSession'):
 		self.browser_session = browser_session
 		self.logger = browser_session.logger
 
-		# Target -> set of sessions attached to it
+		# All targets (entities: pages, iframes, workers)
+		self._targets: dict[TargetID, 'Target'] = {}
+
+		# All sessions (communication channels)
+		self._sessions: dict[SessionID, 'CDPSession'] = {}
+
+		# Mapping: target -> sessions attached to it
 		self._target_sessions: dict[TargetID, set[SessionID]] = {}
 
-		# Session -> target mapping for reverse lookup
+		# Reverse mapping: session -> target it belongs to
 		self._session_to_target: dict[SessionID, TargetID] = {}
 
 		# Target -> type cache (page, iframe, worker, etc.) - types are immutable
@@ -86,7 +94,7 @@ class SessionManager:
 		await self._initialize_existing_targets()
 
 	async def get_session_for_target(self, target_id: TargetID) -> 'CDPSession | None':
-		"""Get the current valid session for a target.
+		"""Get ANY valid session for a target (picks first available).
 
 		Args:
 			target_id: Target ID to get session for
@@ -95,20 +103,45 @@ class SessionManager:
 			CDPSession if exists, None if target has detached
 		"""
 		async with self._lock:
-			return self.browser_session._cdp_session_pool.get(target_id)
+			# Get any session for this target (pick first)
+			session_ids = self._target_sessions.get(target_id, set())
+			if not session_ids:
+				return None
+			# Pick first session (deterministic with sorted for stability)
+			session_id = sorted(session_ids)[0]
+			return self._sessions.get(session_id)
 
-	def get_all_page_sessions(self) -> list['CDPSession']:
-		"""Get all page/tab sessions using cached pool.
+	def get_session_for_target_sync(self, target_id: TargetID) -> 'CDPSession | None':
+		"""Synchronous version: Get ANY valid session for a target.
+
+		Use this in sync contexts (properties, __init__, etc). No lock needed for read.
+
+		Args:
+			target_id: Target ID to get session for
 
 		Returns:
-			List of CDPSession objects for all page/tab targets
+			CDPSession if exists, None if target has detached
 		"""
-		page_sessions = []
-		for target_id, session in self.browser_session._cdp_session_pool.items():
+		# Get any session for this target (pick first) - no lock needed for read
+		session_ids = self._target_sessions.get(target_id, set())
+		if not session_ids:
+			return None
+		# Pick first session (deterministic with sorted for stability)
+		session_id = sorted(session_ids)[0]
+		return self._sessions.get(session_id)
+
+	def get_all_page_targets(self) -> list:
+		"""Get all page/tab targets using owned data.
+
+		Returns:
+			List of Target objects for all page/tab targets
+		"""
+		page_targets = []
+		for target_id, target in self._targets.items():
 			target_type = self._target_types.get(target_id, 'unknown')
 			if target_type in ('page', 'tab'):
-				page_sessions.append(session)
-		return page_sessions
+				page_targets.append(target)
+		return page_targets
 
 	async def validate_session(self, target_id: TargetID) -> bool:
 		"""Check if a target still has active sessions.
@@ -126,13 +159,16 @@ class SessionManager:
 			return len(self._target_sessions[target_id]) > 0
 
 	async def clear(self) -> None:
-		"""Clear all session tracking for cleanup."""
+		"""Clear all owned data structures for cleanup."""
 		async with self._lock:
+			# Clear owned data (single source of truth)
+			self._targets.clear()
+			self._sessions.clear()
 			self._target_sessions.clear()
 			self._session_to_target.clear()
 			self._target_types.clear()
 
-		self.logger.info('[SessionManager] Cleared all session tracking')
+		self.logger.info('[SessionManager] Cleared all owned data (targets, sessions, mappings)')
 
 	async def is_target_valid(self, target_id: TargetID) -> bool:
 		"""Check if a target is still valid and has active sessions.
@@ -158,6 +194,96 @@ class SessionManager:
 			Target ID if found, None otherwise
 		"""
 		return self._session_to_target.get(session_id)
+
+	def get_target(self, target_id: TargetID) -> 'Target | None':
+		"""Get target from owned data.
+
+		Args:
+			target_id: Target ID to get
+
+		Returns:
+			Target object if found, None otherwise
+		"""
+		return self._targets.get(target_id)
+
+	def get_all_targets(self) -> dict[TargetID, 'Target']:
+		"""Get all targets (read-only access to owned data).
+
+		Returns:
+			Dict mapping target_id to Target objects
+		"""
+		return self._targets
+
+	def get_all_target_ids(self) -> list[TargetID]:
+		"""Get all target IDs from owned data.
+
+		Returns:
+			List of all target IDs
+		"""
+		return list(self._targets.keys())
+
+	def get_all_sessions(self) -> dict[SessionID, 'CDPSession']:
+		"""Get all sessions (read-only access to owned data).
+
+		Returns:
+			Dict mapping session_id to CDPSession objects
+		"""
+		return self._sessions
+
+	def get_session(self, session_id: SessionID) -> 'CDPSession | None':
+		"""Get session from owned data.
+
+		Args:
+			session_id: Session ID to get
+
+		Returns:
+			CDPSession object if found, None otherwise
+		"""
+		return self._sessions.get(session_id)
+
+	def get_all_sessions_for_target(self, target_id: TargetID) -> list['CDPSession']:
+		"""Get ALL sessions attached to a target from owned data.
+
+		Args:
+			target_id: Target ID to get sessions for
+
+		Returns:
+			List of all CDPSession objects for this target
+		"""
+		session_ids = self._target_sessions.get(target_id, set())
+		return [self._sessions[sid] for sid in session_ids if sid in self._sessions]
+
+	def get_target_sessions_mapping(self) -> dict[TargetID, set[SessionID]]:
+		"""Get target->sessions mapping (read-only access).
+
+		Returns:
+			Dict mapping target_id to set of session_ids
+		"""
+		return self._target_sessions
+
+	def get_focused_target(self) -> 'Target | None':
+		"""Get the target that currently has agent focus.
+
+		Convenience method that uses browser_session.agent_focus_target_id.
+
+		Returns:
+			Target object if agent has focus, None otherwise
+		"""
+		if not self.browser_session.agent_focus_target_id:
+			return None
+		return self.get_target(self.browser_session.agent_focus_target_id)
+
+	async def get_focused_session(self) -> 'CDPSession | None':
+		"""Get a session for the currently focused target.
+
+		Convenience method that uses browser_session.agent_focus_target_id.
+
+		Returns:
+			CDPSession for focused target, None if no focus
+		"""
+		if not self.browser_session.agent_focus_target_id:
+			return None
+		return await self.get_session_for_target(self.browser_session.agent_focus_target_id)
 
 	async def _handle_target_attached(self, event: AttachedToTargetEvent) -> None:
 		"""Handle Target.attachedToTarget event.
@@ -200,36 +326,46 @@ class SessionManager:
 			if target_id not in self._target_types:
 				self._target_types[target_id] = target_type
 
-		# Create CDPSession wrapper and add to pool
-		if target_id not in self.browser_session._cdp_session_pool:
-			from browser_use.browser.session import CDPSession
+		# Create or update Target (source of truth for url/title)
+		if target_id not in self._targets:
+			from browser_use.browser.session import Target
 
-			assert self.browser_session._cdp_client_root is not None, 'Root CDP client required'
-
-			cdp_session = CDPSession(
-				cdp_client=self.browser_session._cdp_client_root,
+			target = Target(
 				target_id=target_id,
-				session_id=session_id,
-				title=target_info.get('title', 'Unknown title'),
+				target_type=target_type,
 				url=target_info.get('url', 'about:blank'),
+				title=target_info.get('title', 'Unknown title'),
 			)
-
-			self.browser_session._cdp_session_pool[target_id] = cdp_session
-
-			self.logger.debug(
-				f'[SessionManager] Created session for target {target_id[:8]}... '
-				f'(pool size: {len(self.browser_session._cdp_session_pool)})'
-			)
-
-			# Enable lifecycle events and network monitoring for page targets
-			if target_type in ('page', 'tab'):
-				await self._enable_page_monitoring(cdp_session)
+			self._targets[target_id] = target
+			self.logger.debug(f'[SessionManager] Created target {target_id[:8]}... (type={target_type})')
 		else:
-			# Update existing session with new session_id
-			existing = self.browser_session._cdp_session_pool[target_id]
-			existing.session_id = session_id
-			existing.title = target_info.get('title', existing.title)
-			existing.url = target_info.get('url', existing.url)
+			# Update existing target info
+			existing_target = self._targets[target_id]
+			existing_target.url = target_info.get('url', existing_target.url)
+			existing_target.title = target_info.get('title', existing_target.title)
+
+		# Create CDPSession (communication channel)
+		from browser_use.browser.session import CDPSession
+
+		assert self.browser_session._cdp_client_root is not None, 'Root CDP client required'
+
+		cdp_session = CDPSession(
+			cdp_client=self.browser_session._cdp_client_root,
+			target_id=target_id,
+			session_id=session_id,
+		)
+
+		# Add to sessions dict
+		self._sessions[session_id] = cdp_session
+
+		self.logger.debug(
+			f'[SessionManager] Created session {session_id[:8]}... for target {target_id[:8]}... '
+			f'(total sessions: {len(self._sessions)})'
+		)
+
+		# Enable lifecycle events and network monitoring for page targets
+		if target_type in ('page', 'tab'):
+			await self._enable_page_monitoring(cdp_session)
 
 		# Resume execution if waiting for debugger
 		if waiting_for_debugger:
@@ -242,7 +378,7 @@ class SessionManager:
 	async def _handle_target_info_changed(self, event: dict) -> None:
 		"""Handle Target.targetInfoChanged event.
 
-		Updates session title/URL without polling getTargetInfo().
+		Updates target title/URL without polling getTargetInfo().
 		Chrome fires this automatically when title or URL changes.
 		"""
 		target_info = event.get('targetInfo', {})
@@ -252,12 +388,12 @@ class SessionManager:
 			return
 
 		async with self._lock:
-			# Update session if it exists in pool
-			if target_id in self.browser_session._cdp_session_pool:
-				session = self.browser_session._cdp_session_pool[target_id]
+			# Update target if it exists (source of truth for url/title)
+			if target_id in self._targets:
+				target = self._targets[target_id]
 
-				session.title = target_info.get('title', session.title)
-				session.url = target_info.get('url', session.url)
+				target.title = target_info.get('title', target.title)
+				target.url = target_info.get('url', target.url)
 
 	async def _handle_target_detached(self, event: DetachedFromTargetEvent) -> None:
 		"""Handle Target.detachedFromTarget event.
@@ -295,21 +431,18 @@ class SessionManager:
 
 				# Only remove target when NO sessions remain
 				if remaining_sessions == 0:
-					self.logger.debug(f'[SessionManager] No sessions remain for target {target_id[:8]}..., removing from pool')
+					self.logger.debug(f'[SessionManager] No sessions remain for target {target_id[:8]}..., removing target')
 
 					target_fully_removed = True
 
 					# Check if agent_focus points to this target
-					agent_focus_lost = (
-						self.browser_session.agent_focus and self.browser_session.agent_focus.target_id == target_id
-					)
+					agent_focus_lost = self.browser_session.agent_focus_target_id == target_id
 
-					# Remove from pool
-					if target_id in self.browser_session._cdp_session_pool:
-						self.browser_session._cdp_session_pool.pop(target_id)
+					# Remove target (entity) from owned data
+					if target_id in self._targets:
+						self._targets.pop(target_id)
 						self.logger.debug(
-							f'[SessionManager] Removed target {target_id[:8]}... from pool '
-							f'(pool size: {len(self.browser_session._cdp_session_pool)})'
+							f'[SessionManager] Removed target {target_id[:8]}... (remaining targets: {len(self._targets)})'
 						)
 
 					# Clean up tracking
@@ -327,6 +460,13 @@ class SessionManager:
 			# Clean up target type cache if target fully removed
 			if target_id not in self._target_sessions and target_id in self._target_types:
 				del self._target_types[target_id]
+
+			# Remove session from owned sessions dict
+			if session_id in self._sessions:
+				self._sessions.pop(session_id)
+				self.logger.debug(
+					f'[SessionManager] Removed session {session_id[:8]}... (remaining sessions: {len(self._sessions)})'
+				)
 
 			# Remove from reverse mapping
 			if session_id in self._session_to_target:
@@ -359,10 +499,10 @@ class SessionManager:
 		# Prevent concurrent recovery attempts
 		async with self._recovery_lock:
 			# Check if another recovery already fixed agent_focus
-			if self.browser_session.agent_focus and self.browser_session.agent_focus.target_id != crashed_target_id:
+			if self.browser_session.agent_focus_target_id and self.browser_session.agent_focus_target_id != crashed_target_id:
 				self.logger.debug(
 					f'[SessionManager] Agent focus already recovered by concurrent operation '
-					f'(now: {self.browser_session.agent_focus.target_id[:8]}...), skipping recovery'
+					f'(now: {self.browser_session.agent_focus_target_id[:8]}...), skipping recovery'
 				)
 				return
 
@@ -373,14 +513,14 @@ class SessionManager:
 
 		try:
 			# Try to find another valid page target
-			page_sessions = self.get_all_page_sessions()
+			page_targets = self.get_all_page_targets()
 
 			new_target_id = None
 			is_existing_tab = False
 
-			if page_sessions:
+			if page_targets:
 				# Switch to most recent page that's not the crashed one
-				new_target_id = page_sessions[-1].target_id
+				new_target_id = page_targets[-1].target_id
 				is_existing_tab = True
 				self.logger.info(f'[SessionManager] Switching agent_focus to existing tab {new_target_id[:8]}...')
 			else:
@@ -403,7 +543,7 @@ class SessionManager:
 					break
 
 			if new_session:
-				self.browser_session.agent_focus = new_session
+				self.browser_session.agent_focus_target_id = new_target_id
 				self.logger.info(f'[SessionManager] ✅ Agent focus recovered: {new_target_id[:8]}...')
 
 				# Visually activate the tab in browser (only for existing tabs)
@@ -415,10 +555,13 @@ class SessionManager:
 					except Exception as e:
 						self.logger.debug(f'[SessionManager] Failed to activate tab visually: {e}')
 
+				# Get target to access url (from owned data)
+				target = self.get_target(new_target_id)
+
 				# Dispatch focus changed event
 				from browser_use.browser.events import AgentFocusChangedEvent
 
-				self.browser_session.event_bus.dispatch(AgentFocusChangedEvent(target_id=new_target_id, url=new_session.url))
+				self.browser_session.event_bus.dispatch(AgentFocusChangedEvent(target_id=new_target_id, url=target.url))
 				return
 
 			# Recovery failed - create emergency fallback tab
@@ -434,7 +577,7 @@ class SessionManager:
 				await asyncio.sleep(0.1)
 				fallback_session = await self.get_session_for_target(fallback_target_id)
 				if fallback_session:
-					self.browser_session.agent_focus = fallback_session
+					self.browser_session.agent_focus_target_id = fallback_target_id
 					self.logger.warning(f'[SessionManager] ⚠️ Agent focus set to emergency fallback: {fallback_target_id[:8]}...')
 
 					from browser_use.browser.events import AgentFocusChangedEvent, TabCreatedEvent
@@ -523,15 +666,18 @@ class SessionManager:
 			await asyncio.wait_for(ready_event.wait(), timeout=2.0)
 		except asyncio.TimeoutError:
 			# Timeout - count what's ready
-			ready_count = sum(
-				1
-				for tid in target_ids_to_wait_for
-				if tid in self.browser_session._cdp_session_pool
-				and (
-					self._target_types.get(tid) not in ('page', 'tab')
-					or hasattr(self.browser_session._cdp_session_pool[tid], '_lifecycle_events')
-				)
-			)
+			ready_count = 0
+			for tid in target_ids_to_wait_for:
+				session = await self.get_session_for_target(tid)
+				if session:
+					target_type = self._target_types.get(tid, 'unknown')
+					# For pages, verify monitoring is enabled
+					if target_type in ('page', 'tab'):
+						if hasattr(session, '_lifecycle_events') and session._lifecycle_events is not None:
+							ready_count += 1
+					else:
+						# Non-page targets don't need monitoring
+						ready_count += 1
 			self.logger.warning(
 				f'[SessionManager] Initialization timeout after 2.0s: {ready_count}/{len(target_ids_to_wait_for)} sessions ready'
 			)
