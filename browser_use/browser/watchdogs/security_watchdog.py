@@ -49,9 +49,6 @@ class SecurityWatchdog(BaseWatchdog):
 
 	async def on_NavigationCompleteEvent(self, event: NavigationCompleteEvent) -> None:
 		"""Check if navigated URL is allowed (catches redirects to blocked domains)."""
-		import asyncio
-		t0 = asyncio.get_event_loop().time()
-		
 		# Check if the navigated URL is allowed (in case of redirects)
 		if not self._is_url_allowed(event.url):
 			self.logger.warning(f'⛔️ Navigation to non-allowed URL detected: {event.url}')
@@ -73,9 +70,6 @@ class SecurityWatchdog(BaseWatchdog):
 			except Exception as e:
 				pass
 				self.logger.error(f'⛔️ Failed to navigate to about:blank: {type(e).__name__} {e}')
-		
-		total_ms = (asyncio.get_event_loop().time() - t0) * 1000
-		self.logger.info(f'[SecurityWatchdog] NavigationCompleteEvent completed ({total_ms:.0f}ms)')
 
 	async def on_TabCreatedEvent(self, event: TabCreatedEvent) -> None:
 		"""Check if new tab URL is allowed."""
