@@ -155,7 +155,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 		"""Handle click request with CDP."""
 		try:
 			# Check if session is alive before attempting any operations
-			if not self.browser_session.agent_focus or not self.browser_session.agent_focus.target_id:
+			if not self.browser_session.agent_focus_target_id:
 				error_msg = 'Cannot execute click: browser session is corrupted (target_id=None). Session may have crashed.'
 				self.logger.error(f'{error_msg}')
 				raise BrowserError(error_msg)
@@ -163,7 +163,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 			# Use the provided node
 			element_node = event.node
 			index_for_logging = element_node.backend_node_id or 'unknown'
-			starting_target_id = self.browser_session.agent_focus.target_id
+			starting_target_id = self.browser_session.agent_focus_target_id
 
 			# Check if element is a file input (should not be clicked)
 			if self.browser_session.is_file_input(element_node):
@@ -277,7 +277,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 	async def on_ScrollEvent(self, event: ScrollEvent) -> None:
 		"""Handle scroll request with CDP."""
 		# Check if we have a current target for scrolling
-		if not self.browser_session.agent_focus:
+		if not self.browser_session.agent_focus_target_id:
 			error_msg = 'No active target for scrolling'
 			raise BrowserError(error_msg)
 
@@ -1631,9 +1631,13 @@ class DefaultActionWatchdog(BaseWatchdog):
 		"""
 		try:
 			# Get CDP client and session
-			assert self.browser_session.agent_focus is not None, 'CDP session not initialized - browser may not be connected yet'
-			cdp_client = self.browser_session.agent_focus.cdp_client
-			session_id = self.browser_session.agent_focus.session_id
+			assert self.browser_session.agent_focus_target_id is not None, (
+				'CDP session not initialized - browser may not be connected yet'
+			)
+			cdp_session = await self.browser_session.session_manager.get_focused_session()
+			assert cdp_session is not None, 'No session for focused target'
+			cdp_client = cdp_session.cdp_client
+			session_id = cdp_session.session_id
 
 			# Get viewport dimensions
 			layout_metrics = await cdp_client.send.Page.getLayoutMetrics(session_id=session_id)
@@ -1778,8 +1782,12 @@ class DefaultActionWatchdog(BaseWatchdog):
 				self.logger.debug(f'Error getting frame session: {e}, using main session')
 
 		# Use main target session
-		assert self.browser_session.agent_focus is not None, 'CDP session not initialized - browser may not be connected yet'
-		return self.browser_session.agent_focus.session_id
+		assert self.browser_session.agent_focus_target_id is not None, (
+			'CDP session not initialized - browser may not be connected yet'
+		)
+		cdp_session = await self.browser_session.session_manager.get_focused_session()
+		assert cdp_session is not None, 'No session for focused target'
+		return cdp_session.session_id
 
 	async def on_GoBackEvent(self, event: GoBackEvent) -> None:
 		"""Handle navigate back request with CDP."""
@@ -2103,9 +2111,11 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 		# Get CDP client and session
 		cdp_client = self.browser_session.cdp_client
-		if self.browser_session.agent_focus is None:
+		if self.browser_session.agent_focus_target_id is None:
 			raise BrowserError('CDP session not initialized - browser may not be connected yet')
-		session_id = self.browser_session.agent_focus.session_id
+		cdp_session = await self.browser_session.session_manager.get_focused_session()
+		assert cdp_session is not None, 'No session for focused target'
+		session_id = cdp_session.session_id
 
 		# Enable DOM
 		await cdp_client.send.DOM.enable(session_id=session_id)

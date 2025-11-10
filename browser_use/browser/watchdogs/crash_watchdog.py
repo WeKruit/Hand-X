@@ -71,8 +71,8 @@ class CrashWatchdog(BaseWatchdog):
 
 	async def on_TabCreatedEvent(self, event: TabCreatedEvent) -> None:
 		"""Attach to new tab."""
-		assert self.browser_session.agent_focus is not None, 'No current target ID'
-		await self.attach_to_target(self.browser_session.agent_focus.target_id)
+		assert self.browser_session.agent_focus_target_id is not None, 'No current target ID'
+		await self.attach_to_target(self.browser_session.agent_focus_target_id)
 
 	async def on_TabClosedEvent(self, event: TabClosedEvent) -> None:
 		"""Clean up tracking when tab closes."""
@@ -163,8 +163,8 @@ class CrashWatchdog(BaseWatchdog):
 
 		is_agent_focus = (
 			target_info
-			and self.browser_session.agent_focus
-			and target_info['targetId'] == self.browser_session.agent_focus.target_id
+			and self.browser_session.agent_focus_target_id
+			and target_info['targetId'] == self.browser_session.agent_focus_target_id
 		)
 
 		if is_agent_focus and target_info:
@@ -280,7 +280,7 @@ class CrashWatchdog(BaseWatchdog):
 		"""Check if browser and targets are still responsive."""
 
 		try:
-			self.logger.debug(f'[CrashWatchdog] Checking browser health for target {self.browser_session.agent_focus}')
+			self.logger.debug(f'[CrashWatchdog] Checking browser health for target {self.browser_session.agent_focus_target_id}')
 			cdp_session = await self.browser_session.get_or_create_cdp_session()
 
 			for target in (await self.browser_session.cdp_client.send.Target.getTargets()).get('targetInfos', []):
@@ -300,10 +300,12 @@ class CrashWatchdog(BaseWatchdog):
 				cdp_session.cdp_client.send.Runtime.evaluate(params={'expression': '1+1'}, session_id=cdp_session.session_id),
 				timeout=1.0,
 			)
-			self.logger.debug(f'[CrashWatchdog] Browser health check passed for target {self.browser_session.agent_focus}')
+			self.logger.debug(
+				f'[CrashWatchdog] Browser health check passed for target {self.browser_session.agent_focus_target_id}'
+			)
 		except Exception as e:
 			self.logger.error(
-				f'[CrashWatchdog] ❌ Crashed/unresponsive session detected for target {self.browser_session.agent_focus} '
+				f'[CrashWatchdog] ❌ Crashed/unresponsive session detected for target {self.browser_session.agent_focus_target_id} '
 				f'error: {type(e).__name__}: {e} (Chrome will send detach event, SessionManager will auto-recover)'
 			)
 

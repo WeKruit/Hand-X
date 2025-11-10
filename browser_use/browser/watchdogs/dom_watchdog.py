@@ -100,7 +100,7 @@ class DOMWatchdog(BaseWatchdog):
 		from browser_use.browser.views import NetworkRequest
 
 		try:
-			if not self.browser_session.agent_focus:
+			if not self.browser_session.agent_focus_target_id:
 				return []
 
 			cdp_session = await self.browser_session.get_or_create_cdp_session(focus=True)
@@ -257,9 +257,11 @@ class DOMWatchdog(BaseWatchdog):
 		self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: STARTING browser state request')
 		page_url = await self.browser_session.get_current_page_url()
 		self.logger.debug(f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: Got page URL: {page_url}')
-		if self.browser_session.agent_focus:
+		if self.browser_session.agent_focus_target_id:
+			cdp_session = await self.browser_session.session_manager.get_focused_session()
+			session_id = cdp_session.session_id if cdp_session else 'unknown'
 			self.logger.debug(
-				f'Current page URL: {page_url}, target_id: {self.browser_session.agent_focus.target_id}, session_id: {self.browser_session.agent_focus.session_id}'
+				f'Current page URL: {page_url}, target_id: {self.browser_session.agent_focus_target_id}, session_id: {session_id}'
 			)
 		else:
 			self.logger.debug(f'Current page URL: {page_url}, no cdp_session attached')
@@ -612,8 +614,8 @@ class DOMWatchdog(BaseWatchdog):
 			self.logger.debug('🔍 DOMWatchdog._capture_clean_screenshot: Capturing clean screenshot...')
 
 			# Ensure we have a focused CDP session
-			assert self.browser_session.agent_focus is not None, 'No current target ID'
-			await self.browser_session.get_or_create_cdp_session(target_id=self.browser_session.agent_focus.target_id, focus=True)
+			assert self.browser_session.agent_focus_target_id is not None, 'No current target ID'
+			await self.browser_session.get_or_create_cdp_session(target_id=self.browser_session.agent_focus_target_id, focus=True)
 
 			# Check if handler is registered
 			handlers = self.event_bus.handlers.get('ScreenshotEvent', [])
@@ -706,11 +708,11 @@ class DOMWatchdog(BaseWatchdog):
 		from browser_use.browser.views import PageInfo
 
 		# Get CDP session for the current target
-		if not self.browser_session.agent_focus:
+		if not self.browser_session.agent_focus_target_id:
 			raise RuntimeError('No active CDP session - browser may not be connected yet')
 
 		cdp_session = await self.browser_session.get_or_create_cdp_session(
-			target_id=self.browser_session.agent_focus.target_id, focus=True
+			target_id=self.browser_session.agent_focus_target_id, focus=True
 		)
 
 		# Get layout metrics which includes all the information we need

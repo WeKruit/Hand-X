@@ -1303,13 +1303,10 @@ class BrowserUseApp(App):
 						pass
 
 					# Show the agent's current page URL if available
-					if browser_session.agent_focus:
-						current_url = (
-							browser_session.agent_focus.url.replace('https://', '')
-							.replace('http://', '')
-							.replace('www.', '')[:36]
-							+ '…'
-						)
+					if browser_session.agent_focus_target_id:
+						target = browser_session.session_manager.get_focused_target()
+						target_url = target.url if target else 'about:blank'
+						current_url = target_url.replace('https://', '').replace('http://', '').replace('www.', '')[:36] + '…'
 						browser_info.write(f'👁️  [green]{current_url}[/]')
 			except Exception as e:
 				browser_info.write(f'[red]Error updating browser info: {str(e)}[/]')
