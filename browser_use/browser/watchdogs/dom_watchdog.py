@@ -284,7 +284,8 @@ class DOMWatchdog(BaseWatchdog):
 			self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: ⏳ Waiting for page stability...')
 			try:
 				if pending_requests_before_wait:
-					await asyncio.sleep(1)
+					# Reduced from 1s to 0.3s for faster DOM builds while still allowing critical resources to load
+					await asyncio.sleep(0.3)
 				self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: ✅ Page stability complete')
 			except Exception as e:
 				self.logger.warning(
@@ -396,34 +397,6 @@ class DOMWatchdog(BaseWatchdog):
 				except Exception as e:
 					self.logger.warning(f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: Clean screenshot failed: {e}')
 					screenshot_b64 = None
-
-			# Apply Python-based highlighting if both DOM and screenshot are available
-			# COMMENTED OUT: Removes highlight numbers from screenshots for code-use mode
-			if (
-				False
-				and screenshot_b64
-				and content
-				and content.selector_map
-				and self.browser_session.browser_profile.highlight_elements
-			):
-				try:
-					self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: 🎨 Applying Python-based highlighting...')
-					from browser_use.browser.python_highlights import create_highlighted_screenshot_async
-
-					# Get CDP session for viewport info
-					cdp_session = await self.browser_session.get_or_create_cdp_session()
-					start = time.time()
-					screenshot_b64 = await create_highlighted_screenshot_async(
-						screenshot_b64,
-						content.selector_map,
-						cdp_session,
-						self.browser_session.browser_profile.filter_highlight_ids,
-					)
-					self.logger.debug(
-						f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: ✅ Applied highlights to {len(content.selector_map)} elements in {time.time() - start:.2f}s'
-					)
-				except Exception as e:
-					self.logger.warning(f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: Python highlighting failed: {e}')
 
 			# Add browser-side highlights for user visibility
 			if content and content.selector_map and self.browser_session.browser_profile.dom_highlight_elements:
@@ -575,12 +548,22 @@ class DOMWatchdog(BaseWatchdog):
 				previous_cached_state=previous_state,
 			)
 			end = time.time()
+			total_time_ms = (end - start) * 1000
 			self.logger.debug(
 				'🔍 DOMWatchdog._build_dom_tree_without_highlights: ✅ DomService.get_serialized_dom_tree completed'
 			)
 
-			self.logger.debug(f'Time taken to get DOM tree: {end - start} seconds')
-			self.logger.debug(f'Timing breakdown: {timing_info}')
+			# Calculate sum of all tracked timings
+			tracked_time_ms = sum(timing_info.values())
+			untracked_time_ms = total_time_ms - tracked_time_ms
+
+			# Format timing values to 2 decimal places
+			timing_formatted = {k: round(v, 2) for k, v in timing_info.items()}
+
+			self.logger.debug(f'⏱️ Total DOM tree time: {total_time_ms:.2f}ms')
+			self.logger.debug(f'📊 Timing breakdown (all in ms): {timing_formatted}')
+			if untracked_time_ms > 1.0:  # Only log if significant
+				self.logger.debug(f'⚠️ Untracked time: {untracked_time_ms:.2f}ms')
 
 			# Update selector map for other watchdogs
 			self.logger.debug('🔍 DOMWatchdog._build_dom_tree_without_highlights: Updating selector maps...')
@@ -641,25 +624,6 @@ class DOMWatchdog(BaseWatchdog):
 		except Exception as e:
 			self.logger.warning(f'📸 Clean screenshot failed: {type(e).__name__}: {e}')
 			raise
-
-	async def _wait_for_stable_network(self):
-		"""Wait for page stability - simplified for CDP-only branch."""
-		start_time = time.time()
-
-		# Apply minimum wait time first (let page settle)
-		min_wait = self.browser_session.browser_profile.minimum_wait_page_load_time
-		if min_wait > 0:
-			self.logger.debug(f'⏳ Minimum wait: {min_wait}s')
-			await asyncio.sleep(min_wait)
-
-		# Apply network idle wait time (for dynamic content like iframes)
-		network_idle_wait = self.browser_session.browser_profile.wait_for_network_idle_page_load_time
-		if network_idle_wait > 0:
-			self.logger.debug(f'⏳ Network idle wait: {network_idle_wait}s')
-			await asyncio.sleep(network_idle_wait)
-
-		elapsed = time.time() - start_time
-		self.logger.debug(f'✅ Page stability wait completed in {elapsed:.2f}s')
 
 	def _detect_pagination_buttons(self, selector_map: dict[int, EnhancedDOMTreeNode]) -> list['PaginationButton']:
 		"""Detect pagination buttons from the DOM selector map.
