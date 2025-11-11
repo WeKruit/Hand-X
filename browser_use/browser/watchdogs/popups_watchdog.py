@@ -102,7 +102,7 @@ class PopupsWatchdog(BaseWatchdog):
 					# Approach 2: Try with current agent focus session
 					if not dismissed and self.browser_session._cdp_client_root and self.browser_session.agent_focus_target_id:
 						try:
-							cdp_session = await self.browser_session.session_manager.get_focused_session()
+							cdp_session = self.browser_session.session_manager.get_focused_session()
 							if cdp_session:
 								self.logger.debug(f'🔄 Approach 2: Using agent focus session {cdp_session.session_id[-8:]}')
 								await asyncio.wait_for(

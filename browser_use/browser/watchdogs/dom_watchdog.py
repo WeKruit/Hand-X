@@ -258,7 +258,7 @@ class DOMWatchdog(BaseWatchdog):
 		page_url = await self.browser_session.get_current_page_url()
 		self.logger.debug(f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: Got page URL: {page_url}')
 		if self.browser_session.agent_focus_target_id:
-			cdp_session = await self.browser_session.session_manager.get_focused_session()
+			cdp_session = self.browser_session.session_manager.get_focused_session()
 			session_id = cdp_session.session_id if cdp_session else 'unknown'
 			self.logger.debug(
 				f'Current page URL: {page_url}, target_id: {self.browser_session.agent_focus_target_id}, session_id: {session_id}'

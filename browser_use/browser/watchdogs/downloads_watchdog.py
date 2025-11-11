@@ -90,7 +90,7 @@ class DownloadsWatchdog(BaseWatchdog):
 
 	async def on_BrowserStateRequestEvent(self, event: BrowserStateRequestEvent) -> None:
 		"""Handle browser state request events."""
-		cdp_session = await self.browser_session.session_manager.get_focused_session()
+		cdp_session = self.browser_session.session_manager.get_focused_session()
 		if not cdp_session:
 			return
 
@@ -944,7 +944,7 @@ class DownloadsWatchdog(BaseWatchdog):
 		"""
 		self.logger.debug(f'[DownloadsWatchdog] Checking if target {target_id} is PDF viewer...')
 
-		session = await self.browser_session.session_manager.get_session_for_target(target_id)
+		session = self.browser_session.session_manager.get_session_for_target(target_id)
 		if not session:
 			self.logger.warning(f'[DownloadsWatchdog] No session found for {target_id}')
 			return False

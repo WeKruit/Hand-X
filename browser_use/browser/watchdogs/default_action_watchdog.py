@@ -1634,7 +1634,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 			assert self.browser_session.agent_focus_target_id is not None, (
 				'CDP session not initialized - browser may not be connected yet'
 			)
-			cdp_session = await self.browser_session.session_manager.get_focused_session()
+			cdp_session = self.browser_session.session_manager.get_focused_session()
 			assert cdp_session is not None, 'No session for focused target'
 			cdp_client = cdp_session.cdp_client
 			session_id = cdp_session.session_id
@@ -1785,7 +1785,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 		assert self.browser_session.agent_focus_target_id is not None, (
 			'CDP session not initialized - browser may not be connected yet'
 		)
-		cdp_session = await self.browser_session.session_manager.get_focused_session()
+		cdp_session = self.browser_session.session_manager.get_focused_session()
 		assert cdp_session is not None, 'No session for focused target'
 		return cdp_session.session_id
 
@@ -2113,7 +2113,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 		cdp_client = self.browser_session.cdp_client
 		if self.browser_session.agent_focus_target_id is None:
 			raise BrowserError('CDP session not initialized - browser may not be connected yet')
-		cdp_session = await self.browser_session.session_manager.get_focused_session()
+		cdp_session = self.browser_session.session_manager.get_focused_session()
 		assert cdp_session is not None, 'No session for focused target'
 		session_id = cdp_session.session_id
 
