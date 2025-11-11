@@ -46,10 +46,7 @@ class SessionManager:
 		# Target -> type cache (page, iframe, worker, etc.) - types are immutable
 		self._target_types: dict[TargetID, str] = {}
 
-		# Lock for thread-safe access
 		self._lock = asyncio.Lock()
-
-		# Lock for recovery to prevent concurrent recovery attempts
 		self._recovery_lock = asyncio.Lock()
 
 	async def start_monitoring(self) -> None:
@@ -93,7 +90,7 @@ class SessionManager:
 		# Discover and initialize ALL existing targets
 		await self._initialize_existing_targets()
 
-	async def get_session_for_target(self, target_id: TargetID) -> 'CDPSession | None':
+	def get_session_for_target(self, target_id: TargetID) -> 'CDPSession | None':
 		"""Get ANY valid session for a target (picks first available).
 
 		Args:
@@ -102,33 +99,10 @@ class SessionManager:
 		Returns:
 			CDPSession if exists, None if target has detached
 		"""
-		async with self._lock:
-			# Get any session for this target (pick first)
-			session_ids = self._target_sessions.get(target_id, set())
-			if not session_ids:
-				return None
-			# Pick first session (deterministic with sorted for stability)
-			session_id = sorted(session_ids)[0]
-			return self._sessions.get(session_id)
-
-	def get_session_for_target_sync(self, target_id: TargetID) -> 'CDPSession | None':
-		"""Synchronous version: Get ANY valid session for a target.
-
-		Use this in sync contexts (properties, __init__, etc). No lock needed for read.
-
-		Args:
-			target_id: Target ID to get session for
-
-		Returns:
-			CDPSession if exists, None if target has detached
-		"""
-		# Get any session for this target (pick first) - no lock needed for read
 		session_ids = self._target_sessions.get(target_id, set())
 		if not session_ids:
 			return None
-		# Pick first session (deterministic with sorted for stability)
-		session_id = sorted(session_ids)[0]
-		return self._sessions.get(session_id)
+		return self._sessions.get(next(iter(session_ids)))
 
 	def get_all_page_targets(self) -> list:
 		"""Get all page/tab targets using owned data.
@@ -152,11 +126,9 @@ class SessionManager:
 		Returns:
 			True if target has active sessions, False if it should be removed
 		"""
-		async with self._lock:
-			if target_id not in self._target_sessions:
-				return False
-
-			return len(self._target_sessions[target_id]) > 0
+		if target_id not in self._target_sessions:
+			return False
+		return len(self._target_sessions[target_id]) > 0
 
 	async def clear(self) -> None:
 		"""Clear all owned data structures for cleanup."""
@@ -179,13 +151,12 @@ class SessionManager:
 		Returns:
 			True if target is valid and has active sessions, False otherwise
 		"""
-		async with self._lock:
-			if target_id not in self._target_sessions:
-				return False
-			return len(self._target_sessions[target_id]) > 0
+		if target_id not in self._target_sessions:
+			return False
+		return len(self._target_sessions[target_id]) > 0
 
 	def get_target_id_from_session_id(self, session_id: SessionID) -> TargetID | None:
-		"""Look up which target a session belongs to (sync, no lock needed).
+		"""Look up which target a session belongs to.
 
 		Args:
 			session_id: The session ID to look up
@@ -273,17 +244,15 @@ class SessionManager:
 			return None
 		return self.get_target(self.browser_session.agent_focus_target_id)
 
-	async def get_focused_session(self) -> 'CDPSession | None':
+	def get_focused_session(self) -> 'CDPSession | None':
 		"""Get a session for the currently focused target.
-
-		Convenience method that uses browser_session.agent_focus_target_id.
 
 		Returns:
 			CDPSession for focused target, None if no focus
 		"""
 		if not self.browser_session.agent_focus_target_id:
 			return None
-		return await self.get_session_for_target(self.browser_session.agent_focus_target_id)
+		return self.get_session_for_target(self.browser_session.agent_focus_target_id)
 
 	async def _handle_target_attached(self, event: AttachedToTargetEvent) -> None:
 		"""Handle Target.attachedToTarget event.
@@ -538,7 +507,7 @@ class SessionManager:
 			new_session = None
 			for attempt in range(20):  # Wait up to 2 seconds
 				await asyncio.sleep(0.1)
-				new_session = await self.get_session_for_target(new_target_id)
+				new_session = self.get_session_for_target(new_target_id)
 				if new_session:
 					break
 
@@ -576,7 +545,7 @@ class SessionManager:
 			# Try one more time with fallback
 			for _ in range(20):
 				await asyncio.sleep(0.1)
-				fallback_session = await self.get_session_for_target(fallback_target_id)
+				fallback_session = self.get_session_for_target(fallback_target_id)
 				if fallback_session:
 					self.browser_session.agent_focus_target_id = fallback_target_id
 					self.logger.warning(f'[SessionManager] ⚠️ Agent focus set to emergency fallback: {fallback_target_id[:8]}...')
@@ -642,7 +611,7 @@ class SessionManager:
 			while True:
 				ready_count = 0
 				for tid in target_ids_to_wait_for:
-					session = await self.get_session_for_target(tid)
+					session = self.get_session_for_target(tid)
 					if session:
 						target_type = self._target_types.get(tid, 'unknown')
 						# For pages, verify monitoring is enabled
@@ -669,7 +638,7 @@ class SessionManager:
 			# Timeout - count what's ready
 			ready_count = 0
 			for tid in target_ids_to_wait_for:
-				session = await self.get_session_for_target(tid)
+				session = self.get_session_for_target(tid)
 				if session:
 					target_type = self._target_types.get(tid, 'unknown')
 					# For pages, verify monitoring is enabled
