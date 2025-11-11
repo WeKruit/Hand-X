@@ -4,6 +4,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 # Action Input Models
+class ExtractAction(BaseModel):
+	query: str
+	extract_links: bool = Field(
+		default=False, description='Set True to true if the query requires links, else false to safe tokens'
+	)
+	start_from_char: int = Field(
+		default=0, description='Use this for long markdowns to start from a specific character (not index in browser_state)'
+	)
+
+
 class SearchAction(BaseModel):
 	query: str
 	engine: str = Field(
@@ -73,10 +83,6 @@ class SendKeysAction(BaseModel):
 class UploadFileAction(BaseModel):
 	index: int
 	path: str
-
-
-class ExtractPageContentAction(BaseModel):
-	value: str
 
 
 class NoParamsAction(BaseModel):
