@@ -333,7 +333,7 @@ class TestToolsIntegration:
 		await tools.navigate(url=f'{base_url}/dropdown1', new_tab=False, browser_session=browser_session)
 
 		# Wait for the page to load using CDP
-		cdp_session = browser_session.agent_focus
+		cdp_session = await browser_session.get_or_create_cdp_session()
 		assert cdp_session is not None, 'CDP session not initialized'
 
 		# Wait for page load by checking document ready state
@@ -445,7 +445,7 @@ class TestToolsIntegration:
 		await tools.navigate(url=f'{base_url}/dropdown2', new_tab=False, browser_session=browser_session)
 
 		# Wait for the page to load using CDP
-		cdp_session = browser_session.agent_focus
+		cdp_session = await browser_session.get_or_create_cdp_session()
 		assert cdp_session is not None, 'CDP session not initialized'
 
 		# Wait for page load by checking document ready state
