@@ -14,7 +14,6 @@ from browser_use.dom.enhanced_snapshot import (
 )
 from browser_use.dom.serializer.serializer import DOMTreeSerializer
 from browser_use.dom.views import (
-	CurrentPageTargets,
 	DOMRect,
 	EnhancedAXNode,
 	EnhancedAXProperty,
@@ -63,49 +62,6 @@ class DomService:
 
 	async def __aexit__(self, exc_type, exc_value, traceback):
 		pass  # no need to cleanup anything, browser_session auto handles cleaning up session cache
-
-	async def _get_targets_for_page(self, target_id: TargetID | None = None) -> CurrentPageTargets:
-		"""Get the target info for a specific page.
-
-		Args:
-			target_id: The target ID to get info for. If None, uses current_target_id.
-		"""
-		targets = await self.browser_session.cdp_client.send.Target.getTargets()
-
-		# Use provided target_id or fall back to current_target_id
-		if target_id is None:
-			target_id = self.browser_session.current_target_id
-			if not target_id:
-				raise ValueError('No current target ID set in browser session')
-
-		# Find main page target by ID
-		main_target = next((t for t in targets['targetInfos'] if t['targetId'] == target_id), None)
-
-		if not main_target:
-			raise ValueError(f'No target found for target ID: {target_id}')
-
-		# Get all frames using the new method to find iframe targets for this page
-		all_frames, _ = await self.browser_session.get_all_frames()
-
-		# Find iframe targets that are children of this target
-		iframe_targets = []
-		for frame_info in all_frames.values():
-			# Check if this frame is a cross-origin iframe with its own target
-			if frame_info.get('isCrossOrigin') and frame_info.get('frameTargetId'):
-				# Check if this frame belongs to our target
-				parent_target = frame_info.get('parentTargetId', frame_info.get('frameTargetId'))
-				if parent_target == target_id:
-					# Find the target info for this iframe
-					iframe_target = next(
-						(t for t in targets['targetInfos'] if t['targetId'] == frame_info['frameTargetId']), None
-					)
-					if iframe_target:
-						iframe_targets.append(iframe_target)
-
-		return CurrentPageTargets(
-			page_session=main_target,
-			iframe_sessions=iframe_targets,
-		)
 
 	def _build_enhanced_ax_node(self, ax_node: AXNode) -> EnhancedAXNode:
 		properties: list[EnhancedAXProperty] | None = None
@@ -451,38 +407,55 @@ class DomService:
 	async def get_dom_tree(
 		self,
 		target_id: TargetID,
+		all_frames: dict,
 		initial_html_frames: list[EnhancedDOMTreeNode] | None = None,
 		initial_total_frame_offset: DOMRect | None = None,
 		iframe_depth: int = 0,
-	) -> EnhancedDOMTreeNode:
+	) -> tuple[EnhancedDOMTreeNode, dict[str, float]]:
 		"""Get the DOM tree for a specific target.
 
 		Args:
 			target_id: Target ID of the page to get the DOM tree for.
+			all_frames: Pre-fetched frame hierarchy to avoid redundant CDP calls (required)
 			initial_html_frames: List of HTML frame nodes encountered so far
 			initial_total_frame_offset: Accumulated coordinate offset
 			iframe_depth: Current depth of iframe nesting to prevent infinite recursion
-		"""
 
+		Returns:
+			Tuple of (enhanced_dom_tree_node, timing_info)
+		"""
+		timing_info: dict[str, float] = {}
+
+		# Get all trees from CDP (snapshot, DOM, AX, viewport ratio)
+		start_cdp = time.time()
 		trees = await self._get_all_trees(target_id)
+		timing_info['cdp_calls_ms'] = (time.time() - start_cdp) * 1000
 
 		dom_tree = trees.dom_tree
 		ax_tree = trees.ax_tree
 		snapshot = trees.snapshot
 		device_pixel_ratio = trees.device_pixel_ratio
 
+		# Build AX tree lookup
+		start_ax_lookup = time.time()
 		ax_tree_lookup: dict[int, AXNode] = {
 			ax_node['backendDOMNodeId']: ax_node for ax_node in ax_tree['nodes'] if 'backendDOMNodeId' in ax_node
 		}
+		timing_info['build_ax_lookup_ms'] = (time.time() - start_ax_lookup) * 1000
 
 		enhanced_dom_tree_node_lookup: dict[int, EnhancedDOMTreeNode] = {}
 		""" NodeId (NOT backend node id) -> enhanced dom tree node"""  # way to get the parent/content node
 
 		# Parse snapshot data with everything calculated upfront
+		start_snapshot_lookup = time.time()
 		snapshot_lookup = build_snapshot_lookup(snapshot, device_pixel_ratio)
+		timing_info['build_snapshot_lookup_ms'] = (time.time() - start_snapshot_lookup) * 1000
 
 		async def _construct_enhanced_node(
-			node: Node, html_frames: list[EnhancedDOMTreeNode] | None, total_frame_offset: DOMRect | None
+			node: Node,
+			html_frames: list[EnhancedDOMTreeNode] | None,
+			total_frame_offset: DOMRect | None,
+			all_frames: dict,
 		) -> EnhancedDOMTreeNode:
 			"""
 			Recursively construct enhanced DOM tree nodes.
@@ -490,7 +463,8 @@ class DomService:
 			Args:
 				node: The DOM node to construct
 				html_frames: List of HTML frame nodes encountered so far
-				accumulated_iframe_offset: Accumulated coordinate translation from parent iframes (includes scroll corrections)
+				total_frame_offset: Accumulated coordinate translation from parent iframes (includes scroll corrections)
+				all_frames: Pre-fetched frame hierarchy to avoid redundant CDP calls
 			"""
 
 			# Initialize lists if not provided
@@ -597,7 +571,7 @@ class DomService:
 
 			if 'contentDocument' in node and node['contentDocument']:
 				dom_tree_node.content_document = await _construct_enhanced_node(
-					node['contentDocument'], updated_html_frames, total_frame_offset
+					node['contentDocument'], updated_html_frames, total_frame_offset, all_frames
 				)
 				dom_tree_node.content_document.parent_node = dom_tree_node
 				# forcefully set the parent node to the content document node (helps traverse the tree)
@@ -605,7 +579,9 @@ class DomService:
 			if 'shadowRoots' in node and node['shadowRoots']:
 				dom_tree_node.shadow_roots = []
 				for shadow_root in node['shadowRoots']:
-					shadow_root_node = await _construct_enhanced_node(shadow_root, updated_html_frames, total_frame_offset)
+					shadow_root_node = await _construct_enhanced_node(
+						shadow_root, updated_html_frames, total_frame_offset, all_frames
+					)
 					# forcefully set the parent node to the shadow root node (helps traverse the tree)
 					shadow_root_node.parent_node = dom_tree_node
 					dom_tree_node.shadow_roots.append(shadow_root_node)
@@ -623,7 +599,7 @@ class DomService:
 					if child['nodeId'] in shadow_root_node_ids:
 						continue
 					dom_tree_node.children_nodes.append(
-						await _construct_enhanced_node(child, updated_html_frames, total_frame_offset)
+						await _construct_enhanced_node(child, updated_html_frames, total_frame_offset, all_frames)
 					)
 
 			# Set visibility using the collected HTML frames
@@ -684,10 +660,9 @@ class DomService:
 						self.logger.debug('Skipping invisible cross-origin iframe')
 
 					if should_process_iframe:
-						# Use get_all_frames to find the iframe's target
+						# Use pre-fetched all_frames to find the iframe's target (no redundant CDP call)
 						frame_id = node.get('frameId', None)
 						if frame_id:
-							all_frames, _ = await self.browser_session.get_all_frames()
 							frame_info = all_frames.get(frame_id)
 							iframe_document_target = None
 							if frame_info and frame_info.get('frameTargetId'):
@@ -703,8 +678,9 @@ class DomService:
 							self.logger.debug(
 								f'Getting content document for iframe {node.get("frameId", None)} at depth {iframe_depth + 1}'
 							)
-							content_document = await self.get_dom_tree(
+							content_document, _ = await self.get_dom_tree(
 								target_id=iframe_document_target.get('targetId'),
+								all_frames=all_frames,
 								# TODO: experiment with this values -> not sure whether the whole cross origin iframe should be ALWAYS included as soon as some part of it is visible or not.
 								# Current config: if the cross origin iframe is AT ALL visible, then just include everything inside of it!
 								# initial_html_frames=updated_html_frames,
@@ -717,9 +693,14 @@ class DomService:
 
 			return dom_tree_node
 
-		enhanced_dom_tree_node = await _construct_enhanced_node(dom_tree['root'], initial_html_frames, initial_total_frame_offset)
+		# Build enhanced DOM tree recursively
+		start_tree_construction = time.time()
+		enhanced_dom_tree_node = await _construct_enhanced_node(
+			dom_tree['root'], initial_html_frames, initial_total_frame_offset, all_frames
+		)
+		timing_info['construct_enhanced_tree_ms'] = (time.time() - start_tree_construction) * 1000
 
-		return enhanced_dom_tree_node
+		return enhanced_dom_tree_node, timing_info
 
 	@observe_debug(ignore_input=True, ignore_output=True, name='get_serialized_dom_tree')
 	async def get_serialized_dom_tree(
@@ -730,23 +711,40 @@ class DomService:
 		Returns:
 			Tuple of (serialized_dom_state, enhanced_dom_tree_root, timing_info)
 		"""
+		timing_info: dict[str, float] = {}
 
 		# Use current target (None means use current)
 		assert self.browser_session.current_target_id is not None
-		enhanced_dom_tree = await self.get_dom_tree(target_id=self.browser_session.current_target_id)
 
-		start = time.time()
+		# Fetch all_frames once at the start to avoid redundant CDP calls during recursive DOM construction
+		start_frames = time.time()
+		all_frames, _ = await self.browser_session.get_all_frames()
+		timing_info['get_all_frames_ms'] = (time.time() - start_frames) * 1000
+
+		# Build DOM tree (includes CDP calls for snapshot, DOM, AX tree)
+		start_dom_tree = time.time()
+		enhanced_dom_tree, dom_tree_timing = await self.get_dom_tree(
+			target_id=self.browser_session.current_target_id,
+			all_frames=all_frames,
+		)
+		timing_info['get_dom_tree_total_ms'] = (time.time() - start_dom_tree) * 1000
+
+		# Add sub-timings from DOM tree construction
+		for key, value in dom_tree_timing.items():
+			timing_info[key] = value
+
+		# Serialize DOM tree for LLM
+		start_serialize = time.time()
 		serialized_dom_state, serializer_timing = DOMTreeSerializer(
 			enhanced_dom_tree, previous_cached_state, paint_order_filtering=self.paint_order_filtering
 		).serialize_accessible_elements()
+		timing_info['serialize_dom_tree_ms'] = (time.time() - start_serialize) * 1000
 
-		end = time.time()
-		serialize_total_timing = {'serialize_dom_tree_total': end - start}
+		# Add serializer sub-timings (convert to ms)
+		for key, value in serializer_timing.items():
+			timing_info[f'{key}_ms'] = value * 1000
 
-		# Combine all timing info
-		all_timing = {**serializer_timing, **serialize_total_timing}
-
-		return serialized_dom_state, enhanced_dom_tree, all_timing
+		return serialized_dom_state, enhanced_dom_tree, timing_info
 
 	@staticmethod
 	def detect_pagination_buttons(selector_map: dict[int, EnhancedDOMTreeNode]) -> list[dict[str, str | int | bool]]:
