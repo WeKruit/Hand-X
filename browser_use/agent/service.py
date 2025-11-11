@@ -180,9 +180,20 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		include_recent_events: bool = False,
 		sample_images: list[ContentPartTextParam | ContentPartImageParam] | None = None,
 		final_response_after_failure: bool = True,
+		llm_screenshot_size: tuple[int, int] | None = None,
 		_url_shortening_limit: int = 25,
 		**kwargs,
 	):
+		# Validate llm_screenshot_size
+		if llm_screenshot_size is not None:
+			if not isinstance(llm_screenshot_size, tuple) or len(llm_screenshot_size) != 2:
+				raise ValueError('llm_screenshot_size must be a tuple of (width, height)')
+			width, height = llm_screenshot_size
+			if not isinstance(width, int) or not isinstance(height, int):
+				raise ValueError('llm_screenshot_size dimensions must be integers')
+			if width < 100 or height < 100:
+				raise ValueError('llm_screenshot_size dimensions must be at least 100 pixels')
+			logger.info(f'🖼️  LLM screenshot resizing enabled: {width}x{height}')
 		if llm is None:
 			default_llm_name = CONFIG.DEFAULT_LLM
 			if default_llm_name:
@@ -198,6 +209,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# set flashmode = True if llm is ChatBrowserUse
 		if llm.provider == 'browser-use':
 			flash_mode = True
+
+		# Auto-configure llm_screenshot_size for Claude Sonnet models
+		if llm_screenshot_size is None:
+			model_name = getattr(llm, 'model', '')
+			if isinstance(model_name, str) and model_name.startswith('claude-sonnet'):
+				llm_screenshot_size = (1400, 850)
+				logger.info('🖼️  Auto-configured LLM screenshot size for Claude Sonnet: 1400x850')
 
 		if page_extraction_llm is None:
 			page_extraction_llm = llm
@@ -254,8 +272,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		elif controller is not None:
 			self.tools = controller
 		else:
-			# Exclude screenshot tool when use_vision=False
-			exclude_actions = ['screenshot'] if use_vision is False else []
+			# Exclude screenshot tool when use_vision is not auto
+			exclude_actions = ['screenshot'] if use_vision != 'auto' else []
 			self.tools = Tools(exclude_actions=exclude_actions, display_files_in_done_text=display_files_in_done_text)
 
 		# Structured output
@@ -349,6 +367,14 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			f'{" +file_system" if self.file_system else ""}'
 		)
 
+		# Store llm_screenshot_size in browser_session so tools can access it
+		self.browser_session.llm_screenshot_size = llm_screenshot_size
+
+		# Check if LLM is ChatAnthropic instance
+		from browser_use.llm.anthropic.chat import ChatAnthropic
+
+		is_anthropic = isinstance(self.llm, ChatAnthropic)
+
 		# Initialize message manager with state
 		# Initial system prompt with all actions - will be updated during each step
 		self._message_manager = MessageManager(
@@ -359,6 +385,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				extend_system_message=extend_system_message,
 				use_thinking=self.settings.use_thinking,
 				flash_mode=self.settings.flash_mode,
+				is_anthropic=is_anthropic,
 			).get_system_message(),
 			file_system=self.file_system,
 			state=self.state.message_manager_state,
@@ -371,6 +398,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			include_tool_call_examples=self.settings.include_tool_call_examples,
 			include_recent_events=self.include_recent_events,
 			sample_images=self.sample_images,
+			llm_screenshot_size=llm_screenshot_size,
 		)
 
 		if self.sensitive_data:
@@ -379,7 +407,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 			# If no allowed_domains are configured, show a security warning
 			if not self.browser_profile.allowed_domains:
-				self.logger.error(
+				self.logger.warning(
 					'⚠️ Agent(sensitive_data=••••••••) was provided but Browser(allowed_domains=[...]) is not locked down! ⚠️\n'
 					'          ☠️ If the agent visits a malicious website and encounters a prompt-injection attack, your sensitive_data may be exposed!\n\n'
 					'   \n'
