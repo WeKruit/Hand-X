@@ -272,7 +272,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		elif controller is not None:
 			self.tools = controller
 		else:
-			# Exclude screenshot tool when use_vision=True
+			# Exclude screenshot tool when use_vision is not auto
 			exclude_actions = ['screenshot'] if use_vision != 'auto' else []
 			self.tools = Tools(exclude_actions=exclude_actions, display_files_in_done_text=display_files_in_done_text)
 
