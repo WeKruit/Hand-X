@@ -407,7 +407,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 			# If no allowed_domains are configured, show a security warning
 			if not self.browser_profile.allowed_domains:
-				self.logger.error(
+				self.logger.warning(
 					'⚠️ Agent(sensitive_data=••••••••) was provided but Browser(allowed_domains=[...]) is not locked down! ⚠️\n'
 					'          ☠️ If the agent visits a malicious website and encounters a prompt-injection attack, your sensitive_data may be exposed!\n\n'
 					'   \n'
