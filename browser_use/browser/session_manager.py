@@ -634,7 +634,7 @@ class SessionManager:
 		try:
 			# Wait for completion with timeout
 			await asyncio.wait_for(ready_event.wait(), timeout=2.0)
-		except asyncio.TimeoutError:
+		except TimeoutError:
 			# Timeout - count what's ready
 			ready_count = 0
 			for tid in target_ids_to_wait_for:
