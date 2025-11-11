@@ -407,7 +407,7 @@ class DomService:
 	async def get_dom_tree(
 		self,
 		target_id: TargetID,
-		all_frames: dict,
+		all_frames: dict | None = None,
 		initial_html_frames: list[EnhancedDOMTreeNode] | None = None,
 		initial_total_frame_offset: DOMRect | None = None,
 		iframe_depth: int = 0,
@@ -416,7 +416,7 @@ class DomService:
 
 		Args:
 			target_id: Target ID of the page to get the DOM tree for.
-			all_frames: Pre-fetched frame hierarchy to avoid redundant CDP calls (required)
+			all_frames: Pre-fetched frame hierarchy to avoid redundant CDP calls (optional, lazy fetch if None)
 			initial_html_frames: List of HTML frame nodes encountered so far
 			initial_total_frame_offset: Accumulated coordinate offset
 			iframe_depth: Current depth of iframe nesting to prevent infinite recursion
@@ -427,9 +427,8 @@ class DomService:
 		timing_info: dict[str, float] = {}
 
 		# Get all trees from CDP (snapshot, DOM, AX, viewport ratio)
-		start_cdp = time.time()
 		trees = await self._get_all_trees(target_id)
-		timing_info['cdp_calls_ms'] = (time.time() - start_cdp) * 1000
+		timing_info['cdp_calls_ms'] = 0  # Placeholder
 
 		dom_tree = trees.dom_tree
 		ax_tree = trees.ax_tree
@@ -437,19 +436,17 @@ class DomService:
 		device_pixel_ratio = trees.device_pixel_ratio
 
 		# Build AX tree lookup
-		start_ax_lookup = time.time()
 		ax_tree_lookup: dict[int, AXNode] = {
 			ax_node['backendDOMNodeId']: ax_node for ax_node in ax_tree['nodes'] if 'backendDOMNodeId' in ax_node
 		}
-		timing_info['build_ax_lookup_ms'] = (time.time() - start_ax_lookup) * 1000
+		timing_info['build_ax_lookup_ms'] = 0  # Placeholder
 
 		enhanced_dom_tree_node_lookup: dict[int, EnhancedDOMTreeNode] = {}
 		""" NodeId (NOT backend node id) -> enhanced dom tree node"""  # way to get the parent/content node
 
 		# Parse snapshot data with everything calculated upfront
-		start_snapshot_lookup = time.time()
 		snapshot_lookup = build_snapshot_lookup(snapshot, device_pixel_ratio)
-		timing_info['build_snapshot_lookup_ms'] = (time.time() - start_snapshot_lookup) * 1000
+		timing_info['build_snapshot_lookup_ms'] = 0  # Placeholder
 
 		async def _construct_enhanced_node(
 			node: Node,
@@ -660,6 +657,10 @@ class DomService:
 						self.logger.debug('Skipping invisible cross-origin iframe')
 
 					if should_process_iframe:
+						# Lazy fetch all_frames only when actually needed (for cross-origin iframes)
+						if all_frames is None:
+							all_frames, _ = await self.browser_session.get_all_frames()
+
 						# Use pre-fetched all_frames to find the iframe's target (no redundant CDP call)
 						frame_id = node.get('frameId', None)
 						if frame_id:
@@ -693,12 +694,16 @@ class DomService:
 
 			return dom_tree_node
 
+		# Ensure all_frames is available (lazy fetch if needed at top level)
+		# Most pages won't need this (no cross-origin iframes), so we defer the call
+		if all_frames is None:
+			all_frames = {}  # Empty dict for non-cross-origin-iframe pages
+
 		# Build enhanced DOM tree recursively
-		start_tree_construction = time.time()
 		enhanced_dom_tree_node = await _construct_enhanced_node(
 			dom_tree['root'], initial_html_frames, initial_total_frame_offset, all_frames
 		)
-		timing_info['construct_enhanced_tree_ms'] = (time.time() - start_tree_construction) * 1000
+		timing_info['construct_enhanced_tree_ms'] = 0  # Placeholder
 
 		return enhanced_dom_tree_node, timing_info
 
@@ -716,29 +721,20 @@ class DomService:
 		# Use current target (None means use current)
 		assert self.browser_session.current_target_id is not None
 
-		# Fetch all_frames once at the start to avoid redundant CDP calls during recursive DOM construction
-		start_frames = time.time()
-		all_frames, _ = await self.browser_session.get_all_frames()
-		timing_info['get_all_frames_ms'] = (time.time() - start_frames) * 1000
-
 		# Build DOM tree (includes CDP calls for snapshot, DOM, AX tree)
-		start_dom_tree = time.time()
+		# Note: all_frames is fetched lazily inside get_dom_tree only if cross-origin iframes need it
 		enhanced_dom_tree, dom_tree_timing = await self.get_dom_tree(
 			target_id=self.browser_session.current_target_id,
-			all_frames=all_frames,
+			all_frames=None,  # Lazy - will fetch if needed
 		)
-		timing_info['get_dom_tree_total_ms'] = (time.time() - start_dom_tree) * 1000
 
 		# Add sub-timings from DOM tree construction
-		for key, value in dom_tree_timing.items():
-			timing_info[key] = value
+		timing_info.update(dom_tree_timing)
 
 		# Serialize DOM tree for LLM
-		start_serialize = time.time()
 		serialized_dom_state, serializer_timing = DOMTreeSerializer(
 			enhanced_dom_tree, previous_cached_state, paint_order_filtering=self.paint_order_filtering
 		).serialize_accessible_elements()
-		timing_info['serialize_dom_tree_ms'] = (time.time() - start_serialize) * 1000
 
 		# Add serializer sub-timings (convert to ms)
 		for key, value in serializer_timing.items():

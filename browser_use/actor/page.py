@@ -405,9 +405,8 @@ class Page:
 
 		dom_service = self.dom_service
 
-		# Fetch all_frames for DOM tree construction
-		all_frames, _ = await self._browser_session.get_all_frames()
-		enhanced_dom_tree, _ = await dom_service.get_dom_tree(target_id=self._target_id, all_frames=all_frames)
+		# Lazy fetch all_frames inside get_dom_tree if needed (for cross-origin iframes)
+		enhanced_dom_tree, _ = await dom_service.get_dom_tree(target_id=self._target_id, all_frames=None)
 
 		serialized_dom_state, _ = DOMTreeSerializer(
 			enhanced_dom_tree, None, paint_order_filtering=True

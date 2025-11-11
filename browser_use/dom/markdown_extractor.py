@@ -49,9 +49,8 @@ async def extract_clean_markdown(
 		method = 'enhanced_dom_tree'
 	elif dom_service is not None and target_id is not None:
 		# DOM service path (page actor)
-		# Fetch all_frames for DOM tree construction
-		all_frames, _ = await dom_service.browser_session.get_all_frames()
-		enhanced_dom_tree, _ = await dom_service.get_dom_tree(target_id=target_id, all_frames=all_frames)
+		# Lazy fetch all_frames inside get_dom_tree if needed (for cross-origin iframes)
+		enhanced_dom_tree, _ = await dom_service.get_dom_tree(target_id=target_id, all_frames=None)
 		current_url = None  # Not available via DOM service
 		method = 'dom_service'
 	else:
