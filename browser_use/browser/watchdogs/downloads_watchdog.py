@@ -960,7 +960,7 @@ class DownloadsWatchdog(BaseWatchdog):
 			self.logger.warning(f'[DownloadsWatchdog] No session found for {target_id}')
 			return False
 
-		# Get URL from target (not session - sessions don't have urls!)
+		# Get URL from target
 		target = self.browser_session.session_manager.get_target(target_id)
 		if not target:
 			self.logger.warning(f'[DownloadsWatchdog] No target found for {target_id}')
