@@ -193,7 +193,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				raise ValueError('llm_screenshot_size dimensions must be integers')
 			if width < 100 or height < 100:
 				raise ValueError('llm_screenshot_size dimensions must be at least 100 pixels')
-			logger.info(f'🖼️  LLM screenshot resizing enabled: {width}x{height}')
+			self.logger.info(f'🖼️  LLM screenshot resizing enabled: {width}x{height}')
 		if llm is None:
 			default_llm_name = CONFIG.DEFAULT_LLM
 			if default_llm_name:
@@ -215,7 +215,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			model_name = getattr(llm, 'model', '')
 			if isinstance(model_name, str) and model_name.startswith('claude-sonnet'):
 				llm_screenshot_size = (1400, 850)
-				logger.info('🖼️  Auto-configured LLM screenshot size for Claude Sonnet: 1400x850')
+				self.logger.info('🖼️  Auto-configured LLM screenshot size for Claude Sonnet: 1400x850')
 
 		if page_extraction_llm is None:
 			page_extraction_llm = llm
@@ -566,10 +566,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				self.file_system = FileSystem.from_state(self.state.file_system_state)
 				# The parent directory of base_dir is the original file_system_path
 				self.file_system_path = str(self.file_system.base_dir)
-				logger.debug(f'💾 File system restored from state to: {self.file_system_path}')
+				self.logger.debug(f'💾 File system restored from state to: {self.file_system_path}')
 				return
 			except Exception as e:
-				logger.error(f'💾 Failed to restore file system from state: {e}')
+				self.logger.error(f'💾 Failed to restore file system from state: {e}')
 				raise e
 
 		# Initialize new file system
@@ -582,13 +582,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				self.file_system = FileSystem(self.agent_directory)
 				self.file_system_path = str(self.agent_directory)
 		except Exception as e:
-			logger.error(f'💾 Failed to initialize file system: {e}.')
+			self.logger.error(f'💾 Failed to initialize file system: {e}.')
 			raise e
 
 		# Save file system state to agent state
 		self.state.file_system_state = self.file_system.get_state()
 
-		logger.debug(f'💾 File system path: {self.file_system_path}')
+		self.logger.debug(f'💾 File system path: {self.file_system_path}')
 
 	def _set_screenshot_service(self) -> None:
 		"""Initialize screenshot service using agent directory"""
@@ -596,9 +596,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			from browser_use.screenshots.service import ScreenshotService
 
 			self.screenshot_service = ScreenshotService(self.agent_directory)
-			logger.debug(f'📸 Screenshot service initialized in: {self.agent_directory}/screenshots')
+			self.logger.debug(f'📸 Screenshot service initialized in: {self.agent_directory}/screenshots')
 		except Exception as e:
-			logger.error(f'📸 Failed to initialize screenshot service: {e}.')
+			self.logger.error(f'📸 Failed to initialize screenshot service: {e}.')
 			raise e
 
 	def save_file_system_state(self) -> None:
@@ -606,7 +606,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if self.file_system:
 			self.state.file_system_state = self.file_system.get_state()
 		else:
-			logger.error('💾 File system is not set up. Cannot save state.')
+			self.logger.error('💾 File system is not set up. Cannot save state.')
 			raise ValueError('File system is not set up. Cannot save state.')
 
 	def _set_browser_use_version_and_source(self, source_override: str | None = None) -> None:
@@ -863,8 +863,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		if 'Could not parse response' in error_msg or 'tool_use_failed' in error_msg:
 			# give model a hint how output should look like
-			logger.log(log_level, f'Model: {self.llm.model} failed')
-			logger.log(log_level, f'{prefix}{error_msg}')
+			self.logger.log(log_level, f'Model: {self.llm.model} failed')
+			self.logger.log(log_level, f'{prefix}{error_msg}')
 		else:
 			self.logger.log(log_level, f'{prefix}{error_msg}')
 
