@@ -17,7 +17,7 @@ from browser_use.dom.views import (
 	SerializedDOMState,
 )
 from browser_use.observability import observe_debug
-from browser_use.utils import time_execution_async
+from browser_use.utils import create_task_with_error_handling, time_execution_async
 
 if TYPE_CHECKING:
 	from browser_use.browser.views import BrowserStateSummary, NetworkRequest, PageInfo, PaginationButton
@@ -369,12 +369,16 @@ class DOMWatchdog(BaseWatchdog):
 					else None
 				)
 
-				dom_task = asyncio.create_task(self._build_dom_tree_without_highlights(previous_state))
+				dom_task = create_task_with_error_handling(
+					self._build_dom_tree_without_highlights(previous_state), name='build_dom_tree', logger_instance=self.logger
+				)
 
 			# Start clean screenshot task if requested (without JS highlights)
 			if event.include_screenshot:
 				self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: 📸 Starting clean screenshot task...')
-				screenshot_task = asyncio.create_task(self._capture_clean_screenshot())
+				screenshot_task = create_task_with_error_handling(
+					self._capture_clean_screenshot(), name='capture_screenshot', logger_instance=self.logger
+				)
 
 			# Wait for both tasks to complete
 			content = None

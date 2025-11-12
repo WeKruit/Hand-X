@@ -668,3 +668,53 @@ def _log_pretty_url(s: str, max_len: int | None = 22) -> str:
 	if max_len is not None and len(s) > max_len:
 		return s[:max_len] + '…'
 	return s
+
+
+def create_task_with_error_handling(
+	coro: Coroutine[Any, Any, T],
+	*,
+	name: str | None = None,
+	logger_instance: logging.Logger | None = None,
+	suppress_exceptions: bool = False,
+) -> asyncio.Task[T]:
+	"""
+	Create an asyncio task with proper exception handling to prevent "Task exception was never retrieved" warnings.
+
+	Args:
+		coro: The coroutine to wrap in a task
+		name: Optional name for the task (useful for debugging)
+		logger_instance: Optional logger instance to use. If None, uses module logger.
+		suppress_exceptions: If True, exceptions are only logged and not re-raised. Default False.
+
+	Returns:
+		asyncio.Task: The created task with exception handling callback
+
+	Example:
+		# Instead of: asyncio.create_task(some_async_function())
+		# Use: create_task_with_error_handling(some_async_function(), name="my_task")
+	"""
+	task = asyncio.create_task(coro, name=name)
+	log = logger_instance or logger
+
+	def _handle_task_exception(t: asyncio.Task[T]) -> None:
+		"""Callback to handle task exceptions"""
+		try:
+			# This will raise if the task had an exception
+			exc = t.exception()
+			if exc is not None:
+				task_name = t.get_name() if hasattr(t, 'get_name') else 'unnamed'
+				log.error(f'Exception in background task [{task_name}]: {type(exc).__name__}: {exc}', exc_info=exc)
+
+				# Re-raise if not suppressed (useful for critical tasks)
+				if not suppress_exceptions:
+					raise exc
+		except asyncio.CancelledError:
+			# Task was cancelled, this is normal behavior
+			pass
+		except Exception as e:
+			# Catch any other exception during exception handling
+			task_name = t.get_name() if hasattr(t, 'get_name') else 'unnamed'
+			log.error(f'Error handling exception in task [{task_name}]: {type(e).__name__}: {e}')
+
+	task.add_done_callback(_handle_task_exception)
+	return task

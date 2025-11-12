@@ -18,6 +18,7 @@ from browser_use.browser.events import (
 	TabCreatedEvent,
 )
 from browser_use.browser.watchdog_base import BaseWatchdog
+from browser_use.utils import create_task_with_error_handling
 
 if TYPE_CHECKING:
 	pass
@@ -61,7 +62,9 @@ class CrashWatchdog(BaseWatchdog):
 		"""Start monitoring when browser is connected."""
 		# logger.debug('[CrashWatchdog] Browser connected event received, beginning monitoring')
 
-		asyncio.create_task(self._start_monitoring())
+		create_task_with_error_handling(
+			self._start_monitoring(), name='start_crash_monitoring', logger_instance=self.logger, suppress_exceptions=True
+		)
 		# logger.debug(f'[CrashWatchdog] Monitoring task started: {self._monitoring_task and not self._monitoring_task.done()}')
 
 	async def on_BrowserStoppedEvent(self, event: BrowserStoppedEvent) -> None:
@@ -95,7 +98,12 @@ class CrashWatchdog(BaseWatchdog):
 			# Register crash event handler
 			def on_target_crashed(event: TargetCrashedEvent, session_id: SessionID | None = None):
 				# Create and track the task
-				task = asyncio.create_task(self._on_target_crash_cdp(target_id))
+				task = create_task_with_error_handling(
+					self._on_target_crash_cdp(target_id),
+					name='handle_target_crash',
+					logger_instance=self.logger,
+					suppress_exceptions=True,
+				)
 				self._cdp_event_tasks.add(task)
 				# Remove from set when done
 				task.add_done_callback(lambda t: self._cdp_event_tasks.discard(t))
@@ -194,7 +202,9 @@ class CrashWatchdog(BaseWatchdog):
 			# logger.info('[CrashWatchdog] Monitoring already running')
 			return
 
-		self._monitoring_task = asyncio.create_task(self._monitoring_loop())
+		self._monitoring_task = create_task_with_error_handling(
+			self._monitoring_loop(), name='crash_monitoring_loop', logger_instance=self.logger, suppress_exceptions=True
+		)
 		# logger.debug('[CrashWatchdog] Monitoring loop created and started')
 
 	async def _stop_monitoring(self) -> None:

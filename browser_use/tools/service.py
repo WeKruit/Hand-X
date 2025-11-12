@@ -51,7 +51,7 @@ from browser_use.tools.views import (
 	SwitchTabAction,
 	UploadFileAction,
 )
-from browser_use.utils import time_execution_sync
+from browser_use.utils import create_task_with_error_handling, time_execution_sync
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +257,9 @@ class Tools(Generic[Context]):
 				element_desc = get_click_description(node)
 
 				# Highlight the element being clicked (truly non-blocking)
-				asyncio.create_task(browser_session.highlight_interaction_element(node))
+				create_task_with_error_handling(
+					browser_session.highlight_interaction_element(node), name='highlight_click_element', suppress_exceptions=True
+				)
 
 				event = browser_session.event_bus.dispatch(ClickElementEvent(node=node))
 				await event
@@ -312,7 +314,9 @@ class Tools(Generic[Context]):
 				return ActionResult(extracted_content=msg)
 
 			# Highlight the element being typed into (truly non-blocking)
-			asyncio.create_task(browser_session.highlight_interaction_element(node))
+			create_task_with_error_handling(
+				browser_session.highlight_interaction_element(node), name='highlight_type_element', suppress_exceptions=True
+			)
 
 			# Dispatch type text event with node
 			try:
@@ -459,7 +463,11 @@ class Tools(Generic[Context]):
 
 			# Highlight the file input element if found (truly non-blocking)
 			if file_input_node:
-				asyncio.create_task(browser_session.highlight_interaction_element(file_input_node))
+				create_task_with_error_handling(
+					browser_session.highlight_interaction_element(file_input_node),
+					name='highlight_file_input',
+					suppress_exceptions=True,
+				)
 
 			# If not found near the selected element, fallback to finding the closest file input to current scroll position
 			if file_input_node is None:
@@ -494,8 +502,13 @@ class Tools(Generic[Context]):
 				if closest_file_input:
 					file_input_node = closest_file_input
 					logger.info(f'Found file input closest to scroll position (distance: {min_distance}px)')
+
 					# Highlight the fallback file input element (truly non-blocking)
-					asyncio.create_task(browser_session.highlight_interaction_element(file_input_node))
+					create_task_with_error_handling(
+						browser_session.highlight_interaction_element(file_input_node),
+						name='highlight_file_input_fallback',
+						suppress_exceptions=True,
+					)
 				else:
 					msg = 'No file upload element found on the page'
 					logger.error(msg)
@@ -1616,7 +1629,11 @@ class CodeAgentTools(Tools[Context]):
 
 			# Highlight the file input element if found (truly non-blocking)
 			if file_input_node:
-				asyncio.create_task(browser_session.highlight_interaction_element(file_input_node))
+				create_task_with_error_handling(
+					browser_session.highlight_interaction_element(file_input_node),
+					name='highlight_file_input',
+					suppress_exceptions=True,
+				)
 
 			# If not found near the selected element, fallback to finding the closest file input to current scroll position
 			if file_input_node is None:
@@ -1651,8 +1668,13 @@ class CodeAgentTools(Tools[Context]):
 				if closest_file_input:
 					file_input_node = closest_file_input
 					logger.info(f'Found file input closest to scroll position (distance: {min_distance}px)')
+
 					# Highlight the fallback file input element (truly non-blocking)
-					asyncio.create_task(browser_session.highlight_interaction_element(file_input_node))
+					create_task_with_error_handling(
+						browser_session.highlight_interaction_element(file_input_node),
+						name='highlight_file_input_fallback',
+						suppress_exceptions=True,
+					)
 				else:
 					msg = 'No file upload element found on the page'
 					logger.error(msg)
