@@ -95,7 +95,7 @@ class JudgementResult(BaseModel):
 	verdict: bool = Field(description='Whether the trace was successful or not')
 	failure_reason: str | None = Field(
 		default=None,
-		description='A brief explanation of key reasons why the task was not completed successfully in case of failure. If verdict is true, use an empty string. Keep it concise and easy to read.',
+		description='Max 5 sentences explanation of why the task was not completed successfully in case of failure. If verdict is true, use an empty string.',
 	)
 	impossible_task: bool = Field(
 		default=False,

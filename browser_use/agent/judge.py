@@ -160,7 +160,7 @@ Respond with EXACTLY this JSON structure (no additional text before or after):
 {{
 	"reasoning": "Breakdown of user task into key points. Detailed analysis covering: what went well, what didn't work, trajectory quality assessment, tool usage evaluation, output quality review, and overall user satisfaction prediction.",
 	"verdict": true or false,
-	"failure_reason": "A brief explanation of key reasons why the task was not completed successfully in case of failure. If verdict is true, use an empty string. Keep it concise and easy to read.",
+	"failure_reason": "Max 5 sentences explanation of why the task was not completed successfully in case of failure. If verdict is true, use an empty string.",
 	"impossible_task": true or false,
 	"reached_captcha": true or false
 }}
