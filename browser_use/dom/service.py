@@ -259,6 +259,7 @@ class DomService:
 		self.logger.debug(f'🔍 DEBUG: Capturing DOM snapshot for target {target_id}')
 
 		# Get actual scroll positions for all iframes before capturing snapshot
+		start_iframe_scroll = time.time()
 		iframe_scroll_positions = {}
 		try:
 			scroll_result = await cdp_session.cdp_client.send.Runtime.evaluate(
@@ -295,6 +296,7 @@ class DomService:
 					)
 		except Exception as e:
 			self.logger.debug(f'Failed to get iframe scroll positions: {e}')
+		iframe_scroll_ms = (time.time() - start_iframe_scroll) * 1000
 
 		# Define CDP request factories to avoid duplication
 		def create_snapshot_request():
@@ -314,7 +316,7 @@ class DomService:
 				params={'depth': -1, 'pierce': True}, session_id=cdp_session.session_id
 			)
 
-		start = time.time()
+		start_cdp_calls = time.time()
 
 		# Create initial tasks
 		tasks = {
@@ -378,8 +380,11 @@ class DomService:
 		dom_tree = results['dom_tree']
 		ax_tree = results['ax_tree']
 		device_pixel_ratio = results['device_pixel_ratio']
-		end = time.time()
-		cdp_timing_ms = (end - start) * 1000
+		end_cdp_calls = time.time()
+		cdp_calls_ms = (end_cdp_calls - start_cdp_calls) * 1000
+
+		# Calculate total time for _get_all_trees and overhead
+		start_snapshot_processing = time.time()
 
 		# DEBUG: Log snapshot info and limit documents to prevent explosion
 		if snapshot and 'documents' in snapshot:
@@ -400,12 +405,19 @@ class DomService:
 						f'🔍 DEBUG: Iframe #{doc_idx} {doc.get("frameId", "no-frame-id")} {doc.get("url", "no-url")} has {len(doc.get("nodes", []))} nodes'
 					)
 
+		snapshot_processing_ms = (time.time() - start_snapshot_processing) * 1000
+
+		# Return with detailed timing breakdown
 		return TargetAllTrees(
 			snapshot=snapshot,
 			dom_tree=dom_tree,
 			ax_tree=ax_tree,
 			device_pixel_ratio=device_pixel_ratio,
-			cdp_timing={'cdp_calls_total_ms': cdp_timing_ms},
+			cdp_timing={
+				'iframe_scroll_detection_ms': iframe_scroll_ms,
+				'cdp_parallel_calls_ms': cdp_calls_ms,
+				'snapshot_processing_ms': snapshot_processing_ms,
+			},
 		)
 
 	@observe_debug(ignore_input=True, ignore_output=True, name='get_dom_tree')
