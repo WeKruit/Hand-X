@@ -1604,6 +1604,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			'deb',
 			'rpm',
 			'iso',
+			# GitHub/Project paths
+			'polynomial',
 		}
 
 		excluded_words = {
