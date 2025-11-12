@@ -112,8 +112,8 @@ class PopupsWatchdog(BaseWatchdog):
 									),
 									timeout=0.5,
 								)
-							dismissed = True
-							self.logger.info('✅ Dialog handled successfully via agent focus session')
+								dismissed = True
+								self.logger.info('✅ Dialog handled successfully via agent focus session')
 						except (TimeoutError, Exception) as e:
 							self.logger.debug(f'Approach 2 failed: {type(e).__name__}')
 
