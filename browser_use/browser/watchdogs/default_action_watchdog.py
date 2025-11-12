@@ -1765,14 +1765,12 @@ class DefaultActionWatchdog(BaseWatchdog):
 		if element_node.frame_id:
 			# Element is in an iframe, need to get session for that frame
 			try:
-				# Get all targets
-				targets = await self.browser_session.cdp_client.send.Target.getTargets()
+				all_targets = self.browser_session.session_manager.get_all_targets()
 
 				# Find the target for this frame
-				for target in targets['targetInfos']:
-					if target['type'] == 'iframe' and element_node.frame_id in str(target.get('targetId', '')):
+				for target_id, target in all_targets.items():
+					if target.target_type == 'iframe' and element_node.frame_id in str(target_id):
 						# Create temporary session for iframe target without switching focus
-						target_id = target['targetId']
 						temp_session = await self.browser_session.get_or_create_cdp_session(target_id, focus=False)
 						return temp_session.session_id
 

@@ -45,9 +45,6 @@ class SessionManager:
 		# Reverse mapping: session -> target it belongs to
 		self._session_to_target: dict[SessionID, TargetID] = {}
 
-		# Target -> type cache (page, iframe, worker, etc.) - types are immutable
-		self._target_types: dict[TargetID, str] = {}
-
 		self._lock = asyncio.Lock()
 		self._recovery_lock = asyncio.Lock()
 
@@ -128,9 +125,8 @@ class SessionManager:
 			List of Target objects for all page/tab targets
 		"""
 		page_targets = []
-		for target_id, target in self._targets.items():
-			target_type = self._target_types.get(target_id, 'unknown')
-			if target_type in ('page', 'tab'):
+		for target in self._targets.values():
+			if target.target_type in ('page', 'tab'):
 				page_targets.append(target)
 		return page_targets
 
@@ -155,7 +151,6 @@ class SessionManager:
 			self._sessions.clear()
 			self._target_sessions.clear()
 			self._session_to_target.clear()
-			self._target_types.clear()
 
 		self.logger.info('[SessionManager] Cleared all owned data (targets, sessions, mappings)')
 
@@ -308,10 +303,6 @@ class SessionManager:
 			self._target_sessions[target_id].add(session_id)
 			self._session_to_target[session_id] = target_id
 
-			# Cache target type (immutable, set once)
-			if target_id not in self._target_types:
-				self._target_types[target_id] = target_type
-
 		# Create or update Target (source of truth for url/title)
 		if target_id not in self._targets:
 			from browser_use.browser.session import Target
@@ -440,12 +431,9 @@ class SessionManager:
 					f'session={session_id[:8]}... (target was already removed or attach event was missed)'
 				)
 
-			# Get target type before cleaning up cache (needed for TabClosedEvent dispatch)
-			target_type = self._target_types.get(target_id)
-
-			# Clean up target type cache if target fully removed
-			if target_id not in self._target_sessions and target_id in self._target_types:
-				del self._target_types[target_id]
+			# Get target type before cleaning up (needed for TabClosedEvent dispatch)
+			target = self._targets.get(target_id)
+			target_type = target.target_type if target else None
 
 			# Remove session from owned sessions dict
 			if session_id in self._sessions:
@@ -630,7 +618,8 @@ class SessionManager:
 				for tid in target_ids_to_wait_for:
 					session = self.get_session_for_target(tid)
 					if session:
-						target_type = self._target_types.get(tid, 'unknown')
+						target = self._targets.get(tid)
+						target_type = target.target_type if target else 'unknown'
 						# For pages, verify monitoring is enabled
 						if target_type in ('page', 'tab'):
 							if hasattr(session, '_lifecycle_events') and session._lifecycle_events is not None:
@@ -659,7 +648,8 @@ class SessionManager:
 			for tid in target_ids_to_wait_for:
 				session = self.get_session_for_target(tid)
 				if session:
-					target_type = self._target_types.get(tid, 'unknown')
+					target = self._targets.get(tid)
+					target_type = target.target_type if target else 'unknown'
 					# For pages, verify monitoring is enabled
 					if target_type in ('page', 'tab'):
 						if hasattr(session, '_lifecycle_events') and session._lifecycle_events is not None:

@@ -534,6 +534,9 @@ class DomService:
 					height=snapshot_data.bounds.height,
 				)
 
+			session = self.browser_session.session_manager.get_session_for_target(target_id)
+			session_id = session.session_id if session else None
+
 			dom_tree_node = EnhancedDOMTreeNode(
 				node_id=node['nodeId'],
 				backend_node_id=node['backendNodeId'],
@@ -543,7 +546,7 @@ class DomService:
 				attributes=attributes or {},
 				is_scrollable=node.get('isScrollable', None),
 				frame_id=node.get('frameId', None),
-				session_id=self.browser_session.current_session_id,
+				session_id=session_id,
 				target_id=target_id,
 				content_document=None,
 				shadow_root_type=shadow_root_type,
@@ -690,11 +693,15 @@ class DomService:
 							frame_info = all_frames.get(frame_id)
 							iframe_document_target = None
 							if frame_info and frame_info.get('frameTargetId'):
-								# Get the target info for this iframe
-								targets = await self.browser_session.cdp_client.send.Target.getTargets()
-								iframe_document_target = next(
-									(t for t in targets['targetInfos'] if t['targetId'] == frame_info['frameTargetId']), None
-								)
+								iframe_target_id = frame_info['frameTargetId']
+								iframe_target = self.browser_session.session_manager.get_target(iframe_target_id)
+								if iframe_target:
+									iframe_document_target = {
+										'targetId': iframe_target.target_id,
+										'url': iframe_target.url,
+										'title': iframe_target.title,
+										'type': iframe_target.target_type,
+									}
 						else:
 							iframe_document_target = None
 						# if target actually exists in one of the frames, just recursively build the dom tree for it
@@ -703,7 +710,7 @@ class DomService:
 								f'Getting content document for iframe {node.get("frameId", None)} at depth {iframe_depth + 1}'
 							)
 							content_document, _ = await self.get_dom_tree(
-								target_id=iframe_document_target.get('targetId'),
+								target_id=iframe_document_target['targetId'],
 								all_frames=all_frames,
 								# TODO: experiment with this values -> not sure whether the whole cross origin iframe should be ALWAYS included as soon as some part of it is visible or not.
 								# Current config: if the cross origin iframe is AT ALL visible, then just include everything inside of it!
@@ -759,12 +766,12 @@ class DomService:
 		start_total = time.time()
 
 		# Use current target (None means use current)
-		assert self.browser_session.current_target_id is not None
+		assert self.browser_session.agent_focus_target_id is not None
 
 		# Build DOM tree (includes CDP calls for snapshot, DOM, AX tree)
 		# Note: all_frames is fetched lazily inside get_dom_tree only if cross-origin iframes need it
 		enhanced_dom_tree, dom_tree_timing = await self.get_dom_tree(
-			target_id=self.browser_session.current_target_id,
+			target_id=self.browser_session.agent_focus_target_id,
 			all_frames=None,  # Lazy - will fetch if needed
 		)
 

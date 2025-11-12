@@ -467,9 +467,6 @@ class BrowserSession(BaseModel):
 			await self.session_manager.clear()
 			self.session_manager = None
 
-		# Note: _targets, _sessions, _target_sessions are now owned by SessionManager
-		# They're cleared via SessionManager.clear() above
-
 		self._cdp_client_root = None  # type: ignore
 		self._cached_browser_state_summary = None
 		self._cached_selector_map.clear()
@@ -1183,7 +1180,8 @@ class BrowserSession(BaseModel):
 		# CRITICAL: Only allow focus change to 'page' type targets, not iframes/workers
 		if focus and self.agent_focus_target_id != target_id:
 			# Get target type from SessionManager
-			target_type = self.session_manager._target_types.get(target_id, 'unknown')
+			target = self.session_manager.get_target(target_id)
+			target_type = target.target_type if target else 'unknown'
 
 			if target_type == 'page':
 				self.logger.debug(f'[SessionManager] Switching focus: {self.agent_focus_target_id[:8]}... → {target_id[:8]}...')
@@ -1204,17 +1202,6 @@ class BrowserSession(BaseModel):
 				pass  # May fail if not waiting
 
 		return session
-
-	@property
-	def current_target_id(self) -> str | None:
-		return self.agent_focus_target_id
-
-	@property
-	def current_session_id(self) -> str | None:
-		if not self.agent_focus_target_id or not self.session_manager:
-			return None
-		session = self.session_manager.get_session_for_target(self.agent_focus_target_id)
-		return session.session_id if session else None
 
 	# endregion - ========== CDP-based ... ==========
 
@@ -1865,14 +1852,12 @@ class BrowserSession(BaseModel):
 
 		# Search in SessionManager targets (exact match first)
 		for target_id, target in self.session_manager.get_all_targets().items():
-			target_type = self.session_manager._target_types.get(target_id, 'unknown')
-			if target_type in ('page', 'tab') and target.url == url:
+			if target.target_type in ('page', 'tab') and target.url == url:
 				return target_id
 
 		# Still not found, try substring match as fallback
 		for target_id, target in self.session_manager.get_all_targets().items():
-			target_type = self.session_manager._target_types.get(target_id, 'unknown')
-			if target_type in ('page', 'tab') and url in target.url:
+			if target.target_type in ('page', 'tab') and url in target.url:
 				return target_id
 
 		raise ValueError(f'No TargetID found for url={url}')
@@ -2599,12 +2584,10 @@ class BrowserSession(BaseModel):
 		# Build TargetInfo dicts from SessionManager owned data (crystal clear ownership)
 		result = []
 		for target_id, target in self.session_manager.get_all_targets().items():
-			target_type = self.session_manager._target_types.get(target_id, 'unknown')
-
 			# Create TargetInfo dict
 			target_info: TargetInfo = {
 				'targetId': target.target_id,
-				'type': target_type,
+				'type': target.target_type,
 				'title': target.title,
 				'url': target.url,
 				'attached': True,
@@ -2835,7 +2818,7 @@ class BrowserSession(BaseModel):
 
 	async def _cdp_navigate(self, url: str, target_id: TargetID | None = None) -> None:
 		"""Navigate to URL using CDP Page.navigate."""
-		# Use provided target_id or fall back to current_target_id
+		# Use provided target_id or fall back to agent_focus_target_id
 
 		assert self._cdp_client_root is not None, 'CDP client not initialized - browser may not be connected yet'
 		assert self.agent_focus_target_id is not None, 'Agent focus not initialized - browser may not be connected yet'
