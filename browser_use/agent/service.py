@@ -853,7 +853,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Handle all other exceptions
 		include_trace = self.logger.isEnabledFor(logging.DEBUG)
 		error_msg = AgentError.format_error(error, include_trace=include_trace)
-		prefix = f'❌ Result failed {self.state.consecutive_failures + 1}/{self.settings.max_failures + int(self.settings.final_response_after_failure)} times:\n '
+		prefix = f'❌ Result failed {self.state.consecutive_failures + 1}/{self.settings.max_failures + int(self.settings.final_response_after_failure)} times: '
 		self.state.consecutive_failures += 1
 
 		# Use WARNING for partial failures, ERROR only when max failures reached
