@@ -322,7 +322,7 @@ class DownloadsWatchdog(BaseWatchdog):
 					"""
 					try:
 						# Look up target_id from session_id
-						event_target_id = self.browser_session.get_target_id_from_session_id(session_id)
+						event_target_id = self.browser_session.session_manager.get_target_id_from_session_id(session_id)
 						if not event_target_id:
 							# Session not in pool - might be a stale session or not yet tracked
 							return
