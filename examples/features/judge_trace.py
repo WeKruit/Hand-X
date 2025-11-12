@@ -21,7 +21,13 @@ from browser_use import Agent, ChatBrowserUse
 async def main():
 	llm = ChatBrowserUse()
 	task = "Search Google for 'what is browser automation' and tell me the top 3 results"
-	agent = Agent(task=task, llm=llm, use_judge=True, judge_llm=llm)
+	agent = Agent(
+		task=task,
+		llm=llm,
+		use_judge=True,
+		judge_llm=llm,
+		# Optional: Add ground_truth="specific answer or criteria" to validate against ground truth
+	)
 	history = await agent.run()
 
 	# Get the judgement result
