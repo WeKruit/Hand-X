@@ -379,7 +379,7 @@ class DomService:
 		ax_tree = results['ax_tree']
 		device_pixel_ratio = results['device_pixel_ratio']
 		end = time.time()
-		cdp_timing = {'cdp_calls_total': end - start}
+		cdp_timing_ms = (end - start) * 1000
 
 		# DEBUG: Log snapshot info and limit documents to prevent explosion
 		if snapshot and 'documents' in snapshot:
@@ -405,7 +405,7 @@ class DomService:
 			dom_tree=dom_tree,
 			ax_tree=ax_tree,
 			device_pixel_ratio=device_pixel_ratio,
-			cdp_timing=cdp_timing,
+			cdp_timing={'cdp_calls_total_ms': cdp_timing_ms},
 		)
 
 	@observe_debug(ignore_input=True, ignore_output=True, name='get_dom_tree')
@@ -433,7 +433,7 @@ class DomService:
 
 		# Get all trees from CDP (snapshot, DOM, AX, viewport ratio)
 		trees = await self._get_all_trees(target_id)
-		timing_info['cdp_calls_ms'] = 0  # Placeholder
+		timing_info.update(trees.cdp_timing)
 
 		dom_tree = trees.dom_tree
 		ax_tree = trees.ax_tree
@@ -441,17 +441,19 @@ class DomService:
 		device_pixel_ratio = trees.device_pixel_ratio
 
 		# Build AX tree lookup
+		start_ax = time.time()
 		ax_tree_lookup: dict[int, AXNode] = {
 			ax_node['backendDOMNodeId']: ax_node for ax_node in ax_tree['nodes'] if 'backendDOMNodeId' in ax_node
 		}
-		timing_info['build_ax_lookup_ms'] = 0  # Placeholder
+		timing_info['build_ax_lookup_ms'] = (time.time() - start_ax) * 1000
 
 		enhanced_dom_tree_node_lookup: dict[int, EnhancedDOMTreeNode] = {}
 		""" NodeId (NOT backend node id) -> enhanced dom tree node"""  # way to get the parent/content node
 
 		# Parse snapshot data with everything calculated upfront
+		start_snapshot = time.time()
 		snapshot_lookup = build_snapshot_lookup(snapshot, device_pixel_ratio)
-		timing_info['build_snapshot_lookup_ms'] = 0  # Placeholder
+		timing_info['build_snapshot_lookup_ms'] = (time.time() - start_snapshot) * 1000
 
 		async def _construct_enhanced_node(
 			node: Node,
@@ -705,10 +707,11 @@ class DomService:
 			all_frames = {}  # Empty dict for non-cross-origin-iframe pages
 
 		# Build enhanced DOM tree recursively
+		start_construct = time.time()
 		enhanced_dom_tree_node = await _construct_enhanced_node(
 			dom_tree['root'], initial_html_frames, initial_total_frame_offset, all_frames
 		)
-		timing_info['construct_enhanced_tree_ms'] = 0  # Placeholder
+		timing_info['construct_enhanced_tree_ms'] = (time.time() - start_construct) * 1000
 
 		return enhanced_dom_tree_node, timing_info
 
