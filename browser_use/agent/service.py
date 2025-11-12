@@ -856,12 +856,17 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		prefix = f'❌ Result failed {self.state.consecutive_failures + 1}/{self.settings.max_failures + int(self.settings.final_response_after_failure)} times:\n '
 		self.state.consecutive_failures += 1
 
+		# Use WARNING for partial failures, ERROR only when max failures reached
+		max_total_failures = self.settings.max_failures + int(self.settings.final_response_after_failure)
+		is_final_failure = self.state.consecutive_failures >= max_total_failures
+		log_level = logging.ERROR if is_final_failure else logging.WARNING
+
 		if 'Could not parse response' in error_msg or 'tool_use_failed' in error_msg:
 			# give model a hint how output should look like
-			logger.error(f'Model: {self.llm.model} failed')
-			logger.error(f'{prefix}{error_msg}')
+			logger.log(log_level, f'Model: {self.llm.model} failed')
+			logger.log(log_level, f'{prefix}{error_msg}')
 		else:
-			self.logger.error(f'{prefix}{error_msg}')
+			self.logger.log(log_level, f'{prefix}{error_msg}')
 
 		self.state.last_result = [ActionResult(error=error_msg)]
 		return None
