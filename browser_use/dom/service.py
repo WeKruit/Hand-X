@@ -430,10 +430,14 @@ class DomService:
 			Tuple of (enhanced_dom_tree_node, timing_info)
 		"""
 		timing_info: dict[str, float] = {}
+		timing_start_total = time.time()
 
 		# Get all trees from CDP (snapshot, DOM, AX, viewport ratio)
+		start_get_trees = time.time()
 		trees = await self._get_all_trees(target_id)
+		get_trees_ms = (time.time() - start_get_trees) * 1000
 		timing_info.update(trees.cdp_timing)
+		timing_info['get_all_trees_total_ms'] = get_trees_ms
 
 		dom_tree = trees.dom_tree
 		ax_tree = trees.ax_tree
@@ -713,6 +717,21 @@ class DomService:
 		)
 		timing_info['construct_enhanced_tree_ms'] = (time.time() - start_construct) * 1000
 
+		# Calculate total time for get_dom_tree
+		total_get_dom_tree_ms = (time.time() - timing_start_total) * 1000
+		timing_info['get_dom_tree_total_ms'] = total_get_dom_tree_ms
+
+		# Calculate overhead in get_dom_tree (time not accounted for by sub-operations)
+		tracked_sub_operations_ms = (
+			timing_info.get('get_all_trees_total_ms', 0)
+			+ timing_info.get('build_ax_lookup_ms', 0)
+			+ timing_info.get('build_snapshot_lookup_ms', 0)
+			+ timing_info.get('construct_enhanced_tree_ms', 0)
+		)
+		get_dom_tree_overhead_ms = total_get_dom_tree_ms - tracked_sub_operations_ms
+		if get_dom_tree_overhead_ms > 0.1:
+			timing_info['get_dom_tree_overhead_ms'] = get_dom_tree_overhead_ms
+
 		return enhanced_dom_tree_node, timing_info
 
 	@observe_debug(ignore_input=True, ignore_output=True, name='get_serialized_dom_tree')
@@ -725,6 +744,7 @@ class DomService:
 			Tuple of (serialized_dom_state, enhanced_dom_tree_root, timing_info)
 		"""
 		timing_info: dict[str, float] = {}
+		start_total = time.time()
 
 		# Use current target (None means use current)
 		assert self.browser_session.current_target_id is not None
@@ -740,13 +760,31 @@ class DomService:
 		timing_info.update(dom_tree_timing)
 
 		# Serialize DOM tree for LLM
+		start_serialize = time.time()
 		serialized_dom_state, serializer_timing = DOMTreeSerializer(
 			enhanced_dom_tree, previous_cached_state, paint_order_filtering=self.paint_order_filtering
 		).serialize_accessible_elements()
+		total_serialization_ms = (time.time() - start_serialize) * 1000
 
 		# Add serializer sub-timings (convert to ms)
 		for key, value in serializer_timing.items():
 			timing_info[f'{key}_ms'] = value * 1000
+
+		# Calculate untracked time in serialization
+		tracked_serialization_ms = sum(value * 1000 for value in serializer_timing.values())
+		serialization_overhead_ms = total_serialization_ms - tracked_serialization_ms
+		if serialization_overhead_ms > 0.1:  # Only log if significant
+			timing_info['serialization_overhead_ms'] = serialization_overhead_ms
+
+		# Calculate total time for get_serialized_dom_tree
+		total_get_serialized_dom_tree_ms = (time.time() - start_total) * 1000
+		timing_info['get_serialized_dom_tree_total_ms'] = total_get_serialized_dom_tree_ms
+
+		# Calculate overhead in get_serialized_dom_tree (time not accounted for)
+		tracked_major_operations_ms = timing_info.get('get_dom_tree_total_ms', 0) + total_serialization_ms
+		get_serialized_overhead_ms = total_get_serialized_dom_tree_ms - tracked_major_operations_ms
+		if get_serialized_overhead_ms > 0.1:
+			timing_info['get_serialized_dom_tree_overhead_ms'] = get_serialized_overhead_ms
 
 		return serialized_dom_state, enhanced_dom_tree, timing_info
 

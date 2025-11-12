@@ -561,8 +561,24 @@ class DOMWatchdog(BaseWatchdog):
 				'🔍 DOMWatchdog._build_dom_tree_without_highlights: ✅ DomService.get_serialized_dom_tree completed'
 			)
 
-			# Calculate sum of all tracked timings
-			tracked_time_ms = sum(timing_info.values())
+			# Calculate sum of all tracked timings (avoiding double-counting)
+			# Exclude sub-timings when we have totals to avoid double-counting
+			exclude_keys = {
+				# Serializer sub-timings (already in serialize_accessible_elements_total_ms)
+				'create_simplified_tree_ms',
+				'calculate_paint_order_ms',
+				'optimize_tree_ms',
+				'bbox_filtering_ms',
+				'clickable_detection_time_ms',  # Already in create_simplified_tree_ms
+				'assign_interactive_indices_ms',
+				# Aggregate/overhead timings (derived from other timings)
+				'cdp_calls_total_ms',  # Already in get_all_trees_total_ms
+				'get_dom_tree_overhead_ms',  # Calculated overhead
+				'serialization_overhead_ms',  # Calculated overhead
+				'get_serialized_dom_tree_overhead_ms',  # Calculated overhead
+				'get_serialized_dom_tree_total_ms',  # Top-level total that includes everything
+			}
+			tracked_time_ms = sum(v for k, v in timing_info.items() if k not in exclude_keys)
 			untracked_time_ms = total_time_ms - tracked_time_ms
 
 			# Format timing values to 2 decimal places
