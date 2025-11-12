@@ -215,7 +215,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			model_name = getattr(llm, 'model', '')
 			if isinstance(model_name, str) and model_name.startswith('claude-sonnet'):
 				llm_screenshot_size = (1400, 850)
-				self.logger.info('🖼️  Auto-configured LLM screenshot size for Claude Sonnet: 1400x850')
+				logger.info('🖼️  Auto-configured LLM screenshot size for Claude Sonnet: 1400x850')
 
 		if page_extraction_llm is None:
 			page_extraction_llm = llm
