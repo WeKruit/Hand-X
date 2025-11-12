@@ -23,6 +23,7 @@ from browser_use.dom.views import (
 	TargetAllTrees,
 )
 from browser_use.observability import observe_debug
+from browser_use.utils import create_task_with_error_handling
 
 if TYPE_CHECKING:
 	from browser_use.browser.session import BrowserSession
@@ -317,10 +318,10 @@ class DomService:
 
 		# Create initial tasks
 		tasks = {
-			'snapshot': asyncio.create_task(create_snapshot_request()),
-			'dom_tree': asyncio.create_task(create_dom_tree_request()),
-			'ax_tree': asyncio.create_task(self._get_ax_tree_for_all_frames(target_id)),
-			'device_pixel_ratio': asyncio.create_task(self._get_viewport_ratio(target_id)),
+			'snapshot': create_task_with_error_handling(create_snapshot_request(), name='get_snapshot'),
+			'dom_tree': create_task_with_error_handling(create_dom_tree_request(), name='get_dom_tree'),
+			'ax_tree': create_task_with_error_handling(self._get_ax_tree_for_all_frames(target_id), name='get_ax_tree'),
+			'device_pixel_ratio': create_task_with_error_handling(self._get_viewport_ratio(target_id), name='get_viewport_ratio'),
 		}
 
 		# Wait for all tasks with timeout
@@ -333,10 +334,14 @@ class DomService:
 
 			# Retry mapping for pending tasks
 			retry_map = {
-				tasks['snapshot']: lambda: asyncio.create_task(create_snapshot_request()),
-				tasks['dom_tree']: lambda: asyncio.create_task(create_dom_tree_request()),
-				tasks['ax_tree']: lambda: asyncio.create_task(self._get_ax_tree_for_all_frames(target_id)),
-				tasks['device_pixel_ratio']: lambda: asyncio.create_task(self._get_viewport_ratio(target_id)),
+				tasks['snapshot']: lambda: create_task_with_error_handling(create_snapshot_request(), name='get_snapshot_retry'),
+				tasks['dom_tree']: lambda: create_task_with_error_handling(create_dom_tree_request(), name='get_dom_tree_retry'),
+				tasks['ax_tree']: lambda: create_task_with_error_handling(
+					self._get_ax_tree_for_all_frames(target_id), name='get_ax_tree_retry'
+				),
+				tasks['device_pixel_ratio']: lambda: create_task_with_error_handling(
+					self._get_viewport_ratio(target_id), name='get_viewport_ratio_retry'
+				),
 			}
 
 			# Create new tasks only for the ones that didn't complete

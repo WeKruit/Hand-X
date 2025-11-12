@@ -1854,8 +1854,14 @@ async def run_auth_command():
 
 			# Run authentication and progress updates concurrently
 			auth_start_time = asyncio.get_event_loop().time()
-			auth_task = asyncio.create_task(sync_service.authenticate(show_instructions=True))
-			progress_task = asyncio.create_task(show_auth_progress())
+			from browser_use.utils import create_task_with_error_handling
+
+			auth_task = create_task_with_error_handling(
+				sync_service.authenticate(show_instructions=True), name='sync_authenticate'
+			)
+			progress_task = create_task_with_error_handling(
+				show_auth_progress(), name='show_auth_progress', suppress_exceptions=True
+			)
 
 			# Wait for authentication to complete, with timeout
 			success = await asyncio.wait_for(auth_task, timeout=120.0)  # 2 minutes for initial testing

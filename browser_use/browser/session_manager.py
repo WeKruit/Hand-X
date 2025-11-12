@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 from cdp_use.cdp.target import AttachedToTargetEvent, DetachedFromTargetEvent, SessionID, TargetID
 
+from browser_use.utils import create_task_with_error_handling
+
 if TYPE_CHECKING:
 	from browser_use.browser.session import BrowserSession, CDPSession, Target
 
@@ -72,14 +74,29 @@ class SessionManager:
 			# - Create CDPSession
 			# - Enable monitoring (for pages/tabs)
 			# - Add to pool
-			asyncio.create_task(self._handle_target_attached(event))
+			create_task_with_error_handling(
+				self._handle_target_attached(event),
+				name='handle_target_attached',
+				logger_instance=self.logger,
+				suppress_exceptions=True,
+			)
 
 		def on_detached(event: DetachedFromTargetEvent, session_id: SessionID | None = None):
-			asyncio.create_task(self._handle_target_detached(event))
+			create_task_with_error_handling(
+				self._handle_target_detached(event),
+				name='handle_target_detached',
+				logger_instance=self.logger,
+				suppress_exceptions=True,
+			)
 
 		def on_target_info_changed(event, session_id: SessionID | None = None):
 			# Update session info from targetInfoChanged events (no polling needed!)
-			asyncio.create_task(self._handle_target_info_changed(event))
+			create_task_with_error_handling(
+				self._handle_target_info_changed(event),
+				name='handle_target_info_changed',
+				logger_instance=self.logger,
+				suppress_exceptions=True,
+			)
 
 		cdp_client.register.Target.attachedToTarget(on_attached)
 		cdp_client.register.Target.detachedFromTarget(on_detached)
@@ -629,7 +646,9 @@ class SessionManager:
 				await asyncio.sleep(0.05)
 
 		# Start checking in background
-		check_task = asyncio.create_task(check_all_ready())
+		check_task = create_task_with_error_handling(
+			check_all_ready(), name='check_all_targets_ready', logger_instance=self.logger
+		)
 
 		try:
 			# Wait for completion with timeout

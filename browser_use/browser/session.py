@@ -44,7 +44,7 @@ from browser_use.browser.profile import BrowserProfile, ProxySettings
 from browser_use.browser.views import BrowserStateSummary, TabInfo
 from browser_use.dom.views import DOMRect, EnhancedDOMTreeNode, TargetInfo
 from browser_use.observability import observe_debug
-from browser_use.utils import _log_pretty_url, is_new_tab_page
+from browser_use.utils import _log_pretty_url, create_task_with_error_handling, is_new_tab_page
 
 if TYPE_CHECKING:
 	from browser_use.actor.page import Page
@@ -1606,7 +1606,9 @@ class BrowserSession(BaseModel):
 							self.logger.debug(f'Proxy auth respond failed: {type(e).__name__}: {e}')
 
 					# schedule
-					asyncio.create_task(_respond())
+					create_task_with_error_handling(
+						_respond(), name='auth_respond', logger_instance=self.logger, suppress_exceptions=True
+					)
 				else:
 					# Default behaviour for non-proxy challenges: let browser handle
 					async def _default():
@@ -1620,7 +1622,9 @@ class BrowserSession(BaseModel):
 							self.logger.debug(f'Default auth respond failed: {type(e).__name__}: {e}')
 
 					if request_id:
-						asyncio.create_task(_default())
+						create_task_with_error_handling(
+							_default(), name='auth_default', logger_instance=self.logger, suppress_exceptions=True
+						)
 
 			def _on_request_paused(event: RequestPausedEvent, session_id: SessionID | None = None):
 				# Continue all paused requests to avoid stalling the network
@@ -1638,7 +1642,9 @@ class BrowserSession(BaseModel):
 					except Exception:
 						pass
 
-				asyncio.create_task(_continue())
+				create_task_with_error_handling(
+					_continue(), name='request_continue', logger_instance=self.logger, suppress_exceptions=True
+				)
 
 			# Register event handler on root client
 			try:
@@ -1670,7 +1676,9 @@ class BrowserSession(BaseModel):
 					except Exception as e:
 						self.logger.debug(f'Fetch.enable on attached session failed: {type(e).__name__}: {e}')
 
-				asyncio.create_task(_enable())
+				create_task_with_error_handling(
+					_enable(), name='fetch_enable_attached', logger_instance=self.logger, suppress_exceptions=True
+				)
 
 			try:
 				self._cdp_client_root.register.Target.attachedToTarget(_on_attached)

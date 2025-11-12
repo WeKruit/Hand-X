@@ -25,6 +25,7 @@ from browser_use.browser.events import (
 	TabCreatedEvent,
 )
 from browser_use.browser.watchdog_base import BaseWatchdog
+from browser_use.utils import create_task_with_error_handling
 
 if TYPE_CHECKING:
 	pass
@@ -182,7 +183,12 @@ class DownloadsWatchdog(BaseWatchdog):
 			except (AssertionError, KeyError):
 				pass
 			# Create and track the task
-			task = asyncio.create_task(self._handle_cdp_download(event, target_id, session_id))
+			task = create_task_with_error_handling(
+				self._handle_cdp_download(event, target_id, session_id),
+				name='handle_cdp_download',
+				logger_instance=self.logger,
+				suppress_exceptions=True,
+			)
 			self._cdp_event_tasks.add(task)
 			# Remove from set when done
 			task.add_done_callback(lambda t: self._cdp_event_tasks.discard(t))
@@ -431,7 +437,12 @@ class DownloadsWatchdog(BaseWatchdog):
 								self.logger.error(f'[DownloadsWatchdog] Error downloading in background: {type(e).__name__}: {e}')
 
 						# Create background task
-						task = asyncio.create_task(download_in_background())
+						task = create_task_with_error_handling(
+							download_in_background(),
+							name='download_in_background',
+							logger_instance=self.logger,
+							suppress_exceptions=True,
+						)
 						self._cdp_event_tasks.add(task)
 						task.add_done_callback(lambda t: self._cdp_event_tasks.discard(t))
 
