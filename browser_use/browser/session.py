@@ -75,8 +75,7 @@ class CDPSession(BaseModel):
 	"""CDP communication channel to a target.
 
 	A session is a connection that allows sending CDP commands to a specific target.
-	Multiple sessions can attach to the same target. The session does not own
-	the target's properties (url, title) - those belong to the Target.
+	Multiple sessions can attach to the same target.
 	"""
 
 	model_config = ConfigDict(arbitrary_types_allowed=True, revalidate_instances='never')
@@ -88,12 +87,6 @@ class CDPSession(BaseModel):
 	# Lifecycle monitoring (populated by SessionManager)
 	_lifecycle_events: Any = PrivateAttr(default=None)
 	_lifecycle_lock: Any = PrivateAttr(default=None)
-
-	async def disconnect(self) -> None:
-		"""Disconnect session (no-op since we use shared WebSocket)."""
-		# With event-driven approach, all sessions share the root WebSocket
-		# Nothing to disconnect - only the root client is disconnected on browser.stop()
-		pass
 
 
 class BrowserSession(BaseModel):
@@ -406,7 +399,7 @@ class BrowserSession(BaseModel):
 	# Mutable private state shared between watchdogs
 	_cdp_client_root: CDPClient | None = PrivateAttr(default=None)
 
-	# PUBLIC: SessionManager instance (OWNS all targets and sessions - single source of truth)
+	# PUBLIC: SessionManager instance (OWNS all targets and sessions)
 	session_manager: Any = Field(default=None, exclude=True)  # SessionManager
 
 	_cached_browser_state_summary: Any = PrivateAttr(default=None)
@@ -461,8 +454,6 @@ class BrowserSession(BaseModel):
 
 	def __str__(self) -> str:
 		return f'BrowserSession🅑 {self._id_for_logs} 🅣 {self._tab_id_for_logs}'
-
-	# Access targets/sessions directly via session_manager.get_target(id) - no wrappers!
 
 	async def reset(self) -> None:
 		"""Clear all cached CDP sessions with proper cleanup."""
@@ -654,7 +645,6 @@ class BrowserSession(BaseModel):
 		current_target_id = self.agent_focus_target_id
 
 		# If new_tab=True but we're already in a new tab, set new_tab=False
-		# Use cached URL from target instead of CDP call for performance
 		current_target = self.session_manager.get_target(current_target_id)
 		if event.new_tab and is_new_tab_page(current_target.url):
 			self.logger.debug(f'[on_NavigateToUrlEvent] Already on blank tab ({current_target.url}), reusing')
@@ -665,7 +655,6 @@ class BrowserSession(BaseModel):
 			self.logger.debug(f'[on_NavigateToUrlEvent] Processing new_tab={event.new_tab}')
 
 			if event.new_tab:
-				# Get all page targets from SessionManager
 				page_targets = self.session_manager.get_all_page_targets()
 				self.logger.debug(f'[on_NavigateToUrlEvent] Found {len(page_targets)} existing tabs')
 
@@ -701,7 +690,6 @@ class BrowserSession(BaseModel):
 				)
 				# Activate target (bring to foreground)
 				await self.event_bus.dispatch(SwitchTabEvent(target_id=target_id))
-				# which updates agent_focus_target_id for us
 			else:
 				self.logger.debug(f'[on_NavigateToUrlEvent] Already on target tab {target_id[-4:]}, skipping SwitchTabEvent')
 
@@ -727,9 +715,7 @@ class BrowserSession(BaseModel):
 					status=None,  # CDP doesn't provide status directly
 				)
 			)
-			await self.event_bus.dispatch(
-				AgentFocusChangedEvent(target_id=target_id, url=event.url)
-			)  # do not await! AgentFocusChangedEvent calls SwitchTabEvent and it will deadlock, dispatch to enqueue and return
+			await self.event_bus.dispatch(AgentFocusChangedEvent(target_id=target_id, url=event.url))
 
 			# Note: These should be handled by dedicated watchdogs:
 			# - Security checks (security_watchdog)
@@ -779,7 +765,6 @@ class BrowserSession(BaseModel):
 		# Start performance tracking
 		nav_start_time = asyncio.get_event_loop().time()
 
-		# Get CDP session for navigation (cdp_session is CDPSession, not Target)
 		nav_result = await cdp_session.cdp_client.send.Page.navigate(
 			params={'url': url, 'transitionType': 'address_bar'},
 			session_id=cdp_session.session_id,
@@ -793,7 +778,7 @@ class BrowserSession(BaseModel):
 		navigation_id = nav_result.get('loaderId')
 		start_time = asyncio.get_event_loop().time()
 
-		# Poll stored lifecycle events (handler registered once in SessionManager)
+		# Poll stored lifecycle events
 		seen_events = []  # Track events for timeout diagnostics
 
 		# Check if session has lifecycle monitoring enabled
@@ -807,14 +792,14 @@ class BrowserSession(BaseModel):
 		# Poll for lifecycle events until timeout
 		poll_interval = 0.05  # Poll every 50ms
 		while (asyncio.get_event_loop().time() - start_time) < timeout:
-			# Check stored events (populated by handler in SessionManager)
+			# Check stored events
 			try:
 				# Get recent events matching our navigation
 				for event_data in list(cdp_session._lifecycle_events):
 					event_name = event_data.get('name')
 					event_loader_id = event_data.get('loaderId')
 
-					# Debug: track events
+					# Track events
 					event_str = f'{event_name}(loader={event_loader_id[:8] if event_loader_id else "none"})'
 					if event_str not in seen_events:
 						seen_events.append(event_str)
@@ -854,26 +839,26 @@ class BrowserSession(BaseModel):
 		if not self.agent_focus_target_id:
 			raise RuntimeError('Cannot switch tabs - browser not connected')
 
-		# Get all page targets from SessionManager
+		# Get all page targets
 		page_targets = self.session_manager.get_all_page_targets()
 		if event.target_id is None:
-			# most recently opened page
+			# Most recently opened page
 			if page_targets:
-				# update the target id to be the id of the most recently opened page, then proceed to switch to it
+				# Update the target id to be the id of the most recently opened page, then proceed to switch to it
 				event.target_id = page_targets[-1].target_id
 			else:
-				# no pages open at all, create a new one (handles switching to it automatically)
+				# No pages open at all, create a new one (handles switching to it automatically)
 				assert self._cdp_client_root is not None, 'CDP client root not initialized - browser may not be connected yet'
 				new_target = await self._cdp_client_root.send.Target.createTarget(params={'url': 'about:blank'})
 				target_id = new_target['targetId']
-				# do not await! these may circularly trigger SwitchTabEvent and could deadlock, dispatch to enqueue and return
+				# Don't await, these may circularly trigger SwitchTabEvent and could deadlock, dispatch to enqueue and return
 				self.event_bus.dispatch(TabCreatedEvent(url='about:blank', target_id=target_id))
 				self.event_bus.dispatch(AgentFocusChangedEvent(target_id=target_id, url='about:blank'))
 				return target_id
 
-		# switch to the target
+		# Switch to the target
 		assert event.target_id is not None, 'target_id must be set at this point'
-		# Ensure session exists and get CDP session for this target
+		# Ensure session exists
 		cdp_session = await self.get_or_create_cdp_session(target_id=event.target_id, focus=True)
 
 		# Update agent focus to this target
@@ -1063,7 +1048,6 @@ class BrowserSession(BaseModel):
 		# Import here to avoid circular import
 		from browser_use.actor.page import Page as PageActor
 
-		# Get all page targets from SessionManager (single source of truth)
 		page_targets = self.session_manager.get_all_page_targets() if self.session_manager else []
 
 		targets = []
@@ -1858,7 +1842,6 @@ class BrowserSession(BaseModel):
 		if not self.session_manager:
 			raise RuntimeError('SessionManager not initialized')
 
-		# Check all targets from SessionManager (single source of truth)
 		for full_target_id in self.session_manager.get_all_target_ids():
 			if full_target_id.endswith(tab_id):
 				if await self._is_target_valid(full_target_id):
@@ -3114,20 +3097,6 @@ class BrowserSession(BaseModel):
 
 	async def cdp_client_for_target(self, target_id: TargetID) -> CDPSession:
 		return await self.get_or_create_cdp_session(target_id, focus=False)
-
-	def get_target_id_from_session_id(self, session_id: SessionID | None) -> TargetID | None:
-		"""Look up target_id from a CDP session_id via SessionManager.
-
-		Args:
-			session_id: The CDP session ID to look up
-
-		Returns:
-			The target_id for this session, or None if not found
-		"""
-		if not session_id or not self.session_manager:
-			return None
-		# Explicitly delegate to SessionManager (single source of truth)
-		return self.session_manager.get_target_id_from_session_id(session_id)
 
 	async def cdp_client_for_frame(self, frame_id: str) -> CDPSession:
 		"""Get a CDP client attached to the target containing the specified frame.
