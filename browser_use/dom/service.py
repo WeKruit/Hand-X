@@ -769,7 +769,7 @@ class DomService:
 		# Use current target (None means use current)
 		assert self.browser_session.agent_focus_target_id is not None
 
-		session_id = self.browser_session.id  
+		session_id = self.browser_session.id
 
 		# Build DOM tree (includes CDP calls for snapshot, DOM, AX tree)
 		# Note: all_frames is fetched lazily inside get_dom_tree only if cross-origin iframes need it

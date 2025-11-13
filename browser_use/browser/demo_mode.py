@@ -853,7 +853,7 @@ class DemoMode:
 			self.logger.warning(f'Failed to ensure demo mode is ready: {exc}')
 			return
 
-		if self.session.agent_focus is None:
+		if self.session.agent_focus_target_id is None:
 			self.logger.debug('Cannot send demo log: no active target')
 			return
 
@@ -905,8 +905,8 @@ class DemoMode:
 		)
 
 		target_ids = [t['targetId'] for t in targets]
-		if not target_ids and self.session.agent_focus:
-			target_ids = [self.session.agent_focus.target_id]
+		if not target_ids and self.session.agent_focus_target_id:
+			target_ids = [self.session.agent_focus_target_id]
 
 		for target_id in target_ids:
 			try:
