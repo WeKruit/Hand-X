@@ -25,6 +25,7 @@ from browser_use.browser.events import (
 	TabCreatedEvent,
 )
 from browser_use.browser.watchdog_base import BaseWatchdog
+from browser_use.utils import create_task_with_error_handling
 
 if TYPE_CHECKING:
 	pass
@@ -90,9 +91,11 @@ class DownloadsWatchdog(BaseWatchdog):
 
 	async def on_BrowserStateRequestEvent(self, event: BrowserStateRequestEvent) -> None:
 		"""Handle browser state request events."""
-		cdp_session = self.browser_session.agent_focus
-		if not cdp_session:
-			return
+		# Use public API - automatically validates and waits for recovery if needed
+		try:
+			cdp_session = await self.browser_session.get_or_create_cdp_session()
+		except ValueError:
+			return  # No valid focus, skip
 
 		url = await self.browser_session.get_current_page_url()
 		if not url:
@@ -152,6 +155,7 @@ class DownloadsWatchdog(BaseWatchdog):
 		self.logger.debug(f'[DownloadsWatchdog] Got target_id={target_id} for tab #{event.target_id[-4:]}')
 
 		is_pdf = await self.check_for_pdf_viewer(target_id)
+
 		if is_pdf:
 			self.logger.debug(f'[DownloadsWatchdog] 📄 PDF detected at {event.url}, triggering auto-download...')
 			download_path = await self.trigger_pdf_download(target_id)
@@ -181,7 +185,12 @@ class DownloadsWatchdog(BaseWatchdog):
 			except (AssertionError, KeyError):
 				pass
 			# Create and track the task
-			task = asyncio.create_task(self._handle_cdp_download(event, target_id, session_id))
+			task = create_task_with_error_handling(
+				self._handle_cdp_download(event, target_id, session_id),
+				name='handle_cdp_download',
+				logger_instance=self.logger,
+				suppress_exceptions=True,
+			)
 			self._cdp_event_tasks.add(task)
 			# Remove from set when done
 			task.add_done_callback(lambda t: self._cdp_event_tasks.discard(t))
@@ -315,7 +324,7 @@ class DownloadsWatchdog(BaseWatchdog):
 					"""
 					try:
 						# Look up target_id from session_id
-						event_target_id = self.browser_session.get_target_id_from_session_id(session_id)
+						event_target_id = self.browser_session.session_manager.get_target_id_from_session_id(session_id)
 						if not event_target_id:
 							# Session not in pool - might be a stale session or not yet tracked
 							return
@@ -430,7 +439,12 @@ class DownloadsWatchdog(BaseWatchdog):
 								self.logger.error(f'[DownloadsWatchdog] Error downloading in background: {type(e).__name__}: {e}')
 
 						# Create background task
-						task = asyncio.create_task(download_in_background())
+						task = create_task_with_error_handling(
+							download_in_background(),
+							name='download_in_background',
+							logger_instance=self.logger,
+							suppress_exceptions=True,
+						)
 						self._cdp_event_tasks.add(task)
 						task.add_done_callback(lambda t: self._cdp_event_tasks.discard(t))
 
@@ -943,15 +957,19 @@ class DownloadsWatchdog(BaseWatchdog):
 		"""
 		self.logger.debug(f'[DownloadsWatchdog] Checking if target {target_id} is PDF viewer...')
 
-		# Get target info to get URL
-		cdp_client = self.browser_session.cdp_client
-		targets = await cdp_client.send.Target.getTargets()
-		target_info = next((t for t in targets['targetInfos'] if t['targetId'] == target_id), None)
-		if not target_info:
-			self.logger.warning(f'[DownloadsWatchdog] No target info found for {target_id}')
+		# Use safe API - focus=False to avoid changing focus during PDF check
+		try:
+			session = await self.browser_session.get_or_create_cdp_session(target_id, focus=False)
+		except ValueError as e:
+			self.logger.warning(f'[DownloadsWatchdog] No session found for {target_id}: {e}')
 			return False
 
-		page_url = target_info.get('url', '')
+		# Get URL from target
+		target = self.browser_session.session_manager.get_target(target_id)
+		if not target:
+			self.logger.warning(f'[DownloadsWatchdog] No target found for {target_id}')
+			return False
+		page_url = target.url
 
 		# Check cache first
 		if page_url in self._pdf_viewer_cache:
@@ -966,15 +984,6 @@ class DownloadsWatchdog(BaseWatchdog):
 				self.logger.debug(f'[DownloadsWatchdog] PDF detected via URL pattern: {page_url}')
 				self._pdf_viewer_cache[page_url] = True
 				return True
-
-			# Method 2: Check network response headers via CDP (safer than JavaScript)
-			header_is_pdf = await self._check_network_headers_for_pdf(target_id)
-			if header_is_pdf:
-				self.logger.debug(f'[DownloadsWatchdog] PDF detected via network headers: {page_url}')
-				self._pdf_viewer_cache[page_url] = True
-				return True
-
-			# Method 3: Check Chrome's PDF viewer specific URLs
 			chrome_pdf_viewer = self._is_chrome_pdf_viewer_url(page_url)
 			if chrome_pdf_viewer:
 				self.logger.debug(f'[DownloadsWatchdog] Chrome PDF viewer detected: {page_url}')
