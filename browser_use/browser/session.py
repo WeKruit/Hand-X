@@ -1145,15 +1145,22 @@ class BrowserSession(BaseModel):
 			ValueError: If target doesn't exist or session is not available.
 		"""
 		assert self._cdp_client_root is not None, 'Root CDP client not initialized'
-		assert self.agent_focus_target_id is not None, 'Agent focus not initialized'
 		assert self.session_manager is not None, 'SessionManager not initialized'
 
-		# If no target_id specified, use current agent focus
+		# If no target_id specified, ensure current agent focus is valid and wait for recovery if needed
 		if target_id is None:
+			# Validate and wait for focus recovery if stale (centralized protection)
+			focus_valid = await self.session_manager.ensure_valid_focus(timeout=5.0)
+			if not focus_valid:
+				raise ValueError(
+					'No valid agent focus available - target may have detached and recovery failed. '
+					'This indicates browser is in an unstable state.'
+				)
+
+			assert self.agent_focus_target_id is not None, 'Focus validation passed but agent_focus_target_id is None'
 			target_id = self.agent_focus_target_id
 
-		# Get session from event-driven pool
-		session = self.session_manager.get_session_for_target(target_id)
+		session = self.session_manager._get_session_for_target(target_id)
 
 		if not session:
 			# Session not in pool yet - wait for attach event
@@ -1162,7 +1169,7 @@ class BrowserSession(BaseModel):
 			# Wait up to 2 seconds for the attach event
 			for attempt in range(20):
 				await asyncio.sleep(0.1)
-				session = self.session_manager.get_session_for_target(target_id)
+				session = self.session_manager._get_session_for_target(target_id)
 				if session:
 					self.logger.debug(f'[SessionManager] Target appeared after {attempt * 100}ms')
 					break
@@ -1184,14 +1191,17 @@ class BrowserSession(BaseModel):
 			target_type = target.target_type if target else 'unknown'
 
 			if target_type == 'page':
-				self.logger.debug(f'[SessionManager] Switching focus: {self.agent_focus_target_id[:8]}... → {target_id[:8]}...')
+				# Format current focus safely (could be None after detach)
+				current_focus = self.agent_focus_target_id[:8] if self.agent_focus_target_id else 'None'
+				self.logger.debug(f'[SessionManager] Switching focus: {current_focus}... → {target_id[:8]}...')
 				self.agent_focus_target_id = target_id
 			else:
 				# Ignore focus request for non-page targets (iframes, workers, etc.)
 				# These can detach at any time, causing agent_focus to point to dead target
+				current_focus = self.agent_focus_target_id[:8] if self.agent_focus_target_id else 'None'
 				self.logger.debug(
 					f'[SessionManager] Ignoring focus request for {target_type} target {target_id[:8]}... '
-					f'(agent_focus stays on {self.agent_focus_target_id[:8]}...)'
+					f'(agent_focus stays on {current_focus}...)'
 				)
 
 		# Resume if waiting for debugger
@@ -1456,14 +1466,11 @@ class BrowserSession(BaseModel):
 					target_id = target.target_id
 					self.logger.debug(f'🔄 Redirecting {target_url} to about:blank for target {target_id}')
 					try:
-						# Sessions now exist from SessionManager initialization
-						session = self.session_manager.get_session_for_target(target_id)
-						if session:
-							await session.cdp_client.send.Page.navigate(
-								params={'url': 'about:blank'}, session_id=session.session_id
-							)
-							# Update target url
-							target.url = 'about:blank'
+						# Use public API with focus=False to avoid changing focus during init
+						session = await self.get_or_create_cdp_session(target_id, focus=False)
+						await session.cdp_client.send.Page.navigate(params={'url': 'about:blank'}, session_id=session.session_id)
+						# Update target url
+						target.url = 'about:blank'
 					except Exception as e:
 						self.logger.warning(f'Failed to redirect {target_url}: {e}')
 
@@ -1476,18 +1483,14 @@ class BrowserSession(BaseModel):
 				target_id = page_targets_from_manager[0].target_id
 				self.logger.debug(f'📄 Using existing page: {target_id}')
 
-			# Wait for SessionManager to receive the attach event for this target
-			# (SessionManager already attached to existing targets in start_monitoring())
-			for _ in range(20):  # Wait up to 2 seconds
-				await asyncio.sleep(0.1)
-				session = self.session_manager.get_session_for_target(target_id)
-				if session:
-					self.agent_focus_target_id = target_id
-					self.logger.debug(f'📄 Agent focus set to {target_id[:8]}...')
-					break
-
-			if not self.agent_focus_target_id:
-				raise RuntimeError(f'Failed to get session for initial target {target_id}')
+			# Set up initial focus using the public API
+			# Note: get_or_create_cdp_session() will wait for attach event and set focus
+			try:
+				await self.get_or_create_cdp_session(target_id, focus=True)
+				# agent_focus_target_id is now set by get_or_create_cdp_session
+				self.logger.debug(f'📄 Agent focus set to {target_id[:8]}...')
+			except ValueError as e:
+				raise RuntimeError(f'Failed to get session for initial target {target_id}: {e}') from e
 
 			# Note: Lifecycle monitoring is enabled automatically in SessionManager._handle_target_attached()
 			# when targets attach, so no manual enablement needed!
@@ -1552,13 +1555,12 @@ class BrowserSession(BaseModel):
 			# Also enable on the focused target's session if available to ensure events are delivered
 			try:
 				if self.agent_focus_target_id:
-					cdp_session = self.session_manager.get_session_for_target(self.agent_focus_target_id)
-					if cdp_session:
-						await cdp_session.cdp_client.send.Fetch.enable(
-							params={'handleAuthRequests': True},
-							session_id=cdp_session.session_id,
-						)
-						self.logger.debug('Fetch.enable(handleAuthRequests=True) enabled on focused session')
+					cdp_session = await self.get_or_create_cdp_session(self.agent_focus_target_id, focus=False)
+					await cdp_session.cdp_client.send.Fetch.enable(
+						params={'handleAuthRequests': True},
+						session_id=cdp_session.session_id,
+					)
+					self.logger.debug('Fetch.enable(handleAuthRequests=True) enabled on focused session')
 			except Exception as e:
 				self.logger.debug(f'Fetch.enable on focused session failed: {type(e).__name__}: {e}')
 
@@ -1636,10 +1638,9 @@ class BrowserSession(BaseModel):
 				self._cdp_client_root.register.Fetch.authRequired(_on_auth_required)
 				self._cdp_client_root.register.Fetch.requestPaused(_on_request_paused)
 				if self.agent_focus_target_id:
-					cdp_session = self.session_manager.get_session_for_target(self.agent_focus_target_id)
-					if cdp_session:
-						cdp_session.cdp_client.register.Fetch.authRequired(_on_auth_required)
-						cdp_session.cdp_client.register.Fetch.requestPaused(_on_request_paused)
+					cdp_session = await self.get_or_create_cdp_session(self.agent_focus_target_id, focus=False)
+					cdp_session.cdp_client.register.Fetch.authRequired(_on_auth_required)
+					cdp_session.cdp_client.register.Fetch.requestPaused(_on_request_paused)
 				self.logger.debug('Registered Fetch.authRequired handlers')
 			except Exception as e:
 				self.logger.debug(f'Failed to register authRequired handlers: {type(e).__name__}: {e}')
@@ -1674,12 +1675,12 @@ class BrowserSession(BaseModel):
 			# Ensure Fetch is enabled for the current focused target's session, too
 			try:
 				if self.agent_focus_target_id:
-					cdp_session = self.session_manager.get_session_for_target(self.agent_focus_target_id)
-					if cdp_session:
-						await cdp_session.cdp_client.send.Fetch.enable(
-							params={'handleAuthRequests': True, 'patterns': [{'urlPattern': '*'}]},
-							session_id=cdp_session.session_id,
-						)
+					# Use safe API with focus=False to avoid changing focus
+					cdp_session = await self.get_or_create_cdp_session(self.agent_focus_target_id, focus=False)
+					await cdp_session.cdp_client.send.Fetch.enable(
+						params={'handleAuthRequests': True, 'patterns': [{'urlPattern': '*'}]},
+						session_id=cdp_session.session_id,
+					)
 			except Exception as e:
 				self.logger.debug(f'Fetch.enable on focused session failed: {type(e).__name__}: {e}')
 		except Exception as e:
@@ -2710,9 +2711,10 @@ class BrowserSession(BaseModel):
 			# Set viewport for specific target
 			cdp_session = await self.get_or_create_cdp_session(target_id, focus=False)
 		elif self.agent_focus_target_id:
-			# Use current focus
-			cdp_session = self.session_manager.get_session_for_target(self.agent_focus_target_id)
-			if not cdp_session:
+			# Use current focus - use safe API with focus=False to avoid changing focus
+			try:
+				cdp_session = await self.get_or_create_cdp_session(self.agent_focus_target_id, focus=False)
+			except ValueError:
 				self.logger.warning('Cannot set viewport: focused target has no sessions')
 				return
 		else:
@@ -2924,9 +2926,10 @@ class BrowserSession(BaseModel):
 				# Only process the current focus target
 				if self.agent_focus_target_id and target_id != self.agent_focus_target_id:
 					continue
-				# Use the existing agent_focus target's session
-				cdp_session = self.session_manager.get_session_for_target(self.agent_focus_target_id)
-				if not cdp_session:
+				# Use the existing agent_focus target's session - use safe API with focus=False
+				try:
+					cdp_session = await self.get_or_create_cdp_session(self.agent_focus_target_id, focus=False)
+				except ValueError:
 					continue  # Skip if no session available
 			else:
 				# Get cached session for this target (don't change focus - iterating frames)
@@ -3158,12 +3161,16 @@ class BrowserSession(BaseModel):
 		# Strategy 4: Fallback to agent_focus_target_id (the page where agent is currently working)
 		if self.agent_focus_target_id:
 			target = self.session_manager.get_target(self.agent_focus_target_id)
-			cdp_session = self.session_manager.get_session_for_target(self.agent_focus_target_id)
-			if cdp_session and target:
-				self.logger.warning(
-					f'⚠️ Node {node.backend_node_id} has no session/frame/target info. Using agent_focus session: {target.url}'
-				)
+			try:
+				# Use safe API with focus=False to avoid changing focus
+				cdp_session = await self.get_or_create_cdp_session(self.agent_focus_target_id, focus=False)
+				if target:
+					self.logger.warning(
+						f'⚠️ Node {node.backend_node_id} has no session/frame/target info. Using agent_focus session: {target.url}'
+					)
 				return cdp_session
+			except ValueError:
+				pass  # Fall through to last resort
 
 		# Last resort: use main session
 		self.logger.error(f'❌ No session info for node {node.backend_node_id} and no agent_focus available. Using main session.')

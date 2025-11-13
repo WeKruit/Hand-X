@@ -91,9 +91,11 @@ class DownloadsWatchdog(BaseWatchdog):
 
 	async def on_BrowserStateRequestEvent(self, event: BrowserStateRequestEvent) -> None:
 		"""Handle browser state request events."""
-		cdp_session = self.browser_session.session_manager.get_focused_session()
-		if not cdp_session:
-			return
+		# Use public API - automatically validates and waits for recovery if needed
+		try:
+			cdp_session = await self.browser_session.get_or_create_cdp_session()
+		except ValueError:
+			return  # No valid focus, skip
 
 		url = await self.browser_session.get_current_page_url()
 		if not url:
@@ -955,9 +957,11 @@ class DownloadsWatchdog(BaseWatchdog):
 		"""
 		self.logger.debug(f'[DownloadsWatchdog] Checking if target {target_id} is PDF viewer...')
 
-		session = self.browser_session.session_manager.get_session_for_target(target_id)
-		if not session:
-			self.logger.warning(f'[DownloadsWatchdog] No session found for {target_id}')
+		# Use safe API - focus=False to avoid changing focus during PDF check
+		try:
+			session = await self.browser_session.get_or_create_cdp_session(target_id, focus=False)
+		except ValueError as e:
+			self.logger.warning(f'[DownloadsWatchdog] No session found for {target_id}: {e}')
 			return False
 
 		# Get URL from target

@@ -534,8 +534,12 @@ class DomService:
 					height=snapshot_data.bounds.height,
 				)
 
-			session = self.browser_session.session_manager.get_session_for_target(target_id)
-			session_id = session.session_id if session else None
+			try:
+				session = await self.browser_session.get_or_create_cdp_session(target_id, focus=False)
+				session_id = session.session_id
+			except ValueError:
+				# Target may have detached during DOM construction
+				session_id = None
 
 			dom_tree_node = EnhancedDOMTreeNode(
 				node_id=node['nodeId'],

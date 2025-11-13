@@ -1630,12 +1630,8 @@ class DefaultActionWatchdog(BaseWatchdog):
 			True if successful, False if failed
 		"""
 		try:
-			# Get CDP client and session
-			assert self.browser_session.agent_focus_target_id is not None, (
-				'CDP session not initialized - browser may not be connected yet'
-			)
-			cdp_session = self.browser_session.session_manager.get_focused_session()
-			assert cdp_session is not None, 'No session for focused target'
+			# Get focused CDP session using public API (validates and waits for recovery if needed)
+			cdp_session = await self.browser_session.get_or_create_cdp_session()
 			cdp_client = cdp_session.cdp_client
 			session_id = cdp_session.session_id
 
@@ -1779,12 +1775,8 @@ class DefaultActionWatchdog(BaseWatchdog):
 			except Exception as e:
 				self.logger.debug(f'Error getting frame session: {e}, using main session')
 
-		# Use main target session
-		assert self.browser_session.agent_focus_target_id is not None, (
-			'CDP session not initialized - browser may not be connected yet'
-		)
-		cdp_session = self.browser_session.session_manager.get_focused_session()
-		assert cdp_session is not None, 'No session for focused target'
+		# Use main target session - get_or_create_cdp_session validates focus automatically
+		cdp_session = await self.browser_session.get_or_create_cdp_session()
 		return cdp_session.session_id
 
 	async def on_GoBackEvent(self, event: GoBackEvent) -> None:
@@ -2107,12 +2099,9 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 		# TODO: handle looking for text inside cross-origin iframes as well
 
-		# Get CDP client and session
-		cdp_client = self.browser_session.cdp_client
-		if self.browser_session.agent_focus_target_id is None:
-			raise BrowserError('CDP session not initialized - browser may not be connected yet')
-		cdp_session = self.browser_session.session_manager.get_focused_session()
-		assert cdp_session is not None, 'No session for focused target'
+		# Get focused CDP session using public API (validates and waits for recovery if needed)
+		cdp_session = await self.browser_session.get_or_create_cdp_session()
+		cdp_client = cdp_session.cdp_client
 		session_id = cdp_session.session_id
 
 		# Enable DOM
