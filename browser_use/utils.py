@@ -712,12 +712,12 @@ def create_task_with_error_handling(
 				if suppress_exceptions:
 					log.error(f'Exception in background task [{task_name}]: {type(exc).__name__}: {exc}', exc_info=exc)
 				else:
-					# Log at warning level when not suppressed - exception remains retrievable via task.exception()
+					# Log at warning level then re-raise to propagate to event loop's exception handler
 					log.warning(
-						f'Exception in background task [{task_name}]: {type(exc).__name__}: {exc} '
-						f'(exception retrievable via task.exception() if awaited)',
+						f'Exception in background task [{task_name}]: {type(exc).__name__}: {exc}',
 						exc_info=exc,
 					)
+					raise exc
 		except asyncio.CancelledError:
 			# Task was cancelled, this is normal behavior
 			pass
