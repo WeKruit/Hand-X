@@ -92,16 +92,25 @@ class DownloadsWatchdog(BaseWatchdog):
 	async def on_BrowserStateRequestEvent(self, event: BrowserStateRequestEvent) -> None:
 		"""Handle browser state request events."""
 		# Use public API - automatically validates and waits for recovery if needed
+		self.logger.debug(f'[DownloadsWatchdog] on_BrowserStateRequestEvent started, event_id={event.event_id[-4:]}')
 		try:
 			cdp_session = await self.browser_session.get_or_create_cdp_session()
 		except ValueError:
+			self.logger.warning(f'[DownloadsWatchdog] No valid focus, skipping BrowserStateRequestEvent {event.event_id[-4:]}')
 			return  # No valid focus, skip
 
+		self.logger.debug(
+			f'[DownloadsWatchdog] About to call get_current_page_url(), target_id={cdp_session.target_id[-4:] if cdp_session.target_id else "None"}'
+		)
 		url = await self.browser_session.get_current_page_url()
+		self.logger.debug(f'[DownloadsWatchdog] Got URL: {url[:80] if url else "None"}')
+
 		if not url:
+			self.logger.warning(f'[DownloadsWatchdog] No URL found for BrowserStateRequestEvent {event.event_id[-4:]}')
 			return
 
 		target_id = cdp_session.target_id
+		self.logger.debug(f'[DownloadsWatchdog] About to dispatch NavigationCompleteEvent for target {target_id[-4:]}')
 		self.event_bus.dispatch(
 			NavigationCompleteEvent(
 				event_type='NavigationCompleteEvent',
@@ -110,6 +119,7 @@ class DownloadsWatchdog(BaseWatchdog):
 				event_parent_id=event.event_id,
 			)
 		)
+		self.logger.debug('[DownloadsWatchdog] Successfully completed BrowserStateRequestEvent')
 
 	async def on_BrowserStoppedEvent(self, event: BrowserStoppedEvent) -> None:
 		"""Clean up when browser stops."""
