@@ -48,6 +48,11 @@ class SessionManager:
 		self._lock = asyncio.Lock()
 		self._recovery_lock = asyncio.Lock()
 
+		# Focus recovery coordination - event-driven instead of polling
+		self._recovery_in_progress: bool = False
+		self._recovery_complete_event: asyncio.Event | None = None
+		self._recovery_task: asyncio.Task | None = None
+
 	async def start_monitoring(self) -> None:
 		"""Start monitoring Target attach/detach events.
 
@@ -106,8 +111,11 @@ class SessionManager:
 		# Discover and initialize ALL existing targets
 		await self._initialize_existing_targets()
 
-	def get_session_for_target(self, target_id: TargetID) -> 'CDPSession | None':
-		"""Get ANY valid session for a target (picks first available).
+	def _get_session_for_target(self, target_id: TargetID) -> 'CDPSession | None':
+		"""Internal: Get ANY valid session for a target (picks first available).
+
+		⚠️ INTERNAL API - Use browser_session.get_or_create_cdp_session() instead!
+		This method has no validation, no focus management, no recovery.
 
 		Args:
 			target_id: Target ID to get session for
@@ -117,6 +125,25 @@ class SessionManager:
 		"""
 		session_ids = self._target_sessions.get(target_id, set())
 		if not session_ids:
+			# Check if this is the focused target - indicates stale focus that needs cleanup
+			if self.browser_session.agent_focus_target_id == target_id:
+				self.logger.warning(
+					f'[SessionManager] ⚠️ Attempted to get session for stale focused target {target_id[:8]}... '
+					f'Clearing stale focus and triggering recovery.'
+				)
+
+				# Clear stale focus immediately (defense in depth)
+				self.browser_session.agent_focus_target_id = None
+
+				# Trigger recovery if not already in progress
+				if not self._recovery_in_progress:
+					self.logger.warning('[SessionManager] Recovery was not in progress! Triggering now.')
+					self._recovery_task = create_task_with_error_handling(
+						self._recover_agent_focus(target_id),
+						name='recover_agent_focus_from_stale_get',
+						logger_instance=self.logger,
+						suppress_exceptions=False,
+					)
 			return None
 		return self._sessions.get(next(iter(session_ids)))
 
@@ -258,15 +285,86 @@ class SessionManager:
 			return None
 		return self.get_target(self.browser_session.agent_focus_target_id)
 
-	def get_focused_session(self) -> 'CDPSession | None':
-		"""Get a session for the currently focused target.
+	async def ensure_valid_focus(self, timeout: float = 3.0) -> bool:
+		"""Ensure agent_focus_target_id points to a valid, attached CDP session.
+
+		If the focus target is stale (detached), this method waits for automatic recovery.
+		Uses event-driven coordination instead of polling for efficiency.
+
+		Args:
+			timeout: Maximum time to wait for recovery in seconds (default: 3.0)
 
 		Returns:
-			CDPSession for focused target, None if no focus
+			True if focus is valid or successfully recovered, False if no focus or recovery failed
 		"""
 		if not self.browser_session.agent_focus_target_id:
-			return None
-		return self.get_session_for_target(self.browser_session.agent_focus_target_id)
+			# No focus at all - might be initial state or complete failure
+			if self._recovery_in_progress and self._recovery_complete_event:
+				# Recovery is happening, wait for it
+				try:
+					await asyncio.wait_for(self._recovery_complete_event.wait(), timeout=timeout)
+					# Check again after recovery - simple existence check
+					focus_id = self.browser_session.agent_focus_target_id
+					return bool(focus_id and self._get_session_for_target(focus_id))
+				except TimeoutError:
+					self.logger.error(f'[SessionManager] ❌ Timed out waiting for recovery after {timeout}s')
+					return False
+			return False
+
+		# Simple existence check - does the focused target have a session?
+		cdp_session = self._get_session_for_target(self.browser_session.agent_focus_target_id)
+		if cdp_session:
+			# Session exists - validate it's still active
+			is_valid = await self.validate_session(self.browser_session.agent_focus_target_id)
+			if is_valid:
+				return True
+
+		# Focus is stale - wait for recovery using event instead of polling
+		stale_target_id = self.browser_session.agent_focus_target_id
+		self.logger.warning(
+			f'[SessionManager] ⚠️ Stale agent_focus detected (target {stale_target_id[:8] if stale_target_id else "None"}... detached), '
+			f'waiting for recovery...'
+		)
+
+		# Check if recovery is already in progress
+		if not self._recovery_in_progress:
+			self.logger.warning(
+				'[SessionManager] ⚠️ Recovery not in progress for stale focus! '
+				'This indicates a bug - recovery should have been triggered.'
+			)
+			return False
+
+		# Wait for recovery complete event (event-driven, not polling!)
+		if self._recovery_complete_event:
+			try:
+				start_time = asyncio.get_event_loop().time()
+				await asyncio.wait_for(self._recovery_complete_event.wait(), timeout=timeout)
+				elapsed = asyncio.get_event_loop().time() - start_time
+
+				# Verify recovery succeeded - simple existence check
+				focus_id = self.browser_session.agent_focus_target_id
+				if focus_id and self._get_session_for_target(focus_id):
+					self.logger.info(
+						f'[SessionManager] ✅ Agent focus recovered to {self.browser_session.agent_focus_target_id[:8]}... '
+						f'after {elapsed * 1000:.0f}ms'
+					)
+					return True
+				else:
+					self.logger.error(
+						f'[SessionManager] ❌ Recovery completed but focus still invalid after {elapsed * 1000:.0f}ms'
+					)
+					return False
+
+			except TimeoutError:
+				self.logger.error(
+					f'[SessionManager] ❌ Recovery timed out after {timeout}s '
+					f'(was: {stale_target_id[:8] if stale_target_id else "None"}..., '
+					f'now: {self.browser_session.agent_focus_target_id[:8] if self.browser_session.agent_focus_target_id else "None"})'
+				)
+				return False
+		else:
+			self.logger.error('[SessionManager] ❌ Recovery event not initialized')
+			return False
 
 	async def _handle_target_attached(self, event: AttachedToTargetEvent) -> None:
 		"""Handle Target.attachedToTarget event.
@@ -417,6 +515,18 @@ class SessionManager:
 					# Check if agent_focus points to this target
 					agent_focus_lost = self.browser_session.agent_focus_target_id == target_id
 
+					# Immediately clear stale focus to prevent operations on detached target
+					if agent_focus_lost:
+						self.logger.debug(
+							f'[SessionManager] Clearing stale agent_focus_target_id {target_id[:8]}... '
+							f'to prevent operations on detached target'
+						)
+						self.browser_session.agent_focus_target_id = None
+
+					# Get target type before removing (needed for TabClosedEvent dispatch)
+					target = self._targets.get(target_id)
+					target_type = target.target_type if target else None
+
 					# Remove target (entity) from owned data
 					if target_id in self._targets:
 						self._targets.pop(target_id)
@@ -432,10 +542,6 @@ class SessionManager:
 					f'[SessionManager] Session detached from untracked target: target={target_id[:8]}... '
 					f'session={session_id[:8]}... (target was already removed or attach event was missed)'
 				)
-
-			# Get target type before cleaning up (needed for TabClosedEvent dispatch)
-			target = self._targets.get(target_id)
-			target_type = target.target_type if target else None
 
 			# Remove session from owned sessions dict
 			if session_id in self._sessions:
@@ -462,32 +568,63 @@ class SessionManager:
 
 		# Auto-recover agent_focus outside the lock to avoid blocking other operations
 		if agent_focus_lost:
-			await self._recover_agent_focus(target_id)
+			# Create recovery task instead of awaiting directly - allows concurrent operations to wait on same recovery
+			if not self._recovery_in_progress:
+				self._recovery_task = create_task_with_error_handling(
+					self._recover_agent_focus(target_id),
+					name='recover_agent_focus',
+					logger_instance=self.logger,
+					suppress_exceptions=False,
+				)
 
 	async def _recover_agent_focus(self, crashed_target_id: TargetID) -> None:
 		"""Auto-recover agent_focus when the focused target crashes/detaches.
 
 		Uses recovery lock to prevent concurrent recovery attempts from creating multiple emergency tabs.
+		Coordinates with ensure_valid_focus() via events for efficient waiting.
 
 		Args:
 			crashed_target_id: The target ID that was lost
 		"""
-		# Prevent concurrent recovery attempts
-		async with self._recovery_lock:
-			# Check if another recovery already fixed agent_focus
-			if self.browser_session.agent_focus_target_id and self.browser_session.agent_focus_target_id != crashed_target_id:
-				self.logger.debug(
-					f'[SessionManager] Agent focus already recovered by concurrent operation '
-					f'(now: {self.browser_session.agent_focus_target_id[:8]}...), skipping recovery'
-				)
-				return
-
-			self.logger.warning(
-				f'[SessionManager] Agent focus target {crashed_target_id[:8]}... detached! '
-				f'Auto-recovering by switching to another target...'
-			)
-
 		try:
+			# Prevent concurrent recovery attempts
+			async with self._recovery_lock:
+				# Set recovery state INSIDE lock to prevent race conditions
+				if self._recovery_in_progress:
+					self.logger.debug('[SessionManager] Recovery already in progress, waiting for it to complete')
+					# Wait for ongoing recovery instead of starting a new one
+					if self._recovery_complete_event:
+						try:
+							await asyncio.wait_for(self._recovery_complete_event.wait(), timeout=5.0)
+						except TimeoutError:
+							self.logger.error('[SessionManager] Timed out waiting for ongoing recovery')
+					return
+
+				# Set recovery state
+				self._recovery_in_progress = True
+				self._recovery_complete_event = asyncio.Event()
+
+				# Check if another recovery already fixed agent_focus
+				if self.browser_session.agent_focus_target_id and self.browser_session.agent_focus_target_id != crashed_target_id:
+					self.logger.debug(
+						f'[SessionManager] Agent focus already recovered by concurrent operation '
+						f'(now: {self.browser_session.agent_focus_target_id[:8]}...), skipping recovery'
+					)
+					return
+
+				# Note: agent_focus_target_id may already be None (cleared in _handle_target_detached)
+				current_focus_desc = (
+					f'{self.browser_session.agent_focus_target_id[:8]}...'
+					if self.browser_session.agent_focus_target_id
+					else 'None (already cleared)'
+				)
+
+				self.logger.warning(
+					f'[SessionManager] Agent focus target {crashed_target_id[:8]}... detached! '
+					f'Current focus: {current_focus_desc}. Auto-recovering by switching to another target...'
+				)
+
+			# Perform recovery (outside lock to allow concurrent operations)
 			# Try to find another valid page target
 			page_targets = self.get_all_page_targets()
 
@@ -510,11 +647,13 @@ class SessionManager:
 
 				self.browser_session.event_bus.dispatch(TabCreatedEvent(url='about:blank', target_id=new_target_id))
 
-			# Wait for attach event to create session, then update agent_focus
+			# Wait for CDP attach event to create session
+			# Note: This polling is necessary - waiting for external Chrome CDP event
+			# _handle_target_attached will add session to pool when Chrome fires attachedToTarget
 			new_session = None
 			for attempt in range(20):  # Wait up to 2 seconds
 				await asyncio.sleep(0.1)
-				new_session = self.get_session_for_target(new_target_id)
+				new_session = self._get_session_for_target(new_target_id)
 				if new_session:
 					break
 
@@ -550,9 +689,10 @@ class SessionManager:
 			self.logger.warning(f'[SessionManager] Created emergency fallback tab {fallback_target_id[:8]}...')
 
 			# Try one more time with fallback
+			# Note: This polling is necessary - waiting for external Chrome CDP event
 			for _ in range(20):
 				await asyncio.sleep(0.1)
-				fallback_session = self.get_session_for_target(fallback_target_id)
+				fallback_session = self._get_session_for_target(fallback_target_id)
 				if fallback_session:
 					self.browser_session.agent_focus_target_id = fallback_target_id
 					self.logger.warning(f'[SessionManager] ⚠️ Agent focus set to emergency fallback: {fallback_target_id[:8]}...')
@@ -572,6 +712,14 @@ class SessionManager:
 
 		except Exception as e:
 			self.logger.error(f'[SessionManager] ❌ Error during agent_focus recovery: {type(e).__name__}: {e}')
+		finally:
+			# Always signal completion and reset recovery state
+			# This allows all waiting operations to proceed (success or failure)
+			if self._recovery_complete_event:
+				self._recovery_complete_event.set()
+			self._recovery_in_progress = False
+			self._recovery_task = None
+			self.logger.debug('[SessionManager] Recovery state reset')
 
 	async def _initialize_existing_targets(self) -> None:
 		"""Discover and initialize all existing targets at startup.
@@ -618,7 +766,7 @@ class SessionManager:
 			while True:
 				ready_count = 0
 				for tid in target_ids_to_wait_for:
-					session = self.get_session_for_target(tid)
+					session = self._get_session_for_target(tid)
 					if session:
 						target = self._targets.get(tid)
 						target_type = target.target_type if target else 'unknown'
@@ -648,7 +796,7 @@ class SessionManager:
 			# Timeout - count what's ready
 			ready_count = 0
 			for tid in target_ids_to_wait_for:
-				session = self.get_session_for_target(tid)
+				session = self._get_session_for_target(tid)
 				if session:
 					target = self._targets.get(tid)
 					target_type = target.target_type if target else 'unknown'

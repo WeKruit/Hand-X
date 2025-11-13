@@ -684,14 +684,20 @@ def create_task_with_error_handling(
 		coro: The coroutine to wrap in a task
 		name: Optional name for the task (useful for debugging)
 		logger_instance: Optional logger instance to use. If None, uses module logger.
-		suppress_exceptions: If True, exceptions are only logged and not re-raised. Default False.
+		suppress_exceptions: If True, logs exceptions at ERROR level. If False, logs at WARNING level
+			and exceptions remain retrievable via task.exception() if the caller awaits the task.
+			Default False.
 
 	Returns:
 		asyncio.Task: The created task with exception handling callback
 
 	Example:
-		# Instead of: asyncio.create_task(some_async_function())
-		# Use: create_task_with_error_handling(some_async_function(), name="my_task")
+		# Fire-and-forget with suppressed exceptions
+		create_task_with_error_handling(some_async_function(), name="my_task", suppress_exceptions=True)
+
+		# Task with retrievable exceptions (if you plan to await it)
+		task = create_task_with_error_handling(critical_function(), name="critical")
+		result = await task  # Will raise the exception if one occurred
 	"""
 	task = asyncio.create_task(coro, name=name)
 	log = logger_instance or logger
@@ -703,16 +709,20 @@ def create_task_with_error_handling(
 			exc = t.exception()
 			if exc is not None:
 				task_name = t.get_name() if hasattr(t, 'get_name') else 'unnamed'
-				log.error(f'Exception in background task [{task_name}]: {type(exc).__name__}: {exc}', exc_info=exc)
-
-				# Re-raise if not suppressed (useful for critical tasks)
-				if not suppress_exceptions:
-					raise exc
+				if suppress_exceptions:
+					log.error(f'Exception in background task [{task_name}]: {type(exc).__name__}: {exc}', exc_info=exc)
+				else:
+					# Log at warning level when not suppressed - exception remains retrievable via task.exception()
+					log.warning(
+						f'Exception in background task [{task_name}]: {type(exc).__name__}: {exc} '
+						f'(exception retrievable via task.exception() if awaited)',
+						exc_info=exc,
+					)
 		except asyncio.CancelledError:
 			# Task was cancelled, this is normal behavior
 			pass
 		except Exception as e:
-			# Catch any other exception during exception handling
+			# Catch any other exception during exception handling (e.g., t.exception() itself failing)
 			task_name = t.get_name() if hasattr(t, 'get_name') else 'unnamed'
 			log.error(f'Error handling exception in task [{task_name}]: {type(e).__name__}: {e}')
 

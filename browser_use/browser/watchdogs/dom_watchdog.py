@@ -100,9 +100,7 @@ class DOMWatchdog(BaseWatchdog):
 		from browser_use.browser.views import NetworkRequest
 
 		try:
-			if not self.browser_session.agent_focus_target_id:
-				return []
-
+			# get_or_create_cdp_session() now handles focus validation automatically
 			cdp_session = await self.browser_session.get_or_create_cdp_session(focus=True)
 
 			# Use performance API to get pending requests
@@ -257,14 +255,10 @@ class DOMWatchdog(BaseWatchdog):
 		self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: STARTING browser state request')
 		page_url = await self.browser_session.get_current_page_url()
 		self.logger.debug(f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: Got page URL: {page_url}')
+
+		# Get focused session for logging (validation already done by get_current_page_url)
 		if self.browser_session.agent_focus_target_id:
-			cdp_session = self.browser_session.session_manager.get_focused_session()
-			session_id = cdp_session.session_id if cdp_session else 'unknown'
-			self.logger.debug(
-				f'Current page URL: {page_url}, target_id: {self.browser_session.agent_focus_target_id}, session_id: {session_id}'
-			)
-		else:
-			self.logger.debug(f'Current page URL: {page_url}, no cdp_session attached')
+			self.logger.debug(f'Current page URL: {page_url}, target_id: {self.browser_session.agent_focus_target_id}')
 
 		# check if we should skip DOM tree build for pointless pages
 		not_a_meaningful_website = page_url.lower().split(':', 1)[0] not in ('http', 'https')
@@ -679,8 +673,6 @@ class DOMWatchdog(BaseWatchdog):
 		try:
 			self.logger.debug('🔍 DOMWatchdog._capture_clean_screenshot: Capturing clean screenshot...')
 
-			# Ensure we have a focused CDP session
-			assert self.browser_session.agent_focus_target_id is not None, 'No current target ID'
 			await self.browser_session.get_or_create_cdp_session(target_id=self.browser_session.agent_focus_target_id, focus=True)
 
 			# Check if handler is registered
@@ -754,10 +746,7 @@ class DOMWatchdog(BaseWatchdog):
 
 		from browser_use.browser.views import PageInfo
 
-		# Get CDP session for the current target
-		if not self.browser_session.agent_focus_target_id:
-			raise RuntimeError('No active CDP session - browser may not be connected yet')
-
+		# get_or_create_cdp_session() handles focus validation automatically
 		cdp_session = await self.browser_session.get_or_create_cdp_session(
 			target_id=self.browser_session.agent_focus_target_id, focus=True
 		)
