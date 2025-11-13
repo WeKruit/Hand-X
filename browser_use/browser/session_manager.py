@@ -62,7 +62,9 @@ class SessionManager:
 
 		# Enable target discovery to receive targetInfoChanged events automatically
 		# This eliminates the need for getTargetInfo() polling calls
-		await cdp_client.send.Target.setDiscoverTargets(params={'discover': True, 'filter': [{'type': 'page'}]})
+		await cdp_client.send.Target.setDiscoverTargets(
+			params={'discover': True, 'filter': [{'type': 'page'}, {'type': 'iframe'}]}
+		)
 
 		# Register synchronous event handlers (CDP requirement)
 		def on_attached(event: AttachedToTargetEvent, session_id: SessionID | None = None):
