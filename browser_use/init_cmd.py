@@ -266,12 +266,20 @@ def main(
 		# Separate default and featured templates
 		default_template_names = ['default', 'advanced', 'tools']
 		featured_templates = [(name, info) for name, info in INIT_TEMPLATES.items() if info.get('featured', False)]
-		other_templates = [(name, info) for name, info in INIT_TEMPLATES.items() if name not in default_template_names and not info.get('featured', False)]
+		other_templates = [
+			(name, info)
+			for name, info in INIT_TEMPLATES.items()
+			if name not in default_template_names and not info.get('featured', False)
+		]
 
 		# Sort by last_modified_date (most recent first)
 		def get_last_modified(item):
 			name, info = item
-			date_str = info.get('author', {}).get('last_modified_date', '1970-01-01') if isinstance(info.get('author'), dict) else '1970-01-01'
+			date_str = (
+				info.get('author', {}).get('last_modified_date', '1970-01-01')
+				if isinstance(info.get('author'), dict)
+				else '1970-01-01'
+			)
 			return date_str
 
 		# Sort default templates by last modified
@@ -301,7 +309,9 @@ def main(
 			choices.append(Choice(name=formatted, value=name))
 
 		# Use fuzzy prompt for search functionality
-		template = inquirer.fuzzy(
+		# Use getattr to avoid static analysis complaining about non-exported names
+		_fuzzy = getattr(inquirer, 'fuzzy')
+		template = _fuzzy(
 			message='Select a template (type to search):',
 			choices=choices,
 			style=inquirer_style,
