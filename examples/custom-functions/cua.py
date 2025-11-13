@@ -46,10 +46,11 @@ async def handle_model_action(browser_session: BrowserSession, action) -> Action
 	if not browser_session.agent_focus_target_id:
 		return ActionResult(error='No active browser session')
 
-	# Get CDP session for the focused target
-	cdp_session = browser_session.session_manager.get_session_for_target(browser_session.agent_focus_target_id)
-	if not cdp_session:
-		return ActionResult(error='No CDP session for focused target')
+	# Get CDP session for the focused target using the public API
+	try:
+		cdp_session = await browser_session.get_or_create_cdp_session(browser_session.agent_focus_target_id, focus=False)
+	except Exception as e:
+		return ActionResult(error=f'Failed to get CDP session: {e}')
 
 	try:
 		match action_type:

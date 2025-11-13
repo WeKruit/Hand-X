@@ -47,8 +47,12 @@ async def analyze_frame_hierarchy(url):
 				print(f'      URL: {target.url}')
 				print(f'      Target ID: {target.target_id[:30]}...')
 
-				# Check if target has active sessions
-				has_session = session.session_manager.get_session_for_target(target.target_id) is not None
+				# Check if target has active sessions using the public API
+				try:
+					cdp_session = await session.get_or_create_cdp_session(target.target_id, focus=False)
+					has_session = cdp_session is not None
+				except Exception:
+					has_session = False
 				print(f'      Has Session: {has_session}')
 
 		# Get main page frame tree
