@@ -1332,7 +1332,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		latest_version = await check_latest_browser_use_version()
 		if latest_version and latest_version != self.version:
 			self.logger.info(
-				f'📦 Newer version available: {latest_version} (current: {self.version}). Upgrade with: uv add browser-use@{latest_version}'
+				f'📦 Newer version available: {latest_version} (current: {self.version}). Upgrade with: uv add browser-use=={latest_version}'
 			)
 
 	def _log_first_step_startup(self) -> None:
