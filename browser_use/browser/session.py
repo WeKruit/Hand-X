@@ -1453,9 +1453,10 @@ class BrowserSession(BaseModel):
 			async with httpx.AsyncClient() as client:
 				headers = self.browser_profile.headers or {}
 				version_info = await client.get(url, headers=headers)
+				self.logger.debug(f'Raw version info: {str(version_info)}')
 				self.browser_profile.cdp_url = version_info.json()['webSocketDebuggerUrl']
 
-		assert self.cdp_url is not None
+		assert self.cdp_url is not None, 'CDP URL is None.'
 
 		browser_location = 'local browser' if self.is_local else 'remote browser'
 		self.logger.debug(f'🌎 Connecting to existing chromium-based browser via CDP: {self.cdp_url} -> ({browser_location})')
