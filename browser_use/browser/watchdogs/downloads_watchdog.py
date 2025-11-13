@@ -333,6 +333,11 @@ class DownloadsWatchdog(BaseWatchdog):
 					This callback is registered globally and uses session_id to determine the correct target.
 					"""
 					try:
+						# Check if session_manager exists (may be None during browser shutdown)
+						if not self.browser_session.session_manager:
+							self.logger.warning('[DownloadsWatchdog] Session manager not found, skipping network monitoring')
+							return
+
 						# Look up target_id from session_id
 						event_target_id = self.browser_session.session_manager.get_target_id_from_session_id(session_id)
 						if not event_target_id:
