@@ -1831,19 +1831,13 @@ class BrowserSession(BaseModel):
 
 		for full_target_id in self.session_manager.get_all_target_ids():
 			if full_target_id.endswith(tab_id):
-				if await self._is_target_valid(full_target_id):
+				if await self.session_manager.is_target_valid(full_target_id):
 					return full_target_id
 				# Stale target - Chrome should have sent detach event
 				# If we're here, event listener will clean it up
 				self.logger.debug(f'Found stale target {full_target_id}, skipping')
 
 		raise ValueError(f'No TargetID found ending in tab_id=...{tab_id}')
-
-	async def _is_target_valid(self, target_id: TargetID) -> bool:
-		"""Check if a target ID is still valid via SessionManager."""
-		if self.session_manager:
-			return await self.session_manager.is_target_valid(target_id)
-		return False
 
 	async def get_target_id_from_url(self, url: str) -> TargetID:
 		"""Get the TargetID from a URL using SessionManager (source of truth)."""
