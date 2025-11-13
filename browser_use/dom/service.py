@@ -475,7 +475,7 @@ class DomService:
 			node: Node,
 			html_frames: list[EnhancedDOMTreeNode] | None,
 			total_frame_offset: DOMRect | None,
-			all_frames: dict,
+			all_frames: dict | None,
 		) -> EnhancedDOMTreeNode:
 			"""
 			Recursively construct enhanced DOM tree nodes.
@@ -728,12 +728,9 @@ class DomService:
 
 			return dom_tree_node
 
-		# Ensure all_frames is available (lazy fetch if needed at top level)
-		# Most pages won't need this (no cross-origin iframes), so we defer the call
-		if all_frames is None:
-			all_frames = {}  # Empty dict for non-cross-origin-iframe pages
-
 		# Build enhanced DOM tree recursively
+		# Note: all_frames stays None and will be lazily fetched inside _construct_enhanced_node
+		# only if/when a cross-origin iframe is encountered
 		start_construct = time.time()
 		enhanced_dom_tree_node = await _construct_enhanced_node(
 			dom_tree['root'], initial_html_frames, initial_total_frame_offset, all_frames
