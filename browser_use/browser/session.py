@@ -474,7 +474,7 @@ class BrowserSession(BaseModel):
 
 		cdp_status = 'connected' if self._cdp_client_root else 'not connected'
 		session_mgr_status = 'exists' if self.session_manager else 'None'
-		self.logger.info(
+		self.logger.debug(
 			f'🔄 Resetting browser session (CDP: {cdp_status}, SessionManager: {session_mgr_status}, '
 			f'focus: {self.agent_focus_target_id[-4:] if self.agent_focus_target_id else "None"})'
 		)
@@ -555,7 +555,7 @@ class BrowserSession(BaseModel):
 
 	async def kill(self) -> None:
 		"""Kill the browser session and reset all state."""
-		self.logger.info('🛑 kill() called - stopping browser with force=True and resetting state')
+		self.logger.debug('🛑 kill() called - stopping browser with force=True and resetting state')
 
 		# First save storage state while CDP is still connected
 		from browser_use.browser.events import SaveStorageStateEvent
@@ -578,7 +578,7 @@ class BrowserSession(BaseModel):
 		This clears event buses and cached state but keeps the browser alive.
 		Useful when you want to clean up resources but plan to reconnect later.
 		"""
-		self.logger.info('⏸️  stop() called - stopping browser gracefully (force=False) and resetting state')
+		self.logger.debug('⏸️  stop() called - stopping browser gracefully (force=False) and resetting state')
 
 		# First save storage state while CDP is still connected
 		from browser_use.browser.events import SaveStorageStateEvent
