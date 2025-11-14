@@ -849,7 +849,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Handle InterruptedError specially
 		if isinstance(error, InterruptedError):
 			error_msg = 'The agent was interrupted mid-step' + (f' - {str(error)}' if str(error) else '')
-			self.logger.error(f'{error_msg}')
+			# NOTE: This is not an error, it's a normal part of the execution when the user interrupts the agent
+			self.logger.warning(f'{error_msg}')
 			return
 
 		# Handle all other exceptions
