@@ -1575,6 +1575,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		if self.history.is_done():
 			await self.log_completion()
+
+			# Run judge before done callback if enabled
+			if self.settings.use_judge:
+				await self._judge_and_log()
+
 			if self.register_done_callback:
 				if inspect.iscoroutinefunction(self.register_done_callback):
 					await self.register_done_callback(self.history)
@@ -1772,6 +1777,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if self.history.is_done():
 			await self.log_completion()
 
+			# Run judge before done callback if enabled
+			if self.settings.use_judge:
+				await self._judge_and_log()
+
 			if self.register_done_callback:
 				if inspect.iscoroutinefunction(self.register_done_callback):
 					await self.register_done_callback(self.history)
@@ -1887,9 +1896,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 				if is_done:
 					# Agent has marked the task as done
-					if self.settings.use_judge:
-						await self._judge_and_log()
-
 					if self._demo_mode_enabled and self.history.history:
 						final_result_text = self.history.final_result() or 'Task completed'
 						await self._demo_mode_log(f'Final Result: {final_result_text}', 'success', {'tag': 'task'})
