@@ -105,6 +105,7 @@ class ChatBrowserUse(BaseChatModel):
 		"""
 		# Get ANONYMIZED_TELEMETRY setting from config
 		from browser_use.config import CONFIG
+
 		anonymized_telemetry = CONFIG.ANONYMIZED_TELEMETRY
 
 		# Prepare request payload
