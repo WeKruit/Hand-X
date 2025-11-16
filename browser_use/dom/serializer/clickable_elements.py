@@ -18,18 +18,6 @@ class ClickableElementDetector:
 		if node.tag_name in {'html', 'body'}:
 			return False
 
-		# Skip elements explicitly marked as inert or aria-hidden
-		if node.attributes:
-			if 'inert' in node.attributes:
-				return False
-
-			aria_hidden = node.attributes.get('aria-hidden')
-			if isinstance(aria_hidden, str):
-				if aria_hidden.strip().lower() in {'true', '1'}:
-					return False
-			elif aria_hidden:
-				return False
-
 		# IFRAME elements should be interactive if they're large enough to potentially need scrolling
 		# Small iframes (< 100px width or height) are unlikely to have scrollable content
 		if node.tag_name and node.tag_name.upper() == 'IFRAME' or node.tag_name.upper() == 'FRAME':
