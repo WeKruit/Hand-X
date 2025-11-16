@@ -1497,9 +1497,16 @@ class BrowserSession(BaseModel):
 
 		try:
 			# Create and store the CDP client for direct CDP communication
-			self._cdp_client_root = CDPClient(
-				self.cdp_url, max_ws_frame_size=200 * 1024 * 1024
-			)  # Use 200MB limit to handle pages with very large DOMs
+			# Try with max_ws_frame_size first (for newer cdp-use versions)
+			# Fall back to without it if the parameter is not supported
+			try:
+				self._cdp_client_root = CDPClient(
+					self.cdp_url, max_ws_frame_size=200 * 1024 * 1024
+				)  # Use 200MB limit to handle pages with very large DOMs
+			except TypeError:
+				# Older cdp-use versions don't support max_ws_frame_size parameter
+				self.logger.debug('CDPClient does not support max_ws_frame_size, using default')
+				self._cdp_client_root = CDPClient(self.cdp_url)
 			assert self._cdp_client_root is not None
 			await self._cdp_client_root.start()
 
