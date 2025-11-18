@@ -274,13 +274,13 @@ class Tools(Generic[Context]):
 				mouse = await page.mouse
 				await mouse.click(actual_x, actual_y)
 
-				memory = f'Clicked on coordinate {actual_x}, {actual_y}'
+				memory = f'Clicked on coordinate {params.coordinate_x}, {params.coordinate_y}'
 				msg = f'🖱️ {memory}'
 				logger.info(msg)
 
 				return ActionResult(
 					extracted_content=memory,
-					metadata={'click_x': actual_x, 'click_y': actual_y},
+					metadata={'click_x': params.coordinate_x, 'click_y': params.coordinate_y},
 				)
 			except Exception as e:
 				error_msg = f'Failed to click at coordinates ({params.coordinate_x}, {params.coordinate_y}).'
