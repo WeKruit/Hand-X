@@ -524,8 +524,6 @@ class BrowserSession(BaseModel):
 		self._connection_lock = asyncio.Lock()
 
 		# Check if handlers are already registered to prevent duplicates
-		from browser_use.browser.watchdog_base import BaseWatchdog
-
 		start_handlers = self.event_bus.handlers.get('BrowserStartEvent', [])
 		start_handler_names = [getattr(h, '__name__', str(h)) for h in start_handlers]
 
@@ -535,6 +533,12 @@ class BrowserSession(BaseModel):
 				'on_BrowserStartEvent is already registered. '
 				'This likely means BrowserSession was initialized multiple times with the same EventBus.'
 			)
+
+		self._register_essential_handlers()
+
+	def _register_essential_handlers(self) -> None:
+		"""Register all essential event handlers on the current event bus."""
+		from browser_use.browser.watchdog_base import BaseWatchdog
 
 		BaseWatchdog.attach_handler_to_session(self, BrowserStartEvent, self.on_BrowserStartEvent)
 		BaseWatchdog.attach_handler_to_session(self, BrowserStopEvent, self.on_BrowserStopEvent)
@@ -581,7 +585,8 @@ class BrowserSession(BaseModel):
 		await self.reset()
 		# Create fresh event bus
 		self.event_bus = EventBus()
-		self._ensure_demo_mode_handlers()
+		# Re-register all essential handlers on the new event bus
+		self._register_essential_handlers()
 
 	async def stop(self) -> None:
 		"""Stop the browser session without killing the browser process.
@@ -606,7 +611,8 @@ class BrowserSession(BaseModel):
 		await self.reset()
 		# Create fresh event bus
 		self.event_bus = EventBus()
-		self._ensure_demo_mode_handlers()
+		# Re-register all essential handlers on the new event bus
+		self._register_essential_handlers()
 
 	@observe_debug(ignore_input=True, ignore_output=True, name='browser_start_event_handler')
 	async def on_BrowserStartEvent(self, event: BrowserStartEvent) -> dict[str, str]:
