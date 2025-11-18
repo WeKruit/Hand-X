@@ -435,6 +435,7 @@ class BrowserSession(BaseModel):
 
 	_cloud_browser_client: CloudBrowserClient = PrivateAttr(default_factory=lambda: CloudBrowserClient())
 	_demo_mode: 'DemoMode | None' = PrivateAttr(default=None)
+	_demo_nav_handler_registered: bool = PrivateAttr(default=False)
 
 	_logger: Any = PrivateAttr(default=None)
 
@@ -538,6 +539,10 @@ class BrowserSession(BaseModel):
 		BaseWatchdog.attach_handler_to_session(self, BrowserStartEvent, self.on_BrowserStartEvent)
 		BaseWatchdog.attach_handler_to_session(self, BrowserStopEvent, self.on_BrowserStopEvent)
 		BaseWatchdog.attach_handler_to_session(self, NavigateToUrlEvent, self.on_NavigateToUrlEvent)
+
+		if not self._demo_nav_handler_registered:
+			self.event_bus.on(NavigationCompleteEvent, self._on_demo_mode_navigation_complete)
+			self._demo_nav_handler_registered = True
 		BaseWatchdog.attach_handler_to_session(self, SwitchTabEvent, self.on_SwitchTabEvent)
 		BaseWatchdog.attach_handler_to_session(self, TabCreatedEvent, self.on_TabCreatedEvent)
 		BaseWatchdog.attach_handler_to_session(self, TabClosedEvent, self.on_TabClosedEvent)
@@ -884,6 +889,20 @@ class BrowserSession(BaseModel):
 			)
 		else:
 			self.logger.warning(f'⚠️ Page readiness timeout ({timeout}s, {duration_ms:.0f}ms) for {url}')
+
+	async def _on_demo_mode_navigation_complete(self, event: NavigationCompleteEvent) -> None:
+		"""Rehydrate the demo overlay and logs after navigation."""
+		if not self.browser_profile.demo_mode:
+			return
+
+		demo = self.demo_mode
+		if not demo:
+			return
+
+		try:
+			await demo.refresh_target(event.target_id)
+		except Exception as exc:
+			self.logger.debug(f'[DemoMode] Failed to refresh overlay for target {event.target_id[:8]}...: {exc}')
 
 	async def on_SwitchTabEvent(self, event: SwitchTabEvent) -> TargetID:
 		"""Handle tab switching - core browser functionality."""
@@ -2776,19 +2795,19 @@ class BrowserSession(BaseModel):
 		"""Clear geolocation override using CDP."""
 		await self.cdp_client.send.Emulation.clearGeolocationOverride()
 
-	async def _cdp_add_init_script(self, script: str) -> str:
-		"""Add script to evaluate on new document using CDP Page.addScriptToEvaluateOnNewDocument."""
+	async def _cdp_add_init_script(self, script: str, target_id: TargetID | None = None) -> str:
+		"""Add script to evaluate on new document for a specific target."""
 		assert self._cdp_client_root is not None
-		cdp_session = await self.get_or_create_cdp_session()
+		cdp_session = await self.get_or_create_cdp_session(target_id=target_id, focus=target_id is None)
 
 		result = await cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
 			params={'source': script, 'runImmediately': True}, session_id=cdp_session.session_id
 		)
 		return result['identifier']
 
-	async def _cdp_remove_init_script(self, identifier: str) -> None:
-		"""Remove script added with addScriptToEvaluateOnNewDocument."""
-		cdp_session = await self.get_or_create_cdp_session(target_id=None)
+	async def _cdp_remove_init_script(self, identifier: str, target_id: TargetID | None = None) -> None:
+		"""Remove script added with addScriptToEvaluateOnNewDocument for a target."""
+		cdp_session = await self.get_or_create_cdp_session(target_id=target_id, focus=target_id is None)
 		await cdp_session.cdp_client.send.Page.removeScriptToEvaluateOnNewDocument(
 			params={'identifier': identifier}, session_id=cdp_session.session_id
 		)
