@@ -1272,9 +1272,10 @@ def get_last_panel_script(session_id: str, accent_color: str = '#fe750e') -> str
         bottom: calc(24px + env(safe-area-inset-bottom, 0px));
         right: calc(24px + env(safe-area-inset-right, 0px));
         min-width: 240px;
+        min-height: 150px;
         max-width: min(380px, calc(100vw - 48px));
-        max-height: 320px;
-        overflow-y: auto;
+        max-height: 360px;
+        overflow: hidden;
         background: rgba(5, 5, 5, 0.94);
         color: #f8f9ff;
         font-family: 'JetBrains Mono', 'Fira Code', 'Monaco', 'Menlo', monospace;
@@ -1286,11 +1287,11 @@ def get_last_panel_script(session_id: str, accent_color: str = '#fe750e') -> str
         flex-direction: column;
         gap: 12px;
         box-sizing: border-box;
-	        cursor: grab;
-	        pointer-events: auto;
-	        z-index: 2147480000;
-	        transition: box-shadow 0.25s ease;
-	      }
+        cursor: grab;
+        pointer-events: auto;
+        z-index: 2147480000;
+        transition: box-shadow 0.25s ease;
+      }
 
 	      #${BOX_ID}.dragging {
 	        cursor: grabbing;
@@ -1319,15 +1320,14 @@ def get_last_panel_script(session_id: str, accent_color: str = '#fe750e') -> str
         font-size: 12px;
         word-break: break-word;
         color: #fefefe;
-        background: rgba(255, 255, 255, 0.03);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 14px;
-        padding: 12px 14px;
-        padding-right: 12px;
-        min-height: 74px;
-        max-height: 140px;
+        padding: 0;
+        min-height: 48px;
+        max-height: 200px;
         overflow-y: auto;
-        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        box-shadow: none;
       }
 
       #${BOX_ID} .browser-use-last-content::-webkit-scrollbar {
@@ -1345,8 +1345,12 @@ def get_last_panel_script(session_id: str, accent_color: str = '#fe750e') -> str
       }
 
       #${BOX_ID} .browser-use-last-content.browser-use-last-final {
-        max-height: 160px;
-        border-color: rgba(255, 117, 14, 0.35);
+        max-height: none;
+        padding: 14px 16px;
+        border: 1px solid rgba(255, 117, 14, 0.35);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.03);
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
       }
 
       #${BOX_ID} .browser-use-last-content.browser-use-last-final::-webkit-scrollbar {
@@ -1562,27 +1566,29 @@ def get_last_panel_script(session_id: str, accent_color: str = '#fe750e') -> str
 
     const hasFinal = Boolean(state.lastFinal);
 
-    if (thoughtEl) {
-      if (state.lastThought) {
-        thoughtEl.textContent = state.lastThought;
-        thoughtEl.classList.remove('browser-use-last-empty');
-      } else {
-        thoughtEl.textContent = '';
-        thoughtEl.classList.add('browser-use-last-empty');
-      }
-      thoughtEl.style.display = hasFinal ? 'none' : '';
-    }
+	    if (thoughtEl) {
+	      const showThought = Boolean(state.lastThought) && !hasFinal;
+	      if (showThought) {
+	        thoughtEl.textContent = state.lastThought;
+	        thoughtEl.classList.remove('browser-use-last-empty');
+	      } else {
+	        thoughtEl.textContent = '';
+	        thoughtEl.classList.add('browser-use-last-empty');
+	      }
+	      thoughtEl.style.display = showThought ? '' : 'none';
+	    }
 
-    if (memoryEl) {
-      if (state.lastMemory) {
-        memoryEl.textContent = state.lastMemory;
-        memoryEl.classList.remove('browser-use-last-empty');
-      } else {
-        memoryEl.textContent = '';
-        memoryEl.classList.add('browser-use-last-empty');
-      }
-      memoryEl.style.display = hasFinal ? 'none' : '';
-    }
+	    if (memoryEl) {
+	      const showMemory = Boolean(state.lastMemory) && !hasFinal;
+	      if (showMemory) {
+	        memoryEl.textContent = state.lastMemory;
+	        memoryEl.classList.remove('browser-use-last-empty');
+	      } else {
+	        memoryEl.textContent = '';
+	        memoryEl.classList.add('browser-use-last-empty');
+	      }
+	      memoryEl.style.display = showMemory ? '' : 'none';
+	    }
 
     if (finalEl) {
       const wasVisible = finalEl.dataset.visible === 'true';
