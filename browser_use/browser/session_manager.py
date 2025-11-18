@@ -181,7 +181,7 @@ class SessionManager:
 			self._target_sessions.clear()
 			self._session_to_target.clear()
 
-		self.logger.info('[SessionManager] Cleared all owned data (targets, sessions, mappings)')
+		self.logger.debug('[SessionManager] Cleared all owned data (targets, sessions, mappings)')
 
 	async def is_target_valid(self, target_id: TargetID) -> bool:
 		"""Check if a target is still valid and has active sessions.
