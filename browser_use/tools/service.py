@@ -280,7 +280,7 @@ class Tools(Generic[Context]):
 
 				return ActionResult(
 					extracted_content=memory,
-					metadata={'click_x': params.coordinate_x, 'click_y': params.coordinate_y},
+					metadata={'click_x': actual_x, 'click_y': actual_y},
 				)
 			except Exception as e:
 				error_msg = f'Failed to click at coordinates ({params.coordinate_x}, {params.coordinate_y}).'
