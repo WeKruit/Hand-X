@@ -1502,7 +1502,6 @@ class BrowserSession(BaseModel):
 			)  # Use 200MB limit to handle pages with very large DOMs
 			assert self._cdp_client_root is not None
 			await self._cdp_client_root.start()
-		    
 
 			# Initialize event-driven session manager FIRST (before enabling autoAttach)
 			# SessionManager will:
