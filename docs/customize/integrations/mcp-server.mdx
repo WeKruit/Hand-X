@@ -45,10 +45,13 @@ Add to your Claude Desktop config file:
 {
   "mcpServers": {
     "browser-use": {
-      "url": "https://api.browser-use.com/mcp",
-      "headers": {
-        "X-Browser-Use-API-Key": "Your-API-Key-Here"
-      }
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://api.browser-use.com/mcp",
+        "--header",
+        "X-Browser-Use-API-Key: your-api-key"
+      ]
     }
   }
 }
@@ -63,10 +66,11 @@ Add to `~/.cursor/mcp.json`:
 {
   "mcpServers": {
     "browser-use": {
-      "url": "https://api.browser-use.com/mcp",
-      "headers": {
-        "X-Browser-Use-API-Key": "Your-API-Key-Here"
-      }
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://api.browser-use.com/mcp"
+      ]
     }
   }
 }
