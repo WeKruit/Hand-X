@@ -1747,7 +1747,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if on_step_start is not None:
 			await on_step_start(self)
 
-
 		self.logger.debug(f'🚶 Starting step {step + 1}/{max_steps}...')
 
 		try:
