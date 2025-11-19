@@ -1197,7 +1197,7 @@ Validated Code (after quote fixing):
 		fixed_code = re.sub(r'\\\\([.*+?^${}()|[\]])', r'\\\1', fixed_code)
 
 		# Pattern 3: Fix XPath expressions with mixed quotes
-		xpath_pattern = r'document\.evaluate\s*\(\s*"([^"]*\'[^"]*)"'
+		xpath_pattern = r'document\.evaluate\s*\(\s*"([^"]*)"\s*,'
 
 		def fix_xpath_quotes(match):
 			xpath_with_quotes = match.group(1)
@@ -1206,7 +1206,7 @@ Validated Code (after quote fixing):
 		fixed_code = re.sub(xpath_pattern, fix_xpath_quotes, fixed_code)
 
 		# Pattern 4: Fix querySelector/querySelectorAll with mixed quotes
-		selector_pattern = r'(querySelector(?:All)?)\s*\(\s*"([^"]*\'[^"]*)"'
+		selector_pattern = r'(querySelector(?:All)?)\s*\(\s*"([^"]*)"\s*\)'
 
 		def fix_selector_quotes(match):
 			method_name = match.group(1)
@@ -1216,7 +1216,7 @@ Validated Code (after quote fixing):
 		fixed_code = re.sub(selector_pattern, fix_selector_quotes, fixed_code)
 
 		# Pattern 5: Fix closest() calls with mixed quotes
-		closest_pattern = r'\.closest\s*\(\s*"([^"]*\'[^"]*)"'
+		closest_pattern = r'\.closest\s*\(\s*"([^"]*)"\s*\)'
 
 		def fix_closest_quotes(match):
 			selector_with_quotes = match.group(1)
@@ -1225,7 +1225,7 @@ Validated Code (after quote fixing):
 		fixed_code = re.sub(closest_pattern, fix_closest_quotes, fixed_code)
 
 		# Pattern 6: Fix .matches() calls with mixed quotes (similar to closest)
-		matches_pattern = r'\.matches\s*\(\s*"([^"]*\'[^"]*)"'
+		matches_pattern = r'\.matches\s*\(\s*"([^"]*)"\s*\)'
 
 		def fix_matches_quotes(match):
 			selector_with_quotes = match.group(1)
