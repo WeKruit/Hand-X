@@ -274,7 +274,7 @@ class Tools(Generic[Context]):
 				mouse = await page.mouse
 				await mouse.click(actual_x, actual_y)
 
-				memory = f'Clicked on coordinate {actual_x}, {actual_y}'
+				memory = f'Clicked on coordinate {params.coordinate_x}, {params.coordinate_y}'
 				msg = f'🖱️ {memory}'
 				logger.info(msg)
 

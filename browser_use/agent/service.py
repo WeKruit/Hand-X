@@ -233,6 +233,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				"""Determine timeout based on model name"""
 				model_name = getattr(llm_model, 'model', '').lower()
 				if 'gemini' in model_name:
+					if '3-pro' in model_name:
+						return 90
 					return 45
 				elif 'groq' in model_name:
 					return 30
