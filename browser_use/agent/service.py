@@ -51,6 +51,7 @@ from browser_use.agent.views import (
 	AgentStepInfo,
 	AgentStructuredOutput,
 	BrowserStateHistory,
+	DetectedVariable,
 	JudgementResult,
 	StepMetadata,
 )
@@ -2488,3 +2489,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		import asyncio
 
 		return asyncio.run(self.run(max_steps=max_steps, on_step_start=on_step_start, on_step_end=on_step_end))
+
+	def detect_variables(self) -> dict[str, DetectedVariable]:
+		"""Detect variables in current agent history"""
+		from browser_use.agent.variable_detector import detect_variables_in_history
+
+		return detect_variables_in_history(self.history)
