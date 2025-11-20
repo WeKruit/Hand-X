@@ -159,6 +159,7 @@ class StepMetadata(BaseModel):
 	step_start_time: float
 	step_end_time: float
 	step_number: int
+	step_interval: float | None = None
 
 	@property
 	def duration_seconds(self) -> float:
