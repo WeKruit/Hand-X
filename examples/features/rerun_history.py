@@ -4,18 +4,42 @@ Example: Rerunning saved agent history with variable detection and substitution
 This example shows how to:
 1. Run an agent and save its history (including initial URL navigation)
 2. Detect variables in the saved history (emails, names, dates, etc.)
-3. Rerun the history with original values
-4. Rerun the history with substituted values (different data)
+3. Rerun the history with substituted values (different data)
+4. Get AI-generated summary of rerun completion (with screenshot analysis)
 
 Useful for:
 - Debugging agent behavior
 - Testing changes with consistent scenarios
 - Replaying successful workflows with different data
 - Understanding what values can be substituted in reruns
+- Getting automated verification of rerun success
 
 Note: Initial actions (like opening URLs from tasks) are now automatically
 saved to history and will be replayed during rerun, so you don't need to
 worry about manually specifying URLs when rerunning.
+
+AI Summary:
+The rerun will automatically generate an AI summary at the end that analyzes
+the final screenshot and execution statistics. By default it uses the agent's LLM,
+but you can pass a custom LLM via the summary_llm parameter:
+
+	# Option 1: Use agent's LLM (default)
+	results = await agent.load_and_rerun(history_file)
+
+	# Option 2: Use a specific LLM for summary generation
+	from browser_use.llm.openai import ChatOpenAI
+	summary_llm = ChatOpenAI(model='gpt-4o')
+	results = await agent.load_and_rerun(history_file, summary_llm=summary_llm)
+
+	# Option 3: Use Anthropic, Google, or any other supported LLM
+	from browser_use.llm.anthropic import ChatAnthropic
+	summary_llm = ChatAnthropic(model='claude-3-5-sonnet-20241022')
+	results = await agent.load_and_rerun(history_file, summary_llm=summary_llm)
+
+The AI summary will be the last item in results and will have:
+	- extracted_content: The summary text
+	- success: Whether rerun was successful
+	- is_done: Always True for summary
 """
 
 import asyncio
@@ -30,6 +54,13 @@ async def main():
 	history_file = Path('agent_history.json')
 	task = 'Go to https://browser-use.github.io/stress-tests/challenges/reference-number-form.html and fill the form with example data and submit.'
 	llm = ChatBrowserUse()
+
+	# Optional: Use a custom LLM for AI summary generation
+	# By default, the agent's LLM is used, but you can specify a different one
+	# Uncomment to use a custom LLM for summaries:
+	# from browser_use.llm.openai import ChatOpenAI
+	# summary_llm = ChatOpenAI(model='gpt-4o-mini')
+	summary_llm = None  # Set to None to use agent's LLM (default)
 
 	# Step 1: Run the agent and save history
 	print('=== Running Agent ===')
@@ -49,13 +80,7 @@ async def main():
 	else:
 		print('No variables detected in history')
 
-	# Step 3: Rerun the history with original values
-	print('\n=== Rerunning History (Original Values) ===')
-	rerun_agent = Agent(task='', llm=llm)
-	await rerun_agent.load_and_rerun(history_file)
-	print('✓ History rerun complete')
-
-	# Step 4: Rerun the history with substituted values
+	# Step 3: Rerun the history with substituted values
 	if variables:
 		print('\n=== Rerunning History (Substituted Values) ===')
 		# Create new values for the detected variables
@@ -67,7 +92,7 @@ async def main():
 			elif var_name == 'full_name':
 				new_values[var_name] = 'Jane Smith'
 			elif var_name.startswith('full_name_'):
-				new_values[var_name] = 'Sales Department'
+				new_values[var_name] = 'General Information'
 			elif var_name == 'first_name':
 				new_values[var_name] = 'Jane'
 			elif var_name == 'date':
@@ -82,10 +107,19 @@ async def main():
 				old_value = variables[var_name].original_value
 				print(f'  • {var_name}: "{old_value}" → "{new_value}"')
 
-			# Rerun with substituted values
+			# Rerun with substituted values and optional custom summary LLM
 			substitute_agent = Agent(task='', llm=llm)
-			await substitute_agent.load_and_rerun(history_file, variables=new_values)
+			results = await substitute_agent.load_and_rerun(history_file, variables=new_values, summary_llm=summary_llm)
+
+			# Display AI-generated summary (last result)
+			if results and results[-1].is_done:
+				summary = results[-1]
+				print('\n📊 AI Summary:')
+				print(f'  Summary: {summary.extracted_content}')
+				print(f'  Success: {summary.success}')
 			print('✓ History rerun with substituted values complete')
+	else:
+		print('\n⚠️  No variables detected, skipping substitution rerun')
 
 
 if __name__ == '__main__':
