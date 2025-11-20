@@ -899,10 +899,18 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			return
 
 		if browser_state_summary:
+			step_interval = None
+			if len(self.history.history) > 0:
+				last_history_item = self.history.history[-1]
+
+				if last_history_item.metadata:
+					previous_end_time = last_history_item.metadata.step_end_time
+					step_interval = max(0, self.step_start_time - previous_end_time)
 			metadata = StepMetadata(
 				step_number=self.state.n_steps,
 				step_start_time=self.step_start_time,
 				step_end_time=step_end_time,
+				step_interval=step_interval,
 			)
 
 			# Use _make_history_item like main branch
@@ -2197,10 +2205,15 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				results.append(ActionResult(error='No action to replay'))
 				continue
 
+			if history_item.metadata and history_item.metadata.step_interval is not None:
+				step_delay = history_item.metadata.step_interval
+			else:
+				step_delay = delay_between_actions
+
 			retry_count = 0
 			while retry_count < max_retries:
 				try:
-					result = await self._execute_history_step(history_item, delay_between_actions)
+					result = await self._execute_history_step(history_item, step_delay)
 					results.extend(result)
 					break
 
@@ -2246,11 +2259,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					action=self.initial_actions,
 				)
 
-			metadata = StepMetadata(
-				step_number=0,
-				step_start_time=time.time(),
-				step_end_time=time.time(),
-			)
+			metadata = StepMetadata(step_number=0, step_start_time=time.time(), step_end_time=time.time(), step_interval=None)
 
 			# Create minimal browser state history for initial actions
 			state_history = BrowserStateHistory(
@@ -2275,6 +2284,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	async def _execute_history_step(self, history_item: AgentHistory, delay: float) -> list[ActionResult]:
 		"""Execute a single step from history with element validation"""
 		assert self.browser_session is not None, 'BrowserSession is not set up'
+
+		await asyncio.sleep(delay)
 		state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
 		if not state or not history_item.model_output:
 			raise ValueError('Invalid state or model output')
@@ -2291,8 +2302,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				raise ValueError(f'Could not find matching element {i} in current page')
 
 		result = await self.multi_act(updated_actions)
-
-		await asyncio.sleep(delay)
 		return result
 
 	async def _update_action_indices(
