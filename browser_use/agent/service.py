@@ -233,6 +233,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				"""Determine timeout based on model name"""
 				model_name = getattr(llm_model, 'model', '').lower()
 				if 'gemini' in model_name:
+					if '3-pro' in model_name:
+						return 90
 					return 45
 				elif 'groq' in model_name:
 					return 30
@@ -1521,6 +1523,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		judge_verdict = judgement_data.get('verdict') if judgement_data else None
 		judge_reasoning = judgement_data.get('reasoning') if judgement_data else None
 		judge_failure_reason = judgement_data.get('failure_reason') if judgement_data else None
+		judge_reached_captcha = judgement_data.get('reached_captcha') if judgement_data else None
+		judge_impossible_task = judgement_data.get('impossible_task') if judgement_data else None
 
 		self.telemetry.capture(
 			AgentTelemetryEvent(
@@ -1551,6 +1555,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				judge_verdict=judge_verdict,
 				judge_reasoning=judge_reasoning,
 				judge_failure_reason=judge_failure_reason,
+				judge_reached_captcha=judge_reached_captcha,
+				judge_impossible_task=judge_impossible_task,
 			)
 		)
 
