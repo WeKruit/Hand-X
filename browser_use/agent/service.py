@@ -906,7 +906,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 				if last_history_item.metadata:
 					previous_end_time = last_history_item.metadata.step_end_time
-					step_interval = max(0, self.step_start_time - previous_end_time)
+					previous_start_time = last_history_item.metadata.step_start_time
+					step_interval = max(0, previous_end_time - previous_start_time)
 			metadata = StepMetadata(
 				step_number=self.state.n_steps,
 				step_start_time=self.step_start_time,
@@ -2195,7 +2196,25 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			goal = history_item.model_output.current_state.next_goal if history_item.model_output else ''
 			step_num = history_item.metadata.step_number if history_item.metadata else i
 			step_name = 'Initial actions' if step_num == 0 else f'Step {step_num}'
-			self.logger.info(f'Replaying {step_name} ({i + 1}/{len(history.history)}): {goal}')
+
+			# Determine step delay
+			if history_item.metadata and history_item.metadata.step_interval is not None:
+				step_delay = history_item.metadata.step_interval
+				# Format delay nicely - show ms for values < 1s, otherwise show seconds
+				if step_delay < 1.0:
+					delay_str = f'{step_delay * 1000:.0f}ms'
+				else:
+					delay_str = f'{step_delay:.1f}s'
+				delay_source = f'using saved step_interval={delay_str}'
+			else:
+				step_delay = delay_between_actions
+				if step_delay < 1.0:
+					delay_str = f'{step_delay * 1000:.0f}ms'
+				else:
+					delay_str = f'{step_delay:.1f}s'
+				delay_source = f'using default delay={delay_str}'
+
+			self.logger.info(f'Replaying {step_name} ({i + 1}/{len(history.history)}) [{delay_source}]: {goal}')
 
 			if (
 				not history_item.model_output
@@ -2205,11 +2224,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				self.logger.warning(f'{step_name}: No action to replay, skipping')
 				results.append(ActionResult(error='No action to replay'))
 				continue
-
-			if history_item.metadata and history_item.metadata.step_interval is not None:
-				step_delay = history_item.metadata.step_interval
-			else:
-				step_delay = delay_between_actions
 
 			retry_count = 0
 			while retry_count < max_retries:
@@ -2339,17 +2353,28 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		return action
 
-	async def load_and_rerun(self, history_file: str | Path | None = None, **kwargs) -> list[ActionResult]:
+	async def load_and_rerun(
+		self,
+		history_file: str | Path | None = None,
+		variables: dict[str, str] | None = None,
+		**kwargs,
+	) -> list[ActionResult]:
 		"""
-		Load history from file and rerun it.
+		Load history from file and rerun it, optionally substituting variables.
 
 		Args:
-		                history_file: Path to the history file
-		                **kwargs: Additional arguments passed to rerun_history
+			history_file: Path to the history file
+			variables: Optional dict mapping variable names to new values (e.g. {'email': 'new@example.com'})
+			**kwargs: Additional arguments passed to rerun_history
 		"""
 		if not history_file:
 			history_file = 'AgentHistory.json'
 		history = AgentHistoryList.load_from_file(history_file, self.AgentOutput)
+
+		# Substitute variables if provided
+		if variables:
+			history = self._substitute_variables_in_history(history, variables)
+
 		return await self.rerun_history(history, **kwargs)
 
 	def save_history(self, file_path: str | Path | None = None) -> None:
@@ -2499,7 +2524,91 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		return asyncio.run(self.run(max_steps=max_steps, on_step_start=on_step_start, on_step_end=on_step_end))
 
 	def detect_variables(self) -> dict[str, DetectedVariable]:
-		"""Detect variables in current agent history"""
+		"""Detect reusable variables in agent history"""
 		from browser_use.agent.variable_detector import detect_variables_in_history
 
 		return detect_variables_in_history(self.history)
+
+	def _substitute_variables_in_history(self, history: AgentHistoryList, variables: dict[str, str]) -> AgentHistoryList:
+		"""Substitute variables in history with new values for rerunning with different data"""
+		from browser_use.agent.variable_detector import detect_variables_in_history
+
+		# Detect variables in the history
+		detected_vars = detect_variables_in_history(history)
+
+		# Build a mapping of original values to new values
+		value_replacements: dict[str, str] = {}
+		for var_name, new_value in variables.items():
+			if var_name in detected_vars:
+				old_value = detected_vars[var_name].original_value
+				value_replacements[old_value] = new_value
+			else:
+				self.logger.warning(f'Variable "{var_name}" not found in history, skipping substitution')
+
+		if not value_replacements:
+			self.logger.info('No variables to substitute')
+			return history
+
+		# Create a deep copy of history to avoid modifying the original
+		import copy
+
+		modified_history = copy.deepcopy(history)
+
+		# Substitute values in all actions
+		substitution_count = 0
+		for history_item in modified_history.history:
+			if not history_item.model_output or not history_item.model_output.action:
+				continue
+
+			for action in history_item.model_output.action:
+				# Handle both Pydantic models and dicts
+				if hasattr(action, 'model_dump'):
+					action_dict = action.model_dump()
+				elif isinstance(action, dict):
+					action_dict = action
+				else:
+					action_dict = vars(action) if hasattr(action, '__dict__') else {}
+
+				# Substitute in all string fields
+				substitution_count += self._substitute_in_dict(action_dict, value_replacements)
+
+				# Update the action with modified values
+				if hasattr(action, 'model_dump'):
+					# For Pydantic RootModel, we need to recreate from the modified dict
+					if hasattr(action, 'root'):
+						# This is a RootModel - recreate it from the modified dict
+						new_action = type(action).model_validate(action_dict)
+						# Replace the root field in-place using object.__setattr__ to bypass Pydantic's immutability
+						object.__setattr__(action, 'root', getattr(new_action, 'root'))
+					else:
+						# Regular Pydantic model - update fields in-place
+						for key, val in action_dict.items():
+							if hasattr(action, key):
+								setattr(action, key, val)
+				elif isinstance(action, dict):
+					action.update(action_dict)
+
+		self.logger.info(f'Substituted {substitution_count} value(s) in {len(value_replacements)} variable type(s) in history')
+		return modified_history
+
+	def _substitute_in_dict(self, data: dict, replacements: dict[str, str]) -> int:
+		"""Recursively substitute values in a dictionary, returns count of substitutions made"""
+		count = 0
+		for key, value in data.items():
+			if isinstance(value, str):
+				# Replace if exact match
+				if value in replacements:
+					data[key] = replacements[value]
+					count += 1
+			elif isinstance(value, dict):
+				# Recurse into nested dicts
+				count += self._substitute_in_dict(value, replacements)
+			elif isinstance(value, list):
+				# Handle lists
+				for i, item in enumerate(value):
+					if isinstance(item, str) and item in replacements:
+						value[i] = replacements[item]
+						count += 1
+					elif isinstance(item, dict):
+						count += self._substitute_in_dict(item, replacements)
+		return count
