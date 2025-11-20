@@ -19,14 +19,14 @@ import asyncio
 from pathlib import Path
 
 from browser_use import Agent
-from browser_use.llm.openai.chat import ChatOpenAI
+from browser_use.llm import ChatBrowserUse
 
 
 async def main():
 	# Example task to demonstrate history saving and rerunning
 	history_file = Path('agent_history.json')
 	task = 'Go to https://browser-use.github.io/stress-tests/challenges/ember-form.html and fill the form with example data.'
-	llm = ChatOpenAI(model='gpt-4.1-mini')
+	llm = ChatBrowserUse()
 
 	agent = Agent(task=task, llm=llm, max_actions_per_step=1)
 	await agent.run(max_steps=5)
