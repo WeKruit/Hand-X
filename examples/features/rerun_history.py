@@ -20,20 +20,14 @@ worry about manually specifying URLs when rerunning.
 
 AI Summary:
 The rerun will automatically generate an AI summary at the end that analyzes
-the final screenshot and execution statistics. By default it uses the agent's LLM,
-but you can pass a custom LLM via the summary_llm parameter:
+the final screenshot and execution statistics.:
 
 	# Option 1: Use agent's LLM (default)
 	results = await agent.load_and_rerun(history_file)
 
 	# Option 2: Use a specific LLM for summary generation
-	from browser_use.llm.openai import ChatOpenAI
-	summary_llm = ChatOpenAI(model='gpt-4o')
-	results = await agent.load_and_rerun(history_file, summary_llm=summary_llm)
-
-	# Option 3: Use Anthropic, Google, or any other supported LLM
-	from browser_use.llm.anthropic import ChatAnthropic
-	summary_llm = ChatAnthropic(model='claude-3-5-sonnet-20241022')
+	from browser_use.llm import ChatOpenAI
+	summary_llm = ChatOpenAI(model='gpt-4.1-mini')
 	results = await agent.load_and_rerun(history_file, summary_llm=summary_llm)
 
 The AI summary will be the last item in results and will have:
@@ -56,10 +50,9 @@ async def main():
 	llm = ChatBrowserUse()
 
 	# Optional: Use a custom LLM for AI summary generation
-	# By default, the agent's LLM is used, but you can specify a different one
 	# Uncomment to use a custom LLM for summaries:
-	# from browser_use.llm.openai import ChatOpenAI
-	# summary_llm = ChatOpenAI(model='gpt-4o-mini')
+	# from browser_use.llm import ChatOpenAI
+	# summary_llm = ChatOpenAI(model='gpt-4.1-mini')
 	summary_llm = None  # Set to None to use agent's LLM (default)
 
 	# Step 1: Run the agent and save history
