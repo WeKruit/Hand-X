@@ -2284,6 +2284,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	async def _execute_history_step(self, history_item: AgentHistory, delay: float) -> list[ActionResult]:
 		"""Execute a single step from history with element validation"""
 		assert self.browser_session is not None, 'BrowserSession is not set up'
+
+		await asyncio.sleep(delay)
 		state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
 		if not state or not history_item.model_output:
 			raise ValueError('Invalid state or model output')
@@ -2300,8 +2302,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				raise ValueError(f'Could not find matching element {i} in current page')
 
 		result = await self.multi_act(updated_actions)
-
-		await asyncio.sleep(delay)
 		return result
 
 	async def _update_action_indices(
