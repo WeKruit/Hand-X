@@ -21,18 +21,18 @@ def test_step_metadata_step_interval_optional():
 
 
 def test_step_interval_calculation():
-	"""Test step_interval calculation logic"""
-	# Step 1 ends at 100.5
-	step1_end = 100.5
+	"""Test step_interval calculation logic (step duration)"""
+	# Step starts at 100.0
+	step_start = 100.0
 
-	# Step 2 starts at 103.2
-	step2_start = 103.2
+	# Step ends at 102.5
+	step_end = 102.5
 
-	# Wait time should be 2.7 seconds
-	expected_wait = 2.7
-	calculated_wait = step2_start - step1_end
+	# Step duration should be 2.5 seconds
+	expected_duration = 2.5
+	calculated_duration = step_end - step_start
 
-	assert abs(calculated_wait - expected_wait) < 0.001  # Float comparison
+	assert abs(calculated_duration - expected_duration) < 0.001  # Float comparison
 
 
 def test_step_metadata_serialization_with_step_interval():
