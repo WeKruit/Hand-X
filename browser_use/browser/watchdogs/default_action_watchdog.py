@@ -3,6 +3,9 @@
 import asyncio
 import json
 
+from cdp_use.cdp.input.commands import DispatchKeyEventParameters
+
+from browser_use.actor.utils import get_key_info
 from browser_use.browser.events import (
 	ClickElementEvent,
 	GetDropdownOptionsEvent,
@@ -35,34 +38,166 @@ UploadFileEvent.model_rebuild()
 class DefaultActionWatchdog(BaseWatchdog):
 	"""Handles default browser actions like click, type, and scroll using CDP."""
 
+	def _is_print_related_element(self, element_node: EnhancedDOMTreeNode) -> bool:
+		"""Check if an element is related to printing (print buttons, print dialogs, etc.).
+
+		Primary check: onclick attribute (most reliable for print detection)
+		Fallback: button text/value (for cases without onclick)
+		"""
+		# Primary: Check onclick attribute for print-related functions (most reliable)
+		onclick = element_node.attributes.get('onclick', '').lower() if element_node.attributes else ''
+		if onclick and 'print' in onclick:
+			# Matches: window.print(), PrintElem(), print(), etc.
+			return True
+
+		return False
+
+	async def _handle_print_button_click(self, element_node: EnhancedDOMTreeNode) -> dict | None:
+		"""Handle print button by directly generating PDF via CDP instead of opening dialog.
+
+		Returns:
+			Metadata dict with download path if successful, None otherwise
+		"""
+		try:
+			import base64
+			import os
+			from pathlib import Path
+
+			# Get CDP session
+			cdp_session = await self.browser_session.get_or_create_cdp_session(focus=True)
+
+			# Generate PDF using CDP Page.printToPDF
+			result = await asyncio.wait_for(
+				cdp_session.cdp_client.send.Page.printToPDF(
+					params={
+						'printBackground': True,
+						'preferCSSPageSize': True,
+					},
+					session_id=cdp_session.session_id,
+				),
+				timeout=15.0,  # 15 second timeout for PDF generation
+			)
+
+			pdf_data = result.get('data')
+			if not pdf_data:
+				self.logger.warning('⚠️ PDF generation returned no data')
+				return None
+
+			# Decode base64 PDF data
+			pdf_bytes = base64.b64decode(pdf_data)
+
+			# Get downloads path
+			downloads_path = self.browser_session.browser_profile.downloads_path
+			if not downloads_path:
+				self.logger.warning('⚠️ No downloads path configured, cannot save PDF')
+				return None
+
+			# Generate filename from page title or URL
+			try:
+				page_title = await asyncio.wait_for(self.browser_session.get_current_page_title(), timeout=2.0)
+				# Sanitize title for filename
+				import re
+
+				safe_title = re.sub(r'[^\w\s-]', '', page_title)[:50]  # Max 50 chars
+				filename = f'{safe_title}.pdf' if safe_title else 'print.pdf'
+			except Exception:
+				filename = 'print.pdf'
+
+			# Ensure downloads directory exists
+			downloads_dir = Path(downloads_path).expanduser().resolve()
+			downloads_dir.mkdir(parents=True, exist_ok=True)
+
+			# Generate unique filename if file exists
+			final_path = downloads_dir / filename
+			if final_path.exists():
+				base, ext = os.path.splitext(filename)
+				counter = 1
+				while (downloads_dir / f'{base} ({counter}){ext}').exists():
+					counter += 1
+				final_path = downloads_dir / f'{base} ({counter}){ext}'
+
+			# Write PDF to file
+			import anyio
+
+			async with await anyio.open_file(final_path, 'wb') as f:
+				await f.write(pdf_bytes)
+
+			file_size = final_path.stat().st_size
+			self.logger.info(f'✅ Generated PDF via CDP: {final_path} ({file_size:,} bytes)')
+
+			# Dispatch FileDownloadedEvent
+			from browser_use.browser.events import FileDownloadedEvent
+
+			page_url = await self.browser_session.get_current_page_url()
+			self.browser_session.event_bus.dispatch(
+				FileDownloadedEvent(
+					url=page_url,
+					path=str(final_path),
+					file_name=final_path.name,
+					file_size=file_size,
+					file_type='pdf',
+					mime_type='application/pdf',
+					auto_download=False,  # This was intentional (user clicked print)
+				)
+			)
+
+			return {'pdf_generated': True, 'path': str(final_path)}
+
+		except TimeoutError:
+			self.logger.warning('⏱️ PDF generation timed out')
+			return None
+		except Exception as e:
+			self.logger.warning(f'⚠️ Failed to generate PDF via CDP: {type(e).__name__}: {e}')
+			return None
+
 	@observe_debug(ignore_input=True, ignore_output=True, name='click_element_event')
 	async def on_ClickElementEvent(self, event: ClickElementEvent) -> dict | None:
 		"""Handle click request with CDP."""
 		try:
 			# Check if session is alive before attempting any operations
-			if not self.browser_session.agent_focus or not self.browser_session.agent_focus.target_id:
+			if not self.browser_session.agent_focus_target_id:
 				error_msg = 'Cannot execute click: browser session is corrupted (target_id=None). Session may have crashed.'
-				self.logger.error(f'⚠️ {error_msg}')
+				self.logger.error(f'{error_msg}')
 				raise BrowserError(error_msg)
 
 			# Use the provided node
 			element_node = event.node
-			index_for_logging = element_node.element_index or 'unknown'
-			starting_target_id = self.browser_session.agent_focus.target_id
+			index_for_logging = element_node.backend_node_id or 'unknown'
+			starting_target_id = self.browser_session.agent_focus_target_id
 
 			# Check if element is a file input (should not be clicked)
 			if self.browser_session.is_file_input(element_node):
 				msg = f'Index {index_for_logging} - has an element which opens file upload dialog. To upload files please use a specific function to upload files'
-				self.logger.info(msg)
-				raise BrowserError(
-					message=msg,
-					long_term_memory=msg,
+				self.logger.info(f'{msg}')
+				# Return validation error instead of raising to avoid ERROR logs
+				return {'validation_error': msg}
+
+			# Detect print-related elements and handle them specially
+			is_print_element = self._is_print_related_element(element_node)
+			if is_print_element:
+				self.logger.info(
+					f'🖨️ Detected print button (index {index_for_logging}), generating PDF directly instead of opening dialog...'
 				)
 
+				# Instead of clicking, directly generate PDF via CDP
+				click_metadata = await self._handle_print_button_click(element_node)
+
+				if click_metadata and click_metadata.get('pdf_generated'):
+					msg = f'Generated PDF: {click_metadata.get("path")}'
+					self.logger.info(f'💾 {msg}')
+					return click_metadata
+				else:
+					# Fallback to regular click if PDF generation failed
+					self.logger.warning('⚠️ PDF generation failed, falling back to regular click')
+
 			# Perform the actual click using internal implementation
-			click_metadata = None
 			click_metadata = await self._click_element_node_impl(element_node)
 			download_path = None  # moved to downloads_watchdog.py
+
+			# Check for validation errors - return them without raising to avoid ERROR logs
+			if isinstance(click_metadata, dict) and 'validation_error' in click_metadata:
+				self.logger.info(f'{click_metadata["validation_error"]}')
+				return click_metadata
 
 			# Build success message
 			if download_path:
@@ -82,10 +217,10 @@ class DefaultActionWatchdog(BaseWatchdog):
 		try:
 			# Use the provided node
 			element_node = event.node
-			index_for_logging = element_node.element_index or 'unknown'
+			index_for_logging = element_node.backend_node_id or 'unknown'
 
 			# Check if this is index 0 or a falsy index - type to the page (whatever has focus)
-			if not element_node.element_index or element_node.element_index == 0:
+			if not element_node.backend_node_id or element_node.backend_node_id == 0:
 				# Type to the page without focusing any specific element
 				await self._type_to_page(event.text)
 				# Log with sensitive data protection
@@ -120,7 +255,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 					# Element not found or error - fall back to typing to the page
 					self.logger.warning(f'Failed to type to element {index_for_logging}: {e}. Falling back to page typing.')
 					try:
-						await asyncio.wait_for(self._click_element_node_impl(element_node), timeout=3.0)
+						await asyncio.wait_for(self._click_element_node_impl(element_node), timeout=10.0)
 					except Exception as e:
 						pass
 					await self._type_to_page(event.text)
@@ -142,7 +277,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 	async def on_ScrollEvent(self, event: ScrollEvent) -> None:
 		"""Handle scroll request with CDP."""
 		# Check if we have a current target for scrolling
-		if not self.browser_session.agent_focus:
+		if not self.browser_session.agent_focus_target_id:
 			error_msg = 'No active target for scrolling'
 			raise BrowserError(error_msg)
 
@@ -232,20 +367,22 @@ class DefaultActionWatchdog(BaseWatchdog):
 								textContent: (el.textContent || '').substring(0, 100)
 							};
 						};
-						
+
+
 						const elementAtPoint = document.elementFromPoint(arguments[0], arguments[1]);
 						if (!elementAtPoint) {
 							return { targetInfo: getElementInfo(this), isClickable: false };
 						}
-						
+
+
 						// Simple containment-based clickability logic
-						const isClickable = this === elementAtPoint || 
+						const isClickable = this === elementAtPoint ||
 							this.contains(elementAtPoint) ||
 							elementAtPoint.contains(this);
-							
+
 						return {
 							targetInfo: getElementInfo(this),
-							elementAtPointInfo: getElementInfo(elementAtPoint), 
+							elementAtPointInfo: getElementInfo(elementAtPoint),
 							isClickable: isClickable
 						};
 					}
@@ -295,21 +432,14 @@ class DefaultActionWatchdog(BaseWatchdog):
 			element_type = element_node.attributes.get('type', '').lower() if element_node.attributes else ''
 
 			if tag_name == 'select':
-				msg = (
-					f'Cannot click on <select> elements. Use dropdown_options(index={element_node.element_index}) action instead.'
-				)
-				self.logger.warning(msg)
-				raise BrowserError(
-					message=msg,
-					long_term_memory=msg,
-				)
+				msg = f'Cannot click on <select> elements. Use dropdown_options(index={element_node.backend_node_id}) action instead.'
+				# Return error dict instead of raising to avoid ERROR logs
+				return {'validation_error': msg}
 
 			if tag_name == 'input' and element_type == 'file':
-				msg = f'Cannot click on file input element (index={element_node.element_index}). File uploads must be handled using upload_file_to_element action.'
-				raise BrowserError(
-					message=msg,
-					long_term_memory=msg,
-				)
+				msg = f'Cannot click on file input element (index={element_node.backend_node_id}). File uploads must be handled using upload_file_to_element action.'
+				# Return error dict instead of raising to avoid ERROR logs
+				return {'validation_error': msg}
 
 			# Get CDP client
 			cdp_session = await self.browser_session.cdp_client_for_node(element_node)
@@ -383,7 +513,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 					# Navigation is handled by BrowserSession via events
 					return None
 				except Exception as js_e:
-					self.logger.error(f'CDP JavaScript click also failed: {js_e}')
+					self.logger.warning(f'CDP JavaScript click also failed: {js_e}')
 					if 'No node with given id found' in str(js_e):
 						raise Exception('Element with given id not found')
 					else:
@@ -490,7 +620,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 							},
 							session_id=session_id,
 						),
-						timeout=1.0,  # 1 second timeout for mousePressed
+						timeout=3.0,  # 3 second timeout for mousePressed
 					)
 					await asyncio.sleep(0.08)
 				except TimeoutError:
@@ -510,12 +640,13 @@ class DefaultActionWatchdog(BaseWatchdog):
 							},
 							session_id=session_id,
 						),
-						timeout=3.0,  # 1 second timeout for mouseReleased
+						timeout=5.0,  # 5 second timeout for mouseReleased
 					)
 				except TimeoutError:
 					self.logger.debug('⏱️ Mouse up timed out (possibly due to lag or dialog popup), continuing...')
 
 				self.logger.debug('🖱️ Clicked successfully using x,y coordinates')
+
 				# Return coordinates as dict for metadata
 				return {'click_x': center_x, 'click_y': center_y}
 
@@ -539,14 +670,27 @@ class DefaultActionWatchdog(BaseWatchdog):
 						},
 						session_id=session_id,
 					)
+
+					# Small delay for dialog dismissal
+					await asyncio.sleep(0.1)
+
 					return None
 				except Exception as js_e:
-					self.logger.error(f'CDP JavaScript click also failed: {js_e}')
+					self.logger.warning(f'CDP JavaScript click also failed: {js_e}')
 					raise Exception(f'Failed to click element: {e}')
 			finally:
-				# always re-focus back to original top-level page session context in case click opened a new tab/popup/window/dialog/etc.
-				cdp_session = await self.browser_session.get_or_create_cdp_session(focus=True)
-				await cdp_session.cdp_client.send.Runtime.runIfWaitingForDebugger(session_id=cdp_session.session_id)
+				# Always re-focus back to original top-level page session context in case click opened a new tab/popup/window/dialog/etc.
+				# Use timeout to prevent hanging if dialog is blocking
+				try:
+					cdp_session = await asyncio.wait_for(self.browser_session.get_or_create_cdp_session(focus=True), timeout=3.0)
+					await asyncio.wait_for(
+						cdp_session.cdp_client.send.Runtime.runIfWaitingForDebugger(session_id=cdp_session.session_id),
+						timeout=2.0,
+					)
+				except TimeoutError:
+					self.logger.debug('⏱️ Refocus after click timed out (page may be blocked by dialog). Continuing...')
+				except Exception as e:
+					self.logger.debug(f'⚠️ Refocus error (non-critical): {type(e).__name__}: {e}')
 
 		except URLNotAllowedError as e:
 			raise e
@@ -555,12 +699,20 @@ class DefaultActionWatchdog(BaseWatchdog):
 		except Exception as e:
 			# Extract key element info for error message
 			element_info = f'<{element_node.tag_name or "unknown"}'
-			if element_node.element_index:
-				element_info += f' index={element_node.element_index}'
+			if element_node.backend_node_id:
+				element_info += f' index={element_node.backend_node_id}'
 			element_info += '>'
+
+			# Create helpful error message based on context
+			error_detail = f'Failed to click element {element_info}. The element may not be interactable or visible.'
+
+			# Add hint if element has index (common in code-use mode)
+			if element_node.backend_node_id:
+				error_detail += f' If the page changed after navigation/interaction, the index [{element_node.backend_node_id}] may be stale. Get fresh browser state before retrying.'
+
 			raise BrowserError(
 				message=f'Failed to click element: {e}',
-				long_term_memory=f'Failed to click element {element_info}. The element may not be interactable or visible.',
+				long_term_memory=error_detail,
 			)
 
 	async def _type_to_page(self, text: str):
@@ -760,17 +912,54 @@ class DefaultActionWatchdog(BaseWatchdog):
 	async def _clear_text_field(self, object_id: str, cdp_session) -> bool:
 		"""Clear text field using multiple strategies, starting with the most reliable."""
 		try:
-			# Strategy 1: Direct JavaScript value setting (most reliable for modern web apps)
+			# Strategy 1: Direct JavaScript value/content setting (handles both inputs and contenteditable)
 			self.logger.debug('🧹 Clearing text field using JavaScript value setting')
 
-			await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+			clear_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
 				params={
 					'functionDeclaration': """
-						function() { 
-							this.value = ""; 
-							this.dispatchEvent(new Event("input", { bubbles: true })); 
-							this.dispatchEvent(new Event("change", { bubbles: true })); 
-							return this.value;
+						function() {
+							// Check if it's a contenteditable element
+							const hasContentEditable = this.getAttribute('contenteditable') === 'true' ||
+													this.getAttribute('contenteditable') === '' ||
+													this.isContentEditable === true;
+
+							if (hasContentEditable) {
+								// For contenteditable elements, clear all content
+								while (this.firstChild) {
+									this.removeChild(this.firstChild);
+								}
+								this.textContent = "";
+								this.innerHTML = "";
+
+								// Focus and position cursor at the beginning
+								this.focus();
+								const selection = window.getSelection();
+								const range = document.createRange();
+								range.setStart(this, 0);
+								range.setEnd(this, 0);
+								selection.removeAllRanges();
+								selection.addRange(range);
+
+								// Dispatch events
+								this.dispatchEvent(new Event("input", { bubbles: true }));
+								this.dispatchEvent(new Event("change", { bubbles: true }));
+
+								return {cleared: true, method: 'contenteditable', finalText: this.textContent};
+							} else if (this.value !== undefined) {
+								// For regular inputs with value property
+								try {
+									this.select();
+								} catch (e) {
+									// ignore
+								}
+								this.value = "";
+								this.dispatchEvent(new Event("input", { bubbles: true }));
+								this.dispatchEvent(new Event("change", { bubbles: true }));
+								return {cleared: true, method: 'value', finalText: this.value};
+							} else {
+								return {cleared: false, method: 'none', error: 'Not a supported input type'};
+							}
 						}
 					""",
 					'objectId': object_id,
@@ -779,25 +968,25 @@ class DefaultActionWatchdog(BaseWatchdog):
 				session_id=cdp_session.session_id,
 			)
 
-			# Verify clearing worked by checking the value
-			verify_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
-				params={
-					'functionDeclaration': 'function() { return this.value; }',
-					'objectId': object_id,
-					'returnByValue': True,
-				},
-				session_id=cdp_session.session_id,
-			)
+			# Check the clear result
+			clear_info = clear_result.get('result', {}).get('value', {})
+			self.logger.debug(f'Clear result: {clear_info}')
 
-			current_value = verify_result.get('result', {}).get('value', '')
-			if not current_value:
-				self.logger.debug('✅ Text field cleared successfully using JavaScript')
-				return True
+			if clear_info.get('cleared'):
+				final_text = clear_info.get('finalText', '')
+				if not final_text or not final_text.strip():
+					self.logger.debug(f'✅ Text field cleared successfully using {clear_info.get("method")}')
+					return True
+				else:
+					self.logger.debug(f'⚠️ JavaScript clear partially failed, field still contains: "{final_text}"')
+					return False
 			else:
-				self.logger.debug(f'⚠️ JavaScript clear partially failed, field still contains: "{current_value}"')
+				self.logger.debug(f'❌ JavaScript clear failed: {clear_info.get("error", "Unknown error")}')
+				return False
 
 		except Exception as e:
-			self.logger.debug(f'JavaScript clear failed: {e}')
+			self.logger.debug(f'JavaScript clear failed with exception: {e}')
+			return False
 
 		# Strategy 2: Triple-click + Delete (fallback for stubborn fields)
 		try:
@@ -973,14 +1162,155 @@ class DefaultActionWatchdog(BaseWatchdog):
 				self.logger.debug(f'Click focus failed: {e}')
 
 		# Both strategies failed
-		self.logger.warning('⚠️ All focus strategies failed')
+		self.logger.debug('Focus strategies failed, will attempt typing anyway')
 		return False
+
+	def _requires_direct_value_assignment(self, element_node: EnhancedDOMTreeNode) -> bool:
+		"""
+		Check if an element requires direct value assignment instead of character-by-character typing.
+
+		Certain input types have compound components, custom plugins, or special requirements
+		that make character-by-character typing unreliable. These need direct .value assignment:
+
+		Native HTML5:
+		- date, time, datetime-local: Have spinbutton components (ISO format required)
+		- month, week: Similar compound structure
+		- color: Expects hex format #RRGGBB
+		- range: Needs numeric value within min/max
+
+		jQuery/Bootstrap Datepickers:
+		- Detected by class names or data attributes
+		- Often expect specific date formats (MM/DD/YYYY, DD/MM/YYYY, etc.)
+
+		Note: We use direct assignment because:
+		1. Typing triggers intermediate validation that might reject partial values
+		2. Compound components (like date spinbuttons) don't work with sequential typing
+		3. It's much faster and more reliable
+		4. We dispatch proper input/change events afterward to trigger listeners
+		"""
+		if not element_node.tag_name or not element_node.attributes:
+			return False
+
+		tag_name = element_node.tag_name.lower()
+
+		# Check for native HTML5 inputs that need direct assignment
+		if tag_name == 'input':
+			input_type = element_node.attributes.get('type', '').lower()
+
+			# Native HTML5 inputs with compound components or strict formats
+			if input_type in {'date', 'time', 'datetime-local', 'month', 'week', 'color', 'range'}:
+				return True
+
+			# Detect jQuery/Bootstrap datepickers (text inputs with datepicker plugins)
+			if input_type in {'text', ''}:
+				# Check for common datepicker indicators
+				class_attr = element_node.attributes.get('class', '').lower()
+				if any(
+					indicator in class_attr
+					for indicator in ['datepicker', 'daterangepicker', 'datetimepicker', 'bootstrap-datepicker']
+				):
+					return True
+
+				# Check for data attributes indicating datepickers
+				if any(attr in element_node.attributes for attr in ['data-datepicker', 'data-date-format', 'data-provide']):
+					return True
+
+		return False
+
+	async def _set_value_directly(self, element_node: EnhancedDOMTreeNode, text: str, object_id: str, cdp_session) -> None:
+		"""
+		Set element value directly using JavaScript for inputs that don't support typing.
+
+		This is used for:
+		- Date/time inputs where character-by-character typing doesn't work
+		- jQuery datepickers that need direct value assignment
+		- Color/range inputs that need specific formats
+		- Any input with custom plugins that intercept typing
+
+		After setting the value, we dispatch comprehensive events to ensure all frameworks
+		and plugins recognize the change (React, Vue, Angular, jQuery, etc.)
+		"""
+		try:
+			# Set the value using JavaScript with comprehensive event dispatching
+			# callFunctionOn expects a function body (not a self-invoking function)
+			set_value_js = f"""
+			function() {{
+				// Store old value for comparison
+				const oldValue = this.value;
+
+				// REACT-COMPATIBLE VALUE SETTING:
+				// React uses Object.getOwnPropertyDescriptor to track input changes
+				// We need to use the native setter to bypass React's tracking and then trigger events
+				const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+					window.HTMLInputElement.prototype,
+					'value'
+				).set;
+
+				// Set the value using the native setter (bypasses React's control)
+				nativeInputValueSetter.call(this, {json.dumps(text)});
+
+				// Dispatch comprehensive events to ensure all frameworks detect the change
+				// Order matters: focus -> input -> change -> blur (mimics user interaction)
+
+				// 1. Focus event (in case element isn't focused)
+				this.dispatchEvent(new FocusEvent('focus', {{ bubbles: true }}));
+
+				// 2. Input event (CRITICAL for React onChange)
+				// React listens to 'input' events on the document and checks for value changes
+				const inputEvent = new Event('input', {{ bubbles: true, cancelable: true }});
+				this.dispatchEvent(inputEvent);
+
+				// 3. Change event (for form handling, traditional listeners)
+				const changeEvent = new Event('change', {{ bubbles: true, cancelable: true }});
+				this.dispatchEvent(changeEvent);
+
+				// 4. Blur event (triggers final validation in some libraries)
+				this.dispatchEvent(new FocusEvent('blur', {{ bubbles: true }}));
+
+				// 5. jQuery-specific events (if jQuery is present)
+				if (typeof jQuery !== 'undefined' && jQuery.fn) {{
+					try {{
+						jQuery(this).trigger('change');
+						// Trigger datepicker-specific events if it's a datepicker
+						if (jQuery(this).data('datepicker')) {{
+							jQuery(this).datepicker('update');
+						}}
+					}} catch (e) {{
+						// jQuery not available or error, continue anyway
+					}}
+				}}
+
+				return this.value;
+			}}
+			"""
+
+			result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+				params={
+					'objectId': object_id,
+					'functionDeclaration': set_value_js,
+					'returnByValue': True,
+				},
+				session_id=cdp_session.session_id,
+			)
+
+			# Verify the value was set correctly
+			if 'result' in result and 'value' in result['result']:
+				actual_value = result['result']['value']
+				self.logger.debug(f'✅ Value set directly to: "{actual_value}"')
+			else:
+				self.logger.warning('⚠️ Could not verify value was set correctly')
+
+		except Exception as e:
+			self.logger.error(f'❌ Failed to set value directly: {e}')
+			raise
 
 	async def _input_text_element_node_impl(
 		self, element_node: EnhancedDOMTreeNode, text: str, clear: bool = True, is_sensitive: bool = False
 	) -> dict | None:
 		"""
 		Input text into an element using pure CDP with improved focus fallbacks.
+
+		For date/time inputs, uses direct value assignment instead of typing.
 		"""
 
 		try:
@@ -1006,9 +1336,15 @@ class DefaultActionWatchdog(BaseWatchdog):
 				)
 				await asyncio.sleep(0.01)
 			except Exception as e:
-				self.logger.warning(
-					f'⚠️ Failed to focus the page {cdp_session} and scroll element {element_node} into view before typing in text: {type(e).__name__}: {e}'
-				)
+				# Node detached errors are common with shadow DOM and dynamic content
+				# The element can still be interacted with even if scrolling fails
+				error_str = str(e)
+				if 'Node is detached from document' in error_str or 'detached from document' in error_str:
+					self.logger.debug(
+						f'Element node temporarily detached during scroll (common with shadow DOM), continuing: {element_node}'
+					)
+				else:
+					self.logger.debug(f'Failed to scroll element {element_node} into view before typing: {type(e).__name__}: {e}')
 
 			# Get object ID for the element
 			result = await cdp_client.send.DOM.resolveNode(
@@ -1048,13 +1384,26 @@ class DefaultActionWatchdog(BaseWatchdog):
 				backend_node_id=backend_node_id, object_id=object_id, cdp_session=cdp_session, input_coordinates=input_coordinates
 			)
 
-			# Step 2: Clear existing text if requested
-			if clear and focused_successfully:
+			# Step 2: Check if this element requires direct value assignment (date/time inputs)
+			requires_direct_assignment = self._requires_direct_value_assignment(element_node)
+
+			if requires_direct_assignment:
+				# Date/time inputs: use direct value assignment instead of typing
+				self.logger.debug(
+					f'🎯 Element type={element_node.attributes.get("type")} requires direct value assignment, setting value directly'
+				)
+				await self._set_value_directly(element_node, text, object_id, cdp_session)
+
+				# Return input coordinates for metadata
+				return input_coordinates
+
+			# Step 3: Clear existing text if requested (only for regular inputs that support typing)
+			if clear:
 				cleared_successfully = await self._clear_text_field(object_id=object_id, cdp_session=cdp_session)
 				if not cleared_successfully:
 					self.logger.warning('⚠️ Text field clearing failed, typing may append to existing text')
 
-			# Step 3: Type the text character by character using proper human-like key events
+			# Step 4: Type the text character by character using proper human-like key events
 			# This emulates exactly how a human would type, which modern websites expect
 			if is_sensitive:
 				# Note: sensitive_key_name is not passed to this low-level method,
@@ -1285,10 +1634,10 @@ class DefaultActionWatchdog(BaseWatchdog):
 			True if successful, False if failed
 		"""
 		try:
-			# Get CDP client and session
-			assert self.browser_session.agent_focus is not None, 'CDP session not initialized - browser may not be connected yet'
-			cdp_client = self.browser_session.agent_focus.cdp_client
-			session_id = self.browser_session.agent_focus.session_id
+			# Get focused CDP session using public API (validates and waits for recovery if needed)
+			cdp_session = await self.browser_session.get_or_create_cdp_session()
+			cdp_client = cdp_session.cdp_client
+			session_id = cdp_session.session_id
 
 			# Get viewport dimensions
 			layout_metrics = await cdp_client.send.Page.getLayoutMetrics(session_id=session_id)
@@ -1416,14 +1765,12 @@ class DefaultActionWatchdog(BaseWatchdog):
 		if element_node.frame_id:
 			# Element is in an iframe, need to get session for that frame
 			try:
-				# Get all targets
-				targets = await self.browser_session.cdp_client.send.Target.getTargets()
+				all_targets = self.browser_session.session_manager.get_all_targets()
 
 				# Find the target for this frame
-				for target in targets['targetInfos']:
-					if target['type'] == 'iframe' and element_node.frame_id in str(target.get('targetId', '')):
+				for target_id, target in all_targets.items():
+					if target.target_type == 'iframe' and element_node.frame_id in str(target_id):
 						# Create temporary session for iframe target without switching focus
-						target_id = target['targetId']
 						temp_session = await self.browser_session.get_or_create_cdp_session(target_id, focus=False)
 						return temp_session.session_id
 
@@ -1432,9 +1779,9 @@ class DefaultActionWatchdog(BaseWatchdog):
 			except Exception as e:
 				self.logger.debug(f'Error getting frame session: {e}, using main session')
 
-		# Use main target session
-		assert self.browser_session.agent_focus is not None, 'CDP session not initialized - browser may not be connected yet'
-		return self.browser_session.agent_focus.session_id
+		# Use main target session - get_or_create_cdp_session validates focus automatically
+		cdp_session = await self.browser_session.get_or_create_cdp_session()
+		return cdp_session.session_id
 
 	async def on_GoBackEvent(self, event: GoBackEvent) -> None:
 		"""Handle navigate back request with CDP."""
@@ -1527,159 +1874,190 @@ class DefaultActionWatchdog(BaseWatchdog):
 		except Exception as e:
 			raise
 
+	async def _dispatch_key_event(self, cdp_session, event_type: str, key: str, modifiers: int = 0) -> None:
+		"""Helper to dispatch a keyboard event with proper key codes."""
+		code, vk_code = get_key_info(key)
+		params: DispatchKeyEventParameters = {
+			'type': event_type,
+			'key': key,
+			'code': code,
+		}
+		if modifiers:
+			params['modifiers'] = modifiers
+		if vk_code is not None:
+			params['windowsVirtualKeyCode'] = vk_code
+		await cdp_session.cdp_client.send.Input.dispatchKeyEvent(params=params, session_id=cdp_session.session_id)
+
 	async def on_SendKeysEvent(self, event: SendKeysEvent) -> None:
 		"""Handle send keys request with CDP."""
 		cdp_session = await self.browser_session.get_or_create_cdp_session(focus=True)
 		try:
-			# Parse key combination
-			keys = event.keys.lower()
+			# Normalize key names from common aliases
+			key_aliases = {
+				'ctrl': 'Control',
+				'control': 'Control',
+				'alt': 'Alt',
+				'option': 'Alt',
+				'meta': 'Meta',
+				'cmd': 'Meta',
+				'command': 'Meta',
+				'shift': 'Shift',
+				'enter': 'Enter',
+				'return': 'Enter',
+				'tab': 'Tab',
+				'delete': 'Delete',
+				'backspace': 'Backspace',
+				'escape': 'Escape',
+				'esc': 'Escape',
+				'space': ' ',
+				'up': 'ArrowUp',
+				'down': 'ArrowDown',
+				'left': 'ArrowLeft',
+				'right': 'ArrowRight',
+				'pageup': 'PageUp',
+				'pagedown': 'PageDown',
+				'home': 'Home',
+				'end': 'End',
+			}
 
-			# Handle special key combinations
+			# Parse and normalize the key string
+			keys = event.keys
 			if '+' in keys:
-				# Handle modifier keys
+				# Handle key combinations like "ctrl+a"
 				parts = keys.split('+')
-				key = parts[-1]
-
-				# Calculate modifier bits inline
-				# CDP Modifier bits: Alt=1, Control=2, Meta/Command=4, Shift=8
-				modifiers = 0
-				for part in parts[:-1]:
-					part_lower = part.lower()
-					if part_lower in ['alt', 'option']:
-						modifiers |= 1  # Alt
-					elif part_lower in ['ctrl', 'control']:
-						modifiers |= 2  # Control
-					elif part_lower in ['meta', 'cmd', 'command']:
-						modifiers |= 4  # Meta/Command
-					elif part_lower in ['shift']:
-						modifiers |= 8  # Shift
-
-				# Send key with modifiers
-				# Use rawKeyDown for non-text keys (like shortcuts)
-				await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-					params={
-						'type': 'rawKeyDown',
-						'key': key.capitalize() if len(key) == 1 else key,
-						'modifiers': modifiers,
-					},
-					session_id=cdp_session.session_id,
-				)
-				await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-					params={
-						'type': 'keyUp',
-						'key': key.capitalize() if len(key) == 1 else key,
-						'modifiers': modifiers,
-					},
-					session_id=cdp_session.session_id,
-				)
+				normalized_parts = []
+				for part in parts:
+					part_lower = part.strip().lower()
+					normalized = key_aliases.get(part_lower, part)
+					normalized_parts.append(normalized)
+				normalized_keys = '+'.join(normalized_parts)
 			else:
 				# Single key
-				key_map = {
-					'enter': 'Enter',
-					'return': 'Enter',
-					'tab': 'Tab',
-					'delete': 'Delete',
-					'backspace': 'Backspace',
-					'escape': 'Escape',
-					'esc': 'Escape',
-					'space': ' ',
-					'up': 'ArrowUp',
-					'down': 'ArrowDown',
-					'left': 'ArrowLeft',
-					'right': 'ArrowRight',
-					'pageup': 'PageUp',
-					'pagedown': 'PageDown',
-					'home': 'Home',
-					'end': 'End',
+				keys_lower = keys.strip().lower()
+				normalized_keys = key_aliases.get(keys_lower, keys)
+
+			# Handle key combinations like "Control+A"
+			if '+' in normalized_keys:
+				parts = normalized_keys.split('+')
+				modifiers = parts[:-1]
+				main_key = parts[-1]
+
+				# Calculate modifier bitmask
+				modifier_value = 0
+				modifier_map = {'Alt': 1, 'Control': 2, 'Meta': 4, 'Shift': 8}
+				for mod in modifiers:
+					modifier_value |= modifier_map.get(mod, 0)
+
+				# Press modifier keys
+				for mod in modifiers:
+					await self._dispatch_key_event(cdp_session, 'keyDown', mod)
+
+				# Press main key with modifiers bitmask
+				await self._dispatch_key_event(cdp_session, 'keyDown', main_key, modifier_value)
+
+				await self._dispatch_key_event(cdp_session, 'keyUp', main_key, modifier_value)
+
+				# Release modifier keys
+				for mod in reversed(modifiers):
+					await self._dispatch_key_event(cdp_session, 'keyUp', mod)
+			else:
+				# Check if this is a text string or special key
+				special_keys = {
+					'Enter',
+					'Tab',
+					'Delete',
+					'Backspace',
+					'Escape',
+					'ArrowUp',
+					'ArrowDown',
+					'ArrowLeft',
+					'ArrowRight',
+					'PageUp',
+					'PageDown',
+					'Home',
+					'End',
+					'Control',
+					'Alt',
+					'Meta',
+					'Shift',
+					'F1',
+					'F2',
+					'F3',
+					'F4',
+					'F5',
+					'F6',
+					'F7',
+					'F8',
+					'F9',
+					'F10',
+					'F11',
+					'F12',
 				}
 
-				key = key_map.get(keys, keys)
-
-				# Keys that need 3-step sequence (produce characters)
-				keys_needing_char_event = ['enter', 'return', 'space']
-
-				# Virtual key codes for proper key identification
-				virtual_key_codes = {
-					'enter': 13,
-					'return': 13,
-					'tab': 9,
-					'escape': 27,
-					'esc': 27,
-					'space': 32,
-					'backspace': 8,
-					'delete': 46,
-					'up': 38,
-					'down': 40,
-					'left': 37,
-					'right': 39,
-					'home': 36,
-					'end': 35,
-					'pageup': 33,
-					'pagedown': 34,
-				}
-
-				if keys in keys_needing_char_event:
-					# 3-step sequence for keys that produce characters
-					vk_code = virtual_key_codes.get(keys, 0)
-					char_text = '\r' if keys in ['enter', 'return'] else ' ' if keys == 'space' else ''
-
-					await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-						params={
-							'type': 'rawKeyDown',
-							'windowsVirtualKeyCode': vk_code,
-							'code': key_map.get(keys, keys),
-							'key': key_map.get(keys, keys),
-						},
-						session_id=cdp_session.session_id,
-					)
-					await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-						params={'type': 'char', 'text': char_text, 'unmodifiedText': char_text},
-						session_id=cdp_session.session_id,
-					)
-					await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-						params={
-							'type': 'keyUp',
-							'windowsVirtualKeyCode': vk_code,
-							'code': key_map.get(keys, keys),
-							'key': key_map.get(keys, keys),
-						},
-						session_id=cdp_session.session_id,
-					)
-				else:
-					# 2-step sequence for other keys
-					key_type = 'rawKeyDown' if keys in key_map else 'keyDown'
-					vk_code = virtual_key_codes.get(keys)
-
-					if vk_code:
-						# Special keys with virtual key codes
+				# If it's a special key, use original logic
+				if normalized_keys in special_keys:
+					await self._dispatch_key_event(cdp_session, 'keyDown', normalized_keys)
+					# For Enter key, also dispatch a char event to trigger keypress listeners
+					if normalized_keys == 'Enter':
 						await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
 							params={
-								'type': key_type,
-								'key': key,
-								'windowsVirtualKeyCode': vk_code,
-								'code': key_map.get(keys, keys),
+								'type': 'char',
+								'text': '\r',
+								'key': 'Enter',
 							},
 							session_id=cdp_session.session_id,
 						)
+					await self._dispatch_key_event(cdp_session, 'keyUp', normalized_keys)
+				else:
+					# It's text (single character or string) - send each character as text input
+					# This is crucial for text to appear in focused input fields
+					for char in normalized_keys:
+						# Special-case newline characters to dispatch as Enter
+						if char in ('\n', '\r'):
+							await self._dispatch_key_event(cdp_session, 'keyDown', 'Enter')
+							await self._dispatch_key_event(cdp_session, 'keyUp', 'Enter')
+							continue
+
+						# Get proper modifiers and key info for the character
+						modifiers, vk_code, base_key = self._get_char_modifiers_and_vk(char)
+						key_code = self._get_key_code_for_char(base_key)
+
+						# Send keyDown
+						await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
+							params={
+								'type': 'keyDown',
+								'key': base_key,
+								'code': key_code,
+								'modifiers': modifiers,
+								'windowsVirtualKeyCode': vk_code,
+							},
+							session_id=cdp_session.session_id,
+						)
+
+						# Send char event with text - this is what makes text appear in input fields
+						await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
+							params={
+								'type': 'char',
+								'text': char,
+								'key': char,
+							},
+							session_id=cdp_session.session_id,
+						)
+
+						# Send keyUp
 						await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
 							params={
 								'type': 'keyUp',
-								'key': key,
+								'key': base_key,
+								'code': key_code,
+								'modifiers': modifiers,
 								'windowsVirtualKeyCode': vk_code,
-								'code': key_map.get(keys, keys),
 							},
 							session_id=cdp_session.session_id,
 						)
-					else:
-						# Regular characters without virtual key codes
-						await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-							params={'type': key_type, 'key': key},
-							session_id=cdp_session.session_id,
-						)
-						await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-							params={'type': 'keyUp', 'key': key},
-							session_id=cdp_session.session_id,
-						)
+
+						# Small delay between characters (18ms like _type_to_page)
+						await asyncio.sleep(0.018)
 
 			self.logger.info(f'⌨️ Sent keys: {event.keys}')
 
@@ -1695,7 +2073,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 		try:
 			# Use the provided node
 			element_node = event.node
-			index_for_logging = element_node.element_index or 'unknown'
+			index_for_logging = element_node.backend_node_id or 'unknown'
 
 			# Check if it's a file input
 			if not self.browser_session.is_file_input(element_node):
@@ -1725,11 +2103,10 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 		# TODO: handle looking for text inside cross-origin iframes as well
 
-		# Get CDP client and session
-		cdp_client = self.browser_session.cdp_client
-		if self.browser_session.agent_focus is None:
-			raise BrowserError('CDP session not initialized - browser may not be connected yet')
-		session_id = self.browser_session.agent_focus.session_id
+		# Get focused CDP session using public API (validates and waits for recovery if needed)
+		cdp_session = await self.browser_session.get_or_create_cdp_session()
+		cdp_client = cdp_session.cdp_client
+		session_id = cdp_session.session_id
 
 		# Enable DOM
 		await cdp_client.send.DOM.enable(session_id=session_id)
@@ -1820,7 +2197,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 		try:
 			# Use the provided node
 			element_node = event.node
-			index_for_logging = element_node.element_index or 'unknown'
+			index_for_logging = element_node.backend_node_id or 'unknown'
 
 			# Get CDP session for this node
 			cdp_session = await self.browser_session.cdp_client_for_node(element_node)
@@ -1841,7 +2218,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 			options_script = """
 			function() {
 				const startElement = this;
-				
+
 				// Function to check if an element is a dropdown and extract options
 				function checkDropdownElement(element) {
 					// Check if it's a native select element
@@ -1859,14 +2236,14 @@ class DefaultActionWatchdog(BaseWatchdog):
 							source: 'target'
 						};
 					}
-					
+
 					// Check if it's an ARIA dropdown/menu
 					const role = element.getAttribute('role');
 					if (role === 'menu' || role === 'listbox' || role === 'combobox') {
 						// Find all menu items/options
 						const menuItems = element.querySelectorAll('[role="menuitem"], [role="option"]');
 						const options = [];
-						
+
 						menuItems.forEach((item, idx) => {
 							const text = item.textContent ? item.textContent.trim() : '';
 							if (text) {
@@ -1878,7 +2255,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 								});
 							}
 						});
-						
+
 						return {
 							type: 'aria',
 							options: options,
@@ -1887,12 +2264,12 @@ class DefaultActionWatchdog(BaseWatchdog):
 							source: 'target'
 						};
 					}
-					
+
 					// Check if it's a Semantic UI dropdown or similar
 					if (element.classList.contains('dropdown') || element.classList.contains('ui')) {
 						const menuItems = element.querySelectorAll('.item, .option, [data-value]');
 						const options = [];
-						
+
 						menuItems.forEach((item, idx) => {
 							const text = item.textContent ? item.textContent.trim() : '';
 							if (text) {
@@ -1904,7 +2281,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 								});
 							}
 						});
-						
+
 						if (options.length > 0) {
 							return {
 								type: 'custom',
@@ -1915,14 +2292,14 @@ class DefaultActionWatchdog(BaseWatchdog):
 							};
 						}
 					}
-					
+
 					return null;
 				}
-				
+
 				// Function to recursively search children up to specified depth
 				function searchChildrenForDropdowns(element, maxDepth, currentDepth = 0) {
 					if (currentDepth >= maxDepth) return null;
-					
+
 					// Check all direct children
 					for (let child of element.children) {
 						// Check if this child is a dropdown
@@ -1931,29 +2308,29 @@ class DefaultActionWatchdog(BaseWatchdog):
 							result.source = `child-depth-${currentDepth + 1}`;
 							return result;
 						}
-						
+
 						// Recursively check this child's children
 						const childResult = searchChildrenForDropdowns(child, maxDepth, currentDepth + 1);
 						if (childResult) {
 							return childResult;
 						}
 					}
-					
+
 					return null;
 				}
-				
+
 				// First check the target element itself
 				let dropdownResult = checkDropdownElement(startElement);
 				if (dropdownResult) {
 					return dropdownResult;
 				}
-				
+
 				// If target element is not a dropdown, search children up to depth 4
 				dropdownResult = searchChildrenForDropdowns(startElement, 4);
 				if (dropdownResult) {
 					return dropdownResult;
 				}
-				
+
 				return {
 					error: `Element and its children (depth 4) are not recognizable dropdown types (tag: ${startElement.tagName}, role: ${startElement.getAttribute('role')}, classes: ${startElement.className})`
 				};
@@ -1980,7 +2357,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 					'error': msg,
 					'short_term_memory': msg,
 					'long_term_memory': msg,
-					'element_index': str(index_for_logging),
+					'backend_node_id': str(index_for_logging),
 				}
 
 			# Format options for display
@@ -2024,7 +2401,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 				'message': msg,
 				'short_term_memory': short_term_memory,
 				'long_term_memory': long_term_memory,
-				'element_index': str(index_for_logging),
+				'backend_node_id': str(index_for_logging),
 			}
 
 		except BrowserError:
@@ -2047,7 +2424,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 		try:
 			# Use the provided node
 			element_node = event.node
-			index_for_logging = element_node.element_index or 'unknown'
+			index_for_logging = element_node.backend_node_id or 'unknown'
 			target_text = event.text
 
 			# Get CDP session for this node
@@ -2070,27 +2447,40 @@ class DefaultActionWatchdog(BaseWatchdog):
 				selection_script = """
 				function(targetText) {
 					const startElement = this;
-					
+
 					// Function to attempt selection on a dropdown element
 					function attemptSelection(element) {
 						// Handle native select elements
 						if (element.tagName.toLowerCase() === 'select') {
 							const options = Array.from(element.options);
 							const targetTextLower = targetText.toLowerCase();
-							
+
 							for (const option of options) {
 								const optionTextLower = option.text.trim().toLowerCase();
 								const optionValueLower = option.value.toLowerCase();
-								
+
 								// Match against both text and value (case-insensitive)
 								if (optionTextLower === targetTextLower || optionValueLower === targetTextLower) {
+									// Focus the element FIRST (important for Svelte/Vue/React and other reactive frameworks)
+									// This simulates the user focusing on the dropdown before changing it
+									element.focus();
+
+									// Then set the value
 									element.value = option.value;
 									option.selected = true;
-									
-									// Trigger change events
-									const changeEvent = new Event('change', { bubbles: true });
+
+									// Trigger all necessary events for reactive frameworks
+									// 1. input event - critical for Vue's v-model and Svelte's bind:value
+									const inputEvent = new Event('input', { bubbles: true, cancelable: true });
+									element.dispatchEvent(inputEvent);
+
+									// 2. change event - traditional form validation and framework reactivity
+									const changeEvent = new Event('change', { bubbles: true, cancelable: true });
 									element.dispatchEvent(changeEvent);
-									
+
+									// 3. blur event - completes the interaction, triggers validation
+									element.blur();
+
 									return {
 										success: true,
 										message: `Selected option: ${option.text.trim()} (value: ${option.value})`,
@@ -2098,31 +2488,31 @@ class DefaultActionWatchdog(BaseWatchdog):
 									};
 								}
 							}
-							
+
 							// Return available options as separate field
 							const availableOptions = options.map(opt => ({
 								text: opt.text.trim(),
 								value: opt.value
 							}));
-							
+
 							return {
 								success: false,
 								error: `Option with text or value '${targetText}' not found in select element`,
 								availableOptions: availableOptions
 							};
 						}
-						
+
 						// Handle ARIA dropdowns/menus
 						const role = element.getAttribute('role');
 						if (role === 'menu' || role === 'listbox' || role === 'combobox') {
 							const menuItems = element.querySelectorAll('[role="menuitem"], [role="option"]');
 							const targetTextLower = targetText.toLowerCase();
-							
+
 							for (const item of menuItems) {
 								if (item.textContent) {
 									const itemTextLower = item.textContent.trim().toLowerCase();
 									const itemValueLower = (item.getAttribute('data-value') || '').toLowerCase();
-									
+
 									// Match against both text and data-value (case-insensitive)
 									if (itemTextLower === targetTextLower || itemValueLower === targetTextLower) {
 										// Clear previous selections
@@ -2130,16 +2520,16 @@ class DefaultActionWatchdog(BaseWatchdog):
 											mi.setAttribute('aria-selected', 'false');
 											mi.classList.remove('selected');
 										});
-										
+
 										// Select this item
 										item.setAttribute('aria-selected', 'true');
 										item.classList.add('selected');
-										
+
 										// Trigger click and change events
 										item.click();
 										const clickEvent = new MouseEvent('click', { view: window, bubbles: true, cancelable: true });
 										item.dispatchEvent(clickEvent);
-										
+
 										return {
 											success: true,
 											message: `Selected ARIA menu item: ${item.textContent.trim()}`
@@ -2147,55 +2537,55 @@ class DefaultActionWatchdog(BaseWatchdog):
 									}
 								}
 							}
-							
+
 							// Return available options as separate field
 							const availableOptions = Array.from(menuItems).map(item => ({
 								text: item.textContent ? item.textContent.trim() : '',
 								value: item.getAttribute('data-value') || ''
 							})).filter(opt => opt.text || opt.value);
-							
+
 							return {
 								success: false,
 								error: `Menu item with text or value '${targetText}' not found`,
 								availableOptions: availableOptions
 							};
 						}
-						
+
 						// Handle Semantic UI or custom dropdowns
 						if (element.classList.contains('dropdown') || element.classList.contains('ui')) {
 							const menuItems = element.querySelectorAll('.item, .option, [data-value]');
 							const targetTextLower = targetText.toLowerCase();
-							
+
 							for (const item of menuItems) {
 								if (item.textContent) {
 									const itemTextLower = item.textContent.trim().toLowerCase();
 									const itemValueLower = (item.getAttribute('data-value') || '').toLowerCase();
-									
+
 									// Match against both text and data-value (case-insensitive)
 									if (itemTextLower === targetTextLower || itemValueLower === targetTextLower) {
 										// Clear previous selections
 										menuItems.forEach(mi => {
 											mi.classList.remove('selected', 'active');
 										});
-										
+
 										// Select this item
 										item.classList.add('selected', 'active');
-										
+
 										// Update dropdown text if there's a text element
 										const textElement = element.querySelector('.text');
 										if (textElement) {
 											textElement.textContent = item.textContent.trim();
 										}
-										
+
 										// Trigger click and change events
 										item.click();
 										const clickEvent = new MouseEvent('click', { view: window, bubbles: true, cancelable: true });
 										item.dispatchEvent(clickEvent);
-										
+
 										// Also dispatch on the main dropdown element
 										const dropdownChangeEvent = new Event('change', { bubbles: true });
 										element.dispatchEvent(dropdownChangeEvent);
-										
+
 										return {
 											success: true,
 											message: `Selected custom dropdown item: ${item.textContent.trim()}`
@@ -2203,27 +2593,27 @@ class DefaultActionWatchdog(BaseWatchdog):
 									}
 								}
 							}
-							
+
 							// Return available options as separate field
 							const availableOptions = Array.from(menuItems).map(item => ({
 								text: item.textContent ? item.textContent.trim() : '',
 								value: item.getAttribute('data-value') || ''
 							})).filter(opt => opt.text || opt.value);
-							
+
 							return {
 								success: false,
 								error: `Custom dropdown item with text or value '${targetText}' not found`,
 								availableOptions: availableOptions
 							};
 						}
-						
+
 						return null; // Not a dropdown element
 					}
-					
+
 					// Function to recursively search children for dropdowns
 					function searchChildrenForSelection(element, maxDepth, currentDepth = 0) {
 						if (currentDepth >= maxDepth) return null;
-						
+
 						// Check all direct children
 						for (let child of element.children) {
 							// Try selection on this child
@@ -2231,17 +2621,17 @@ class DefaultActionWatchdog(BaseWatchdog):
 							if (result && result.success) {
 								return result;
 							}
-							
+
 							// Recursively check this child's children
 							const childResult = searchChildrenForSelection(child, maxDepth, currentDepth + 1);
 							if (childResult && childResult.success) {
 								return childResult;
 							}
 						}
-						
+
 						return null;
 					}
-					
+
 					// First try the target element itself
 					let selectionResult = attemptSelection(startElement);
 					if (selectionResult) {
@@ -2249,13 +2639,13 @@ class DefaultActionWatchdog(BaseWatchdog):
 						// Don't search children if we found a dropdown element but selection failed
 						return selectionResult;
 					}
-					
+
 					// Only search children if target element is not a dropdown element
 					selectionResult = searchChildrenForSelection(startElement, 4);
 					if (selectionResult && selectionResult.success) {
 						return selectionResult;
 					}
-					
+
 					return {
 						success: false,
 						error: `Element and its children (depth 4) do not contain a dropdown with option '${targetText}' (tag: ${startElement.tagName}, role: ${startElement.getAttribute('role')}, classes: ${startElement.className})`
@@ -2284,7 +2674,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 						'success': 'true',
 						'message': msg,
 						'value': selection_result.get('value', target_text),
-						'element_index': str(index_for_logging),
+						'backend_node_id': str(index_for_logging),
 					}
 				else:
 					error_msg = selection_result.get('error', f'Failed to select option: {target_text}')
@@ -2308,10 +2698,10 @@ class DefaultActionWatchdog(BaseWatchdog):
 								short_term_options.append(f'- {opt}')
 
 						if short_term_options:
-							short_term_memory = f'Available dropdown options at index {index_for_logging} are:\n' + '\n'.join(
-								short_term_options
+							short_term_memory = 'Available dropdown options  are:\n' + '\n'.join(short_term_options)
+							long_term_memory = (
+								f"Couldn't select the dropdown option as '{target_text}' is not one of the available options."
 							)
-							long_term_memory = f"Couldn't select the dropdown option at index {index_for_logging} as '{target_text}' is not one of the available options."
 
 							# Return error result with structured memory instead of raising exception
 							return {
@@ -2319,14 +2709,14 @@ class DefaultActionWatchdog(BaseWatchdog):
 								'error': error_msg,
 								'short_term_memory': short_term_memory,
 								'long_term_memory': long_term_memory,
-								'element_index': str(index_for_logging),
+								'backend_node_id': str(index_for_logging),
 							}
 
 					# Fallback to regular error result if no available options
 					return {
 						'success': 'false',
 						'error': error_msg,
-						'element_index': str(index_for_logging),
+						'backend_node_id': str(index_for_logging),
 					}
 
 			except Exception as e:
