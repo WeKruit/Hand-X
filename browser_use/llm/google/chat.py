@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar, overload
 
 from google import genai
@@ -60,6 +60,9 @@ class ChatGoogle(BaseChatModel):
 		http_options: HTTP options for the client
 		include_system_in_user: If True, system messages are included in the first user message
 		supports_structured_output: If True, uses native JSON mode; if False, uses prompt-based fallback
+		max_retries: Number of retries for retryable errors (default: 3)
+		retryable_status_codes: List of HTTP status codes to retry on (default: [403,  503])
+		retry_delay: Delay in seconds between retries (default: 0.01)
 
 	Example:
 		from google.genai import types
@@ -68,20 +71,26 @@ class ChatGoogle(BaseChatModel):
 			model='gemini-2.0-flash-exp',
 			config={
 				'tools': [types.Tool(code_execution=types.ToolCodeExecution())]
-			}
+			},
+			max_retries=5,
+			retryable_status_codes=[403, 503],
+			retry_delay=0.02
 		)
 	"""
 
 	# Model configuration
 	model: VerifiedGeminiModels | str
-	temperature: float | None = 0.2
+	temperature: float | None = 0.5
 	top_p: float | None = None
 	seed: int | None = None
 	thinking_budget: int | None = None  # for gemini-2.5 flash and flash-lite models, default will be set to 0
-	max_output_tokens: int | None = 4096
+	max_output_tokens: int | None = 8096
 	config: types.GenerateContentConfigDict | None = None
 	include_system_in_user: bool = False
 	supports_structured_output: bool = True  # New flag
+	max_retries: int = 3  # Number of retries for retryable errors
+	retryable_status_codes: list[int] = field(default_factory=lambda: [403, 503])  # Status codes to retry on
+	retry_delay: float = 0.01  # Delay in seconds between retries
 
 	# Client initialization parameters
 	api_key: str | None = None
@@ -138,6 +147,12 @@ class ChatGoogle(BaseChatModel):
 	@property
 	def name(self) -> str:
 		return str(self.model)
+
+	def _get_stop_reason(self, response: types.GenerateContentResponse) -> str | None:
+		"""Extract stop_reason from Google response."""
+		if hasattr(response, 'candidates') and response.candidates:
+			return str(response.candidates[0].finish_reason) if hasattr(response.candidates[0], 'finish_reason') else None
+		return None
 
 	def _get_usage(self, response: types.GenerateContentResponse) -> ChatInvokeUsage | None:
 		usage: ChatInvokeUsage | None = None
@@ -246,6 +261,7 @@ class ChatGoogle(BaseChatModel):
 					return ChatInvokeCompletion(
 						completion=text,
 						usage=usage,
+						stop_reason=self._get_stop_reason(response),
 					)
 
 				else:
@@ -291,6 +307,7 @@ class ChatGoogle(BaseChatModel):
 									return ChatInvokeCompletion(
 										completion=output_format.model_validate(parsed_data),
 										usage=usage,
+										stop_reason=self._get_stop_reason(response),
 									)
 								except (json.JSONDecodeError, ValueError) as e:
 									self.logger.error(f'❌ Failed to parse JSON response: {str(e)}')
@@ -313,12 +330,14 @@ class ChatGoogle(BaseChatModel):
 							return ChatInvokeCompletion(
 								completion=response.parsed,
 								usage=usage,
+								stop_reason=self._get_stop_reason(response),
 							)
 						else:
 							# If it's not the expected type, try to validate it
 							return ChatInvokeCompletion(
 								completion=output_format.model_validate(response.parsed),
 								usage=usage,
+								stop_reason=self._get_stop_reason(response),
 							)
 					else:
 						# Fallback: Request JSON in the prompt for models without native JSON mode
@@ -369,6 +388,7 @@ class ChatGoogle(BaseChatModel):
 								return ChatInvokeCompletion(
 									completion=output_format.model_validate(parsed_data),
 									usage=usage,
+									stop_reason=self._get_stop_reason(response),
 								)
 							except (json.JSONDecodeError, ValueError) as e:
 								self.logger.error(f'❌ Failed to parse fallback JSON: {str(e)}')
@@ -391,52 +411,58 @@ class ChatGoogle(BaseChatModel):
 				# Re-raise the exception
 				raise
 
-		try:
-			# Let Google client handle retries internally with proper connection management
-			self.logger.debug(f'🔄 Making API call to {self.model} (using built-in retry)')
-			return await _make_api_call()
+		# Retry logic for certain errors
+		assert self.max_retries >= 1, 'max_retries must be at least 1'
 
-		except Exception as e:
-			# Handle specific Google API errors with enhanced diagnostics
-			error_message = str(e)
-			status_code: int | None = None
+		for attempt in range(self.max_retries):
+			try:
+				return await _make_api_call()
+			except ModelProviderError as e:
+				# Retry if status code is in retryable list and we have attempts left
+				if e.status_code in self.retryable_status_codes and attempt < self.max_retries - 1:
+					self.logger.warning(f'⚠️ Got {e.status_code} error, retrying... (attempt {attempt + 1}/{self.max_retries})')
+					await asyncio.sleep(self.retry_delay)
+					continue
+				# Otherwise raise
+				raise
+			except Exception as e:
+				# For non-ModelProviderError, wrap and raise
+				error_message = str(e)
+				status_code: int | None = None
 
-			# Enhanced timeout error handling
-			if 'timeout' in error_message.lower() or 'cancelled' in error_message.lower():
-				if isinstance(e, asyncio.CancelledError) or 'CancelledError' in str(type(e)):
-					enhanced_message = 'Gemini API request was cancelled (likely timeout). '
-					enhanced_message += 'This suggests the API is taking too long to respond. '
-					enhanced_message += (
-						'Consider: 1) Reducing input size, 2) Using a different model, 3) Checking network connectivity.'
-					)
-					error_message = enhanced_message
-					status_code = 504  # Gateway timeout
-					self.logger.error(f'🕐 Timeout diagnosis: Model: {self.model}')
-				else:
-					status_code = 408  # Request timeout
-			# Check if this is a rate limit error
-			elif any(
-				indicator in error_message.lower()
-				for indicator in ['rate limit', 'resource exhausted', 'quota exceeded', 'too many requests', '429']
-			):
-				status_code = 429
-			elif any(
-				indicator in error_message.lower()
-				for indicator in ['service unavailable', 'internal server error', 'bad gateway', '503', '502', '500']
-			):
-				status_code = 503
+				# Try to extract status code if available
+				if hasattr(e, 'response'):
+					response_obj = getattr(e, 'response', None)
+					if response_obj and hasattr(response_obj, 'status_code'):
+						status_code = getattr(response_obj, 'status_code', None)
 
-			# Try to extract status code if available
-			if hasattr(e, 'response'):
-				response_obj = getattr(e, 'response', None)
-				if response_obj and hasattr(response_obj, 'status_code'):
-					status_code = getattr(response_obj, 'status_code', None)
+				# Enhanced timeout error handling
+				if 'timeout' in error_message.lower() or 'cancelled' in error_message.lower():
+					if isinstance(e, asyncio.CancelledError) or 'CancelledError' in str(type(e)):
+						error_message = 'Gemini API request was cancelled (likely timeout). Consider: 1) Reducing input size, 2) Using a different model, 3) Checking network connectivity.'
+						status_code = 504
+					else:
+						status_code = 408
+				elif any(indicator in error_message.lower() for indicator in ['forbidden', '403']):
+					status_code = 403
+				elif any(
+					indicator in error_message.lower()
+					for indicator in ['rate limit', 'resource exhausted', 'quota exceeded', 'too many requests', '429']
+				):
+					status_code = 429
+				elif any(
+					indicator in error_message.lower()
+					for indicator in ['service unavailable', 'internal server error', 'bad gateway', '503', '502', '500']
+				):
+					status_code = 503
 
-			raise ModelProviderError(
-				message=error_message,
-				status_code=status_code or 502,  # Use default if None
-				model=self.name,
-			) from e
+				raise ModelProviderError(
+					message=error_message,
+					status_code=status_code or 502,
+					model=self.name,
+				) from e
+
+		raise RuntimeError('Retry loop completed without return or exception')
 
 	def _fix_gemini_schema(self, schema: dict[str, Any]) -> dict[str, Any]:
 		"""
