@@ -61,7 +61,7 @@ def test_screenshot_included_with_use_vision_auto():
 
 def test_screenshot_excluded_with_custom_tools_and_use_vision_false():
 	"""Test that screenshot action is excluded even when user passes custom tools and use_vision=False.
-	
+
 	This is the critical test case that verifies the fix:
 	When users pass their own Tools instance with screenshot included,
 	the Agent should still enforce the exclusion if use_vision != 'auto'.
@@ -81,14 +81,14 @@ def test_screenshot_excluded_with_custom_tools_and_use_vision_false():
 	)
 
 	# Verify screenshot is excluded even though user passed custom tools
-	assert (
-		'screenshot' not in agent.tools.registry.registry.actions
-	), 'Screenshot should be excluded when use_vision=False, even with custom tools'
+	assert 'screenshot' not in agent.tools.registry.registry.actions, (
+		'Screenshot should be excluded when use_vision=False, even with custom tools'
+	)
 
 
 def test_screenshot_excluded_with_custom_tools_and_use_vision_true():
 	"""Test that screenshot action is excluded even when user passes custom tools and use_vision=True.
-	
+
 	This is another critical test case:
 	When users pass their own Tools instance with screenshot included,
 	the Agent should still enforce the exclusion if use_vision != 'auto'.
@@ -113,9 +113,9 @@ def test_screenshot_excluded_with_custom_tools_and_use_vision_true():
 
 	# Verify screenshot is excluded even though user passed custom tools
 	# The key test: screenshot should be excluded after Agent init
-	assert (
-		'screenshot' not in agent.tools.registry.registry.actions
-	), f'Screenshot should be excluded when use_vision=True, even with custom tools (had screenshot before: {has_screenshot_before})'
+	assert 'screenshot' not in agent.tools.registry.registry.actions, (
+		f'Screenshot should be excluded when use_vision=True, even with custom tools (had screenshot before: {has_screenshot_before})'
+	)
 
 
 def test_screenshot_included_with_custom_tools_and_use_vision_auto():
@@ -135,9 +135,9 @@ def test_screenshot_included_with_custom_tools_and_use_vision_auto():
 	)
 
 	# Verify screenshot is kept when use_vision='auto'
-	assert (
-		'screenshot' in agent.tools.registry.registry.actions
-	), 'Screenshot should be included when use_vision="auto", even with custom tools'
+	assert 'screenshot' in agent.tools.registry.registry.actions, (
+		'Screenshot should be included when use_vision="auto", even with custom tools'
+	)
 
 
 def test_tools_exclude_action_method():
