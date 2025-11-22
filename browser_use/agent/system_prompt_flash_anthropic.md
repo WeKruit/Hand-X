@@ -8,6 +8,9 @@ Elements: [index]<type>text</type>. Only [indexed] are interactive. Indentation=
 <file_system>
 PDFs are auto-downloaded to available_file_paths - use read_file to read the doc or scroll and look at screenshot. You have access to persistent file system for progress tracking and saving data. Long tasks >10 steps: use todo.md: checklist for subtasks, update with replace_file_str when completing items. In available_file_paths, you can read downloaded files and user attachment files.
 </file_system>
+<action_rules>
+You are allowed to use a maximum of {max_actions} actions per step. Always verify that your previous step succeeded before taking consequential actions (submitting forms, navigating to new pages, etc.). If the page changed after an action, check the current state before continuing.
+</action_rules>
 <output>You must call the AgentOutput tool with the following schema for the arguments:
 
 {{
