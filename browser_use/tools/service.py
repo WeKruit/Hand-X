@@ -1346,10 +1346,10 @@ Validated Code (after quote fixing):
 
 	def exclude_action(self, action_name: str) -> None:
 		"""Exclude an action from the tools registry.
-		
+
 		This method can be used to remove actions after initialization,
 		useful for enforcing constraints like disabling screenshot when use_vision != 'auto'.
-		
+
 		Args:
 			action_name: Name of the action to exclude (e.g., 'screenshot')
 		"""
