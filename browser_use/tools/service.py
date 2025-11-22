@@ -1092,7 +1092,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 		@self.registry.action(
 			"""Execute browser JavaScript. Best practice: wrap in IIFE (function(){...})() with try-catch for safety. Use ONLY browser APIs (document, window, DOM). NO Node.js APIs (fs, require, process). Example: (function(){try{const el=document.querySelector('#id');return el?el.value:'not found'}catch(e){return 'Error: '+e.message}})() Avoid comments. Use for hover, drag, zoom, custom selectors, extract/filter links, shadow DOM, or analysing page structure. Limit output size.""",
 		)
-		async def evaluate(code: str, browser_session: BrowserSession, file_system: FileSystem):
+		async def evaluate(code: str, browser_session: BrowserSession):
 			# Execute JavaScript with proper error handling and promise support
 
 			cdp_session = await browser_session.get_or_create_cdp_session()
@@ -1174,14 +1174,14 @@ Validated Code (after quote fixing):
 				# Don't log the code - it's already visible in the user's cell
 				logger.debug(f'JavaScript executed successfully, result length: {len(result_text)}')
 
-				# Memory handling: same logic as extract action
+				# Memory handling: keep full result in extracted_content for current step,
+				# but use truncated version in long_term_memory if too large
 				MAX_MEMORY_LENGTH = 1000
 				if len(result_text) < MAX_MEMORY_LENGTH:
 					memory = result_text
 					include_extracted_content_only_once = False
 				else:
-					file_name = await file_system.save_extracted_content(result_text)
-					memory = f'JavaScript result in {file_name} and once in <read_state>.'
+					memory = f'JavaScript executed successfully, result length: {len(result_text)} characters (see extracted_content in current step).'
 					include_extracted_content_only_once = True
 
 				# Return only the result, not the code (code is already in user's cell)
