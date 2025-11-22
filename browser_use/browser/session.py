@@ -5,7 +5,7 @@ import logging
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Self, Union, cast, overload
-from urllib.parse import urlunparse
+from urllib.parse import urlparse, urlunparse
 from uuid import UUID
 
 import httpx
@@ -1478,8 +1478,6 @@ class BrowserSession(BaseModel):
 				self.logger.debug(f'Error stopping old CDP client: {e}')
 			self._cdp_client_root = None
 
-		from urllib.parse import urlparse,urlunparse;
-
 		if not self.cdp_url.startswith('ws'):
 			# If it's an HTTP URL, fetch the WebSocket URL from /json/version endpoint
 			parsed_url = urlparse(self.cdp_url)
@@ -1487,15 +1485,10 @@ class BrowserSession(BaseModel):
 
 			if not path.endswith('/json/version'):
 				path = path + '/json/version'
-			
-			url = urlunparse((
-				parsed_url.scheme,
-				parsed_url.netloc,
-				path,
-				parsed_url.params,
-				parsed_url.query,
-				parsed_url.fragment
-			))
+
+			url = urlunparse(
+				(parsed_url.scheme, parsed_url.netloc, path, parsed_url.params, parsed_url.query, parsed_url.fragment)
+			)
 
 			# Run a tiny HTTP client to query for the WebSocket URL from the /json/version endpoint
 			async with httpx.AsyncClient() as client:
