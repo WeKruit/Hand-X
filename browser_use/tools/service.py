@@ -1185,7 +1185,12 @@ Validated Code (after quote fixing):
 					include_extracted_content_only_once = True
 
 				# Return only the result, not the code (code is already in user's cell)
-				return ActionResult(extracted_content=result_text, long_term_memory=memory, include_extracted_content_only_once=include_extracted_content_only_once, metadata=metadata)
+				return ActionResult(
+					extracted_content=result_text,
+					long_term_memory=memory,
+					include_extracted_content_only_once=include_extracted_content_only_once,
+					metadata=metadata,
+				)
 
 			except Exception as e:
 				# CDP communication or other system errors
