@@ -1181,7 +1181,7 @@ Validated Code (after quote fixing):
 					memory = result_text
 					include_extracted_content_only_once = False
 				else:
-					memory = f'JavaScript executed successfully, result length: {len(result_text)} characters (see extracted_content in current step).'
+					memory = f'JavaScript executed successfully, result length: {len(result_text)} characters.'
 					include_extracted_content_only_once = True
 
 				# Return only the result, not the code (code is already in user's cell)
