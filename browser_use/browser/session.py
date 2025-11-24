@@ -1920,6 +1920,73 @@ class BrowserSession(BaseModel):
 		"""Alias for get_dom_element_by_index for backwards compatibility."""
 		return await self.get_dom_element_by_index(index)
 
+	async def get_dom_element_at_coordinates(self, x: int, y: int) -> EnhancedDOMTreeNode | None:
+		"""Get DOM element at coordinates as EnhancedDOMTreeNode (minimal, for backwards compatibility).
+
+		This creates a minimal EnhancedDOMTreeNode with only backend_node_id populated.
+		No extra CDP calls - just DOM.getNodeForLocation.
+
+		Args:
+			x: X coordinate relative to viewport
+			y: Y coordinate relative to viewport
+
+		Returns:
+			Minimal EnhancedDOMTreeNode at the coordinates, or None if no element found
+		"""
+		from browser_use.dom.views import NodeType
+
+		# Get current page to access CDP session
+		page = await self.get_current_page()
+		if page is None:
+			raise RuntimeError('No active page found')
+
+		# Get session ID for CDP call
+		session_id = await page._ensure_session()
+
+		try:
+			# Call CDP DOM.getNodeForLocation - single CDP call
+			result = await self.cdp_client.send.DOM.getNodeForLocation(
+				params={
+					'x': x,
+					'y': y,
+					'includeUserAgentShadowDOM': False,
+					'ignorePointerEventsNone': False,
+				},
+				session_id=session_id,
+			)
+
+			backend_node_id = result.get('backendNodeId')
+			if backend_node_id is None:
+				self.logger.debug(f'No element found at coordinates ({x}, {y})')
+				return None
+
+			# Create minimal EnhancedDOMTreeNode with only backend_node_id
+			return EnhancedDOMTreeNode(
+				node_id=result.get('nodeId', 0),
+				backend_node_id=backend_node_id,
+				node_type=NodeType.ELEMENT_NODE,  # Assume element
+				node_name='',  # Unknown - will be fetched by event handler if needed
+				node_value='',
+				attributes={},
+				is_scrollable=None,
+				frame_id=result.get('frameId'),
+				session_id=session_id,
+				target_id=self.agent_focus_target_id or '',
+				content_document=None,
+				shadow_root_type=None,
+				shadow_roots=None,
+				parent_node=None,
+				children_nodes=None,
+				ax_node=None,
+				snapshot_node=None,
+				is_visible=None,
+				absolute_position=None,
+			)
+
+		except Exception as e:
+			self.logger.warning(f'Failed to get DOM element at coordinates ({x}, {y}): {e}')
+			return None
+
 	async def get_target_id_from_tab_id(self, tab_id: str) -> TargetID:
 		"""Get the full-length TargetID from the truncated 4-char tab_id using SessionManager."""
 		if not self.session_manager:
