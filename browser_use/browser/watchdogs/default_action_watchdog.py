@@ -768,10 +768,10 @@ class DefaultActionWatchdog(BaseWatchdog):
 			if element_node.backend_node_id:
 				error_detail += f' If the page changed after navigation/interaction, the index [{element_node.backend_node_id}] may be stale. Get fresh browser state before retrying.'
 
-		raise BrowserError(
-			message=f'Failed to click element: {e}',
-			long_term_memory=error_detail,
-		)
+			raise BrowserError(
+				message=f'Failed to click element: {str(e)}',
+				long_term_memory=error_detail,
+			)
 
 	async def _click_on_coordinate(self, coordinate_x: int, coordinate_y: int, force: bool = False) -> dict | None:
 		"""
