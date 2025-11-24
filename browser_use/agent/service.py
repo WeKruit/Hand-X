@@ -51,6 +51,7 @@ from browser_use.agent.views import (
 	AgentStepInfo,
 	AgentStructuredOutput,
 	BrowserStateHistory,
+	DetectedVariable,
 	JudgementResult,
 	StepMetadata,
 )
@@ -159,9 +160,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		generate_gif: bool | str = False,
 		available_file_paths: list[str] | None = None,
 		include_attributes: list[str] | None = None,
-		max_actions_per_step: int = 10,
+		max_actions_per_step: int = 3,
 		use_thinking: bool = True,
 		flash_mode: bool = False,
+		demo_mode: bool | None = None,
 		max_history_items: int | None = None,
 		page_extraction_llm: BaseChatModel | None = None,
 		use_judge: bool = True,
@@ -232,6 +234,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				"""Determine timeout based on model name"""
 				model_name = getattr(llm_model, 'model', '').lower()
 				if 'gemini' in model_name:
+					if '3-pro' in model_name:
+						return 90
 					return 45
 				elif 'groq' in model_name:
 					return 30
@@ -246,17 +250,31 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self.task_id: str = self.id
 		self.session_id: str = uuid7str()
 
-		browser_profile = browser_profile or DEFAULT_BROWSER_PROFILE
+		base_profile = browser_profile or DEFAULT_BROWSER_PROFILE
+		if base_profile is DEFAULT_BROWSER_PROFILE:
+			base_profile = base_profile.model_copy()
+		if demo_mode is not None and base_profile.demo_mode != demo_mode:
+			base_profile = base_profile.model_copy(update={'demo_mode': demo_mode})
+		browser_profile = base_profile
 
 		# Handle browser vs browser_session parameter (browser takes precedence)
 		if browser and browser_session:
 			raise ValueError('Cannot specify both "browser" and "browser_session" parameters. Use "browser" for the cleaner API.')
 		browser_session = browser or browser_session
 
+		if browser_session is not None and demo_mode is not None and browser_session.browser_profile.demo_mode != demo_mode:
+			browser_session.browser_profile = browser_session.browser_profile.model_copy(update={'demo_mode': demo_mode})
+
 		self.browser_session = browser_session or BrowserSession(
 			browser_profile=browser_profile,
 			id=uuid7str()[:-4] + self.id[-4:],  # re-use the same 4-char suffix so they show up together in logs
 		)
+
+		self._demo_mode_enabled: bool = bool(self.browser_profile.demo_mode) if self.browser_session else False
+		if self._demo_mode_enabled and getattr(self.browser_profile, 'headless', False):
+			self.logger.warning(
+				'Demo mode is enabled but the browser is headless=True; set headless=False to view the in-browser panel.'
+			)
 
 		# Initialize available file paths as direct attribute
 		self.available_file_paths = available_file_paths
@@ -276,6 +294,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			# Exclude screenshot tool when use_vision is not auto
 			exclude_actions = ['screenshot'] if use_vision != 'auto' else []
 			self.tools = Tools(exclude_actions=exclude_actions, display_files_in_done_text=display_files_in_done_text)
+
+		# Enforce screenshot exclusion when use_vision != 'auto', even if user passed custom tools
+		if use_vision != 'auto':
+			self.tools.exclude_action('screenshot')
 
 		# Structured output
 		self.output_model_schema = output_model_schema
@@ -849,7 +871,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Handle InterruptedError specially
 		if isinstance(error, InterruptedError):
 			error_msg = 'The agent was interrupted mid-step' + (f' - {str(error)}' if str(error) else '')
-			self.logger.error(f'{error_msg}')
+			# NOTE: This is not an error, it's a normal part of the execution when the user interrupts the agent
+			self.logger.warning(f'{error_msg}')
 			return
 
 		# Handle all other exceptions
@@ -870,6 +893,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		else:
 			self.logger.log(log_level, f'{prefix}{error_msg}')
 
+		await self._demo_mode_log(f'Step error: {error_msg}', 'error', {'step': self.state.n_steps})
 		self.state.last_result = [ActionResult(error=error_msg)]
 		return None
 
@@ -880,10 +904,19 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			return
 
 		if browser_state_summary:
+			step_interval = None
+			if len(self.history.history) > 0:
+				last_history_item = self.history.history[-1]
+
+				if last_history_item.metadata:
+					previous_end_time = last_history_item.metadata.step_end_time
+					previous_start_time = last_history_item.metadata.step_start_time
+					step_interval = max(0, previous_end_time - previous_start_time)
 			metadata = StepMetadata(
 				step_number=self.state.n_steps,
 				step_start_time=self.step_start_time,
 				step_end_time=step_end_time,
+				step_interval=step_interval,
 			)
 
 			# Use _make_history_item like main branch
@@ -896,7 +929,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			)
 
 		# Log step completion summary
-		self._log_step_completion_summary(self.step_start_time, self.state.last_result)
+		summary_message = self._log_step_completion_summary(self.step_start_time, self.state.last_result)
+		if summary_message:
+			await self._demo_mode_log(summary_message, 'info', {'step': self.state.n_steps})
 
 		# Save file system state after step completion
 		self.save_file_system_state()
@@ -1314,6 +1349,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 			if not (hasattr(self.state, 'paused') and (self.state.paused or self.state.stopped)):
 				log_response(parsed, self.tools.registry.registry, self.logger)
+				await self._broadcast_model_state(parsed)
 
 			self._log_next_action_summary(parsed)
 			return parsed
@@ -1332,7 +1368,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		latest_version = await check_latest_browser_use_version()
 		if latest_version and latest_version != self.version:
 			self.logger.info(
-				f'📦 Newer version available: {latest_version} (current: {self.version}). Upgrade with: uv add browser-use@{latest_version}'
+				f'📦 Newer version available: {latest_version} (current: {self.version}). Upgrade with: uv add browser-use=={latest_version}'
 			)
 
 	def _log_first_step_startup(self) -> None:
@@ -1385,10 +1421,47 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			param_str = f'({", ".join(param_summary)})' if param_summary else ''
 			action_details.append(f'{action_name}{param_str}')
 
-	def _log_step_completion_summary(self, step_start_time: float, result: list[ActionResult]) -> None:
+	def _prepare_demo_message(self, message: str, limit: int = 600) -> str:
+		# Previously truncated long entries; keep full text for better context in demo panel
+		return message.strip()
+
+	async def _demo_mode_log(self, message: str, level: str = 'info', metadata: dict[str, Any] | None = None) -> None:
+		if not self._demo_mode_enabled or not message or self.browser_session is None:
+			return
+		try:
+			await self.browser_session.send_demo_mode_log(
+				message=self._prepare_demo_message(message),
+				level=level,
+				metadata=metadata or {},
+			)
+		except Exception as exc:
+			self.logger.debug(f'[DemoMode] Failed to send overlay log: {exc}')
+
+	async def _broadcast_model_state(self, parsed: 'AgentOutput') -> None:
+		if not self._demo_mode_enabled:
+			return
+
+		state = parsed.current_state
+		step_meta = {'step': self.state.n_steps}
+
+		if state.thinking:
+			await self._demo_mode_log(state.thinking, 'thought', step_meta)
+
+		if state.evaluation_previous_goal:
+			eval_text = state.evaluation_previous_goal
+			level = 'success' if 'success' in eval_text.lower() else 'warning' if 'failure' in eval_text.lower() else 'info'
+			await self._demo_mode_log(eval_text, level, step_meta)
+
+		if state.memory:
+			await self._demo_mode_log(f'Memory: {state.memory}', 'info', step_meta)
+
+		if state.next_goal:
+			await self._demo_mode_log(f'Next goal: {state.next_goal}', 'info', step_meta)
+
+	def _log_step_completion_summary(self, step_start_time: float, result: list[ActionResult]) -> str | None:
 		"""Log step completion summary with action count, timing, and success/failure stats"""
 		if not result:
-			return
+			return None
 
 		step_duration = time.time() - step_start_time
 		action_count = len(result)
@@ -1403,9 +1476,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		status_parts = [part for part in [success_indicator, failure_indicator] if part]
 		status_str = ' | '.join(status_parts) if status_parts else '✅ 0'
 
-		self.logger.debug(
-			f'📍 Step {self.state.n_steps}: Ran {action_count} action{"" if action_count == 1 else "s"} in {step_duration:.2f}s: {status_str}'
+		message = (
+			f'📍 Step {self.state.n_steps}: Ran {action_count} action{"" if action_count == 1 else "s"} '
+			f'in {step_duration:.2f}s: {status_str}'
 		)
+		self.logger.debug(message)
+		return message
 
 	def _log_final_outcome_messages(self) -> None:
 		"""Log helpful messages to user based on agent run outcome"""
@@ -1461,6 +1537,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		judge_verdict = judgement_data.get('verdict') if judgement_data else None
 		judge_reasoning = judgement_data.get('reasoning') if judgement_data else None
 		judge_failure_reason = judgement_data.get('failure_reason') if judgement_data else None
+		judge_reached_captcha = judgement_data.get('reached_captcha') if judgement_data else None
+		judge_impossible_task = judgement_data.get('impossible_task') if judgement_data else None
 
 		self.telemetry.capture(
 			AgentTelemetryEvent(
@@ -1491,6 +1569,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				judge_verdict=judge_verdict,
 				judge_reasoning=judge_reasoning,
 				judge_failure_reason=judge_failure_reason,
+				judge_reached_captcha=judge_reached_captcha,
+				judge_impossible_task=judge_impossible_task,
 			)
 		)
 
@@ -1515,6 +1595,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		if self.history.is_done():
 			await self.log_completion()
+
+			# Run judge before done callback if enabled
+			if self.settings.use_judge:
+				await self._judge_and_log()
+
 			if self.register_done_callback:
 				if inspect.iscoroutinefunction(self.register_done_callback):
 					await self.register_done_callback(self.history)
@@ -1684,18 +1769,25 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if on_step_start is not None:
 			await on_step_start(self)
 
+		await self._demo_mode_log(
+			f'Starting step {step + 1}/{max_steps}',
+			'info',
+			{'step': step + 1, 'total_steps': max_steps},
+		)
+
 		self.logger.debug(f'🚶 Starting step {step + 1}/{max_steps}...')
 
 		try:
 			await asyncio.wait_for(
 				self.step(step_info),
-				timeout=180,  # 3 minute timeout
+				timeout=self.settings.step_timeout,
 			)
 			self.logger.debug(f'✅ Completed step {step + 1}/{max_steps}')
 		except TimeoutError:
 			# Handle step timeout gracefully
-			error_msg = f'Step {step + 1} timed out after 180 seconds'
+			error_msg = f'Step {step + 1} timed out after {self.settings.step_timeout} seconds'
 			self.logger.error(f'⏰ {error_msg}')
+			await self._demo_mode_log(error_msg, 'error', {'step': step + 1})
 			self.state.consecutive_failures += 1
 			self.state.last_result = [ActionResult(error=error_msg)]
 
@@ -1704,6 +1796,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		if self.history.is_done():
 			await self.log_completion()
+
+			# Run judge before done callback if enabled
+			if self.settings.use_judge:
+				await self._judge_and_log()
 
 			if self.register_done_callback:
 				if inspect.iscoroutinefunction(self.register_done_callback):
@@ -1728,6 +1824,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		loop = asyncio.get_event_loop()
 		agent_run_error: str | None = None  # Initialize error tracking variable
 		self._force_exit_telemetry_logged = False  # ADDED: Flag for custom telemetry on force exit
+		should_delay_close = False
 
 		# Set up the  signal handler with callbacks specific to this agent
 		from browser_use.utils import SignalHandler
@@ -1776,6 +1873,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self._log_first_step_startup()
 			# Start browser session and attach watchdogs
 			await self.browser_session.start()
+			if self._demo_mode_enabled:
+				await self._demo_mode_log(f'Started task: {self.task}', 'info', {'tag': 'task'})
+				await self._demo_mode_log(
+					'Demo mode active - follow the side panel for live thoughts and actions.',
+					'info',
+					{'tag': 'status'},
+				)
 
 			# Normally there was no try catch here but the callback can raise an InterruptedError
 			try:
@@ -1785,11 +1889,15 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			except Exception as e:
 				raise e
 
-			self.logger.debug(f'🔄 Starting main execution loop with max {max_steps} steps...')
-			for step in range(max_steps):
+			self.logger.debug(
+				f'🔄 Starting main execution loop with max {max_steps} steps (currently at step {self.state.n_steps})...'
+			)
+			while self.state.n_steps <= max_steps:
+				current_step = self.state.n_steps - 1  # Convert to 0-indexed for step_info
+
 				# Use the consolidated pause state management
 				if self.state.paused:
-					self.logger.debug(f'⏸️ Step {step}: Agent paused, waiting to resume...')
+					self.logger.debug(f'⏸️ Step {self.state.n_steps}: Agent paused, waiting to resume...')
 					await self._external_pause_event.wait()
 					signal_handler.reset()
 
@@ -1807,13 +1915,16 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					agent_run_error = 'Agent stopped programmatically'
 					break
 
-				step_info = AgentStepInfo(step_number=step, max_steps=max_steps)
-				is_done = await self._execute_step(step, max_steps, step_info, on_step_start, on_step_end)
+				step_info = AgentStepInfo(step_number=current_step, max_steps=max_steps)
+				is_done = await self._execute_step(current_step, max_steps, step_info, on_step_start, on_step_end)
 
 				if is_done:
 					# Agent has marked the task as done
-					if self.settings.use_judge:
-						await self._judge_and_log()
+					if self._demo_mode_enabled and self.history.history:
+						final_result_text = self.history.final_result() or 'Task completed'
+						await self._demo_mode_log(f'Final Result: {final_result_text}', 'success', {'tag': 'task'})
+
+					should_delay_close = True
 					break
 			else:
 				agent_run_error = 'Failed to complete task in maximum steps'
@@ -1858,6 +1969,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			raise e
 
 		finally:
+			if should_delay_close and self._demo_mode_enabled and agent_run_error is None:
+				await asyncio.sleep(30)
+			if agent_run_error:
+				await self._demo_mode_log(f'Agent stopped: {agent_run_error}', 'error', {'tag': 'run'})
 			# Log token usage summary
 			await self.token_cost_service.log_usage_summary()
 
@@ -1949,7 +2064,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				action_name = next(iter(action_data.keys())) if action_data else 'unknown'
 
 				# Log action before execution
-				self._log_action(action, action_name, i + 1, total_actions)
+				await self._log_action(action, action_name, i + 1, total_actions)
 
 				time_start = time.time()
 
@@ -1965,6 +2080,21 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				time_end = time.time()
 				time_elapsed = time_end - time_start
 
+				if result.error:
+					await self._demo_mode_log(
+						f'Action "{action_name}" failed: {result.error}',
+						'error',
+						{'action': action_name, 'step': self.state.n_steps},
+					)
+				elif result.is_done:
+					completion_text = result.long_term_memory or result.extracted_content or 'Task marked as done.'
+					level = 'success' if result.success is not False else 'warning'
+					await self._demo_mode_log(
+						completion_text,
+						level,
+						{'action': action_name, 'step': self.state.n_steps},
+					)
+
 				results.append(result)
 
 				if results[-1].is_done or results[-1].error or i == total_actions - 1:
@@ -1973,11 +2103,16 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			except Exception as e:
 				# Handle any exceptions during action execution
 				self.logger.error(f'❌ Executing action {i + 1} failed -> {type(e).__name__}: {e}')
+				await self._demo_mode_log(
+					f'Action "{action_name}" raised {type(e).__name__}: {e}',
+					'error',
+					{'action': action_name, 'step': self.state.n_steps},
+				)
 				raise e
 
 		return results
 
-	def _log_action(self, action, action_name: str, action_num: int, total_actions: int) -> None:
+	async def _log_action(self, action, action_name: str, action_num: int, total_actions: int) -> None:
 		"""Log the action before execution with colored formatting"""
 		# Color definitions
 		blue = '\033[34m'  # Action name
@@ -1987,8 +2122,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Format action number and name
 		if total_actions > 1:
 			action_header = f'▶️  [{action_num}/{total_actions}] {blue}{action_name}{reset}:'
+			plain_header = f'▶️  [{action_num}/{total_actions}] {action_name}:'
 		else:
 			action_header = f'▶️   {blue}{action_name}{reset}:'
+			plain_header = f'▶️  {action_name}:'
 
 		# Get action parameters
 		action_data = action.model_dump(exclude_unset=True)
@@ -1996,6 +2133,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Build parameter parts with colored formatting
 		param_parts = []
+		plain_param_parts = []
 
 		if params and isinstance(params, dict):
 			for param_name, value in params.items():
@@ -2008,6 +2146,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					display_value = value
 
 				param_parts.append(f'{magenta}{param_name}{reset}: {display_value}')
+				plain_param_parts.append(f'{param_name}: {display_value}')
 
 		# Join all parts
 		if param_parts:
@@ -2016,12 +2155,110 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		else:
 			self.logger.info(f'  {action_header}')
 
+		if self._demo_mode_enabled:
+			panel_message = plain_header
+			if plain_param_parts:
+				panel_message = f'{panel_message} {", ".join(plain_param_parts)}'
+			await self._demo_mode_log(panel_message.strip(), 'action', {'action': action_name, 'step': self.state.n_steps})
+
 	async def log_completion(self) -> None:
 		"""Log the completion of the task"""
 		# self._task_end_time = time.time()
 		# self._task_duration = self._task_end_time - self._task_start_time TODO: this is not working when using take_step
 		if self.history.is_successful():
 			self.logger.info('✅ Task completed successfully')
+			await self._demo_mode_log('Task completed successfully', 'success', {'tag': 'task'})
+
+	async def _generate_rerun_summary(
+		self, original_task: str, results: list[ActionResult], summary_llm: BaseChatModel | None = None
+	) -> ActionResult:
+		"""Generate AI summary of rerun completion using screenshot and last step info"""
+		from browser_use.agent.views import RerunSummaryAction
+
+		# Get current screenshot
+		screenshot_b64 = None
+		try:
+			screenshot = await self.browser_session.take_screenshot(full_page=False)
+			if screenshot:
+				import base64
+
+				screenshot_b64 = base64.b64encode(screenshot).decode('utf-8')
+		except Exception as e:
+			self.logger.warning(f'Failed to capture screenshot for rerun summary: {e}')
+
+		# Build summary prompt and message
+		error_count = sum(1 for r in results if r.error)
+		success_count = len(results) - error_count
+
+		from browser_use.agent.prompts import get_rerun_summary_message, get_rerun_summary_prompt
+
+		prompt = get_rerun_summary_prompt(
+			original_task=original_task,
+			total_steps=len(results),
+			success_count=success_count,
+			error_count=error_count,
+		)
+
+		# Use provided LLM, agent's LLM, or fall back to OpenAI with structured output
+		try:
+			# Determine which LLM to use
+			if summary_llm is None:
+				# Try to use the agent's LLM first
+				summary_llm = self.llm
+				self.logger.debug('Using agent LLM for rerun summary')
+			else:
+				self.logger.debug(f'Using provided LLM for rerun summary: {summary_llm.model}')
+
+			# Build message with prompt and optional screenshot
+			from browser_use.llm.messages import BaseMessage
+
+			message = get_rerun_summary_message(prompt, screenshot_b64)
+			messages: list[BaseMessage] = [message]  # type: ignore[list-item]
+
+			# Try calling with structured output first
+			self.logger.debug(f'Calling LLM for rerun summary with {len(messages)} message(s)')
+			try:
+				kwargs: dict = {'output_format': RerunSummaryAction}
+				response = await summary_llm.ainvoke(messages, **kwargs)
+				summary: RerunSummaryAction = response.completion  # type: ignore[assignment]
+				self.logger.debug(f'LLM response type: {type(summary)}')
+				self.logger.debug(f'LLM response: {summary}')
+			except Exception as structured_error:
+				# If structured output fails (e.g., Browser-Use LLM doesn't support it for this type),
+				# fall back to text response without parsing
+				self.logger.debug(f'Structured output failed: {structured_error}, falling back to text response')
+
+				response = await summary_llm.ainvoke(messages, None)
+				response_text = response.completion
+				self.logger.debug(f'LLM text response: {response_text}')
+
+				# Use the text response directly as the summary
+				summary = RerunSummaryAction(
+					summary=response_text if isinstance(response_text, str) else str(response_text),
+					success=error_count == 0,
+					completion_status='complete' if error_count == 0 else ('partial' if success_count > 0 else 'failed'),
+				)
+
+			self.logger.info(f'📊 Rerun Summary: {summary.summary}')
+			self.logger.info(f'📊 Status: {summary.completion_status} (success={summary.success})')
+
+			return ActionResult(
+				is_done=True,
+				success=summary.success,
+				extracted_content=summary.summary,
+				long_term_memory=f'Rerun completed with status: {summary.completion_status}. {summary.summary[:100]}',
+			)
+
+		except Exception as e:
+			self.logger.warning(f'Failed to generate AI summary: {e.__class__.__name__}: {e}')
+			self.logger.debug('Full error traceback:', exc_info=True)
+			# Fallback to simple summary
+			return ActionResult(
+				is_done=True,
+				success=error_count == 0,
+				extracted_content=f'Rerun completed: {success_count}/{len(results)} steps succeeded',
+				long_term_memory=f'Rerun completed: {success_count} steps succeeded, {error_count} errors',
+			)
 
 	async def rerun_history(
 		self,
@@ -2029,6 +2266,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		max_retries: int = 3,
 		skip_failures: bool = True,
 		delay_between_actions: float = 2.0,
+		summary_llm: BaseChatModel | None = None,
 	) -> list[ActionResult]:
 		"""
 		Rerun a saved history of actions with error handling and retry logic.
@@ -2038,9 +2276,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		                max_retries: Maximum number of retries per action
 		                skip_failures: Whether to skip failed actions or stop execution
 		                delay_between_actions: Delay between actions in seconds
+		                summary_llm: Optional LLM to use for generating the final summary. If not provided, uses the agent's LLM
 
 		Returns:
-		                List of action results
+		                List of action results (including AI summary as the final result)
 		"""
 		# Skip cloud sync session events for rerunning (we're replaying, not starting new)
 		self.state.session_initialized = True
@@ -2054,7 +2293,25 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			goal = history_item.model_output.current_state.next_goal if history_item.model_output else ''
 			step_num = history_item.metadata.step_number if history_item.metadata else i
 			step_name = 'Initial actions' if step_num == 0 else f'Step {step_num}'
-			self.logger.info(f'Replaying {step_name} ({i + 1}/{len(history.history)}): {goal}')
+
+			# Determine step delay
+			if history_item.metadata and history_item.metadata.step_interval is not None:
+				step_delay = history_item.metadata.step_interval
+				# Format delay nicely - show ms for values < 1s, otherwise show seconds
+				if step_delay < 1.0:
+					delay_str = f'{step_delay * 1000:.0f}ms'
+				else:
+					delay_str = f'{step_delay:.1f}s'
+				delay_source = f'using saved step_interval={delay_str}'
+			else:
+				step_delay = delay_between_actions
+				if step_delay < 1.0:
+					delay_str = f'{step_delay * 1000:.0f}ms'
+				else:
+					delay_str = f'{step_delay:.1f}s'
+				delay_source = f'using default delay={delay_str}'
+
+			self.logger.info(f'Replaying {step_name} ({i + 1}/{len(history.history)}) [{delay_source}]: {goal}')
 
 			if (
 				not history_item.model_output
@@ -2068,7 +2325,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			retry_count = 0
 			while retry_count < max_retries:
 				try:
-					result = await self._execute_history_step(history_item, delay_between_actions)
+					result = await self._execute_history_step(history_item, step_delay)
 					results.extend(result)
 					break
 
@@ -2083,6 +2340,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					else:
 						self.logger.warning(f'{step_name} failed (attempt {retry_count}/{max_retries}), retrying...')
 						await asyncio.sleep(delay_between_actions)
+
+		# Generate AI summary of rerun completion
+		self.logger.info('🤖 Generating AI summary of rerun completion...')
+		summary_result = await self._generate_rerun_summary(self.task, results, summary_llm)
+		results.append(summary_result)
 
 		await self.close()
 		return results
@@ -2114,11 +2376,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					action=self.initial_actions,
 				)
 
-			metadata = StepMetadata(
-				step_number=0,
-				step_start_time=time.time(),
-				step_end_time=time.time(),
-			)
+			metadata = StepMetadata(step_number=0, step_start_time=time.time(), step_end_time=time.time(), step_interval=None)
 
 			# Create minimal browser state history for initial actions
 			state_history = BrowserStateHistory(
@@ -2143,6 +2401,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	async def _execute_history_step(self, history_item: AgentHistory, delay: float) -> list[ActionResult]:
 		"""Execute a single step from history with element validation"""
 		assert self.browser_session is not None, 'BrowserSession is not set up'
+
+		await asyncio.sleep(delay)
 		state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
 		if not state or not history_item.model_output:
 			raise ValueError('Invalid state or model output')
@@ -2159,8 +2419,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				raise ValueError(f'Could not find matching element {i} in current page')
 
 		result = await self.multi_act(updated_actions)
-
-		await asyncio.sleep(delay)
 		return result
 
 	async def _update_action_indices(
@@ -2197,17 +2455,28 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		return action
 
-	async def load_and_rerun(self, history_file: str | Path | None = None, **kwargs) -> list[ActionResult]:
+	async def load_and_rerun(
+		self,
+		history_file: str | Path | None = None,
+		variables: dict[str, str] | None = None,
+		**kwargs,
+	) -> list[ActionResult]:
 		"""
-		Load history from file and rerun it.
+		Load history from file and rerun it, optionally substituting variables.
 
 		Args:
-		                history_file: Path to the history file
-		                **kwargs: Additional arguments passed to rerun_history
+			history_file: Path to the history file
+			variables: Optional dict mapping variable names to new values (e.g. {'email': 'new@example.com'})
+			**kwargs: Additional arguments passed to rerun_history
 		"""
 		if not history_file:
 			history_file = 'AgentHistory.json'
 		history = AgentHistoryList.load_from_file(history_file, self.AgentOutput)
+
+		# Substitute variables if provided
+		if variables:
+			history = self._substitute_variables_in_history(history, variables)
+
 		return await self.rerun_history(history, **kwargs)
 
 	def save_history(self, file_path: str | Path | None = None) -> None:
@@ -2355,3 +2624,93 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		import asyncio
 
 		return asyncio.run(self.run(max_steps=max_steps, on_step_start=on_step_start, on_step_end=on_step_end))
+
+	def detect_variables(self) -> dict[str, DetectedVariable]:
+		"""Detect reusable variables in agent history"""
+		from browser_use.agent.variable_detector import detect_variables_in_history
+
+		return detect_variables_in_history(self.history)
+
+	def _substitute_variables_in_history(self, history: AgentHistoryList, variables: dict[str, str]) -> AgentHistoryList:
+		"""Substitute variables in history with new values for rerunning with different data"""
+		from browser_use.agent.variable_detector import detect_variables_in_history
+
+		# Detect variables in the history
+		detected_vars = detect_variables_in_history(history)
+
+		# Build a mapping of original values to new values
+		value_replacements: dict[str, str] = {}
+		for var_name, new_value in variables.items():
+			if var_name in detected_vars:
+				old_value = detected_vars[var_name].original_value
+				value_replacements[old_value] = new_value
+			else:
+				self.logger.warning(f'Variable "{var_name}" not found in history, skipping substitution')
+
+		if not value_replacements:
+			self.logger.info('No variables to substitute')
+			return history
+
+		# Create a deep copy of history to avoid modifying the original
+		import copy
+
+		modified_history = copy.deepcopy(history)
+
+		# Substitute values in all actions
+		substitution_count = 0
+		for history_item in modified_history.history:
+			if not history_item.model_output or not history_item.model_output.action:
+				continue
+
+			for action in history_item.model_output.action:
+				# Handle both Pydantic models and dicts
+				if hasattr(action, 'model_dump'):
+					action_dict = action.model_dump()
+				elif isinstance(action, dict):
+					action_dict = action
+				else:
+					action_dict = vars(action) if hasattr(action, '__dict__') else {}
+
+				# Substitute in all string fields
+				substitution_count += self._substitute_in_dict(action_dict, value_replacements)
+
+				# Update the action with modified values
+				if hasattr(action, 'model_dump'):
+					# For Pydantic RootModel, we need to recreate from the modified dict
+					if hasattr(action, 'root'):
+						# This is a RootModel - recreate it from the modified dict
+						new_action = type(action).model_validate(action_dict)
+						# Replace the root field in-place using object.__setattr__ to bypass Pydantic's immutability
+						object.__setattr__(action, 'root', getattr(new_action, 'root'))
+					else:
+						# Regular Pydantic model - update fields in-place
+						for key, val in action_dict.items():
+							if hasattr(action, key):
+								setattr(action, key, val)
+				elif isinstance(action, dict):
+					action.update(action_dict)
+
+		self.logger.info(f'Substituted {substitution_count} value(s) in {len(value_replacements)} variable type(s) in history')
+		return modified_history
+
+	def _substitute_in_dict(self, data: dict, replacements: dict[str, str]) -> int:
+		"""Recursively substitute values in a dictionary, returns count of substitutions made"""
+		count = 0
+		for key, value in data.items():
+			if isinstance(value, str):
+				# Replace if exact match
+				if value in replacements:
+					data[key] = replacements[value]
+					count += 1
+			elif isinstance(value, dict):
+				# Recurse into nested dicts
+				count += self._substitute_in_dict(value, replacements)
+			elif isinstance(value, list):
+				# Handle lists
+				for i, item in enumerate(value):
+					if isinstance(item, str) and item in replacements:
+						value[i] = replacements[item]
+						count += 1
+					elif isinstance(item, dict):
+						count += self._substitute_in_dict(item, replacements)
+		return count
