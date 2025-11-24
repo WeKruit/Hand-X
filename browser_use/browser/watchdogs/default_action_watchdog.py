@@ -214,7 +214,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 		except Exception as e:
 			raise
 
-	async def on_ClickCoordinateEvent(self, event: 'ClickCoordinateEvent') -> dict | None:
+	async def on_ClickCoordinateEvent(self, event: ClickCoordinateEvent) -> dict | None:
 		"""Handle click at coordinates with CDP."""
 		try:
 			# Check if session is alive before attempting any operations
