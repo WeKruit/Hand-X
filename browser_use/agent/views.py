@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 class AgentSettings(BaseModel):
 	"""Configuration options for the Agent"""
 
-	use_vision: bool | Literal['auto'] = 'auto'
+	use_vision: bool | Literal['auto'] = True
 	vision_detail_level: Literal['auto', 'low', 'high'] = 'auto'
 	save_conversation_path: str | Path | None = None
 	save_conversation_path_encoding: str | None = 'utf-8'
@@ -42,10 +42,11 @@ class AgentSettings(BaseModel):
 	override_system_message: str | None = None
 	extend_system_message: str | None = None
 	include_attributes: list[str] | None = DEFAULT_INCLUDE_ATTRIBUTES
-	max_actions_per_step: int = 4
+	max_actions_per_step: int = 3
 	use_thinking: bool = True
 	flash_mode: bool = False  # If enabled, disables evaluation_previous_goal and next_goal, and sets use_thinking = False
 	use_judge: bool = True
+	ground_truth: str | None = None  # Ground truth answer or criteria for judge validation
 	max_history_items: int | None = None
 
 	page_extraction_llm: BaseChatModel | None = None
@@ -95,7 +96,7 @@ class JudgementResult(BaseModel):
 	verdict: bool = Field(description='Whether the trace was successful or not')
 	failure_reason: str | None = Field(
 		default=None,
-		description='A brief explanation of key reasons why the task was not completed successfully in case of failure. If verdict is true, use an empty string. Keep it concise and easy to read.',
+		description='Max 5 sentences explanation of why the task was not completed successfully in case of failure. If verdict is true, use an empty string.',
 	)
 	impossible_task: bool = Field(
 		default=False,
@@ -152,12 +153,23 @@ class ActionResult(BaseModel):
 		return self
 
 
+class RerunSummaryAction(BaseModel):
+	"""AI-generated summary for rerun completion"""
+
+	summary: str = Field(description='Summary of what happened during the rerun')
+	success: bool = Field(description='Whether the rerun completed successfully based on visual inspection')
+	completion_status: Literal['complete', 'partial', 'failed'] = Field(
+		description='Status of rerun completion: complete (all steps succeeded), partial (some steps succeeded), failed (task did not complete)'
+	)
+
+
 class StepMetadata(BaseModel):
 	"""Metadata for a single step including timing and token information"""
 
 	step_start_time: float
 	step_end_time: float
 	step_number: int
+	step_interval: float | None = None
 
 	@property
 	def duration_seconds(self) -> float:
@@ -752,3 +764,18 @@ class AgentError:
 		if include_trace:
 			return f'{str(error)}\nStacktrace:\n{traceback.format_exc()}'
 		return f'{str(error)}'
+
+
+class DetectedVariable(BaseModel):
+	"""A detected variable in agent history"""
+
+	name: str
+	original_value: str
+	type: str = 'string'
+	format: str | None = None
+
+
+class VariableMetadata(BaseModel):
+	"""Metadata about detected variables in history"""
+
+	detected_variables: dict[str, DetectedVariable] = Field(default_factory=dict)
