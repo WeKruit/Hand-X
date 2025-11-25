@@ -500,13 +500,16 @@ class ChatGoogle(BaseChatModel):
 			schema = resolve_refs(schema)
 
 		# Remove unsupported properties
-		def clean_schema(obj: Any) -> Any:
+		def clean_schema(obj: Any, parent_key: str | None = None) -> Any:
 			if isinstance(obj, dict):
 				# Remove unsupported properties
 				cleaned = {}
 				for key, value in obj.items():
-					if key not in ['additionalProperties', 'title', 'default']:
-						cleaned_value = clean_schema(value)
+					# Only strip 'title' when it's a JSON Schema metadata field (not inside 'properties')
+					# 'title' as a metadata field appears at schema level, not as a property name
+					is_metadata_title = key == 'title' and parent_key != 'properties'
+					if key not in ['additionalProperties', 'default'] and not is_metadata_title:
+						cleaned_value = clean_schema(value, parent_key=key)
 						# Handle empty object properties - Gemini doesn't allow empty OBJECT types
 						if (
 							key == 'properties'
@@ -530,13 +533,9 @@ class ChatGoogle(BaseChatModel):
 				):
 					cleaned['properties'] = {'_placeholder': {'type': 'string'}}
 
-				# Also remove 'title' from the required list if it exists
-				if 'required' in cleaned and isinstance(cleaned.get('required'), list):
-					cleaned['required'] = [p for p in cleaned['required'] if p != 'title']
-
 				return cleaned
 			elif isinstance(obj, list):
-				return [clean_schema(item) for item in obj]
+				return [clean_schema(item, parent_key=parent_key) for item in obj]
 			return obj
 
 		return clean_schema(schema)
