@@ -42,6 +42,12 @@ class ChatOpenAI(BaseChatModel):
 	top_p: float | None = None
 	add_schema_to_system_prompt: bool = False  # Add JSON schema to system prompt instead of using response_format
 	dont_force_structured_output: bool = False  # If True, the model will not be forced to output a structured output
+	remove_min_items_from_schema: bool = (
+		False  # If True, remove minItems from JSON schema (for compatibility with some providers)
+	)
+	remove_defaults_from_schema: bool = (
+		False  # If True, remove default values from JSON schema (for compatibility with some providers)
+	)
 
 	# Client initialization parameters
 	api_key: str | None = None
@@ -184,8 +190,8 @@ class ChatOpenAI(BaseChatModel):
 
 			if self.reasoning_models and any(str(m).lower() in str(self.model).lower() for m in self.reasoning_models):
 				model_params['reasoning_effort'] = self.reasoning_effort
-				del model_params['temperature']
-				del model_params['frequency_penalty']
+				model_params.pop('temperature', None)
+				model_params.pop('frequency_penalty', None)
 
 			if output_format is None:
 				# Return string response
@@ -206,7 +212,11 @@ class ChatOpenAI(BaseChatModel):
 				response_format: JSONSchema = {
 					'name': 'agent_output',
 					'strict': True,
-					'schema': SchemaOptimizer.create_optimized_json_schema(output_format),
+					'schema': SchemaOptimizer.create_optimized_json_schema(
+						output_format,
+						remove_min_items=self.remove_min_items_from_schema,
+						remove_defaults=self.remove_defaults_from_schema,
+					),
 				}
 
 				# Add JSON schema to system prompt if requested

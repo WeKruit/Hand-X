@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 class AgentSettings(BaseModel):
 	"""Configuration options for the Agent"""
 
-	use_vision: bool | Literal['auto'] = 'auto'
+	use_vision: bool | Literal['auto'] = True
 	vision_detail_level: Literal['auto', 'low', 'high'] = 'auto'
 	save_conversation_path: str | Path | None = None
 	save_conversation_path_encoding: str | None = 'utf-8'
@@ -42,10 +42,11 @@ class AgentSettings(BaseModel):
 	override_system_message: str | None = None
 	extend_system_message: str | None = None
 	include_attributes: list[str] | None = DEFAULT_INCLUDE_ATTRIBUTES
-	max_actions_per_step: int = 4
+	max_actions_per_step: int = 3
 	use_thinking: bool = True
 	flash_mode: bool = False  # If enabled, disables evaluation_previous_goal and next_goal, and sets use_thinking = False
 	use_judge: bool = True
+	ground_truth: str | None = None  # Ground truth answer or criteria for judge validation
 	max_history_items: int | None = None
 
 	page_extraction_llm: BaseChatModel | None = None
@@ -93,7 +94,18 @@ class JudgementResult(BaseModel):
 
 	reasoning: str | None = Field(default=None, description='Explanation of the judgement')
 	verdict: bool = Field(description='Whether the trace was successful or not')
-	failure_reason: str | None = Field(default=None, description='If the trace was not successful, the reason why')
+	failure_reason: str | None = Field(
+		default=None,
+		description='Max 5 sentences explanation of why the task was not completed successfully in case of failure. If verdict is true, use an empty string.',
+	)
+	impossible_task: bool = Field(
+		default=False,
+		description='True if the task was impossible to complete due to vague instructions, broken website, inaccessible links, missing login credentials, or other insurmountable obstacles',
+	)
+	reached_captcha: bool = Field(
+		default=False,
+		description='True if the agent encountered captcha challenges during task execution',
+	)
 
 
 class ActionResult(BaseModel):
@@ -111,6 +123,9 @@ class ActionResult(BaseModel):
 
 	# Files
 	attachments: list[str] | None = None  # Files to display in the done message
+
+	# Images (base64 encoded) - separate from text content for efficient handling
+	images: list[dict[str, Any]] | None = None  # [{"name": "file.jpg", "data": "base64_string"}]
 
 	# Always include in long term memory
 	long_term_memory: str | None = None  # Memory of this action
@@ -138,12 +153,23 @@ class ActionResult(BaseModel):
 		return self
 
 
+class RerunSummaryAction(BaseModel):
+	"""AI-generated summary for rerun completion"""
+
+	summary: str = Field(description='Summary of what happened during the rerun')
+	success: bool = Field(description='Whether the rerun completed successfully based on visual inspection')
+	completion_status: Literal['complete', 'partial', 'failed'] = Field(
+		description='Status of rerun completion: complete (all steps succeeded), partial (some steps succeeded), failed (task did not complete)'
+	)
+
+
 class StepMetadata(BaseModel):
 	"""Metadata for a single step including timing and token information"""
 
 	step_start_time: float
 	step_end_time: float
 	step_number: int
+	step_interval: float | None = None
 
 	@property
 	def duration_seconds(self) -> float:
@@ -338,7 +364,7 @@ class AgentHistory(BaseModel):
 		# Handle action serialization
 		model_output_dump = None
 		if self.model_output:
-			action_dump = [action.model_dump(exclude_none=True) for action in self.model_output.action]
+			action_dump = [action.model_dump(exclude_none=True, mode='json') for action in self.model_output.action]
 
 			# Filter sensitive data only from input action parameters if sensitive_data is provided
 			if sensitive_data:
@@ -359,7 +385,7 @@ class AgentHistory(BaseModel):
 
 		# Handle result serialization - don't filter ActionResult data
 		# as it should contain meaningful information for the agent
-		result_dump = [r.model_dump(exclude_none=True) for r in self.result]
+		result_dump = [r.model_dump(exclude_none=True, mode='json') for r in self.result]
 
 		return {
 			'model_output': model_output_dump,
@@ -478,7 +504,7 @@ class AgentHistoryList(BaseModel, Generic[AgentStructuredOutput]):
 	def last_action(self) -> None | dict:
 		"""Last action in history"""
 		if self.history and self.history[-1].model_output:
-			return self.history[-1].model_output.action[-1].model_dump(exclude_none=True)
+			return self.history[-1].model_output.action[-1].model_dump(exclude_none=True, mode='json')
 		return None
 
 	def errors(self) -> list[str | None]:
@@ -604,7 +630,7 @@ class AgentHistoryList(BaseModel, Generic[AgentStructuredOutput]):
 				# Guard against None interacted_element before zipping
 				interacted_elements = h.state.interacted_element or [None] * len(h.model_output.action)
 				for action, interacted_element in zip(h.model_output.action, interacted_elements):
-					output = action.model_dump(exclude_none=True)
+					output = action.model_dump(exclude_none=True, mode='json')
 					output['interacted_element'] = interacted_element
 					outputs.append(output)
 		return outputs
@@ -620,7 +646,7 @@ class AgentHistoryList(BaseModel, Generic[AgentStructuredOutput]):
 				interacted_elements = h.state.interacted_element or [None] * len(h.model_output.action)
 				# Zip actions with interacted elements and results
 				for action, interacted_element, result in zip(h.model_output.action, interacted_elements, h.result):
-					action_output = action.model_dump(exclude_none=True)
+					action_output = action.model_dump(exclude_none=True, mode='json')
 					action_output['interacted_element'] = interacted_element
 					# Only keep long_term_memory from result
 					action_output['result'] = result.long_term_memory if result and result.long_term_memory else None
@@ -669,8 +695,8 @@ class AgentHistoryList(BaseModel, Generic[AgentStructuredOutput]):
 
 			# Get actions from model_output
 			if h.model_output and h.model_output.action:
-				# Use existing model_dump to get action dicts
-				actions_list = [action.model_dump(exclude_none=True) for action in h.model_output.action]
+				# Use model_dump with mode='json' to serialize enums properly
+				actions_list = [action.model_dump(exclude_none=True, mode='json') for action in h.model_output.action]
 				action_json = json.dumps(actions_list, indent=1)
 				step_text += f'Actions: {action_json}\n'
 
@@ -738,3 +764,18 @@ class AgentError:
 		if include_trace:
 			return f'{str(error)}\nStacktrace:\n{traceback.format_exc()}'
 		return f'{str(error)}'
+
+
+class DetectedVariable(BaseModel):
+	"""A detected variable in agent history"""
+
+	name: str
+	original_value: str
+	type: str = 'string'
+	format: str | None = None
+
+
+class VariableMetadata(BaseModel):
+	"""Metadata about detected variables in history"""
+
+	detected_variables: dict[str, DetectedVariable] = Field(default_factory=dict)
