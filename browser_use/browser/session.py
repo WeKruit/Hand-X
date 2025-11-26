@@ -1028,7 +1028,6 @@ class BrowserSession(BaseModel):
 		if event.target_id:
 			# Ensure session exists and update agent focus (validates target_type internally)
 			await self.get_or_create_cdp_session(target_id=event.target_id, focus=True)
-			self.logger.debug(f'🔄 Updated agent focus to tab target_id=...{event.target_id[-4:]}')
 
 			# Apply viewport settings to the newly focused tab
 			if self.browser_profile.viewport and not self.browser_profile.no_viewport:
