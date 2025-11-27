@@ -1515,10 +1515,11 @@ class BrowserSession(BaseModel):
 		self._recording_watchdog = RecordingWatchdog(event_bus=self.event_bus, browser_session=self)
 		self._recording_watchdog.attach_to_session()
 
-		# Initialize HarRecordingWatchdog (handles HTTPS HAR capture)
-		HarRecordingWatchdog.model_rebuild()
-		self._har_recording_watchdog = HarRecordingWatchdog(event_bus=self.event_bus, browser_session=self)
-		self._har_recording_watchdog.attach_to_session()
+		# Initialize HarRecordingWatchdog if record_har_path is configured (handles HTTPS HAR capture)
+		if self.browser_profile.record_har_path:
+			HarRecordingWatchdog.model_rebuild()
+			self._har_recording_watchdog = HarRecordingWatchdog(event_bus=self.event_bus, browser_session=self)
+			self._har_recording_watchdog.attach_to_session()
 
 		# Mark watchdogs as attached to prevent duplicate attachment
 		self._watchdogs_attached = True
