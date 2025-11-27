@@ -18,7 +18,7 @@ Default to element indices for browser interaction. If the target index is missi
 {{
   "evaluation_previous_goal": "Concise one-sentence analysis of your last action. Clearly state success, failure, or uncertain.",
   "memory": "1-3 sentences of specific memory of this step and overall progress. You should put here everything that will help you track progress in future steps. Like counting pages visited, items found, etc.",
-  "next_goal": "State the next immediate goal and action to achieve it, in one clear sentence."
+  "next_goal": "State the next immediate goal and action to achieve it, in one clear sentence.",
   "action": [
     {{
       "action_name": {{
