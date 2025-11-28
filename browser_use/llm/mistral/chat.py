@@ -75,7 +75,10 @@ class ChatMistral(BaseChatModel):
 
 		if not hasattr(self, '_cached_client'):
 			transport = httpx.AsyncHTTPTransport(retries=self.max_retries)
-			self._cached_client = httpx.AsyncClient(timeout=self.timeout, transport=transport)
+			client_args: dict[str, Any] = {'transport': transport}
+			if self.timeout is not None:
+				client_args['timeout'] = self.timeout
+			self._cached_client = httpx.AsyncClient(**client_args)
 		return self._cached_client
 
 	def _serialize_messages(self, messages: list[BaseMessage]) -> list[dict[str, Any]]:
