@@ -213,12 +213,16 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if llm.provider == 'browser-use':
 			flash_mode = True
 
-		# Auto-configure llm_screenshot_size for Claude Sonnet models
+		# Auto-configure llm_screenshot_size for specific models
 		if llm_screenshot_size is None:
 			model_name = getattr(llm, 'model', '')
-			if isinstance(model_name, str) and model_name.startswith('claude-sonnet'):
-				llm_screenshot_size = (1400, 850)
-				logger.info('🖼️  Auto-configured LLM screenshot size for Claude Sonnet: 1400x850')
+			if isinstance(model_name, str):
+				if model_name.startswith('claude-sonnet'):
+					llm_screenshot_size = (1400, 850)
+					logger.info('🖼️  Auto-configured LLM screenshot size for Claude Sonnet: 1400x850')
+				elif 'gemini' in model_name.lower():
+					llm_screenshot_size = (1024, 720)
+					logger.info('🖼️  Auto-configured LLM screenshot size for Gemini: 1024x720')
 
 		if page_extraction_llm is None:
 			page_extraction_llm = llm
