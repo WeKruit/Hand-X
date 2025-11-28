@@ -19,7 +19,6 @@ from browser_use.browser.events import (
 	GetDropdownOptionsEvent,
 	GoBackEvent,
 	NavigateToUrlEvent,
-	ScrollAtCoordinateEvent,
 	ScrollEvent,
 	ScrollToTextEvent,
 	SendKeysEvent,
@@ -45,7 +44,6 @@ from browser_use.tools.views import (
 	NavigateAction,
 	NoParamsAction,
 	ScrollAction,
-	ScrollAtCoordinateAction,
 	SearchAction,
 	SelectDropdownOptionAction,
 	SendKeysAction,
@@ -62,7 +60,6 @@ logger = logging.getLogger(__name__)
 ClickElementEvent.model_rebuild()
 TypeTextEvent.model_rebuild()
 ScrollEvent.model_rebuild()
-ScrollAtCoordinateEvent.model_rebuild()
 UploadFileEvent.model_rebuild()
 
 Context = TypeVar('Context')
@@ -254,25 +251,6 @@ class Tools(Generic[Context]):
 				return actual_x, actual_y
 			return llm_x, llm_y
 
-		def _convert_llm_scroll_deltas_to_viewport(
-			llm_scroll_x: int, llm_scroll_y: int, browser_session: BrowserSession
-		) -> tuple[int, int]:
-			"""Convert scroll deltas from LLM screenshot size to original viewport size."""
-			if browser_session.llm_screenshot_size and browser_session._original_viewport_size:
-				original_width, original_height = browser_session._original_viewport_size
-				llm_width, llm_height = browser_session.llm_screenshot_size
-
-				# Scale scroll deltas using the same ratio as coordinates
-				actual_scroll_x = int((llm_scroll_x / llm_width) * original_width)
-				actual_scroll_y = int((llm_scroll_y / llm_height) * original_height)
-
-				logger.info(
-					f'🔄 Scaling scroll deltas: LLM ({llm_scroll_x}, {llm_scroll_y}) @ {llm_width}x{llm_height} '
-					f'→ Viewport ({actual_scroll_x}, {actual_scroll_y}) @ {original_width}x{original_height}'
-				)
-				return actual_scroll_x, actual_scroll_y
-			return llm_scroll_x, llm_scroll_y
-
 		# Element Interaction Actions
 		async def _click_by_coordinate(params: ClickElementAction, browser_session: BrowserSession) -> ActionResult:
 			# Ensure coordinates are provided (type safety)
@@ -374,7 +352,7 @@ class Tools(Generic[Context]):
 				return ActionResult(error=error_msg)
 
 		@self.registry.action(
-			'Click element by index or coordinates',
+			'Click element by index or coordinates. Prefer index over coordinates when possible. Either provide coordinates or index.',
 			param_model=ClickElementAction,
 		)
 		async def click(params: ClickElementAction, browser_session: BrowserSession):
@@ -810,14 +788,25 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				raise RuntimeError(str(e))
 
 		@self.registry.action(
-			"""Scroll by pages where one page = viewport height. Set down=True to scroll down, down=False to scroll up. Defaults to scrolling down one page.""",
+			"""Scroll by pages. REQUIRED: down=True/False (True=scroll down, False=scroll up, default=True). Optional: pages=0.5-10.0 (default 1.0). Use index for scroll containers (dropdowns/custom UI). High pages (10) reaches bottom. Multi-page scrolls sequentially. Viewport-based height, fallback 1000px/page.""",
 			param_model=ScrollAction,
 		)
 		async def scroll(params: ScrollAction, browser_session: BrowserSession):
 			try:
-				direction = 'down' if params.down else 'up'
+				# Look up the node from the selector map if index is provided
+				# Special case: index 0 means scroll the whole page (root/body element)
+				node = None
+				if params.index is not None and params.index != 0:
+					node = await browser_session.get_element_by_index(params.index)
+					if node is None:
+						# Element does not exist
+						msg = f'Element index {params.index} not found in browser state'
+						return ActionResult(error=msg)
 
-				# Get actual viewport height for scrolling
+				direction = 'down' if params.down else 'up'
+				target = f'element {params.index}' if params.index is not None and params.index != 0 else ''
+
+				# Get actual viewport height for more accurate scrolling
 				try:
 					cdp_session = await browser_session.get_or_create_cdp_session()
 					metrics = await cdp_session.cdp_client.send.Page.getLayoutMetrics(session_id=cdp_session.session_id)
@@ -833,12 +822,6 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				except Exception as e:
 					viewport_height = 1000  # Fallback to 1000px
 					logger.debug(f'Failed to get viewport height, using fallback 1000px: {e}')
-
-				# For reporting to LLM, use LLM screenshot height if available (so LLM's mental model matches)
-				if browser_session.llm_screenshot_size:
-					_, llm_viewport_height = browser_session.llm_screenshot_size
-				else:
-					llm_viewport_height = viewport_height
 
 				# For multiple pages (>=1.0), scroll one page at a time to ensure each scroll completes
 				if params.pages >= 1.0:
@@ -857,7 +840,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 								pixels = -pixels
 
 							event = browser_session.event_bus.dispatch(
-								ScrollEvent(direction=direction, amount=abs(pixels), node=None)
+								ScrollEvent(direction=direction, amount=abs(pixels), node=node)
 							)
 							await event
 							await event.event_result(raise_if_any=True, raise_if_none=False)
@@ -878,7 +861,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 								pixels = -pixels
 
 							event = browser_session.event_bus.dispatch(
-								ScrollEvent(direction=direction, amount=abs(pixels), node=None)
+								ScrollEvent(direction=direction, amount=abs(pixels), node=node)
 							)
 							await event
 							await event.event_result(raise_if_any=True, raise_if_none=False)
@@ -888,19 +871,18 @@ You will be given a query and the markdown of a webpage that has been filtered t
 							logger.warning(f'Fractional scroll failed: {e}')
 
 					if params.pages == 1.0:
-						long_term_memory = f'Scrolled {direction} {llm_viewport_height}px'
+						long_term_memory = f'Scrolled {direction} {target} {viewport_height}px'.replace('  ', ' ')
 					else:
-						long_term_memory = f'Scrolled {direction} {completed_scrolls:.1f} pages'
+						long_term_memory = f'Scrolled {direction} {target} {completed_scrolls:.1f} pages'.replace('  ', ' ')
 				else:
 					# For fractional pages <1.0, do single scroll
 					pixels = int(params.pages * viewport_height)
 					event = browser_session.event_bus.dispatch(
-						ScrollEvent(direction='down' if params.down else 'up', amount=pixels, node=None)
+						ScrollEvent(direction='down' if params.down else 'up', amount=pixels, node=node)
 					)
 					await event
 					await event.event_result(raise_if_any=True, raise_if_none=False)
-					llm_pixels = int(params.pages * llm_viewport_height)
-					long_term_memory = f'Scrolled {direction} {llm_pixels}px'
+					long_term_memory = f'Scrolled {direction} {target} {params.pages} pages'.replace('  ', ' ')
 
 				msg = f'🔍 {long_term_memory}'
 				logger.info(msg)
@@ -909,54 +891,6 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				logger.error(f'Failed to dispatch ScrollEvent: {type(e).__name__}: {e}')
 				error_msg = 'Failed to execute scroll action.'
 				return ActionResult(error=error_msg)
-
-		@self.registry.action(
-			'Scroll at specific coordinates. Use when you need to scroll within a specific area (e.g., scrollable containers, maps, modals) not reachable via element index.',
-			param_model=ScrollAtCoordinateAction,
-		)
-		async def scroll_at_coordinates(params: ScrollAtCoordinateAction, browser_session: BrowserSession):
-			try:
-				# Convert coordinates from LLM screenshot size to viewport size
-				actual_x, actual_y = _convert_llm_coordinates_to_viewport(
-					params.coordinate_x, params.coordinate_y, browser_session
-				)
-
-				# Convert scroll deltas from LLM screenshot size to viewport size
-				actual_scroll_x, actual_scroll_y = _convert_llm_scroll_deltas_to_viewport(
-					params.scroll_x, params.scroll_y, browser_session
-				)
-
-				# Dispatch scroll at coordinate event
-				event = browser_session.event_bus.dispatch(
-					ScrollAtCoordinateEvent(
-						coordinate_x=actual_x,
-						coordinate_y=actual_y,
-						scroll_x=actual_scroll_x,
-						scroll_y=actual_scroll_y,
-					)
-				)
-				await event
-				await event.event_result(raise_if_any=True, raise_if_none=False)
-
-				# Build memory with scroll amounts
-				direction_parts = []
-				if params.scroll_y > 0:
-					direction_parts.append(f'down {params.scroll_y}px')
-				elif params.scroll_y < 0:
-					direction_parts.append(f'up {abs(params.scroll_y)}px')
-				if params.scroll_x > 0:
-					direction_parts.append(f'right {params.scroll_x}px')
-				elif params.scroll_x < 0:
-					direction_parts.append(f'left {abs(params.scroll_x)}px')
-				scroll_desc = ' and '.join(direction_parts) if direction_parts else 'zero'
-
-				memory = f'Scrolled {scroll_desc} at ({params.coordinate_x}, {params.coordinate_y})'
-				msg = f'🔍 {memory}'
-				logger.info(msg)
-				return ActionResult(extracted_content=msg, long_term_memory=memory)
-			except Exception as e:
-				logger.error(f'Failed to scroll at coordinates: {type(e).__name__}: {e}')
-				return ActionResult(error=f'Failed to scroll at ({params.coordinate_x}, {params.coordinate_y})')
 
 		@self.registry.action(
 			'',
