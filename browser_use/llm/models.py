@@ -187,7 +187,8 @@ def get_llm_by_name(model_name: str):
 			'codestral': 'codestral-latest',
 			'pixtral-large': 'pixtral-large-latest',
 		}
-		resolved_model = mistral_map.get(model_part, model.replace('_', '-'))
+		normalized_model_part = model_part.replace('_', '-')
+		resolved_model = mistral_map.get(normalized_model_part, model.replace('_', '-'))
 		return ChatMistral(model=resolved_model, api_key=api_key, base_url=base_url)
 
 	# OCI Models
