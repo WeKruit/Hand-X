@@ -73,7 +73,8 @@ class CloseTabAction(BaseModel):
 
 class ScrollAction(BaseModel):
 	down: bool = Field(default=True, description='down=True=scroll down, down=False scroll up')
-	pages: float = Field(default=1.0, description='0.5=half page, 1=full page, 2=two pages, etc.')
+	pages: float = Field(default=1.0, description='0.5=half page, 1=full page, 10=to bottom/top')
+	index: int | None = Field(default=None, description='Optional element index to scroll within specific container')
 
 
 class SendKeysAction(BaseModel):
@@ -96,10 +97,3 @@ class GetDropdownOptionsAction(BaseModel):
 class SelectDropdownOptionAction(BaseModel):
 	index: int
 	text: str = Field(description='exact text/value')
-
-
-class ScrollAtCoordinateAction(BaseModel):
-	coordinate_x: int = Field(description='Horizontal coordinate relative to viewport left edge')
-	coordinate_y: int = Field(description='Vertical coordinate relative to viewport top edge')
-	scroll_x: int = Field(default=0, description='Horizontal scroll delta (positive=right, negative=left)')
-	scroll_y: int = Field(default=0, description='Vertical scroll delta (positive=down, negative=up)')
