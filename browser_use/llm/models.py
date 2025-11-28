@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from browser_use.llm.azure.chat import ChatAzureOpenAI
 from browser_use.llm.google.chat import ChatGoogle
+from browser_use.llm.mistral.chat import ChatMistral
 from browser_use.llm.openai.chat import ChatOpenAI
 
 if TYPE_CHECKING:
@@ -52,6 +53,11 @@ google_gemini_2_0_pro: 'BaseChatModel'
 google_gemini_2_5_pro: 'BaseChatModel'
 google_gemini_2_5_flash: 'BaseChatModel'
 google_gemini_2_5_flash_lite: 'BaseChatModel'
+mistral_large: 'BaseChatModel'
+mistral_medium: 'BaseChatModel'
+mistral_small: 'BaseChatModel'
+codestral: 'BaseChatModel'
+pixtral_large: 'BaseChatModel'
 
 
 def get_llm_by_name(model_name: str):
@@ -69,6 +75,19 @@ def get_llm_by_name(model_name: str):
 	"""
 	if not model_name:
 		raise ValueError('Model name cannot be empty')
+
+	# Handle top-level Mistral aliases without provider prefix
+	mistral_aliases = {
+		'mistral_large': 'mistral-large-latest',
+		'mistral_medium': 'mistral-medium-latest',
+		'mistral_small': 'mistral-small-latest',
+		'codestral': 'codestral-latest',
+		'pixtral_large': 'pixtral-large-latest',
+	}
+	if model_name in mistral_aliases:
+		api_key = os.getenv('MISTRAL_API_KEY')
+		base_url = os.getenv('MISTRAL_BASE_URL', 'https://api.mistral.ai/v1')
+		return ChatMistral(model=mistral_aliases[model_name], api_key=api_key, base_url=base_url)
 
 	# Parse model name
 	parts = model_name.split('_', 1)
@@ -108,8 +127,22 @@ def get_llm_by_name(model_name: str):
 		api_key = os.getenv('GOOGLE_API_KEY')
 		return ChatGoogle(model=model, api_key=api_key)
 
+	# Mistral Models
+	elif provider == 'mistral':
+		api_key = os.getenv('MISTRAL_API_KEY')
+		base_url = os.getenv('MISTRAL_BASE_URL', 'https://api.mistral.ai/v1')
+		mistral_map = {
+			'large': 'mistral-large-latest',
+			'medium': 'mistral-medium-latest',
+			'small': 'mistral-small-latest',
+			'codestral': 'codestral-latest',
+			'pixtral-large': 'pixtral-large-latest',
+		}
+		resolved_model = mistral_map.get(model_part, model.replace('_', '-'))
+		return ChatMistral(model=resolved_model, api_key=api_key, base_url=base_url)
+
 	else:
-		available_providers = ['openai', 'azure', 'google']
+		available_providers = ['openai', 'azure', 'google', 'mistral']
 		raise ValueError(f"Unknown provider: '{provider}'. Available providers: {', '.join(available_providers)}")
 
 
@@ -123,6 +156,8 @@ def __getattr__(name: str) -> 'BaseChatModel':
 		return ChatAzureOpenAI  # type: ignore
 	elif name == 'ChatGoogle':
 		return ChatGoogle  # type: ignore
+	elif name == 'ChatMistral':
+		return ChatMistral  # type: ignore
 
 	# Handle model instances - these are the main use case
 	try:
@@ -135,6 +170,7 @@ __all__ = [
 	'ChatOpenAI',
 	'ChatAzureOpenAI',
 	'ChatGoogle',
+	'ChatMistral',
 	'get_llm_by_name',
 	# OpenAI instances - created on demand
 	'openai_gpt_4o',
@@ -168,4 +204,10 @@ __all__ = [
 	'google_gemini_2_5_pro',
 	'google_gemini_2_5_flash',
 	'google_gemini_2_5_flash_lite',
+	# Mistral instances - created on demand
+	'mistral_large',
+	'mistral_medium',
+	'mistral_small',
+	'codestral',
+	'pixtral_large',
 ]
