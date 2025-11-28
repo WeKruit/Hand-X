@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping, TypeVar, overload
+from typing import Any, TypeVar, cast, overload
 
 import httpx
 from pydantic import BaseModel
@@ -80,11 +81,17 @@ class ChatMistral(BaseChatModel):
 	def _serialize_messages(self, messages: list[BaseMessage]) -> list[dict[str, Any]]:
 		raw_messages: list[dict[str, Any]] = []
 		for msg in OpenAIMessageSerializer.serialize_messages(messages):
-			if hasattr(msg, 'model_dump'):
-				raw_messages.append(msg.model_dump(exclude_none=True))
+			dumper = getattr(msg, 'model_dump', None)
+			if callable(dumper):
+				raw_messages.append(cast(dict[str, Any], dumper(exclude_none=True)))
 			else:
-				raw_messages.append(msg)  # type: ignore[arg-type]
+				raw_messages.append(cast(dict[str, Any], msg))  # type: ignore[arg-type]
 		return raw_messages
+
+	def _query_params(self) -> dict[str, str] | None:
+		if self.default_query is None:
+			return None
+		return {k: str(v) for k, v in self.default_query.items() if v is not None}
 
 	def _build_usage(self, usage: dict[str, Any] | None) -> ChatInvokeUsage | None:
 		if not usage:
@@ -133,9 +140,9 @@ class ChatMistral(BaseChatModel):
 		return response.text
 
 	async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
-		url = f"{self._get_base_url()}/chat/completions"
+		url = f'{self._get_base_url()}/chat/completions'
 		client = self._client()
-		response = await client.post(url, headers=self._auth_headers(), json=payload, params=self.default_query)
+		response = await client.post(url, headers=self._auth_headers(), json=payload, params=self._query_params())
 
 		if response.status_code >= 400:
 			message = self._parse_error(response)
@@ -200,9 +207,9 @@ class ChatMistral(BaseChatModel):
 			parsed = output_format.model_validate_json(content_text)
 			return ChatInvokeCompletion(completion=parsed, usage=usage)
 
-		except ModelProviderError:
-			raise
 		except ModelRateLimitError:
+			raise
+		except ModelProviderError:
 			raise
 		except Exception as e:
 			logger.error(f'Mistral invocation failed: {e}')

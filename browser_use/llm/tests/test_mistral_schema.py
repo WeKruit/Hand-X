@@ -10,7 +10,7 @@ class NestedExample(BaseModel):
 
 class RootExample(BaseModel):
 	item: NestedExample
-	email: str = Field(..., format='email')
+	email: str = Field(..., json_schema_extra={'format': 'email'})
 
 
 def test_mistral_schema_strips_unsupported_keywords():

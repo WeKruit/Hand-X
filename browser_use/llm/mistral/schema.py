@@ -27,9 +27,7 @@ class MistralSchemaOptimizer:
 	def _strip_unsupported_keywords(cls, obj: Any) -> Any:
 		if isinstance(obj, dict):
 			return {
-				key: cls._strip_unsupported_keywords(value)
-				for key, value in obj.items()
-				if key not in cls.UNSUPPORTED_KEYWORDS
+				key: cls._strip_unsupported_keywords(value) for key, value in obj.items() if key not in cls.UNSUPPORTED_KEYWORDS
 			}
 		if isinstance(obj, list):
 			return [cls._strip_unsupported_keywords(item) for item in obj]
