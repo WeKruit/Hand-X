@@ -43,13 +43,8 @@ class SystemPrompt:
 		"""Load the prompt template from the markdown file."""
 		try:
 			# Choose the appropriate template based on flash_mode, use_thinking, and is_anthropic
-			if self.is_anthropic:
-				if self.flash_mode:
-					template_filename = 'system_prompt_flash_anthropic.md'
-				elif self.use_thinking:
-					template_filename = 'system_prompt_anthropic.md'
-				else:
-					template_filename = 'system_prompt_no_thinking.md'
+			if self.flash_mode and self.is_anthropic:
+				template_filename = 'system_prompt_flash_anthropic.md'
 			elif self.flash_mode:
 				template_filename = 'system_prompt_flash.md'
 			elif self.use_thinking:
