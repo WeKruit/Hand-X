@@ -176,7 +176,6 @@ def get_llm_by_name(model_name: str):
 		api_key = os.getenv('GOOGLE_API_KEY')
 		return ChatGoogle(model=model, api_key=api_key)
 
-
 	# Mistral Models
 	elif provider == 'mistral':
 		api_key = os.getenv('MISTRAL_API_KEY')
@@ -238,7 +237,6 @@ def __getattr__(name: str) -> 'BaseChatModel':
 	elif name == 'ChatBrowserUse':
 		return ChatBrowserUse  # type: ignore
 
-
 	# Handle model instances - these are the main use case
 	try:
 		return get_llm_by_name(name)
@@ -251,9 +249,7 @@ __all__ = [
 	'ChatOpenAI',
 	'ChatAzureOpenAI',
 	'ChatGoogle',
-
 	'ChatMistral',
-
 	'ChatCerebras',
 	'ChatBrowserUse',
 ]
@@ -262,7 +258,6 @@ if OCI_AVAILABLE:
 	__all__.append('ChatOCIRaw')
 
 __all__ += [
-
 	'get_llm_by_name',
 	# OpenAI instances - created on demand
 	'openai_gpt_4o',
@@ -296,14 +291,12 @@ __all__ += [
 	'google_gemini_2_5_pro',
 	'google_gemini_2_5_flash',
 	'google_gemini_2_5_flash_lite',
-
 	# Mistral instances - created on demand
 	'mistral_large',
 	'mistral_medium',
 	'mistral_small',
 	'codestral',
 	'pixtral_large',
-
 	# Cerebras instances - created on demand
 	'cerebras_llama3_1_8b',
 	'cerebras_llama3_3_70b',
@@ -317,7 +310,6 @@ __all__ += [
 	# Browser Use instances - created on demand
 	'bu_latest',
 	'bu_1_0',
-
 ]
 
 # NOTE: OCI backend is optional. The try/except ImportError and conditional __all__ are required
