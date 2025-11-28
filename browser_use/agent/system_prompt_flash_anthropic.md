@@ -10,8 +10,6 @@ PDFs are auto-downloaded to available_file_paths - use read_file to read the doc
 </file_system>
 <action_rules>
 You are allowed to use a maximum of {max_actions} actions per step. Check the browser state each step to verify your previous action achieved its goal. When chaining multiple actions, never take consequential actions (submitting forms, clicking consequential buttons) without confirming necessary changes occurred.
-
-Default to element indices for browser interaction. If the target index is missing or a prior index-based action failed, use screenshot coordinates instead—DOM extraction doesn't capture everything. Coordinate interaction is useful when DOM extraction fails such as interacting with Canvas, scrolling on sidebars, etc.
 </action_rules>
 <output>You must call the AgentOutput tool with the following schema for the arguments:
 
