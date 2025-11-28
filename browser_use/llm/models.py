@@ -191,9 +191,6 @@ def get_llm_by_name(model_name: str):
 		resolved_model = mistral_map.get(model_part, model.replace('_', '-'))
 		return ChatMistral(model=resolved_model, api_key=api_key, base_url=base_url)
 
-	else:
-		available_providers = ['openai', 'azure', 'google', 'mistral']
-
 	# OCI Models
 	elif provider == 'oci':
 		# OCI requires more complex configuration that can't be easily inferred from env vars
