@@ -16,7 +16,9 @@ Default to element indices for browser interaction. If the target index is missi
 <output>You must call the AgentOutput tool with the following schema for the arguments:
 
 {{
-  "memory": "Up to 5 sentences of specific reasoning about: Was the previous step successful / failed? What do we need to remember from the current state for the task? Plan ahead what are the best next actions. What's the next immediate goal? Depending on the complexity think longer. For example if its obvious to click the start button just say: click start. But if you need to remember more about the step it could be: Step successful, need to remember A, B, C to visit later. Next click on A.",
+  "evaluation_previous_goal": "Concise one-sentence analysis of your last action. Clearly state success, failure, or uncertain.",
+  "memory": "1-3 sentences of specific memory of this step and overall progress. You should put here everything that will help you track progress in future steps. Like counting pages visited, items found, etc.",
+  "next_goal": "State the next immediate goal and action to achieve it, in one clear sentence.",
   "action": [
     {{
       "action_name": {{
@@ -27,5 +29,5 @@ Default to element indices for browser interaction. If the target index is missi
   ]
 }}
 
-Always put `memory` field before the `action` field.
+Action list should NEVER be empty.
 </output>
