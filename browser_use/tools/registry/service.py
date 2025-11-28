@@ -35,7 +35,23 @@ class Registry(Generic[Context]):
 	def __init__(self, exclude_actions: list[str] | None = None):
 		self.registry = ActionRegistry()
 		self.telemetry = ProductTelemetry()
-		self.exclude_actions = exclude_actions if exclude_actions is not None else []
+		# Create a new list to avoid mutable default argument issues
+		self.exclude_actions = list(exclude_actions) if exclude_actions is not None else []
+
+	def exclude_action(self, action_name: str) -> None:
+		"""Exclude an action from the registry after initialization.
+
+		If the action is already registered, it will be removed from the registry.
+		The action is also added to the exclude_actions list to prevent re-registration.
+		"""
+		# Add to exclude list to prevent future registration
+		if action_name not in self.exclude_actions:
+			self.exclude_actions.append(action_name)
+
+		# Remove from registry if already registered
+		if action_name in self.registry.actions:
+			del self.registry.actions[action_name]
+			logger.debug(f'Excluded action "{action_name}" from registry')
 
 	def _get_special_param_types(self) -> dict[str, type | UnionType | None]:
 		"""Get the expected types for special parameters from SpecialActionParameters"""
@@ -333,14 +349,12 @@ class Registry(Generic[Context]):
 			if sensitive_data:
 				# Get current URL if browser_session is provided
 				current_url = None
-				if browser_session and browser_session.current_target_id:
+				if browser_session and browser_session.agent_focus_target_id:
 					try:
-						# Get current page info using CDP
-						targets = await browser_session.cdp_client.send.Target.getTargets()
-						for target in targets.get('targetInfos', []):
-							if target.get('targetId') == browser_session.current_target_id:
-								current_url = target.get('url')
-								break
+						# Get current page info from session_manager
+						target = browser_session.session_manager.get_target(browser_session.agent_focus_target_id)
+						if target:
+							current_url = target.url
 					except Exception:
 						pass
 				validated_params = self._replace_sensitive_data(validated_params, sensitive_data, current_url)
@@ -350,12 +364,12 @@ class Registry(Generic[Context]):
 				'browser_session': browser_session,
 				'page_extraction_llm': page_extraction_llm,
 				'available_file_paths': available_file_paths,
-				'has_sensitive_data': action_name == 'input_text' and bool(sensitive_data),
+				'has_sensitive_data': action_name == 'input' and bool(sensitive_data),
 				'file_system': file_system,
 			}
 
-			# Only pass sensitive_data to actions that explicitly need it (input_text)
-			if action_name == 'input_text':
+			# Only pass sensitive_data to actions that explicitly need it (input)
+			if action_name == 'input':
 				special_context['sensitive_data'] = sensitive_data
 
 			# Add CDP-related parameters if browser_session is available
@@ -538,8 +552,6 @@ class Registry(Generic[Context]):
 			union_type = Union[tuple(individual_action_models)]  # type: ignore : Typing doesn't understand that the length is >= 2 (by design)
 
 			class ActionModelUnion(RootModel[union_type]):  # type: ignore
-				"""Union of all available action models that maintains ActionModel interface"""
-
 				def get_index(self) -> int | None:
 					"""Delegate get_index to the underlying action model"""
 					if hasattr(self.root, 'get_index'):

@@ -26,6 +26,8 @@ Or as an MCP server in Claude Desktop or other MCP clients:
 import os
 import sys
 
+from browser_use.llm import ChatAWSBedrock
+
 # Set environment variables BEFORE any browser_use imports to prevent early logging
 os.environ['BROWSER_USE_LOGGING_LEVEL'] = 'critical'
 os.environ['BROWSER_USE_SETUP_LOGGING'] = 'false'
@@ -148,7 +150,7 @@ except ImportError:
 	sys.exit(1)
 
 from browser_use.telemetry import MCPServerTelemetryEvent, ProductTelemetry
-from browser_use.utils import get_browser_use_version
+from browser_use.utils import create_task_with_error_handling, get_browser_use_version
 
 
 def get_parent_process_cmdline() -> str | None:
@@ -551,12 +553,16 @@ class BrowserUseServer:
 
 		# Initialize LLM from config
 		llm_config = get_default_llm(self.config)
+		base_url = llm_config.get('base_url', None)
+		kwargs = {}
+		if base_url:
+			kwargs['base_url'] = base_url
 		if api_key := llm_config.get('api_key'):
 			self.llm = ChatOpenAI(
-				model=llm_config.get('model', 'gpt-4o-mini'),
+				model=llm_config.get('model', 'gpt-o4-mini'),
 				api_key=api_key,
 				temperature=llm_config.get('temperature', 0.7),
-				# max_tokens=llm_config.get('max_tokens'),
+				**kwargs,
 			)
 
 		# Initialize FileSystem for extraction actions
@@ -578,21 +584,42 @@ class BrowserUseServer:
 
 		# Get LLM config
 		llm_config = get_default_llm(self.config)
-		api_key = llm_config.get('api_key') or os.getenv('OPENAI_API_KEY')
-		if not api_key:
-			return 'Error: OPENAI_API_KEY not set in config or environment'
 
-		# Override model if provided in tool call
-		if model != llm_config.get('model', 'gpt-4o'):
-			llm_model = model
+		# Get LLM provider
+		model_provider = llm_config.get('model_provider') or os.getenv('MODEL_PROVIDER')
+
+		# 如果model_provider不等于空，且等Bedrock
+		if model_provider and model_provider.lower() == 'bedrock':
+			llm_model = llm_config.get('model') or os.getenv('MODEL') or 'us.anthropic.claude-sonnet-4-20250514-v1:0'
+			aws_region = llm_config.get('region') or os.getenv('REGION')
+			if not aws_region:
+				aws_region = 'us-east-1'
+			llm = ChatAWSBedrock(
+				model=llm_model,  # or any Bedrock model
+				aws_region=aws_region,
+				aws_sso_auth=True,
+			)
 		else:
-			llm_model = llm_config.get('model', 'gpt-4o')
+			api_key = llm_config.get('api_key') or os.getenv('OPENAI_API_KEY')
+			if not api_key:
+				return 'Error: OPENAI_API_KEY not set in config or environment'
 
-		llm = ChatOpenAI(
-			model=llm_model,
-			api_key=api_key,
-			temperature=llm_config.get('temperature', 0.7),
-		)
+			# Override model if provided in tool call
+			if model != llm_config.get('model', 'gpt-4o'):
+				llm_model = model
+			else:
+				llm_model = llm_config.get('model', 'gpt-4o')
+
+			base_url = llm_config.get('base_url', None)
+			kwargs = {}
+			if base_url:
+				kwargs['base_url'] = base_url
+			llm = ChatOpenAI(
+				model=llm_model,
+				api_key=api_key,
+				temperature=llm_config.get('temperature', 0.7),
+				**kwargs,
+			)
 
 		# Get profile config and merge with tool parameters
 		profile_config = get_default_profile(self.config)
@@ -811,7 +838,7 @@ class BrowserUseServer:
 
 		state = await self.browser_session.get_browser_state_summary()
 
-		# Use the extract_structured_data action
+		# Use the extract action
 		# Create a dynamic action model that matches the tools's expectations
 		from pydantic import create_model
 
@@ -819,13 +846,13 @@ class BrowserUseServer:
 		ExtractAction = create_model(
 			'ExtractAction',
 			__base__=ActionModel,
-			extract_structured_data=dict[str, Any],
+			extract=dict[str, Any],
 		)
 
 		# Use model_validate because Pyright does not understand the dynamic model
 		action = ExtractAction.model_validate(
 			{
-				'extract_structured_data': {'query': query, 'extract_links': extract_links},
+				'extract': {'query': query, 'extract_links': extract_links},
 			}
 		)
 		action_result = await self.tools.act(
@@ -1041,7 +1068,7 @@ class BrowserUseServer:
 					logger.error(f'Error in cleanup task: {e}')
 					await asyncio.sleep(120)
 
-		self._cleanup_task = asyncio.create_task(cleanup_loop())
+		self._cleanup_task = create_task_with_error_handling(cleanup_loop(), name='mcp_cleanup_loop', suppress_exceptions=True)
 
 	async def run(self):
 		"""Run the MCP server."""

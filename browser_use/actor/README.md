@@ -75,7 +75,12 @@ await element.drag_to(target_element)  # Drag and drop
 value = await element.get_attribute("value")
 box = await element.get_bounding_box()  # Returns BoundingBox or None
 info = await element.get_basic_info()  # Comprehensive element info
-screenshot_b64 = await element.screenshot(format='jpeg')
+screenshot_b64 = await element.screenshot(format='png')
+
+# Execute JavaScript on element (this context is the element)
+text = await element.evaluate("() => this.textContent")
+await element.evaluate("(color) => this.style.backgroundColor = color", "yellow")
+classes = await element.evaluate("() => Array.from(this.classList)")
 ```
 
 ## Mouse Operations
@@ -103,7 +108,7 @@ await page.press("Escape")     # Single keys
 
 # Page controls
 await page.set_viewport_size(width=1920, height=1080)
-page_screenshot = await page.screenshot()  # JPEG by default
+page_screenshot = await page.screenshot()  # PNG by default
 page_png = await page.screenshot(format="png", quality=90)
 
 # Page information
@@ -161,21 +166,22 @@ products = await page.extract_content(
 - `evaluate(page_function: str, *args)` → `str` - Execute JavaScript (MUST use (...args) => format)
 - `press(key: str)` - Press key on page (supports "Control+A" format)
 - `set_viewport_size(width: int, height: int)` - Set viewport dimensions
-- `screenshot(format='jpeg', quality=None)` → `str` - Take page screenshot, return base64
+- `screenshot(format='png', quality=None)` → `str` - Take page screenshot, return base64
 - `get_url()` → `str`, `get_title()` → `str` - Get page information
 - `mouse` → `Mouse` - Get mouse interface for this page
 
 ### Element Methods (DOM Interactions)
 - `click(button='left', click_count=1, modifiers=None)` - Click element with advanced fallbacks
-- `fill(text: str, clear_existing=True)` - Fill input with text (clears first by default)
+- `fill(text: str, clear=True)` - Fill input with text (clears first by default)
 - `hover()` - Hover over element
 - `focus()` - Focus the element
 - `check()` - Toggle checkbox/radio button (clicks to change state)
 - `select_option(values: str | list[str])` - Select dropdown options
 - `drag_to(target_element: Element | Position, source_position=None, target_position=None)` - Drag to target element
+- `evaluate(page_function: str, *args)` → `str` - Execute JavaScript on element (this = element)
 - `get_attribute(name: str)` → `str | None` - Get attribute value
 - `get_bounding_box()` → `BoundingBox | None` - Get element position/size
-- `screenshot(format='jpeg', quality=None)` → `str` - Take element screenshot, return base64
+- `screenshot(format='png', quality=None)` → `str` - Take element screenshot, return base64
 - `get_basic_info()` → `ElementInfo` - Get comprehensive element information
 
 
@@ -221,10 +227,11 @@ class ElementInfo(TypedDict):
 **This is browser-use actor, NOT Playwright or Selenium.** Only use the methods documented above.
 
 ### Critical JavaScript Rules
-- `page.evaluate()` MUST use `(...args) => {}` arrow function format
+- `page.evaluate()` and `element.evaluate()` MUST use `(...args) => {}` arrow function format
 - Always returns string (objects are JSON-stringified automatically)
 - Use single quotes around the function: `page.evaluate('() => document.title')`
 - For complex selectors in JS: `'() => document.querySelector("input[name=\\"email\\"]")'`
+- `element.evaluate()`: `this` context is bound to the element automatically
 
 ### Method Restrictions
 - `get_elements_by_css_selector()` returns immediately (no automatic waiting)
