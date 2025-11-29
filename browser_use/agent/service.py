@@ -213,16 +213,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if llm.provider == 'browser-use':
 			flash_mode = True
 
-		# Auto-configure llm_screenshot_size for specific models
+		# Auto-configure llm_screenshot_size for Claude Sonnet models
 		if llm_screenshot_size is None:
 			model_name = getattr(llm, 'model', '')
-			if isinstance(model_name, str):
-				if model_name.startswith('claude-sonnet'):
-					llm_screenshot_size = (1400, 850)
-					logger.info('🖼️  Auto-configured LLM screenshot size for Claude Sonnet: 1400x850')
-				elif 'gemini' in model_name.lower():
-					llm_screenshot_size = (1024, 720)
-					logger.info('🖼️  Auto-configured LLM screenshot size for Gemini: 1024x720')
+			if isinstance(model_name, str) and model_name.startswith('claude-sonnet'):
+				llm_screenshot_size = (1400, 850)
+				logger.info('🖼️  Auto-configured LLM screenshot size for Claude Sonnet: 1400x850')
 
 		if page_extraction_llm is None:
 			page_extraction_llm = llm
@@ -934,6 +930,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Log step completion summary
 		summary_message = self._log_step_completion_summary(self.step_start_time, self.state.last_result)
+		if summary_message:
+			await self._demo_mode_log(summary_message, 'info', {'step': self.state.n_steps})
 
 		# Save file system state after step completion
 		self.save_file_system_state()
@@ -1771,6 +1769,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		"""
 		if on_step_start is not None:
 			await on_step_start(self)
+
+		await self._demo_mode_log(
+			f'Starting step {step + 1}/{max_steps}',
+			'info',
+			{'step': step + 1, 'total_steps': max_steps},
+		)
 
 		self.logger.debug(f'🚶 Starting step {step + 1}/{max_steps}...')
 
