@@ -920,6 +920,8 @@ class DefaultActionWatchdog(BaseWatchdog):
 						},
 						session_id=cdp_session.session_id,
 					)
+				# Add 10ms delay between keystrokes
+				await asyncio.sleep(0.010)
 		except Exception as e:
 			raise Exception(f'Failed to type to page: {str(e)}')
 
@@ -2221,6 +2223,9 @@ class DefaultActionWatchdog(BaseWatchdog):
 							},
 							session_id=cdp_session.session_id,
 						)
+
+						# Small delay between characters (10ms)
+						await asyncio.sleep(0.010)
 
 			self.logger.info(f'⌨️ Sent keys: {event.keys}')
 
