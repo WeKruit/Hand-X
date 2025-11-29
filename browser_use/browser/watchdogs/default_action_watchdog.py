@@ -13,7 +13,6 @@ from browser_use.browser.events import (
 	GoBackEvent,
 	GoForwardEvent,
 	RefreshEvent,
-	ScrollAtCoordinateEvent,
 	ScrollEvent,
 	ScrollToTextEvent,
 	SelectDropdownOptionEvent,
@@ -380,46 +379,6 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 			# Log success
 			self.logger.debug(f'📜 Scrolled {event.direction} by {event.amount} pixels')
-			return None
-		except Exception as e:
-			raise
-
-	async def on_ScrollAtCoordinateEvent(self, event: ScrollAtCoordinateEvent) -> None:
-		"""Handle scroll at specific coordinates using CDP synthesizeScrollGesture."""
-		# Check if we have a current target for scrolling
-		if not self.browser_session.agent_focus_target_id:
-			error_msg = 'No active target for scrolling'
-			raise BrowserError(error_msg)
-
-		try:
-			# Get focused CDP session
-			cdp_session = await self.browser_session.get_or_create_cdp_session()
-			cdp_client = cdp_session.cdp_client
-			session_id = cdp_session.session_id
-
-			# Convert scroll deltas to gesture distances
-			# Note: synthesizeScrollGesture uses opposite directions:
-			# - positive yDistance = scroll UP (opposite of mouseWheel deltaY)
-			# - positive xDistance = scroll LEFT (opposite of mouseWheel deltaX)
-			# So we negate the values to maintain the same behavior as before
-			params: dict[str, float] = {
-				'x': float(event.coordinate_x),
-				'y': float(event.coordinate_y),
-			}
-			if event.scroll_x != 0:
-				params['xDistance'] = float(-event.scroll_x)
-			if event.scroll_y != 0:
-				params['yDistance'] = float(-event.scroll_y)
-
-			# Synthesize scroll gesture at the specified coordinates
-			await cdp_client.send.Input.synthesizeScrollGesture(
-				params=params,  # type: ignore[arg-type]
-				session_id=session_id,
-			)
-
-			self.logger.debug(
-				f'📄 Scrolled at ({event.coordinate_x}, {event.coordinate_y}) by deltaX={event.scroll_x}, deltaY={event.scroll_y}'
-			)
 			return None
 		except Exception as e:
 			raise
@@ -961,6 +920,8 @@ class DefaultActionWatchdog(BaseWatchdog):
 						},
 						session_id=cdp_session.session_id,
 					)
+				# Add 10ms delay between keystrokes
+				await asyncio.sleep(0.010)
 		except Exception as e:
 			raise Exception(f'Failed to type to page: {str(e)}')
 
@@ -2262,6 +2223,9 @@ class DefaultActionWatchdog(BaseWatchdog):
 							},
 							session_id=cdp_session.session_id,
 						)
+
+						# Small delay between characters (10ms)
+						await asyncio.sleep(0.010)
 
 			self.logger.info(f'⌨️ Sent keys: {event.keys}')
 

@@ -2,7 +2,7 @@
 name = "browser-use"
 description = "Make websites accessible for AI agents"
 authors = [{ name = "Gregor Zunic" }]
-version = "0.9.7"
+version = "0.10.1"
 readme = "README.md"
 requires-python = ">=3.11,<4.0"
 classifiers = [
@@ -100,7 +100,7 @@ build-backend = "hatchling.build"
 
 
 [tool.codespell]
-ignore-words-list = "bu,wit,dont,cant,wont,re-use,re-used,re-using,re-usable,thats,doesnt,doubleclick,finaly,finalY,initialY"
+ignore-words-list = "bu,wit,dont,cant,wont,re-use,re-used,re-using,re-usable,thats,doesnt,doubleclick,finaly,finalY"
 skip = "*.json"
 
 [tool.ruff]
@@ -166,9 +166,6 @@ include = [
     "browser_use/agent/system_prompt_no_thinking.md",
     "browser_use/agent/system_prompt_flash.md",
     "browser_use/agent/system_prompt_flash_anthropic.md",
-    "browser-use/agent/system_prompt_anthropic_no_thinking.md",
-    "browser_use/agent/system_prompt_flash_anthropic.md",
-    "browser-use/agent/system_prompt_anthropic.md",
     "browser_use/code_use/system_prompt.md",
     "browser_use/cli_templates/*.py",
     "browser_use/py.typed",
