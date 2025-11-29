@@ -368,7 +368,7 @@ class Tools(Generic[Context]):
 				return await _click_by_coordinate(params, browser_session)
 
 		@self.registry.action(
-			'Input text into element with index.',
+			'Input text into element with index. Only works with index, NEVER use coordinates for inputting text.',
 			param_model=InputTextAction,
 		)
 		async def input(
