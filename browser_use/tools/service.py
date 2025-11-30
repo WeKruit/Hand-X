@@ -267,9 +267,8 @@ class Tools(Generic[Context]):
 				asyncio.create_task(browser_session.highlight_coordinate_click(actual_x, actual_y))
 
 				# Dispatch ClickCoordinateEvent - handler will check for safety and click
-				# Pass force parameter from params (defaults to False for safety)
 				event = browser_session.event_bus.dispatch(
-					ClickCoordinateEvent(coordinate_x=actual_x, coordinate_y=actual_y, force=params.force)
+					ClickCoordinateEvent(coordinate_x=actual_x, coordinate_y=actual_y, force=True)
 				)
 				await event
 				# Wait for handler to complete and get any exception or metadata
