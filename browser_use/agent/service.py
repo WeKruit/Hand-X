@@ -22,6 +22,7 @@ from browser_use.agent.cloud_events import (
 )
 from browser_use.agent.message_manager.utils import save_conversation
 from browser_use.llm.base import BaseChatModel
+from browser_use.llm.exceptions import ModelProviderError, ModelRateLimitError
 from browser_use.llm.messages import BaseMessage, ContentPartImageParam, ContentPartTextParam, UserMessage
 from browser_use.tokens.service import TokenCost
 
@@ -166,6 +167,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		demo_mode: bool | None = None,
 		max_history_items: int | None = None,
 		page_extraction_llm: BaseChatModel | None = None,
+		fallback_llm: BaseChatModel | None = None,
 		use_judge: bool = True,
 		ground_truth: str | None = None,
 		judge_llm: BaseChatModel | None = None,
@@ -283,6 +285,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self.task = self._enhance_task_with_schema(task, output_model_schema)
 		self.llm = llm
 		self.judge_llm = judge_llm
+
+		# Fallback LLM configuration
+		self._fallback_llm: BaseChatModel | None = fallback_llm
+		self._using_fallback_llm: bool = False
+		self._original_llm: BaseChatModel = llm  # Store original for reference
 		self.directly_open_url = directly_open_url
 		self.include_recent_events = include_recent_events
 		self._url_shortening_limit = _url_shortening_limit
@@ -524,19 +531,30 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	@property
 	def logger(self) -> logging.Logger:
 		"""Get instance-specific logger with task ID in the name"""
-
-		_browser_session_id = self.browser_session.id if self.browser_session else '----'
+		# logger may be called in __init__ so we don't assume self.* attributes have been initialized
+		_task_id = task_id[-4:] if (task_id := getattr(self, 'task_id', None)) else '----'
+		_browser_session_id = browser_session.id[-4:] if (browser_session := getattr(self, 'browser_session', None)) else '----'
 		_current_target_id = (
-			self.browser_session.agent_focus_target_id[-2:]
-			if self.browser_session and self.browser_session.agent_focus_target_id
+			browser_session.agent_focus_target_id[-2:]
+			if (browser_session := getattr(self, 'browser_session', None)) and browser_session.agent_focus_target_id
 			else '--'
 		)
-		return logging.getLogger(f'browser_use.Agent🅰 {self.task_id[-4:]} ⇢ 🅑 {_browser_session_id[-4:]} 🅣 {_current_target_id}')
+		return logging.getLogger(f'browser_use.Agent🅰 {_task_id} ⇢ 🅑 {_browser_session_id} 🅣 {_current_target_id}')
 
 	@property
 	def browser_profile(self) -> BrowserProfile:
 		assert self.browser_session is not None, 'BrowserSession is not set up'
 		return self.browser_session.browser_profile
+
+	@property
+	def is_using_fallback_llm(self) -> bool:
+		"""Check if the agent is currently using the fallback LLM."""
+		return self._using_fallback_llm
+
+	@property
+	def current_llm_model(self) -> str:
+		"""Get the model name of the currently active LLM."""
+		return self.llm.model if hasattr(self.llm, 'model') else 'unknown'
 
 	async def _check_and_update_downloads(self, context: str = '') -> None:
 		"""Check for new downloads and update available file paths."""
@@ -1356,6 +1374,68 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		except ValidationError:
 			# Just re-raise - Pydantic's validation errors are already descriptive
 			raise
+		except (ModelRateLimitError, ModelProviderError) as e:
+			# Check if we can switch to a fallback LLM
+			if not self._try_switch_to_fallback_llm(e):
+				# No fallback available, re-raise the original error
+				raise
+			# Retry with the fallback LLM
+			return await self.get_model_output(input_messages)
+
+	def _try_switch_to_fallback_llm(self, error: ModelRateLimitError | ModelProviderError) -> bool:
+		"""
+		Attempt to switch to a fallback LLM after a rate limit or provider error.
+
+		Returns True if successfully switched to a fallback, False if no fallback available.
+		Once switched, the agent will use the fallback LLM for the rest of the run.
+		"""
+		# Already using fallback - can't switch again
+		if self._using_fallback_llm:
+			self.logger.warning(
+				f'⚠️ Fallback LLM also failed ({type(error).__name__}: {error.message}), no more fallbacks available'
+			)
+			return False
+
+		# Check if error is retryable (rate limit, auth errors, or server errors)
+		# 401: API key invalid/expired - fallback to different provider
+		# 402: Insufficient credits/payment required - fallback to different provider
+		# 429: Rate limit exceeded
+		# 500, 502, 503, 504: Server errors
+		retryable_status_codes = {401, 402, 429, 500, 502, 503, 504}
+		is_retryable = isinstance(error, ModelRateLimitError) or (
+			hasattr(error, 'status_code') and error.status_code in retryable_status_codes
+		)
+
+		if not is_retryable:
+			return False
+
+		# Check if we have a fallback LLM configured
+		if self._fallback_llm is None:
+			self.logger.warning(f'⚠️ LLM error ({type(error).__name__}: {error.message}) but no fallback_llm configured')
+			return False
+
+		self._log_fallback_switch(error, self._fallback_llm)
+
+		# Switch to the fallback LLM
+		self.llm = self._fallback_llm
+		self._using_fallback_llm = True
+
+		# Register the fallback LLM for token cost tracking
+		self.token_cost_service.register_llm(self._fallback_llm)
+
+		return True
+
+	def _log_fallback_switch(self, error: ModelRateLimitError | ModelProviderError, fallback: BaseChatModel) -> None:
+		"""Log when switching to a fallback LLM."""
+		original_model = self._original_llm.model if hasattr(self._original_llm, 'model') else 'unknown'
+		fallback_model = fallback.model if hasattr(fallback, 'model') else 'unknown'
+		error_type = type(error).__name__
+		status_code = getattr(error, 'status_code', 'N/A')
+
+		self.logger.warning(
+			f'⚠️ Primary LLM ({original_model}) failed with {error_type} (status={status_code}), '
+			f'switching to fallback LLM ({fallback_model})'
+		)
 
 	async def _log_agent_run(self) -> None:
 		"""Log the agent run"""
