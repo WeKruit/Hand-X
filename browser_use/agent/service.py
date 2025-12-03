@@ -524,14 +524,15 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	@property
 	def logger(self) -> logging.Logger:
 		"""Get instance-specific logger with task ID in the name"""
-
-		_browser_session_id = self.browser_session.id if self.browser_session else '----'
+		# logger may be called in __init__ so we don't assume self.* attributes have been initialized
+		_task_id = task_id[-4:] if (task_id := getattr(self, 'task_id', None)) else '----'
+		_browser_session_id = browser_session.id[-4:] if (browser_session := getattr(self, 'browser_session', None)) else '----'
 		_current_target_id = (
-			self.browser_session.agent_focus_target_id[-2:]
-			if self.browser_session and self.browser_session.agent_focus_target_id
+			browser_session.agent_focus_target_id[-2:]
+			if (browser_session := getattr(self, 'browser_session', None)) and browser_session.agent_focus_target_id
 			else '--'
 		)
-		return logging.getLogger(f'browser_use.Agent🅰 {self.task_id[-4:]} ⇢ 🅑 {_browser_session_id[-4:]} 🅣 {_current_target_id}')
+		return logging.getLogger(f'browser_use.Agent🅰 {_task_id} ⇢ 🅑 {_browser_session_id} 🅣 {_current_target_id}')
 
 	@property
 	def browser_profile(self) -> BrowserProfile:
