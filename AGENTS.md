@@ -96,7 +96,7 @@ Then add your API key to the file.
   ```
 </CodeGroup>
 
-See [Supported Models](/supported-models) for more.
+See [Supported Models](https://docs.browser-use.com/supported-models#supported-models) for more.
 
 ## 3. Run your first agent
 
