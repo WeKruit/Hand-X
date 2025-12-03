@@ -15,6 +15,7 @@ import httpx
 from pydantic import BaseModel
 
 from browser_use.llm.base import BaseChatModel
+from browser_use.llm.exceptions import ModelProviderError, ModelRateLimitError
 from browser_use.llm.messages import BaseMessage
 from browser_use.llm.views import ChatInvokeCompletion
 from browser_use.observability import observe
@@ -240,7 +241,7 @@ class ChatBrowserUse(BaseChatModel):
 			return response.json()
 
 	def _raise_http_error(self, e: httpx.HTTPStatusError) -> None:
-		"""Raise a ValueError with appropriate error message for HTTP errors."""
+		"""Raise appropriate ModelProviderError for HTTP errors."""
 		error_detail = ''
 		try:
 			error_data = e.response.json()
@@ -248,12 +249,18 @@ class ChatBrowserUse(BaseChatModel):
 		except Exception:
 			error_detail = str(e)
 
-		if e.response.status_code == 401:
-			raise ValueError(f'Invalid API key. {error_detail}')
-		elif e.response.status_code == 402:
-			raise ValueError(f'Insufficient credits. {error_detail}')
+		status_code = e.response.status_code
+
+		if status_code == 401:
+			raise ModelProviderError(message=f'Invalid API key. {error_detail}', status_code=401, model=self.name)
+		elif status_code == 402:
+			raise ModelProviderError(message=f'Insufficient credits. {error_detail}', status_code=402, model=self.name)
+		elif status_code == 429:
+			raise ModelRateLimitError(message=f'Rate limit exceeded. {error_detail}', status_code=429, model=self.name)
+		elif status_code in {500, 502, 503, 504}:
+			raise ModelProviderError(message=f'Server error. {error_detail}', status_code=status_code, model=self.name)
 		else:
-			raise ValueError(f'API request failed: {error_detail}')
+			raise ModelProviderError(message=f'API request failed: {error_detail}', status_code=status_code, model=self.name)
 
 	def _serialize_message(self, message: BaseMessage) -> dict:
 		"""Serialize a message to JSON format."""
