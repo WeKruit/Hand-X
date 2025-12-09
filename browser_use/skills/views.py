@@ -2,25 +2,23 @@
 
 from typing import Any
 
-from browser_use_sdk.types import (
-	app_api_v2skills_views_parameter_schema as parameter_schema_module,
-)
-from browser_use_sdk.types import (
-	app_api_v2skills_views_parameter_type as parameter_type_module,
-)
-from browser_use_sdk.types import (
-	execute_skill_response,
-	skill_response,
-	skills_generation_status,
-)
+from browser_use_sdk.types.parameter_schema import ParameterSchema
+from browser_use_sdk.types.skill_response import SkillResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-# Re-export SDK types for convenience
-SkillsGenerationStatus = skills_generation_status.SkillsGenerationStatus
-ParameterType = parameter_type_module.AppApiV2SkillsViewsParameterType
-ParameterSchema = parameter_schema_module.AppApiV2SkillsViewsParameterSchema
-SkillResponse = skill_response.SkillResponse
-ExecuteSkillResponse = execute_skill_response.ExecuteSkillResponse
+
+class MissingCookieException(Exception):
+	"""Raised when a required cookie is missing for skill execution
+
+	Attributes:
+		cookie_name: The name of the missing cookie parameter
+		cookie_description: Description of how to obtain the cookie
+	"""
+
+	def __init__(self, cookie_name: str, cookie_description: str):
+		self.cookie_name = cookie_name
+		self.cookie_description = cookie_description
+		super().__init__(f"Missing required cookie '{cookie_name}': {cookie_description}")
 
 
 class Skill(BaseModel):
@@ -49,12 +47,19 @@ class Skill(BaseModel):
 			output_schema=response.output_schema,
 		)
 
-	@property
-	def parameters_pydantic(self) -> type[BaseModel]:
-		"""Convert parameter schemas to a pydantic model for structured output"""
+	def parameters_pydantic(self, exclude_cookies: bool = False) -> type[BaseModel]:
+		"""Convert parameter schemas to a pydantic model for structured output
+
+		exclude_cookies is very useful when dealing with LLMs that are not aware of cookies.
+		"""
 		from browser_use.skills.utils import convert_parameters_to_pydantic
 
-		return convert_parameters_to_pydantic(self.parameters, model_name=f'{self.title}Parameters')
+		parameters = list[ParameterSchema](self.parameters)
+
+		if exclude_cookies:
+			parameters = [param for param in parameters if param.type != 'cookie']
+
+		return convert_parameters_to_pydantic(parameters, model_name=f'{self.title}Parameters')
 
 	@property
 	def output_type_pydantic(self) -> type[BaseModel] | None:
