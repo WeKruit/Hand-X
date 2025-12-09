@@ -55,7 +55,8 @@ class SkillService:
 			# Fetch all skills from API in one call
 			logger.info('Fetching all available skills from Browser Use API...')
 			skills_response: SkillListResponse = await self._client.skills.list_skills(
-				page_size=100
+				page_size=100,
+				is_enabled=True,
 			)  # max size is 100, assuming users have less than 100 skills
 
 			# Filter to only enabled and finished skills
