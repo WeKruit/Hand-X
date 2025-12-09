@@ -281,18 +281,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Initialize available file paths as direct attribute
 		self.available_file_paths = available_file_paths
 
-		# Core components
-		self.task = self._enhance_task_with_schema(task, output_model_schema)
-		self.llm = llm
-		self.judge_llm = judge_llm
-
-		# Fallback LLM configuration
-		self._fallback_llm: BaseChatModel | None = fallback_llm
-		self._using_fallback_llm: bool = False
-		self._original_llm: BaseChatModel = llm  # Store original for reference
-		self.directly_open_url = directly_open_url
-		self.include_recent_events = include_recent_events
-		self._url_shortening_limit = _url_shortening_limit
+		# Set up tools first (needed to detect output_model_schema)
 		if tools is not None:
 			self.tools = tools
 		elif controller is not None:
@@ -306,10 +295,34 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if use_vision != 'auto':
 			self.tools.exclude_action('screenshot')
 
-		# Structured output
+		# Structured output - use explicit param or detect from tools
+		tools_output_model = self.tools.get_output_model()
+		if output_model_schema is not None and tools_output_model is not None:
+			# Both provided - warn if they differ
+			if output_model_schema is not tools_output_model:
+				logger.warning(
+					f'output_model_schema ({output_model_schema.__name__}) differs from Tools output_model '
+					f'({tools_output_model.__name__}). Using Agent output_model_schema.'
+				)
+		elif output_model_schema is None and tools_output_model is not None:
+			# Only tools has it - use that
+			output_model_schema = tools_output_model
 		self.output_model_schema = output_model_schema
 		if self.output_model_schema is not None:
 			self.tools.use_structured_output_action(self.output_model_schema)
+
+		# Core components - task enhancement now has access to output_model_schema from tools
+		self.task = self._enhance_task_with_schema(task, output_model_schema)
+		self.llm = llm
+		self.judge_llm = judge_llm
+
+		# Fallback LLM configuration
+		self._fallback_llm: BaseChatModel | None = fallback_llm
+		self._using_fallback_llm: bool = False
+		self._original_llm: BaseChatModel = llm  # Store original for reference
+		self.directly_open_url = directly_open_url
+		self.include_recent_events = include_recent_events
+		self._url_shortening_limit = _url_shortening_limit
 
 		self.sensitive_data = sensitive_data
 
