@@ -708,24 +708,40 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		else:
 			self.DoneAgentOutput = AgentOutput.type_with_custom_actions_no_thinking(self.DoneActionModel)
 
-	def _get_skill_display_name(self, skill: 'Skill', all_skills: list['Skill']) -> str:
-		"""Get display name for a skill, adding UUID suffix if there are duplicates
+	def _get_skill_slug(self, skill: 'Skill', all_skills: list['Skill']) -> str:
+		"""Generate a clean slug from skill title for LLM usage
+
+		Converts title to lowercase, removes special characters, replaces spaces with hyphens.
+		Adds UUID suffix if there are duplicate slugs.
 
 		Args:
-			skill: The skill to get display name for
+			skill: The skill to get slug for
 			all_skills: List of all skills to check for duplicates
 
 		Returns:
-			Display name with UUID[:4] suffix if title is duplicated
-		"""
-		# Count how many skills have the same title
-		same_title_count = sum(1 for s in all_skills if s.title == skill.title)
+			Slug like "cloned-github-stars-tracker" or "get-weather-data-a1b2" if duplicate
 
-		if same_title_count > 1:
-			# Add UUID suffix for disambiguation
-			return f'{skill.title} [{skill.id[:4]}]'
+		Examples:
+			"[Cloned] Github Stars Tracker" -> "cloned-github-stars-tracker"
+			"Get Weather Data" -> "get-weather-data"
+		"""
+		import re
+
+		# Remove special characters and convert to lowercase
+		slug = re.sub(r'[^\w\s-]', '', skill.title.lower())
+		# Replace whitespace with hyphens
+		slug = re.sub(r'[\s_]+', '-', slug)
+		# Remove leading/trailing hyphens
+		slug = slug.strip('-')
+
+		# Check for duplicates and add UUID suffix if needed
+		same_slug_count = sum(
+			1 for s in all_skills if re.sub(r'[\s_]+', '-', re.sub(r'[^\w\s-]', '', s.title.lower()).strip('-')) == slug
+		)
+		if same_slug_count > 1:
+			return f'{slug}-{skill.id[:4]}'
 		else:
-			return skill.title
+			return slug
 
 	async def _register_skills_as_actions(self) -> None:
 		"""Register a single 'skill' action that can execute any loaded skill"""
@@ -741,10 +757,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.logger.warning('No skills loaded from SkillService')
 			return
 
-		# Build a description that lists all available skills with disambiguated names and parameters
+		# Build a description that lists all available skills with slugs and parameters
 		skill_entries = []
 		for skill in skills:
-			display_name = self._get_skill_display_name(skill, skills)
+			slug = self._get_skill_slug(skill, skills)
 			# Get non-cookie parameters
 			non_cookie_params = [p for p in skill.parameters if p.type != 'cookie']
 			if non_cookie_params:
@@ -754,9 +770,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 						for p in non_cookie_params
 					]
 				)
-				skill_entries.append(f'  - {display_name}: {skill.description}\n    Parameters: {params_desc}')
+				skill_entries.append(f'  - {slug} ("{skill.title}"): {skill.description}\n    Parameters: {params_desc}')
 			else:
-				skill_entries.append(f'  - {display_name}: {skill.description}')
+				skill_entries.append(f'  - {slug} ("{skill.title}"): {skill.description}')
 
 		skill_list = '\n'.join(skill_entries)
 		skill_action_description = f'Execute a skill from the Browser Use skill library.\n\nAvailable skills:\n{skill_list}'
@@ -769,9 +785,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Get parameter models for each skill (excluding cookies since LLM doesn't provide them)
 		skill_param_models: dict[str, type[BaseModel]] = {}
 		for skill in skills:
-			display_name = self._get_skill_display_name(skill, skills)
+			slug = self._get_skill_slug(skill, skills)
 			param_model = skill.parameters_pydantic(exclude_cookies=True)
-			skill_param_models[display_name] = param_model
+			skill_param_models[slug] = param_model
 
 		# Create a union of all skill parameter types
 		if len(skill_param_models) == 1:
@@ -784,18 +800,18 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Create the skill data model (no outer wrapper needed - action registry wraps it)
 		SkillData = create_model(
 			'SkillData',
-			name=(str, Field(..., description='The name of the skill to execute (as shown in the available skills list)')),
+			name=(str, Field(..., description='The skill slug to execute (e.g., "cloned-github-stars-tracker")')),
 			parameters=(ParametersUnion, Field(..., description='The parameters for the skill')),
 			__base__=BaseModel,
 		)
 
 		# Create the skill handler function
 		async def skill_handler(params: BaseModel) -> ActionResult:
-			"""Execute any skill based on skill name"""
+			"""Execute any skill based on skill slug"""
 			assert self.skill_service is not None, 'SkillService not initialized'
 
 			# Extract skill data directly (action registry already wraps with 'skill' key)
-			skill_name = getattr(params, 'name')
+			skill_slug = getattr(params, 'name')
 			skill_params_model = getattr(params, 'parameters')
 
 			# Convert parameters to dict (handles both BaseModel and dict inputs)
@@ -806,19 +822,19 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			else:
 				return ActionResult(extracted_content=None, error=f'Invalid parameters type: {type(skill_params_model)}')
 
-			# Look up skill by display name
+			# Look up skill by slug
 			all_skills = await self.skill_service.get_all_skills()
 			matching_skill = None
 			for skill in all_skills:
-				if self._get_skill_display_name(skill, all_skills) == skill_name:
+				if self._get_skill_slug(skill, all_skills) == skill_slug:
 					matching_skill = skill
 					break
 
 			if matching_skill is None:
-				available_names = [self._get_skill_display_name(s, all_skills) for s in all_skills]
+				available_slugs = [self._get_skill_slug(s, all_skills) for s in all_skills]
 				return ActionResult(
 					extracted_content=None,
-					error=f'Skill "{skill_name}" not found. Available skills: {", ".join(available_names)}',
+					error=f'Skill "{skill_slug}" not found. Available skills: {", ".join(available_slugs)}',
 				)
 
 			_cookies = await self.browser_session.cookies()
@@ -910,14 +926,15 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			if not unavailable_skills:
 				return ''
 
-			# Format the unavailable skills info with disambiguated names
+			# Format the unavailable skills info with slugs
 			lines = ['Unavailable Skills (missing required cookies):']
 			for skill_info in unavailable_skills:
-				# Get the full skill object to use the display name helper
+				# Get the full skill object to use the slug helper
 				skill_obj = next((s for s in skills if s.id == skill_info['id']), None)
-				display_name = self._get_skill_display_name(skill_obj, skills) if skill_obj else skill_info['title']
+				slug = self._get_skill_slug(skill_obj, skills) if skill_obj else skill_info['title']
+				title = skill_info['title']
 
-				lines.append(f'\n  • {display_name}')
+				lines.append(f'\n  • {slug} ("{title}")')
 				lines.append(f'    Description: {skill_info["description"]}')
 				lines.append('    Missing cookies:')
 				for cookie in skill_info['missing_cookies']:
