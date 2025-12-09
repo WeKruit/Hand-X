@@ -709,9 +709,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.DoneAgentOutput = AgentOutput.type_with_custom_actions_no_thinking(self.DoneActionModel)
 
 	def _get_skill_slug(self, skill: 'Skill', all_skills: list['Skill']) -> str:
-		"""Generate a clean slug from skill title for LLM usage
+		"""Generate a clean slug from skill title for action names
 
-		Converts title to lowercase, removes special characters, replaces spaces with hyphens.
+		Converts title to lowercase, removes special characters, replaces spaces with underscores.
 		Adds UUID suffix if there are duplicate slugs.
 
 		Args:
@@ -719,36 +719,36 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			all_skills: List of all skills to check for duplicates
 
 		Returns:
-			Slug like "cloned-github-stars-tracker" or "get-weather-data-a1b2" if duplicate
+			Slug like "cloned_github_stars_tracker" or "get_weather_data_a1b2" if duplicate
 
 		Examples:
-			"[Cloned] Github Stars Tracker" -> "cloned-github-stars-tracker"
-			"Get Weather Data" -> "get-weather-data"
+			"[Cloned] Github Stars Tracker" -> "cloned_github_stars_tracker"
+			"Get Weather Data" -> "get_weather_data"
 		"""
 		import re
 
 		# Remove special characters and convert to lowercase
-		slug = re.sub(r'[^\w\s-]', '', skill.title.lower())
-		# Replace whitespace with hyphens
-		slug = re.sub(r'[\s_]+', '-', slug)
-		# Remove leading/trailing hyphens
-		slug = slug.strip('-')
+		slug = re.sub(r'[^\w\s]', '', skill.title.lower())
+		# Replace whitespace and hyphens with underscores
+		slug = re.sub(r'[\s\-]+', '_', slug)
+		# Remove leading/trailing underscores
+		slug = slug.strip('_')
 
 		# Check for duplicates and add UUID suffix if needed
 		same_slug_count = sum(
-			1 for s in all_skills if re.sub(r'[\s_]+', '-', re.sub(r'[^\w\s-]', '', s.title.lower()).strip('-')) == slug
+			1 for s in all_skills if re.sub(r'[\s\-]+', '_', re.sub(r'[^\w\s]', '', s.title.lower()).strip('_')) == slug
 		)
 		if same_slug_count > 1:
-			return f'{slug}-{skill.id[:4]}'
+			return f'{slug}_{skill.id[:4]}'
 		else:
 			return slug
 
 	async def _register_skills_as_actions(self) -> None:
-		"""Register a single 'skill' action that can execute any loaded skill"""
+		"""Register each skill as a separate action using slug as action name"""
 		if not self.skill_service or self._skills_registered:
 			return
 
-		self.logger.info('🔧 Registering unified skill action...')
+		self.logger.info('🔧 Registering skill actions...')
 
 		# Fetch all skills (auto-initializes if needed)
 		skills = await self.skill_service.get_all_skills()
@@ -757,121 +757,79 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.logger.warning('No skills loaded from SkillService')
 			return
 
-		# Build a description that lists all available skills with slugs and parameters
-		skill_entries = []
-		for skill in skills:
-			slug = self._get_skill_slug(skill, skills)
-			# Get non-cookie parameters
-			non_cookie_params = [p for p in skill.parameters if p.type != 'cookie']
-			if non_cookie_params:
-				params_desc = ', '.join(
-					[
-						f'{p.name} ({p.type}, {"required" if p.required else "optional"}): {p.description}'
-						for p in non_cookie_params
-					]
-				)
-				skill_entries.append(f'  - {slug} ("{skill.title}"): {skill.description}\n    Parameters: {params_desc}')
-			else:
-				skill_entries.append(f'  - {slug} ("{skill.title}"): {skill.description}')
-
-		skill_list = '\n'.join(skill_entries)
-		skill_action_description = f'Execute a skill from the Browser Use skill library.\n\nAvailable skills:\n{skill_list}'
-
-		# Create parameter model for the unified skill action using actual skill parameter types
-		from typing import Union
-
-		from pydantic import Field, create_model
-
-		# Get parameter models for each skill (excluding cookies since LLM doesn't provide them)
-		skill_param_models: dict[str, type[BaseModel]] = {}
+		# Register each skill as its own action
 		for skill in skills:
 			slug = self._get_skill_slug(skill, skills)
 			param_model = skill.parameters_pydantic(exclude_cookies=True)
-			skill_param_models[slug] = param_model
 
-		# Create a union of all skill parameter types
-		if len(skill_param_models) == 1:
-			# Single skill - use its param model directly
-			ParametersUnion = list(skill_param_models.values())[0]
-		else:
-			# Multiple skills - create union of all param models
-			ParametersUnion = Union[tuple(skill_param_models.values())]
+			# Create description with skill title in quotes
+			description = f'{skill.description} (Skill: "{skill.title}")'
 
-		# Create the skill data model (no outer wrapper needed - action registry wraps it)
-		SkillData = create_model(
-			'SkillData',
-			name=(str, Field(..., description='The skill slug to execute (e.g., "cloned-github-stars-tracker")')),
-			parameters=(ParametersUnion, Field(..., description='The parameters for the skill')),
-			__base__=BaseModel,
-		)
+			# Create handler for this specific skill
+			def make_skill_handler(skill_id: str):
+				async def skill_handler(params: BaseModel) -> ActionResult:
+					"""Execute a specific skill"""
+					assert self.skill_service is not None, 'SkillService not initialized'
 
-		# Create the skill handler function
-		async def skill_handler(params: BaseModel) -> ActionResult:
-			"""Execute any skill based on skill slug"""
-			assert self.skill_service is not None, 'SkillService not initialized'
+					# Convert parameters to dict
+					if isinstance(params, BaseModel):
+						skill_params = params.model_dump()
+					elif isinstance(params, dict):
+						skill_params = params
+					else:
+						return ActionResult(extracted_content=None, error=f'Invalid parameters type: {type(params)}')
 
-			# Extract skill data directly (action registry already wraps with 'skill' key)
-			skill_slug = getattr(params, 'name')
-			skill_params_model = getattr(params, 'parameters')
+					# Get cookies from browser
+					_cookies = await self.browser_session.cookies()
 
-			# Convert parameters to dict (handles both BaseModel and dict inputs)
-			if isinstance(skill_params_model, BaseModel):
-				skill_params = skill_params_model.model_dump()
-			elif isinstance(skill_params_model, dict):
-				skill_params = skill_params_model
-			else:
-				return ActionResult(extracted_content=None, error=f'Invalid parameters type: {type(skill_params_model)}')
+					try:
+						result = await self.skill_service.execute_skill(
+							skill_id=skill_id, parameters=skill_params, cookies=_cookies
+						)
 
-			# Look up skill by slug
-			all_skills = await self.skill_service.get_all_skills()
-			matching_skill = None
-			for skill in all_skills:
-				if self._get_skill_slug(skill, all_skills) == skill_slug:
-					matching_skill = skill
-					break
+						if result.success:
+							return ActionResult(
+								extracted_content=str(result.result) if result.result else None,
+								error=None,
+							)
+						else:
+							return ActionResult(extracted_content=None, error=result.error or 'Skill execution failed')
+					except Exception as e:
+						# Check if it's a MissingCookieException
+						if type(e).__name__ == 'MissingCookieException':
+							# Format: "Missing cookies (name): description"
+							cookie_name = getattr(e, 'cookie_name', 'unknown')
+							cookie_description = getattr(e, 'cookie_description', str(e))
+							error_msg = f'Missing cookies ({cookie_name}): {cookie_description}'
+							return ActionResult(extracted_content=None, error=error_msg)
+						return ActionResult(extracted_content=None, error=f'Skill execution error: {type(e).__name__}: {e}')
 
-			if matching_skill is None:
-				available_slugs = [self._get_skill_slug(s, all_skills) for s in all_skills]
-				return ActionResult(
-					extracted_content=None,
-					error=f'Skill "{skill_slug}" not found. Available skills: {", ".join(available_slugs)}',
-				)
+				return skill_handler
 
-			_cookies = await self.browser_session.cookies()
+			# Create the handler for this skill
+			handler = make_skill_handler(skill.id)
+			handler.__name__ = slug
 
-			try:
-				result = await self.skill_service.execute_skill(
-					skill_id=matching_skill.id, parameters=skill_params, cookies=_cookies
-				)
-
-				if result.success:
-					return ActionResult(
-						extracted_content=str(result.result) if result.result else None,
-						error=None,
-					)
-				else:
-					return ActionResult(extracted_content=None, error=result.error or 'Skill execution failed')
-			except Exception as e:
-				# Check if it's a MissingCookieException
-				if type(e).__name__ == 'MissingCookieException':
-					# Format: "Missing cookies (name): description"
-					cookie_name = getattr(e, 'cookie_name', 'unknown')
-					cookie_description = getattr(e, 'cookie_description', str(e))
-					error_msg = f'Missing cookies ({cookie_name}): {cookie_description}'
-					return ActionResult(extracted_content=None, error=error_msg)
-				return ActionResult(extracted_content=None, error=f'Skill execution error: {type(e).__name__}: {e}')
-
-		# Register the unified skill action
-		skill_handler.__name__ = 'skill'
-		self.tools.registry.action(description=skill_action_description, param_model=SkillData)(skill_handler)
+			# Register the action with the slug as the action name
+			self.tools.registry.action(description=description, param_model=param_model)(handler)
 
 		# Mark as registered
 		self._skills_registered = True
 
-		# Rebuild action models to include the new skill action
+		# Rebuild action models to include the new skill actions
 		self._setup_action_models()
 
-		self.logger.info(f'✓ Registered unified skill action with {len(skills)} available skills')
+		# Reconvert initial actions with the new ActionModel type if they exist
+		if self.initial_actions:
+			# Convert back to dict form first
+			initial_actions_dict = []
+			for action in self.initial_actions:
+				action_dump = action.model_dump(exclude_unset=True)
+				initial_actions_dict.append(action_dump)
+			# Reconvert using new ActionModel
+			self.initial_actions = self._convert_initial_actions(initial_actions_dict)
+
+		self.logger.info(f'✓ Registered {len(skills)} skill actions')
 
 	async def _get_unavailable_skills_info(self) -> str:
 		"""Get information about skills that are unavailable due to missing cookies
