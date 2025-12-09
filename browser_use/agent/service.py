@@ -761,21 +761,31 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		skill_list = '\n'.join(skill_entries)
 		skill_action_description = f'Execute a skill from the Browser Use skill library.\n\nAvailable skills:\n{skill_list}'
 
-		# Create parameter model for the unified skill action
+		# Create parameter model for the unified skill action using actual skill parameter types
+		from typing import Union
+
 		from pydantic import Field, create_model
 
+		# Get parameter models for each skill (excluding cookies since LLM doesn't provide them)
+		skill_param_models: dict[str, type[BaseModel]] = {}
+		for skill in skills:
+			display_name = self._get_skill_display_name(skill, skills)
+			param_model = skill.parameters_pydantic(exclude_cookies=True)
+			skill_param_models[display_name] = param_model
+
+		# Create a union of all skill parameter types
+		if len(skill_param_models) == 1:
+			# Single skill - use its param model directly
+			ParametersUnion = list(skill_param_models.values())[0]
+		else:
+			# Multiple skills - create union of all param models
+			ParametersUnion = Union[tuple(skill_param_models.values())]
+
 		# Create the skill data model (no outer wrapper needed - action registry wraps it)
-		# Use string type for parameters to avoid OpenAI strict mode constraints - LLM outputs JSON as string
 		SkillData = create_model(
 			'SkillData',
 			name=(str, Field(..., description='The name of the skill to execute (as shown in the available skills list)')),
-			parameters=(
-				str,
-				Field(
-					...,
-					description='The parameters for the skill as a JSON string (e.g., "{\\"repo\\": \\"browser-use/browser-use\\"}")',
-				),
-			),
+			parameters=(ParametersUnion, Field(..., description='The parameters for the skill')),
 			__base__=BaseModel,
 		)
 
@@ -786,15 +796,15 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 			# Extract skill data directly (action registry already wraps with 'skill' key)
 			skill_name = getattr(params, 'name')
-			skill_params_str = getattr(params, 'parameters')
+			skill_params_model = getattr(params, 'parameters')
 
-			# Parse parameters from JSON string
-			import json
-
-			try:
-				skill_params = json.loads(skill_params_str) if isinstance(skill_params_str, str) else skill_params_str
-			except json.JSONDecodeError as e:
-				return ActionResult(extracted_content=None, error=f'Invalid JSON in parameters: {e}')
+			# Convert parameters to dict (handles both BaseModel and dict inputs)
+			if isinstance(skill_params_model, BaseModel):
+				skill_params = skill_params_model.model_dump()
+			elif isinstance(skill_params_model, dict):
+				skill_params = skill_params_model
+			else:
+				return ActionResult(extracted_content=None, error=f'Invalid parameters type: {type(skill_params_model)}')
 
 			# Look up skill by display name
 			all_skills = await self.skill_service.get_all_skills()
