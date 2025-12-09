@@ -8,8 +8,11 @@ import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Generic, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+	from browser_use.skills.views import Skill
 
 from dotenv import load_dotenv
 
@@ -135,7 +138,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		tools: Tools[Context] | None = None,
 		controller: Tools[Context] | None = None,  # Alias for tools
 		# Skills integration
-		skill_ids: list[str] | None = None,
+		skill_ids: list[str | Literal['*']] | None = None,
 		# Initial agent run parameters
 		sensitive_data: dict[str, str | dict[str, str]] | None = None,
 		initial_actions: list[dict[str, dict[str, Any]]] | None = None,
@@ -705,12 +708,31 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		else:
 			self.DoneAgentOutput = AgentOutput.type_with_custom_actions_no_thinking(self.DoneActionModel)
 
+	def _get_skill_display_name(self, skill: 'Skill', all_skills: list['Skill']) -> str:
+		"""Get display name for a skill, adding UUID suffix if there are duplicates
+
+		Args:
+			skill: The skill to get display name for
+			all_skills: List of all skills to check for duplicates
+
+		Returns:
+			Display name with UUID[:4] suffix if title is duplicated
+		"""
+		# Count how many skills have the same title
+		same_title_count = sum(1 for s in all_skills if s.title == skill.title)
+
+		if same_title_count > 1:
+			# Add UUID suffix for disambiguation
+			return f'{skill.title} [{skill.id[:4]}]'
+		else:
+			return skill.title
+
 	async def _register_skills_as_actions(self) -> None:
-		"""Register all skills from SkillService as actions in the tools registry"""
+		"""Register a single 'skill' action that can execute any loaded skill"""
 		if not self.skill_service or self._skills_registered:
 			return
 
-		self.logger.info('🔧 Registering skills as actions...')
+		self.logger.info('🔧 Registering unified skill action...')
 
 		# Fetch all skills (auto-initializes if needed)
 		skills = await self.skill_service.get_all_skills()
@@ -719,56 +741,183 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.logger.warning('No skills loaded from SkillService')
 			return
 
-		# Register each skill as an action
+		# Build a description that lists all available skills with disambiguated names and parameters
+		skill_entries = []
 		for skill in skills:
-			# Create a unique action name from skill title (lowercase, replace spaces with underscores)
-			action_name = skill.title.lower().replace(' ', '_').replace('-', '_')
-			# Remove any non-alphanumeric characters except underscores
-			action_name = ''.join(c for c in action_name if c.isalnum() or c == '_')
+			display_name = self._get_skill_display_name(skill, skills)
+			# Get non-cookie parameters
+			non_cookie_params = [p for p in skill.parameters if p.type != 'cookie']
+			if non_cookie_params:
+				params_desc = ', '.join(
+					[
+						f'{p.name} ({p.type}, {"required" if p.required else "optional"}): {p.description}'
+						for p in non_cookie_params
+					]
+				)
+				skill_entries.append(f'  - {display_name}: {skill.description}\n    Parameters: {params_desc}')
+			else:
+				skill_entries.append(f'  - {display_name}: {skill.description}')
 
-			# Get the skill's pydantic parameter model
-			param_model = skill.parameters_pydantic
+		skill_list = '\n'.join(skill_entries)
+		skill_action_description = f'Execute a skill from the Browser Use skill library.\n\nAvailable skills:\n{skill_list}'
 
-			# Create the skill handler function
-			# We need to capture skill.id in the closure
-			def create_skill_handler(skill_id: str, skill_title: str):
-				async def skill_handler(params: BaseModel) -> ActionResult:
-					"""Execute skill and return result"""
-					assert self.skill_service is not None, 'SkillService not initialized'
+		# Create parameter model for the unified skill action
+		from pydantic import Field, create_model
 
-					try:
-						result = await self.skill_service.execute_skill(skill_id=skill_id, parameters=params)
+		# Create the skill data model (no outer wrapper needed - action registry wraps it)
+		# Use string type for parameters to avoid OpenAI strict mode constraints - LLM outputs JSON as string
+		SkillData = create_model(
+			'SkillData',
+			name=(str, Field(..., description='The name of the skill to execute (as shown in the available skills list)')),
+			parameters=(
+				str,
+				Field(
+					...,
+					description='The parameters for the skill as a JSON string (e.g., "{\\"repo\\": \\"browser-use/browser-use\\"}")',
+				),
+			),
+			__base__=BaseModel,
+		)
 
-						if result.success:
-							return ActionResult(
-								extracted_content=str(result.result) if result.result else None,
-								error=None,
-							)
-						else:
-							return ActionResult(extracted_content=None, error=result.error or 'Skill execution failed')
-					except Exception as e:
-						return ActionResult(extracted_content=None, error=f'Skill execution error: {type(e).__name__}: {e}')
+		# Create the skill handler function
+		async def skill_handler(params: BaseModel) -> ActionResult:
+			"""Execute any skill based on skill name"""
+			assert self.skill_service is not None, 'SkillService not initialized'
 
-				return skill_handler
+			# Extract skill data directly (action registry already wraps with 'skill' key)
+			skill_name = getattr(params, 'name')
+			skill_params_str = getattr(params, 'parameters')
 
-			# Register the skill as an action
-			handler = create_skill_handler(skill.id, skill.title)
+			# Parse parameters from JSON string
+			import json
 
-			# Set the function name to the unique action name
-			handler.__name__ = action_name
+			try:
+				skill_params = json.loads(skill_params_str) if isinstance(skill_params_str, str) else skill_params_str
+			except json.JSONDecodeError as e:
+				return ActionResult(extracted_content=None, error=f'Invalid JSON in parameters: {e}')
 
-			# Use the registry's action decorator
-			self.tools.registry.action(description=skill.description, param_model=param_model)(handler)
+			# Look up skill by display name
+			all_skills = await self.skill_service.get_all_skills()
+			matching_skill = None
+			for skill in all_skills:
+				if self._get_skill_display_name(skill, all_skills) == skill_name:
+					matching_skill = skill
+					break
 
-			self.logger.info(f'  ✓ Registered skill: {skill.title} (action: {action_name})')
+			if matching_skill is None:
+				available_names = [self._get_skill_display_name(s, all_skills) for s in all_skills]
+				return ActionResult(
+					extracted_content=None,
+					error=f'Skill "{skill_name}" not found. Available skills: {", ".join(available_names)}',
+				)
+
+			_cookies = await self.browser_session.cookies()
+
+			try:
+				result = await self.skill_service.execute_skill(
+					skill_id=matching_skill.id, parameters=skill_params, cookies=_cookies
+				)
+
+				if result.success:
+					return ActionResult(
+						extracted_content=str(result.result) if result.result else None,
+						error=None,
+					)
+				else:
+					return ActionResult(extracted_content=None, error=result.error or 'Skill execution failed')
+			except Exception as e:
+				# Check if it's a MissingCookieException
+				if type(e).__name__ == 'MissingCookieException':
+					# Format: "Missing cookies (name): description"
+					cookie_name = getattr(e, 'cookie_name', 'unknown')
+					cookie_description = getattr(e, 'cookie_description', str(e))
+					error_msg = f'Missing cookies ({cookie_name}): {cookie_description}'
+					return ActionResult(extracted_content=None, error=error_msg)
+				return ActionResult(extracted_content=None, error=f'Skill execution error: {type(e).__name__}: {e}')
+
+		# Register the unified skill action
+		skill_handler.__name__ = 'skill'
+		self.tools.registry.action(description=skill_action_description, param_model=SkillData)(skill_handler)
 
 		# Mark as registered
 		self._skills_registered = True
 
-		# Rebuild action models to include the new skills
+		# Rebuild action models to include the new skill action
 		self._setup_action_models()
 
-		self.logger.info(f'✓ Registered {len(skills)} skills as actions')
+		self.logger.info(f'✓ Registered unified skill action with {len(skills)} available skills')
+
+	async def _get_unavailable_skills_info(self) -> str:
+		"""Get information about skills that are unavailable due to missing cookies
+
+		Returns:
+			Formatted string describing unavailable skills and how to make them available
+		"""
+		if not self.skill_service:
+			return ''
+
+		try:
+			# Get all skills
+			skills = await self.skill_service.get_all_skills()
+			if not skills:
+				return ''
+
+			# Get current cookies
+			current_cookies = await self.browser_session.cookies()
+			cookie_dict = {cookie['name']: cookie['value'] for cookie in current_cookies}
+
+			# Check each skill for missing required cookies
+			unavailable_skills: list[dict[str, Any]] = []
+
+			for skill in skills:
+				# Get cookie parameters for this skill
+				cookie_params = [p for p in skill.parameters if p.type == 'cookie']
+
+				if not cookie_params:
+					# No cookies needed, skip
+					continue
+
+				# Check for missing required cookies
+				missing_cookies: list[dict[str, str]] = []
+				for cookie_param in cookie_params:
+					is_required = cookie_param.required if cookie_param.required is not None else True
+
+					if is_required and cookie_param.name not in cookie_dict:
+						missing_cookies.append(
+							{'name': cookie_param.name, 'description': cookie_param.description or 'No description provided'}
+						)
+
+				if missing_cookies:
+					unavailable_skills.append(
+						{
+							'id': skill.id,
+							'title': skill.title,
+							'description': skill.description,
+							'missing_cookies': missing_cookies,
+						}
+					)
+
+			if not unavailable_skills:
+				return ''
+
+			# Format the unavailable skills info with disambiguated names
+			lines = ['Unavailable Skills (missing required cookies):']
+			for skill_info in unavailable_skills:
+				# Get the full skill object to use the display name helper
+				skill_obj = next((s for s in skills if s.id == skill_info['id']), None)
+				display_name = self._get_skill_display_name(skill_obj, skills) if skill_obj else skill_info['title']
+
+				lines.append(f'\n  • {display_name}')
+				lines.append(f'    Description: {skill_info["description"]}')
+				lines.append('    Missing cookies:')
+				for cookie in skill_info['missing_cookies']:
+					lines.append(f'      - {cookie["name"]}: {cookie["description"]}')
+
+			return '\n'.join(lines)
+
+		except Exception as e:
+			self.logger.error(f'Error getting unavailable skills info: {type(e).__name__}: {e}')
+			return ''
 
 	def add_new_task(self, new_task: str) -> None:
 		"""Add a new task to the agent, keeping the same task_id as tasks are continuous"""
@@ -868,6 +1017,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Page-specific actions will be included directly in the browser_state message
 		self.logger.debug(f'💬 Step {self.state.n_steps}: Creating state messages for context...')
 
+		# Get unavailable skills info if skills service is enabled
+		unavailable_skills_info = None
+		if self.skill_service is not None:
+			unavailable_skills_info = await self._get_unavailable_skills_info()
+
 		self._message_manager.create_state_messages(
 			browser_state_summary=browser_state_summary,
 			model_output=self.state.last_model_output,
@@ -877,6 +1031,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			page_filtered_actions=page_filtered_actions if page_filtered_actions else None,
 			sensitive_data=self.sensitive_data,
 			available_file_paths=self.available_file_paths,  # Always pass current available_file_paths
+			unavailable_skills_info=unavailable_skills_info,
 		)
 
 		await self._force_done_after_last_step(step_info)

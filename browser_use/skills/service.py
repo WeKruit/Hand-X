@@ -1,14 +1,19 @@
 """Skills service for fetching and executing skills from the Browser Use API"""
 
-import asyncio
 import logging
 import os
-from typing import Any
+from typing import Any, Literal
 
 from browser_use_sdk import AsyncBrowserUse
+from browser_use_sdk.types.execute_skill_response import ExecuteSkillResponse
+from browser_use_sdk.types.skill_list_response import SkillListResponse
+from cdp_use.cdp.network import Cookie
 from pydantic import BaseModel, ValidationError
 
-from browser_use.skills.views import ExecuteSkillResponse, Skill, SkillResponse
+from browser_use.skills.views import (
+	MissingCookieException,
+	Skill,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -16,11 +21,11 @@ logger = logging.getLogger(__name__)
 class SkillService:
 	"""Service for managing and executing skills from the Browser Use API"""
 
-	def __init__(self, skill_ids: list[str], api_key: str | None = None):
+	def __init__(self, skill_ids: list[str | Literal['*']], api_key: str | None = None):
 		"""Initialize the skills service
 
 		Args:
-			skill_ids: List of skill IDs to fetch and cache
+			skill_ids: List of skill IDs to fetch and cache, or ['*'] to fetch all available skills
 			api_key: Browser Use API key (optional, will use env var if not provided)
 		"""
 		self.skill_ids = skill_ids
@@ -34,9 +39,10 @@ class SkillService:
 		self._initialized = False
 
 	async def async_init(self) -> None:
-		"""Async initialization to fetch all skills concurrently
+		"""Async initialization to fetch all skills at once
 
 		This should be called after __init__ to fetch and cache all skills.
+		Fetches all available skills in one API call and filters based on skill_ids.
 		"""
 		if self._initialized:
 			logger.debug('SkillService already initialized')
@@ -45,55 +51,52 @@ class SkillService:
 		# Create the SDK client
 		self._client = AsyncBrowserUse(api_key=self.api_key)
 
-		# Fetch all skills concurrently
-		logger.info(f'Fetching {len(self.skill_ids)} skills from Browser Use API...')
-
-		fetch_tasks = [self._fetch_skill(skill_id) for skill_id in self.skill_ids]
-		results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-
-		# Process results
-		for skill_id, result in zip(self.skill_ids, results):
-			if isinstance(result, Exception):
-				logger.error(f'Failed to fetch skill {skill_id}: {result}')
-			elif isinstance(result, Skill):
-				self._skills[skill_id] = result
-				logger.debug(f'Cached skill: {result.title} ({skill_id})')
-
-		logger.info(f'Successfully loaded {len(self._skills)}/{len(self.skill_ids)} skills')
-		self._initialized = True
-
-	async def _fetch_skill(self, skill_id: str) -> Skill | None:
-		"""Fetch a single skill from the API and convert to Skill model
-
-		Args:
-			skill_id: The UUID of the skill to fetch
-
-		Returns:
-			Skill model or None if fetch failed
-		"""
-		assert self._client is not None, 'Client not initialized - call async_init() first'
-
 		try:
-			# Fetch skill details from API (returns SkillResponse from SDK)
-			skill_response: SkillResponse = await self._client.skills.get_skill(skill_id=skill_id)
+			# Fetch all skills from API in one call
+			logger.info('Fetching all available skills from Browser Use API...')
+			skills_response: SkillListResponse = await self._client.skills.list_skills(
+				page_size=100
+			)  # max size is 100, assuming users have less than 100 skills
 
-			# Check if skill is finished and enabled
-			if skill_response.status != 'finished':
-				logger.warning(f'Skill {skill_id} is not finished (status: {skill_response.status})')
-				return None
+			# Filter to only enabled and finished skills
+			all_available_skills = [skill for skill in skills_response.items if skill.is_enabled and skill.status == 'finished']
 
-			if not skill_response.is_enabled:
-				logger.warning(f'Skill {skill_id} is not enabled')
-				return None
+			logger.info(f'Found {len(all_available_skills)} available skills from API')
 
-			# Convert SDK SkillResponse to our Skill model with helper properties
-			skill = Skill.from_skill_response(skill_response)
+			# Determine which skills to load
+			use_wildcard = '*' in self.skill_ids
 
-			return skill
+			if use_wildcard:
+				logger.info('Wildcard "*" detected, loading all available skills')
+				# Load all available skills
+				skills_to_load = all_available_skills
+			else:
+				# Load only the requested skill IDs
+				requested_ids = set(self.skill_ids)
+				skills_to_load = [skill for skill in all_available_skills if skill.id in requested_ids]
+
+				# Warn about any requested skills that weren't found
+				found_ids = {skill.id for skill in skills_to_load}
+				missing_ids = requested_ids - found_ids
+				if missing_ids:
+					logger.warning(f'Requested skills not found or not available: {missing_ids}')
+
+			# Convert SDK SkillResponse objects to our Skill models and cache them
+			for skill_response in skills_to_load:
+				try:
+					skill = Skill.from_skill_response(skill_response)
+					self._skills[skill.id] = skill
+					logger.debug(f'Cached skill: {skill.title} ({skill.id})')
+				except Exception as e:
+					logger.error(f'Failed to convert skill {skill_response.id}: {type(e).__name__}: {e}')
+
+			logger.info(f'Successfully loaded {len(self._skills)} skills')
+			self._initialized = True
 
 		except Exception as e:
-			logger.error(f'Error fetching skill {skill_id}: {type(e).__name__}: {e}')
-			return None
+			logger.error(f'Error during skill initialization: {type(e).__name__}: {e}')
+			self._initialized = True  # Mark as initialized even on failure to avoid retry loops
+			raise
 
 	async def get_skill(self, skill_id: str) -> Skill | None:
 		"""Get a cached skill by ID. Auto-initializes if not already initialized.
@@ -120,7 +123,9 @@ class SkillService:
 
 		return list(self._skills.values())
 
-	async def execute_skill(self, skill_id: str, parameters: dict[str, Any] | BaseModel) -> ExecuteSkillResponse:
+	async def execute_skill(
+		self, skill_id: str, parameters: dict[str, Any] | BaseModel, cookies: list[Cookie]
+	) -> ExecuteSkillResponse:
 		"""Execute a skill with the provided parameters. Auto-initializes if not already initialized.
 
 		Parameters are validated against the skill's Pydantic schema before execution.
@@ -147,8 +152,40 @@ class SkillService:
 		if skill is None:
 			raise ValueError(f'Skill {skill_id} not found in cache. Available skills: {list(self._skills.keys())}')
 
+		# Extract cookie parameters from the skill
+		cookie_params = [p for p in skill.parameters if p.type == 'cookie']
+
+		# Build a dict of cookies from the provided cookie list
+		cookie_dict: dict[str, str] = {cookie['name']: cookie['value'] for cookie in cookies}
+
+		# Check for missing required cookies and fill cookie values
+		if cookie_params:
+			for cookie_param in cookie_params:
+				is_required = cookie_param.required if cookie_param.required is not None else True
+
+				if is_required and cookie_param.name not in cookie_dict:
+					# Required cookie is missing - raise exception with description
+					raise MissingCookieException(
+						cookie_name=cookie_param.name, cookie_description=cookie_param.description or 'No description provided'
+					)
+
+			# Fill in cookie values into parameters
+			# Convert parameters to dict first if it's a BaseModel
+			if isinstance(parameters, BaseModel):
+				params_dict = parameters.model_dump()
+			else:
+				params_dict = dict(parameters)
+
+			# Add cookie values to parameters
+			for cookie_param in cookie_params:
+				if cookie_param.name in cookie_dict:
+					params_dict[cookie_param.name] = cookie_dict[cookie_param.name]
+
+			# Replace parameters with the updated dict
+			parameters = params_dict
+
 		# Get the skill's pydantic model for parameter validation
-		ParameterModel = skill.parameters_pydantic
+		ParameterModel = skill.parameters_pydantic(exclude_cookies=False)
 
 		# Validate and convert parameters to dict
 		validated_params_dict: dict[str, Any]
