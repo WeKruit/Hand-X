@@ -139,6 +139,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		controller: Tools[Context] | None = None,  # Alias for tools
 		# Skills integration
 		skill_ids: list[str | Literal['*']] | None = None,
+		skills: list[str | Literal['*']] | None = None,  # Alias for skill_ids
 		# Initial agent run parameters
 		sensitive_data: dict[str, str | dict[str, str]] | None = None,
 		initial_actions: list[dict[str, dict[str, Any]]] | None = None,
@@ -310,6 +311,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Enforce screenshot exclusion when use_vision != 'auto', even if user passed custom tools
 		if use_vision != 'auto':
 			self.tools.exclude_action('screenshot')
+
+		# Handle skills vs skill_ids parameter (skills takes precedence)
+		if skills and skill_ids:
+			raise ValueError('Cannot specify both "skills" and "skill_ids" parameters. Use "skills" for the cleaner API.')
+		skill_ids = skills or skill_ids
 
 		# Skills integration
 		self.skill_service = None

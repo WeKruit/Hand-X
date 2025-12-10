@@ -1,0 +1,82 @@
+---
+title: "Basics"
+description: "Describe what you need. We magically build the API. Browser Use calls it. Automatically."
+icon: "sparkles"
+---
+
+Skills are deterministic, cheap APIs that you can build yourself. To learn more visit [docs.cloud.browser-use.com/concepts/skills](https://docs.cloud.browser-use.com/concepts/skills)
+
+<Note>
+Get your API key at [cloud.browser-use.com/new-api-key](https://cloud.browser-use.com/new-api-key) - new signups get $10 free.
+</Note>
+
+## Quick Example
+
+Add your API key to `.env`:
+
+```bash .env
+BROWSER_USE_API_KEY=your-api-key
+```
+
+Load `['*']` for all skills or specific skill IDs from [cloud.browser-use.com/skills](https://cloud.browser-use.com/skills).
+
+```python
+from browser_use import Agent, ChatBrowserUse
+
+agent = Agent(
+    task='Your task',
+    skills=['*'],  # All skills
+    # or
+    skills=['skill-uuid-1', 'skill-uuid-2'],  # Specific skills
+    llm=ChatBrowserUse()
+)
+
+await agent.run()
+```
+
+## Cookie Handling
+
+Cookies are automatically injected from your browser:
+
+```python
+agent = Agent(
+    task='Post a tweet saying "Hello World"',
+    skills=['tweet-poster-skill-id'],
+    llm=ChatBrowserUse()
+)
+
+# Agent navigates to twitter.com, logs in if needed,
+# extracts cookies, and passes them to the skill automatically
+await agent.run()
+```
+
+If cookies are missing, the LLM sees which cookies are needed and navigates to obtain them.
+
+---
+
+## Full Example
+
+```python
+from browser_use import Agent, ChatBrowserUse
+from dotenv import load_dotenv
+import asyncio
+
+load_dotenv()
+
+async def main():
+    agent = Agent(
+        task='Analyze TikTak and Instegram profiles',
+        skills=[
+            'a582eb44-e4e2-4c55-acc2-2f5a875e35e9',  # TikTak Profile Scraper
+            'f8d91c2a-3b4e-4f7d-9a1e-6c8e2d3f4a5b',  # Instegram Profile Scraper
+        ],
+        llm=ChatBrowserUse()
+    )
+
+    await agent.run()
+    await agent.close()
+
+asyncio.run(main())
+```
+
+Browse and create skills at [cloud.browser-use.com/skills](https://cloud.browser-use.com/skills).
