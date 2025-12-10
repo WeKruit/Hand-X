@@ -1,33 +1,26 @@
-"""
-Simple try of the agent.
-
-@dev You need to add OPENAI_API_KEY to your environment variables.
-"""
-
 import asyncio
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from dotenv import load_dotenv
 
-from browser_use import Agent, ChatOpenAI
+from browser_use import Agent
 
 load_dotenv()
 
-from lmnr import Laminar
 
-Laminar.initialize()
+async def run_search():
+	agent = Agent(
+		# llm=llm,
+		task='How many stars does the browser-use repo have?',
+		flash_mode=True,
+		skills=['502af156-2a75-4b4e-816d-b2dc138b6647'],  # skill for fetching the number of stars of any Github repository
+	)
 
-# All the models are type safe from OpenAI in case you need a list of supported models
-llm = ChatOpenAI(model='gpt-5-mini')
-agent = Agent(
-	llm=llm,
-	task='How many stars does the browser-use repo have? (please use the skill)',
-	skill_ids=['*'],
-)
-
-
-async def main():
-	await agent.run(max_steps=20)
-	input('Press Enter to continue...')
+	await agent.run()
 
 
-asyncio.run(main())
+if __name__ == '__main__':
+	asyncio.run(run_search())
