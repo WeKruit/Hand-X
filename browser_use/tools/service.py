@@ -110,6 +110,7 @@ class Tools(Generic[Context]):
 	):
 		self.registry = Registry[Context](exclude_actions if exclude_actions is not None else [])
 		self.display_files_in_done_text = display_files_in_done_text
+		self._output_model: type[BaseModel] | None = output_model
 
 		"""Register all default browser actions"""
 
@@ -846,7 +847,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 							completed_scrolls += 1
 
 							# Small delay to ensure scroll completes before next one
-							await asyncio.sleep(0.3)
+							await asyncio.sleep(0.15)
 
 						except Exception as e:
 							logger.warning(f'Scroll {i + 1}/{num_full_pages} failed: {e}')
@@ -1336,7 +1337,12 @@ Validated Code (after quote fixing):
 				)
 
 	def use_structured_output_action(self, output_model: type[T]):
+		self._output_model = output_model
 		self._register_done_action(output_model)
+
+	def get_output_model(self) -> type[BaseModel] | None:
+		"""Get the output model if structured output is configured."""
+		return self._output_model
 
 	# Register ---------------------------------------------------------------
 
