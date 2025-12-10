@@ -8,7 +8,7 @@ import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, TypeVar, cast
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -305,8 +305,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					f'({tools_output_model.__name__}). Using Agent output_model_schema.'
 				)
 		elif output_model_schema is None and tools_output_model is not None:
-			# Only tools has it - use that
-			output_model_schema = tools_output_model
+			# Only tools has it - use that (cast is safe: both are BaseModel subclasses)
+			output_model_schema = cast(type[AgentStructuredOutput], tools_output_model)
 		self.output_model_schema = output_model_schema
 		if self.output_model_schema is not None:
 			self.tools.use_structured_output_action(self.output_model_schema)
