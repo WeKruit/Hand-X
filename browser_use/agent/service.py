@@ -438,6 +438,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		is_anthropic = isinstance(self.llm, ChatAnthropic)
 
+		# Check if model is a browser-use fine-tuned model (uses simplified prompts)
+		is_browser_use_model = 'browser-use/' in self.llm.model.lower()
+
 		# Initialize message manager with state
 		# Initial system prompt with all actions - will be updated during each step
 		self._message_manager = MessageManager(
@@ -449,6 +452,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				use_thinking=self.settings.use_thinking,
 				flash_mode=self.settings.flash_mode,
 				is_anthropic=is_anthropic,
+				is_browser_use_model=is_browser_use_model,
 			).get_system_message(),
 			file_system=self.file_system,
 			state=self.state.message_manager_state,
