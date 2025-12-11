@@ -422,17 +422,22 @@ class MessageManager:
 
 	def _set_message_with_type(self, message: BaseMessage, message_type: Literal['system', 'state']) -> None:
 		"""Replace a specific state message slot with a new message"""
-		# Don't filter system and state messages - they should contain placeholder tags or normal conversation
+		# System messages don't need filtering - they only contain instructions/placeholders
+		# State messages need filtering - they include agent_history_description which contains
+		# action results with real sensitive values (after placeholder replacement during execution)
 		if message_type == 'system':
 			self.state.history.system_message = message
 		elif message_type == 'state':
+			if self.sensitive_data:
+				message = self._filter_sensitive_data(message)
 			self.state.history.state_message = message
 		else:
 			raise ValueError(f'Invalid state message type: {message_type}')
 
 	def _add_context_message(self, message: BaseMessage) -> None:
 		"""Add a contextual message specific to this step (e.g., validation errors, retry instructions, timeout warnings)"""
-		# Don't filter context messages - they should contain normal conversation or error messages
+		# Context messages typically contain error messages and validation info, not action results
+		# with sensitive data, so filtering is not needed here
 		self.state.history.context_messages.append(message)
 
 	@time_execution_sync('--filter_sensitive_data')
