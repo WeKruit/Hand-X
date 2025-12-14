@@ -8,8 +8,11 @@ import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Generic, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, cast
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+	from browser_use.skills.views import Skill
 
 from dotenv import load_dotenv
 
@@ -22,6 +25,7 @@ from browser_use.agent.cloud_events import (
 )
 from browser_use.agent.message_manager.utils import save_conversation
 from browser_use.llm.base import BaseChatModel
+from browser_use.llm.exceptions import ModelProviderError, ModelRateLimitError
 from browser_use.llm.messages import BaseMessage, ContentPartImageParam, ContentPartTextParam, UserMessage
 from browser_use.tokens.service import TokenCost
 
@@ -133,6 +137,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		browser: Browser | None = None,  # Alias for browser_session
 		tools: Tools[Context] | None = None,
 		controller: Tools[Context] | None = None,  # Alias for tools
+		# Skills integration
+		skill_ids: list[str | Literal['*']] | None = None,
+		skills: list[str | Literal['*']] | None = None,  # Alias for skill_ids
 		# Initial agent run parameters
 		sensitive_data: dict[str, str | dict[str, str]] | None = None,
 		initial_actions: list[dict[str, dict[str, Any]]] | None = None,
@@ -166,6 +173,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		demo_mode: bool | None = None,
 		max_history_items: int | None = None,
 		page_extraction_llm: BaseChatModel | None = None,
+		fallback_llm: BaseChatModel | None = None,
 		use_judge: bool = True,
 		ground_truth: str | None = None,
 		judge_llm: BaseChatModel | None = None,
@@ -279,13 +287,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Initialize available file paths as direct attribute
 		self.available_file_paths = available_file_paths
 
-		# Core components
-		self.task = self._enhance_task_with_schema(task, output_model_schema)
-		self.llm = llm
-		self.judge_llm = judge_llm
-		self.directly_open_url = directly_open_url
-		self.include_recent_events = include_recent_events
-		self._url_shortening_limit = _url_shortening_limit
+		# Set up tools first (needed to detect output_model_schema)
 		if tools is not None:
 			self.tools = tools
 		elif controller is not None:
@@ -299,10 +301,55 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if use_vision != 'auto':
 			self.tools.exclude_action('screenshot')
 
-		# Structured output
+		# Enable coordinate clicking for models that support it
+		model_name = getattr(llm, 'model', '').lower()
+		supports_coordinate_clicking = any(
+			pattern in model_name for pattern in ['claude-sonnet-4', 'claude-opus-4', 'gemini-3-pro', 'browser-use/']
+		)
+		if supports_coordinate_clicking:
+			self.tools.set_coordinate_clicking(True)
+
+		# Handle skills vs skill_ids parameter (skills takes precedence)
+		if skills and skill_ids:
+			raise ValueError('Cannot specify both "skills" and "skill_ids" parameters. Use "skills" for the cleaner API.')
+		skill_ids = skills or skill_ids
+
+		# Skills integration
+		self.skill_service = None
+		self._skills_registered = False
+		if skill_ids:
+			from browser_use.skills import SkillService
+
+			self.skill_service = SkillService(skill_ids=skill_ids)
+
+		# Structured output - use explicit param or detect from tools
+		tools_output_model = self.tools.get_output_model()
+		if output_model_schema is not None and tools_output_model is not None:
+			# Both provided - warn if they differ
+			if output_model_schema is not tools_output_model:
+				logger.warning(
+					f'output_model_schema ({output_model_schema.__name__}) differs from Tools output_model '
+					f'({tools_output_model.__name__}). Using Agent output_model_schema.'
+				)
+		elif output_model_schema is None and tools_output_model is not None:
+			# Only tools has it - use that (cast is safe: both are BaseModel subclasses)
+			output_model_schema = cast(type[AgentStructuredOutput], tools_output_model)
 		self.output_model_schema = output_model_schema
 		if self.output_model_schema is not None:
 			self.tools.use_structured_output_action(self.output_model_schema)
+
+		# Core components - task enhancement now has access to output_model_schema from tools
+		self.task = self._enhance_task_with_schema(task, output_model_schema)
+		self.llm = llm
+		self.judge_llm = judge_llm
+
+		# Fallback LLM configuration
+		self._fallback_llm: BaseChatModel | None = fallback_llm
+		self._using_fallback_llm: bool = False
+		self._original_llm: BaseChatModel = llm  # Store original for reference
+		self.directly_open_url = directly_open_url
+		self.include_recent_events = include_recent_events
+		self._url_shortening_limit = _url_shortening_limit
 
 		self.sensitive_data = sensitive_data
 
@@ -380,9 +427,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.logger.warning('⚠️ DeepSeek models do not support use_vision=True yet. Setting use_vision=False for now...')
 			self.settings.use_vision = False
 
-		# Handle users trying to use use_vision=True with XAI models
-		if 'grok' in self.llm.model.lower():
-			self.logger.warning('⚠️ XAI models do not support use_vision=True yet. Setting use_vision=False for now...')
+		# Handle users trying to use use_vision=True with XAI models that don't support it
+		# grok-3 variants and grok-code don't support vision; grok-2 and grok-4 do
+		model_lower = self.llm.model.lower()
+		if 'grok-3' in model_lower or 'grok-code' in model_lower:
+			self.logger.warning('⚠️ This XAI model does not support use_vision=True yet. Setting use_vision=False for now...')
 			self.settings.use_vision = False
 
 		logger.debug(
@@ -399,6 +448,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		is_anthropic = isinstance(self.llm, ChatAnthropic)
 
+		# Check if model is a browser-use fine-tuned model (uses simplified prompts)
+		is_browser_use_model = 'browser-use/' in self.llm.model.lower()
+
 		# Initialize message manager with state
 		# Initial system prompt with all actions - will be updated during each step
 		self._message_manager = MessageManager(
@@ -410,6 +462,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				use_thinking=self.settings.use_thinking,
 				flash_mode=self.settings.flash_mode,
 				is_anthropic=is_anthropic,
+				is_browser_use_model=is_browser_use_model,
 			).get_system_message(),
 			file_system=self.file_system,
 			state=self.state.message_manager_state,
@@ -524,19 +577,30 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	@property
 	def logger(self) -> logging.Logger:
 		"""Get instance-specific logger with task ID in the name"""
-
-		_browser_session_id = self.browser_session.id if self.browser_session else '----'
+		# logger may be called in __init__ so we don't assume self.* attributes have been initialized
+		_task_id = task_id[-4:] if (task_id := getattr(self, 'task_id', None)) else '----'
+		_browser_session_id = browser_session.id[-4:] if (browser_session := getattr(self, 'browser_session', None)) else '----'
 		_current_target_id = (
-			self.browser_session.agent_focus_target_id[-2:]
-			if self.browser_session and self.browser_session.agent_focus_target_id
+			browser_session.agent_focus_target_id[-2:]
+			if (browser_session := getattr(self, 'browser_session', None)) and browser_session.agent_focus_target_id
 			else '--'
 		)
-		return logging.getLogger(f'browser_use.Agent🅰 {self.task_id[-4:]} ⇢ 🅑 {_browser_session_id[-4:]} 🅣 {_current_target_id}')
+		return logging.getLogger(f'browser_use.Agent🅰 {_task_id} ⇢ 🅑 {_browser_session_id} 🅣 {_current_target_id}')
 
 	@property
 	def browser_profile(self) -> BrowserProfile:
 		assert self.browser_session is not None, 'BrowserSession is not set up'
 		return self.browser_session.browser_profile
+
+	@property
+	def is_using_fallback_llm(self) -> bool:
+		"""Check if the agent is currently using the fallback LLM."""
+		return self._using_fallback_llm
+
+	@property
+	def current_llm_model(self) -> str:
+		"""Get the model name of the currently active LLM."""
+		return self.llm.model if hasattr(self.llm, 'model') else 'unknown'
 
 	async def _check_and_update_downloads(self, context: str = '') -> None:
 		"""Check for new downloads and update available file paths."""
@@ -677,6 +741,202 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		else:
 			self.DoneAgentOutput = AgentOutput.type_with_custom_actions_no_thinking(self.DoneActionModel)
 
+	def _get_skill_slug(self, skill: 'Skill', all_skills: list['Skill']) -> str:
+		"""Generate a clean slug from skill title for action names
+
+		Converts title to lowercase, removes special characters, replaces spaces with underscores.
+		Adds UUID suffix if there are duplicate slugs.
+
+		Args:
+			skill: The skill to get slug for
+			all_skills: List of all skills to check for duplicates
+
+		Returns:
+			Slug like "cloned_github_stars_tracker" or "get_weather_data_a1b2" if duplicate
+
+		Examples:
+			"[Cloned] Github Stars Tracker" -> "cloned_github_stars_tracker"
+			"Get Weather Data" -> "get_weather_data"
+		"""
+		import re
+
+		# Remove special characters and convert to lowercase
+		slug = re.sub(r'[^\w\s]', '', skill.title.lower())
+		# Replace whitespace and hyphens with underscores
+		slug = re.sub(r'[\s\-]+', '_', slug)
+		# Remove leading/trailing underscores
+		slug = slug.strip('_')
+
+		# Check for duplicates and add UUID suffix if needed
+		same_slug_count = sum(
+			1 for s in all_skills if re.sub(r'[\s\-]+', '_', re.sub(r'[^\w\s]', '', s.title.lower()).strip('_')) == slug
+		)
+		if same_slug_count > 1:
+			return f'{slug}_{skill.id[:4]}'
+		else:
+			return slug
+
+	async def _register_skills_as_actions(self) -> None:
+		"""Register each skill as a separate action using slug as action name"""
+		if not self.skill_service or self._skills_registered:
+			return
+
+		self.logger.info('🔧 Registering skill actions...')
+
+		# Fetch all skills (auto-initializes if needed)
+		skills = await self.skill_service.get_all_skills()
+
+		if not skills:
+			self.logger.warning('No skills loaded from SkillService')
+			return
+
+		# Register each skill as its own action
+		for skill in skills:
+			slug = self._get_skill_slug(skill, skills)
+			param_model = skill.parameters_pydantic(exclude_cookies=True)
+
+			# Create description with skill title in quotes
+			description = f'{skill.description} (Skill: "{skill.title}")'
+
+			# Create handler for this specific skill
+			def make_skill_handler(skill_id: str):
+				async def skill_handler(params: BaseModel) -> ActionResult:
+					"""Execute a specific skill"""
+					assert self.skill_service is not None, 'SkillService not initialized'
+
+					# Convert parameters to dict
+					if isinstance(params, BaseModel):
+						skill_params = params.model_dump()
+					elif isinstance(params, dict):
+						skill_params = params
+					else:
+						return ActionResult(extracted_content=None, error=f'Invalid parameters type: {type(params)}')
+
+					# Get cookies from browser
+					_cookies = await self.browser_session.cookies()
+
+					try:
+						result = await self.skill_service.execute_skill(
+							skill_id=skill_id, parameters=skill_params, cookies=_cookies
+						)
+
+						if result.success:
+							return ActionResult(
+								extracted_content=str(result.result) if result.result else None,
+								error=None,
+							)
+						else:
+							return ActionResult(extracted_content=None, error=result.error or 'Skill execution failed')
+					except Exception as e:
+						# Check if it's a MissingCookieException
+						if type(e).__name__ == 'MissingCookieException':
+							# Format: "Missing cookies (name): description"
+							cookie_name = getattr(e, 'cookie_name', 'unknown')
+							cookie_description = getattr(e, 'cookie_description', str(e))
+							error_msg = f'Missing cookies ({cookie_name}): {cookie_description}'
+							return ActionResult(extracted_content=None, error=error_msg)
+						return ActionResult(extracted_content=None, error=f'Skill execution error: {type(e).__name__}: {e}')
+
+				return skill_handler
+
+			# Create the handler for this skill
+			handler = make_skill_handler(skill.id)
+			handler.__name__ = slug
+
+			# Register the action with the slug as the action name
+			self.tools.registry.action(description=description, param_model=param_model)(handler)
+
+		# Mark as registered
+		self._skills_registered = True
+
+		# Rebuild action models to include the new skill actions
+		self._setup_action_models()
+
+		# Reconvert initial actions with the new ActionModel type if they exist
+		if self.initial_actions:
+			# Convert back to dict form first
+			initial_actions_dict = []
+			for action in self.initial_actions:
+				action_dump = action.model_dump(exclude_unset=True)
+				initial_actions_dict.append(action_dump)
+			# Reconvert using new ActionModel
+			self.initial_actions = self._convert_initial_actions(initial_actions_dict)
+
+		self.logger.info(f'✓ Registered {len(skills)} skill actions')
+
+	async def _get_unavailable_skills_info(self) -> str:
+		"""Get information about skills that are unavailable due to missing cookies
+
+		Returns:
+			Formatted string describing unavailable skills and how to make them available
+		"""
+		if not self.skill_service:
+			return ''
+
+		try:
+			# Get all skills
+			skills = await self.skill_service.get_all_skills()
+			if not skills:
+				return ''
+
+			# Get current cookies
+			current_cookies = await self.browser_session.cookies()
+			cookie_dict = {cookie['name']: cookie['value'] for cookie in current_cookies}
+
+			# Check each skill for missing required cookies
+			unavailable_skills: list[dict[str, Any]] = []
+
+			for skill in skills:
+				# Get cookie parameters for this skill
+				cookie_params = [p for p in skill.parameters if p.type == 'cookie']
+
+				if not cookie_params:
+					# No cookies needed, skip
+					continue
+
+				# Check for missing required cookies
+				missing_cookies: list[dict[str, str]] = []
+				for cookie_param in cookie_params:
+					is_required = cookie_param.required if cookie_param.required is not None else True
+
+					if is_required and cookie_param.name not in cookie_dict:
+						missing_cookies.append(
+							{'name': cookie_param.name, 'description': cookie_param.description or 'No description provided'}
+						)
+
+				if missing_cookies:
+					unavailable_skills.append(
+						{
+							'id': skill.id,
+							'title': skill.title,
+							'description': skill.description,
+							'missing_cookies': missing_cookies,
+						}
+					)
+
+			if not unavailable_skills:
+				return ''
+
+			# Format the unavailable skills info with slugs
+			lines = ['Unavailable Skills (missing required cookies):']
+			for skill_info in unavailable_skills:
+				# Get the full skill object to use the slug helper
+				skill_obj = next((s for s in skills if s.id == skill_info['id']), None)
+				slug = self._get_skill_slug(skill_obj, skills) if skill_obj else skill_info['title']
+				title = skill_info['title']
+
+				lines.append(f'\n  • {slug} ("{title}")')
+				lines.append(f'    Description: {skill_info["description"]}')
+				lines.append('    Missing cookies:')
+				for cookie in skill_info['missing_cookies']:
+					lines.append(f'      - {cookie["name"]}: {cookie["description"]}')
+
+			return '\n'.join(lines)
+
+		except Exception as e:
+			self.logger.error(f'Error getting unavailable skills info: {type(e).__name__}: {e}')
+			return ''
+
 	def add_new_task(self, new_task: str) -> None:
 		"""Add a new task to the agent, keeping the same task_id as tasks are continuous"""
 		# Simply delegate to message manager - no need for new task_id or events
@@ -775,6 +1035,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Page-specific actions will be included directly in the browser_state message
 		self.logger.debug(f'💬 Step {self.state.n_steps}: Creating state messages for context...')
 
+		# Get unavailable skills info if skills service is enabled
+		unavailable_skills_info = None
+		if self.skill_service is not None:
+			unavailable_skills_info = await self._get_unavailable_skills_info()
+
 		self._message_manager.create_state_messages(
 			browser_state_summary=browser_state_summary,
 			model_output=self.state.last_model_output,
@@ -784,6 +1049,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			page_filtered_actions=page_filtered_actions if page_filtered_actions else None,
 			sensitive_data=self.sensitive_data,
 			available_file_paths=self.available_file_paths,  # Always pass current available_file_paths
+			unavailable_skills_info=unavailable_skills_info,
 		)
 
 		await self._force_done_after_last_step(step_info)
@@ -930,6 +1196,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Log step completion summary
 		summary_message = self._log_step_completion_summary(self.step_start_time, self.state.last_result)
+		if summary_message:
+			await self._demo_mode_log(summary_message, 'info', {'step': self.state.n_steps})
 
 		# Save file system state after step completion
 		self.save_file_system_state()
@@ -1354,6 +1622,68 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		except ValidationError:
 			# Just re-raise - Pydantic's validation errors are already descriptive
 			raise
+		except (ModelRateLimitError, ModelProviderError) as e:
+			# Check if we can switch to a fallback LLM
+			if not self._try_switch_to_fallback_llm(e):
+				# No fallback available, re-raise the original error
+				raise
+			# Retry with the fallback LLM
+			return await self.get_model_output(input_messages)
+
+	def _try_switch_to_fallback_llm(self, error: ModelRateLimitError | ModelProviderError) -> bool:
+		"""
+		Attempt to switch to a fallback LLM after a rate limit or provider error.
+
+		Returns True if successfully switched to a fallback, False if no fallback available.
+		Once switched, the agent will use the fallback LLM for the rest of the run.
+		"""
+		# Already using fallback - can't switch again
+		if self._using_fallback_llm:
+			self.logger.warning(
+				f'⚠️ Fallback LLM also failed ({type(error).__name__}: {error.message}), no more fallbacks available'
+			)
+			return False
+
+		# Check if error is retryable (rate limit, auth errors, or server errors)
+		# 401: API key invalid/expired - fallback to different provider
+		# 402: Insufficient credits/payment required - fallback to different provider
+		# 429: Rate limit exceeded
+		# 500, 502, 503, 504: Server errors
+		retryable_status_codes = {401, 402, 429, 500, 502, 503, 504}
+		is_retryable = isinstance(error, ModelRateLimitError) or (
+			hasattr(error, 'status_code') and error.status_code in retryable_status_codes
+		)
+
+		if not is_retryable:
+			return False
+
+		# Check if we have a fallback LLM configured
+		if self._fallback_llm is None:
+			self.logger.warning(f'⚠️ LLM error ({type(error).__name__}: {error.message}) but no fallback_llm configured')
+			return False
+
+		self._log_fallback_switch(error, self._fallback_llm)
+
+		# Switch to the fallback LLM
+		self.llm = self._fallback_llm
+		self._using_fallback_llm = True
+
+		# Register the fallback LLM for token cost tracking
+		self.token_cost_service.register_llm(self._fallback_llm)
+
+		return True
+
+	def _log_fallback_switch(self, error: ModelRateLimitError | ModelProviderError, fallback: BaseChatModel) -> None:
+		"""Log when switching to a fallback LLM."""
+		original_model = self._original_llm.model if hasattr(self._original_llm, 'model') else 'unknown'
+		fallback_model = fallback.model if hasattr(fallback, 'model') else 'unknown'
+		error_type = type(error).__name__
+		status_code = getattr(error, 'status_code', 'N/A')
+
+		self.logger.warning(
+			f'⚠️ Primary LLM ({original_model}) failed with {error_type} (status={status_code}), '
+			f'switching to fallback LLM ({fallback_model})'
+		)
 
 	async def _log_agent_run(self) -> None:
 		"""Log the agent run"""
@@ -1768,6 +2098,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if on_step_start is not None:
 			await on_step_start(self)
 
+		await self._demo_mode_log(
+			f'Starting step {step + 1}/{max_steps}',
+			'info',
+			{'step': step + 1, 'total_steps': max_steps},
+		)
+
 		self.logger.debug(f'🚶 Starting step {step + 1}/{max_steps}...')
 
 		try:
@@ -1873,6 +2209,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					'info',
 					{'tag': 'status'},
 				)
+
+			# Register skills as actions if SkillService is configured
+			await self._register_skills_as_actions()
 
 			# Normally there was no try catch here but the callback can raise an InterruptedError
 			try:
@@ -2253,6 +2592,111 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				long_term_memory=f'Rerun completed: {success_count} steps succeeded, {error_count} errors',
 			)
 
+	async def _execute_ai_step(
+		self,
+		query: str,
+		include_screenshot: bool = False,
+		extract_links: bool = False,
+		ai_step_llm: BaseChatModel | None = None,
+	) -> ActionResult:
+		"""
+		Execute an AI step during rerun to re-evaluate extract actions.
+		Analyzes full page DOM/markdown + optional screenshot.
+
+		Args:
+			query: What to analyze or extract from the current page
+			include_screenshot: Whether to include screenshot in analysis
+			extract_links: Whether to include links in markdown extraction
+			ai_step_llm: Optional LLM to use. If not provided, uses agent's LLM
+
+		Returns:
+			ActionResult with extracted content
+		"""
+		from browser_use.agent.prompts import get_ai_step_system_prompt, get_ai_step_user_prompt, get_rerun_summary_message
+		from browser_use.llm.messages import SystemMessage, UserMessage
+		from browser_use.utils import sanitize_surrogates
+
+		# Use provided LLM or agent's LLM
+		llm = ai_step_llm or self.llm
+		self.logger.debug(f'Using LLM for AI step: {llm.model}')
+
+		# Extract clean markdown
+		try:
+			from browser_use.dom.markdown_extractor import extract_clean_markdown
+
+			content, content_stats = await extract_clean_markdown(
+				browser_session=self.browser_session, extract_links=extract_links
+			)
+		except Exception as e:
+			return ActionResult(error=f'Could not extract clean markdown: {type(e).__name__}: {e}')
+
+		# Get screenshot if requested
+		screenshot_b64 = None
+		if include_screenshot:
+			try:
+				screenshot = await self.browser_session.take_screenshot(full_page=False)
+				if screenshot:
+					import base64
+
+					screenshot_b64 = base64.b64encode(screenshot).decode('utf-8')
+			except Exception as e:
+				self.logger.warning(f'Failed to capture screenshot for ai_step: {e}')
+
+		# Build prompt with content stats
+		original_html_length = content_stats['original_html_chars']
+		initial_markdown_length = content_stats['initial_markdown_chars']
+		final_filtered_length = content_stats['final_filtered_chars']
+		chars_filtered = content_stats['filtered_chars_removed']
+
+		stats_summary = f"""Content processed: {original_html_length:,} HTML chars → {initial_markdown_length:,} initial markdown → {final_filtered_length:,} filtered markdown"""
+		if chars_filtered > 0:
+			stats_summary += f' (filtered {chars_filtered:,} chars of noise)'
+
+		# Sanitize content
+		content = sanitize_surrogates(content)
+		query = sanitize_surrogates(query)
+
+		# Get prompts from prompts.py
+		system_prompt = get_ai_step_system_prompt()
+		prompt_text = get_ai_step_user_prompt(query, stats_summary, content)
+
+		# Build user message with optional screenshot
+		if screenshot_b64:
+			user_message = get_rerun_summary_message(prompt_text, screenshot_b64)
+		else:
+			user_message = UserMessage(content=prompt_text)
+
+		try:
+			import asyncio
+
+			response = await asyncio.wait_for(llm.ainvoke([SystemMessage(content=system_prompt), user_message]), timeout=120.0)
+
+			current_url = await self.browser_session.get_current_page_url()
+			extracted_content = (
+				f'<url>\n{current_url}\n</url>\n<query>\n{query}\n</query>\n<result>\n{response.completion}\n</result>'
+			)
+
+			# Simple memory handling
+			MAX_MEMORY_LENGTH = 1000
+			if len(extracted_content) < MAX_MEMORY_LENGTH:
+				memory = extracted_content
+				include_extracted_content_only_once = False
+			else:
+				file_name = await self.file_system.save_extracted_content(extracted_content)
+				memory = f'Query: {query}\nContent in {file_name} and once in <read_state>.'
+				include_extracted_content_only_once = True
+
+			self.logger.info(f'🤖 AI Step: {memory}')
+			return ActionResult(
+				extracted_content=extracted_content,
+				include_extracted_content_only_once=include_extracted_content_only_once,
+				long_term_memory=memory,
+			)
+		except Exception as e:
+			self.logger.warning(f'Failed to execute AI step: {e.__class__.__name__}: {e}')
+			self.logger.debug('Full error traceback:', exc_info=True)
+			return ActionResult(error=f'AI step failed: {e}')
+
 	async def rerun_history(
 		self,
 		history: AgentHistoryList,
@@ -2260,6 +2704,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		skip_failures: bool = True,
 		delay_between_actions: float = 2.0,
 		summary_llm: BaseChatModel | None = None,
+		ai_step_llm: BaseChatModel | None = None,
 	) -> list[ActionResult]:
 		"""
 		Rerun a saved history of actions with error handling and retry logic.
@@ -2270,6 +2715,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		                skip_failures: Whether to skip failed actions or stop execution
 		                delay_between_actions: Delay between actions in seconds
 		                summary_llm: Optional LLM to use for generating the final summary. If not provided, uses the agent's LLM
+		                ai_step_llm: Optional LLM to use for AI steps (extract actions). If not provided, uses the agent's LLM
 
 		Returns:
 		                List of action results (including AI summary as the final result)
@@ -2318,7 +2764,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			retry_count = 0
 			while retry_count < max_retries:
 				try:
-					result = await self._execute_history_step(history_item, step_delay)
+					result = await self._execute_history_step(history_item, step_delay, ai_step_llm)
 					results.extend(result)
 					break
 
@@ -2391,28 +2837,66 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.logger.debug('📝 Saved initial actions to history as step 0')
 			self.logger.debug('Initial actions completed')
 
-	async def _execute_history_step(self, history_item: AgentHistory, delay: float) -> list[ActionResult]:
-		"""Execute a single step from history with element validation"""
+	async def _execute_history_step(
+		self, history_item: AgentHistory, delay: float, ai_step_llm: BaseChatModel | None = None
+	) -> list[ActionResult]:
+		"""Execute a single step from history with element validation.
+
+		For extract actions, uses AI to re-evaluate the content since page content may have changed.
+		"""
 		assert self.browser_session is not None, 'BrowserSession is not set up'
 
 		await asyncio.sleep(delay)
 		state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
 		if not state or not history_item.model_output:
 			raise ValueError('Invalid state or model output')
-		updated_actions = []
+
+		results = []
+		pending_actions = []
+
 		for i, action in enumerate(history_item.model_output.action):
-			updated_action = await self._update_action_indices(
-				history_item.state.interacted_element[i],
-				action,
-				state,
-			)
-			updated_actions.append(updated_action)
+			# Check if this is an extract action - use AI step instead
+			action_data = action.model_dump(exclude_unset=True)
+			action_name = next(iter(action_data.keys()), None)
 
-			if updated_action is None:
-				raise ValueError(f'Could not find matching element {i} in current page')
+			if action_name == 'extract':
+				# Execute any pending actions first to maintain correct order
+				# (e.g., if step is [click, extract], click must happen before extract)
+				if pending_actions:
+					batch_results = await self.multi_act(pending_actions)
+					results.extend(batch_results)
+					pending_actions = []
 
-		result = await self.multi_act(updated_actions)
-		return result
+				# Now execute AI step for extract action
+				extract_params = action_data['extract']
+				query = extract_params.get('query', '')
+				extract_links = extract_params.get('extract_links', False)
+
+				self.logger.info(f'🤖 Using AI step for extract action: {query[:50]}...')
+				ai_result = await self._execute_ai_step(
+					query=query,
+					include_screenshot=False,  # Match original extract behavior
+					extract_links=extract_links,
+					ai_step_llm=ai_step_llm,
+				)
+				results.append(ai_result)
+			else:
+				# For non-extract actions, update indices and collect for batch execution
+				updated_action = await self._update_action_indices(
+					history_item.state.interacted_element[i],
+					action,
+					state,
+				)
+				if updated_action is None:
+					raise ValueError(f'Could not find matching element {i} in current page')
+				pending_actions.append(updated_action)
+
+		# Execute any remaining pending actions
+		if pending_actions:
+			batch_results = await self.multi_act(pending_actions)
+			results.extend(batch_results)
+
+		return results
 
 	async def _update_action_indices(
 		self,
@@ -2548,6 +3032,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					# Kill the browser session - this dispatches BrowserStopEvent,
 					# stops the EventBus with clear=True, and recreates a fresh EventBus
 					await self.browser_session.kill()
+
+			# Close skill service if configured
+			if self.skill_service is not None:
+				await self.skill_service.close()
 
 			# Force garbage collection
 			gc.collect()
