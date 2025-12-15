@@ -57,7 +57,9 @@ class ChatBrowserUse(BaseChatModel):
 		Initialize ChatBrowserUse client.
 
 		Args:
-			model: Model name to use. Options: 'bu-latest', 'bu-1-0'. Defaults to 'bu-latest'.
+			model: Model name to use. Options:
+				- 'bu-latest' or 'bu-1-0': Default model
+				- 'browser-use/bu-30b-a3b-preview': Browser Use Open Source Model
 			api_key: API key for browser-use cloud. Defaults to BROWSER_USE_API_KEY env var.
 			base_url: Base URL for the API. Defaults to BROWSER_USE_LLM_URL env var or production URL.
 			timeout: Request timeout in seconds.
@@ -65,12 +67,18 @@ class ChatBrowserUse(BaseChatModel):
 			retry_base_delay: Base delay in seconds for exponential backoff (default: 1.0).
 			retry_max_delay: Maximum delay in seconds between retries (default: 60.0).
 		"""
-		# Validate model name
+		# Validate model name - allow bu-* and browser-use/* patterns
 		valid_models = ['bu-latest', 'bu-1-0']
-		if model not in valid_models:
-			raise ValueError(f"Invalid model: '{model}'. Must be one of {valid_models}")
+		is_valid = model in valid_models or model.startswith('browser-use/')
+		if not is_valid:
+			raise ValueError(f"Invalid model: '{model}'. Must be one of {valid_models} or start with 'browser-use/'")
 
-		self.model = 'bu-1-0' if model == 'bu-latest' else model  # must update on new model releases
+		# Normalize bu-latest to bu-1-0 for default models
+		if model == 'bu-latest':
+			self.model = 'bu-1-0'
+		else:
+			self.model = model
+
 		self.fast = False
 		self.api_key = api_key or os.getenv('BROWSER_USE_API_KEY')
 		self.base_url = base_url or os.getenv('BROWSER_USE_LLM_URL', 'https://llm.api.browser-use.com')
@@ -125,6 +133,7 @@ class ChatBrowserUse(BaseChatModel):
 
 		# Prepare request payload
 		payload = {
+			'model': self.model,
 			'messages': [self._serialize_message(msg) for msg in messages],
 			'fast': self.fast,
 			'request_type': request_type,
