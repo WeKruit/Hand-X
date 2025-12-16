@@ -1599,7 +1599,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Build kwargs for ainvoke
 		# Note: ChatBrowserUse will automatically generate action descriptions from output_format schema
-		kwargs: dict = {'output_format': self.AgentOutput}
+		kwargs: dict = {'output_format': self.AgentOutput, 'session_id': self.session_id}
 
 		try:
 			response = await self.llm.ainvoke(input_messages, **kwargs)
