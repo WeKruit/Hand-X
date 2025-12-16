@@ -19,7 +19,7 @@ except ImportError:
 
 # Point to local llm-use server for testing
 llm = ChatBrowserUse(
-	model='browser-use/bu-30b-a3b-preview',
+	model='browser-use/bu-30b-a3b-preview',  # BU Open Source Model!!
 )
 
 agent = Agent(
