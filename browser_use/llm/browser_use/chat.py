@@ -9,7 +9,7 @@ import asyncio
 import logging
 import os
 import random
-from typing import TypeVar, overload
+from typing import Any, TypeVar, overload
 
 import httpx
 from pydantic import BaseModel
@@ -103,17 +103,21 @@ class ChatBrowserUse(BaseChatModel):
 
 	@overload
 	async def ainvoke(
-		self, messages: list[BaseMessage], output_format: None = None, request_type: str = 'browser_agent'
+		self, messages: list[BaseMessage], output_format: None = None, request_type: str = 'browser_agent', **kwargs: Any
 	) -> ChatInvokeCompletion[str]: ...
 
 	@overload
 	async def ainvoke(
-		self, messages: list[BaseMessage], output_format: type[T], request_type: str = 'browser_agent'
+		self, messages: list[BaseMessage], output_format: type[T], request_type: str = 'browser_agent', **kwargs: Any
 	) -> ChatInvokeCompletion[T]: ...
 
 	@observe(name='chat_browser_use_ainvoke')
 	async def ainvoke(
-		self, messages: list[BaseMessage], output_format: type[T] | None = None, request_type: str = 'browser_agent'
+		self,
+		messages: list[BaseMessage],
+		output_format: type[T] | None = None,
+		request_type: str = 'browser_agent',
+		**kwargs: Any,
 	) -> ChatInvokeCompletion[T] | ChatInvokeCompletion[str]:
 		"""
 		Send request to browser-use cloud API.
@@ -122,6 +126,8 @@ class ChatBrowserUse(BaseChatModel):
 			messages: List of messages to send
 			output_format: Expected output format (Pydantic model)
 			request_type: Type of request - 'browser_agent' or 'judge'
+			**kwargs: Additional arguments, including:
+				- session_id: Session ID for sticky routing (same session → same container)
 
 		Returns:
 			ChatInvokeCompletion with structured response and usage info
@@ -131,14 +137,21 @@ class ChatBrowserUse(BaseChatModel):
 
 		anonymized_telemetry = CONFIG.ANONYMIZED_TELEMETRY
 
+		# Extract session_id from kwargs for sticky routing
+		session_id = kwargs.get('session_id')
+
 		# Prepare request payload
-		payload = {
+		payload: dict[str, Any] = {
 			'model': self.model,
 			'messages': [self._serialize_message(msg) for msg in messages],
 			'fast': self.fast,
 			'request_type': request_type,
 			'anonymized_telemetry': anonymized_telemetry,
 		}
+
+		# Add session_id for sticky routing if provided
+		if session_id:
+			payload['session_id'] = session_id
 
 		# Add output format schema if provided
 		if output_format is not None:
