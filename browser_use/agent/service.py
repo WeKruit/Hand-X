@@ -62,7 +62,7 @@ from browser_use.agent.views import (
 from browser_use.browser.session import DEFAULT_BROWSER_PROFILE
 from browser_use.browser.views import BrowserStateSummary
 from browser_use.config import CONFIG
-from browser_use.dom.views import DOMInteractedElement
+from browser_use.dom.views import DOMInteractedElement, MatchLevel
 from browser_use.filesystem.file_system import FileSystem
 from browser_use.observability import observe, observe_debug
 from browser_use.telemetry.service import ProductTelemetry
@@ -2914,36 +2914,52 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		Update action indices based on current page state.
 		Returns updated action or None if element cannot be found.
 
-		Matching strategy:
-		1. Try element_hash match (includes ax_name for uniqueness)
-		2. Fall back to XPath matching (for backwards compatibility with old history files)
+		Cascading matching strategy (tries each level in order):
+		1. EXACT: Full element_hash match (includes all attributes + ax_name)
+		2. STABLE: Hash with dynamic CSS classes filtered out (focus, hover, animation, etc.)
+		3. XPATH: XPath string match (structural position in DOM)
 		"""
 		if not historical_element or not browser_state_summary.dom_state.selector_map:
 			return action
 
 		selector_map = browser_state_summary.dom_state.selector_map
+		highlight_index: int | None = None
+		match_level: MatchLevel | None = None
 
-		# Strategy 1: Hash match (hash now includes ax_name for uniqueness)
-		highlight_index, current_element = next(
-			((idx, elem) for idx, elem in selector_map.items() if elem.element_hash == historical_element.element_hash),
-			(None, None),
-		)
+		# Level 1: EXACT hash match
+		for idx, elem in selector_map.items():
+			if elem.element_hash == historical_element.element_hash:
+				highlight_index = idx
+				match_level = MatchLevel.EXACT
+				break
 
-		# Strategy 2: XPath fallback (for backwards compatibility with old history files)
-		if current_element is None and historical_element.x_path:
+		# Level 2: STABLE hash match (dynamic classes filtered)
+		# Use stored stable_hash (computed at save time from EnhancedDOMTreeNode - single source of truth)
+		if highlight_index is None and historical_element.stable_hash is not None:
 			for idx, elem in selector_map.items():
-				if elem.xpath == historical_element.x_path:
-					highlight_index, current_element = idx, elem
-					self.logger.debug(f'Found element via XPath fallback: {historical_element.x_path}')
+				if elem.compute_stable_hash() == historical_element.stable_hash:
+					highlight_index = idx
+					match_level = MatchLevel.STABLE
+					self.logger.info('Element matched at STABLE level (dynamic classes filtered)')
 					break
 
-		if not current_element or highlight_index is None:
+		# Level 3: XPATH match
+		if highlight_index is None and historical_element.x_path:
+			for idx, elem in selector_map.items():
+				if elem.xpath == historical_element.x_path:
+					highlight_index = idx
+					match_level = MatchLevel.XPATH
+					self.logger.info(f'Element matched at XPATH level: {historical_element.x_path}')
+					break
+
+		if highlight_index is None:
 			return None
 
 		old_index = action.get_index()
 		if old_index != highlight_index:
 			action.set_index(highlight_index)
-			self.logger.info(f'Element moved in DOM, updated index from {old_index} to {highlight_index}')
+			level_name = match_level.name if match_level else 'UNKNOWN'
+			self.logger.info(f'Element index updated {old_index} → {highlight_index} (matched at {level_name} level)')
 
 		return action
 
