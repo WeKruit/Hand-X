@@ -2913,20 +2913,29 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		"""
 		Update action indices based on current page state.
 		Returns updated action or None if element cannot be found.
+
+		Matching strategy:
+		1. Try element_hash match (includes ax_name for uniqueness)
+		2. Fall back to XPath matching (for backwards compatibility with old history files)
 		"""
 		if not historical_element or not browser_state_summary.dom_state.selector_map:
 			return action
 
-		# selector_hash_map = {hash(e): e for e in browser_state_summary.dom_state.selector_map.values()}
+		selector_map = browser_state_summary.dom_state.selector_map
 
+		# Strategy 1: Hash match (hash now includes ax_name for uniqueness)
 		highlight_index, current_element = next(
-			(
-				(highlight_index, element)
-				for highlight_index, element in browser_state_summary.dom_state.selector_map.items()
-				if element.element_hash == historical_element.element_hash
-			),
+			((idx, elem) for idx, elem in selector_map.items() if elem.element_hash == historical_element.element_hash),
 			(None, None),
 		)
+
+		# Strategy 2: XPath fallback (for backwards compatibility with old history files)
+		if current_element is None and historical_element.x_path:
+			for idx, elem in selector_map.items():
+				if elem.xpath == historical_element.x_path:
+					highlight_index, current_element = idx, elem
+					self.logger.debug(f'Found element via XPath fallback: {historical_element.x_path}')
+					break
 
 		if not current_element or highlight_index is None:
 			return None
