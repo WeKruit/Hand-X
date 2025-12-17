@@ -2701,7 +2701,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self,
 		history: AgentHistoryList,
 		max_retries: int = 3,
-		skip_failures: bool = True,
+		skip_failures: bool = False,
 		delay_between_actions: float = 2.0,
 		max_step_interval: float = 5.0,
 		summary_llm: BaseChatModel | None = None,
