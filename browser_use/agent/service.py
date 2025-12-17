@@ -2888,13 +2888,22 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				results.append(ai_result)
 			else:
 				# For non-extract actions, update indices and collect for batch execution
+				historical_elem = history_item.state.interacted_element[i]
 				updated_action = await self._update_action_indices(
-					history_item.state.interacted_element[i],
+					historical_elem,
 					action,
 					state,
 				)
 				if updated_action is None:
-					raise ValueError(f'Could not find matching element {i} in current page')
+					# Build informative error message
+					elem_info = self._format_element_for_error(historical_elem)
+					selector_count = len(state.dom_state.selector_map) if state.dom_state.selector_map else 0
+					raise ValueError(
+						f'Could not find matching element for action {i} in current page.\n'
+						f'  Looking for: {elem_info}\n'
+						f'  Page has {selector_count} interactive elements.\n'
+						f'  Tried: EXACT hash → STABLE hash → XPATH → ATTRIBUTE matching'
+					)
 				pending_actions.append(updated_action)
 
 		# Execute any remaining pending actions
@@ -2918,6 +2927,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		1. EXACT: Full element_hash match (includes all attributes + ax_name)
 		2. STABLE: Hash with dynamic CSS classes filtered out (focus, hover, animation, etc.)
 		3. XPATH: XPath string match (structural position in DOM)
+		4. ATTRIBUTE: Unique attribute match (name, id, aria-label) for old history files
 		"""
 		if not historical_element or not browser_state_summary.dom_state.selector_map:
 			return action
@@ -2926,12 +2936,21 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		highlight_index: int | None = None
 		match_level: MatchLevel | None = None
 
+		# Debug: log what we're looking for
+		self.logger.debug(
+			f'Searching for element: <{historical_element.node_name}> '
+			f'hash={historical_element.element_hash} stable_hash={historical_element.stable_hash}'
+		)
+
 		# Level 1: EXACT hash match
 		for idx, elem in selector_map.items():
 			if elem.element_hash == historical_element.element_hash:
 				highlight_index = idx
 				match_level = MatchLevel.EXACT
 				break
+
+		if highlight_index is None:
+			self.logger.debug(f'EXACT hash match failed (checked {len(selector_map)} elements)')
 
 		# Level 2: STABLE hash match (dynamic classes filtered)
 		# Use stored stable_hash (computed at save time from EnhancedDOMTreeNode - single source of truth)
@@ -2942,6 +2961,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					match_level = MatchLevel.STABLE
 					self.logger.info('Element matched at STABLE level (dynamic classes filtered)')
 					break
+			if highlight_index is None:
+				self.logger.debug('STABLE hash match failed')
+		elif highlight_index is None:
+			self.logger.debug('STABLE hash match skipped (no stable_hash in history)')
 
 		# Level 3: XPATH match
 		if highlight_index is None and historical_element.x_path:
@@ -2951,6 +2974,33 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					match_level = MatchLevel.XPATH
 					self.logger.info(f'Element matched at XPATH level: {historical_element.x_path}')
 					break
+			if highlight_index is None:
+				self.logger.debug(f'XPATH match failed for: {historical_element.x_path[-60:]}')
+
+		# Level 4: Unique attribute fallback (for old history files without stable_hash)
+		if highlight_index is None and historical_element.attributes:
+			hist_attrs = historical_element.attributes
+			hist_name = historical_element.node_name.lower()
+
+			# Try matching by unique identifiers: name, id, or aria-label
+			for attr_key in ['name', 'id', 'aria-label']:
+				if attr_key in hist_attrs and hist_attrs[attr_key]:
+					for idx, elem in selector_map.items():
+						if (
+							elem.node_name.lower() == hist_name
+							and elem.attributes
+							and elem.attributes.get(attr_key) == hist_attrs[attr_key]
+						):
+							highlight_index = idx
+							match_level = MatchLevel.XPATH  # Reuse XPATH level for logging
+							self.logger.info(f'Element matched via {attr_key} attribute: {hist_attrs[attr_key]}')
+							break
+					if highlight_index is not None:
+						break
+
+			if highlight_index is None:
+				tried_attrs = [k for k in ['name', 'id', 'aria-label'] if k in hist_attrs and hist_attrs[k]]
+				self.logger.debug(f'ATTRIBUTE match failed (tried: {tried_attrs})')
 
 		if highlight_index is None:
 			return None
@@ -2962,6 +3012,31 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.logger.info(f'Element index updated {old_index} → {highlight_index} (matched at {level_name} level)')
 
 		return action
+
+	def _format_element_for_error(self, elem: DOMInteractedElement | None) -> str:
+		"""Format element info for error messages during history rerun."""
+		if elem is None:
+			return '<no element recorded>'
+
+		parts = [f'<{elem.node_name}>']
+
+		# Add key identifying attributes
+		if elem.attributes:
+			for key in ['name', 'id', 'aria-label', 'type']:
+				if key in elem.attributes and elem.attributes[key]:
+					parts.append(f'{key}="{elem.attributes[key]}"')
+
+		# Add hash info
+		parts.append(f'hash={elem.element_hash}')
+		if elem.stable_hash:
+			parts.append(f'stable_hash={elem.stable_hash}')
+
+		# Add xpath (truncated)
+		if elem.x_path:
+			xpath_short = elem.x_path if len(elem.x_path) <= 60 else f'...{elem.x_path[-57:]}'
+			parts.append(f'xpath="{xpath_short}"')
+
+		return ' '.join(parts)
 
 	async def load_and_rerun(
 		self,
