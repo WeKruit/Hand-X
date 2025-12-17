@@ -758,7 +758,7 @@ class EnhancedDOMTreeNode:
 
 	def __hash__(self) -> int:
 		"""
-		Hash the element based on its parent branch path and attributes.
+		Hash the element based on its parent branch path, attributes, and accessibility name.
 
 		TODO: migrate this to use only backendNodeId + current SessionId
 		"""
@@ -771,8 +771,14 @@ class EnhancedDOMTreeNode:
 			f'{k}={v}' for k, v in sorted((k, v) for k, v in self.attributes.items() if k in STATIC_ATTRIBUTES)
 		)
 
-		# Combine both for final hash
-		combined_string = f'{parent_branch_path_string}|{attributes_string}'
+		# Include accessibility name (ax_name) if available - this helps distinguish
+		# elements that have identical structure and attributes but different visible text
+		ax_name = ''
+		if self.ax_node and self.ax_node.name:
+			ax_name = f'|ax_name={self.ax_node.name}'
+
+		# Combine all for final hash
+		combined_string = f'{parent_branch_path_string}|{attributes_string}{ax_name}'
 		element_hash = hashlib.sha256(combined_string.encode()).hexdigest()
 
 		# Convert to int for __hash__ return type - use first 16 chars and convert from hex to int
@@ -875,6 +881,9 @@ class DOMInteractedElement:
 
 	element_hash: int
 
+	# Accessibility name (visible text) - used for fallback matching when hash/xpath fail
+	ax_name: str | None = None
+
 	def to_dict(self) -> dict[str, Any]:
 		return {
 			'node_id': self.node_id,
@@ -887,10 +896,16 @@ class DOMInteractedElement:
 			'x_path': self.x_path,
 			'element_hash': self.element_hash,
 			'bounds': self.bounds.to_dict() if self.bounds else None,
+			'ax_name': self.ax_name,
 		}
 
 	@classmethod
 	def load_from_enhanced_dom_tree(cls, enhanced_dom_tree: EnhancedDOMTreeNode) -> 'DOMInteractedElement':
+		# Extract accessibility name if available
+		ax_name = None
+		if enhanced_dom_tree.ax_node and enhanced_dom_tree.ax_node.name:
+			ax_name = enhanced_dom_tree.ax_node.name
+
 		return cls(
 			node_id=enhanced_dom_tree.node_id,
 			backend_node_id=enhanced_dom_tree.backend_node_id,
@@ -902,4 +917,5 @@ class DOMInteractedElement:
 			bounds=enhanced_dom_tree.snapshot_node.bounds if enhanced_dom_tree.snapshot_node else None,
 			x_path=enhanced_dom_tree.xpath,
 			element_hash=hash(enhanced_dom_tree),
+			ax_name=ax_name,
 		)
