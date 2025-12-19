@@ -140,6 +140,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Skills integration
 		skill_ids: list[str | Literal['*']] | None = None,
 		skills: list[str | Literal['*']] | None = None,  # Alias for skill_ids
+		skill_service: Any | None = None,
 		# Initial agent run parameters
 		sensitive_data: dict[str, str | dict[str, str]] | None = None,
 		initial_actions: list[dict[str, dict[str, Any]]] | None = None,
@@ -314,10 +315,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			raise ValueError('Cannot specify both "skills" and "skill_ids" parameters. Use "skills" for the cleaner API.')
 		skill_ids = skills or skill_ids
 
-		# Skills integration
+		# Skills integration - use injected service or create from skill_ids
 		self.skill_service = None
 		self._skills_registered = False
-		if skill_ids:
+		if skill_service is not None:
+			self.skill_service = skill_service
+		elif skill_ids:
 			from browser_use.skills import SkillService
 
 			self.skill_service = SkillService(skill_ids=skill_ids)
