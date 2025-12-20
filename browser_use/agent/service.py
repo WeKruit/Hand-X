@@ -2984,11 +2984,23 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		highlight_index: int | None = None
 		match_level: MatchLevel | None = None
 
-		# Debug: log what we're looking for
-		self.logger.debug(
-			f'Searching for element: <{historical_element.node_name}> '
+		# Debug: log what we're looking for and what's available
+		self.logger.info(
+			f'🔍 Searching for element: <{historical_element.node_name}> '
 			f'hash={historical_element.element_hash} stable_hash={historical_element.stable_hash}'
 		)
+		# Log what elements are in selector_map for debugging
+		if historical_element.node_name:
+			hist_name = historical_element.node_name.lower()
+			matching_nodes = [
+				(idx, elem.node_name, elem.attributes.get('name') if elem.attributes else None)
+				for idx, elem in selector_map.items()
+				if elem.node_name.lower() == hist_name
+			]
+			self.logger.info(
+				f'🔍 Selector map has {len(selector_map)} elements, '
+				f'{len(matching_nodes)} are <{hist_name.upper()}>: {matching_nodes}'
+			)
 
 		# Level 1: EXACT hash match
 		for idx, elem in selector_map.items():
@@ -3054,8 +3066,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					for idx, elem in selector_map.items()
 					if elem.node_name.lower() == hist_name and elem.attributes
 				]
-				self.logger.debug(
-					f'ATTRIBUTE match failed for <{hist_name.upper()}> '
+				self.logger.info(
+					f'🔍 ATTRIBUTE match failed for <{hist_name.upper()}> '
 					f'(tried: {tried_attrs}, looking for: {[hist_attrs.get(k) for k in tried_attrs]}). '
 					f'Page has {len(same_node_elements)} <{hist_name.upper()}> elements with identifiers: '
 					f'{same_node_elements[:5]}{"..." if len(same_node_elements) > 5 else ""}'
