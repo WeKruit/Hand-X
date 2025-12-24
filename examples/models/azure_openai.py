@@ -31,13 +31,11 @@ from browser_use.llm import ChatAzureOpenAI
 api_key = os.getenv('AZURE_OPENAI_KEY')
 azure_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
 llm = ChatAzureOpenAI(
-	model='gpt-5.1-codex-mini',
-	api_key=api_key,
-	azure_endpoint=azure_endpoint,
+	model='gpt-5.1-codex-mini', api_key=api_key, azure_endpoint=azure_endpoint, api_version='2025-03-01-preview'
 )
 
 TASK = """
-Go to google.com/travel/flights and find the cheapest flight from New York to Paris on 2025-10-15
+Go to google.com/travel/flights and find the cheapest flight from New York to Paris on next Sunday
 """
 
 agent = Agent(
@@ -47,7 +45,7 @@ agent = Agent(
 
 
 async def main():
-	await agent.run(max_steps=10)
+	await agent.run(max_steps=25)
 
 
 asyncio.run(main())
