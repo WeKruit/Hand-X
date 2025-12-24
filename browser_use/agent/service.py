@@ -2709,6 +2709,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		max_step_interval: float = 45.0,
 		summary_llm: BaseChatModel | None = None,
 		ai_step_llm: BaseChatModel | None = None,
+		wait_for_elements: bool = False,
 	) -> list[ActionResult]:
 		"""
 		Rerun a saved history of actions with error handling and retry logic.
@@ -2723,6 +2724,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		                max_step_interval: Maximum delay from saved step_interval (caps LLM time from original run)
 		                summary_llm: Optional LLM to use for generating the final summary. If not provided, uses the agent's LLM
 		                ai_step_llm: Optional LLM to use for AI steps (extract actions). If not provided, uses the agent's LLM
+		                wait_for_elements: If True, wait for minimum number of elements before attempting element
+		                               matching. Useful for SPA pages where shadow DOM content loads dynamically.
+		                               Default is False.
 
 		Returns:
 		                List of action results (including AI summary as the final result)
@@ -2807,9 +2811,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 				retry_count = 0
 				step_succeeded = False
+				# Exponential backoff: 5s base, doubling each retry, capped at 30s
+				base_retry_delay = 5.0
+				max_retry_delay = 30.0
 				while retry_count < max_retries:
 					try:
-						result = await self._execute_history_step(history_item, step_delay, ai_step_llm)
+						result = await self._execute_history_step(history_item, step_delay, ai_step_llm, wait_for_elements)
 						results.extend(result)
 						step_succeeded = True
 						break
@@ -2825,8 +2832,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 								raise RuntimeError(error_msg)
 							# With skip_failures=True, continue to next step
 						else:
-							self.logger.warning(f'{step_name} failed (attempt {retry_count}/{max_retries}), retrying...')
-							await asyncio.sleep(delay_between_actions)
+							# Exponential backoff: 5s, 10s, 20s, ... capped at 30s
+							retry_delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
+							self.logger.warning(
+								f'{step_name} failed (attempt {retry_count}/{max_retries}), retrying in {retry_delay}s...'
+							)
+							await asyncio.sleep(retry_delay)
 
 				# Update tracking for redundant retry detection
 				previous_item = history_item
@@ -2891,17 +2902,120 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.logger.debug('📝 Saved initial actions to history as step 0')
 			self.logger.debug('Initial actions completed')
 
+	async def _wait_for_minimum_elements(
+		self,
+		min_elements: int,
+		timeout: float = 30.0,
+		poll_interval: float = 1.0,
+	) -> BrowserStateSummary | None:
+		"""Wait for the page to have at least min_elements interactive elements.
+
+		This helps handle SPA pages where shadow DOM and dynamic content
+		may not be immediately available even when document.readyState is 'complete'.
+
+		Args:
+			min_elements: Minimum number of interactive elements to wait for
+			timeout: Maximum time to wait in seconds
+			poll_interval: Time between polling attempts in seconds
+
+		Returns:
+			BrowserStateSummary if minimum elements found, None if timeout
+		"""
+		assert self.browser_session is not None, 'BrowserSession is not set up'
+
+		start_time = time.time()
+		last_count = 0
+
+		while (time.time() - start_time) < timeout:
+			state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
+			if state and state.dom_state.selector_map:
+				current_count = len(state.dom_state.selector_map)
+				if current_count >= min_elements:
+					self.logger.debug(f'✅ Page has {current_count} elements (needed {min_elements}), proceeding with action')
+					return state
+				if current_count != last_count:
+					self.logger.debug(
+						f'⏳ Waiting for elements: {current_count}/{min_elements} '
+						f'(timeout in {timeout - (time.time() - start_time):.1f}s)'
+					)
+					last_count = current_count
+			await asyncio.sleep(poll_interval)
+
+		# Return last state even if we didn't reach min_elements
+		self.logger.warning(f'⚠️ Timeout waiting for {min_elements} elements, proceeding with {last_count} elements')
+		return await self.browser_session.get_browser_state_summary(include_screenshot=False)
+
+	def _count_expected_elements_from_history(self, history_item: AgentHistory) -> int:
+		"""Estimate the minimum number of elements expected based on history.
+
+		Uses the action indices from the history to determine the minimum
+		number of elements the page should have. If an action targets index N,
+		the page needs at least N+1 elements in the selector_map.
+		"""
+		if not history_item.model_output or not history_item.model_output.action:
+			return 0
+
+		max_index = -1  # Use -1 to indicate no index found yet
+		for action in history_item.model_output.action:
+			# Get the element index this action targets
+			index = action.get_index()
+			if index is not None:
+				max_index = max(max_index, index)
+
+		# Need at least max_index + 1 elements (indices are 0-based)
+		# Cap at 50 to avoid waiting forever for very high indices
+		# max_index >= 0 means we found at least one action with an index
+		return min(max_index + 1, 50) if max_index >= 0 else 0
+
 	async def _execute_history_step(
-		self, history_item: AgentHistory, delay: float, ai_step_llm: BaseChatModel | None = None
+		self,
+		history_item: AgentHistory,
+		delay: float,
+		ai_step_llm: BaseChatModel | None = None,
+		wait_for_elements: bool = False,
 	) -> list[ActionResult]:
 		"""Execute a single step from history with element validation.
 
 		For extract actions, uses AI to re-evaluate the content since page content may have changed.
+
+		Args:
+			history_item: The history step to execute
+			delay: Delay before executing the step
+			ai_step_llm: Optional LLM to use for AI steps
+			wait_for_elements: If True, wait for minimum elements before element matching
 		"""
 		assert self.browser_session is not None, 'BrowserSession is not set up'
 
 		await asyncio.sleep(delay)
-		state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
+
+		# Optionally wait for minimum elements before element matching (useful for SPAs)
+		if wait_for_elements:
+			# Determine if we need to wait for elements (actions that interact with DOM elements)
+			needs_element_matching = False
+			if history_item.model_output:
+				for i, action in enumerate(history_item.model_output.action):
+					action_data = action.model_dump(exclude_unset=True)
+					action_name = next(iter(action_data.keys()), None)
+					# Actions that need element matching
+					if action_name in ('click', 'input', 'hover', 'select_option', 'drag_and_drop'):
+						historical_elem = (
+							history_item.state.interacted_element[i] if i < len(history_item.state.interacted_element) else None
+						)
+						if historical_elem is not None:
+							needs_element_matching = True
+							break
+
+			# If we need element matching, wait for minimum elements before proceeding
+			if needs_element_matching:
+				min_elements = self._count_expected_elements_from_history(history_item)
+				if min_elements > 0:
+					state = await self._wait_for_minimum_elements(min_elements, timeout=15.0, poll_interval=1.0)
+				else:
+					state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
+			else:
+				state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
+		else:
+			state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
 		if not state or not history_item.model_output:
 			raise ValueError('Invalid state or model output')
 
