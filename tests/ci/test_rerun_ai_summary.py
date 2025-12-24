@@ -574,3 +574,291 @@ async def test_rerun_records_errors_when_skip_failures_true(httpserver):
 
 	finally:
 		await agent.close()
+
+
+async def test_rerun_skips_redundant_retry_steps(httpserver):
+	"""Test that rerun_history skips redundant retry steps.
+
+	This handles cases where the original run needed to click the same element multiple
+	times due to slow page response, but during replay the first click already succeeded.
+	When consecutive steps target the same element with the same action, the second step
+	should be skipped as a redundant retry.
+	"""
+	from browser_use.dom.views import DOMInteractedElement
+
+	# Set up a test page with a button
+	test_html = """<!DOCTYPE html>
+	<html>
+	<body>
+		<button id="login-btn" aria-label="Log In">Log In</button>
+	</body>
+	</html>"""
+	httpserver.expect_request('/test').respond_with_data(test_html, content_type='text/html')
+	test_url = httpserver.url_for('/test')
+
+	# Create a mock LLM for summary
+	summary_action = RerunSummaryAction(
+		summary='Rerun completed with skipped redundant step',
+		success=True,
+		completion_status='complete',
+	)
+
+	async def custom_ainvoke(*args, **kwargs):
+		output_format = args[1] if len(args) > 1 else kwargs.get('output_format')
+		if output_format is RerunSummaryAction:
+			from browser_use.llm.views import ChatInvokeCompletion
+
+			return ChatInvokeCompletion(completion=summary_action, usage=None)
+		raise ValueError('Unexpected output_format')
+
+	mock_summary_llm = AsyncMock()
+	mock_summary_llm.ainvoke.side_effect = custom_ainvoke
+
+	llm = create_mock_llm(actions=None)
+	agent = Agent(task='Test task', llm=llm)
+	AgentOutput = agent.AgentOutput
+
+	# Create an interacted element that matches the button on the page
+	login_button_element = DOMInteractedElement(
+		node_id=1,
+		backend_node_id=1,
+		frame_id=None,
+		node_type=NodeType.ELEMENT_NODE,
+		node_value='',
+		node_name='BUTTON',
+		attributes={'aria-label': 'Log In', 'id': 'login-btn'},
+		x_path='html/body/button',
+		element_hash=12345,  # Same hash for both steps (same element)
+		stable_hash=12345,
+		bounds=DOMRect(x=0, y=0, width=100, height=50),
+	)
+
+	# Step 1: Navigate to test page
+	navigate_step = AgentHistory(
+		model_output=AgentOutput(
+			evaluation_previous_goal=None,
+			memory='Navigate to test page',
+			next_goal=None,
+			action=[{'navigate': {'url': test_url}}],  # type: ignore[arg-type]
+		),
+		result=[ActionResult(long_term_memory='Navigated')],
+		state=BrowserStateHistory(
+			url=test_url,
+			title='Test Page',
+			tabs=[],
+			interacted_element=[None],
+		),
+		metadata=StepMetadata(
+			step_start_time=0,
+			step_end_time=1,
+			step_number=1,
+			step_interval=0.1,
+		),
+	)
+
+	# Step 2: Click login button (first click)
+	click_step_1 = AgentHistory(
+		model_output=AgentOutput(
+			evaluation_previous_goal=None,
+			memory='Click login button',
+			next_goal=None,
+			action=[{'click': {'index': 1}}],  # type: ignore[arg-type]
+		),
+		result=[ActionResult(long_term_memory='Clicked login button')],
+		state=BrowserStateHistory(
+			url=test_url,
+			title='Test Page',
+			tabs=[],
+			interacted_element=[login_button_element],
+		),
+		metadata=StepMetadata(
+			step_start_time=1,
+			step_end_time=2,
+			step_number=2,
+			step_interval=0.1,
+		),
+	)
+
+	# Step 3: Click login button AGAIN (redundant retry - same element, same action)
+	click_step_2 = AgentHistory(
+		model_output=AgentOutput(
+			evaluation_previous_goal=None,
+			memory='Page did not change, clicking login button again',
+			next_goal=None,
+			action=[{'click': {'index': 1}}],  # type: ignore[arg-type]  # Same action type
+		),
+		result=[ActionResult(long_term_memory='Clicked login button')],
+		state=BrowserStateHistory(
+			url=test_url,
+			title='Test Page',
+			tabs=[],
+			interacted_element=[login_button_element],  # Same element!
+		),
+		metadata=StepMetadata(
+			step_start_time=2,
+			step_end_time=3,
+			step_number=3,
+			step_interval=0.1,
+		),
+	)
+
+	history = AgentHistoryList(history=[navigate_step, click_step_1, click_step_2])
+
+	try:
+		results = await agent.rerun_history(
+			history,
+			skip_failures=True,
+			summary_llm=mock_summary_llm,
+		)
+
+		# Should have 4 results: navigate + click + skipped redundant + AI summary
+		assert len(results) == 4
+
+		# First result: navigation succeeded
+		nav_result = results[0]
+		assert nav_result.error is None
+
+		# Second result: first click succeeded
+		click_result = results[1]
+		assert click_result.error is None
+
+		# Third result: redundant retry was SKIPPED (not an error)
+		skipped_result = results[2]
+		assert skipped_result.error is None  # Not an error - intentionally skipped
+		assert 'Skipped - redundant retry' in (skipped_result.extracted_content or '')
+
+		# Fourth result: AI summary
+		summary_result = results[3]
+		assert summary_result.is_done is True
+
+	finally:
+		await agent.close()
+
+
+async def test_is_redundant_retry_step_detection():
+	"""Test the _is_redundant_retry_step method directly."""
+	from browser_use.dom.views import DOMInteractedElement
+
+	llm = create_mock_llm(actions=None)
+	agent = Agent(task='Test task', llm=llm)
+	AgentOutput = agent.AgentOutput
+
+	# Create an interacted element
+	button_element = DOMInteractedElement(
+		node_id=1,
+		backend_node_id=1,
+		frame_id=None,
+		node_type=NodeType.ELEMENT_NODE,
+		node_value='',
+		node_name='BUTTON',
+		attributes={'aria-label': 'Submit'},
+		x_path='html/body/button',
+		element_hash=12345,
+		stable_hash=12345,
+		bounds=DOMRect(x=0, y=0, width=100, height=50),
+	)
+
+	different_element = DOMInteractedElement(
+		node_id=2,
+		backend_node_id=2,
+		frame_id=None,
+		node_type=NodeType.ELEMENT_NODE,
+		node_value='',
+		node_name='INPUT',
+		attributes={'name': 'email'},
+		x_path='html/body/input',
+		element_hash=99999,  # Different hash
+		stable_hash=99999,
+		bounds=DOMRect(x=0, y=0, width=200, height=30),
+	)
+
+	# Step with click on button
+	click_step = AgentHistory(
+		model_output=AgentOutput(
+			evaluation_previous_goal=None,
+			memory='Click button',
+			next_goal=None,
+			action=[{'click': {'index': 1}}],  # type: ignore[arg-type]
+		),
+		result=[ActionResult(long_term_memory='Clicked')],
+		state=BrowserStateHistory(
+			url='http://test.com',
+			title='Test',
+			tabs=[],
+			interacted_element=[button_element],
+		),
+		metadata=StepMetadata(step_start_time=0, step_end_time=1, step_number=1, step_interval=0.1),
+	)
+
+	# Same click on same button (redundant retry)
+	retry_click_step = AgentHistory(
+		model_output=AgentOutput(
+			evaluation_previous_goal=None,
+			memory='Click button again',
+			next_goal=None,
+			action=[{'click': {'index': 1}}],  # type: ignore[arg-type]
+		),
+		result=[ActionResult(long_term_memory='Clicked')],
+		state=BrowserStateHistory(
+			url='http://test.com',
+			title='Test',
+			tabs=[],
+			interacted_element=[button_element],  # Same element
+		),
+		metadata=StepMetadata(step_start_time=1, step_end_time=2, step_number=2, step_interval=0.1),
+	)
+
+	# Different action type on same element (not redundant)
+	input_step = AgentHistory(
+		model_output=AgentOutput(
+			evaluation_previous_goal=None,
+			memory='Type in button (weird but valid)',
+			next_goal=None,
+			action=[{'input': {'index': 1, 'text': 'hello'}}],  # type: ignore[arg-type]  # Different action type
+		),
+		result=[ActionResult(long_term_memory='Typed')],
+		state=BrowserStateHistory(
+			url='http://test.com',
+			title='Test',
+			tabs=[],
+			interacted_element=[button_element],
+		),
+		metadata=StepMetadata(step_start_time=2, step_end_time=3, step_number=3, step_interval=0.1),
+	)
+
+	# Same action type but different element (not redundant)
+	different_element_step = AgentHistory(
+		model_output=AgentOutput(
+			evaluation_previous_goal=None,
+			memory='Click different element',
+			next_goal=None,
+			action=[{'click': {'index': 2}}],  # type: ignore[arg-type]
+		),
+		result=[ActionResult(long_term_memory='Clicked')],
+		state=BrowserStateHistory(
+			url='http://test.com',
+			title='Test',
+			tabs=[],
+			interacted_element=[different_element],  # Different element
+		),
+		metadata=StepMetadata(step_start_time=3, step_end_time=4, step_number=4, step_interval=0.1),
+	)
+
+	try:
+		# Test 1: Same element, same action, previous succeeded -> redundant
+		assert agent._is_redundant_retry_step(retry_click_step, click_step, True) is True
+
+		# Test 2: Same element, same action, previous FAILED -> NOT redundant
+		assert agent._is_redundant_retry_step(retry_click_step, click_step, False) is False
+
+		# Test 3: Same element, different action type -> NOT redundant
+		assert agent._is_redundant_retry_step(input_step, click_step, True) is False
+
+		# Test 4: Different element, same action type -> NOT redundant
+		assert agent._is_redundant_retry_step(different_element_step, click_step, True) is False
+
+		# Test 5: No previous step -> NOT redundant
+		assert agent._is_redundant_retry_step(click_step, None, True) is False
+
+	finally:
+		await agent.close()
