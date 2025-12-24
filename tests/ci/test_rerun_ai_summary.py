@@ -865,55 +865,13 @@ async def test_is_redundant_retry_step_detection():
 
 
 async def test_count_expected_elements_from_history():
-	"""Test that _count_expected_elements_from_history correctly estimates element count."""
-	from browser_use.dom.views import DOMInteractedElement
-
+	"""Test that _count_expected_elements_from_history correctly estimates element count based on action indices."""
 	llm = create_mock_llm(actions=None)
 	agent = Agent(task='Test task', llm=llm)
 	AgentOutput = agent.AgentOutput
 
-	# Create elements with different backend_node_ids
-	element_low_id = DOMInteractedElement(
-		node_id=1,
-		backend_node_id=5,
-		frame_id=None,
-		node_type=NodeType.ELEMENT_NODE,
-		node_value='',
-		node_name='INPUT',
-		attributes={'name': 'username'},
-		x_path='html/body/input[1]',
-		element_hash=12345,
-		bounds=DOMRect(x=0, y=0, width=100, height=30),
-	)
-
-	element_high_id = DOMInteractedElement(
-		node_id=2,
-		backend_node_id=25,
-		frame_id=None,
-		node_type=NodeType.ELEMENT_NODE,
-		node_value='',
-		node_name='BUTTON',
-		attributes={'id': 'submit'},
-		x_path='html/body/button',
-		element_hash=67890,
-		bounds=DOMRect(x=0, y=0, width=100, height=30),
-	)
-
-	element_very_high_id = DOMInteractedElement(
-		node_id=3,
-		backend_node_id=100,  # Very high - should be capped at 50
-		frame_id=None,
-		node_type=NodeType.ELEMENT_NODE,
-		node_value='',
-		node_name='DIV',
-		attributes={},
-		x_path='html/body/div',
-		element_hash=11111,
-		bounds=DOMRect(x=0, y=0, width=100, height=30),
-	)
-
-	# Test 1: History with low backend_node_id
-	step_low = AgentHistory(
+	# Test 1: Action with low index (5) -> needs at least 6 elements (index + 1)
+	step_low_index = AgentHistory(
 		model_output=AgentOutput(
 			evaluation_previous_goal=None,
 			memory='Test',
@@ -925,13 +883,13 @@ async def test_count_expected_elements_from_history():
 			url='http://test.com',
 			title='Test',
 			tabs=[],
-			interacted_element=[element_low_id],
+			interacted_element=[None],
 		),
 		metadata=StepMetadata(step_start_time=0, step_end_time=1, step_number=1, step_interval=0.1),
 	)
 
-	# Test 2: History with higher backend_node_id
-	step_high = AgentHistory(
+	# Test 2: Action with higher index (25) -> needs at least 26 elements
+	step_high_index = AgentHistory(
 		model_output=AgentOutput(
 			evaluation_previous_goal=None,
 			memory='Test',
@@ -943,13 +901,13 @@ async def test_count_expected_elements_from_history():
 			url='http://test.com',
 			title='Test',
 			tabs=[],
-			interacted_element=[element_high_id],
+			interacted_element=[None],
 		),
 		metadata=StepMetadata(step_start_time=0, step_end_time=1, step_number=2, step_interval=0.1),
 	)
 
-	# Test 3: History with very high backend_node_id (should be capped)
-	step_very_high = AgentHistory(
+	# Test 3: Action with very high index (100) -> capped at 50
+	step_very_high_index = AgentHistory(
 		model_output=AgentOutput(
 			evaluation_previous_goal=None,
 			memory='Test',
@@ -961,13 +919,13 @@ async def test_count_expected_elements_from_history():
 			url='http://test.com',
 			title='Test',
 			tabs=[],
-			interacted_element=[element_very_high_id],
+			interacted_element=[None],
 		),
 		metadata=StepMetadata(step_start_time=0, step_end_time=1, step_number=3, step_interval=0.1),
 	)
 
-	# Test 4: History with no interacted elements
-	step_no_elements = AgentHistory(
+	# Test 4: Navigate action (no index) -> returns 0
+	step_no_index = AgentHistory(
 		model_output=AgentOutput(
 			evaluation_previous_goal=None,
 			memory='Test',
@@ -984,18 +942,42 @@ async def test_count_expected_elements_from_history():
 		metadata=StepMetadata(step_start_time=0, step_end_time=1, step_number=4, step_interval=0.1),
 	)
 
+	# Test 5: Multiple actions - uses max index
+	step_multiple_actions = AgentHistory(
+		model_output=AgentOutput(
+			evaluation_previous_goal=None,
+			memory='Test',
+			next_goal=None,
+			action=[
+				{'click': {'index': 3}},  # type: ignore[arg-type]
+				{'input': {'index': 10, 'text': 'test'}},  # type: ignore[arg-type]
+			],
+		),
+		result=[ActionResult(long_term_memory='Done'), ActionResult(long_term_memory='Done')],
+		state=BrowserStateHistory(
+			url='http://test.com',
+			title='Test',
+			tabs=[],
+			interacted_element=[None, None],
+		),
+		metadata=StepMetadata(step_start_time=0, step_end_time=1, step_number=5, step_interval=0.1),
+	)
+
 	try:
-		# Test 1: Low backend_node_id returns that id
-		assert agent._count_expected_elements_from_history(step_low) == 5
+		# Test 1: Action index 5 -> needs 6 elements (index + 1)
+		assert agent._count_expected_elements_from_history(step_low_index) == 6
 
-		# Test 2: Higher backend_node_id returns that id
-		assert agent._count_expected_elements_from_history(step_high) == 25
+		# Test 2: Action index 25 -> needs 26 elements
+		assert agent._count_expected_elements_from_history(step_high_index) == 26
 
-		# Test 3: Very high backend_node_id is capped at 50
-		assert agent._count_expected_elements_from_history(step_very_high) == 50
+		# Test 3: Action index 100 -> capped at 50
+		assert agent._count_expected_elements_from_history(step_very_high_index) == 50
 
-		# Test 4: No interacted elements returns 0
-		assert agent._count_expected_elements_from_history(step_no_elements) == 0
+		# Test 4: Navigate has no index -> returns 0
+		assert agent._count_expected_elements_from_history(step_no_index) == 0
+
+		# Test 5: Multiple actions -> uses max index (10) + 1 = 11
+		assert agent._count_expected_elements_from_history(step_multiple_actions) == 11
 
 	finally:
 		await agent.close()
@@ -1154,12 +1136,13 @@ async def test_rerun_waits_for_elements_before_matching(httpserver):
 	history = AgentHistoryList(history=[navigate_step, click_step])
 
 	try:
-		# Run rerun - it should wait for elements before trying to match
+		# Run rerun with wait_for_elements=True - should wait for elements before trying to match
 		results = await agent.rerun_history(
 			history,
 			skip_failures=True,
 			max_retries=1,
 			summary_llm=mock_summary_llm,
+			wait_for_elements=True,  # Enable element waiting
 		)
 
 		# Should have results: navigate + click (or error if element not found) + summary
