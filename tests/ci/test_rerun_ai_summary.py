@@ -963,6 +963,25 @@ async def test_count_expected_elements_from_history():
 		metadata=StepMetadata(step_start_time=0, step_end_time=1, step_number=5, step_interval=0.1),
 	)
 
+	# Test 6: Action with index 0 (edge case) -> needs at least 1 element
+	# Using input action because it allows index 0 (click requires ge=1)
+	step_index_zero = AgentHistory(
+		model_output=AgentOutput(
+			evaluation_previous_goal=None,
+			memory='Test',
+			next_goal=None,
+			action=[{'input': {'index': 0, 'text': 'test'}}],  # type: ignore[arg-type]
+		),
+		result=[ActionResult(long_term_memory='Done')],
+		state=BrowserStateHistory(
+			url='http://test.com',
+			title='Test',
+			tabs=[],
+			interacted_element=[None],
+		),
+		metadata=StepMetadata(step_start_time=0, step_end_time=1, step_number=6, step_interval=0.1),
+	)
+
 	try:
 		# Test 1: Action index 5 -> needs 6 elements (index + 1)
 		assert agent._count_expected_elements_from_history(step_low_index) == 6
@@ -978,6 +997,9 @@ async def test_count_expected_elements_from_history():
 
 		# Test 5: Multiple actions -> uses max index (10) + 1 = 11
 		assert agent._count_expected_elements_from_history(step_multiple_actions) == 11
+
+		# Test 6: Action index 0 (edge case) -> needs 1 element (0 + 1)
+		assert agent._count_expected_elements_from_history(step_index_zero) == 1
 
 	finally:
 		await agent.close()

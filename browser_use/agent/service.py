@@ -2955,7 +2955,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if not history_item.model_output or not history_item.model_output.action:
 			return 0
 
-		max_index = 0
+		max_index = -1  # Use -1 to indicate no index found yet
 		for action in history_item.model_output.action:
 			# Get the element index this action targets
 			index = action.get_index()
@@ -2964,7 +2964,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Need at least max_index + 1 elements (indices are 0-based)
 		# Cap at 50 to avoid waiting forever for very high indices
-		return min(max_index + 1, 50) if max_index > 0 else 0
+		# max_index >= 0 means we found at least one action with an index
+		return min(max_index + 1, 50) if max_index >= 0 else 0
 
 	async def _execute_history_step(
 		self,
