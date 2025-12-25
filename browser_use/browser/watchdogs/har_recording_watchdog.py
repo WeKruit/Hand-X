@@ -357,13 +357,10 @@ class HarRecordingWatchdog(BaseWatchdog):
 				response.get('securityDetails') if isinstance(response, dict) else getattr(response, 'securityDetails', None)
 			)
 			if security_details_raw:
-				if isinstance(security_details_raw, dict):
-					entry.security_details = security_details_raw
-				else:
-					try:
-						entry.security_details = dict(security_details_raw)
-					except Exception:
-						pass
+				try:
+					entry.security_details = dict(security_details_raw)
+				except Exception:
+					pass
 		except Exception as e:
 			self.logger.debug(f'responseReceived handling error: {e}')
 
