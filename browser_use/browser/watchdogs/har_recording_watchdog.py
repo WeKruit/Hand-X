@@ -8,6 +8,7 @@ and `record_har_mode` (full/minimal).
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from dataclasses import dataclass, field
 from importlib import metadata as importlib_metadata
@@ -60,6 +61,11 @@ class _HarEntryBuilder:
 	encoded_data_length: int | None = None
 	response_body: bytes | None = None
 	content_length: int | None = None  # From Content-Length header
+	protocol: str | None = None
+	server_ip_address: str | None = None
+	server_port: int | None = None
+	security_details: dict | None = None
+	transfer_size: int | None = None
 
 
 def _is_https(url: str | None) -> bool:
@@ -77,6 +83,62 @@ def _origin(url: str) -> str:
 		return f'https://{host_port}'
 	except Exception:
 		return ''
+
+
+def _mime_to_extension(mime_type: str | None) -> str:
+	"""Map MIME type to file extension, matching Playwright's behavior."""
+	if not mime_type:
+		return 'bin'
+
+	mime_lower = mime_type.lower().split(';')[0].strip()
+
+	# Common MIME type to extension mapping
+	mime_map = {
+		'text/html': 'html',
+		'text/css': 'css',
+		'text/javascript': 'js',
+		'application/javascript': 'js',
+		'application/x-javascript': 'js',
+		'application/json': 'json',
+		'application/xml': 'xml',
+		'text/xml': 'xml',
+		'text/plain': 'txt',
+		'image/png': 'png',
+		'image/jpeg': 'jpg',
+		'image/jpg': 'jpg',
+		'image/gif': 'gif',
+		'image/webp': 'webp',
+		'image/svg+xml': 'svg',
+		'image/x-icon': 'ico',
+		'font/woff': 'woff',
+		'font/woff2': 'woff2',
+		'application/font-woff': 'woff',
+		'application/font-woff2': 'woff2',
+		'application/x-font-woff': 'woff',
+		'application/x-font-woff2': 'woff2',
+		'font/ttf': 'ttf',
+		'application/x-font-ttf': 'ttf',
+		'font/otf': 'otf',
+		'application/x-font-opentype': 'otf',
+		'application/pdf': 'pdf',
+		'application/zip': 'zip',
+		'application/x-zip-compressed': 'zip',
+		'video/mp4': 'mp4',
+		'video/webm': 'webm',
+		'audio/mpeg': 'mp3',
+		'audio/mp3': 'mp3',
+		'audio/wav': 'wav',
+		'audio/ogg': 'ogg',
+	}
+
+	return mime_map.get(mime_lower, 'bin')
+
+
+def _generate_har_filename(content: bytes, mime_type: str | None) -> str:
+	"""Generate a hash-based filename for HAR attach mode, matching Playwright's format."""
+	content_hash = hashlib.sha1(content).hexdigest()
+	extension = _mime_to_extension(mime_type)
+	return f'{content_hash}.{extension}'
 
 
 class HarRecordingWatchdog(BaseWatchdog):
@@ -267,6 +329,41 @@ class HarRecordingWatchdog(BaseWatchdog):
 
 			entry.mime_type = response.get('mimeType') if isinstance(response, dict) else getattr(response, 'mimeType', None)
 			entry.ts_response = params.get('timestamp') if hasattr(params, 'get') else getattr(params, 'timestamp', None)
+
+			protocol_raw = response.get('protocol') if isinstance(response, dict) else getattr(response, 'protocol', None)
+			if protocol_raw:
+				protocol_lower = str(protocol_raw).lower()
+				if protocol_lower == 'h2' or protocol_lower.startswith('http/2'):
+					entry.protocol = 'HTTP/2.0'
+				elif protocol_lower.startswith('http/1.1'):
+					entry.protocol = 'HTTP/1.1'
+				elif protocol_lower.startswith('http/1.0'):
+					entry.protocol = 'HTTP/1.0'
+				else:
+					entry.protocol = str(protocol_raw).upper()
+
+			entry.server_ip_address = (
+				response.get('remoteIPAddress') if isinstance(response, dict) else getattr(response, 'remoteIPAddress', None)
+			)
+			server_port_raw = response.get('remotePort') if isinstance(response, dict) else getattr(response, 'remotePort', None)
+			if server_port_raw is not None:
+				try:
+					entry.server_port = int(server_port_raw)
+				except (ValueError, TypeError):
+					pass
+
+			# Extract security details (TLS info)
+			security_details_raw = (
+				response.get('securityDetails') if isinstance(response, dict) else getattr(response, 'securityDetails', None)
+			)
+			if security_details_raw:
+				if isinstance(security_details_raw, dict):
+					entry.security_details = security_details_raw
+				else:
+					try:
+						entry.security_details = dict(security_details_raw)
+					except Exception:
+						pass
 		except Exception as e:
 			self.logger.debug(f'responseReceived handling error: {e}')
 
@@ -324,6 +421,7 @@ class HarRecordingWatchdog(BaseWatchdog):
 			if encoded_length is not None:
 				try:
 					entry.encoded_data_length = int(encoded_length)
+					entry.transfer_size = entry.encoded_data_length
 				except Exception:
 					entry.encoded_data_length = None
 		except Exception as e:
@@ -437,26 +535,22 @@ class HarRecordingWatchdog(BaseWatchdog):
 					text_decoded = body_bytes.decode('utf-8')
 					content_obj['text'] = text_decoded
 					content_obj['size'] = content_size
-					if compression > 0:
-						content_obj['compression'] = compression
+					content_obj['compression'] = compression
 				except UnicodeDecodeError:
 					content_obj['text'] = base64.b64encode(body_bytes).decode('ascii')
 					content_obj['encoding'] = 'base64'
 					content_obj['size'] = content_size
-					if compression > 0:
-						content_obj['compression'] = compression
-			elif self._content_mode == 'attach' and content_size > 0 and sidecar_dir is not None:
-				# Use incremental index-based filenames for determinism
-				rel_name = f'{len(har_entries):06d}.bin'
-				(sidecar_dir / rel_name).write_bytes(body_bytes)
-				content_obj['_file'] = str(Path(sidecar_dir.name) / rel_name)
-				content_obj['size'] = content_size
-				if compression > 0:
 					content_obj['compression'] = compression
+			elif self._content_mode == 'attach' and content_size > 0 and sidecar_dir is not None:
+				filename = _generate_har_filename(body_bytes, e.mime_type)
+				(sidecar_dir / filename).write_bytes(body_bytes)
+				content_obj['_file'] = filename
+				content_obj['size'] = content_size
+				content_obj['compression'] = compression
 			else:
 				# omit or empty
 				content_obj['size'] = content_size
-				if compression > 0:
+				if content_size > 0:
 					content_obj['compression'] = compression
 
 			started_date_time, total_time_ms, timings = self._compute_timings(e)
@@ -470,46 +564,77 @@ class HarRecordingWatchdog(BaseWatchdog):
 				if self._content_mode == 'embed':
 					request_post_data = {'mimeType': e.request_headers.get('content-type', ''), 'text': e.post_data}
 				elif self._content_mode == 'attach' and sidecar_dir is not None:
-					req_name = f'{len(har_entries):06d}_req.txt'
-					(sidecar_dir / req_name).write_text(e.post_data)
+					post_data_bytes = e.post_data.encode('utf-8')
+					req_mime_type = e.request_headers.get('content-type', 'text/plain')
+					req_filename = _generate_har_filename(post_data_bytes, req_mime_type)
+					(sidecar_dir / req_filename).write_bytes(post_data_bytes)
 					request_post_data = {
-						'mimeType': e.request_headers.get('content-type', ''),
-						'_file': str(Path(sidecar_dir.name) / req_name),
+						'mimeType': req_mime_type,
+						'_file': req_filename,
 					}
 
-			har_entries.append(
-				{
-					'startedDateTime': started_date_time,
-					'time': total_time_ms,
-					'request': {
-						'method': e.method or 'GET',
-						'url': e.url or '',
-						'httpVersion': 'HTTP/1.1',
-						'headers': req_headers_list,
-						'queryString': [],
-						'cookies': [],
-						'headersSize': request_headers_size,
-						'bodySize': request_body_size,
-						'postData': request_post_data,
-					},
-					'response': {
-						'status': e.status or 0,
-						'statusText': e.status_text or '',
-						'httpVersion': 'HTTP/1.1',
-						'headers': resp_headers_list,
-						'cookies': [],
-						'content': content_obj,
-						'redirectURL': '',
-						'headersSize': response_headers_size,
-						'bodySize': e.encoded_data_length
-						if e.encoded_data_length is not None
-						else (content_size if content_size > 0 else -1),
-					},
-					'cache': {},
-					'timings': timings,
-					'pageref': self._page_ref_for_entry(e),
-				}
-			)
+			http_version = e.protocol if e.protocol else 'HTTP/1.1'
+
+			response_body_size = e.transfer_size
+			if response_body_size is None:
+				response_body_size = e.encoded_data_length
+			if response_body_size is None:
+				response_body_size = content_size if content_size > 0 else -1
+
+			entry_dict = {
+				'startedDateTime': started_date_time,
+				'time': total_time_ms,
+				'request': {
+					'method': e.method or 'GET',
+					'url': e.url or '',
+					'httpVersion': http_version,
+					'headers': req_headers_list,
+					'queryString': [],
+					'cookies': [],
+					'headersSize': request_headers_size,
+					'bodySize': request_body_size,
+					'postData': request_post_data,
+				},
+				'response': {
+					'status': e.status or 0,
+					'statusText': e.status_text or '',
+					'httpVersion': http_version,
+					'headers': resp_headers_list,
+					'cookies': [],
+					'content': content_obj,
+					'redirectURL': '',
+					'headersSize': response_headers_size,
+					'bodySize': response_body_size,
+				},
+				'cache': {},
+				'timings': timings,
+				'pageref': self._page_ref_for_entry(e),
+			}
+
+			# Add security/TLS details if available
+			if e.server_ip_address:
+				entry_dict['serverIPAddress'] = e.server_ip_address
+			if e.server_port is not None:
+				entry_dict['_serverPort'] = e.server_port
+			if e.security_details:
+				# Filter to match Playwright's minimal security details set
+				security_filtered = {}
+				if 'protocol' in e.security_details:
+					security_filtered['protocol'] = e.security_details['protocol']
+				if 'subjectName' in e.security_details:
+					security_filtered['subjectName'] = e.security_details['subjectName']
+				if 'issuer' in e.security_details:
+					security_filtered['issuer'] = e.security_details['issuer']
+				if 'validFrom' in e.security_details:
+					security_filtered['validFrom'] = e.security_details['validFrom']
+				if 'validTo' in e.security_details:
+					security_filtered['validTo'] = e.security_details['validTo']
+				if security_filtered:
+					entry_dict['_securityDetails'] = security_filtered
+			if e.transfer_size is not None:
+				entry_dict['response']['_transferSize'] = e.transfer_size
+
+			har_entries.append(entry_dict)
 
 		# Try to include our library version in creator
 		try:
@@ -525,7 +650,7 @@ class HarRecordingWatchdog(BaseWatchdog):
 				'browser': {'name': self._browser_name, 'version': self._browser_version},
 				'pages': [
 					{
-						'id': pid,
+						'id': f'page@{pid}',  # Use Playwright format: "page@{frame_id}"
 						'title': page_info.get('title', page_info.get('url', '')),
 						'startedDateTime': self._format_page_started_datetime(page_info.get('startedDateTime')),
 						'pageTimings': (
@@ -558,13 +683,16 @@ class HarRecordingWatchdog(BaseWatchdog):
 			return ''
 
 	def _page_ref_for_entry(self, e: _HarEntryBuilder) -> str | None:
-		# Use frame_id as stable page id if known
+		# Use Playwright format: "page@{frame_id}" if frame_id is known
 		if e.frame_id and e.frame_id in self._top_level_pages:
-			return e.frame_id
+			return f'page@{e.frame_id}'
 		return None
 
 	def _include_entry(self, e: _HarEntryBuilder) -> bool:
 		if not _is_https(e.url):
+			return False
+		# Filter out favicon requests (matching Playwright behavior)
+		if e.url and '/favicon.ico' in e.url.lower():
 			return False
 		if getattr(self, '_mode', 'full') == 'full':
 			return True
@@ -587,15 +715,38 @@ class HarRecordingWatchdog(BaseWatchdog):
 		except Exception:
 			started = ''
 
+		# Calculate timings - CDP doesn't always provide DNS/connect/SSL breakdown
+		# Default to 0 for unavailable timings, calculate what we can from timestamps
+		dns_ms = 0
+		connect_ms = 0
+		ssl_ms = 0
 		send_ms = 0
 		wait_ms = 0
 		receive_ms = 0
+
 		if e.ts_request is not None and e.ts_response is not None:
 			wait_ms = max(0, int(round((e.ts_response - e.ts_request) * 1000)))
+
 		if e.ts_response is not None and e.ts_finished is not None:
 			receive_ms = max(0, int(round((e.ts_finished - e.ts_response) * 1000)))
-		total = send_ms + wait_ms + receive_ms
-		return started, total, {'send': send_ms, 'wait': wait_ms, 'receive': receive_ms}
+
+		# Note: DNS, connect, and SSL timings would require additional CDP events or ResourceTiming API
+		# For now, we structure the timings dict to match Playwright format
+		# but leave DNS/connect/SSL as 0 since CDP doesn't provide this breakdown directly
+
+		total = dns_ms + connect_ms + ssl_ms + send_ms + wait_ms + receive_ms
+		return (
+			started,
+			total,
+			{
+				'dns': dns_ms,
+				'connect': connect_ms,
+				'ssl': ssl_ms,
+				'send': send_ms,
+				'wait': wait_ms,
+				'receive': receive_ms,
+			},
+		)
 
 	def _calc_headers_size(self, method: str | None, url: str | None, headers_list: list[dict]) -> int:
 		try:
