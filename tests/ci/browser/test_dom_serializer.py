@@ -248,7 +248,7 @@ class TestDOMSerializer:
 			antd_label_idx = next((idx for idx, el in antd_elements if el.tag_name == 'label'), None) or antd_elements[0][0]
 			await click(antd_label_idx, 'AntD-like label', browser_session)
 
-		# Validate click counter - verify all 3 clicks actually executed JavaScript
+			# Validate click counter - verify all 4 clicks actually executed JavaScript
 		print('\n✅ Validating click counter...')
 
 		# Get the CDP session for the main page (use target from a regular DOM element)
