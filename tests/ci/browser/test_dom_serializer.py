@@ -270,7 +270,7 @@ class TestDOMSerializer:
 		print(f'   Click counter value: {click_count}')
 
 		assert click_count == 4, (
-			f'Expected 3 clicks (Regular DOM + Shadow DOM + Iframe), but counter shows {click_count}. '
+			f'Expected 4 clicks (Regular DOM + Shadow DOM + Iframe + AntD-like label), but counter shows {click_count}. '
 			f'This means some clicks did not execute JavaScript properly.'
 		)
 
