@@ -84,9 +84,10 @@ class TestDOMSerializer:
 		- Regular DOM: 3 elements (button, input, link on main page)
 		- Shadow DOM: 3 elements (2 buttons, 1 input inside shadow root)
 		- Same-origin iframe: 2 elements (button, input inside iframe)
+		- AntD-like controls: 2 elements (labels wrapping radio inputs)
 		- Cross-origin iframe placeholder: about:blank (no interactive elements)
 		- Iframe tags: 2 elements (the iframe elements themselves)
-		Total: ~10 interactive elements
+		Total: ~14 interactive elements
 		"""
 		from browser_use.tools.service import Tools
 
@@ -155,6 +156,7 @@ class TestDOMSerializer:
 		shadow_elements = []
 		iframe_content_elements = []
 		iframe_tags = []
+		antd_elements = []
 
 		# Categorize elements by their IDs (more stable than hardcoded indices)
 		# Check element attributes to identify their location
@@ -171,6 +173,8 @@ class TestDOMSerializer:
 				# Iframe content elements have IDs starting with "iframe-"
 				elif elem_id.startswith('iframe-'):
 					iframe_content_elements.append((idx, element))
+				elif elem_id.startswith('antd-'):
+					antd_elements.append((idx, element))
 				# Everything else is regular DOM
 				else:
 					regular_elements.append((idx, element))
@@ -182,8 +186,9 @@ class TestDOMSerializer:
 		# - Regular DOM: 3-4 elements (button, input, link on main page + possible cross-origin content)
 		# - Shadow DOM: 3 elements (2 buttons, 1 input inside shadow root)
 		# - Iframe content: 2 elements (button, input from same-origin iframe)
+		# - AntD-like controls: 2+ elements (labels + inputs)
 		# - Iframe tags: 2 elements (the iframe elements themselves)
-		# Total: ~10-11 interactive elements depending on cross-origin iframe extraction
+		# Total: ~14 interactive elements depending on cross-origin iframe extraction
 
 		print('\n✅ DOM Serializer Test Summary:')
 		print(f'   • Regular DOM: {len(regular_elements)} elements {"✓" if len(regular_elements) >= 3 else "✗"}')
@@ -191,6 +196,7 @@ class TestDOMSerializer:
 		print(
 			f'   • Same-origin iframe content: {len(iframe_content_elements)} elements {"✓" if len(iframe_content_elements) >= 2 else "✗"}'
 		)
+		print(f'   • AntD-like controls: {len(antd_elements)} elements {"✓" if len(antd_elements) >= 2 else "✗"}')
 		print(f'   • Iframe tags: {len(iframe_tags)} elements {"✓" if len(iframe_tags) >= 2 else "✗"}')
 		print(f'   • Total elements: {len(selector_map)}')
 
@@ -201,6 +207,7 @@ class TestDOMSerializer:
 		assert len(iframe_content_elements) >= 1, (
 			f'Should find at least 1 iframe content element, found {len(iframe_content_elements)}'
 		)
+		assert len(antd_elements) >= 2, f'Should find at least 2 AntD-like label elements, found {len(antd_elements)}'
 
 		# Now test clicking elements from each category using tools.click(index)
 		print('\n🖱️  Testing Click Functionality:')
@@ -236,6 +243,11 @@ class TestDOMSerializer:
 			if iframe_button_idx:
 				await click(iframe_button_idx, 'Same-origin iframe button', browser_session)
 
+		# Test clicking an AntD-like label wrapper
+		if antd_elements:
+			antd_label_idx = next((idx for idx, el in antd_elements if el.tag_name == 'label'), None) or antd_elements[0][0]
+			await click(antd_label_idx, 'AntD-like label', browser_session)
+
 		# Validate click counter - verify all 3 clicks actually executed JavaScript
 		print('\n✅ Validating click counter...')
 
@@ -257,7 +269,7 @@ class TestDOMSerializer:
 		click_count = result.get('result', {}).get('value', 0)
 		print(f'   Click counter value: {click_count}')
 
-		assert click_count == 3, (
+		assert click_count == 4, (
 			f'Expected 3 clicks (Regular DOM + Shadow DOM + Iframe), but counter shows {click_count}. '
 			f'This means some clicks did not execute JavaScript properly.'
 		)
