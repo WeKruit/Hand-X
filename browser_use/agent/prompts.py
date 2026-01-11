@@ -236,7 +236,7 @@ class AgentMessagePrompt:
 			current_page_position = pi.scroll_y / max(pi.page_height - pi.viewport_height, 1)
 			page_info_text = '<page_info>'
 			page_info_text += f'{pages_above:.1f} above, '
-			page_info_text += f'{pages_below:.1f} below, '
+			page_info_text += f'{pages_below:.1f} below '
 
 			page_info_text += '</page_info>\n'
 			# , at {current_page_position:.0%} of page
