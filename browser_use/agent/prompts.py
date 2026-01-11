@@ -235,18 +235,13 @@ class AgentMessagePrompt:
 			total_pages = pi.page_height / pi.viewport_height if pi.viewport_height > 0 else 0
 			current_page_position = pi.scroll_y / max(pi.page_height - pi.viewport_height, 1)
 			page_info_text = '<page_info>'
-			page_info_text += f'{pages_above:.1f} pages above, '
-			page_info_text += f'{pages_below:.1f} pages below, '
-			page_info_text += f'{total_pages:.1f} total pages'
+			page_info_text += f'{pages_above:.1f} above, '
+			page_info_text += f'{pages_below:.1f} below, '
+
 			page_info_text += '</page_info>\n'
 			# , at {current_page_position:.0%} of page
 		if elements_text != '':
-			if has_content_above:
-				if self.browser_state.page_info:
-					pi = self.browser_state.page_info
-					pages_above = pi.pixels_above / pi.viewport_height if pi.viewport_height > 0 else 0
-					elements_text = f'... {pages_above:.1f} pages above ...\n{elements_text}'
-			else:
+			if not has_content_above:
 				elements_text = f'[Start of page]\n{elements_text}'
 			if not has_content_below:
 				elements_text = f'{elements_text}\n[End of page]'
