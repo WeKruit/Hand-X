@@ -200,7 +200,7 @@ class AgentMessagePrompt:
 		# Extract page statistics first
 		page_stats = self._extract_page_statistics()
 
-		# Format statistics for LLM
+		# Format statistics
 		stats_text = '<page_stats>'
 		if page_stats['total_elements'] < 10:
 			stats_text += 'Page appears empty (SPA not loaded?) - '
