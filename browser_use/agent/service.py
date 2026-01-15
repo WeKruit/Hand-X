@@ -3386,7 +3386,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		Returns True if the step appears to open a dropdown/submenu.
 		"""
-		if not history_item or not history_item.state.interacted_element:
+		if not history_item or not history_item.state or not history_item.state.interacted_element:
 			return False
 
 		elem = history_item.state.interacted_element[0] if history_item.state.interacted_element else None
