@@ -59,6 +59,7 @@ from browser_use.agent.views import (
 	JudgementResult,
 	StepMetadata,
 )
+from browser_use.browser.events import _get_timeout
 from browser_use.browser.session import DEFAULT_BROWSER_PROFILE
 from browser_use.browser.views import BrowserStateSummary
 from browser_use.config import CONFIG
@@ -2350,8 +2351,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self._log_final_outcome_messages()
 
 			# Stop the event bus gracefully, waiting for all events to be processed
-			# Use longer timeout to avoid deadlocks in tests with multiple agents
-			await self.eventbus.stop(timeout=3.0)
+			# Configurable via TIMEOUT_AgentEventBusStop env var (default: 3.0s)
+			await self.eventbus.stop(timeout=_get_timeout('TIMEOUT_AgentEventBusStop', 3.0))
 
 			await self.close()
 
