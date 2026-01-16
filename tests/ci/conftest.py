@@ -39,11 +39,13 @@ from bubus import BaseEvent
 # The default is often 30s, which is too tight when browser launch takes 28s
 original_process_event = bubus.EventBus.process_event
 
+
 async def patched_process_event(self, event: bubus.BaseEvent, *args, **kwargs):
 	# If timeout is not explicitly set (or key missing), default to 60s for CI
 	if 'timeout' not in kwargs:
 		kwargs['timeout'] = 60.0
 	return await original_process_event(self, event, *args, **kwargs)
+
 
 bubus.EventBus.process_event = patched_process_event
 
