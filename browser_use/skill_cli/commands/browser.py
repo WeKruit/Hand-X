@@ -119,28 +119,9 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 		return {'screenshot': base64.b64encode(data).decode(), 'size': len(data)}
 
 	elif action == 'state':
-		state = await bs.get_browser_state_summary(include_screenshot=False)
-		if state:
-			# Build element list with indices from DOM state
-			elements = []
-			if state.dom_state and state.dom_state.selector_map:
-				for idx, elem in state.dom_state.selector_map.items():
-					elements.append(
-						{
-							'index': idx,
-							'tag': getattr(elem, 'tag_name', ''),
-							'text': (getattr(elem, 'text', '') or '')[:50],
-							'role': getattr(elem, 'role', ''),
-						}
-					)
-
-			return {
-				'url': state.url,
-				'title': state.title,
-				'element_count': len(elements),
-				'elements': elements[:20],  # Return first 20 elements
-			}
-		return {'url': '', 'title': '', 'elements': []}
+		# Return the same LLM representation that browser-use agents see
+		state_text = await bs.get_state_as_text()
+		return {'_raw_text': state_text}
 
 	elif action == 'switch':
 		from browser_use.browser.events import SwitchTabEvent

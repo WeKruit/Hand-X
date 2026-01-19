@@ -390,11 +390,15 @@ def main() -> int:
 			data = response.get('data')
 			if data is not None:
 				if isinstance(data, dict):
-					for key, value in data.items():
-						if key == 'screenshot' and len(str(value)) > 100:
-							print(f'{key}: <{len(value)} bytes>')
-						else:
-							print(f'{key}: {value}')
+					# Special case: raw text output (e.g., state command)
+					if '_raw_text' in data:
+						print(data['_raw_text'])
+					else:
+						for key, value in data.items():
+							if key == 'screenshot' and len(str(value)) > 100:
+								print(f'{key}: <{len(value)} bytes>')
+							else:
+								print(f'{key}: {value}')
 				elif isinstance(data, str):
 					print(data)
 				else:
