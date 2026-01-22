@@ -47,6 +47,18 @@ def is_server_running(session: str) -> bool:
 		return False
 
 
+def find_all_sessions() -> list[str]:
+	"""Find all running browser-use sessions by scanning PID files."""
+	sessions = []
+	tmpdir = Path(tempfile.gettempdir())
+	for pid_file in tmpdir.glob('browser-use-*.pid'):
+		# Extract session name from filename: browser-use-{session}.pid
+		name = pid_file.stem.replace('browser-use-', '', 1)
+		if is_server_running(name):
+			sessions.append(name)
+	return sessions
+
+
 def cleanup_session_files(session: str) -> None:
 	"""Remove session socket and PID files."""
 	sock_path = get_socket_path(session)

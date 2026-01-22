@@ -204,6 +204,7 @@ Examples:
 	# open <url>
 	p = subparsers.add_parser('open', help='Navigate to URL')
 	p.add_argument('url', help='URL to navigate to')
+	p.add_argument('--headed', action='store_true', help='Show browser window')
 
 	# click <index>
 	p = subparsers.add_parser('click', help='Click element by index')
@@ -347,12 +348,12 @@ def main() -> int:
 	if args.command == 'server':
 		return handle_server_command(args)
 
-	# Handle sessions list (may need to check multiple sessions)
+	# Handle sessions list - find all running sessions
 	if args.command == 'sessions':
-		# For now, just check the current session
-		sessions = []
-		if is_server_running(args.session):
-			sessions.append({'name': args.session, 'status': 'running'})
+		from browser_use.skill_cli.utils import find_all_sessions
+
+		session_names = find_all_sessions()
+		sessions = [{'name': name, 'status': 'running'} for name in session_names]
 
 		if args.json:
 			print(json.dumps(sessions))
@@ -360,6 +361,29 @@ def main() -> int:
 			if sessions:
 				for s in sessions:
 					print(f'  {s["name"]}: {s["status"]}')
+			else:
+				print('No active sessions')
+		return 0
+
+	# Handle close --all by closing all running sessions
+	if args.command == 'close' and getattr(args, 'all', False):
+		from browser_use.skill_cli.utils import find_all_sessions
+
+		session_names = find_all_sessions()
+		closed = []
+		for name in session_names:
+			try:
+				response = send_command(name, 'close', {})
+				if response.get('success'):
+					closed.append(name)
+			except Exception:
+				pass  # Server may already be stopping
+
+		if args.json:
+			print(json.dumps({'closed': closed, 'count': len(closed)}))
+		else:
+			if closed:
+				print(f'Closed {len(closed)} session(s): {", ".join(closed)}')
 			else:
 				print('No active sessions')
 		return 0

@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 COMMANDS = {'sessions', 'close'}
 
 
-async def handle(action: str, registry: 'SessionRegistry', params: dict[str, Any]) -> Any:
+async def handle(action: str, session_name: str, registry: 'SessionRegistry', params: dict[str, Any]) -> Any:
 	"""Handle session management command."""
 	if action == 'sessions':
 		sessions = registry.list_sessions()
@@ -31,9 +31,8 @@ async def handle(action: str, registry: 'SessionRegistry', params: dict[str, Any
 				'_shutdown': True,  # Signal to stop server
 			}
 		else:
-			# Close current session and signal shutdown
-			name = params.get('session', 'default')
-			await registry.close_session(name)
-			return {'closed': name, '_shutdown': True}
+			# Close this server's session and shutdown
+			await registry.close_session(session_name)
+			return {'closed': session_name, '_shutdown': True}
 
 	raise ValueError(f'Unknown session action: {action}')

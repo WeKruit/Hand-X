@@ -110,7 +110,7 @@ class SessionServer:
 
 			# Session commands don't need a browser session
 			if action in session.COMMANDS:
-				result = await session.handle(action, self.registry, params)
+				result = await session.handle(action, self.session_name, self.registry, params)
 				# Check if command wants to shutdown server
 				if result.get('_shutdown'):
 					asyncio.create_task(self.shutdown())

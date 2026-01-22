@@ -93,6 +93,7 @@ Repository = "https://github.com/browser-use/browser-use"
 
 [project.scripts]
 browser-use = "browser_use.skill_cli.main:main"  # Fast CLI for browser automation
+browseruse = "browser_use.skill_cli.main:main"  # Alias for browser-use
 bu = "browser_use.skill_cli.main:main"  # Alias for browser-use
 browser = "browser_use.skill_cli.main:main"  # Alias for browser-use
 browser-use-tui = "browser_use.cli:main"  # Legacy TUI interface

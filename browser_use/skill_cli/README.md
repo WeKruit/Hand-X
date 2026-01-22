@@ -123,6 +123,8 @@ browser-use python --file script.py   # Run Python file
 | `--json` | Output as JSON |
 | `--api-key KEY` | Override API key |
 
+**Session behavior**: All commands without `--session` use the same "default" session. The browser stays open and is reused across commands. Use `--session NAME` to run multiple browsers in parallel.
+
 ## Examples
 
 ### Fill a Form
