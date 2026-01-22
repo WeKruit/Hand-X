@@ -7,9 +7,6 @@ Fast, persistent browser automation from the command line.
 ```bash
 # From the browser-use repo directory
 uv pip install -e .
-
-# Or with pip
-pip install -e .
 ```
 
 ## Quick Start

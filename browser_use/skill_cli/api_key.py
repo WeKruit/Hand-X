@@ -114,6 +114,8 @@ def save_api_key(key: str) -> None:
 
 	config['api_key'] = key
 	config_path.write_text(json.dumps(config, indent=2))
+	# Restrict permissions to owner only (0600)
+	config_path.chmod(0o600)
 	print(f'Saved to {config_path}')
 
 

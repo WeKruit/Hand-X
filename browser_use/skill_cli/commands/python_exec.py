@@ -40,6 +40,8 @@ async def handle(session: SessionInfo, params: dict[str, Any]) -> Any:
 		file_path = Path(params['file'])
 		if not file_path.exists():
 			return {'success': False, 'error': f'File not found: {file_path}'}
+		if file_path.is_dir():
+			return {'success': False, 'error': f'Path is a directory, not a file: {file_path}'}
 		code = file_path.read_text()
 
 	if not code:
