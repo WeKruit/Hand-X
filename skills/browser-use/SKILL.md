@@ -206,3 +206,23 @@ browser-use sessions                  # Check active sessions
 browser-use close --all               # Clean slate
 browser-use open <url>                # Fresh start
 ```
+
+## Cleanup
+
+**Important:** Browser sessions persist after commands complete. When you're done with browser automation:
+
+1. **Always offer to clean up** - Ask the user: "Would you like me to close the browser session?"
+
+2. **If user says yes**, run:
+```bash
+browser-use close                     # Close current session
+# Or for all sessions:
+browser-use close --all
+```
+
+3. **If user says no**, inform them:
+   - The browser will stay open in the background
+   - They can close it later with `browser-use close`
+   - Or it will be cleaned up when they run `browser-use server stop`
+
+**Never leave sessions running without informing the user.** A headed browser window left open can be confusing, and headless browsers consume resources silently.
