@@ -50,15 +50,7 @@ async def handle(session: SessionInfo, params: dict[str, Any]) -> Any:
 	result = await loop.run_in_executor(None, python_session.execute, code, browser_session, loop)
 
 	if result.success:
-		return {
-			'success': True,
-			'output': result.output,
-			'execution_count': python_session.execution_count,
-		}
+		# Return raw text output for clean display
+		return {'_raw_text': result.output} if result.output else {}
 	else:
-		return {
-			'success': False,
-			'output': result.output,
-			'error': result.error,
-			'execution_count': python_session.execution_count,
-		}
+		return {'error': result.error or 'Unknown error'}
