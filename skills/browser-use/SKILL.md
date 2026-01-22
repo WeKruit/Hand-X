@@ -142,7 +142,7 @@ browser-use server logs                   # View server logs
 ```bash
 browser-use open https://example.com/contact
 browser-use state
-# Shows: [0] input "Name", [1] input "Email", [2] textarea "Message", [3] browser-usetton "Submit"
+# Shows: [0] input "Name", [1] input "Email", [2] textarea "Message", [3] button "Submit"
 browser-use input 0 "John Doe"
 browser-use input 1 "john@example.com"
 browser-use input 2 "Hello, this is a test message."
@@ -181,7 +181,7 @@ browser-use state  # Already logged in!
 ## Tips
 
 1. **Always run `browser-use state` first** to see available elements and their indices
-2. **Use `--headed` for debrowser-usegging** to see what the browser is doing
+2. **Use `--headed` for debugging** to see what the browser is doing
 3. **Sessions persist** - the browser stays open between commands
 4. **Use `--json` for parsing** output programmatically
 5. **Python variables persist** across `browser-use python` commands within a session

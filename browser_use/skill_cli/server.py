@@ -66,6 +66,7 @@ class SessionServer:
 				if not line:
 					break
 
+				request = {}
 				try:
 					request = json.loads(line.decode())
 					response = await self.dispatch(request)
