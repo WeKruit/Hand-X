@@ -22,20 +22,18 @@ async def handle(action: str, registry: 'SessionRegistry', params: dict[str, Any
 
 	elif action == 'close':
 		if params.get('all'):
-			# Close all sessions
+			# Close all sessions and signal shutdown
 			sessions = registry.list_sessions()
 			await registry.close_all()
 			return {
 				'closed': [s['name'] for s in sessions],
 				'count': len(sessions),
+				'_shutdown': True,  # Signal to stop server
 			}
 		else:
-			# Close current session
+			# Close current session and signal shutdown
 			name = params.get('session', 'default')
-			success = await registry.close_session(name)
-			if success:
-				return {'closed': name}
-			else:
-				return {'error': f'Session not found: {name}'}
+			await registry.close_session(name)
+			return {'closed': name, '_shutdown': True}
 
 	raise ValueError(f'Unknown session action: {action}')

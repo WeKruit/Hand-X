@@ -368,6 +368,18 @@ def main() -> int:
 	if args.api_key:
 		os.environ['BROWSER_USE_API_KEY'] = args.api_key
 
+	# Validate API key for remote browser mode upfront
+	if args.browser == 'remote':
+		from browser_use.skill_cli.api_key import APIKeyRequired, require_api_key
+
+		try:
+			api_key = require_api_key('Remote browser')
+			# Ensure it's in environment for the cloud client
+			os.environ['BROWSER_USE_API_KEY'] = api_key
+		except APIKeyRequired as e:
+			print(f'Error: {e}', file=sys.stderr)
+			return 1
+
 	# Ensure server is running
 	ensure_server(args.session, args.browser, args.headed, args.profile, args.api_key)
 
@@ -395,6 +407,9 @@ def main() -> int:
 						print(data['_raw_text'])
 					else:
 						for key, value in data.items():
+							# Skip internal fields
+							if key.startswith('_'):
+								continue
 							if key == 'screenshot' and len(str(value)) > 100:
 								print(f'{key}: <{len(value)} bytes>')
 							else:

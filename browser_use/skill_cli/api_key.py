@@ -57,7 +57,7 @@ def require_api_key(feature: str = 'this feature') -> str:
 │                                                             │
 │  {feature} requires an API key.                             │
 │                                                             │
-│  Get yours at: https://browser-use.com/dashboard            │
+│  Get yours at: https://browser-use.com/new-api-key            │
 │                                                             │
 │  Then set it via:                                           │
 │    export BROWSER_USE_API_KEY=your_key_here                 │
@@ -77,7 +77,7 @@ def prompt_for_api_key(feature: str) -> str:
 │  🔑 Browser-Use API Key Required                            │
 │                                                             │
 │  {feature} requires an API key.                             │
-│  Get yours at: https://browser-use.com/dashboard            │
+│  Get yours at: https://browser-use.com/new-api-key            │
 ╰─────────────────────────────────────────────────────────────╯
 """
 	)

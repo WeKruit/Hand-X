@@ -161,6 +161,16 @@ browser.screenshot('scrolled.png')
 "
 ```
 
+## Claude Code Skill
+
+For [Claude Code](https://claude.ai/code), a skill provides richer context for browser automation:
+
+```bash
+mkdir -p ~/.claude/skills/browser-use
+curl -o ~/.claude/skills/browser-use/SKILL.md \
+  https://raw.githubusercontent.com/browser-use/browser-use/main/skills/browser-use/SKILL.md
+```
+
 ## How It Works
 
 The CLI uses a session server architecture:
