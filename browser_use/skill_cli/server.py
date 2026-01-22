@@ -108,7 +108,15 @@ class SessionServer:
 			if action == 'shutdown':
 				return {'id': req_id, 'success': True, 'data': {'shutdown': True}}
 
-			# Get or create session
+			# Session commands don't need a browser session
+			if action in session.COMMANDS:
+				result = await session.handle(action, self.registry, params)
+				# Check if command wants to shutdown server
+				if result.get('_shutdown'):
+					asyncio.create_task(self.shutdown())
+				return {'id': req_id, 'success': True, 'data': result}
+
+			# Get or create session for browser commands
 			session_info = await self.registry.get_or_create(
 				self.session_name,
 				self.browser_mode,
@@ -123,8 +131,6 @@ class SessionServer:
 				result = await python_exec.handle(session_info, params)
 			elif action == 'run':
 				result = await agent.handle(session_info, params)
-			elif action in session.COMMANDS:
-				result = await session.handle(action, self.registry, params)
 			else:
 				return {'id': req_id, 'success': False, 'error': f'Unknown action: {action}'}
 

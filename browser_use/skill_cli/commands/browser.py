@@ -55,7 +55,13 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 		from browser_use.browser.events import NavigateToUrlEvent
 
 		await bs.event_bus.dispatch(NavigateToUrlEvent(url=url))
-		return {'url': url, 'success': True}
+		result: dict[str, Any] = {'url': url}
+		# Add live preview URL for cloud browsers
+		if bs.browser_profile.use_cloud and bs.cdp_url:
+			from urllib.parse import quote
+
+			result['live_url'] = f'https://live.browser-use.com/?wss={quote(bs.cdp_url, safe="")}'
+		return result
 
 	elif action == 'click':
 		from browser_use.browser.events import ClickElementEvent
