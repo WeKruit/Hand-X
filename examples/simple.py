@@ -6,12 +6,12 @@ Setup:
 
 from dotenv import load_dotenv
 
-from browser_use import Agent, ChatBrowserUse
+from browser_use import Agent, ChatGoogle
 
 load_dotenv()
 
 agent = Agent(
-	task='Find the number of stars of the following repos: browser-use, playwright, stagehand, react, nextjs',
-	llm=ChatBrowserUse(model='bu-2-0'),
+	task='Who are founders of Browser Use',
+	llm=ChatGoogle(model='gemini-3-pro-preview'),
 )
 agent.run_sync()
