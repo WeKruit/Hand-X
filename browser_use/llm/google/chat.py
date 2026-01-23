@@ -88,7 +88,7 @@ class ChatGoogle(BaseChatModel):
 	temperature: float | None = 0.5
 	top_p: float | None = None
 	seed: int | None = None
-	thinking_budget: int | None = None  # for gemini-2.5 flash and flash-lite models, default will be set to 0
+	thinking_budget: int | None = None  # for gemini-2.5 flash, flash-lite, and gemini-3 models, default will be set to 0
 	max_output_tokens: int | None = 8096
 	config: types.GenerateContentConfigDict | None = None
 	include_system_in_user: bool = False
@@ -230,8 +230,10 @@ class ChatGoogle(BaseChatModel):
 		if self.seed is not None:
 			config['seed'] = self.seed
 
-		# set default for flash, flash-lite, gemini-flash-lite-latest, and gemini-flash-latest models
-		if self.thinking_budget is None and ('gemini-2.5-flash' in self.model or 'gemini-flash' in self.model):
+		# set default for flash, flash-lite, gemini-flash-lite-latest, gemini-flash-latest, and gemini-3 models
+		if self.thinking_budget is None and (
+			'gemini-2.5-flash' in self.model or 'gemini-flash' in self.model or 'gemini-3' in self.model
+		):
 			self.thinking_budget = 0
 
 		if self.thinking_budget is not None:
