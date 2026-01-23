@@ -12,6 +12,6 @@ load_dotenv()
 
 agent = Agent(
 	task='Who are founders of Browser Use',
-	llm=ChatGoogle(model='gemini-3-pro-preview'),
+	llm=ChatGoogle(model='gemini-3-flash-preview'),
 )
 agent.run_sync()
