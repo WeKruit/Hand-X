@@ -298,6 +298,48 @@ class DomService:
 			self.logger.debug(f'Failed to get iframe scroll positions: {e}')
 		iframe_scroll_ms = (time.time() - start_iframe_scroll) * 1000
 
+		# Detect and mark elements with JavaScript click event listeners
+		start_js_listener_detection = time.time()
+		try:
+			js_listener_result = await cdp_session.cdp_client.send.Runtime.evaluate(
+				params={
+					'expression': """
+					(() => {
+						// getEventListeners is only available in DevTools context via includeCommandLineAPI
+						if (typeof getEventListeners !== 'function') {
+							return { success: false, error: 'getEventListeners not available', count: 0 };
+						}
+
+						let count = 0;
+						const allElements = document.querySelectorAll('*');
+
+						for (const el of allElements) {
+							try {
+								const listeners = getEventListeners(el);
+								// Check for click-related event listeners
+								if (listeners.click || listeners.mousedown || listeners.mouseup || listeners.pointerdown || listeners.pointerup) {
+									el.setAttribute('data-browser-use-js-click', 'true');
+									count++;
+								}
+							} catch (e) {
+								// Ignore errors for individual elements (e.g., cross-origin)
+							}
+						}
+
+						return { success: true, count };
+					})()
+					""",
+					'includeCommandLineAPI': True,  # enables getEventListeners()
+					'returnByValue': True,
+				},
+				session_id=cdp_session.session_id,
+			)
+			js_listener_value = js_listener_result.get('result', {}).get('value', {})
+			if js_listener_value.get('success'):
+				self.logger.debug(f'Marked {js_listener_value.get("count", 0)} elements with JS click listeners')
+		except Exception as e:
+			self.logger.debug(f'Failed to detect JS event listeners: {e}')
+
 		# Define CDP request factories to avoid duplication
 		def create_snapshot_request():
 			return cdp_session.cdp_client.send.DOMSnapshot.captureSnapshot(
