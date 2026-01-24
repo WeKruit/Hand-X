@@ -68,7 +68,9 @@ def connect_to_server(session: str, timeout: float = 60.0) -> socket.socket:
 	return sock
 
 
-def ensure_server(session: str, browser: str, headed: bool, profile: str | None, api_key: str | None, cdp_url: str | None = None) -> bool:
+def ensure_server(
+	session: str, browser: str, headed: bool, profile: str | None, api_key: str | None, cdp_url: str | None = None
+) -> bool:
 	"""Start server if not running. Returns True if started."""
 	# Check if server is already running and responsive
 	if is_server_running(session):
