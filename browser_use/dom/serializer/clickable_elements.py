@@ -18,9 +18,9 @@ class ClickableElementDetector:
 		if node.tag_name in {'html', 'body'}:
 			return False
 
-		# Check for JavaScript click event listeners detected via CDP
+		# Check for JavaScript click event listeners detected via CDP (without DOM mutation)
 		# this handles vue.js @click, react onClick, angular (click), etc.
-		if node.attributes and node.attributes.get('data-browser-use-js-click') == 'true':
+		if node.has_js_click_listener:
 			return True
 
 		# IFRAME elements should be interactive if they're large enough to potentially need scrolling
