@@ -68,7 +68,7 @@ def connect_to_server(session: str, timeout: float = 60.0) -> socket.socket:
 	return sock
 
 
-def ensure_server(session: str, browser: str, headed: bool, profile: str | None, api_key: str | None) -> bool:
+def ensure_server(session: str, browser: str, headed: bool, profile: str | None, api_key: str | None, cdp_url: str | None = None) -> bool:
 	"""Start server if not running. Returns True if started."""
 	# Check if server is already running and responsive
 	if is_server_running(session):
@@ -93,6 +93,8 @@ def ensure_server(session: str, browser: str, headed: bool, profile: str | None,
 		cmd.append('--headed')
 	if profile:
 		cmd.extend(['--profile', profile])
+	if cdp_url:
+		cmd.extend(['--cdp-url', cdp_url])
 
 	# Set up environment
 	env = os.environ.copy()
@@ -194,6 +196,7 @@ Examples:
 	parser.add_argument('--profile', help='Chrome profile (real browser mode)')
 	parser.add_argument('--json', action='store_true', help='Output as JSON')
 	parser.add_argument('--api-key', help='Browser-Use API key')
+	parser.add_argument('--cdp-url', help='CDP URL to connect to existing browser (e.g., http://localhost:9222)')
 
 	subparsers = parser.add_subparsers(dest='command', help='Command to execute')
 
@@ -405,11 +408,11 @@ def main() -> int:
 			return 1
 
 	# Ensure server is running
-	ensure_server(args.session, args.browser, args.headed, args.profile, args.api_key)
+	ensure_server(args.session, args.browser, args.headed, args.profile, args.api_key, getattr(args, 'cdp_url', None))
 
 	# Build params from args
 	params = {}
-	skip_keys = {'command', 'session', 'browser', 'headed', 'profile', 'json', 'api_key', 'server_command'}
+	skip_keys = {'command', 'session', 'browser', 'headed', 'profile', 'json', 'api_key', 'server_command', 'cdp_url'}
 
 	for key, value in vars(args).items():
 		if key not in skip_keys and value is not None:
