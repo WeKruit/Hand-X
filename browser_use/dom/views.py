@@ -445,6 +445,18 @@ class EnhancedDOMTreeNode:
 	Used to identify clicks that don't use native interactive HTML tags
 	"""
 
+	hidden_interactive_count: int = 0
+	"""
+	Number of interactive elements hidden due to viewport threshold (for iframes)
+	Used to show a specific count hint in the LLM representation
+	"""
+
+	has_hidden_content: bool = False
+	"""
+	Whether the iframe has any content hidden due to viewport threshold
+	Used to show a generic hint when there's content but no interactive elements
+	"""
+
 	uuid: str = field(default_factory=uuid7str)
 
 	@property
