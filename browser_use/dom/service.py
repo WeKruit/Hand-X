@@ -74,8 +74,17 @@ class DomService:
 		- has_hidden_content: whether any content is hidden by viewport threshold
 		"""
 		interactive_tags = {
-			'A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'LABEL',
-			'DETAILS', 'SUMMARY', 'OPTION', 'VIDEO', 'AUDIO',
+			'A',
+			'BUTTON',
+			'INPUT',
+			'SELECT',
+			'TEXTAREA',
+			'LABEL',
+			'DETAILS',
+			'SUMMARY',
+			'OPTION',
+			'VIDEO',
+			'AUDIO',
 		}
 		interactive_roles = {'button', 'link', 'checkbox', 'radio', 'textbox', 'combobox', 'menuitem', 'tab'}
 
@@ -105,11 +114,7 @@ class DomService:
 			if subtree_root.node_type == NodeType.ELEMENT_NODE:
 				tag = (subtree_root.tag_name or '').upper()
 				role = subtree_root.ax_node.role if subtree_root.ax_node else None
-				is_interactive = (
-					tag in interactive_tags
-					or subtree_root.has_js_click_listener
-					or role in interactive_roles
-				)
+				is_interactive = tag in interactive_tags or subtree_root.has_js_click_listener or role in interactive_roles
 
 				if is_hidden_by_threshold(subtree_root):
 					has_content = True
