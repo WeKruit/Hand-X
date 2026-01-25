@@ -50,6 +50,7 @@ class DomService:
 		paint_order_filtering: bool = True,
 		max_iframes: int = 100,
 		max_iframe_depth: int = 5,
+		viewport_threshold: int | None = 1000,
 	):
 		self.browser_session = browser_session
 		self.logger = logger or browser_session.logger
@@ -57,12 +58,103 @@ class DomService:
 		self.paint_order_filtering = paint_order_filtering
 		self.max_iframes = max_iframes
 		self.max_iframe_depth = max_iframe_depth
+		self.viewport_threshold = viewport_threshold
 
 	async def __aenter__(self):
 		return self
 
 	async def __aexit__(self, exc_type, exc_value, traceback):
 		pass  # no need to cleanup anything, browser_session auto handles cleaning up session cache
+
+	def _count_hidden_elements_in_iframes(self, node: EnhancedDOMTreeNode) -> None:
+		"""Count hidden elements in iframes for LLM hints.
+
+		For each iframe, tracks:
+		- hidden_interactive_count: interactive elements hidden by viewport threshold
+		- has_hidden_content: whether any content is hidden by viewport threshold
+		"""
+		interactive_tags = {
+			'A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'LABEL',
+			'DETAILS', 'SUMMARY', 'OPTION', 'VIDEO', 'AUDIO',
+		}
+		interactive_roles = {'button', 'link', 'checkbox', 'radio', 'textbox', 'combobox', 'menuitem', 'tab'}
+
+		def is_hidden_by_threshold(element: EnhancedDOMTreeNode) -> bool:
+			"""Check if element is hidden by viewport threshold (not CSS)."""
+			if element.is_visible or not element.snapshot_node or not element.snapshot_node.bounds:
+				return False
+
+			computed_styles = element.snapshot_node.computed_styles or {}
+			display = computed_styles.get('display', '').lower()
+			visibility = computed_styles.get('visibility', '').lower()
+			opacity = computed_styles.get('opacity', '1')
+
+			css_hidden = display == 'none' or visibility == 'hidden'
+			try:
+				css_hidden = css_hidden or float(opacity) <= 0
+			except (ValueError, TypeError):
+				pass
+
+			return not css_hidden
+
+		def analyze_subtree(subtree_root: EnhancedDOMTreeNode) -> tuple[int, bool]:
+			"""Analyze subtree for hidden content. Returns (interactive_count, has_any_content)."""
+			interactive_count = 0
+			has_content = False
+
+			if subtree_root.node_type == NodeType.ELEMENT_NODE:
+				tag = (subtree_root.tag_name or '').upper()
+				role = subtree_root.ax_node.role if subtree_root.ax_node else None
+				is_interactive = (
+					tag in interactive_tags
+					or subtree_root.has_js_click_listener
+					or role in interactive_roles
+				)
+
+				if is_hidden_by_threshold(subtree_root):
+					has_content = True
+					if is_interactive:
+						interactive_count += 1
+
+			elif subtree_root.node_type == NodeType.TEXT_NODE:
+				text = (subtree_root.node_value or '').strip()
+				if text and len(text) > 1 and is_hidden_by_threshold(subtree_root):
+					has_content = True
+
+			for child in subtree_root.children_nodes or []:
+				child_interactive, child_content = analyze_subtree(child)
+				interactive_count += child_interactive
+				has_content = has_content or child_content
+
+			for shadow_root in subtree_root.shadow_roots or []:
+				shadow_interactive, shadow_content = analyze_subtree(shadow_root)
+				interactive_count += shadow_interactive
+				has_content = has_content or shadow_content
+
+			return interactive_count, has_content
+
+		def process_node(current_node: EnhancedDOMTreeNode) -> None:
+			"""Process node and descendants, analyzing hidden content for iframes."""
+			if (
+				current_node.node_type == NodeType.ELEMENT_NODE
+				and current_node.tag_name
+				and current_node.tag_name.upper() in ('IFRAME', 'FRAME')
+				and current_node.content_document
+			):
+				interactive_count, has_content = analyze_subtree(current_node.content_document)
+				current_node.hidden_interactive_count = interactive_count
+				current_node.has_hidden_content = has_content
+
+			for child in current_node.children_nodes or []:
+				process_node(child)
+
+			if current_node.content_document:
+				process_node(current_node.content_document)
+
+			for shadow_root in current_node.shadow_roots or []:
+				process_node(shadow_root)
+
+		process_node(node)
 
 	def _build_enhanced_ax_node(self, ax_node: AXNode) -> EnhancedAXNode:
 		properties: list[EnhancedAXProperty] | None = None
@@ -123,9 +215,16 @@ class DomService:
 
 	@classmethod
 	def is_element_visible_according_to_all_parents(
-		cls, node: EnhancedDOMTreeNode, html_frames: list[EnhancedDOMTreeNode]
+		cls, node: EnhancedDOMTreeNode, html_frames: list[EnhancedDOMTreeNode], viewport_threshold: int | None = 1000
 	) -> bool:
-		"""Check if the element is visible according to all its parent HTML frames."""
+		"""Check if the element is visible according to all its parent HTML frames.
+
+		Args:
+			node: The DOM node to check visibility for
+			html_frames: List of parent HTML frame nodes
+			viewport_threshold: Pixel threshold beyond viewport to consider visible.
+				Default 1000px. Set to None to disable threshold checking entirely.
+		"""
 
 		if not node.snapshot_node:
 			return False
@@ -150,6 +249,10 @@ class DomService:
 
 		if not current_bounds:
 			return False  # If there are no bounds, the element is not visible
+
+		# If threshold is None, skip all viewport-based filtering (only check CSS visibility)
+		if viewport_threshold is None:
+			return True
 
 		"""
 		Reverse iterate through the html frames (that can be either iframe or document -> if it's a document frame compare if the current bounds interest with it (taking scroll into account) otherwise move the current bounds by the iframe offset)
@@ -193,8 +296,8 @@ class DomService:
 				frame_intersects = (
 					adjusted_x < viewport_right
 					and adjusted_x + current_bounds.width > viewport_left
-					and adjusted_y < viewport_bottom + 1000
-					and adjusted_y + current_bounds.height > viewport_top - 1000
+					and adjusted_y < viewport_bottom + viewport_threshold
+					and adjusted_y + current_bounds.height > viewport_top - viewport_threshold
 				)
 
 				if not frame_intersects:
@@ -742,8 +845,10 @@ class DomService:
 						await _construct_enhanced_node(child, updated_html_frames, total_frame_offset, all_frames)
 					)
 
-			# Set visibility using the collected HTML frames
-			dom_tree_node.is_visible = self.is_element_visible_according_to_all_parents(dom_tree_node, updated_html_frames)
+			# Set visibility using the collected HTML frames and viewport threshold
+			dom_tree_node.is_visible = self.is_element_visible_according_to_all_parents(
+				dom_tree_node, updated_html_frames, self.viewport_threshold
+			)
 
 			# DEBUG: Log visibility info for form elements in iframes
 			if dom_tree_node.tag_name and dom_tree_node.tag_name.upper() in ['INPUT', 'SELECT', 'TEXTAREA', 'LABEL']:
@@ -849,6 +954,9 @@ class DomService:
 			dom_tree['root'], initial_html_frames, initial_total_frame_offset, all_frames
 		)
 		timing_info['construct_enhanced_tree_ms'] = (time.time() - start_construct) * 1000
+
+		# Count hidden elements per iframe for LLM hints
+		self._count_hidden_elements_in_iframes(enhanced_dom_tree_node)
 
 		# Calculate total time for get_dom_tree
 		total_get_dom_tree_ms = (time.time() - timing_start_total) * 1000
