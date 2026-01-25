@@ -447,9 +447,14 @@ class EnhancedDOMTreeNode:
 
 	hidden_elements_info: list[dict[str, Any]] = field(default_factory=list)
 	"""
-	Details of interactive elements hidden due to viewport threshold (for iframes)
-	Each dict contains: tag, text, y_position
-	Used to show specific element info in the LLM representation
+	Details of interactive elements hidden due to viewport threshold (for iframes).
+	Each dict contains: tag, text, pages (scroll distance in viewport pages).
+	Used to show specific element info in the LLM representation.
+	"""
+
+	has_hidden_content: bool = False
+	"""
+	Whether this iframe has hidden non-interactive content below the viewport threshold.
 	"""
 
 	uuid: str = field(default_factory=uuid7str)
