@@ -2857,7 +2857,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 				# Check if selection was reverted by framework - try clicking as fallback
 				if selection_result.get('selectionReverted'):
-					self.logger.info(f'⚠️ Selection was reverted by page framework, trying click fallback...')
+					self.logger.info('⚠️ Selection was reverted by page framework, trying click fallback...')
 					target_option = selection_result.get('targetOption', {})
 					option_index = target_option.get('index', 0)
 
