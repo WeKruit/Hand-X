@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cdp_use.cdp.accessibility.commands import GetFullAXTreeReturns
 from cdp_use.cdp.accessibility.types import AXNode
@@ -67,11 +67,10 @@ class DomService:
 		pass  # no need to cleanup anything, browser_session auto handles cleaning up session cache
 
 	def _count_hidden_elements_in_iframes(self, node: EnhancedDOMTreeNode) -> None:
-		"""Count hidden elements in iframes for LLM hints.
+		"""Collect hidden interactive elements in iframes for LLM hints.
 
-		For each iframe, tracks:
-		- hidden_interactive_count: interactive elements hidden by viewport threshold
-		- has_hidden_content: whether any content is hidden by viewport threshold
+		For each iframe, collects details of hidden interactive elements including
+		tag, text/name, and scroll distance in pages so the agent knows how far to scroll.
 		"""
 		interactive_tags = {
 			'A',
@@ -106,49 +105,64 @@ class DomService:
 
 			return not css_hidden
 
-		def analyze_subtree(subtree_root: EnhancedDOMTreeNode) -> tuple[int, bool]:
-			"""Analyze subtree for hidden content. Returns (interactive_count, has_any_content)."""
-			interactive_count = 0
-			has_content = False
+		def collect_hidden_elements(
+			subtree_root: EnhancedDOMTreeNode, viewport_height: float
+		) -> list[dict[str, Any]]:
+			"""Collect hidden interactive elements from subtree."""
+			hidden: list[dict[str, Any]] = []
 
 			if subtree_root.node_type == NodeType.ELEMENT_NODE:
 				tag = (subtree_root.tag_name or '').upper()
 				role = subtree_root.ax_node.role if subtree_root.ax_node else None
 				is_interactive = tag in interactive_tags or subtree_root.has_js_click_listener or role in interactive_roles
 
-				if is_hidden_by_threshold(subtree_root):
-					has_content = True
-					if is_interactive:
-						interactive_count += 1
+				if is_interactive and is_hidden_by_threshold(subtree_root):
+					# Get element text/name
+					text = ''
+					if subtree_root.ax_node and subtree_root.ax_node.name:
+						text = subtree_root.ax_node.name[:40]
+					elif subtree_root.attributes:
+						text = (
+							subtree_root.attributes.get('placeholder', '')
+							or subtree_root.attributes.get('title', '')
+							or subtree_root.attributes.get('aria-label', '')
+						)[:40]
 
-			elif subtree_root.node_type == NodeType.TEXT_NODE:
-				text = (subtree_root.node_value or '').strip()
-				if text and len(text) > 1 and is_hidden_by_threshold(subtree_root):
-					has_content = True
+					# Get y position and convert to pages
+					y_pos = subtree_root.snapshot_node.bounds.y if subtree_root.snapshot_node.bounds else 0
+					pages_down = round(y_pos / viewport_height, 1) if viewport_height > 0 else 0
+
+					hidden.append({
+						'tag': subtree_root.tag_name or '?',
+						'text': text or '(no label)',
+						'pages': pages_down,
+					})
 
 			for child in subtree_root.children_nodes or []:
-				child_interactive, child_content = analyze_subtree(child)
-				interactive_count += child_interactive
-				has_content = has_content or child_content
+				hidden.extend(collect_hidden_elements(child, viewport_height))
 
 			for shadow_root in subtree_root.shadow_roots or []:
-				shadow_interactive, shadow_content = analyze_subtree(shadow_root)
-				interactive_count += shadow_interactive
-				has_content = has_content or shadow_content
+				hidden.extend(collect_hidden_elements(shadow_root, viewport_height))
 
-			return interactive_count, has_content
+			return hidden
 
 		def process_node(current_node: EnhancedDOMTreeNode) -> None:
-			"""Process node and descendants, analyzing hidden content for iframes."""
+			"""Process node and descendants, collecting hidden elements for iframes."""
 			if (
 				current_node.node_type == NodeType.ELEMENT_NODE
 				and current_node.tag_name
 				and current_node.tag_name.upper() in ('IFRAME', 'FRAME')
 				and current_node.content_document
 			):
-				interactive_count, has_content = analyze_subtree(current_node.content_document)
-				current_node.hidden_interactive_count = interactive_count
-				current_node.has_hidden_content = has_content
+				# Get viewport height from iframe's client rect
+				viewport_height = 0.0
+				if current_node.snapshot_node and current_node.snapshot_node.clientRects:
+					viewport_height = current_node.snapshot_node.clientRects.height
+
+				hidden = collect_hidden_elements(current_node.content_document, viewport_height)
+				# Sort by pages and limit to avoid bloating context
+				hidden.sort(key=lambda x: x['pages'])
+				current_node.hidden_elements_info = hidden[:10]  # Limit to 10
 
 			for child in current_node.children_nodes or []:
 				process_node(child)
