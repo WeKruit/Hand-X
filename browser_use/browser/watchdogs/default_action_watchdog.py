@@ -1567,8 +1567,9 @@ class DefaultActionWatchdog(BaseWatchdog):
 				or 'data-offset-key' in _attrs  # Draft.js offset key for content tracking
 			)
 
-			if _is_draftjs and len(text) > 0:
-				# Prepend a space as "sacrifice character" - it will be dropped by Draft.js
+			if _is_draftjs and len(text) > 0 and clear:
+				# Prepend a space as "sacrifice character" - it will be dropped by Draft.js 
+				# Only when clear=True (cursor at leaf start), otherwise Draft.js won't drop it
 				text = ' ' + text
 				self.logger.debug('🎯 Draft.js detected, prepending sacrifice space')
 
