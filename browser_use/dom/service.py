@@ -12,6 +12,7 @@ from browser_use.dom.enhanced_snapshot import (
 	REQUIRED_COMPUTED_STYLES,
 	build_snapshot_lookup,
 )
+from browser_use.dom.serializer.clickable_elements import ClickableElementDetector
 from browser_use.dom.serializer.serializer import DOMTreeSerializer
 from browser_use.dom.views import (
 	DOMRect,
@@ -72,20 +73,6 @@ class DomService:
 		For each iframe, collects details of hidden interactive elements including
 		tag, text/name, and scroll distance in pages so the agent knows how far to scroll.
 		"""
-		interactive_tags = {
-			'A',
-			'BUTTON',
-			'INPUT',
-			'SELECT',
-			'TEXTAREA',
-			'LABEL',
-			'DETAILS',
-			'SUMMARY',
-			'OPTION',
-			'VIDEO',
-			'AUDIO',
-		}
-		interactive_roles = {'button', 'link', 'checkbox', 'radio', 'textbox', 'combobox', 'menuitem', 'tab'}
 
 		def is_hidden_by_threshold(element: EnhancedDOMTreeNode) -> bool:
 			"""Check if element is hidden by viewport threshold (not CSS)."""
@@ -110,9 +97,7 @@ class DomService:
 			hidden: list[dict[str, Any]] = []
 
 			if subtree_root.node_type == NodeType.ELEMENT_NODE:
-				tag = (subtree_root.tag_name or '').upper()
-				role = subtree_root.ax_node.role if subtree_root.ax_node else None
-				is_interactive = tag in interactive_tags or subtree_root.has_js_click_listener or role in interactive_roles
+				is_interactive = ClickableElementDetector.is_interactive(subtree_root)
 
 				if is_interactive and is_hidden_by_threshold(subtree_root):
 					# Get element text/name
