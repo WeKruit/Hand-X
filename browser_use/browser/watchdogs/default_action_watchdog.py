@@ -2867,13 +2867,16 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 								// Match against both text and value (case-insensitive)
 								if (optionTextLower === targetTextLower || optionValueLower === targetTextLower) {
+									const expectedValue = option.value;
+
 									// Focus the element FIRST (important for Svelte/Vue/React and other reactive frameworks)
 									// This simulates the user focusing on the dropdown before changing it
 									element.focus();
 
-									// Then set the value
-									element.value = option.value;
+									// Then set the value using multiple methods for maximum compatibility
+									element.value = expectedValue;
 									option.selected = true;
+									element.selectedIndex = option.index;
 
 									// Trigger all necessary events for reactive frameworks
 									// 1. input event - critical for Vue's v-model and Svelte's bind:value
@@ -2886,6 +2889,25 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 									// 3. blur event - completes the interaction, triggers validation
 									element.blur();
+
+									// Verification: Check if the selection actually stuck (avoid intercepting and resetting the value)
+									if (element.value !== expectedValue) {
+										// Selection was reverted - need to try clicking instead
+										return {
+											success: false,
+											error: `Selection was set but reverted by page framework. The dropdown may require clicking.`,
+											selectionReverted: true,
+											targetOption: {
+												text: option.text.trim(),
+												value: expectedValue,
+												index: option.index
+											},
+											availableOptions: Array.from(element.options).map(opt => ({
+												text: opt.text.trim(),
+												value: opt.value
+											}))
+										};
+									}
 
 									return {
 										success: true,
@@ -3070,6 +3092,90 @@ class DefaultActionWatchdog(BaseWatchdog):
 				)
 
 				selection_result = result.get('result', {}).get('value', {})
+
+				# Check if selection was reverted by framework - try clicking as fallback
+				if selection_result.get('selectionReverted'):
+					self.logger.info('⚠️ Selection was reverted by page framework, trying click fallback...')
+					target_option = selection_result.get('targetOption', {})
+					option_index = target_option.get('index', 0)
+
+					# Try clicking on the option element directly
+					click_fallback_script = """
+					function(optionIndex) {
+						const select = this;
+						if (select.tagName.toLowerCase() !== 'select') return { success: false, error: 'Not a select element' };
+
+						const option = select.options[optionIndex];
+						if (!option) return { success: false, error: 'Option not found at index ' + optionIndex };
+
+						// Method 1: Try using the native selectedIndex setter with a small delay
+						const originalValue = select.value;
+
+						// Simulate opening the dropdown (some frameworks need this)
+						select.focus();
+						const mouseDown = new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window });
+						select.dispatchEvent(mouseDown);
+
+						// Set using selectedIndex (more reliable for some frameworks)
+						select.selectedIndex = optionIndex;
+
+						// Click the option
+						option.selected = true;
+						const optionClick = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+						option.dispatchEvent(optionClick);
+
+						// Close dropdown
+						const mouseUp = new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window });
+						select.dispatchEvent(mouseUp);
+
+						// Fire change event
+						const changeEvent = new Event('change', { bubbles: true, cancelable: true });
+						select.dispatchEvent(changeEvent);
+
+						// Blur to finalize
+						select.blur();
+
+						// Verify
+						if (select.value === option.value || select.selectedIndex === optionIndex) {
+							return {
+								success: true,
+								message: 'Selected via click fallback: ' + option.text.trim(),
+								value: option.value
+							};
+						}
+
+						return {
+							success: false,
+							error: 'Click fallback also failed - framework may block all programmatic selection',
+							finalValue: select.value,
+							expectedValue: option.value
+						};
+					}
+					"""
+
+					fallback_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+						params={
+							'functionDeclaration': click_fallback_script,
+							'arguments': [{'value': option_index}],
+							'objectId': object_id,
+							'returnByValue': True,
+						},
+						session_id=cdp_session.session_id,
+					)
+
+					fallback_data = fallback_result.get('result', {}).get('value', {})
+					if fallback_data.get('success'):
+						msg = fallback_data.get('message', f'Selected option via click: {target_text}')
+						self.logger.info(f'✅ {msg}')
+						return {
+							'success': 'true',
+							'message': msg,
+							'value': fallback_data.get('value', target_text),
+							'backend_node_id': str(index_for_logging),
+						}
+					else:
+						self.logger.warning(f'⚠️ Click fallback also failed: {fallback_data.get("error", "unknown")}')
+						# Continue to error handling below
 
 				if selection_result.get('success'):
 					msg = selection_result.get('message', f'Selected option: {target_text}')
