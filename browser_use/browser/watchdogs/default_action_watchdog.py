@@ -1549,14 +1549,8 @@ class DefaultActionWatchdog(BaseWatchdog):
 			else:
 				self.logger.debug(f'🎯 Typing text character by character: "{text}"')
 
-			# FIX for Issue #3889: Draft.js editors lose the first character because
-			# CDP's dispatchKeyEvent doesn't trigger the beforeinput event that
-			# Draft.js relies on.
-			#
-			# Solution: Detect Draft.js editors specifically (not all contenteditable
-			# elements) and prepend a "sacrifice" space character that will be
-			# dropped by Draft.js, so the actual text starts from the second character.
-			#
+			# Detect Draft.js editors, and prepend a "sacrifice" space so the first char isn't dropped
+
 			# Draft.js detection: Check for Draft.js-specific class names and data attributes
 			_attrs = element_node.attributes or {}
 			_class_name = _attrs.get('class', '')
@@ -1568,8 +1562,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 			)
 
 			if _is_draftjs and len(text) > 0 and clear:
-				# Prepend a space as "sacrifice character" - it will be dropped by Draft.js
-				# Only when clear=True (cursor at leaf start), otherwise Draft.js won't drop it
+				# Prepend a space as sacrifice when clear=True (cursor at leaf start) - dropped by Draft.js
 				text = ' ' + text
 				self.logger.debug('🎯 Draft.js detected, prepending sacrifice space')
 
