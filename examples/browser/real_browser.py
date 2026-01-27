@@ -23,7 +23,7 @@ def select_chrome_profile() -> str | None:
 
 	print('Available Chrome profiles:')
 	for i, p in enumerate(profiles, 1):
-		print(f"  {i}. {p['name']}")
+		print(f'  {i}. {p["name"]}')
 
 	while True:
 		choice = input(f'\nSelect profile (1-{len(profiles)}): ').strip()

@@ -163,10 +163,12 @@ def list_chrome_profiles() -> list[dict[str, str]]:
 		info_cache = local_state.get('profile', {}).get('info_cache', {})
 		profiles = []
 		for directory, info in info_cache.items():
-			profiles.append({
-				'directory': directory,
-				'name': info.get('name', directory),
-			})
+			profiles.append(
+				{
+					'directory': directory,
+					'name': info.get('name', directory),
+				}
+			)
 		return sorted(profiles, key=lambda p: p['directory'])
 	except (json.JSONDecodeError, KeyError, OSError):
 		return []
