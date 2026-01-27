@@ -411,7 +411,7 @@ class BrowserSession(BaseModel):
 				# Use first available profile
 				profile_directory = profiles[0]['directory']
 				logging.getLogger('browser_use').info(
-					f"Auto-selected Chrome profile: {profiles[0]['name']} ({profile_directory})"
+					f'Auto-selected Chrome profile: {profiles[0]["name"]} ({profile_directory})'
 				)
 			else:
 				profile_directory = 'Default'
