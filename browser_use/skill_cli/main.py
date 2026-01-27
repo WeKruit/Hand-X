@@ -345,6 +345,17 @@ def main() -> int:
 	parser = build_parser()
 	args = parser.parse_args()
 
+	# Use different default session for CDP URL to avoid conflicts with other browser modes.
+	# This prevents issues where an existing 'default' session (e.g., using chromium mode)
+	# would be reused when the user specifies --cdp-url, since session parameters are
+	# set at creation time. The same issue would occur switching between any browser modes
+	# (e.g., --browser chromium to --browser real), but CDP is the most common case where
+	# users expect to connect to a specific existing browser.
+	# NOTE: This must happen before any command handling (server, sessions, close --all)
+	# so that those commands also target the correct session.
+	if getattr(args, 'cdp_url', None) and args.session == 'default':
+		args.session = 'cdp-default'
+
 	if not args.command:
 		parser.print_help()
 		return 0
