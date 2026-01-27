@@ -3,7 +3,6 @@
 import base64
 import logging
 from pathlib import Path
-
 from typing import Literal
 
 from browser_use.llm.messages import (
