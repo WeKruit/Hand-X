@@ -1551,9 +1551,8 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 			# Detect contenteditable elements (may have leaf-start bug where first char is dropped)
 			_attrs = element_node.attributes or {}
-			_is_contenteditable = (
-				_attrs.get('contenteditable') in ('true', '')
-				or (_attrs.get('role') == 'textbox' and element_node.tag_name not in ('input', 'textarea'))
+			_is_contenteditable = _attrs.get('contenteditable') in ('true', '') or (
+				_attrs.get('role') == 'textbox' and element_node.tag_name not in ('input', 'textarea')
 			)
 
 			# For contenteditable: after typing first char, check if dropped and retype if needed
@@ -1655,7 +1654,13 @@ class DefaultActionWatchdog(BaseWatchdog):
 						modifiers, vk_code, base_key = self._get_char_modifiers_and_vk(_first_char)
 						key_code = self._get_key_code_for_char(base_key)
 						await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-							params={'type': 'keyDown', 'key': base_key, 'code': key_code, 'modifiers': modifiers, 'windowsVirtualKeyCode': vk_code},
+							params={
+								'type': 'keyDown',
+								'key': base_key,
+								'code': key_code,
+								'modifiers': modifiers,
+								'windowsVirtualKeyCode': vk_code,
+							},
 							session_id=cdp_session.session_id,
 						)
 						await asyncio.sleep(0.005)
@@ -1664,7 +1669,13 @@ class DefaultActionWatchdog(BaseWatchdog):
 							session_id=cdp_session.session_id,
 						)
 						await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
-							params={'type': 'keyUp', 'key': base_key, 'code': key_code, 'modifiers': modifiers, 'windowsVirtualKeyCode': vk_code},
+							params={
+								'type': 'keyUp',
+								'key': base_key,
+								'code': key_code,
+								'modifiers': modifiers,
+								'windowsVirtualKeyCode': vk_code,
+							},
 							session_id=cdp_session.session_id,
 						)
 
