@@ -246,7 +246,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				if 'gemini' in model_name:
 					if '3-pro' in model_name:
 						return 90
-					return 45
+					return 75
+				elif 'browser-use' in model_name:
+					return 75
 				elif 'groq' in model_name:
 					return 30
 				elif 'o3' in model_name or 'claude' in model_name or 'sonnet' in model_name or 'deepseek' in model_name:
