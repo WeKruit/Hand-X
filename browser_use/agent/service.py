@@ -2354,7 +2354,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 			# Stop the event bus gracefully, waiting for all events to be processed
 			# Configurable via TIMEOUT_AgentEventBusStop env var (default: 3.0s)
-			await self.eventbus.stop(timeout=_get_timeout('TIMEOUT_AgentEventBusStop', 3.0))
+			await self.eventbus.stop(clear=True, timeout=_get_timeout('TIMEOUT_AgentEventBusStop', 3.0))
 
 			await self.close()
 
