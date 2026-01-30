@@ -767,7 +767,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				)
 
 				# Simple memory handling
-				MAX_MEMORY_LENGTH = 1000
+				MAX_MEMORY_LENGTH = 10000
 				if len(extracted_content) < MAX_MEMORY_LENGTH:
 					memory = extracted_content
 					include_extracted_content_only_once = False
@@ -1183,7 +1183,7 @@ Validated Code (after quote fixing):
 
 				# Memory handling: keep full result in extracted_content for current step,
 				# but use truncated version in long_term_memory if too large
-				MAX_MEMORY_LENGTH = 1000
+				MAX_MEMORY_LENGTH = 10000
 				if len(result_text) < MAX_MEMORY_LENGTH:
 					memory = result_text
 					include_extracted_content_only_once = False
