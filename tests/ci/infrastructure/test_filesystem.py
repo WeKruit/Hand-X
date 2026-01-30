@@ -17,7 +17,6 @@ from browser_use.filesystem.file_system import (
 	JsonlFile,
 	MarkdownFile,
 	TxtFile,
-	XmlFile,
 )
 
 
