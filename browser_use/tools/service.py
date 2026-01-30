@@ -112,7 +112,8 @@ def _is_autocomplete_field(node: EnhancedDOMTreeNode) -> bool:
 		return True
 	if attrs.get('list'):
 		return True
-	if attrs.get('aria-haspopup') and (attrs.get('aria-controls') or attrs.get('aria-owns')):
+	haspopup = attrs.get('aria-haspopup', '')
+	if haspopup and haspopup != 'false' and (attrs.get('aria-controls') or attrs.get('aria-owns')):
 		return True
 	return False
 
