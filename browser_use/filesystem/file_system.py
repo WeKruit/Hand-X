@@ -11,6 +11,66 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 INVALID_FILENAME_ERROR_MESSAGE = 'Error: Invalid filename format. Must be alphanumeric with supported extension.'
+
+UNSUPPORTED_BINARY_EXTENSIONS = {
+	'png',
+	'jpg',
+	'jpeg',
+	'gif',
+	'bmp',
+	'svg',
+	'webp',
+	'ico',
+	'mp3',
+	'mp4',
+	'wav',
+	'avi',
+	'mov',
+	'zip',
+	'tar',
+	'gz',
+	'rar',
+	'exe',
+	'bin',
+	'dll',
+	'so',
+}
+
+
+def _build_filename_error_message(file_name: str, supported_extensions: list[str]) -> str:
+	"""Build a specific error message explaining why the filename was rejected and how to fix it."""
+	base = os.path.basename(file_name)
+
+	# Check for binary/image extension
+	if '.' in base:
+		_, ext = base.rsplit('.', 1)
+		ext_lower = ext.lower()
+		if ext_lower in UNSUPPORTED_BINARY_EXTENSIONS:
+			return (
+				f"Error: Cannot write binary/image file '{base}'. "
+				f"The write_file tool only supports text-based files. "
+				f"Supported extensions: {', '.join('.' + e for e in supported_extensions)}. "
+				f"For screenshots, the browser automatically captures them - do not try to save screenshots as files."
+			)
+		if ext_lower not in supported_extensions:
+			return (
+				f"Error: Unsupported file extension '.{ext_lower}' in '{base}'. "
+				f"Supported extensions: {', '.join('.' + e for e in supported_extensions)}. "
+				f"Please rename the file to use a supported extension."
+			)
+
+	# No extension or no dot
+	if '.' not in base:
+		return (
+			f"Error: Filename '{base}' has no extension. "
+			f"Please add a supported extension: {', '.join('.' + e for e in supported_extensions)}."
+		)
+
+	return (
+		f"Error: Invalid filename '{base}'. "
+		f"Filenames must contain only letters, numbers, underscores, hyphens, dots, parentheses, and spaces. "
+		f"Supported extensions: {', '.join('.' + e for e in supported_extensions)}."
+	)
 DEFAULT_FILE_SYSTEM_PATH = 'browseruse_agent_data'
 
 
@@ -208,6 +268,22 @@ class DocxFile(BaseFile):
 			await asyncio.get_event_loop().run_in_executor(executor, lambda: self.sync_to_disk_sync(path))
 
 
+class HtmlFile(BaseFile):
+	"""HTML file implementation"""
+
+	@property
+	def extension(self) -> str:
+		return 'html'
+
+
+class XmlFile(BaseFile):
+	"""XML file implementation"""
+
+	@property
+	def extension(self) -> str:
+		return 'xml'
+
+
 class FileSystemState(BaseModel):
 	"""Serializable state of the file system"""
 
@@ -239,6 +315,8 @@ class FileSystem:
 			'csv': CsvFile,
 			'pdf': PdfFile,
 			'docx': DocxFile,
+			'html': HtmlFile,
+			'xml': XmlFile,
 		}
 
 		self.files = {}
@@ -269,12 +347,48 @@ class FileSystem:
 			file_obj.sync_to_disk_sync(self.data_dir)
 
 	def _is_valid_filename(self, file_name: str) -> bool:
-		"""Check if filename matches the required pattern: name.extension"""
-		# Build extensions pattern from _file_types
+		"""Check if filename matches the required pattern: name.extension
+
+		Allows letters, numbers, underscores, hyphens, dots, parentheses, spaces, and Chinese characters
+		in the name part, followed by a dot and a supported extension.
+		"""
 		extensions = '|'.join(self._file_types.keys())
-		pattern = rf'^[a-zA-Z0-9_\-\u4e00-\u9fff]+\.({extensions})$'
+		# Allow dots, spaces, parens in the name part - match everything up to the last dot
+		pattern = rf'^[a-zA-Z0-9_\-\.\(\) \u4e00-\u9fff]+\.({extensions})$'
 		file_name_base = os.path.basename(file_name)
-		return bool(re.match(pattern, file_name_base))
+		if not re.match(pattern, file_name_base):
+			return False
+		# Ensure the name part (before last dot) is non-empty
+		name_part = file_name_base.rsplit('.', 1)[0]
+		return len(name_part.strip()) > 0
+
+	@staticmethod
+	def sanitize_filename(file_name: str) -> str:
+		"""Sanitize a filename by replacing/removing invalid characters.
+
+		- Replaces spaces with hyphens
+		- Removes characters that are not alphanumeric, underscore, hyphen, dot, parentheses, or Chinese
+		- Preserves the extension
+		- Collapses multiple consecutive hyphens
+		"""
+		base = os.path.basename(file_name)
+		if '.' not in base:
+			return base
+
+		name_part, ext = base.rsplit('.', 1)
+		# Replace spaces with hyphens
+		name_part = name_part.replace(' ', '-')
+		# Remove invalid characters (keep alphanumeric, underscore, hyphen, dot, parens, Chinese)
+		name_part = re.sub(r'[^a-zA-Z0-9_\-\.\(\)\u4e00-\u9fff]', '', name_part)
+		# Collapse multiple hyphens
+		name_part = re.sub(r'-{2,}', '-', name_part)
+		# Strip leading/trailing hyphens and dots
+		name_part = name_part.strip('-.')
+
+		if not name_part:
+			name_part = 'file'
+
+		return f'{name_part}.{ext.lower()}'
 
 	def _parse_filename(self, filename: str) -> tuple[str, str]:
 		"""Parse filename into name and extension. Always check _is_valid_filename first."""
@@ -419,7 +533,12 @@ class FileSystem:
 	async def write_file(self, full_filename: str, content: str) -> str:
 		"""Write content to file using file-specific write method"""
 		if not self._is_valid_filename(full_filename):
-			return INVALID_FILENAME_ERROR_MESSAGE
+			# Try sanitizing the filename before giving up
+			sanitized = self.sanitize_filename(full_filename)
+			if sanitized != os.path.basename(full_filename) and self._is_valid_filename(sanitized):
+				full_filename = sanitized
+			else:
+				return _build_filename_error_message(full_filename, self.get_allowed_extensions())
 
 		try:
 			name_without_ext, extension = self._parse_filename(full_filename)
@@ -445,7 +564,11 @@ class FileSystem:
 	async def append_file(self, full_filename: str, content: str) -> str:
 		"""Append content to file using file-specific append method"""
 		if not self._is_valid_filename(full_filename):
-			return INVALID_FILENAME_ERROR_MESSAGE
+			sanitized = self.sanitize_filename(full_filename)
+			if sanitized != os.path.basename(full_filename) and self._is_valid_filename(sanitized):
+				full_filename = sanitized
+			else:
+				return _build_filename_error_message(full_filename, self.get_allowed_extensions())
 
 		file_obj = self.get_file(full_filename)
 		if not file_obj:
@@ -462,7 +585,11 @@ class FileSystem:
 	async def replace_file_str(self, full_filename: str, old_str: str, new_str: str) -> str:
 		"""Replace old_str with new_str in file_name"""
 		if not self._is_valid_filename(full_filename):
-			return INVALID_FILENAME_ERROR_MESSAGE
+			sanitized = self.sanitize_filename(full_filename)
+			if sanitized != os.path.basename(full_filename) and self._is_valid_filename(sanitized):
+				full_filename = sanitized
+			else:
+				return _build_filename_error_message(full_filename, self.get_allowed_extensions())
 
 		if not old_str:
 			return 'Error: Cannot replace empty string. Please provide a non-empty string to replace.'
@@ -596,23 +723,23 @@ class FileSystem:
 			file_info = file_data['data']
 
 			# Create the appropriate file object based on type
-			if file_type == 'MarkdownFile':
-				file_obj = MarkdownFile(**file_info)
-			elif file_type == 'TxtFile':
-				file_obj = TxtFile(**file_info)
-			elif file_type == 'JsonFile':
-				file_obj = JsonFile(**file_info)
-			elif file_type == 'JsonlFile':
-				file_obj = JsonlFile(**file_info)
-			elif file_type == 'CsvFile':
-				file_obj = CsvFile(**file_info)
-			elif file_type == 'PdfFile':
-				file_obj = PdfFile(**file_info)
-			elif file_type == 'DocxFile':
-				file_obj = DocxFile(**file_info)
-			else:
+			file_type_map: dict[str, type[BaseFile]] = {
+				'MarkdownFile': MarkdownFile,
+				'TxtFile': TxtFile,
+				'JsonFile': JsonFile,
+				'JsonlFile': JsonlFile,
+				'CsvFile': CsvFile,
+				'PdfFile': PdfFile,
+				'DocxFile': DocxFile,
+				'HtmlFile': HtmlFile,
+				'XmlFile': XmlFile,
+			}
+
+			file_class = file_type_map.get(file_type)
+			if not file_class:
 				# Skip unknown file types
 				continue
+			file_obj = file_class(**file_info)
 
 			# Add to files dict and sync to disk
 			fs.files[full_filename] = file_obj
