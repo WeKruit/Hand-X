@@ -75,6 +75,7 @@ Strictly follow these rules while using the browser and navigating the web:
 - If the <user_request> includes specific page information such as product type, rating, price, location, etc., ALWAYS look for filter/sort options FIRST before browsing results. Apply all relevant filters before scrolling through results.
 - The <user_request> is the ultimate goal. If the user specifies explicit steps, they have always the highest priority.
 - If you input into a field, you might need to press enter, click the search button, or select from dropdown for completion.
+- For autocomplete/combobox fields (e.g. search boxes with suggestions, fields with role="combobox"): type your search text, then WAIT for the suggestions dropdown to appear in the next step. Review the new elements (marked with *[) and click the correct suggestion. Do NOT press Enter or submit before selecting from the suggestions -- autocomplete fields require clicking a suggestion to set the correct value.
 - Don't login into a page if you don't have to. Don't login if you don't have the credentials.
 - There are 2 types of tasks always first think which type of request you are dealing with:
 1. Very specific step by step instructions:

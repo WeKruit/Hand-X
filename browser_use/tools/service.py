@@ -102,6 +102,21 @@ def handle_browser_error(e: BrowserError) -> ActionResult:
 	raise e
 
 
+def _is_autocomplete_field(node: EnhancedDOMTreeNode) -> bool:
+	"""Detect if a node is an autocomplete/combobox field from its attributes."""
+	attrs = node.attributes or {}
+	if attrs.get('role') == 'combobox':
+		return True
+	aria_ac = attrs.get('aria-autocomplete', '')
+	if aria_ac and aria_ac != 'none':
+		return True
+	if attrs.get('list'):
+		return True
+	if attrs.get('aria-haspopup') and (attrs.get('aria-controls') or attrs.get('aria-owns')):
+		return True
+	return False
+
+
 class Tools(Generic[Context]):
 	def __init__(
 		self,
@@ -416,6 +431,18 @@ class Tools(Generic[Context]):
 					log_msg = f"Typed '{params.text}'"
 
 				logger.debug(log_msg)
+
+				# Check for value mismatch (non-sensitive only)
+				actual_value = None
+				if isinstance(input_metadata, dict):
+					actual_value = input_metadata.pop('actual_value', None)
+
+				if not has_sensitive_data and actual_value is not None and actual_value != params.text:
+					msg += f"\n⚠️ Note: the field's actual value '{actual_value}' differs from typed text '{params.text}'. The page may have reformatted or autocompleted your input."
+
+				# Check for autocomplete/combobox field
+				if _is_autocomplete_field(node):
+					msg += '\n💡 This is an autocomplete field. Wait for suggestions to appear, then click the correct suggestion instead of pressing Enter.'
 
 				# Include input coordinates in metadata if available
 				return ActionResult(
