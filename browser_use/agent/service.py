@@ -1249,7 +1249,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				f'BUDGET WARNING: You have used {steps_used}/{step_info.max_steps} steps '
 				f'({pct}%). {steps_remaining} steps remaining. '
 				f'If the task cannot be completed in the remaining steps, prioritize: '
-				f'(1) save all partial results to files, (2) call done with what you have. '
+				f'(1) consolidate your results (save to files if the file system is in use), '
+				f'(2) call done with what you have. '
 				f'Partial results are far more valuable than exhausting all steps with nothing saved.'
 			)
 			self.logger.info(f'Step budget warning: {steps_used}/{step_info.max_steps} ({pct}%)')
