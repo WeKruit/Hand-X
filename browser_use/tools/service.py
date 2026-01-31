@@ -44,6 +44,7 @@ from browser_use.tools.views import (
 	InputTextAction,
 	NavigateAction,
 	NoParamsAction,
+	ScreenshotAction,
 	ScrollAction,
 	SearchAction,
 	SelectDropdownOptionAction,
@@ -100,6 +101,22 @@ def handle_browser_error(e: BrowserError) -> ActionResult:
 		'⚠️ A BrowserError was raised without long_term_memory - always set long_term_memory when raising BrowserError to propagate right messages to LLM.'
 	)
 	raise e
+
+
+def _is_autocomplete_field(node: EnhancedDOMTreeNode) -> bool:
+	"""Detect if a node is an autocomplete/combobox field from its attributes."""
+	attrs = node.attributes or {}
+	if attrs.get('role') == 'combobox':
+		return True
+	aria_ac = attrs.get('aria-autocomplete', '')
+	if aria_ac and aria_ac != 'none':
+		return True
+	if attrs.get('list'):
+		return True
+	haspopup = attrs.get('aria-haspopup', '')
+	if haspopup and haspopup != 'false' and (attrs.get('aria-controls') or attrs.get('aria-owns')):
+		return True
+	return False
 
 
 class Tools(Generic[Context]):
@@ -417,6 +434,18 @@ class Tools(Generic[Context]):
 
 				logger.debug(log_msg)
 
+				# Check for value mismatch (non-sensitive only)
+				actual_value = None
+				if isinstance(input_metadata, dict):
+					actual_value = input_metadata.pop('actual_value', None)
+
+				if not has_sensitive_data and actual_value is not None and actual_value != params.text:
+					msg += f"\n⚠️ Note: the field's actual value '{actual_value}' differs from typed text '{params.text}'. The page may have reformatted or autocompleted your input."
+
+				# Check for autocomplete/combobox field
+				if _is_autocomplete_field(node):
+					msg += '\n💡 This is an autocomplete field. Wait for suggestions to appear, then click the correct suggestion instead of pressing Enter.'
+
 				# Include input coordinates in metadata if available
 				return ActionResult(
 					extracted_content=msg,
@@ -469,10 +498,14 @@ class Tools(Generic[Context]):
 							msg = f'File path {params.path} is not available. To fix: The user must add this file path to the available_file_paths parameter when creating the Agent. Example: Agent(task="...", llm=llm, browser=browser, available_file_paths=["{params.path}"])'
 							raise BrowserError(message=msg, long_term_memory=msg)
 
-			# For local browsers, ensure the file exists on the local filesystem
+			# For local browsers, ensure the file exists and has content
 			if browser_session.is_local:
 				if not os.path.exists(params.path):
 					msg = f'File {params.path} does not exist'
+					return ActionResult(error=msg)
+				file_size = os.path.getsize(params.path)
+				if file_size == 0:
+					msg = f'File {params.path} is empty (0 bytes). The file may not have been saved correctly.'
 					return ActionResult(error=msg)
 
 			# Get the selector map to find the node
@@ -763,7 +796,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				)
 
 				# Simple memory handling
-				MAX_MEMORY_LENGTH = 1000
+				MAX_MEMORY_LENGTH = 10000
 				if len(extracted_content) < MAX_MEMORY_LENGTH:
 					memory = extracted_content
 					include_extracted_content_only_once = False
@@ -928,20 +961,42 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				)
 
 		@self.registry.action(
-			'Get a screenshot of the current viewport. Use when: visual inspection needed, layout unclear, element positions uncertain, debugging UI issues, or verifying page state. Screenshot is included in the next browser_state No parameters are needed.',
-			param_model=NoParamsAction,
+			'Take a screenshot of the current viewport. If file_name is provided, saves to that file and returns the path. '
+			'Otherwise, screenshot is included in the next browser_state observation.',
+			param_model=ScreenshotAction,
 		)
-		async def screenshot(_: NoParamsAction):
-			"""Request that a screenshot be included in the next observation"""
-			memory = 'Requested screenshot for next observation'
-			msg = f'📸 {memory}'
-			logger.info(msg)
+		async def screenshot(
+			params: ScreenshotAction,
+			browser_session: BrowserSession,
+			file_system: FileSystem,
+		):
+			"""Take screenshot, optionally saving to file."""
+			if params.file_name:
+				# Save screenshot to file
+				file_name = params.file_name
+				if not file_name.lower().endswith('.png'):
+					file_name = f'{file_name}.png'
+				file_name = FileSystem.sanitize_filename(file_name)
 
-			# Return flag in metadata to signal that screenshot should be included
-			return ActionResult(
-				extracted_content=memory,
-				metadata={'include_screenshot': True},
-			)
+				screenshot_bytes = await browser_session.take_screenshot(full_page=False)
+				file_path = file_system.get_dir() / file_name
+				file_path.write_bytes(screenshot_bytes)
+
+				result = f'Screenshot saved to {file_name}'
+				logger.info(f'📸 {result}. Full path: {file_path}')
+				return ActionResult(
+					extracted_content=result,
+					long_term_memory=f'{result}. Full path: {file_path}',
+					attachments=[str(file_path)],
+				)
+			else:
+				# Flag for next observation
+				memory = 'Requested screenshot for next observation'
+				logger.info(f'📸 {memory}')
+				return ActionResult(
+					extracted_content=memory,
+					metadata={'include_screenshot': True},
+				)
 
 		# Dropdown Actions
 
@@ -1021,7 +1076,11 @@ You will be given a query and the markdown of a webpage that has been filtered t
 		# File System Actions
 
 		@self.registry.action(
-			'Write content to a file in the local file system. Use this to create new files or overwrite entire file contents. For targeted edits within existing files, use replace_file instead. Supports alphanumeric filename and file extension formats: .txt, .md, .json, .jsonl, .csv, .pdf. For PDF files, write content in markdown format and it will be automatically converted to a properly formatted PDF document.'
+			'Write content to a file. By default this OVERWRITES the entire file - use append=true to add to an existing file, or use replace_file for targeted edits within a file. '
+			'FILENAME RULES: Use only letters, numbers, underscores, hyphens, dots, parentheses. Spaces are auto-converted to hyphens. '
+			'SUPPORTED EXTENSIONS: .txt, .md, .json, .jsonl, .csv, .html, .xml, .pdf, .docx. '
+			'CANNOT write binary/image files (.png, .jpg, .mp4, etc.) - do not attempt to save screenshots as files. '
+			'For PDF files, write content in markdown format and it will be auto-converted to PDF.'
 		)
 		async def write_file(
 			file_name: str,
@@ -1179,7 +1238,7 @@ Validated Code (after quote fixing):
 
 				# Memory handling: keep full result in extracted_content for current step,
 				# but use truncated version in long_term_memory if too large
-				MAX_MEMORY_LENGTH = 1000
+				MAX_MEMORY_LENGTH = 10000
 				if len(result_text) < MAX_MEMORY_LENGTH:
 					memory = result_text
 					include_extracted_content_only_once = False
