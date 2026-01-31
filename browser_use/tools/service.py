@@ -1164,7 +1164,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			# Check if a matching download already exists
 			already_downloaded = find_matching_download()
 			if already_downloaded:
-				result_msg = f"Download completed: {already_downloaded['file_name']} ({already_downloaded['file_size']} bytes) saved to {already_downloaded['path']}"
+				result_msg = f'Download completed: {already_downloaded["file_name"]} ({already_downloaded["file_size"]} bytes) saved to {already_downloaded["path"]}'
 				logger.info(f'📥 {result_msg}')
 				return ActionResult(
 					extracted_content=result_msg,
@@ -1193,17 +1193,17 @@ You will be given a query and the markdown of a webpage that has been filtered t
 
 			try:
 				await asyncio.wait_for(download_complete.wait(), timeout=params.timeout)
-				result_msg = f"Download completed: {downloaded_file_info['file_name']} ({downloaded_file_info['file_size']} bytes) saved to {downloaded_file_info['path']}"
+				result_msg = f'Download completed: {downloaded_file_info["file_name"]} ({downloaded_file_info["file_size"]} bytes) saved to {downloaded_file_info["path"]}'
 				logger.info(f'📥 {result_msg}')
 				return ActionResult(
 					extracted_content=result_msg,
 					include_in_memory=True,
 				)
-			except asyncio.TimeoutError:
+			except TimeoutError:
 				# Check one more time in case download completed but event was missed
 				final_check = find_matching_download()
 				if final_check:
-					result_msg = f"Download completed: {final_check['file_name']} ({final_check['file_size']} bytes) saved to {final_check['path']}"
+					result_msg = f'Download completed: {final_check["file_name"]} ({final_check["file_size"]} bytes) saved to {final_check["path"]}'
 					logger.info(f'📥 {result_msg}')
 					return ActionResult(
 						extracted_content=result_msg,
