@@ -188,7 +188,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		include_tool_call_examples: bool = False,
 		vision_detail_level: Literal['auto', 'low', 'high'] = 'auto',
 		llm_timeout: int | None = None,
-		step_timeout: int = 120,
+		step_timeout: int = 180,
 		directly_open_url: bool = True,
 		include_recent_events: bool = False,
 		sample_images: list[ContentPartTextParam | ContentPartImageParam] | None = None,
@@ -246,13 +246,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				if 'gemini' in model_name:
 					if '3-pro' in model_name:
 						return 90
-					return 45
+					return 75
 				elif 'groq' in model_name:
 					return 30
 				elif 'o3' in model_name or 'claude' in model_name or 'sonnet' in model_name or 'deepseek' in model_name:
 					return 90
 				else:
-					return 60  # Default timeout
+					return 75  # Default timeout
 
 			llm_timeout = _get_model_timeout(llm)
 
@@ -1057,6 +1057,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			unavailable_skills_info=unavailable_skills_info,
 		)
 
+		await self._inject_budget_warning(step_info)
 		await self._force_done_after_last_step(step_info)
 		await self._force_done_after_failure()
 		return browser_state_summary
@@ -1228,6 +1229,32 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Increment step counter after step is fully completed
 		self.state.n_steps += 1
+
+	async def _inject_budget_warning(self, step_info: AgentStepInfo | None = None) -> None:
+		"""Inject a prominent budget warning when the agent has used >= 75% of its step budget.
+
+		This gives the LLM advance notice to wrap up, save partial results, and call done
+		rather than exhausting all steps with nothing saved.
+		"""
+		if step_info is None:
+			return
+
+		steps_used = step_info.step_number + 1  # Convert 0-indexed to 1-indexed
+		budget_ratio = steps_used / step_info.max_steps
+
+		if budget_ratio >= 0.75 and not step_info.is_last_step():
+			steps_remaining = step_info.max_steps - steps_used
+			pct = int(budget_ratio * 100)
+			msg = (
+				f'BUDGET WARNING: You have used {steps_used}/{step_info.max_steps} steps '
+				f'({pct}%). {steps_remaining} steps remaining. '
+				f'If the task cannot be completed in the remaining steps, prioritize: '
+				f'(1) consolidate your results (save to files if the file system is in use), '
+				f'(2) call done with what you have. '
+				f'Partial results are far more valuable than exhausting all steps with nothing saved.'
+			)
+			self.logger.info(f'Step budget warning: {steps_used}/{step_info.max_steps} ({pct}%)')
+			self._message_manager._add_context_message(UserMessage(content=msg))
 
 	async def _force_done_after_last_step(self, step_info: AgentStepInfo | None = None) -> None:
 		"""Handle special processing for the last step"""
@@ -2354,7 +2381,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 			# Stop the event bus gracefully, waiting for all events to be processed
 			# Configurable via TIMEOUT_AgentEventBusStop env var (default: 3.0s)
-			await self.eventbus.stop(timeout=_get_timeout('TIMEOUT_AgentEventBusStop', 3.0))
+			await self.eventbus.stop(clear=True, timeout=_get_timeout('TIMEOUT_AgentEventBusStop', 3.0))
 
 			await self.close()
 
