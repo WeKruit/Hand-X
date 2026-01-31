@@ -393,18 +393,23 @@ class FileSystem:
 	def _resolve_filename(self, file_name: str) -> tuple[str, bool]:
 		"""Resolve a filename, attempting sanitization if the original is invalid.
 
-		Returns:
-			(resolved_name, was_sanitized): The resolved filename and whether sanitization was applied.
-			If resolution fails, returns (original_name, False).
-		"""
-		if self._is_valid_filename(file_name):
-			return file_name, False
+		Normalizes to basename first to prevent directory traversal (e.g. ../secret.md).
 
-		sanitized = self.sanitize_filename(file_name)
-		if sanitized != os.path.basename(file_name) and self._is_valid_filename(sanitized):
+		Returns:
+			(resolved_name, was_changed): The resolved filename and whether it differs from the input.
+			If resolution fails, returns (basename, was_changed).
+		"""
+		base_name = os.path.basename(file_name)
+		was_changed = base_name != file_name
+
+		if self._is_valid_filename(base_name):
+			return base_name, was_changed
+
+		sanitized = self.sanitize_filename(base_name)
+		if sanitized != base_name and self._is_valid_filename(sanitized):
 			return sanitized, True
 
-		return file_name, False
+		return base_name, was_changed
 
 	def _parse_filename(self, filename: str) -> tuple[str, str]:
 		"""Parse filename into name and extension. Always check _is_valid_filename first."""
@@ -532,10 +537,7 @@ class FileSystem:
 		file_obj = self.files.get(resolved)
 		if not file_obj:
 			if was_sanitized:
-				result['message'] = (
-					f"File '{resolved}' not found. "
-					f"(Filename was auto-corrected from '{full_filename}')"
-				)
+				result['message'] = f"File '{resolved}' not found. (Filename was auto-corrected from '{full_filename}')"
 			else:
 				result['message'] = f"File '{full_filename}' not found."
 			return result
