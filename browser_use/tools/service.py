@@ -497,10 +497,14 @@ class Tools(Generic[Context]):
 							msg = f'File path {params.path} is not available. To fix: The user must add this file path to the available_file_paths parameter when creating the Agent. Example: Agent(task="...", llm=llm, browser=browser, available_file_paths=["{params.path}"])'
 							raise BrowserError(message=msg, long_term_memory=msg)
 
-			# For local browsers, ensure the file exists on the local filesystem
+			# For local browsers, ensure the file exists and has content
 			if browser_session.is_local:
 				if not os.path.exists(params.path):
 					msg = f'File {params.path} does not exist'
+					return ActionResult(error=msg)
+				file_size = os.path.getsize(params.path)
+				if file_size == 0:
+					msg = f'File {params.path} is empty (0 bytes). The file may not have been saved correctly.'
 					return ActionResult(error=msg)
 
 			# Get the selector map to find the node
@@ -791,7 +795,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				)
 
 				# Simple memory handling
-				MAX_MEMORY_LENGTH = 1000
+				MAX_MEMORY_LENGTH = 10000
 				if len(extracted_content) < MAX_MEMORY_LENGTH:
 					memory = extracted_content
 					include_extracted_content_only_once = False
@@ -1207,7 +1211,7 @@ Validated Code (after quote fixing):
 
 				# Memory handling: keep full result in extracted_content for current step,
 				# but use truncated version in long_term_memory if too large
-				MAX_MEMORY_LENGTH = 1000
+				MAX_MEMORY_LENGTH = 10000
 				if len(result_text) < MAX_MEMORY_LENGTH:
 					memory = result_text
 					include_extracted_content_only_once = False

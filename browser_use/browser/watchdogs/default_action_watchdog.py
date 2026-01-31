@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 
 from cdp_use.cdp.input.commands import DispatchKeyEventParameters
 
@@ -2288,6 +2289,14 @@ class DefaultActionWatchdog(BaseWatchdog):
 			# Get CDP client and session
 			cdp_client = self.browser_session.cdp_client
 			session_id = await self._get_session_id_for_element(element_node)
+
+			# Validate file before upload
+			if os.path.exists(event.file_path):
+				file_size = os.path.getsize(event.file_path)
+				if file_size == 0:
+					msg = f'Upload failed - file {event.file_path} is empty (0 bytes).'
+					raise BrowserError(message=msg, long_term_memory=msg)
+				self.logger.debug(f'📎 File {event.file_path} validated ({file_size} bytes)')
 
 			# Set file(s) to upload
 			backend_node_id = element_node.backend_node_id
