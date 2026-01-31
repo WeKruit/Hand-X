@@ -178,9 +178,7 @@ class BaseWatchdog(BaseModel):
 		event_bus.on(event_class, unique_handler)
 
 	@staticmethod
-	def detach_handler_from_session(
-		browser_session: 'BrowserSession', event_class: type[BaseEvent[Any]], handler
-	) -> None:
+	def detach_handler_from_session(browser_session: 'BrowserSession', event_class: type[BaseEvent[Any]], handler) -> None:
 		"""Detach a single event handler from a browser session."""
 		event_bus = browser_session.event_bus
 
