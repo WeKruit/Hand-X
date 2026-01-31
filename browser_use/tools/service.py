@@ -51,6 +51,7 @@ from browser_use.tools.views import (
 	StructuredOutputAction,
 	SwitchTabAction,
 	UploadFileAction,
+	WaitForDownloadAction,
 )
 from browser_use.utils import create_task_with_error_handling, sanitize_surrogates, time_execution_sync
 
@@ -1127,6 +1128,57 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				images=images,
 				include_extracted_content_only_once=True,
 			)
+
+		# Download Actions
+
+		@self.registry.action(
+			'Wait for a file download to complete. Use this after triggering a download (ex: clicking a download link) to confirm it finished and get the file path.',
+			param_model=WaitForDownloadAction,
+		)
+		async def wait_for_download(params: WaitForDownloadAction, browser_session: BrowserSession):
+			import re
+
+			from browser_use.browser.events import FileDownloadedEvent
+			from browser_use.browser.watchdog_base import BaseWatchdog
+
+			download_complete = asyncio.Event()
+			downloaded_file_info: dict = {}
+
+			async def on_FileDownloadedEvent(event: FileDownloadedEvent):
+				# If pattern specified, check if filename matches
+				if params.file_name_pattern:
+					if not re.search(params.file_name_pattern, event.file_name):
+						return  # not the file
+
+				downloaded_file_info['path'] = event.path
+				downloaded_file_info['file_name'] = event.file_name
+				downloaded_file_info['file_size'] = event.file_size
+				downloaded_file_info['mime_type'] = event.mime_type
+				download_complete.set()
+				return 'handled'
+
+			# Attach handler
+			BaseWatchdog.attach_handler_to_session(browser_session, FileDownloadedEvent, on_FileDownloadedEvent)
+
+			try:
+				await asyncio.wait_for(download_complete.wait(), timeout=params.timeout)
+				result_msg = f"Download completed: {downloaded_file_info['file_name']} ({downloaded_file_info['file_size']} bytes) saved to {downloaded_file_info['path']}"
+				logger.info(f'📥 {result_msg}')
+				return ActionResult(
+					extracted_content=result_msg,
+					include_in_memory=True,
+				)
+			except asyncio.TimeoutError:
+				result_msg = f'Download timed out after {params.timeout} seconds. No file download was detected.'
+				logger.warning(f'⏱️ {result_msg}')
+				return ActionResult(
+					extracted_content=result_msg,
+					include_in_memory=True,
+					error='Download timeout',
+				)
+			finally:
+				# Detach handler to prevent memory leaks
+				BaseWatchdog.detach_handler_from_session(browser_session, FileDownloadedEvent, on_FileDownloadedEvent)
 
 		@self.registry.action(
 			"""Execute browser JavaScript. Best practice: wrap in IIFE (function(){...})() with try-catch for safety. Use ONLY browser APIs (document, window, DOM). NO Node.js APIs (fs, require, process). Example: (function(){try{const el=document.querySelector('#id');return el?el.value:'not found'}catch(e){return 'Error: '+e.message}})() Avoid comments. Use for hover, drag, zoom, custom selectors, extract/filter links, shadow DOM, or analysing page structure. Limit output size.""",
