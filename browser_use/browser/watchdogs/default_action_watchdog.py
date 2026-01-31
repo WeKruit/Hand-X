@@ -1657,6 +1657,26 @@ class DefaultActionWatchdog(BaseWatchdog):
 			# to update their internal state and trigger re-renders
 			await self._trigger_framework_events(object_id=object_id, cdp_session=cdp_session)
 
+			# Step 5: Read back actual value for verification (skip for sensitive data)
+			if not is_sensitive:
+				try:
+					await asyncio.sleep(0.05)  # let autocomplete/formatter JS settle
+					readback_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+						params={
+							'objectId': object_id,
+							'functionDeclaration': 'function() { return this.value !== undefined ? this.value : this.textContent; }',
+							'returnByValue': True,
+						},
+						session_id=cdp_session.session_id,
+					)
+					actual_value = readback_result.get('result', {}).get('value')
+					if actual_value is not None:
+						if input_coordinates is None:
+							input_coordinates = {}
+						input_coordinates['actual_value'] = actual_value
+				except Exception as e:
+					self.logger.debug(f'Value readback failed (non-critical): {e}')
+
 			# Return coordinates metadata if available
 			return input_coordinates
 
