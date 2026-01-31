@@ -1137,10 +1137,41 @@ You will be given a query and the markdown of a webpage that has been filtered t
 		)
 		async def wait_for_download(params: WaitForDownloadAction, browser_session: BrowserSession):
 			import re
+			from pathlib import Path
 
 			from browser_use.browser.events import FileDownloadedEvent
 			from browser_use.browser.watchdog_base import BaseWatchdog
 
+			def find_matching_download() -> dict | None:
+				"""Find a download that matches the pattern (most recent first)."""
+				# Check downloads in reverse order (most recent first)
+				for file_path in reversed(browser_session.downloaded_files):
+					path = Path(file_path)
+					if path.exists():
+						file_name = path.name
+						# Check pattern if specified
+						if params.file_name_pattern:
+							if not re.search(params.file_name_pattern, file_name):
+								continue
+						return {
+							'path': file_path,
+							'file_name': file_name,
+							'file_size': path.stat().st_size,
+							'mime_type': None,
+						}
+				return None
+
+			# Check if a matching download already exists
+			already_downloaded = find_matching_download()
+			if already_downloaded:
+				result_msg = f"Download completed: {already_downloaded['file_name']} ({already_downloaded['file_size']} bytes) saved to {already_downloaded['path']}"
+				logger.info(f'📥 {result_msg}')
+				return ActionResult(
+					extracted_content=result_msg,
+					include_in_memory=True,
+				)
+
+			# No matching download yet - wait for FileDownloadedEvent
 			download_complete = asyncio.Event()
 			downloaded_file_info: dict = {}
 
@@ -1169,6 +1200,16 @@ You will be given a query and the markdown of a webpage that has been filtered t
 					include_in_memory=True,
 				)
 			except asyncio.TimeoutError:
+				# Check one more time in case download completed but event was missed
+				final_check = find_matching_download()
+				if final_check:
+					result_msg = f"Download completed: {final_check['file_name']} ({final_check['file_size']} bytes) saved to {final_check['path']}"
+					logger.info(f'📥 {result_msg}')
+					return ActionResult(
+						extracted_content=result_msg,
+						include_in_memory=True,
+					)
+
 				result_msg = f'Download timed out after {params.timeout} seconds. No file download was detected.'
 				logger.warning(f'⏱️ {result_msg}')
 				return ActionResult(
