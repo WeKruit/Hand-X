@@ -444,7 +444,11 @@ class FileSystem:
 					)
 					return result
 
-				if extension in ['md', 'txt', 'json', 'jsonl', 'csv']:
+				# Text-based extensions: derive from _file_types, excluding those with special readers
+				_special_extensions = {'docx', 'pdf', 'jpg', 'jpeg', 'png'}
+				text_extensions = [ext for ext in self._file_types if ext not in _special_extensions]
+
+				if extension in text_extensions:
 					import anyio
 
 					async with await anyio.open_file(full_filename, 'r') as f:
