@@ -988,7 +988,7 @@ class TestFilenameSanitization:
 
 			result = await fs.write_file('screenshot.png', 'content')
 			assert 'binary/image' in result.lower() or 'Cannot write' in result
-			assert '.png' not in [f.split('.')[-1] for f in fs.list_files()]
+			assert 'screenshot.png' not in fs.list_files()
 
 			result = await fs.write_file('photo.jpg', 'content')
 			assert 'binary/image' in result.lower() or 'Cannot write' in result
