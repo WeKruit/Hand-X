@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 
 from cdp_use.cdp.input.commands import DispatchKeyEventParameters
 
@@ -1687,6 +1688,26 @@ class DefaultActionWatchdog(BaseWatchdog):
 			# to update their internal state and trigger re-renders
 			await self._trigger_framework_events(object_id=object_id, cdp_session=cdp_session)
 
+			# Step 5: Read back actual value for verification (skip for sensitive data)
+			if not is_sensitive:
+				try:
+					await asyncio.sleep(0.05)  # let autocomplete/formatter JS settle
+					readback_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+						params={
+							'objectId': object_id,
+							'functionDeclaration': 'function() { return this.value !== undefined ? this.value : this.textContent; }',
+							'returnByValue': True,
+						},
+						session_id=cdp_session.session_id,
+					)
+					actual_value = readback_result.get('result', {}).get('value')
+					if actual_value is not None:
+						if input_coordinates is None:
+							input_coordinates = {}
+						input_coordinates['actual_value'] = actual_value
+				except Exception as e:
+					self.logger.debug(f'Value readback failed (non-critical): {e}')
+
 			# Return coordinates metadata if available
 			return input_coordinates
 
@@ -2299,6 +2320,14 @@ class DefaultActionWatchdog(BaseWatchdog):
 			# Get CDP client and session
 			cdp_client = self.browser_session.cdp_client
 			session_id = await self._get_session_id_for_element(element_node)
+
+			# Validate file before upload
+			if os.path.exists(event.file_path):
+				file_size = os.path.getsize(event.file_path)
+				if file_size == 0:
+					msg = f'Upload failed - file {event.file_path} is empty (0 bytes).'
+					raise BrowserError(message=msg, long_term_memory=msg)
+				self.logger.debug(f'📎 File {event.file_path} validated ({file_size} bytes)')
 
 			# Set file(s) to upload
 			backend_node_id = element_node.backend_node_id
