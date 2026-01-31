@@ -51,7 +51,6 @@ from browser_use.tools.views import (
 	StructuredOutputAction,
 	SwitchTabAction,
 	UploadFileAction,
-	WaitForDownloadAction,
 )
 from browser_use.utils import create_task_with_error_handling, sanitize_surrogates, time_execution_sync
 
@@ -1128,98 +1127,6 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				images=images,
 				include_extracted_content_only_once=True,
 			)
-
-		# Download Actions
-
-		@self.registry.action(
-			'Wait for a file download to complete. Use this after triggering a download (ex: clicking a download link) to confirm it finished and get the file path.',
-			param_model=WaitForDownloadAction,
-		)
-		async def wait_for_download(params: WaitForDownloadAction, browser_session: BrowserSession):
-			import re
-			from pathlib import Path
-
-			from browser_use.browser.events import FileDownloadedEvent
-			from browser_use.browser.watchdog_base import BaseWatchdog
-
-			def find_matching_download() -> dict | None:
-				"""Find a download that matches the pattern (most recent first)."""
-				# Check downloads in reverse order (most recent first)
-				for file_path in reversed(browser_session.downloaded_files):
-					path = Path(file_path)
-					if path.exists():
-						file_name = path.name
-						# Check pattern if specified
-						if params.file_name_pattern:
-							if not re.search(params.file_name_pattern, file_name):
-								continue
-						return {
-							'path': file_path,
-							'file_name': file_name,
-							'file_size': path.stat().st_size,
-							'mime_type': None,
-						}
-				return None
-
-			# Check if a matching download already exists
-			already_downloaded = find_matching_download()
-			if already_downloaded:
-				result_msg = f'Download completed: {already_downloaded["file_name"]} ({already_downloaded["file_size"]} bytes) saved to {already_downloaded["path"]}'
-				logger.info(f'📥 {result_msg}')
-				return ActionResult(
-					extracted_content=result_msg,
-					include_in_memory=True,
-				)
-
-			# No matching download yet - wait for FileDownloadedEvent
-			download_complete = asyncio.Event()
-			downloaded_file_info: dict = {}
-
-			async def on_FileDownloadedEvent(event: FileDownloadedEvent):
-				# If pattern specified, check if filename matches
-				if params.file_name_pattern:
-					if not re.search(params.file_name_pattern, event.file_name):
-						return  # not the file
-
-				downloaded_file_info['path'] = event.path
-				downloaded_file_info['file_name'] = event.file_name
-				downloaded_file_info['file_size'] = event.file_size
-				downloaded_file_info['mime_type'] = event.mime_type
-				download_complete.set()
-				return 'handled'
-
-			# Attach handler
-			BaseWatchdog.attach_handler_to_session(browser_session, FileDownloadedEvent, on_FileDownloadedEvent)
-
-			try:
-				await asyncio.wait_for(download_complete.wait(), timeout=params.timeout)
-				result_msg = f'Download completed: {downloaded_file_info["file_name"]} ({downloaded_file_info["file_size"]} bytes) saved to {downloaded_file_info["path"]}'
-				logger.info(f'📥 {result_msg}')
-				return ActionResult(
-					extracted_content=result_msg,
-					include_in_memory=True,
-				)
-			except TimeoutError:
-				# Check one more time in case download completed but event was missed
-				final_check = find_matching_download()
-				if final_check:
-					result_msg = f'Download completed: {final_check["file_name"]} ({final_check["file_size"]} bytes) saved to {final_check["path"]}'
-					logger.info(f'📥 {result_msg}')
-					return ActionResult(
-						extracted_content=result_msg,
-						include_in_memory=True,
-					)
-
-				result_msg = f'Download timed out after {params.timeout} seconds. No file download was detected.'
-				logger.warning(f'⏱️ {result_msg}')
-				return ActionResult(
-					extracted_content=result_msg,
-					include_in_memory=True,
-					error='Download timeout',
-				)
-			finally:
-				# Detach handler to prevent memory leaks
-				BaseWatchdog.detach_handler_from_session(browser_session, FileDownloadedEvent, on_FileDownloadedEvent)
 
 		@self.registry.action(
 			"""Execute browser JavaScript. Best practice: wrap in IIFE (function(){...})() with try-catch for safety. Use ONLY browser APIs (document, window, DOM). NO Node.js APIs (fs, require, process). Example: (function(){try{const el=document.querySelector('#id');return el?el.value:'not found'}catch(e){return 'Error: '+e.message}})() Avoid comments. Use for hover, drag, zoom, custom selectors, extract/filter links, shadow DOM, or analysing page structure. Limit output size.""",

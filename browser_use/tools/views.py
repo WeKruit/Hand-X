@@ -105,18 +105,3 @@ class GetDropdownOptionsAction(BaseModel):
 class SelectDropdownOptionAction(BaseModel):
 	index: int
 	text: str = Field(description='exact text/value')
-
-
-class WaitForDownloadAction(BaseModel):
-	"""Wait for a file download to complete."""
-
-	timeout: float = Field(
-		default=30.0,
-		description='Maximum time to wait for download in seconds',
-		ge=1.0,
-		le=300.0,
-	)
-	file_name_pattern: str | None = Field(
-		default=None,
-		description='Optional regex pattern to match the downloaded file name',
-	)
