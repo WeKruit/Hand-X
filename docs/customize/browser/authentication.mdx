@@ -29,7 +29,7 @@ You may need to close Chrome completely before running. Browser-Use launches Chr
 </Warning>
 
 ```python
-from browser_use import Agent, Browser, ChatOpenAI
+from browser_use import Agent, Browser, ChatBrowserUse
 
 # Auto-detect Chrome and profile (cross-platform)
 browser = Browser.from_system_chrome()
@@ -37,7 +37,7 @@ browser = Browser.from_system_chrome()
 agent = Agent(
     task='Check my Gmail inbox',
     browser=browser,
-    llm=ChatOpenAI(model='gpt-4.1-mini'),
+    llm=ChatBrowserUse(),
 )
 await agent.run()
 ```
@@ -66,14 +66,14 @@ await browser.stop()
 ### Load in Headless Mode
 
 ```python
-from browser_use import Agent, Browser, ChatOpenAI
+from browser_use import Agent, Browser, ChatBrowserUse
 
 browser = Browser(storage_state='auth.json')
 
 agent = Agent(
     task='Check my notifications',
     browser=browser,
-    llm=ChatOpenAI(model='gpt-4.1-mini'),
+    llm=ChatBrowserUse(),
 )
 await agent.run()
 ```
@@ -136,7 +136,7 @@ See [Sensitive Data](/examples/templates/sensitive-data) for more on credential 
 3. When the agent inputs `bu_2fa_code`, it generates a fresh 6-digit code
 
 ```python
-from browser_use import Agent, ChatOpenAI
+from browser_use import Agent, ChatBrowserUse
 
 # TOTP secret from your authenticator setup
 # (NOT the 6-digit code - the secret key itself)
@@ -153,7 +153,7 @@ agent = Agent(
         'x_pass': 'mypassword',
         'bu_2fa_code': totp_secret,  # suffix must be bu_2fa_code
     },
-    llm=ChatOpenAI(model='gpt-4.1-mini'),
+    llm=ChatBrowserUse(),
 )
 await agent.run()
 ```
@@ -181,7 +181,7 @@ For sites that send verification codes via email or SMS, use follow-up tasks to 
 
 ```python
 from agentmail import AsyncAgentMail
-from browser_use import Agent, ChatOpenAI, Tools, ActionResult
+from browser_use import Agent, ChatBrowserUse, Tools, ActionResult
 
 email_client = AsyncAgentMail()
 inbox = await email_client.inboxes.create()
@@ -202,7 +202,7 @@ async def get_verification_code():
 agent = Agent(
     task='Sign up at example.com, get verification code from email',
     tools=tools,
-    llm=ChatOpenAI(model='gpt-4.1-mini'),
+    llm=ChatBrowserUse(),
 )
 await agent.run()
 ```
@@ -216,7 +216,7 @@ Retrieve codes from your password manager:
 ```python
 import os
 from onepassword.client import Client
-from browser_use import Agent, Tools, ActionResult, ChatOpenAI
+from browser_use import Agent, Tools, ActionResult, ChatBrowserUse
 
 tools = Tools()
 
@@ -233,7 +233,7 @@ async def get_1password_2fa():
 agent = Agent(
     task='Login to Google and check email',
     tools=tools,
-    llm=ChatOpenAI(model='gpt-4.1-mini'),
+    llm=ChatBrowserUse(),
 )
 await agent.run()
 ```
@@ -245,7 +245,7 @@ See [`examples/custom-functions/onepassword_2fa.py`](https://github.com/browser-
 Built-in Gmail integration for reading 2FA codes from your inbox:
 
 ```python
-from browser_use import Agent, ChatOpenAI, Tools
+from browser_use import Agent, ChatBrowserUse, Tools
 from browser_use.integrations.gmail import GmailService, register_gmail_actions
 
 gmail_service = GmailService()
@@ -255,7 +255,7 @@ register_gmail_actions(tools, gmail_service=gmail_service)
 agent = Agent(
     task='Login to example.com, then get the verification code from Gmail',
     tools=tools,
-    llm=ChatOpenAI(model='gpt-4.1-mini'),
+    llm=ChatBrowserUse(),
 )
 await agent.run()
 ```
@@ -294,7 +294,7 @@ agent = Agent(
     task='Login and check balance',
     use_vision=False,  # No screenshots sent to LLM
     sensitive_data={'password': 'secret123'},
-    llm=ChatOpenAI(model='gpt-4.1-mini'),
+    llm=ChatBrowserUse(),
 )
 ```
 
@@ -327,14 +327,14 @@ For production deployments, consider [Browser Use Cloud](https://cloud.browser-u
 - Built-in proxy and fingerprint management
 
 ```python
-from browser_use import Agent, Browser, ChatOpenAI
+from browser_use import Agent, Browser, ChatBrowserUse
 
 browser = Browser(cdp_url='wss://cloud.browser-use.com/...')
 
 agent = Agent(
     task='Check my orders',
     browser=browser,
-    llm=ChatOpenAI(model='gpt-4.1-mini'),
+    llm=ChatBrowserUse(),
 )
 await agent.run()
 ```
