@@ -10,9 +10,6 @@ from browser_use.actor.utils import get_key_info
 from browser_use.browser.events import (
 	ClickCoordinateEvent,
 	ClickElementEvent,
-	DownloadProgressEvent,
-	DownloadStartedEvent,
-	FileDownloadedEvent,
 	GetDropdownOptionsEvent,
 	GoBackEvent,
 	GoForwardEvent,
@@ -108,7 +105,6 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 		# Get the downloads watchdog and register direct callbacks
 		downloads_watchdog = self.browser_session._downloads_watchdog
-		import sys; print(f'[DEBUG] downloads_watchdog={downloads_watchdog is not None}', file=sys.stderr)  # TEMP DEBUG
 		self.logger.debug(f'[ClickWithDownload] downloads_watchdog={downloads_watchdog is not None}')
 		if downloads_watchdog:
 			self.logger.debug('[ClickWithDownload] Registering download callbacks...')
@@ -372,9 +368,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 					self.logger.warning('⚠️ PDF generation failed, falling back to regular click')
 
 			# Execute click with automatic download detection
-			click_metadata = await self._execute_click_with_download_detection(
-				self._click_element_node_impl(element_node)
-			)
+			click_metadata = await self._execute_click_with_download_detection(self._click_element_node_impl(element_node))
 
 			# Check for validation errors
 			if isinstance(click_metadata, dict) and 'validation_error' in click_metadata:
