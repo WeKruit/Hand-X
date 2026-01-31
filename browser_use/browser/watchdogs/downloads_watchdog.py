@@ -10,7 +10,8 @@ from urllib.parse import urlparse
 
 import anyio
 from bubus import BaseEvent
-from cdp_use.cdp.browser import DownloadProgressEvent, DownloadWillBeginEvent
+from cdp_use.cdp.browser import DownloadProgressEvent as CDPDownloadProgressEvent
+from cdp_use.cdp.browser import DownloadWillBeginEvent
 from cdp_use.cdp.network import ResponseReceivedEvent
 from cdp_use.cdp.target import SessionID, TargetID
 from pydantic import PrivateAttr
@@ -79,14 +80,18 @@ class DownloadsWatchdog(BaseWatchdog):
 		on_complete: Any | None = None,
 	) -> None:
 		"""Register direct callbacks for download events
-		
+
 		Callbacks called sync from CDP event handlers, so click
 		handlers receive download notif without waiting for event bus to process
 		"""
-		self.logger.debug(f'[DownloadsWatchdog] Registering callbacks: start={on_start is not None}, progress={on_progress is not None}, complete={on_complete is not None}')
+		self.logger.debug(
+			f'[DownloadsWatchdog] Registering callbacks: start={on_start is not None}, progress={on_progress is not None}, complete={on_complete is not None}'
+		)
 		if on_start:
 			self._download_start_callbacks.append(on_start)
-			self.logger.debug(f'[DownloadsWatchdog] Registered start callback, now have {len(self._download_start_callbacks)} start callbacks')
+			self.logger.debug(
+				f'[DownloadsWatchdog] Registered start callback, now have {len(self._download_start_callbacks)} start callbacks'
+			)
 		if on_progress:
 			self._download_progress_callbacks.append(on_progress)
 		if on_complete:
@@ -275,11 +280,11 @@ class DownloadsWatchdog(BaseWatchdog):
 			# Remove from set when done
 			task.add_done_callback(lambda t: self._cdp_event_tasks.discard(t))
 
-		def download_progress_handler(event: DownloadProgressEvent, session_id: SessionID | None) -> None:
+		def download_progress_handler(event: CDPDownloadProgressEvent, session_id: SessionID | None) -> None:
 			guid = event.get('guid', '')
 			state = event.get('state', '')
-			received_bytes = event.get('receivedBytes', 0)
-			total_bytes = event.get('totalBytes', 0)
+			received_bytes = int(event.get('receivedBytes', 0))
+			total_bytes = int(event.get('totalBytes', 0))
 
 			# Call direct callbacks first (for click handlers tracking progress)
 			progress_info = {
