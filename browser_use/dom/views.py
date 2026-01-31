@@ -47,6 +47,8 @@ DEFAULT_INCLUDE_ATTRIBUTES = [
 	'multiple',  # Whether multiple files/selections are allowed
 	'inputmode',  # Virtual keyboard hint (numeric, tel, email, url, etc.)
 	'autocomplete',  # Autocomplete behavior hint
+	'aria-autocomplete',  # ARIA autocomplete type (list, inline, both)
+	'list',  # Associated datalist element ID
 	'data-mask',  # Input mask format (e.g., phone numbers, credit cards)
 	'data-inputmask',  # Alternative input mask attribute
 	'data-datepicker',  # jQuery datepicker indicator
@@ -114,8 +116,10 @@ STATIC_ATTRIBUTES = {
 	'aria-disabled',
 	'aria-hidden',
 	'aria-pressed',
+	'aria-autocomplete',
 	'aria-checked',
 	'aria-selected',
+	'list',
 	'tabindex',
 	'alt',
 	'src',
