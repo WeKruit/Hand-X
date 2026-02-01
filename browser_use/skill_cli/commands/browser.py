@@ -24,6 +24,7 @@ COMMANDS = {
 	'select',
 	'eval',
 	'extract',
+	'cookies',
 }
 
 
@@ -189,5 +190,45 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 		# This requires LLM integration
 		# For now, return a placeholder
 		return {'query': query, 'error': 'extract requires agent mode - use: browser-use run "extract ..."'}
+
+	elif action == 'cookies':
+		cookies_command = params.get('cookies_command')
+
+		if cookies_command == 'get':
+			from browser_use.browser.events import GetCookiesEvent
+
+			url = params.get('url')
+			event = GetCookiesEvent(url=url)
+			await bs.event_bus.dispatch(event)
+			cookies = await event.event_result()
+			return {'cookies': cookies}
+
+		elif cookies_command == 'set':
+			from browser_use.browser.events import SetCookieEvent
+
+			event = SetCookieEvent(
+				name=params['name'],
+				value=params['value'],
+				domain=params.get('domain'),
+				path=params.get('path', '/'),
+				secure=params.get('secure', False),
+				http_only=params.get('http_only', False),
+				same_site=params.get('same_site'),
+				expires=params.get('expires'),
+			)
+			await bs.event_bus.dispatch(event)
+			success = await event.event_result()
+			return {'set': params['name'], 'success': success}
+
+		elif cookies_command == 'clear':
+			from browser_use.browser.events import ClearCookiesEvent
+
+			url = params.get('url')
+			event = ClearCookiesEvent(url=url)
+			await bs.event_bus.dispatch(event)
+			# No event_result() call - this is a void operation
+			return {'cleared': True, 'url': url}
+
+		return {'error': 'Invalid cookies command. Use: get, set, clear'}
 
 	raise ValueError(f'Unknown browser action: {action}')
