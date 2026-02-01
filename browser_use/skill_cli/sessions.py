@@ -135,15 +135,17 @@ async def create_browser_session(
 			executable_path=chrome_path,
 			user_data_dir=user_data_dir,
 			profile_directory=profile_directory,
-			headless=False,  # Real browser always visible
+			headless=not headed,  # Headless by default, --headed for visible
 		)
 
 	elif mode == 'remote':
 		from browser_use.skill_cli.api_key import require_api_key
 
 		require_api_key('Remote browser')
+		# Profile is used as cloud_profile_id for remote mode
 		return BrowserSession(
 			use_cloud=True,
+			cloud_profile_id=profile,
 		)
 
 	else:

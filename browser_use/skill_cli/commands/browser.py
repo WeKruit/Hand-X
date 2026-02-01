@@ -264,7 +264,62 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 			# No event_result() call - this is a void operation
 			return {'cleared': True, 'url': url}
 
-		return {'error': 'Invalid cookies command. Use: get, set, clear'}
+		elif cookies_command == 'export':
+			import json
+
+			from browser_use.browser.events import GetCookiesEvent
+
+			url = params.get('url')
+			event = GetCookiesEvent(url=url)
+			await bs.event_bus.dispatch(event)
+			cookies = await event.event_result()
+
+			file_path = Path(params['file'])
+			file_path.write_text(json.dumps(cookies, indent=2))
+			return {'exported': len(cookies), 'file': str(file_path)}
+
+		elif cookies_command == 'import':
+			import json
+
+			file_path = Path(params['file'])
+			if not file_path.exists():
+				return {'error': f'File not found: {file_path}'}
+
+			cookies = json.loads(file_path.read_text())
+
+			# Get CDP session for bulk cookie setting
+			cdp_session = await bs.get_or_create_cdp_session(target_id=None, focus=False)
+			if not cdp_session:
+				return {'error': 'No active browser session'}
+
+			# Build cookie list for bulk set
+			cookie_list = []
+			for c in cookies:
+				cookie_params = {
+					'name': c['name'],
+					'value': c['value'],
+					'domain': c.get('domain'),
+					'path': c.get('path', '/'),
+					'secure': c.get('secure', False),
+					'httpOnly': c.get('httpOnly', False),
+				}
+				if c.get('sameSite'):
+					cookie_params['sameSite'] = c['sameSite']
+				if c.get('expires'):
+					cookie_params['expires'] = c['expires']
+				cookie_list.append(cookie_params)
+
+			# Set all cookies in one call
+			try:
+				await cdp_session.cdp_client.send.Network.setCookies(
+					params={'cookies': cookie_list},
+					session_id=cdp_session.session_id,
+				)
+				return {'imported': len(cookie_list), 'file': str(file_path)}
+			except Exception as e:
+				return {'error': f'Failed to import cookies: {e}'}
+
+		return {'error': 'Invalid cookies command. Use: get, set, clear, export, import'}
 
 	elif action == 'wait':
 		wait_command = params.get('wait_command')

@@ -302,6 +302,15 @@ Examples:
 	p = cookies_sub.add_parser('clear', help='Clear cookies')
 	p.add_argument('--url', help='Clear only for URL')
 
+	# cookies export <file>
+	p = cookies_sub.add_parser('export', help='Export cookies to JSON file')
+	p.add_argument('file', help='Output file path')
+	p.add_argument('--url', help='Filter by URL')
+
+	# cookies import <file>
+	p = cookies_sub.add_parser('import', help='Import cookies from JSON file')
+	p.add_argument('file', help='Input file path')
+
 	# -------------------------------------------------------------------------
 	# Wait Commands
 	# -------------------------------------------------------------------------
@@ -399,7 +408,80 @@ Examples:
 	# profile list-local
 	profile_sub.add_parser('list-local', help='List local Chrome profiles')
 
+	# Cloud profile commands
+	# profile list
+	p = profile_sub.add_parser('list', help='List cloud profiles')
+	p.add_argument('--page', type=int, default=1, help='Page number')
+	p.add_argument('--page-size', type=int, default=10, help='Items per page')
+
+	# profile create
+	p = profile_sub.add_parser('create', help='Create cloud profile')
+	p.add_argument('--name', help='Profile name')
+
+	# profile get <id>
+	p = profile_sub.add_parser('get', help='Get cloud profile details')
+	p.add_argument('id', help='Profile ID')
+
+	# profile update <id>
+	p = profile_sub.add_parser('update', help='Update cloud profile')
+	p.add_argument('id', help='Profile ID')
+	p.add_argument('--name', required=True, help='New profile name')
+
+	# profile delete <id>
+	p = profile_sub.add_parser('delete', help='Delete cloud profile')
+	p.add_argument('id', help='Profile ID')
+
+	# profile cookies <profile> - list cookies by domain in a local profile
+	p = profile_sub.add_parser('cookies', help='List cookies by domain in a local profile')
+	p.add_argument('profile', help='Local profile name (e.g. "Default", "Profile 1")')
+
+	# profile sync - sync local profile to cloud
+	p = profile_sub.add_parser('sync', help='Sync local Chrome profile to cloud')
+	p.add_argument('--from', dest='from_profile', help='Local profile name (e.g. "Default", "Profile 1")')
+	p.add_argument('--name', help='Cloud profile name (default: auto-generated)')
+	p.add_argument('--domain', help='Only sync cookies for this domain (e.g. "youtube.com")')
+
 	return parser
+
+
+def cloud_api_request(method: str, endpoint: str, body: dict | None = None) -> dict:
+	"""Make authenticated request to Browser-Use Cloud API.
+
+	Returns dict with 'success', 'data' or 'error'.
+	"""
+	import urllib.request
+	import urllib.error
+
+	from browser_use.skill_cli.api_key import APIKeyRequired, require_api_key
+
+	try:
+		api_key = require_api_key('Cloud profiles')
+	except APIKeyRequired as e:
+		return {'success': False, 'error': str(e)}
+
+	url = f'https://api.browser-use.com/api/v2{endpoint}'
+	headers = {
+		'X-Browser-Use-API-Key': api_key,
+		'Content-Type': 'application/json',
+	}
+
+	data = json.dumps(body).encode() if body else None
+	req = urllib.request.Request(url, data=data, headers=headers, method=method)
+
+	try:
+		with urllib.request.urlopen(req) as resp:
+			if resp.status == 204:  # No content (e.g., delete)
+				return {'success': True, 'data': {}}
+			return {'success': True, 'data': json.loads(resp.read().decode())}
+	except urllib.error.HTTPError as e:
+		try:
+			error_body = json.loads(e.read().decode())
+			error_msg = error_body.get('detail', str(e))
+		except Exception:
+			error_msg = str(e)
+		return {'success': False, 'error': f'{e.code}: {error_msg}'}
+	except urllib.error.URLError as e:
+		return {'success': False, 'error': f'Connection error: {e.reason}'}
 
 
 def handle_profile_command(args: argparse.Namespace) -> int:
@@ -419,9 +501,121 @@ def handle_profile_command(args: argparse.Namespace) -> int:
 				print('No Chrome profiles found')
 		return 0
 
+	elif args.profile_command == 'list':
+		# List cloud profiles
+		endpoint = f'/profiles?pageNumber={args.page}&pageSize={args.page_size}'
+		result = cloud_api_request('GET', endpoint)
+
+		if not result['success']:
+			print(f'Error: {result["error"]}', file=sys.stderr)
+			return 1
+
+		data = result['data']
+		if args.json:
+			print(json.dumps(data))
+		else:
+			items = data.get('items', [])
+			total = data.get('totalItems', 0)
+			if items:
+				print(f'Cloud profiles ({len(items)}/{total}):')
+				for p in items:
+					name = p.get('name') or '(unnamed)'
+					domains = p.get('cookieDomains') or []
+					domain_str = f' [{len(domains)} domains]' if domains else ''
+					print(f'  {p["id"]}: {name}{domain_str}')
+			else:
+				print('No cloud profiles found')
+		return 0
+
+	elif args.profile_command == 'create':
+		# Create cloud profile
+		body = {}
+		if args.name:
+			body['name'] = args.name
+
+		result = cloud_api_request('POST', '/profiles', body)
+
+		if not result['success']:
+			print(f'Error: {result["error"]}', file=sys.stderr)
+			return 1
+
+		data = result['data']
+		if args.json:
+			print(json.dumps(data))
+		else:
+			name = data.get('name') or '(unnamed)'
+			print(f'Created profile: {data["id"]}')
+			print(f'  Name: {name}')
+		return 0
+
+	elif args.profile_command == 'get':
+		# Get cloud profile details
+		result = cloud_api_request('GET', f'/profiles/{args.id}')
+
+		if not result['success']:
+			print(f'Error: {result["error"]}', file=sys.stderr)
+			return 1
+
+		data = result['data']
+		if args.json:
+			print(json.dumps(data))
+		else:
+			print(f'Profile: {data["id"]}')
+			print(f'  Name: {data.get("name") or "(unnamed)"}')
+			print(f'  Created: {data.get("createdAt", "unknown")}')
+			print(f'  Updated: {data.get("updatedAt", "unknown")}')
+			print(f'  Last used: {data.get("lastUsedAt") or "never"}')
+			domains = data.get('cookieDomains') or []
+			if domains:
+				print(f'  Cookie domains ({len(domains)}):')
+				for d in domains[:10]:
+					print(f'    - {d}')
+				if len(domains) > 10:
+					print(f'    ... and {len(domains) - 10} more')
+		return 0
+
+	elif args.profile_command == 'update':
+		# Update cloud profile
+		body = {'name': args.name}
+		result = cloud_api_request('PATCH', f'/profiles/{args.id}', body)
+
+		if not result['success']:
+			print(f'Error: {result["error"]}', file=sys.stderr)
+			return 1
+
+		data = result['data']
+		if args.json:
+			print(json.dumps(data))
+		else:
+			print(f'Updated profile: {data["id"]}')
+			print(f'  Name: {data.get("name") or "(unnamed)"}')
+		return 0
+
+	elif args.profile_command == 'delete':
+		# Delete cloud profile
+		result = cloud_api_request('DELETE', f'/profiles/{args.id}')
+
+		if not result['success']:
+			print(f'Error: {result["error"]}', file=sys.stderr)
+			return 1
+
+		if args.json:
+			print(json.dumps({'deleted': args.id}))
+		else:
+			print(f'Deleted profile: {args.id}')
+		return 0
+
+	elif args.profile_command == 'cookies':
+		# List cookies by domain in a local profile
+		return handle_profile_cookies(args)
+
+	elif args.profile_command == 'sync':
+		# Sync local profile to cloud
+		return handle_profile_sync(args)
+
 	# No subcommand specified
 	print('Usage: browser-use profile <command>')
-	print('Commands: list-local')
+	print('Commands: list-local, list, create, get, update, delete, cookies, sync')
 	return 1
 
 
@@ -457,6 +651,299 @@ def list_local_chrome_profiles() -> list[dict]:
 		return profiles
 	except Exception:
 		return []
+
+
+def handle_profile_cookies(args: argparse.Namespace) -> int:
+	"""List cookies by domain in a local Chrome profile."""
+	import asyncio
+	from collections import defaultdict
+
+	# Get local profiles
+	local_profiles = list_local_chrome_profiles()
+	if not local_profiles:
+		print('Error: No local Chrome profiles found', file=sys.stderr)
+		return 1
+
+	# Find the matching profile
+	profile_arg = args.profile
+	selected_profile = None
+	for p in local_profiles:
+		if p['id'] == profile_arg or p['name'] == profile_arg:
+			selected_profile = p
+			break
+
+	if not selected_profile:
+		print(f'Error: Profile "{profile_arg}" not found', file=sys.stderr)
+		print('Available profiles:')
+		for p in local_profiles:
+			print(f'  {p["id"]}: {p["name"]}')
+		return 1
+
+	profile_id = selected_profile['id']
+	print(f'Loading cookies from: {selected_profile["name"]} ({selected_profile["email"]})')
+
+	async def get_cookies() -> list[dict]:
+		from browser_use.browser.events import GetCookiesEvent
+		from browser_use.skill_cli.sessions import create_browser_session
+
+		# Start local browser headless
+		local_session = await create_browser_session('real', headed=False, profile=profile_id, cdp_url=None)
+		await local_session.start()
+
+		try:
+			event = GetCookiesEvent(url=None)
+			await local_session.event_bus.dispatch(event)
+			return await event.event_result() or []
+		finally:
+			await local_session.kill()
+
+	try:
+		cookies = asyncio.get_event_loop().run_until_complete(get_cookies())
+	except RuntimeError:
+		cookies = asyncio.run(get_cookies())
+
+	if not cookies:
+		print('No cookies found')
+		return 0
+
+	# Group by domain
+	domain_counts: dict[str, int] = defaultdict(int)
+	for c in cookies:
+		domain = c.get('domain', 'unknown')
+		# Remove leading dot for grouping
+		if domain.startswith('.'):
+			domain = domain[1:]
+		domain_counts[domain] += 1
+
+	# Sort by count (descending)
+	sorted_domains = sorted(domain_counts.items(), key=lambda x: (-x[1], x[0]))
+
+	if args.json:
+		print(json.dumps({'domains': dict(sorted_domains), 'total': len(cookies)}))
+	else:
+		print(f'\nCookies by domain ({len(cookies)} total):')
+		for domain, count in sorted_domains:
+			print(f'  {domain}: {count}')
+		print()
+		print('To sync a specific domain:')
+		print(f'  browser-use profile sync --from "{profile_id}" --domain <domain>')
+
+	return 0
+
+
+def handle_profile_sync(args: argparse.Namespace) -> int:
+	"""Sync a local Chrome profile to Browser-Use Cloud.
+
+	This command:
+	1. Lists local profiles (if --from not specified)
+	2. Creates a cloud profile
+	3. Exports cookies from local Chrome (headless)
+	4. Imports cookies to cloud profile
+	"""
+	import asyncio
+	import tempfile
+
+	from browser_use.skill_cli.api_key import APIKeyRequired, require_api_key
+
+	# Check API key first
+	try:
+		require_api_key('Profile sync')
+	except APIKeyRequired as e:
+		print(f'Error: {e}', file=sys.stderr)
+		return 1
+
+	# Get local profiles
+	local_profiles = list_local_chrome_profiles()
+	if not local_profiles:
+		print('Error: No local Chrome profiles found', file=sys.stderr)
+		return 1
+
+	# Determine which profile to sync
+	from_profile = args.from_profile
+	if not from_profile:
+		# Show available profiles and ask user to specify
+		print('Available local profiles:')
+		for p in local_profiles:
+			print(f'  {p["id"]}: {p["name"]} ({p["email"]})')
+		print()
+		print('Use --from to specify a profile:')
+		print('  browser-use profile sync --from "Default"')
+		print('  browser-use profile sync --from "Profile 1"')
+		return 1
+
+	# Find the matching profile
+	selected_profile = None
+	for p in local_profiles:
+		if p['id'] == from_profile or p['name'] == from_profile:
+			selected_profile = p
+			break
+
+	if not selected_profile:
+		print(f'Error: Profile "{from_profile}" not found', file=sys.stderr)
+		print('Available profiles:')
+		for p in local_profiles:
+			print(f'  {p["id"]}: {p["name"]}')
+		return 1
+
+	profile_id = selected_profile['id']
+	profile_name = selected_profile['name']
+	domain_filter = args.domain
+
+	# Generate cloud profile name
+	if args.name:
+		cloud_name = args.name
+	elif domain_filter:
+		cloud_name = f'Chrome - {profile_name} ({domain_filter})'
+	else:
+		cloud_name = f'Chrome - {profile_name}'
+
+	if domain_filter:
+		print(f'Syncing: {profile_name} → {domain_filter} cookies only')
+	else:
+		print(f'Syncing: {profile_name} ({selected_profile["email"]})')
+
+	# Step 1: Create cloud profile
+	print('  Creating cloud profile...')
+	result = cloud_api_request('POST', '/profiles', {'name': cloud_name})
+	if not result['success']:
+		print(f'Error creating cloud profile: {result["error"]}', file=sys.stderr)
+		return 1
+
+	cloud_profile_id = result['data']['id']
+	print(f'  ✓ Created: {cloud_profile_id}')
+
+	# Step 2: Export cookies from local Chrome (headless)
+	print('  Extracting cookies from local Chrome...')
+
+	async def sync_cookies() -> tuple[int, str | None]:
+		from browser_use.browser.events import GetCookiesEvent
+		from browser_use.skill_cli.sessions import create_browser_session
+
+		# Start local browser headless
+		local_session = await create_browser_session('real', headed=False, profile=profile_id, cdp_url=None)
+		await local_session.start()
+
+		try:
+			# Get cookies
+			event = GetCookiesEvent(url=None)
+			await local_session.event_bus.dispatch(event)
+			cookies = await event.event_result()
+
+			if not cookies:
+				return 0, 'No cookies found in local profile'
+
+			# Filter by domain if specified
+			if domain_filter:
+				filtered = []
+				for c in cookies:
+					cookie_domain = c.get('domain', '')
+					# Remove leading dot for comparison
+					if cookie_domain.startswith('.'):
+						cookie_domain = cookie_domain[1:]
+					# Match if domain ends with filter (e.g. "youtube.com" matches ".youtube.com" and "www.youtube.com")
+					if cookie_domain == domain_filter or cookie_domain.endswith('.' + domain_filter):
+						filtered.append(c)
+				cookies = filtered
+				if not cookies:
+					return 0, f'No cookies found for domain: {domain_filter}'
+
+			# Save to temp file
+			cookies_file = Path(tempfile.gettempdir()) / f'browser-use-sync-{cloud_profile_id}.json'
+			cookies_file.write_text(json.dumps(cookies, indent=2))
+
+			return len(cookies), str(cookies_file)
+		finally:
+			await local_session.kill()
+
+	try:
+		cookie_count, cookies_file = asyncio.get_event_loop().run_until_complete(sync_cookies())
+	except RuntimeError:
+		# No event loop running
+		cookie_count, cookies_file = asyncio.run(sync_cookies())
+
+	if cookies_file is None:
+		print(f'  ⚠ {cookie_count}')  # cookie_count contains error message
+		return 1
+
+	print(f'  ✓ Extracted {cookie_count} cookies')
+
+	# Step 3: Import cookies to cloud profile
+	print('  Uploading cookies to cloud...')
+
+	async def upload_cookies(cookies_path: str) -> tuple[int, str | None]:
+		from browser_use.skill_cli.sessions import create_browser_session
+
+		# Start remote browser with the new profile
+		remote_session = await create_browser_session('remote', headed=False, profile=cloud_profile_id, cdp_url=None)
+		await remote_session.start()
+
+		try:
+			# Load cookies
+			cookies = json.loads(Path(cookies_path).read_text())
+
+			# Set cookies via CDP
+			cdp_session = await remote_session.get_or_create_cdp_session(target_id=None, focus=False)
+			if not cdp_session:
+				return 0, 'Failed to connect to remote browser'
+
+			# Build cookie list for bulk set
+			cookie_list = []
+			for c in cookies:
+				cookie_params = {
+					'name': c['name'],
+					'value': c['value'],
+					'domain': c.get('domain'),
+					'path': c.get('path', '/'),
+					'secure': c.get('secure', False),
+					'httpOnly': c.get('httpOnly', False),
+				}
+				if c.get('sameSite'):
+					cookie_params['sameSite'] = c['sameSite']
+				if c.get('expires'):
+					cookie_params['expires'] = c['expires']
+				cookie_list.append(cookie_params)
+
+			# Set all cookies in one call
+			try:
+				await cdp_session.cdp_client.send.Network.setCookies(
+					params={'cookies': cookie_list},
+					session_id=cdp_session.session_id,
+				)
+				return len(cookie_list), None
+			except Exception as e:
+				return 0, f'Failed to set cookies: {e}'
+		finally:
+			await remote_session.kill()
+
+	try:
+		uploaded_count, error = asyncio.get_event_loop().run_until_complete(upload_cookies(cookies_file))
+	except RuntimeError:
+		uploaded_count, error = asyncio.run(upload_cookies(cookies_file))
+
+	# Clean up temp file
+	Path(cookies_file).unlink(missing_ok=True)
+
+	if error:
+		print(f'  Error: {error}', file=sys.stderr)
+		return 1
+
+	print(f'  ✓ Uploaded {uploaded_count} cookies')
+	print()
+	print(f'✓ Profile synced successfully!')
+	print(f'  Cloud profile ID: {cloud_profile_id}')
+	print(f'  Name: {cloud_name}')
+	print()
+	print('Use with:')
+	print(f'  browser-use --browser remote --profile {cloud_profile_id} open <url>')
+
+	if args.json:
+		print(json.dumps({
+			'profile_id': cloud_profile_id,
+			'name': cloud_name,
+			'cookies_synced': uploaded_count,
+		}))
+
+	return 0
 
 
 def handle_server_command(args: argparse.Namespace) -> int:
