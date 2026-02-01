@@ -113,6 +113,13 @@ browser-use wait text "Success"           # Wait for text to appear
 browser-use wait selector "h1" --timeout 5000  # Custom timeout in ms
 ```
 
+### Additional Interactions
+```bash
+browser-use hover <index>                 # Hover over element (triggers CSS :hover)
+browser-use dblclick <index>              # Double-click element
+browser-use rightclick <index>            # Right-click element (context menu)
+```
+
 ### Python Execution (Persistent Session)
 ```bash
 browser-use python "x = 42"               # Set variable

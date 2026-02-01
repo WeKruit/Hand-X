@@ -264,6 +264,18 @@ Examples:
 	p = subparsers.add_parser('extract', help='Extract data using LLM')
 	p.add_argument('query', help='What to extract')
 
+	# hover <index>
+	p = subparsers.add_parser('hover', help='Hover over element')
+	p.add_argument('index', type=int, help='Element index')
+
+	# dblclick <index>
+	p = subparsers.add_parser('dblclick', help='Double-click element')
+	p.add_argument('index', type=int, help='Element index')
+
+	# rightclick <index>
+	p = subparsers.add_parser('rightclick', help='Right-click element')
+	p.add_argument('index', type=int, help='Element index')
+
 	# -------------------------------------------------------------------------
 	# Cookies Commands
 	# -------------------------------------------------------------------------

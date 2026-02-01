@@ -26,6 +26,9 @@ COMMANDS = {
 	'extract',
 	'cookies',
 	'wait',
+	'hover',
+	'dblclick',
+	'rightclick',
 }
 
 
@@ -191,6 +194,36 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 		# This requires LLM integration
 		# For now, return a placeholder
 		return {'query': query, 'error': 'extract requires agent mode - use: browser-use run "extract ..."'}
+
+	elif action == 'hover':
+		from browser_use.browser.events import HoverElementEvent
+
+		index = params['index']
+		node = await bs.get_element_by_index(index)
+		if node is None:
+			return {'error': f'Element index {index} not found - page may have changed'}
+		await bs.event_bus.dispatch(HoverElementEvent(node=node))
+		return {'hovered': index}
+
+	elif action == 'dblclick':
+		from browser_use.browser.events import ElementDblClickEvent
+
+		index = params['index']
+		node = await bs.get_element_by_index(index)
+		if node is None:
+			return {'error': f'Element index {index} not found - page may have changed'}
+		await bs.event_bus.dispatch(ElementDblClickEvent(node=node))
+		return {'double_clicked': index}
+
+	elif action == 'rightclick':
+		from browser_use.browser.events import ElementRightClickEvent
+
+		index = params['index']
+		node = await bs.get_element_by_index(index)
+		if node is None:
+			return {'error': f'Element index {index} not found - page may have changed'}
+		await bs.event_bus.dispatch(ElementRightClickEvent(node=node))
+		return {'right_clicked': index}
 
 	elif action == 'cookies':
 		cookies_command = params.get('cookies_command')
