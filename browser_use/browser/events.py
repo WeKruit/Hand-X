@@ -532,6 +532,35 @@ class WaitForTextEvent(BaseEvent[bool]):
 
 
 # ============================================================================
+# Interaction Events
+# ============================================================================
+
+
+class HoverElementEvent(ElementSelectedEvent[None]):
+	"""Hover over an element."""
+
+	node: 'EnhancedDOMTreeNode'
+
+	event_timeout: float | None = Field(default_factory=lambda: _get_timeout('TIMEOUT_HoverElementEvent', 15.0))
+
+
+class ElementDblClickEvent(ElementSelectedEvent[None]):
+	"""Double-click an element."""
+
+	node: 'EnhancedDOMTreeNode'
+
+	event_timeout: float | None = Field(default_factory=lambda: _get_timeout('TIMEOUT_ElementDblClickEvent', 15.0))
+
+
+class ElementRightClickEvent(ElementSelectedEvent[None]):
+	"""Right-click (context menu) an element."""
+
+	node: 'EnhancedDOMTreeNode'
+
+	event_timeout: float | None = Field(default_factory=lambda: _get_timeout('TIMEOUT_ElementRightClickEvent', 15.0))
+
+
+# ============================================================================
 # Storage State Events
 # ============================================================================
 
