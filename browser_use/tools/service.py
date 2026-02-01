@@ -1393,8 +1393,9 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			else:
 				result = await file_system.write_file(file_name, content)
 
-			# Log the full path where the file is stored
-			file_path = file_system.get_dir() / file_name
+			# Log the full path where the file is stored (use resolved name)
+			resolved_name, _ = file_system._resolve_filename(file_name)
+			file_path = file_system.get_dir() / resolved_name
 			logger.info(f'💾 {result} File location: {file_path}')
 
 			return ActionResult(extracted_content=result, long_term_memory=result)
