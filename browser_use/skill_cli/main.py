@@ -321,6 +321,36 @@ Examples:
 	p.add_argument('--timeout', type=int, default=30000, help='Timeout in ms')
 
 	# -------------------------------------------------------------------------
+	# Get Commands (info retrieval)
+	# -------------------------------------------------------------------------
+
+	get_p = subparsers.add_parser('get', help='Get information')
+	get_sub = get_p.add_subparsers(dest='get_command')
+
+	# get title
+	get_sub.add_parser('title', help='Get page title')
+
+	# get html [--selector SELECTOR]
+	p = get_sub.add_parser('html', help='Get page HTML')
+	p.add_argument('--selector', help='CSS selector to scope HTML')
+
+	# get text <index>
+	p = get_sub.add_parser('text', help='Get element text')
+	p.add_argument('index', type=int, help='Element index')
+
+	# get value <index>
+	p = get_sub.add_parser('value', help='Get input element value')
+	p.add_argument('index', type=int, help='Element index')
+
+	# get attributes <index>
+	p = get_sub.add_parser('attributes', help='Get element attributes')
+	p.add_argument('index', type=int, help='Element index')
+
+	# get bbox <index>
+	p = get_sub.add_parser('bbox', help='Get element bounding box')
+	p.add_argument('index', type=int, help='Element index')
+
+	# -------------------------------------------------------------------------
 	# Python Execution
 	# -------------------------------------------------------------------------
 

@@ -1,12 +1,19 @@
-"""Interactions watchdog for hover, double-click, right-click."""
+"""Interactions watchdog for hover, double-click, right-click, and info retrieval."""
 
 import asyncio
+import json
 from typing import Any, ClassVar
 
 from bubus import BaseEvent
 
 from browser_use.browser.events import (
 	ElementDblClickEvent,
+	GetElementAttributesEvent,
+	GetElementBoundingBoxEvent,
+	GetElementTextEvent,
+	GetElementValueEvent,
+	GetPageHtmlEvent,
+	GetPageTitleEvent,
 	HoverElementEvent,
 	ElementRightClickEvent,
 )
@@ -17,15 +24,25 @@ from browser_use.dom.service import EnhancedDOMTreeNode
 HoverElementEvent.model_rebuild()
 ElementDblClickEvent.model_rebuild()
 ElementRightClickEvent.model_rebuild()
+GetElementTextEvent.model_rebuild()
+GetElementValueEvent.model_rebuild()
+GetElementAttributesEvent.model_rebuild()
+GetElementBoundingBoxEvent.model_rebuild()
 
 
 class InteractionsWatchdog(BaseWatchdog):
-	"""Handles hover, double-click, and right-click interactions."""
+	"""Handles hover, double-click, right-click, and element info retrieval."""
 
 	LISTENS_TO: ClassVar[list[type[BaseEvent]]] = [
 		HoverElementEvent,
 		ElementDblClickEvent,
 		ElementRightClickEvent,
+		GetPageTitleEvent,
+		GetPageHtmlEvent,
+		GetElementTextEvent,
+		GetElementValueEvent,
+		GetElementAttributesEvent,
+		GetElementBoundingBoxEvent,
 	]
 	EMITS: ClassVar[list[type[BaseEvent]]] = []
 
@@ -174,3 +191,121 @@ class InteractionsWatchdog(BaseWatchdog):
 			self.logger.debug(f'[InteractionsWatchdog] Right-clicked at ({center_x}, {center_y})')
 		except Exception as e:
 			self.logger.error(f'[InteractionsWatchdog] Failed to right-click: {e}')
+
+	async def _execute_js(self, js: str) -> Any:
+		"""Execute JavaScript in the browser context."""
+		cdp_session = await self.browser_session.get_or_create_cdp_session(target_id=None)
+		if not cdp_session:
+			raise RuntimeError('No active browser session')
+
+		result = await cdp_session.cdp_client.send.Runtime.evaluate(
+			params={'expression': js, 'returnByValue': True},
+			session_id=cdp_session.session_id,
+		)
+		return result.get('result', {}).get('value')
+
+	async def on_GetPageTitleEvent(self, event: GetPageTitleEvent) -> str:
+		"""Get the page title."""
+		try:
+			title = await self._execute_js('document.title')
+			return title or ''
+		except Exception as e:
+			self.logger.error(f'[InteractionsWatchdog] Failed to get title: {e}')
+			return ''
+
+	async def on_GetPageHtmlEvent(self, event: GetPageHtmlEvent) -> str:
+		"""Get page HTML, optionally scoped to a selector."""
+		try:
+			if event.selector:
+				js = f'''
+					(function() {{
+						const el = document.querySelector({json.dumps(event.selector)});
+						return el ? el.outerHTML : null;
+					}})()
+				'''
+			else:
+				js = 'document.documentElement.outerHTML'
+
+			html = await self._execute_js(js)
+			return html or ''
+		except Exception as e:
+			self.logger.error(f'[InteractionsWatchdog] Failed to get HTML: {e}')
+			return ''
+
+	async def on_GetElementTextEvent(self, event: GetElementTextEvent) -> str:
+		"""Get text content of an element."""
+		try:
+			# Use the node's text from our model
+			text = event.node.get_all_children_text(max_depth=10) if event.node else ''
+			return text
+		except Exception as e:
+			self.logger.error(f'[InteractionsWatchdog] Failed to get element text: {e}')
+			return ''
+
+	async def on_GetElementValueEvent(self, event: GetElementValueEvent) -> str:
+		"""Get value of an input/textarea element."""
+		try:
+			cdp_session = await self.browser_session.cdp_client_for_node(event.node)
+			backend_node_id = event.node.backend_node_id
+
+			# Use callFunctionOn to get the value
+			result = await cdp_session.cdp_client.send.DOM.resolveNode(
+				params={'backendNodeId': backend_node_id},
+				session_id=cdp_session.session_id,
+			)
+			object_id = result.get('object', {}).get('objectId')
+
+			if object_id:
+				value_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+					params={
+						'objectId': object_id,
+						'functionDeclaration': 'function() { return this.value; }',
+						'returnByValue': True,
+					},
+					session_id=cdp_session.session_id,
+				)
+				value = value_result.get('result', {}).get('value')
+				return value or ''
+			else:
+				return ''
+		except Exception as e:
+			self.logger.error(f'[InteractionsWatchdog] Failed to get element value: {e}')
+			return ''
+
+	async def on_GetElementAttributesEvent(self, event: GetElementAttributesEvent) -> dict[str, Any]:
+		"""Get all attributes of an element."""
+		try:
+			# Use the attributes from the node model
+			attrs = event.node.attributes or {}
+			return dict(attrs)
+		except Exception as e:
+			self.logger.error(f'[InteractionsWatchdog] Failed to get element attributes: {e}')
+			return {}
+
+	async def on_GetElementBoundingBoxEvent(self, event: GetElementBoundingBoxEvent) -> dict[str, float]:
+		"""Get bounding box of an element."""
+		try:
+			cdp_session = await self.browser_session.cdp_client_for_node(event.node)
+			backend_node_id = event.node.backend_node_id
+
+			# Get box model
+			result = await cdp_session.cdp_client.send.DOM.getBoxModel(
+				params={'backendNodeId': backend_node_id},
+				session_id=cdp_session.session_id,
+			)
+
+			model = result.get('model', {})
+			content = model.get('content', [])
+
+			if len(content) >= 8:
+				# content is [x1, y1, x2, y2, x3, y3, x4, y4] - corners of the quad
+				x = min(content[0], content[2], content[4], content[6])
+				y = min(content[1], content[3], content[5], content[7])
+				width = max(content[0], content[2], content[4], content[6]) - x
+				height = max(content[1], content[3], content[5], content[7]) - y
+				return {'x': x, 'y': y, 'width': width, 'height': height}
+			else:
+				return {}
+		except Exception as e:
+			self.logger.error(f'[InteractionsWatchdog] Failed to get element bbox: {e}')
+			return {}

@@ -561,6 +561,57 @@ class ElementRightClickEvent(ElementSelectedEvent[None]):
 
 
 # ============================================================================
+# Information Retrieval Events
+# ============================================================================
+
+
+class GetPageTitleEvent(BaseEvent[str]):
+	"""Get the page title."""
+
+	event_timeout: float | None = Field(default_factory=lambda: _get_timeout('TIMEOUT_GetPageTitleEvent', 15.0))
+
+
+class GetPageHtmlEvent(BaseEvent[str]):
+	"""Get page HTML, optionally scoped to a selector."""
+
+	selector: str | None = None  # None = full document
+
+	event_timeout: float | None = Field(default_factory=lambda: _get_timeout('TIMEOUT_GetPageHtmlEvent', 15.0))
+
+
+class GetElementTextEvent(ElementSelectedEvent[str]):
+	"""Get text content of an element."""
+
+	node: 'EnhancedDOMTreeNode'
+
+	event_timeout: float | None = Field(default_factory=lambda: _get_timeout('TIMEOUT_GetElementTextEvent', 15.0))
+
+
+class GetElementValueEvent(ElementSelectedEvent[str]):
+	"""Get value of an input/textarea element. Returns empty string if not found."""
+
+	node: 'EnhancedDOMTreeNode'
+
+	event_timeout: float | None = Field(default_factory=lambda: _get_timeout('TIMEOUT_GetElementValueEvent', 15.0))
+
+
+class GetElementAttributesEvent(ElementSelectedEvent[dict[str, str]]):
+	"""Get all attributes of an element."""
+
+	node: 'EnhancedDOMTreeNode'
+
+	event_timeout: float | None = Field(default_factory=lambda: _get_timeout('TIMEOUT_GetElementAttributesEvent', 15.0))
+
+
+class GetElementBoundingBoxEvent(ElementSelectedEvent[dict]):
+	"""Get bounding box of an element (x, y, width, height). Returns empty dict if not found."""
+
+	node: 'EnhancedDOMTreeNode'
+
+	event_timeout: float | None = Field(default_factory=lambda: _get_timeout('TIMEOUT_GetElementBoundingBoxEvent', 15.0))
+
+
+# ============================================================================
 # Storage State Events
 # ============================================================================
 
