@@ -104,6 +104,15 @@ browser-use cookies clear                 # Clear all cookies
 browser-use cookies clear --url <url>     # Clear cookies for specific URL
 ```
 
+### Wait Conditions
+```bash
+browser-use wait selector "h1"            # Wait for element to be visible
+browser-use wait selector ".loading" --state hidden  # Wait for element to disappear
+browser-use wait selector "#btn" --state attached    # Wait for element in DOM
+browser-use wait text "Success"           # Wait for text to appear
+browser-use wait selector "h1" --timeout 5000  # Custom timeout in ms
+```
+
 ### Python Execution (Persistent Session)
 ```bash
 browser-use python "x = 42"               # Set variable

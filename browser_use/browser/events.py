@@ -508,6 +508,30 @@ class ClearCookiesEvent(BaseEvent[None]):
 
 
 # ============================================================================
+# Wait Events
+# ============================================================================
+
+
+class WaitForSelectorEvent(BaseEvent[bool]):
+	"""Wait for a CSS selector to appear on the page."""
+
+	selector: str
+	timeout_ms: int = 30000
+	state: Literal['attached', 'detached', 'visible', 'hidden'] = 'visible'
+
+	event_timeout: float | None = Field(default_factory=lambda: _get_timeout('TIMEOUT_WaitForSelectorEvent', 60.0))
+
+
+class WaitForTextEvent(BaseEvent[bool]):
+	"""Wait for text to appear on the page."""
+
+	text: str
+	timeout_ms: int = 30000
+
+	event_timeout: float | None = Field(default_factory=lambda: _get_timeout('TIMEOUT_WaitForTextEvent', 60.0))
+
+
+# ============================================================================
 # Storage State Events
 # ============================================================================
 

@@ -25,6 +25,7 @@ COMMANDS = {
 	'eval',
 	'extract',
 	'cookies',
+	'wait',
 }
 
 
@@ -230,5 +231,33 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 			return {'cleared': True, 'url': url}
 
 		return {'error': 'Invalid cookies command. Use: get, set, clear'}
+
+	elif action == 'wait':
+		wait_command = params.get('wait_command')
+
+		if wait_command == 'selector':
+			from browser_use.browser.events import WaitForSelectorEvent
+
+			event = WaitForSelectorEvent(
+				selector=params['selector'],
+				timeout_ms=params.get('timeout', 30000),
+				state=params.get('state', 'visible'),
+			)
+			await bs.event_bus.dispatch(event)
+			success = await event.event_result()
+			return {'selector': params['selector'], 'found': success}
+
+		elif wait_command == 'text':
+			from browser_use.browser.events import WaitForTextEvent
+
+			event = WaitForTextEvent(
+				text=params['text'],
+				timeout_ms=params.get('timeout', 30000),
+			)
+			await bs.event_bus.dispatch(event)
+			success = await event.event_result()
+			return {'text': params['text'], 'found': success}
+
+		return {'error': 'Invalid wait command. Use: selector, text'}
 
 	raise ValueError(f'Unknown browser action: {action}')

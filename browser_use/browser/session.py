@@ -1487,6 +1487,13 @@ class BrowserSession(BaseModel):
 		self._cookies_watchdog = CookiesWatchdog(event_bus=self.event_bus, browser_session=self)
 		self._cookies_watchdog.attach_to_session()
 
+		# Initialize WaitWatchdog (handles wait conditions for selectors and text)
+		from browser_use.browser.watchdogs.wait_watchdog import WaitWatchdog
+
+		WaitWatchdog.model_rebuild()
+		self._wait_watchdog = WaitWatchdog(event_bus=self.event_bus, browser_session=self)
+		self._wait_watchdog.attach_to_session()
+
 		# Mark watchdogs as attached to prevent duplicate attachment
 		self._watchdogs_attached = True
 
