@@ -106,6 +106,27 @@ class TestSchemaDictToPydanticModel:
 		instance = Model(status='active')
 		assert instance.status == 'active'  # type: ignore[attr-defined]
 
+	def test_optional_enum_defaults_to_none(self):
+		"""Non-required enum fields default to None, not an out-of-set empty string."""
+		schema = {
+			'type': 'object',
+			'properties': {
+				'name': {'type': 'string'},
+				'priority': {'type': 'string', 'enum': ['low', 'medium', 'high']},
+			},
+			'required': ['name'],
+		}
+		Model = schema_dict_to_pydantic_model(schema)
+		instance = Model(name='task1')
+		assert instance.priority is None  # type: ignore[attr-defined]
+		# Serialized output must not contain an out-of-set value
+		dumped = instance.model_dump(mode='json')
+		assert dumped['priority'] is None
+
+		# When provided, value still works
+		instance2 = Model(name='task2', priority='high')
+		assert instance2.priority == 'high'  # type: ignore[attr-defined]
+
 	def test_optional_fields_get_type_appropriate_defaults(self):
 		schema = {
 			'type': 'object',
