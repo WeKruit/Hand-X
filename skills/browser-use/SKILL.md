@@ -120,6 +120,17 @@ browser-use dblclick <index>              # Double-click element
 browser-use rightclick <index>            # Right-click element (context menu)
 ```
 
+### Information Retrieval
+```bash
+browser-use get title                     # Get page title
+browser-use get html                      # Get full page HTML
+browser-use get html --selector "h1"      # Get HTML of specific element
+browser-use get text <index>              # Get text content of element
+browser-use get value <index>             # Get value of input/textarea
+browser-use get attributes <index>        # Get all attributes of element
+browser-use get bbox <index>              # Get bounding box (x, y, width, height)
+```
+
 ### Python Execution (Persistent Session)
 ```bash
 browser-use python "x = 42"               # Set variable

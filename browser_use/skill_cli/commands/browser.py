@@ -29,6 +29,7 @@ COMMANDS = {
 	'hover',
 	'dblclick',
 	'rightclick',
+	'get',
 }
 
 
@@ -292,5 +293,75 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 			return {'text': params['text'], 'found': success}
 
 		return {'error': 'Invalid wait command. Use: selector, text'}
+
+	elif action == 'get':
+		get_command = params.get('get_command')
+
+		if get_command == 'title':
+			from browser_use.browser.events import GetPageTitleEvent
+
+			event = GetPageTitleEvent()
+			await bs.event_bus.dispatch(event)
+			title = await event.event_result()
+			return {'title': title}
+
+		elif get_command == 'html':
+			from browser_use.browser.events import GetPageHtmlEvent
+
+			selector = params.get('selector')
+			event = GetPageHtmlEvent(selector=selector)
+			await bs.event_bus.dispatch(event)
+			html = await event.event_result()
+			return {'html': html}
+
+		elif get_command == 'text':
+			from browser_use.browser.events import GetElementTextEvent
+
+			index = params['index']
+			node = await bs.get_element_by_index(index)
+			if node is None:
+				return {'error': f'Element index {index} not found - page may have changed'}
+			event = GetElementTextEvent(node=node)
+			await bs.event_bus.dispatch(event)
+			text = await event.event_result()
+			return {'index': index, 'text': text}
+
+		elif get_command == 'value':
+			from browser_use.browser.events import GetElementValueEvent
+
+			index = params['index']
+			node = await bs.get_element_by_index(index)
+			if node is None:
+				return {'error': f'Element index {index} not found - page may have changed'}
+			event = GetElementValueEvent(node=node)
+			await bs.event_bus.dispatch(event)
+			value = await event.event_result()
+			return {'index': index, 'value': value}
+
+		elif get_command == 'attributes':
+			from browser_use.browser.events import GetElementAttributesEvent
+
+			index = params['index']
+			node = await bs.get_element_by_index(index)
+			if node is None:
+				return {'error': f'Element index {index} not found - page may have changed'}
+			event = GetElementAttributesEvent(node=node)
+			await bs.event_bus.dispatch(event)
+			attrs = await event.event_result()
+			return {'index': index, 'attributes': attrs}
+
+		elif get_command == 'bbox':
+			from browser_use.browser.events import GetElementBoundingBoxEvent
+
+			index = params['index']
+			node = await bs.get_element_by_index(index)
+			if node is None:
+				return {'error': f'Element index {index} not found - page may have changed'}
+			event = GetElementBoundingBoxEvent(node=node)
+			await bs.event_bus.dispatch(event)
+			bbox = await event.event_result()
+			return {'index': index, 'bbox': bbox}
+
+		return {'error': 'Invalid get command. Use: title, html, text, value, attributes, bbox'}
 
 	raise ValueError(f'Unknown browser action: {action}')
