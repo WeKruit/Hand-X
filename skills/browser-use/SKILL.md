@@ -102,6 +102,9 @@ browser-use cookies set <name> <value>    # Set a cookie
 browser-use cookies set name val --domain .example.com --secure --http-only
 browser-use cookies clear                 # Clear all cookies
 browser-use cookies clear --url <url>     # Clear cookies for specific URL
+browser-use cookies export <file>         # Export all cookies to JSON file
+browser-use cookies export <file> --url <url>  # Export cookies for specific URL
+browser-use cookies import <file>         # Import cookies from JSON file
 ```
 
 ### Wait Conditions
@@ -183,9 +186,101 @@ browser-use --browser real --profile "Profile 1" open https://gmail.com
 
 # Without a profile (fresh browser, no existing logins)
 browser-use --browser real open https://gmail.com
+
+# Headless mode (no visible window) - useful for cookie export
+browser-use --browser real --profile "Default" cookies export /tmp/cookies.json
 ```
 
 Each Chrome profile has its own cookies, history, and logged-in sessions. Choosing the right profile determines whether sites will be pre-authenticated.
+
+### Cloud Profiles
+
+Cloud profiles store browser state (cookies) in Browser-Use Cloud, persisting across sessions. Requires `BROWSER_USE_API_KEY`.
+
+```bash
+browser-use profile list                      # List cloud profiles
+browser-use profile get <id>                  # Get profile details
+browser-use profile update <id> --name "New"  # Rename profile
+browser-use profile delete <id>               # Delete profile
+```
+
+Use a cloud profile with `--browser remote --profile <id>`:
+
+```bash
+browser-use --browser remote --profile abc-123 open https://example.com
+```
+
+### Syncing Cookies to Cloud
+
+**⚠️ IMPORTANT: Before syncing cookies from a local browser to the cloud, the agent MUST:**
+1. Ask the user which local Chrome profile to use (`browser-use profile list-local`)
+2. Ask which domain(s) to sync - do NOT default to syncing the full profile
+3. Confirm before proceeding
+
+**Default behavior:** Create a NEW cloud profile for each domain sync. This ensures clear separation of concerns for cookies. Users can add cookies to existing profiles if needed.
+
+**Step 1: List available profiles and cookies**
+
+```bash
+# List local Chrome profiles
+browser-use profile list-local
+# → Default: Person 1 (user@gmail.com)
+# → Profile 1: Work (work@company.com)
+
+# See what cookies are in a profile
+browser-use profile cookies "Default"
+# → youtube.com: 23
+# → google.com: 18
+# → github.com: 2
+```
+
+**Step 2: Sync cookies (three levels of control)**
+
+**1. Domain-specific sync (recommended default)**
+```bash
+browser-use profile sync --from "Default" --domain youtube.com
+# Creates new cloud profile: "Chrome - Default (youtube.com)"
+# Only syncs youtube.com cookies
+```
+This is the recommended approach - sync only the cookies you need.
+
+**2. Full profile sync (use with caution)**
+```bash
+browser-use profile sync --from "Default"
+# Syncs ALL cookies from the profile
+```
+⚠️ **Warning:** This syncs ALL cookies including sensitive data, tracking cookies, session tokens for every site, etc. Only use when the user explicitly needs their entire browser state.
+
+**3. Fine-grained control (advanced)**
+```bash
+# Export cookies to file
+browser-use --browser real --profile "Default" cookies export /tmp/cookies.json
+
+# Manually edit the JSON to keep only specific cookies
+
+# Import to cloud profile
+browser-use --browser remote --profile <id> cookies import /tmp/cookies.json
+```
+For users who need individual cookie-level control.
+
+**Step 3: Use the synced profile**
+
+```bash
+browser-use --browser remote --profile <id> open https://youtube.com
+```
+
+**Adding cookies to existing profiles:**
+```bash
+# Sync additional domain to existing profile
+browser-use --browser real --profile "Default" cookies export /tmp/cookies.json
+browser-use --browser remote --profile <existing-id> cookies import /tmp/cookies.json
+```
+
+**Managing profiles:**
+```bash
+browser-use profile update <id> --name "New Name"  # Rename
+browser-use profile delete <id>                    # Delete
+```
 
 ### Server Control
 ```bash
