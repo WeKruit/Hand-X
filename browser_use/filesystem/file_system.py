@@ -542,12 +542,19 @@ class FileSystem:
 						text = page_texts[page_num - 1][1]
 						if not text.strip():
 							continue
-						page_content = f'--- Page {page_num} ---\n{text}'
-						if chars_used + len(page_content) > MAX_CHARS:
-							continue  # skip this page, try next
+						page_header = f'--- Page {page_num} ---\n'
+						remaining = MAX_CHARS - chars_used
+						if remaining <= len(page_header):
+							break  # no room left for any content
+						page_content = page_header + text
+						if len(page_content) > remaining:
+							# Truncate page to fit remaining budget
+							page_content = page_content[: remaining - 20] + '\n[...truncated]'
 						content_parts.append((page_num, page_content))
 						chars_used += len(page_content)
 						pages_included.append(page_num)
+						if chars_used >= MAX_CHARS:
+							break
 
 					# Sort included pages by page number for readability
 					content_parts.sort(key=lambda x: x[0])

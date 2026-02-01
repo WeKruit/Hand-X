@@ -4,6 +4,8 @@ import logging
 import os
 from typing import Generic, TypeVar
 
+import anyio
+
 try:
 	from lmnr import Laminar  # type: ignore
 except ImportError:
@@ -1196,21 +1198,25 @@ Context: {context}"""
 				for match in regex.finditer(content):
 					start = max(0, match.start() - context_chars)
 					end = min(len(content), match.end() + context_chars)
-					matches.append({
-						'position': match.start(),
-						'snippet': content[start:end],
-					})
+					matches.append(
+						{
+							'position': match.start(),
+							'snippet': content[start:end],
+						}
+					)
 				return matches
 
 			def chunk_content(content: str, chunk_size: int = 2000) -> list[dict]:
 				"""Split content into chunks with positions."""
 				chunks = []
 				for i in range(0, len(content), chunk_size):
-					chunks.append({
-						'start': i,
-						'end': min(i + chunk_size, len(content)),
-						'text': content[i:i + chunk_size],
-					})
+					chunks.append(
+						{
+							'start': i,
+							'end': min(i + chunk_size, len(content)),
+							'text': content[i : i + chunk_size],
+						}
+					)
 				return chunks
 
 			try:
@@ -1334,8 +1340,8 @@ Context: {context}"""
 
 					else:
 						# Text file
-						with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-							content = f.read()
+						async with await anyio.open_file(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+							content = await f.read()
 
 				# Check if content fits in budget
 				if len(content) <= max_chars:
@@ -1439,10 +1445,12 @@ Context: {context}"""
 					start = max(0, match.start() - context_chars)
 					end = min(len(text), match.end() + context_chars)
 					snippet = text[start:end].replace('\n', ' ')
-					matches.append({
-						'position': match.start(),
-						'snippet': snippet,
-					})
+					matches.append(
+						{
+							'position': match.start(),
+							'snippet': snippet,
+						}
+					)
 				return matches
 
 			if source.lower() == 'page':
@@ -1496,13 +1504,13 @@ Context: {context}"""
 				elif not os.path.isabs(file_path):
 					return ActionResult(
 						extracted_content=f'Error: File path must be absolute or in available_file_paths: {file_path}',
-						long_term_memory=f'Failed to search: invalid path',
+						long_term_memory='Failed to search: invalid path',
 					)
 
 				if not os.path.exists(file_path):
 					return ActionResult(
 						extracted_content=f'Error: File not found: {file_path}',
-						long_term_memory=f'Failed to search: file not found',
+						long_term_memory='Failed to search: file not found',
 					)
 
 				# Determine file type and search accordingly
@@ -1540,8 +1548,8 @@ Context: {context}"""
 
 					else:
 						# Text file search
-						with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-							content = f.read()
+						async with await anyio.open_file(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+							content = await f.read()
 
 						lines = content.split('\n')
 						matches = []
@@ -1549,10 +1557,12 @@ Context: {context}"""
 							for match in pattern.finditer(line):
 								start = max(0, match.start() - 50)
 								end = min(len(line), match.end() + 50)
-								matches.append({
-									'line': line_num,
-									'snippet': line[start:end],
-								})
+								matches.append(
+									{
+										'line': line_num,
+										'snippet': line[start:end],
+									}
+								)
 
 						if not matches:
 							result_text = f'No matches found for "{query}" in {file_path}'

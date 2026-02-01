@@ -128,7 +128,6 @@ class ReadContentAction(BaseModel):
 	context: str = Field(default='', description='Additional context about the task')
 
 
-
 class GetDropdownOptionsAction(BaseModel):
 	index: int
 
