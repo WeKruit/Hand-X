@@ -291,6 +291,24 @@ Examples:
 	p.add_argument('--url', help='Clear only for URL')
 
 	# -------------------------------------------------------------------------
+	# Wait Commands
+	# -------------------------------------------------------------------------
+
+	wait_p = subparsers.add_parser('wait', help='Wait for conditions')
+	wait_sub = wait_p.add_subparsers(dest='wait_command')
+
+	# wait selector <css>
+	p = wait_sub.add_parser('selector', help='Wait for CSS selector')
+	p.add_argument('selector', help='CSS selector')
+	p.add_argument('--timeout', type=int, default=30000, help='Timeout in ms')
+	p.add_argument('--state', choices=['attached', 'detached', 'visible', 'hidden'], default='visible', help='Element state')
+
+	# wait text <text>
+	p = wait_sub.add_parser('text', help='Wait for text')
+	p.add_argument('text', help='Text to wait for')
+	p.add_argument('--timeout', type=int, default=30000, help='Timeout in ms')
+
+	# -------------------------------------------------------------------------
 	# Python Execution
 	# -------------------------------------------------------------------------
 
