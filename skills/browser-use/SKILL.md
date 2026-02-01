@@ -94,6 +94,16 @@ browser-use eval "document.title"         # Execute JavaScript, return result
 browser-use extract "all product prices"  # Extract data using LLM (requires API key)
 ```
 
+### Cookies
+```bash
+browser-use cookies get                   # Get all cookies
+browser-use cookies get --url <url>       # Get cookies for specific URL
+browser-use cookies set <name> <value>    # Set a cookie
+browser-use cookies set name val --domain .example.com --secure --http-only
+browser-use cookies clear                 # Clear all cookies
+browser-use cookies clear --url <url>     # Clear cookies for specific URL
+```
+
 ### Python Execution (Persistent Session)
 ```bash
 browser-use python "x = 42"               # Set variable

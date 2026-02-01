@@ -265,6 +265,32 @@ Examples:
 	p.add_argument('query', help='What to extract')
 
 	# -------------------------------------------------------------------------
+	# Cookies Commands
+	# -------------------------------------------------------------------------
+
+	cookies_p = subparsers.add_parser('cookies', help='Cookie operations')
+	cookies_sub = cookies_p.add_subparsers(dest='cookies_command')
+
+	# cookies get [--url URL]
+	p = cookies_sub.add_parser('get', help='Get all cookies')
+	p.add_argument('--url', help='Filter by URL')
+
+	# cookies set <name> <value>
+	p = cookies_sub.add_parser('set', help='Set a cookie')
+	p.add_argument('name', help='Cookie name')
+	p.add_argument('value', help='Cookie value')
+	p.add_argument('--domain', help='Cookie domain')
+	p.add_argument('--path', default='/', help='Cookie path')
+	p.add_argument('--secure', action='store_true', help='Secure cookie')
+	p.add_argument('--http-only', action='store_true', help='HTTP-only cookie')
+	p.add_argument('--same-site', choices=['Strict', 'Lax', 'None'], help='SameSite attribute')
+	p.add_argument('--expires', type=float, help='Expiration timestamp')
+
+	# cookies clear [--url URL]
+	p = cookies_sub.add_parser('clear', help='Clear cookies')
+	p.add_argument('--url', help='Clear only for URL')
+
+	# -------------------------------------------------------------------------
 	# Python Execution
 	# -------------------------------------------------------------------------
 

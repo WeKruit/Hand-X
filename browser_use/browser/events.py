@@ -472,6 +472,42 @@ class BrowserErrorEvent(BaseEvent):
 
 
 # ============================================================================
+# Cookie Events
+# ============================================================================
+
+
+class GetCookiesEvent(BaseEvent[list[dict]]):
+	"""Get browser cookies."""
+
+	url: str | None = None  # Optional: filter by URL
+
+	event_timeout: float | None = Field(default_factory=lambda: _get_timeout('TIMEOUT_GetCookiesEvent', 15.0))
+
+
+class SetCookieEvent(BaseEvent[bool]):
+	"""Set a browser cookie."""
+
+	name: str
+	value: str
+	domain: str | None = None
+	path: str = '/'
+	secure: bool = False
+	http_only: bool = False
+	same_site: Literal['Strict', 'Lax', 'None'] | None = None
+	expires: float | None = None  # Unix timestamp
+
+	event_timeout: float | None = Field(default_factory=lambda: _get_timeout('TIMEOUT_SetCookieEvent', 15.0))
+
+
+class ClearCookiesEvent(BaseEvent[None]):
+	"""Clear browser cookies."""
+
+	url: str | None = None  # Optional: clear only cookies for this URL
+
+	event_timeout: float | None = Field(default_factory=lambda: _get_timeout('TIMEOUT_ClearCookiesEvent', 15.0))
+
+
+# ============================================================================
 # Storage State Events
 # ============================================================================
 

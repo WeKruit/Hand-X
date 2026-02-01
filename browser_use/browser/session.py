@@ -1480,6 +1480,13 @@ class BrowserSession(BaseModel):
 		self._recording_watchdog = RecordingWatchdog(event_bus=self.event_bus, browser_session=self)
 		self._recording_watchdog.attach_to_session()
 
+		# Initialize CookiesWatchdog (handles cookie get/set/clear operations)
+		from browser_use.browser.watchdogs.cookies_watchdog import CookiesWatchdog
+
+		CookiesWatchdog.model_rebuild()
+		self._cookies_watchdog = CookiesWatchdog(event_bus=self.event_bus, browser_session=self)
+		self._cookies_watchdog.attach_to_session()
+
 		# Mark watchdogs as attached to prevent duplicate attachment
 		self._watchdogs_attached = True
 
