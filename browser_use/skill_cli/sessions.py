@@ -126,11 +126,15 @@ async def create_browser_session(
 		if not chrome_path:
 			raise RuntimeError('Could not find Chrome executable. Please install Chrome or specify --browser chromium')
 
-		user_data_dir = get_chrome_profile_path(profile)
+		# Always get the Chrome user data directory (not the profile subdirectory)
+		user_data_dir = get_chrome_profile_path(None)
+		# Profile directory defaults to 'Default', or use the specified profile name
+		profile_directory = profile if profile else 'Default'
 
 		return BrowserSession(
 			executable_path=chrome_path,
 			user_data_dir=user_data_dir,
+			profile_directory=profile_directory,
 			headless=False,  # Real browser always visible
 		)
 
