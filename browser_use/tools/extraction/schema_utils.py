@@ -84,6 +84,14 @@ def _resolve_type(schema: dict, name: str) -> Any:
 	return base
 
 
+_PRIMITIVE_DEFAULTS: dict[str, Any] = {
+	'string': '',
+	'number': 0.0,
+	'integer': 0,
+	'boolean': False,
+}
+
+
 def _build_model(schema: dict, name: str) -> type[BaseModel]:
 	"""Build a pydantic model from an object-type JSON Schema node."""
 	_check_unsupported(schema)
@@ -97,15 +105,36 @@ def _build_model(schema: dict, name: str) -> type[BaseModel]:
 
 		if prop_name in required_fields:
 			default = ...
+		elif 'default' in prop_schema:
+			default = prop_schema['default']
+		elif prop_schema.get('nullable', False):
+			# _resolve_type already made the type include None
+			default = None
 		else:
-			prop_type = prop_type | None
-			default = prop_schema.get('default', None)
+			# Non-required, non-nullable, no explicit default.
+			# Use a type-appropriate zero value for primitives/arrays;
+			# fall back to None (with | None) only for nested objects
+			# where constructing a default is not feasible.
+			json_type = prop_schema.get('type', 'string')
+			if 'enum' in prop_schema:
+				default = ''
+			elif json_type in _PRIMITIVE_DEFAULTS:
+				default = _PRIMITIVE_DEFAULTS[json_type]
+			elif json_type == 'array':
+				default = []
+			else:
+				# Nested object or unknown — must allow None as sentinel
+				prop_type = prop_type | None
+				default = None
 
 		field_kwargs: dict[str, Any] = {}
 		if 'description' in prop_schema:
 			field_kwargs['description'] = prop_schema['description']
 
-		fields[prop_name] = (prop_type, Field(default, **field_kwargs))
+		if isinstance(default, list) and not default:
+			fields[prop_name] = (prop_type, Field(default_factory=list, **field_kwargs))
+		else:
+			fields[prop_name] = (prop_type, Field(default, **field_kwargs))
 
 	return create_model(name, __base__=_StrictBase, **fields)
 

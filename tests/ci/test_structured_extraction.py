@@ -106,7 +106,30 @@ class TestSchemaDictToPydanticModel:
 		instance = Model(status='active')
 		assert instance.status == 'active'  # type: ignore[attr-defined]
 
-	def test_optional_fields(self):
+	def test_optional_fields_get_type_appropriate_defaults(self):
+		schema = {
+			'type': 'object',
+			'properties': {
+				'name': {'type': 'string'},
+				'nickname': {'type': 'string'},
+				'score': {'type': 'number'},
+				'rank': {'type': 'integer'},
+				'active': {'type': 'boolean'},
+				'tags': {'type': 'array', 'items': {'type': 'string'}},
+			},
+			'required': ['name'],
+		}
+		Model = schema_dict_to_pydantic_model(schema)
+		instance = Model(name='Alice')
+		assert instance.name == 'Alice'  # type: ignore[attr-defined]
+		assert instance.nickname == ''  # type: ignore[attr-defined]
+		assert instance.score == 0.0  # type: ignore[attr-defined]
+		assert instance.rank == 0  # type: ignore[attr-defined]
+		assert instance.active is False  # type: ignore[attr-defined]
+		assert instance.tags == []  # type: ignore[attr-defined]
+
+	def test_optional_non_nullable_rejects_null(self):
+		"""Non-required fields that aren't nullable must reject explicit null."""
 		schema = {
 			'type': 'object',
 			'properties': {
@@ -116,9 +139,39 @@ class TestSchemaDictToPydanticModel:
 			'required': ['name'],
 		}
 		Model = schema_dict_to_pydantic_model(schema)
+		with pytest.raises(ValidationError):
+			Model(name='Alice', nickname=None)
+
+	def test_optional_with_explicit_default(self):
+		schema = {
+			'type': 'object',
+			'properties': {
+				'name': {'type': 'string'},
+				'color': {'type': 'string', 'default': 'blue'},
+			},
+			'required': ['name'],
+		}
+		Model = schema_dict_to_pydantic_model(schema)
 		instance = Model(name='Alice')
-		assert instance.name == 'Alice'  # type: ignore[attr-defined]
-		assert instance.nickname is None  # type: ignore[attr-defined]
+		assert instance.color == 'blue'  # type: ignore[attr-defined]
+
+	def test_optional_nested_object_defaults_to_none(self):
+		"""Non-required nested objects fall back to None since constructing a default is not feasible."""
+		schema = {
+			'type': 'object',
+			'properties': {
+				'name': {'type': 'string'},
+				'address': {
+					'type': 'object',
+					'properties': {'city': {'type': 'string'}},
+					'required': ['city'],
+				},
+			},
+			'required': ['name'],
+		}
+		Model = schema_dict_to_pydantic_model(schema)
+		instance = Model(name='Alice')
+		assert instance.address is None  # type: ignore[attr-defined]
 
 	def test_model_name_from_title(self):
 		schema = {
