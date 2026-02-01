@@ -37,6 +37,7 @@ if '--mcp' in sys.argv:
 	asyncio.run(mcp_main())
 	sys.exit(0)
 
+
 # Helper to find the subcommand (first non-flag argument)
 def _get_subcommand() -> str | None:
 	"""Get the first non-flag argument (the subcommand)."""
