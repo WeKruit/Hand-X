@@ -19,6 +19,25 @@ class ExtractAction(BaseModel):
 	)
 
 
+class SearchPageAction(BaseModel):
+	pattern: str = Field(description='Text or regex pattern to search for in page content')
+	regex: bool = Field(default=False, description='Treat pattern as regex (default: literal text match)')
+	case_sensitive: bool = Field(default=False, description='Case-sensitive search (default: case-insensitive)')
+	context_chars: int = Field(default=150, description='Characters of surrounding context per match')
+	css_scope: str | None = Field(default=None, description='CSS selector to limit search scope (e.g. "div#main")')
+	max_results: int = Field(default=25, description='Maximum matches to return')
+
+
+class FindElementsAction(BaseModel):
+	selector: str = Field(description='CSS selector to query elements (e.g. "table tr", "a.link", "div.product")')
+	attributes: list[str] | None = Field(
+		default=None,
+		description='Specific attributes to extract (e.g. ["href", "src", "class"]). If not set, returns tag and text only.',
+	)
+	max_results: int = Field(default=50, description='Maximum elements to return')
+	include_text: bool = Field(default=True, description='Include text content of each element')
+
+
 class SearchAction(BaseModel):
 	query: str
 	engine: str = Field(
