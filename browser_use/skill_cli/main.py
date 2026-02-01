@@ -97,85 +97,36 @@ if _get_subcommand() == 'init':
 	sys.exit(0)
 
 # Handle --template flag directly (without 'init' subcommand)
+# Delegate to init_main() which handles full template logic (directories, manifests, etc.)
 if '--template' in sys.argv:
-	import click
+	from browser_use.init_cmd import main as init_main
 
-	from browser_use.init_cmd import _get_template_list
+	# Build clean argv for init_main: keep only init-relevant flags
+	new_argv = [sys.argv[0]]  # program name
 
-	# Parse template and output from sys.argv
-	try:
-		template_idx = sys.argv.index('--template')
-		template = sys.argv[template_idx + 1] if template_idx + 1 < len(sys.argv) else None
-	except (ValueError, IndexError):
-		template = None
+	i = 1
+	while i < len(sys.argv):
+		arg = sys.argv[i]
+		# Keep --template/-t and its value
+		if arg in ('--template', '-t'):
+			new_argv.append(arg)
+			if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith('-'):
+				new_argv.append(sys.argv[i + 1])
+				i += 1
+		# Keep --output/-o and its value
+		elif arg in ('--output', '-o'):
+			new_argv.append(arg)
+			if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith('-'):
+				new_argv.append(sys.argv[i + 1])
+				i += 1
+		# Keep --force/-f and --list/-l flags
+		elif arg in ('--force', '-f', '--list', '-l'):
+			new_argv.append(arg)
+		# Skip other flags (--session, --browser, --headed, etc.)
+		i += 1
 
-	# If template is not provided or is another flag, use interactive mode
-	if not template or template.startswith('-'):
-		# Redirect to init command with interactive template selection
-		from browser_use.init_cmd import main as init_main
-
-		# Remove --template from sys.argv
-		sys.argv.remove('--template')
-		init_main()
-		sys.exit(0)
-
-	# Fetch templates from GitHub
-	try:
-		templates = _get_template_list()
-	except FileNotFoundError as e:
-		click.echo(f'❌ {e}', err=True)
-		sys.exit(1)
-
-	# Validate template name
-	if template not in templates:
-		click.echo(f'❌ Invalid template. Choose from: {", ".join(templates.keys())}', err=True)
-		sys.exit(1)
-
-	# Check for --output flag
-	output = None
-	if '--output' in sys.argv or '-o' in sys.argv:
-		try:
-			output_idx = sys.argv.index('--output') if '--output' in sys.argv else sys.argv.index('-o')
-			output = sys.argv[output_idx + 1] if output_idx + 1 < len(sys.argv) else None
-		except (ValueError, IndexError):
-			pass
-
-	# Check for --force flag
-	force = '--force' in sys.argv or '-f' in sys.argv
-
-	# Determine output path
-	output_path = Path(output) if output else Path.cwd() / f'browser_use_{template}.py'
-
-	# Fetch template content from GitHub
-	from browser_use.init_cmd import _get_template_content
-
-	try:
-		template_file = templates[template]['file']
-		content = _get_template_content(template_file)
-	except Exception as e:
-		click.echo(f'❌ Error reading template: {e}', err=True)
-		sys.exit(1)
-
-	# Write file with safety checks
-	if output_path.exists() and not force:
-		click.echo(f'⚠️  File already exists: {output_path}')
-		if not click.confirm('Overwrite?', default=False):
-			click.echo('❌ Cancelled')
-			sys.exit(1)
-
-	output_path.parent.mkdir(parents=True, exist_ok=True)
-	output_path.write_text(content, encoding='utf-8')
-
-	click.echo(f'✅ Created {output_path}')
-	click.echo('\nNext steps:')
-	click.echo('  1. Install browser-use:')
-	click.echo('     uv pip install browser-use')
-	click.echo('  2. Set up your API key in .env file or environment:')
-	click.echo('     BROWSER_USE_API_KEY=your-key')
-	click.echo('     (Get your key at https://cloud.browser-use.com/new-api-key)')
-	click.echo('  3. Run your script:')
-	click.echo(f'     python {output_path.name}')
-
+	sys.argv = new_argv
+	init_main()
 	sys.exit(0)
 
 # =============================================================================
