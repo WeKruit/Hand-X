@@ -543,13 +543,16 @@ class FileSystem:
 						if not text.strip():
 							continue
 						page_header = f'--- Page {page_num} ---\n'
+						truncation_suffix = '\n[...truncated]'
 						remaining = MAX_CHARS - chars_used
-						if remaining <= len(page_header):
-							break  # no room left for any content
+						# Need room for header + suffix + at least some content
+						min_useful = len(page_header) + len(truncation_suffix) + 50
+						if remaining < min_useful:
+							break  # no room left for meaningful content
 						page_content = page_header + text
 						if len(page_content) > remaining:
-							# Truncate page to fit remaining budget
-							page_content = page_content[: remaining - 20] + '\n[...truncated]'
+							# Truncate page to fit remaining budget exactly
+							page_content = page_content[: remaining - len(truncation_suffix)] + truncation_suffix
 						content_parts.append((page_num, page_content))
 						chars_used += len(page_content)
 						pages_included.append(page_num)
