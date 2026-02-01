@@ -389,7 +389,74 @@ Examples:
 	server_sub.add_parser('stop', help='Stop server')
 	server_sub.add_parser('logs', help='View server logs')
 
+	# -------------------------------------------------------------------------
+	# Profile Management
+	# -------------------------------------------------------------------------
+
+	profile_p = subparsers.add_parser('profile', help='Manage browser profiles')
+	profile_sub = profile_p.add_subparsers(dest='profile_command')
+
+	# profile list-local
+	profile_sub.add_parser('list-local', help='List local Chrome profiles')
+
 	return parser
+
+
+def handle_profile_command(args: argparse.Namespace) -> int:
+	"""Handle profile subcommands."""
+	if args.profile_command == 'list-local':
+		profiles = list_local_chrome_profiles()
+
+		if args.json:
+			print(json.dumps({'profiles': profiles}))
+		else:
+			if profiles:
+				print('Local Chrome profiles:')
+				for p in profiles:
+					email_str = f' ({p["email"]})' if p['email'] != 'local' else ''
+					print(f'  {p["id"]}: {p["name"]}{email_str}')
+			else:
+				print('No Chrome profiles found')
+		return 0
+
+	# No subcommand specified
+	print('Usage: browser-use profile <command>')
+	print('Commands: list-local')
+	return 1
+
+
+def list_local_chrome_profiles() -> list[dict]:
+	"""List local Chrome profiles from the Local State file."""
+	local_state_paths = [
+		Path.home() / 'Library/Application Support/Google/Chrome/Local State',  # macOS
+		Path.home() / '.config/google-chrome/Local State',  # Linux
+		Path.home() / 'AppData/Local/Google/Chrome/User Data/Local State',  # Windows
+	]
+
+	local_state = None
+	for path in local_state_paths:
+		if path.exists():
+			local_state = path
+			break
+
+	if not local_state:
+		return []
+
+	try:
+		data = json.loads(local_state.read_text())
+		profiles_info = data.get('profile', {}).get('info_cache', {})
+
+		profiles = []
+		for profile_id, info in profiles_info.items():
+			profiles.append({
+				'id': profile_id,
+				'name': info.get('name', 'Unknown'),
+				'email': info.get('user_name') or info.get('gaia_name') or 'local',
+			})
+
+		return profiles
+	except Exception:
+		return []
 
 
 def handle_server_command(args: argparse.Namespace) -> int:
@@ -448,6 +515,10 @@ def main() -> int:
 	# Handle server subcommands without starting server
 	if args.command == 'server':
 		return handle_server_command(args)
+
+	# Handle profile subcommands without starting server
+	if args.command == 'profile':
+		return handle_profile_command(args)
 
 	# Handle sessions list - find all running sessions
 	if args.command == 'sessions':

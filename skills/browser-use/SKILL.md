@@ -166,6 +166,27 @@ browser-use close                         # Close current session
 browser-use close --all                   # Close all sessions
 ```
 
+### Profile Management
+```bash
+browser-use profile list-local            # List local Chrome profiles
+```
+
+**Before opening a real browser (`--browser real`)**, always ask the user if they want to use a specific Chrome profile or no profile. Use `profile list-local` to show available profiles:
+
+```bash
+browser-use profile list-local
+# Output: Default: Person 1 (user@gmail.com)
+#         Profile 1: Work (work@company.com)
+
+# With a specific profile (has that profile's cookies/logins)
+browser-use --browser real --profile "Profile 1" open https://gmail.com
+
+# Without a profile (fresh browser, no existing logins)
+browser-use --browser real open https://gmail.com
+```
+
+Each Chrome profile has its own cookies, history, and logged-in sessions. Choosing the right profile determines whether sites will be pre-authenticated.
+
 ### Server Control
 ```bash
 browser-use server status                 # Check if server is running
