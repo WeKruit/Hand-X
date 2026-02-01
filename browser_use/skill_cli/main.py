@@ -18,6 +18,167 @@ import time
 from pathlib import Path
 
 # =============================================================================
+# Early command interception (before heavy imports)
+# These commands don't need the session server infrastructure
+# =============================================================================
+
+# Handle --mcp flag early to prevent logging initialization
+if '--mcp' in sys.argv:
+	import logging
+
+	os.environ['BROWSER_USE_LOGGING_LEVEL'] = 'critical'
+	os.environ['BROWSER_USE_SETUP_LOGGING'] = 'false'
+	logging.disable(logging.CRITICAL)
+
+	import asyncio
+
+	from browser_use.mcp.server import main as mcp_main
+
+	asyncio.run(mcp_main())
+	sys.exit(0)
+
+# Helper to find the subcommand (first non-flag argument)
+def _get_subcommand() -> str | None:
+	"""Get the first non-flag argument (the subcommand)."""
+	for arg in sys.argv[1:]:
+		if not arg.startswith('-'):
+			return arg
+	return None
+
+
+# Handle 'install' command - installs Chromium browser + system dependencies
+if _get_subcommand() == 'install':
+	import platform
+
+	print('📦 Installing Chromium browser + system dependencies...')
+	print('⏳ This may take a few minutes...\n')
+
+	# Build command - only use --with-deps on Linux (it fails on Windows/macOS)
+	cmd = ['uvx', 'playwright', 'install', 'chromium']
+	if platform.system() == 'Linux':
+		cmd.append('--with-deps')
+	cmd.append('--no-shell')
+
+	result = subprocess.run(cmd)
+
+	if result.returncode == 0:
+		print('\n✅ Installation complete!')
+		print('🚀 Ready to use! Run: uvx browser-use')
+	else:
+		print('\n❌ Installation failed')
+		sys.exit(1)
+	sys.exit(0)
+
+# Handle 'init' command - generate template files
+# Uses _get_subcommand() to check if 'init' is the actual subcommand,
+# not just anywhere in argv (prevents hijacking: browser-use run "init something")
+if _get_subcommand() == 'init':
+	from browser_use.init_cmd import main as init_main
+
+	# Check if --template or -t flag is present without a value
+	# If so, just remove it and let init_main handle interactive mode
+	if '--template' in sys.argv or '-t' in sys.argv:
+		try:
+			template_idx = sys.argv.index('--template') if '--template' in sys.argv else sys.argv.index('-t')
+			template = sys.argv[template_idx + 1] if template_idx + 1 < len(sys.argv) else None
+
+			# If template is not provided or is another flag, remove the flag and use interactive mode
+			if not template or template.startswith('-'):
+				if '--template' in sys.argv:
+					sys.argv.remove('--template')
+				else:
+					sys.argv.remove('-t')
+		except (ValueError, IndexError):
+			pass
+
+	# Remove 'init' from sys.argv so click doesn't see it as an unexpected argument
+	sys.argv.remove('init')
+	init_main()
+	sys.exit(0)
+
+# Handle --template flag directly (without 'init' subcommand)
+if '--template' in sys.argv:
+	import click
+
+	from browser_use.init_cmd import _get_template_list
+
+	# Parse template and output from sys.argv
+	try:
+		template_idx = sys.argv.index('--template')
+		template = sys.argv[template_idx + 1] if template_idx + 1 < len(sys.argv) else None
+	except (ValueError, IndexError):
+		template = None
+
+	# If template is not provided or is another flag, use interactive mode
+	if not template or template.startswith('-'):
+		# Redirect to init command with interactive template selection
+		from browser_use.init_cmd import main as init_main
+
+		# Remove --template from sys.argv
+		sys.argv.remove('--template')
+		init_main()
+		sys.exit(0)
+
+	# Fetch templates from GitHub
+	try:
+		templates = _get_template_list()
+	except FileNotFoundError as e:
+		click.echo(f'❌ {e}', err=True)
+		sys.exit(1)
+
+	# Validate template name
+	if template not in templates:
+		click.echo(f'❌ Invalid template. Choose from: {", ".join(templates.keys())}', err=True)
+		sys.exit(1)
+
+	# Check for --output flag
+	output = None
+	if '--output' in sys.argv or '-o' in sys.argv:
+		try:
+			output_idx = sys.argv.index('--output') if '--output' in sys.argv else sys.argv.index('-o')
+			output = sys.argv[output_idx + 1] if output_idx + 1 < len(sys.argv) else None
+		except (ValueError, IndexError):
+			pass
+
+	# Check for --force flag
+	force = '--force' in sys.argv or '-f' in sys.argv
+
+	# Determine output path
+	output_path = Path(output) if output else Path.cwd() / f'browser_use_{template}.py'
+
+	# Fetch template content from GitHub
+	from browser_use.init_cmd import _get_template_content
+
+	try:
+		template_file = templates[template]['file']
+		content = _get_template_content(template_file)
+	except Exception as e:
+		click.echo(f'❌ Error reading template: {e}', err=True)
+		sys.exit(1)
+
+	# Write file with safety checks
+	if output_path.exists() and not force:
+		click.echo(f'⚠️  File already exists: {output_path}')
+		if not click.confirm('Overwrite?', default=False):
+			click.echo('❌ Cancelled')
+			sys.exit(1)
+
+	output_path.parent.mkdir(parents=True, exist_ok=True)
+	output_path.write_text(content, encoding='utf-8')
+
+	click.echo(f'✅ Created {output_path}')
+	click.echo('\nNext steps:')
+	click.echo('  1. Install browser-use:')
+	click.echo('     uv pip install browser-use')
+	click.echo('  2. Set up your API key in .env file or environment:')
+	click.echo('     BROWSER_USE_API_KEY=your-key')
+	click.echo('     (Get your key at https://cloud.browser-use.com/new-api-key)')
+	click.echo('  3. Run your script:')
+	click.echo(f'     python {output_path.name}')
+
+	sys.exit(0)
+
+# =============================================================================
 # Utility functions (inlined to avoid imports)
 # =============================================================================
 
@@ -177,6 +338,10 @@ def build_parser() -> argparse.ArgumentParser:
 		formatter_class=argparse.RawDescriptionHelpFormatter,
 		epilog="""
 Examples:
+  browser-use install                    # Install Chromium browser
+  browser-use init                       # Generate template file (interactive)
+  browser-use init --template default    # Generate specific template
+  browser-use --mcp                      # Run as MCP server
   browser-use open https://example.com
   browser-use click 5
   browser-use type "Hello World"
@@ -194,8 +359,24 @@ Examples:
 	parser.add_argument('--profile', help='Chrome profile (real browser mode)')
 	parser.add_argument('--json', action='store_true', help='Output as JSON')
 	parser.add_argument('--api-key', help='Browser-Use API key')
+	parser.add_argument('--mcp', action='store_true', help='Run as MCP server (JSON-RPC via stdin/stdout)')
+	parser.add_argument('--template', help='Generate template file (use with --output for custom path)')
 
 	subparsers = parser.add_subparsers(dest='command', help='Command to execute')
+
+	# -------------------------------------------------------------------------
+	# Setup Commands (handled early, before argparse)
+	# -------------------------------------------------------------------------
+
+	# install
+	subparsers.add_parser('install', help='Install Chromium browser + system dependencies')
+
+	# init
+	p = subparsers.add_parser('init', help='Generate browser-use template file')
+	p.add_argument('--template', '-t', help='Template name (interactive if not specified)')
+	p.add_argument('--output', '-o', help='Output file path')
+	p.add_argument('--force', '-f', action='store_true', help='Overwrite existing files')
+	p.add_argument('--list', '-l', action='store_true', help='List available templates')
 
 	# -------------------------------------------------------------------------
 	# Browser Control Commands
