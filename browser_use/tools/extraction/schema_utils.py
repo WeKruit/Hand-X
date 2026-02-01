@@ -113,11 +113,14 @@ def _build_model(schema: dict, name: str) -> type[BaseModel]:
 		else:
 			# Non-required, non-nullable, no explicit default.
 			# Use a type-appropriate zero value for primitives/arrays;
-			# fall back to None (with | None) only for nested objects
-			# where constructing a default is not feasible.
+			# fall back to None (with | None) for enums and nested objects
+			# where no in-set or constructible default exists.
 			json_type = prop_schema.get('type', 'string')
 			if 'enum' in prop_schema:
-				default = ''
+				# Can't pick an arbitrary enum member as default — use None
+				# so absent fields serialize as null, not an out-of-set value.
+				prop_type = prop_type | None
+				default = None
 			elif json_type in _PRIMITIVE_DEFAULTS:
 				default = _PRIMITIVE_DEFAULTS[json_type]
 			elif json_type == 'array':
