@@ -946,7 +946,6 @@ def handle_profile_sync(args: argparse.Namespace) -> int:
 	print('  Extracting cookies from local Chrome...')
 
 	async def sync_cookies() -> tuple[int, str | None]:
-		from browser_use.browser.events import GetCookiesEvent
 		from browser_use.skill_cli.sessions import create_browser_session
 
 		# Start local browser headless
@@ -954,10 +953,8 @@ def handle_profile_sync(args: argparse.Namespace) -> int:
 		await local_session.start()
 
 		try:
-			# Get cookies
-			event = GetCookiesEvent(url=None)
-			await local_session.event_bus.dispatch(event)
-			cookies = await event.event_result()
+			# Get cookies via direct CDP
+			cookies = await local_session._cdp_get_cookies()
 
 			if not cookies:
 				return 0, 'No cookies found in local profile'
@@ -991,8 +988,8 @@ def handle_profile_sync(args: argparse.Namespace) -> int:
 		# No event loop running
 		cookie_count, cookies_file = asyncio.run(sync_cookies())
 
-	if cookies_file is None:
-		print(f'  ⚠ {cookie_count}')  # cookie_count contains error message
+	if cookie_count == 0:
+		print(f'  ⚠ {cookies_file}')  # cookies_file contains error message
 		return 1
 
 	print(f'  ✓ Extracted {cookie_count} cookies')
