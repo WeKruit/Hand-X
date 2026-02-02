@@ -36,7 +36,7 @@ from pydantic import BaseModel, ValidationError
 from uuid_extensions import uuid7str
 
 from browser_use import Browser, BrowserProfile, BrowserSession
-from browser_use.agent.judge import construct_judge_messages
+from browser_use.agent.judge import construct_judge_messages, construct_self_verify_messages
 
 # Lazy import for gif to avoid heavy agent.views import at startup
 # from browser_use.agent.gif import create_history_gif
@@ -57,6 +57,7 @@ from browser_use.agent.views import (
 	BrowserStateHistory,
 	DetectedVariable,
 	JudgementResult,
+	SelfVerifyResult,
 	StepMetadata,
 )
 from browser_use.browser.events import _get_timeout
@@ -178,6 +179,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		page_extraction_llm: BaseChatModel | None = None,
 		fallback_llm: BaseChatModel | None = None,
 		use_judge: bool = True,
+		use_self_verification: bool = True,
 		ground_truth: str | None = None,
 		judge_llm: BaseChatModel | None = None,
 		injected_agent_state: AgentState | None = None,
@@ -386,6 +388,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			step_timeout=step_timeout,
 			final_response_after_failure=final_response_after_failure,
 			use_judge=use_judge,
+			use_self_verification=use_self_verification,
 			ground_truth=ground_truth,
 		)
 
@@ -1286,6 +1289,40 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self._message_manager._add_context_message(UserMessage(content=msg))
 			self.AgentOutput = self.DoneAgentOutput
 
+	async def _self_verify_success(self) -> bool:
+		"""Lightweight self-verification when agent claims success.
+
+		Uses the agent's own LLM to verify that the final response actually satisfies the task.
+		Returns True if verification passes, False if success should be overridden to False.
+		"""
+		last_result = self.history.history[-1].result[-1]
+		if not last_result.success:
+			return True  # Agent already says failure, no need to verify
+
+		task = self.task
+		final_result = self.history.final_result() or ''
+		screenshot_paths = [p for p in self.history.screenshot_paths() if p is not None]
+
+		verify_messages = construct_self_verify_messages(
+			task=task,
+			final_result=final_result,
+			last_screenshot_path=screenshot_paths[-1] if screenshot_paths else None,
+			use_vision=self.settings.use_vision,
+		)
+
+		try:
+			response = await self.llm.ainvoke(verify_messages, output_format=SelfVerifyResult)
+			result: SelfVerifyResult = response.completion  # type: ignore[assignment]
+			if not result.verified:
+				self.logger.info(f'⚠️  Self-verification failed: {result.reason}')
+				last_result.success = False
+				if last_result.extracted_content:
+					last_result.extracted_content += f'\n\n[Self-verification: {result.reason}]'
+			return result.verified
+		except Exception as e:
+			self.logger.warning(f'Self-verification failed with error: {e}')
+			return True  # Don't override on error
+
 	@observe(ignore_input=True, ignore_output=False)
 	async def _judge_trace(self) -> JudgementResult | None:
 		"""Judge the trace of the agent"""
@@ -1962,6 +1999,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		await self.step(step_info)
 
 		if self.history.is_done():
+			# Self-verify before logging completion
+			if self.settings.use_self_verification:
+				await self._self_verify_success()
+
 			await self.log_completion()
 
 			# Run judge before done callback if enabled
@@ -2163,6 +2204,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			await on_step_end(self)
 
 		if self.history.is_done():
+			# Self-verify before logging completion
+			if self.settings.use_self_verification:
+				await self._self_verify_success()
+
 			await self.log_completion()
 
 			# Run judge before done callback if enabled
