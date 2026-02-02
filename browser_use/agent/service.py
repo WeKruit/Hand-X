@@ -160,6 +160,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		register_should_stop_callback: Callable[[], Awaitable[bool]] | None = None,
 		# Agent settings
 		output_model_schema: type[AgentStructuredOutput] | None = None,
+		extraction_schema: dict | None = None,
 		use_vision: bool | Literal['auto'] = True,
 		save_conversation_path: str | Path | None = None,
 		save_conversation_path_encoding: str | None = 'utf-8',
@@ -341,6 +342,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self.output_model_schema = output_model_schema
 		if self.output_model_schema is not None:
 			self.tools.use_structured_output_action(self.output_model_schema)
+
+		# Extraction schema: explicit param takes priority, otherwise auto-bridge from output_model_schema
+		self.extraction_schema = extraction_schema
+		if self.extraction_schema is None and self.output_model_schema is not None:
+			self.extraction_schema = self.output_model_schema.model_json_schema()
 
 		# Core components - task enhancement now has access to output_model_schema from tools
 		self.task = self._enhance_task_with_schema(task, output_model_schema)
@@ -1057,6 +1063,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			unavailable_skills_info=unavailable_skills_info,
 		)
 
+		await self._inject_budget_warning(step_info)
 		await self._force_done_after_last_step(step_info)
 		await self._force_done_after_failure()
 		return browser_state_summary
@@ -1228,6 +1235,32 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Increment step counter after step is fully completed
 		self.state.n_steps += 1
+
+	async def _inject_budget_warning(self, step_info: AgentStepInfo | None = None) -> None:
+		"""Inject a prominent budget warning when the agent has used >= 75% of its step budget.
+
+		This gives the LLM advance notice to wrap up, save partial results, and call done
+		rather than exhausting all steps with nothing saved.
+		"""
+		if step_info is None:
+			return
+
+		steps_used = step_info.step_number + 1  # Convert 0-indexed to 1-indexed
+		budget_ratio = steps_used / step_info.max_steps
+
+		if budget_ratio >= 0.75 and not step_info.is_last_step():
+			steps_remaining = step_info.max_steps - steps_used
+			pct = int(budget_ratio * 100)
+			msg = (
+				f'BUDGET WARNING: You have used {steps_used}/{step_info.max_steps} steps '
+				f'({pct}%). {steps_remaining} steps remaining. '
+				f'If the task cannot be completed in the remaining steps, prioritize: '
+				f'(1) consolidate your results (save to files if the file system is in use), '
+				f'(2) call done with what you have. '
+				f'Partial results are far more valuable than exhausting all steps with nothing saved.'
+			)
+			self.logger.info(f'Step budget warning: {steps_used}/{step_info.max_steps} ({pct}%)')
+			self._message_manager._add_context_message(UserMessage(content=msg))
 
 	async def _force_done_after_last_step(self, step_info: AgentStepInfo | None = None) -> None:
 		"""Handle special processing for the last step"""
@@ -2413,6 +2446,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					page_extraction_llm=self.settings.page_extraction_llm,
 					sensitive_data=self.sensitive_data,
 					available_file_paths=self.available_file_paths,
+					extraction_schema=self.extraction_schema,
 				)
 
 				time_end = time.time()
