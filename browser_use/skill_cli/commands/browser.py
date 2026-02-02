@@ -367,7 +367,8 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 				parsed = urlparse(url)
 				domain = parsed.netloc
 				cookie_list = [
-					c for c in cookie_list
+					c
+					for c in cookie_list
 					if domain.endswith(str(c.get('domain', '')).lstrip('.'))
 					or str(c.get('domain', '')).lstrip('.').endswith(domain)
 				]
@@ -465,7 +466,8 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 				parsed = urlparse(url)
 				domain = parsed.netloc
 				cookie_list = [
-					c for c in cookie_list
+					c
+					for c in cookie_list
 					if domain.endswith(str(c.get('domain', '')).lstrip('.'))
 					or str(c.get('domain', '')).lstrip('.').endswith(domain)
 				]
@@ -536,7 +538,7 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 				elif state == 'detached':
 					js = f'document.querySelector({json_module.dumps(selector)}) === null'
 				elif state == 'visible':
-					js = f'''
+					js = f"""
 						(function() {{
 							const el = document.querySelector({json_module.dumps(selector)});
 							if (!el) return false;
@@ -548,9 +550,9 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 								   rect.width > 0 &&
 								   rect.height > 0;
 						}})()
-					'''
+					"""
 				elif state == 'hidden':
-					js = f'''
+					js = f"""
 						(function() {{
 							const el = document.querySelector({json_module.dumps(selector)});
 							if (!el) return true;
@@ -562,7 +564,7 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 								   rect.width === 0 ||
 								   rect.height === 0;
 						}})()
-					'''
+					"""
 				else:
 					js = f'document.querySelector({json_module.dumps(selector)}) !== null'
 
@@ -584,12 +586,12 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 			elapsed = 0.0
 
 			while elapsed < timeout_seconds:
-				js = f'''
+				js = f"""
 					(function() {{
 						const text = {json_module.dumps(text)};
 						return document.body.innerText.includes(text);
 					}})()
-				'''
+				"""
 				result = await _execute_js(session, js)
 				if result:
 					return {'text': text, 'found': True}
