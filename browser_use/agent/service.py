@@ -160,6 +160,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		register_should_stop_callback: Callable[[], Awaitable[bool]] | None = None,
 		# Agent settings
 		output_model_schema: type[AgentStructuredOutput] | None = None,
+		extraction_schema: dict | None = None,
 		use_vision: bool | Literal['auto'] = True,
 		save_conversation_path: str | Path | None = None,
 		save_conversation_path_encoding: str | None = 'utf-8',
@@ -341,6 +342,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self.output_model_schema = output_model_schema
 		if self.output_model_schema is not None:
 			self.tools.use_structured_output_action(self.output_model_schema)
+
+		# Extraction schema: explicit param takes priority, otherwise auto-bridge from output_model_schema
+		self.extraction_schema = extraction_schema
+		if self.extraction_schema is None and self.output_model_schema is not None:
+			self.extraction_schema = self.output_model_schema.model_json_schema()
 
 		# Core components - task enhancement now has access to output_model_schema from tools
 		self.task = self._enhance_task_with_schema(task, output_model_schema)
@@ -2440,6 +2446,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					page_extraction_llm=self.settings.page_extraction_llm,
 					sensitive_data=self.sensitive_data,
 					available_file_paths=self.available_file_paths,
+					extraction_schema=self.extraction_schema,
 				)
 
 				time_end = time.time()

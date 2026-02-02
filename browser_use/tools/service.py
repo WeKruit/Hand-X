@@ -914,6 +914,7 @@ class Tools(Generic[Context]):
 			browser_session: BrowserSession,
 			page_extraction_llm: BaseChatModel,
 			file_system: FileSystem,
+			extraction_schema: dict | None = None,
 		):
 			# Constants
 			MAX_CHAR_LIMIT = 100000
@@ -921,6 +922,10 @@ class Tools(Generic[Context]):
 			extract_links = params['extract_links'] if isinstance(params, dict) else params.extract_links
 			start_from_char = params['start_from_char'] if isinstance(params, dict) else params.start_from_char
 			output_schema: dict | None = params.get('output_schema') if isinstance(params, dict) else params.output_schema
+
+			# If the LLM didn't provide an output_schema, use the agent-injected extraction_schema
+			if output_schema is None and extraction_schema is not None:
+				output_schema = extraction_schema
 
 			# Attempt to convert output_schema to a pydantic model upfront; fall back to free-text on failure
 			structured_model: type[BaseModel] | None = None
@@ -1864,6 +1869,7 @@ Validated Code (after quote fixing):
 		sensitive_data: dict[str, str | dict[str, str]] | None = None,
 		available_file_paths: list[str] | None = None,
 		file_system: FileSystem | None = None,
+		extraction_schema: dict | None = None,
 	) -> ActionResult:
 		"""Execute an action"""
 
@@ -1895,6 +1901,7 @@ Validated Code (after quote fixing):
 							file_system=file_system,
 							sensitive_data=sensitive_data,
 							available_file_paths=available_file_paths,
+							extraction_schema=extraction_schema,
 						)
 					except BrowserError as e:
 						logger.error(f'❌ Action {action_name} failed with BrowserError: {str(e)}')
@@ -1945,6 +1952,7 @@ Validated Code (after quote fixing):
 					'file_system',
 					'available_file_paths',
 					'sensitive_data',
+					'extraction_schema',
 				}
 
 				# Extract action params (params for the action itself)
