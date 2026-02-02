@@ -18,7 +18,6 @@ class SessionInfo:
 	browser_mode: str
 	headed: bool
 	profile: str | None
-	cdp_url: str | None
 	browser_session: BrowserSession
 	python_session: PythonSession = field(default_factory=PythonSession)
 
@@ -39,15 +38,14 @@ class SessionRegistry:
 		browser_mode: str,
 		headed: bool,
 		profile: str | None,
-		cdp_url: str | None = None,
 	) -> SessionInfo:
 		"""Get existing session or create new one."""
 		if name in self._sessions:
 			return self._sessions[name]
 
-		logger.info(f'Creating new session: {name} (mode={browser_mode}, headed={headed}, cdp_url={cdp_url})')
+		logger.info(f'Creating new session: {name} (mode={browser_mode}, headed={headed})')
 
-		browser_session = await create_browser_session(browser_mode, headed, profile, cdp_url)
+		browser_session = await create_browser_session(browser_mode, headed, profile)
 		await browser_session.start()
 
 		session_info = SessionInfo(
@@ -55,7 +53,6 @@ class SessionRegistry:
 			browser_mode=browser_mode,
 			headed=headed,
 			profile=profile,
-			cdp_url=cdp_url,
 			browser_session=browser_session,
 		)
 		self._sessions[name] = session_info
@@ -100,7 +97,6 @@ async def create_browser_session(
 	mode: str,
 	headed: bool,
 	profile: str | None,
-	cdp_url: str | None = None,
 ) -> BrowserSession:
 	"""Create BrowserSession based on mode.
 
@@ -108,12 +104,7 @@ async def create_browser_session(
 	- chromium: Playwright-managed Chromium (default)
 	- real: User's Chrome with profile
 	- remote: Browser-Use Cloud (requires API key)
-	- cdp_url: Connect to existing browser via CDP URL (takes precedence)
 	"""
-	# CDP URL takes precedence over other modes
-	if cdp_url:
-		return BrowserSession(cdp_url=cdp_url)
-
 	if mode == 'chromium':
 		return BrowserSession(
 			headless=not headed,
