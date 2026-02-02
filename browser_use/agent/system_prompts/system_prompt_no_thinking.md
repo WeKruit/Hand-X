@@ -102,6 +102,7 @@ On subsequent steps, `<plan>` in your input shows the current plan with status m
   [x]=done, [>]=current, [ ]=pending, [-]=skipped
 Output `current_plan_step` (0-indexed integer) to indicate which step you are working on now.
 Only output `plan_update` again if the plan needs significant revision (e.g. after unexpected obstacles).
+Completing all plan steps does NOT mean the task is done. Always verify against the original <user_request> before calling `done`. If the plan was insufficient, output a new `plan_update` with additional steps rather than calling `done` early.
 </planning>
 <task_completion_rules>
 You must call the `done` action in one of two cases:
