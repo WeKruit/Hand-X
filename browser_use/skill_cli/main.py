@@ -18,6 +18,119 @@ import time
 from pathlib import Path
 
 # =============================================================================
+# Early command interception (before heavy imports)
+# These commands don't need the session server infrastructure
+# =============================================================================
+
+# Handle --mcp flag early to prevent logging initialization
+if '--mcp' in sys.argv:
+	import logging
+
+	os.environ['BROWSER_USE_LOGGING_LEVEL'] = 'critical'
+	os.environ['BROWSER_USE_SETUP_LOGGING'] = 'false'
+	logging.disable(logging.CRITICAL)
+
+	import asyncio
+
+	from browser_use.mcp.server import main as mcp_main
+
+	asyncio.run(mcp_main())
+	sys.exit(0)
+
+
+# Helper to find the subcommand (first non-flag argument)
+def _get_subcommand() -> str | None:
+	"""Get the first non-flag argument (the subcommand)."""
+	for arg in sys.argv[1:]:
+		if not arg.startswith('-'):
+			return arg
+	return None
+
+
+# Handle 'install' command - installs Chromium browser + system dependencies
+if _get_subcommand() == 'install':
+	import platform
+
+	print('📦 Installing Chromium browser + system dependencies...')
+	print('⏳ This may take a few minutes...\n')
+
+	# Build command - only use --with-deps on Linux (it fails on Windows/macOS)
+	cmd = ['uvx', 'playwright', 'install', 'chromium']
+	if platform.system() == 'Linux':
+		cmd.append('--with-deps')
+	cmd.append('--no-shell')
+
+	result = subprocess.run(cmd)
+
+	if result.returncode == 0:
+		print('\n✅ Installation complete!')
+		print('🚀 Ready to use! Run: uvx browser-use')
+	else:
+		print('\n❌ Installation failed')
+		sys.exit(1)
+	sys.exit(0)
+
+# Handle 'init' command - generate template files
+# Uses _get_subcommand() to check if 'init' is the actual subcommand,
+# not just anywhere in argv (prevents hijacking: browser-use run "init something")
+if _get_subcommand() == 'init':
+	from browser_use.init_cmd import main as init_main
+
+	# Check if --template or -t flag is present without a value
+	# If so, just remove it and let init_main handle interactive mode
+	if '--template' in sys.argv or '-t' in sys.argv:
+		try:
+			template_idx = sys.argv.index('--template') if '--template' in sys.argv else sys.argv.index('-t')
+			template = sys.argv[template_idx + 1] if template_idx + 1 < len(sys.argv) else None
+
+			# If template is not provided or is another flag, remove the flag and use interactive mode
+			if not template or template.startswith('-'):
+				if '--template' in sys.argv:
+					sys.argv.remove('--template')
+				else:
+					sys.argv.remove('-t')
+		except (ValueError, IndexError):
+			pass
+
+	# Remove 'init' from sys.argv so click doesn't see it as an unexpected argument
+	sys.argv.remove('init')
+	init_main()
+	sys.exit(0)
+
+# Handle --template flag directly (without 'init' subcommand)
+# Delegate to init_main() which handles full template logic (directories, manifests, etc.)
+if '--template' in sys.argv:
+	from browser_use.init_cmd import main as init_main
+
+	# Build clean argv for init_main: keep only init-relevant flags
+	new_argv = [sys.argv[0]]  # program name
+
+	i = 1
+	while i < len(sys.argv):
+		arg = sys.argv[i]
+		# Keep --template/-t and its value
+		if arg in ('--template', '-t'):
+			new_argv.append(arg)
+			if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith('-'):
+				new_argv.append(sys.argv[i + 1])
+				i += 1
+		# Keep --output/-o and its value
+		elif arg in ('--output', '-o'):
+			new_argv.append(arg)
+			if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith('-'):
+				new_argv.append(sys.argv[i + 1])
+				i += 1
+		# Keep --force/-f and --list/-l flags
+		elif arg in ('--force', '-f', '--list', '-l'):
+			new_argv.append(arg)
+		# Skip other flags (--session, --browser, --headed, etc.)
+		i += 1
+
+	sys.argv = new_argv
+	init_main()
+	sys.exit(0)
+
+# =============================================================================
 # Utility functions (inlined to avoid imports)
 # =============================================================================
 
@@ -68,9 +181,7 @@ def connect_to_server(session: str, timeout: float = 60.0) -> socket.socket:
 	return sock
 
 
-def ensure_server(
-	session: str, browser: str, headed: bool, profile: str | None, api_key: str | None, cdp_url: str | None = None
-) -> bool:
+def ensure_server(session: str, browser: str, headed: bool, profile: str | None, api_key: str | None) -> bool:
 	"""Start server if not running. Returns True if started."""
 	# Check if server is already running and responsive
 	if is_server_running(session):
@@ -95,8 +206,6 @@ def ensure_server(
 		cmd.append('--headed')
 	if profile:
 		cmd.extend(['--profile', profile])
-	if cdp_url:
-		cmd.extend(['--cdp-url', cdp_url])
 
 	# Set up environment
 	env = os.environ.copy()
@@ -181,6 +290,10 @@ def build_parser() -> argparse.ArgumentParser:
 		formatter_class=argparse.RawDescriptionHelpFormatter,
 		epilog="""
 Examples:
+  browser-use install                    # Install Chromium browser
+  browser-use init                       # Generate template file (interactive)
+  browser-use init --template default    # Generate specific template
+  browser-use --mcp                      # Run as MCP server
   browser-use open https://example.com
   browser-use click 5
   browser-use type "Hello World"
@@ -198,9 +311,24 @@ Examples:
 	parser.add_argument('--profile', help='Chrome profile (real browser mode)')
 	parser.add_argument('--json', action='store_true', help='Output as JSON')
 	parser.add_argument('--api-key', help='Browser-Use API key')
-	parser.add_argument('--cdp-url', help='CDP URL to connect to existing browser (e.g., http://localhost:9222)')
+	parser.add_argument('--mcp', action='store_true', help='Run as MCP server (JSON-RPC via stdin/stdout)')
+	parser.add_argument('--template', help='Generate template file (use with --output for custom path)')
 
 	subparsers = parser.add_subparsers(dest='command', help='Command to execute')
+
+	# -------------------------------------------------------------------------
+	# Setup Commands (handled early, before argparse)
+	# -------------------------------------------------------------------------
+
+	# install
+	subparsers.add_parser('install', help='Install Chromium browser + system dependencies')
+
+	# init
+	p = subparsers.add_parser('init', help='Generate browser-use template file')
+	p.add_argument('--template', '-t', help='Template name (interactive if not specified)')
+	p.add_argument('--output', '-o', help='Output file path')
+	p.add_argument('--force', '-f', action='store_true', help='Overwrite existing files')
+	p.add_argument('--list', '-l', action='store_true', help='List available templates')
 
 	# -------------------------------------------------------------------------
 	# Browser Control Commands
@@ -344,17 +472,6 @@ def main() -> int:
 	parser = build_parser()
 	args = parser.parse_args()
 
-	# Use different default session for CDP URL to avoid conflicts with other browser modes.
-	# This prevents issues where an existing 'default' session (e.g., using chromium mode)
-	# would be reused when the user specifies --cdp-url, since session parameters are
-	# set at creation time. The same issue would occur switching between any browser modes
-	# (e.g., --browser chromium to --browser real), but CDP is the most common case where
-	# users expect to connect to a specific existing browser.
-	# NOTE: This must happen before any command handling (server, sessions, close --all)
-	# so that those commands also target the correct session.
-	if getattr(args, 'cdp_url', None) and args.session == 'default':
-		args.session = 'cdp-default'
-
 	if not args.command:
 		parser.print_help()
 		return 0
@@ -420,11 +537,11 @@ def main() -> int:
 			return 1
 
 	# Ensure server is running
-	ensure_server(args.session, args.browser, args.headed, args.profile, args.api_key, getattr(args, 'cdp_url', None))
+	ensure_server(args.session, args.browser, args.headed, args.profile, args.api_key)
 
 	# Build params from args
 	params = {}
-	skip_keys = {'command', 'session', 'browser', 'headed', 'profile', 'json', 'api_key', 'server_command', 'cdp_url'}
+	skip_keys = {'command', 'session', 'browser', 'headed', 'profile', 'json', 'api_key', 'server_command'}
 
 	for key, value in vars(args).items():
 		if key not in skip_keys and value is not None:
