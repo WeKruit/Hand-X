@@ -1,5 +1,6 @@
 """Browser control commands."""
 
+import asyncio
 import base64
 import logging
 from pathlib import Path
@@ -46,6 +47,35 @@ async def _execute_js(session: SessionInfo, js: str) -> Any:
 		session_id=cdp_session.session_id,
 	)
 	return result.get('result', {}).get('value')
+
+
+async def _get_element_center(session: SessionInfo, node: Any) -> tuple[float, float] | None:
+	"""Get the center coordinates of an element."""
+	bs = session.browser_session
+	try:
+		cdp_session = await bs.cdp_client_for_node(node)
+		session_id = cdp_session.session_id
+		backend_node_id = node.backend_node_id
+
+		# Scroll element into view first
+		try:
+			await cdp_session.cdp_client.send.DOM.scrollIntoViewIfNeeded(
+				params={'backendNodeId': backend_node_id}, session_id=session_id
+			)
+			await asyncio.sleep(0.05)
+		except Exception:
+			pass
+
+		# Get element coordinates
+		element_rect = await bs.get_element_coordinates(backend_node_id, cdp_session)
+		if element_rect:
+			center_x = element_rect.x + element_rect.width / 2
+			center_y = element_rect.y + element_rect.height / 2
+			return center_x, center_y
+		return None
+	except Exception as e:
+		logger.error(f'Failed to get element center: {e}')
+		return None
 
 
 async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> Any:
@@ -197,86 +227,252 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 		return {'query': query, 'error': 'extract requires agent mode - use: browser-use run "extract ..."'}
 
 	elif action == 'hover':
-		from browser_use.browser.events import HoverElementEvent
-
 		index = params['index']
 		node = await bs.get_element_by_index(index)
 		if node is None:
 			return {'error': f'Element index {index} not found - page may have changed'}
-		await bs.event_bus.dispatch(HoverElementEvent(node=node))
+
+		coords = await _get_element_center(session, node)
+		if not coords:
+			return {'error': 'Could not get element coordinates for hover'}
+
+		center_x, center_y = coords
+		cdp_session = await bs.cdp_client_for_node(node)
+		await cdp_session.cdp_client.send.Input.dispatchMouseEvent(
+			params={'type': 'mouseMoved', 'x': center_x, 'y': center_y},
+			session_id=cdp_session.session_id,
+		)
 		return {'hovered': index}
 
 	elif action == 'dblclick':
-		from browser_use.browser.events import ElementDblClickEvent
-
 		index = params['index']
 		node = await bs.get_element_by_index(index)
 		if node is None:
 			return {'error': f'Element index {index} not found - page may have changed'}
-		await bs.event_bus.dispatch(ElementDblClickEvent(node=node))
+
+		coords = await _get_element_center(session, node)
+		if not coords:
+			return {'error': 'Could not get element coordinates for double-click'}
+
+		center_x, center_y = coords
+		cdp_session = await bs.cdp_client_for_node(node)
+		session_id = cdp_session.session_id
+
+		# Move mouse to element
+		await cdp_session.cdp_client.send.Input.dispatchMouseEvent(
+			params={'type': 'mouseMoved', 'x': center_x, 'y': center_y},
+			session_id=session_id,
+		)
+		await asyncio.sleep(0.05)
+
+		# Double click (clickCount: 2)
+		await cdp_session.cdp_client.send.Input.dispatchMouseEvent(
+			params={
+				'type': 'mousePressed',
+				'x': center_x,
+				'y': center_y,
+				'button': 'left',
+				'clickCount': 2,
+			},
+			session_id=session_id,
+		)
+		await asyncio.sleep(0.05)
+
+		await cdp_session.cdp_client.send.Input.dispatchMouseEvent(
+			params={
+				'type': 'mouseReleased',
+				'x': center_x,
+				'y': center_y,
+				'button': 'left',
+				'clickCount': 2,
+			},
+			session_id=session_id,
+		)
 		return {'double_clicked': index}
 
 	elif action == 'rightclick':
-		from browser_use.browser.events import ElementRightClickEvent
-
 		index = params['index']
 		node = await bs.get_element_by_index(index)
 		if node is None:
 			return {'error': f'Element index {index} not found - page may have changed'}
-		await bs.event_bus.dispatch(ElementRightClickEvent(node=node))
+
+		coords = await _get_element_center(session, node)
+		if not coords:
+			return {'error': 'Could not get element coordinates for right-click'}
+
+		center_x, center_y = coords
+		cdp_session = await bs.cdp_client_for_node(node)
+		session_id = cdp_session.session_id
+
+		# Move mouse to element
+		await cdp_session.cdp_client.send.Input.dispatchMouseEvent(
+			params={'type': 'mouseMoved', 'x': center_x, 'y': center_y},
+			session_id=session_id,
+		)
+		await asyncio.sleep(0.05)
+
+		# Right click (button: 'right')
+		await cdp_session.cdp_client.send.Input.dispatchMouseEvent(
+			params={
+				'type': 'mousePressed',
+				'x': center_x,
+				'y': center_y,
+				'button': 'right',
+				'clickCount': 1,
+			},
+			session_id=session_id,
+		)
+		await asyncio.sleep(0.05)
+
+		await cdp_session.cdp_client.send.Input.dispatchMouseEvent(
+			params={
+				'type': 'mouseReleased',
+				'x': center_x,
+				'y': center_y,
+				'button': 'right',
+				'clickCount': 1,
+			},
+			session_id=session_id,
+		)
 		return {'right_clicked': index}
 
 	elif action == 'cookies':
 		cookies_command = params.get('cookies_command')
 
 		if cookies_command == 'get':
-			from browser_use.browser.events import GetCookiesEvent
+			# Get cookies via direct CDP
+			cookies = await bs._cdp_get_cookies()
+			# Convert Cookie objects to dicts
+			cookie_list: list[dict[str, Any]] = []
+			for c in cookies:
+				cookie_dict: dict[str, Any] = {
+					'name': c.get('name', ''),
+					'value': c.get('value', ''),
+					'domain': c.get('domain', ''),
+					'path': c.get('path', '/'),
+					'secure': c.get('secure', False),
+					'httpOnly': c.get('httpOnly', False),
+				}
+				if 'sameSite' in c:
+					cookie_dict['sameSite'] = c.get('sameSite')
+				if 'expires' in c:
+					cookie_dict['expires'] = c.get('expires')
+				cookie_list.append(cookie_dict)
 
+			# Filter by URL if provided
 			url = params.get('url')
-			event = GetCookiesEvent(url=url)
-			await bs.event_bus.dispatch(event)
-			cookies = await event.event_result()
-			return {'cookies': cookies}
+			if url:
+				from urllib.parse import urlparse
+
+				parsed = urlparse(url)
+				domain = parsed.netloc
+				cookie_list = [
+					c for c in cookie_list
+					if domain.endswith(str(c.get('domain', '')).lstrip('.'))
+					or str(c.get('domain', '')).lstrip('.').endswith(domain)
+				]
+
+			return {'cookies': cookie_list}
 
 		elif cookies_command == 'set':
-			from browser_use.browser.events import SetCookieEvent
+			from cdp_use.cdp.network import Cookie
 
-			event = SetCookieEvent(
-				name=params['name'],
-				value=params['value'],
-				domain=params.get('domain'),
-				path=params.get('path', '/'),
-				secure=params.get('secure', False),
-				http_only=params.get('http_only', False),
-				same_site=params.get('same_site'),
-				expires=params.get('expires'),
-			)
-			await bs.event_bus.dispatch(event)
-			success = await event.event_result()
-			return {'set': params['name'], 'success': success}
+			cookie_dict: dict[str, Any] = {
+				'name': params['name'],
+				'value': params['value'],
+				'path': params.get('path', '/'),
+				'secure': params.get('secure', False),
+				'httpOnly': params.get('http_only', False),
+			}
+
+			if params.get('domain'):
+				cookie_dict['domain'] = params['domain']
+			if params.get('same_site'):
+				cookie_dict['sameSite'] = params['same_site']
+			if params.get('expires'):
+				cookie_dict['expires'] = params['expires']
+
+			# If no domain specified, get current URL's domain
+			if not params.get('domain'):
+				hostname = await _execute_js(session, 'window.location.hostname')
+				if hostname:
+					cookie_dict['domain'] = hostname
+
+			try:
+				cookie_obj = Cookie(**cookie_dict)
+				await bs._cdp_set_cookies([cookie_obj])
+				return {'set': params['name'], 'success': True}
+			except Exception as e:
+				logger.error(f'Failed to set cookie: {e}')
+				return {'set': params['name'], 'success': False, 'error': str(e)}
 
 		elif cookies_command == 'clear':
-			from browser_use.browser.events import ClearCookiesEvent
-
 			url = params.get('url')
-			event = ClearCookiesEvent(url=url)
-			await bs.event_bus.dispatch(event)
-			# No event_result() call - this is a void operation
+			if url:
+				# Clear cookies only for specific URL domain
+				from urllib.parse import urlparse
+
+				cookies = await bs._cdp_get_cookies()
+				parsed = urlparse(url)
+				domain = parsed.netloc
+
+				cdp_session = await bs.get_or_create_cdp_session(target_id=None, focus=False)
+				if cdp_session:
+					for cookie in cookies:
+						cookie_domain = str(cookie.get('domain', '')).lstrip('.')
+						if domain.endswith(cookie_domain) or cookie_domain.endswith(domain):
+							await cdp_session.cdp_client.send.Network.deleteCookies(
+								params={
+									'name': cookie.get('name', ''),
+									'domain': cookie.get('domain'),
+									'path': cookie.get('path', '/'),
+								},
+								session_id=cdp_session.session_id,
+							)
+			else:
+				# Clear all cookies
+				await bs._cdp_clear_cookies()
+
 			return {'cleared': True, 'url': url}
 
 		elif cookies_command == 'export':
 			import json
 
-			from browser_use.browser.events import GetCookiesEvent
+			# Get cookies via direct CDP
+			cookies = await bs._cdp_get_cookies()
+			# Convert to list of dicts
+			cookie_list: list[dict[str, Any]] = []
+			for c in cookies:
+				cookie_dict: dict[str, Any] = {
+					'name': c.get('name', ''),
+					'value': c.get('value', ''),
+					'domain': c.get('domain', ''),
+					'path': c.get('path', '/'),
+					'secure': c.get('secure', False),
+					'httpOnly': c.get('httpOnly', False),
+				}
+				if 'sameSite' in c:
+					cookie_dict['sameSite'] = c.get('sameSite')
+				if 'expires' in c:
+					cookie_dict['expires'] = c.get('expires')
+				cookie_list.append(cookie_dict)
 
+			# Filter by URL if provided
 			url = params.get('url')
-			event = GetCookiesEvent(url=url)
-			await bs.event_bus.dispatch(event)
-			cookies = await event.event_result()
+			if url:
+				from urllib.parse import urlparse
+
+				parsed = urlparse(url)
+				domain = parsed.netloc
+				cookie_list = [
+					c for c in cookie_list
+					if domain.endswith(str(c.get('domain', '')).lstrip('.'))
+					or str(c.get('domain', '')).lstrip('.').endswith(domain)
+				]
 
 			file_path = Path(params['file'])
-			file_path.write_text(json.dumps(cookies, indent=2))
-			return {'exported': len(cookies), 'file': str(file_path)}
+			file_path.write_text(json.dumps(cookie_list, indent=2))
+			return {'exported': len(cookie_list), 'file': str(file_path)}
 
 		elif cookies_command == 'import':
 			import json
@@ -322,100 +518,184 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 		return {'error': 'Invalid cookies command. Use: get, set, clear, export, import'}
 
 	elif action == 'wait':
+		import json as json_module
+
 		wait_command = params.get('wait_command')
 
 		if wait_command == 'selector':
-			from browser_use.browser.events import WaitForSelectorEvent
+			timeout_seconds = params.get('timeout', 30000) / 1000.0
+			state = params.get('state', 'visible')
+			selector = params['selector']
+			poll_interval = 0.1
+			elapsed = 0.0
 
-			event = WaitForSelectorEvent(
-				selector=params['selector'],
-				timeout_ms=params.get('timeout', 30000),
-				state=params.get('state', 'visible'),
-			)
-			await bs.event_bus.dispatch(event)
-			success = await event.event_result()
-			return {'selector': params['selector'], 'found': success}
+			while elapsed < timeout_seconds:
+				# Build JS check based on state
+				if state == 'attached':
+					js = f'document.querySelector({json_module.dumps(selector)}) !== null'
+				elif state == 'detached':
+					js = f'document.querySelector({json_module.dumps(selector)}) === null'
+				elif state == 'visible':
+					js = f'''
+						(function() {{
+							const el = document.querySelector({json_module.dumps(selector)});
+							if (!el) return false;
+							const style = window.getComputedStyle(el);
+							const rect = el.getBoundingClientRect();
+							return style.display !== 'none' &&
+								   style.visibility !== 'hidden' &&
+								   style.opacity !== '0' &&
+								   rect.width > 0 &&
+								   rect.height > 0;
+						}})()
+					'''
+				elif state == 'hidden':
+					js = f'''
+						(function() {{
+							const el = document.querySelector({json_module.dumps(selector)});
+							if (!el) return true;
+							const style = window.getComputedStyle(el);
+							const rect = el.getBoundingClientRect();
+							return style.display === 'none' ||
+								   style.visibility === 'hidden' ||
+								   style.opacity === '0' ||
+								   rect.width === 0 ||
+								   rect.height === 0;
+						}})()
+					'''
+				else:
+					js = f'document.querySelector({json_module.dumps(selector)}) !== null'
+
+				result = await _execute_js(session, js)
+				if result:
+					return {'selector': selector, 'found': True}
+
+				await asyncio.sleep(poll_interval)
+				elapsed += poll_interval
+
+			return {'selector': selector, 'found': False}
 
 		elif wait_command == 'text':
-			from browser_use.browser.events import WaitForTextEvent
+			import json as json_module
 
-			event = WaitForTextEvent(
-				text=params['text'],
-				timeout_ms=params.get('timeout', 30000),
-			)
-			await bs.event_bus.dispatch(event)
-			success = await event.event_result()
-			return {'text': params['text'], 'found': success}
+			timeout_seconds = params.get('timeout', 30000) / 1000.0
+			text = params['text']
+			poll_interval = 0.1
+			elapsed = 0.0
+
+			while elapsed < timeout_seconds:
+				js = f'''
+					(function() {{
+						const text = {json_module.dumps(text)};
+						return document.body.innerText.includes(text);
+					}})()
+				'''
+				result = await _execute_js(session, js)
+				if result:
+					return {'text': text, 'found': True}
+
+				await asyncio.sleep(poll_interval)
+				elapsed += poll_interval
+
+			return {'text': text, 'found': False}
 
 		return {'error': 'Invalid wait command. Use: selector, text'}
 
 	elif action == 'get':
+		import json as json_module
+
 		get_command = params.get('get_command')
 
 		if get_command == 'title':
-			from browser_use.browser.events import GetPageTitleEvent
-
-			event = GetPageTitleEvent()
-			await bs.event_bus.dispatch(event)
-			title = await event.event_result()
-			return {'title': title}
+			title = await _execute_js(session, 'document.title')
+			return {'title': title or ''}
 
 		elif get_command == 'html':
-			from browser_use.browser.events import GetPageHtmlEvent
-
 			selector = params.get('selector')
-			event = GetPageHtmlEvent(selector=selector)
-			await bs.event_bus.dispatch(event)
-			html = await event.event_result()
-			return {'html': html}
+			if selector:
+				js = f'(function(){{ const el = document.querySelector({json_module.dumps(selector)}); return el ? el.outerHTML : null; }})()'
+			else:
+				js = 'document.documentElement.outerHTML'
+			html = await _execute_js(session, js)
+			return {'html': html or ''}
 
 		elif get_command == 'text':
-			from browser_use.browser.events import GetElementTextEvent
-
 			index = params['index']
 			node = await bs.get_element_by_index(index)
 			if node is None:
 				return {'error': f'Element index {index} not found - page may have changed'}
-			event = GetElementTextEvent(node=node)
-			await bs.event_bus.dispatch(event)
-			text = await event.event_result()
+			# Use the node's text from our model
+			text = node.get_all_children_text(max_depth=10) if node else ''
 			return {'index': index, 'text': text}
 
 		elif get_command == 'value':
-			from browser_use.browser.events import GetElementValueEvent
-
 			index = params['index']
 			node = await bs.get_element_by_index(index)
 			if node is None:
 				return {'error': f'Element index {index} not found - page may have changed'}
-			event = GetElementValueEvent(node=node)
-			await bs.event_bus.dispatch(event)
-			value = await event.event_result()
-			return {'index': index, 'value': value}
+
+			try:
+				cdp_session = await bs.cdp_client_for_node(node)
+				result = await cdp_session.cdp_client.send.DOM.resolveNode(
+					params={'backendNodeId': node.backend_node_id},
+					session_id=cdp_session.session_id,
+				)
+				object_id = result.get('object', {}).get('objectId')
+
+				if object_id:
+					value_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+						params={
+							'objectId': object_id,
+							'functionDeclaration': 'function() { return this.value; }',
+							'returnByValue': True,
+						},
+						session_id=cdp_session.session_id,
+					)
+					value = value_result.get('result', {}).get('value')
+					return {'index': index, 'value': value or ''}
+				else:
+					return {'index': index, 'value': ''}
+			except Exception as e:
+				logger.error(f'Failed to get element value: {e}')
+				return {'index': index, 'value': ''}
 
 		elif get_command == 'attributes':
-			from browser_use.browser.events import GetElementAttributesEvent
-
 			index = params['index']
 			node = await bs.get_element_by_index(index)
 			if node is None:
 				return {'error': f'Element index {index} not found - page may have changed'}
-			event = GetElementAttributesEvent(node=node)
-			await bs.event_bus.dispatch(event)
-			attrs = await event.event_result()
-			return {'index': index, 'attributes': attrs}
+			# Use the attributes from the node model
+			attrs = node.attributes or {}
+			return {'index': index, 'attributes': dict(attrs)}
 
 		elif get_command == 'bbox':
-			from browser_use.browser.events import GetElementBoundingBoxEvent
-
 			index = params['index']
 			node = await bs.get_element_by_index(index)
 			if node is None:
 				return {'error': f'Element index {index} not found - page may have changed'}
-			event = GetElementBoundingBoxEvent(node=node)
-			await bs.event_bus.dispatch(event)
-			bbox = await event.event_result()
-			return {'index': index, 'bbox': bbox}
+
+			try:
+				cdp_session = await bs.cdp_client_for_node(node)
+				result = await cdp_session.cdp_client.send.DOM.getBoxModel(
+					params={'backendNodeId': node.backend_node_id},
+					session_id=cdp_session.session_id,
+				)
+
+				model = result.get('model', {})
+				content = model.get('content', [])
+
+				if len(content) >= 8:
+					# content is [x1, y1, x2, y2, x3, y3, x4, y4] - corners of the quad
+					x = min(content[0], content[2], content[4], content[6])
+					y = min(content[1], content[3], content[5], content[7])
+					width = max(content[0], content[2], content[4], content[6]) - x
+					height = max(content[1], content[3], content[5], content[7]) - y
+					return {'index': index, 'bbox': {'x': x, 'y': y, 'width': width, 'height': height}}
+				else:
+					return {'index': index, 'bbox': {}}
+			except Exception as e:
+				logger.error(f'Failed to get element bbox: {e}')
+				return {'index': index, 'bbox': {}}
 
 		return {'error': 'Invalid get command. Use: title, html, text, value, attributes, bbox'}
 
