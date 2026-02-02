@@ -421,7 +421,7 @@ def chunk_markdown_by_structure(
 	if not blocks:
 		return []
 
-	# Phase 2: greedy chunk assembly
+	# Phase 2: greedy chunk assembly with header-preferred splitting
 	raw_chunks: list[list[_AtomicBlock]] = []
 	current_chunk: list[_AtomicBlock] = []
 	current_size = 0
@@ -430,9 +430,21 @@ def chunk_markdown_by_structure(
 		block_size = block.char_end - block.char_start
 		# If adding this block would exceed limit AND we already have content, emit chunk
 		if current_size + block_size > max_chunk_chars and current_chunk:
-			raw_chunks.append(current_chunk)
-			current_chunk = []
-			current_size = 0
+			# Prefer splitting at a header boundary within the current chunk.
+			# Scan backwards for the last HEADER block; if found and it wouldn't
+			# create a tiny chunk (< 50% of limit), split right before it so the
+			# header starts the next chunk for better semantic coherence.
+			best_split = len(current_chunk)
+			for j in range(len(current_chunk) - 1, 0, -1):
+				if current_chunk[j].block_type == _BlockType.HEADER:
+					prefix_size = sum(b.char_end - b.char_start for b in current_chunk[:j])
+					if prefix_size >= max_chunk_chars * 0.5:
+						best_split = j
+						break
+			raw_chunks.append(current_chunk[:best_split])
+			# Carry remaining blocks (from the header onward) into the next chunk
+			current_chunk = current_chunk[best_split:]
+			current_size = sum(b.char_end - b.char_start for b in current_chunk)
 		current_chunk.append(block)
 		current_size += block_size
 
