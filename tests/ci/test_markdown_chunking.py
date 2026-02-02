@@ -65,6 +65,38 @@ class TestChunkMarkdownHeaders:
 		assert '# Section B' in chunks[1].content
 
 
+class TestChunkMarkdownHeaderPreferred:
+	"""Header-preferred splitting ensures chunks start at semantic boundaries."""
+
+	def test_header_preferred_split_moves_header_to_next_chunk(self):
+		"""When a header sits in the middle of an overflowing chunk, split before it."""
+		# Build content: para_a (big) + header_b + para_b (small)
+		para_a = 'A' * 600
+		header_b = '# Section B'
+		para_b = 'B' * 100
+		content = f'{para_a}\n\n{header_b}\n\n{para_b}'
+		# Limit forces a split; header is near end of first chunk
+		chunks = chunk_markdown_by_structure(content, max_chunk_chars=700)
+		assert len(chunks) >= 2
+		# The header should be the START of the second chunk, not the end of the first
+		assert chunks[1].content.lstrip().startswith('# Section B')
+		# First chunk should NOT contain the header
+		assert '# Section B' not in chunks[0].content
+
+	def test_header_preferred_split_doesnt_create_tiny_chunks(self):
+		"""Don't split at a header that would make the prefix chunk < 50% of limit."""
+		header_a = '# Section A'
+		para_a = 'A' * 30  # very small before header
+		header_b = '# Section B'
+		para_b = 'B' * 600
+		content = f'{header_a}\n\n{para_a}\n\n{header_b}\n\n{para_b}'
+		# With a limit of 700, header_b is near the start — splitting there would
+		# leave a tiny prefix chunk. The algo should NOT split there.
+		chunks = chunk_markdown_by_structure(content, max_chunk_chars=700)
+		# First chunk should contain both headers (no tiny split)
+		assert '# Section A' in chunks[0].content
+
+
 class TestChunkMarkdownCodeFence:
 	"""Code fence blocks never split."""
 

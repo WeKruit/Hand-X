@@ -962,6 +962,11 @@ class Tools(Generic[Context]):
 			chunk = chunks[0]
 			content = chunk.content
 			truncated = chunk.has_more
+
+			# Prepend overlap context for continuation chunks (e.g. table headers)
+			if chunk.overlap_prefix:
+				content = chunk.overlap_prefix + '\n' + content
+
 			if start_from_char > 0:
 				content_stats['started_from_char'] = start_from_char
 			if truncated:
@@ -979,7 +984,8 @@ class Tools(Generic[Context]):
 			if start_from_char > 0:
 				stats_summary += f' (started from char {start_from_char:,})'
 			if truncated:
-				stats_summary += f' → {len(content):,} final chars (truncated, use start_from_char={content_stats["next_start_char"]} to continue)'
+				chunk_info = f'chunk {chunk.chunk_index + 1} of {chunk.total_chunks}, '
+				stats_summary += f' → {len(content):,} final chars ({chunk_info}use start_from_char={content_stats["next_start_char"]} to continue)'
 			elif chars_filtered > 0:
 				stats_summary += f' (filtered {chars_filtered:,} chars of noise)'
 
