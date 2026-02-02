@@ -95,6 +95,7 @@ class TestChunkMarkdownHeaderPreferred:
 		chunks = chunk_markdown_by_structure(content, max_chunk_chars=700)
 		# First chunk should contain both headers (no tiny split)
 		assert '# Section A' in chunks[0].content
+		assert '# Section B' in chunks[0].content
 
 
 class TestChunkMarkdownCodeFence:
