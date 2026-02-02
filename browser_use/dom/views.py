@@ -901,6 +901,19 @@ class EnhancedDOMTreeNode:
 DOMSelectorMap = dict[int, EnhancedDOMTreeNode]
 
 
+@dataclass(slots=True)
+class MarkdownChunk:
+	"""A structure-aware chunk of markdown content."""
+
+	content: str
+	chunk_index: int
+	total_chunks: int
+	char_offset_start: int  # in original content
+	char_offset_end: int  # in original content
+	overlap_prefix: str  # context from prev chunk (e.g. table headers)
+	has_more: bool
+
+
 @dataclass
 class SerializedDOMState:
 	_root: SimplifiedNode | None
