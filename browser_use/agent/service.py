@@ -170,7 +170,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		generate_gif: bool | str = False,
 		available_file_paths: list[str] | None = None,
 		include_attributes: list[str] | None = None,
-		max_actions_per_step: int = 3,
+		max_actions_per_step: int = 5,
 		use_thinking: bool = True,
 		flash_mode: bool = False,
 		demo_mode: bool | None = None,
@@ -2394,7 +2394,14 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	@observe_debug(ignore_input=True, ignore_output=True)
 	@time_execution_async('--multi_act')
 	async def multi_act(self, actions: list[ActionModel]) -> list[ActionResult]:
-		"""Execute multiple actions"""
+		"""Execute multiple actions with page-change guards.
+
+		Two layers of protection prevent executing actions against stale DOM:
+		  1. Static flag: actions tagged with terminates_sequence=True (navigate, search, go_back, switch)
+		     automatically abort remaining queued actions.
+		  2. Runtime detection: after every action, the current URL and focused target are compared
+		     to pre-action values. Any change aborts the remaining queue.
+		"""
 		results: list[ActionResult] = []
 		time_elapsed = 0
 		total_actions = len(actions)
@@ -2437,6 +2444,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				# Log action before execution
 				await self._log_action(action, action_name, i + 1, total_actions)
 
+				# Capture pre-action state for runtime page-change detection
+				pre_action_url = await self.browser_session.get_current_page_url()
+				pre_action_focus = self.browser_session.agent_focus_target_id
+
 				time_start = time.time()
 
 				result = await self.tools.act(
@@ -2470,6 +2481,24 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				results.append(result)
 
 				if results[-1].is_done or results[-1].error or i == total_actions - 1:
+					break
+
+				# --- Page-change guards (only when more actions remain) ---
+
+				# Layer 1: Static flag — action metadata declares it changes the page
+				registered_action = self.tools.registry.registry.actions.get(action_name)
+				if registered_action and registered_action.terminates_sequence:
+					self.logger.info(
+						f'Action "{action_name}" terminates sequence — skipping {total_actions - i - 1} remaining action(s)'
+					)
+					break
+
+				# Layer 2: Runtime detection — URL or focus target changed
+				post_action_url = await self.browser_session.get_current_page_url()
+				post_action_focus = self.browser_session.agent_focus_target_id
+
+				if post_action_url != pre_action_url or post_action_focus != pre_action_focus:
+					self.logger.info(f'Page changed after "{action_name}" — skipping {total_actions - i - 1} remaining action(s)')
 					break
 
 			except Exception as e:
