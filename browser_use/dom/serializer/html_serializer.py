@@ -121,6 +121,12 @@ class HTMLSerializer:
 
 			# Handle table normalization (ensure thead/tbody for markdownify)
 			if tag_name == 'table':
+				# Serialize shadow roots first (same as the general path)
+				if node.shadow_roots:
+					for shadow_root in node.shadow_roots:
+						child_html = self.serialize(shadow_root, depth + 1)
+						if child_html:
+							parts.append(child_html)
 				table_html = self._serialize_table_children(node, depth)
 				parts.append(table_html)
 			# Handle iframe content document

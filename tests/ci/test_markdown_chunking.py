@@ -123,6 +123,27 @@ class TestChunkMarkdownTable:
 			assert '| Col1 | Col2 |' in chunks[1].overlap_prefix
 			assert '| --- | --- |' in chunks[1].overlap_prefix
 
+	def test_table_header_carried_across_three_plus_chunks(self):
+		"""Table header must persist in overlap for ALL continuation chunks, not just the second."""
+		header = '| Col1 | Col2 |'
+		separator = '| --- | --- |'
+		rows = [f'| row{i} | data{i} |' for i in range(200)]
+		table = '\n'.join([header, separator] + rows)
+		content = table
+
+		# Force many small chunks
+		chunks = chunk_markdown_by_structure(content, max_chunk_chars=200)
+		assert len(chunks) >= 3, f'Expected >=3 chunks, got {len(chunks)}'
+
+		# Every chunk after the first should carry the table header in its overlap
+		for i in range(1, len(chunks)):
+			assert '| Col1 | Col2 |' in chunks[i].overlap_prefix, (
+				f'Chunk {i} missing table header in overlap'
+			)
+			assert '| --- | --- |' in chunks[i].overlap_prefix, (
+				f'Chunk {i} missing table separator in overlap'
+			)
+
 
 class TestChunkMarkdownListItems:
 	"""List item continuations stay together."""
