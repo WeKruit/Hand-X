@@ -577,8 +577,8 @@ def cloud_api_request(method: str, endpoint: str, body: dict | None = None) -> d
 
 	Returns dict with 'success', 'data' or 'error'.
 	"""
-	import urllib.request
 	import urllib.error
+	import urllib.request
 
 	from browser_use.skill_cli.api_key import APIKeyRequired, require_api_key
 
@@ -770,11 +770,13 @@ def list_local_chrome_profiles() -> list[dict]:
 
 		profiles = []
 		for profile_id, info in profiles_info.items():
-			profiles.append({
-				'id': profile_id,
-				'name': info.get('name', 'Unknown'),
-				'email': info.get('user_name') or info.get('gaia_name') or 'local',
-			})
+			profiles.append(
+				{
+					'id': profile_id,
+					'name': info.get('name', 'Unknown'),
+					'email': info.get('user_name') or info.get('gaia_name') or 'local',
+				}
+			)
 
 		return profiles
 	except Exception:
@@ -1057,7 +1059,7 @@ def handle_profile_sync(args: argparse.Namespace) -> int:
 
 	print(f'  ✓ Uploaded {uploaded_count} cookies')
 	print()
-	print(f'✓ Profile synced successfully!')
+	print('✓ Profile synced successfully!')
 	print(f'  Cloud profile ID: {cloud_profile_id}')
 	print(f'  Name: {cloud_name}')
 	print()
@@ -1065,11 +1067,15 @@ def handle_profile_sync(args: argparse.Namespace) -> int:
 	print(f'  browser-use --browser remote --profile {cloud_profile_id} open <url>')
 
 	if args.json:
-		print(json.dumps({
-			'profile_id': cloud_profile_id,
-			'name': cloud_name,
-			'cookies_synced': uploaded_count,
-		}))
+		print(
+			json.dumps(
+				{
+					'profile_id': cloud_profile_id,
+					'name': cloud_name,
+					'cookies_synced': uploaded_count,
+				}
+			)
+		)
 
 	return 0
 
