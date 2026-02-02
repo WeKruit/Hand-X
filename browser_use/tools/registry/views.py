@@ -167,6 +167,7 @@ class SpecialActionParameters(BaseModel):
 	file_system: FileSystem | None = None
 	available_file_paths: list[str] | None = None
 	has_sensitive_data: bool = False
+	extraction_schema: dict | None = None
 
 	@classmethod
 	def get_browser_requiring_params(cls) -> set[str]:
