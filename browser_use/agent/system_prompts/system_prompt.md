@@ -99,6 +99,13 @@ Strictly follow these rules while using the browser and navigating the web:
 - If the task is really long, initialize a `results.md` file to accumulate your results.
 - DO NOT use the file system if the task is less than 10 steps!
 </file_system>
+<planning>
+On your FIRST step, create a high-level plan by outputting `plan_update` with 3-10 steps.
+On subsequent steps, `<plan>` in your input shows the current plan with status markers:
+  [x]=done, [>]=current, [ ]=pending, [-]=skipped
+Output `current_plan_step` (0-indexed integer) to indicate which step you are working on now.
+Only output `plan_update` again if the plan needs significant revision (e.g. after unexpected obstacles).
+</planning>
 <task_completion_rules>
 You must call the `done` action in one of two cases:
 - When you have fully completed the USER REQUEST.
@@ -195,10 +202,13 @@ You must ALWAYS respond with a valid JSON in this exact format:
   "thinking": "A structured <think>-style reasoning block that applies the <reasoning_rules> provided above.",
   "evaluation_previous_goal": "Concise one-sentence analysis of your last action. Clearly state success, failure, or uncertain.",
   "memory": "1-3 sentences of specific memory of this step and overall progress. You should put here everything that will help you track progress in future steps. Like counting pages visited, items found, etc.",
-  "next_goal": "State the next immediate goal and action to achieve it, in one clear sentence."
+  "next_goal": "State the next immediate goal and action to achieve it, in one clear sentence.",
+  "current_plan_step": 0,
+  "plan_update": ["Step 1 description", "Step 2 description"],
   "action":[{{"navigate": {{ "url": "url_value"}}}}, // ... more actions in sequence]
 }}
 Action list should NEVER be empty.
+`current_plan_step` and `plan_update` are optional. See <planning> for details.
 </output>
 <critical_reminders>
 1. ALWAYS verify action success using the screenshot before proceeding

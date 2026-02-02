@@ -57,6 +57,7 @@ from browser_use.agent.views import (
 	BrowserStateHistory,
 	DetectedVariable,
 	JudgementResult,
+	PlanStep,
 	StepMetadata,
 )
 from browser_use.browser.events import _get_timeout
@@ -194,6 +195,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		include_recent_events: bool = False,
 		sample_images: list[ContentPartTextParam | ContentPartImageParam] | None = None,
 		final_response_after_failure: bool = True,
+		enable_planning: bool = True,
+		planning_replan_on_stall: int = 3,
 		llm_screenshot_size: tuple[int, int] | None = None,
 		_url_shortening_limit: int = 25,
 		**kwargs,
@@ -387,6 +390,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			final_response_after_failure=final_response_after_failure,
 			use_judge=use_judge,
 			ground_truth=ground_truth,
+			enable_planning=enable_planning,
+			planning_replan_on_stall=planning_replan_on_stall,
 		)
 
 		# Token cost service
@@ -1051,6 +1056,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if self.skill_service is not None:
 			unavailable_skills_info = await self._get_unavailable_skills_info()
 
+		# Render plan description for injection into agent context
+		plan_description = self._render_plan_description()
+
 		self._message_manager.create_state_messages(
 			browser_state_summary=browser_state_summary,
 			model_output=self.state.last_model_output,
@@ -1061,9 +1069,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			sensitive_data=self.sensitive_data,
 			available_file_paths=self.available_file_paths,  # Always pass current available_file_paths
 			unavailable_skills_info=unavailable_skills_info,
+			plan_description=plan_description,
 		)
 
 		await self._inject_budget_warning(step_info)
+		self._inject_replan_nudge()
 		await self._force_done_after_last_step(step_info)
 		await self._force_done_after_failure()
 		return browser_state_summary
@@ -1118,6 +1128,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Check for new downloads after executing actions
 		await self._check_and_update_downloads('after executing actions')
+
+		# Update plan state from model output
+		if self.state.last_model_output is not None:
+			self._update_plan_from_model_output(self.state.last_model_output)
 
 		# check for action errors  and len more than 1
 		if self.state.last_result and len(self.state.last_result) == 1 and self.state.last_result[-1].error:
@@ -1235,6 +1249,69 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Increment step counter after step is fully completed
 		self.state.n_steps += 1
+
+	def _update_plan_from_model_output(self, model_output: AgentOutput) -> None:
+		"""Update the plan state from model output fields (current_plan_step, plan_update)."""
+		if not self.settings.enable_planning:
+			return
+
+		# If model provided a new plan via plan_update, replace the current plan
+		if model_output.plan_update is not None:
+			self.state.plan = [PlanStep(text=step_text) for step_text in model_output.plan_update]
+			self.state.current_plan_step_index = 0
+			self.state.plan_generation_step = self.state.n_steps
+			if self.state.plan:
+				self.state.plan[0].status = 'current'
+			self.logger.info(
+				f'📋 Plan {"updated" if self.state.plan_generation_step else "created"} with {len(self.state.plan)} steps'
+			)
+			return
+
+		# If model provided a step index update, advance the plan
+		if model_output.current_plan_step is not None and self.state.plan is not None:
+			new_idx = model_output.current_plan_step
+			# Clamp to valid range
+			new_idx = max(0, min(new_idx, len(self.state.plan) - 1))
+			old_idx = self.state.current_plan_step_index
+
+			# Mark steps between old and new as done
+			for i in range(old_idx, new_idx):
+				if i < len(self.state.plan) and self.state.plan[i].status in ('current', 'pending'):
+					self.state.plan[i].status = 'done'
+
+			# Mark the new step as current
+			if new_idx < len(self.state.plan):
+				self.state.plan[new_idx].status = 'current'
+
+			self.state.current_plan_step_index = new_idx
+
+	def _render_plan_description(self) -> str | None:
+		"""Render the current plan as a text description for injection into agent context."""
+		if not self.settings.enable_planning or self.state.plan is None:
+			return None
+
+		markers = {'done': '[x]', 'current': '[>]', 'pending': '[ ]', 'skipped': '[-]'}
+		lines = []
+		for i, step in enumerate(self.state.plan):
+			marker = markers.get(step.status, '[ ]')
+			lines.append(f'{marker} {i}: {step.text}')
+		return '\n'.join(lines)
+
+	def _inject_replan_nudge(self) -> None:
+		"""Inject a replan nudge when stall detection threshold is met."""
+		if not self.settings.enable_planning or self.state.plan is None:
+			return
+		if self.settings.planning_replan_on_stall <= 0:
+			return
+		if self.state.consecutive_failures >= self.settings.planning_replan_on_stall:
+			msg = (
+				'REPLAN SUGGESTED: You have failed '
+				f'{self.state.consecutive_failures} consecutive times. '
+				'Your current plan may need revision. '
+				'Output a new `plan_update` with revised steps to recover.'
+			)
+			self.logger.info(f'📋 Replan nudge injected after {self.state.consecutive_failures} consecutive failures')
+			self._message_manager._add_context_message(UserMessage(content=msg))
 
 	async def _inject_budget_warning(self, step_info: AgentStepInfo | None = None) -> None:
 		"""Inject a prominent budget warning when the agent has used >= 75% of its step budget.
