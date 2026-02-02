@@ -68,6 +68,7 @@ class Registry(Generic[Context]):
 			'available_file_paths': list,
 			'has_sensitive_data': bool,
 			'file_system': FileSystem,
+			'extraction_schema': None,  # dict | None, skip type validation
 		}
 
 	def _normalize_action_function_signature(
@@ -333,6 +334,7 @@ class Registry(Generic[Context]):
 		file_system: FileSystem | None = None,
 		sensitive_data: dict[str, str | dict[str, str]] | None = None,
 		available_file_paths: list[str] | None = None,
+		extraction_schema: dict | None = None,
 	) -> Any:
 		"""Execute a registered action with simplified parameter handling"""
 		if action_name not in self.registry.actions:
@@ -366,6 +368,7 @@ class Registry(Generic[Context]):
 				'available_file_paths': available_file_paths,
 				'has_sensitive_data': action_name == 'input' and bool(sensitive_data),
 				'file_system': file_system,
+				'extraction_schema': extraction_schema,
 			}
 
 			# Only pass sensitive_data to actions that explicitly need it (input)
