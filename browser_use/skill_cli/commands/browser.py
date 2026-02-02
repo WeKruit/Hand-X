@@ -510,7 +510,7 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 			# Set all cookies in one call
 			try:
 				await cdp_session.cdp_client.send.Network.setCookies(
-					params={'cookies': cookie_list},
+					params={'cookies': cookie_list},  # type: ignore[arg-type]
 					session_id=cdp_session.session_id,
 				)
 				return {'imported': len(cookie_list), 'file': str(file_path)}
@@ -638,11 +638,11 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 
 			try:
 				cdp_session = await bs.cdp_client_for_node(node)
-				result = await cdp_session.cdp_client.send.DOM.resolveNode(
+				resolve_result = await cdp_session.cdp_client.send.DOM.resolveNode(
 					params={'backendNodeId': node.backend_node_id},
 					session_id=cdp_session.session_id,
 				)
-				object_id = result.get('object', {}).get('objectId')
+				object_id = resolve_result['object'].get('objectId')  # type: ignore[union-attr]
 
 				if object_id:
 					value_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
@@ -678,13 +678,13 @@ async def handle(action: str, session: SessionInfo, params: dict[str, Any]) -> A
 
 			try:
 				cdp_session = await bs.cdp_client_for_node(node)
-				result = await cdp_session.cdp_client.send.DOM.getBoxModel(
+				box_result = await cdp_session.cdp_client.send.DOM.getBoxModel(
 					params={'backendNodeId': node.backend_node_id},
 					session_id=cdp_session.session_id,
 				)
 
-				model = result.get('model', {})
-				content = model.get('content', [])
+				model = box_result['model']  # type: ignore[index]
+				content = model.get('content', [])  # type: ignore[union-attr]
 
 				if len(content) >= 8:
 					# content is [x1, y1, x2, y2, x3, y3, x4, y4] - corners of the quad

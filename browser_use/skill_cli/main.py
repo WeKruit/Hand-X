@@ -812,18 +812,15 @@ def handle_profile_cookies(args: argparse.Namespace) -> int:
 	profile_id = selected_profile['id']
 	print(f'Loading cookies from: {selected_profile["name"]} ({selected_profile["email"]})')
 
-	async def get_cookies() -> list[dict]:
-		from browser_use.browser.events import GetCookiesEvent
+	async def get_cookies() -> list:
 		from browser_use.skill_cli.sessions import create_browser_session
 
 		# Start local browser headless
-		local_session = await create_browser_session('real', headed=False, profile=profile_id, cdp_url=None)
+		local_session = await create_browser_session('real', headed=False, profile=profile_id)
 		await local_session.start()
 
 		try:
-			event = GetCookiesEvent(url=None)
-			await local_session.event_bus.dispatch(event)
-			return await event.event_result() or []
+			return await local_session._cdp_get_cookies() or []
 		finally:
 			await local_session.kill()
 
@@ -949,7 +946,7 @@ def handle_profile_sync(args: argparse.Namespace) -> int:
 		from browser_use.skill_cli.sessions import create_browser_session
 
 		# Start local browser headless
-		local_session = await create_browser_session('real', headed=False, profile=profile_id, cdp_url=None)
+		local_session = await create_browser_session('real', headed=False, profile=profile_id)
 		await local_session.start()
 
 		try:
@@ -992,6 +989,7 @@ def handle_profile_sync(args: argparse.Namespace) -> int:
 		print(f'  ⚠ {cookies_file}')  # cookies_file contains error message
 		return 1
 
+	assert cookies_file is not None  # Type guard: if cookie_count > 0, cookies_file is a valid path
 	print(f'  ✓ Extracted {cookie_count} cookies')
 
 	# Step 3: Import cookies to cloud profile
@@ -1001,7 +999,7 @@ def handle_profile_sync(args: argparse.Namespace) -> int:
 		from browser_use.skill_cli.sessions import create_browser_session
 
 		# Start remote browser with the new profile
-		remote_session = await create_browser_session('remote', headed=False, profile=cloud_profile_id, cdp_url=None)
+		remote_session = await create_browser_session('remote', headed=False, profile=cloud_profile_id)
 		await remote_session.start()
 
 		try:
