@@ -1480,27 +1480,6 @@ class BrowserSession(BaseModel):
 		self._recording_watchdog = RecordingWatchdog(event_bus=self.event_bus, browser_session=self)
 		self._recording_watchdog.attach_to_session()
 
-		# Initialize CookiesWatchdog (handles cookie get/set/clear operations)
-		from browser_use.browser.watchdogs.cookies_watchdog import CookiesWatchdog
-
-		CookiesWatchdog.model_rebuild()
-		self._cookies_watchdog = CookiesWatchdog(event_bus=self.event_bus, browser_session=self)
-		self._cookies_watchdog.attach_to_session()
-
-		# Initialize WaitWatchdog (handles wait conditions for selectors and text)
-		from browser_use.browser.watchdogs.wait_watchdog import WaitWatchdog
-
-		WaitWatchdog.model_rebuild()
-		self._wait_watchdog = WaitWatchdog(event_bus=self.event_bus, browser_session=self)
-		self._wait_watchdog.attach_to_session()
-
-		# Initialize InteractionsWatchdog (handles hover, double-click, right-click)
-		from browser_use.browser.watchdogs.interactions_watchdog import InteractionsWatchdog
-
-		InteractionsWatchdog.model_rebuild()
-		self._interactions_watchdog = InteractionsWatchdog(event_bus=self.event_bus, browser_session=self)
-		self._interactions_watchdog.attach_to_session()
-
 		# Mark watchdogs as attached to prevent duplicate attachment
 		self._watchdogs_attached = True
 
