@@ -474,8 +474,9 @@ def chunk_markdown_by_structure(
 				overlap = '\n'.join(prev_lines[-(overlap_lines):])
 
 		# Track table header from this chunk for next iteration.
-		# Scan all blocks: the header+separator block could be anywhere in the chunk.
-		prev_chunk_last_table_header = None
+		# Only overwrite if this chunk contains a new header+separator block;
+		# otherwise preserve the previous header so tables spanning 3+ chunks
+		# still get the header carried forward.
 		for b in chunk_blocks:
 			if b.block_type == _BlockType.TABLE:
 				hdr = _get_table_header(b)
