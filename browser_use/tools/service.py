@@ -664,9 +664,10 @@ class Tools(Generic[Context]):
 				if not has_sensitive_data and actual_value is not None and actual_value != params.text:
 					msg += f"\n⚠️ Note: the field's actual value '{actual_value}' differs from typed text '{params.text}'. The page may have reformatted or autocompleted your input."
 
-				# Check for autocomplete/combobox field
+				# Check for autocomplete/combobox field — add mechanical delay for dropdown
 				if _is_autocomplete_field(node):
 					msg += '\n💡 This is an autocomplete field. Wait for suggestions to appear, then click the correct suggestion instead of pressing Enter.'
+					await asyncio.sleep(0.4)  # let dropdown populate before next action
 
 				# Include input coordinates in metadata if available
 				return ActionResult(
