@@ -57,7 +57,7 @@ from browser_use.agent.views import (
 	BrowserStateHistory,
 	DetectedVariable,
 	JudgementResult,
-	PlanStep,
+	PlanItem,
 	StepMetadata,
 )
 from browser_use.browser.events import _get_timeout
@@ -197,6 +197,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		final_response_after_failure: bool = True,
 		enable_planning: bool = True,
 		planning_replan_on_stall: int = 3,
+		planning_exploration_limit: int = 5,
 		llm_screenshot_size: tuple[int, int] | None = None,
 		_url_shortening_limit: int = 25,
 		**kwargs,
@@ -392,6 +393,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			ground_truth=ground_truth,
 			enable_planning=enable_planning,
 			planning_replan_on_stall=planning_replan_on_stall,
+			planning_exploration_limit=planning_exploration_limit,
 		)
 
 		# Token cost service
@@ -1074,6 +1076,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		await self._inject_budget_warning(step_info)
 		self._inject_replan_nudge()
+		self._inject_exploration_nudge()
 		await self._force_done_after_last_step(step_info)
 		await self._force_done_after_failure()
 		return browser_state_summary
@@ -1251,14 +1254,14 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self.state.n_steps += 1
 
 	def _update_plan_from_model_output(self, model_output: AgentOutput) -> None:
-		"""Update the plan state from model output fields (current_plan_step, plan_update)."""
+		"""Update the plan state from model output fields (current_plan_item, plan_update)."""
 		if not self.settings.enable_planning:
 			return
 
 		# If model provided a new plan via plan_update, replace the current plan
 		if model_output.plan_update is not None:
-			self.state.plan = [PlanStep(text=step_text) for step_text in model_output.plan_update]
-			self.state.current_plan_step_index = 0
+			self.state.plan = [PlanItem(text=step_text) for step_text in model_output.plan_update]
+			self.state.current_plan_item_index = 0
 			self.state.plan_generation_step = self.state.n_steps
 			if self.state.plan:
 				self.state.plan[0].status = 'current'
@@ -1268,11 +1271,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			return
 
 		# If model provided a step index update, advance the plan
-		if model_output.current_plan_step is not None and self.state.plan is not None:
-			new_idx = model_output.current_plan_step
+		if model_output.current_plan_item is not None and self.state.plan is not None:
+			new_idx = model_output.current_plan_item
 			# Clamp to valid range
 			new_idx = max(0, min(new_idx, len(self.state.plan) - 1))
-			old_idx = self.state.current_plan_step_index
+			old_idx = self.state.current_plan_item_index
 
 			# Mark steps between old and new as done
 			for i in range(old_idx, new_idx):
@@ -1283,7 +1286,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			if new_idx < len(self.state.plan):
 				self.state.plan[new_idx].status = 'current'
 
-			self.state.current_plan_step_index = new_idx
+			self.state.current_plan_item_index = new_idx
 
 	def _render_plan_description(self) -> str | None:
 		"""Render the current plan as a text description for injection into agent context."""
@@ -1311,6 +1314,22 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				'Output a new `plan_update` with revised steps to recover.'
 			)
 			self.logger.info(f'📋 Replan nudge injected after {self.state.consecutive_failures} consecutive failures')
+			self._message_manager._add_context_message(UserMessage(content=msg))
+
+	def _inject_exploration_nudge(self) -> None:
+		"""Nudge the agent to create a plan (or call done) after exploring without one."""
+		if not self.settings.enable_planning or self.state.plan is not None:
+			return
+		if self.settings.planning_exploration_limit <= 0:
+			return
+		if self.state.n_steps >= self.settings.planning_exploration_limit:
+			msg = (
+				'PLANNING NUDGE: You have taken '
+				f'{self.state.n_steps} steps without creating a plan. '
+				'If the task is complex, output a `plan_update` with clear todo items now. '
+				'If the task is already done or nearly done, call `done` instead.'
+			)
+			self.logger.info(f'📋 Exploration nudge injected after {self.state.n_steps} steps without a plan')
 			self._message_manager._add_context_message(UserMessage(content=msg))
 
 	async def _inject_budget_warning(self, step_info: AgentStepInfo | None = None) -> None:

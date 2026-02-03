@@ -8,7 +8,7 @@ import json
 
 from browser_use.agent.views import (
 	AgentOutput,
-	PlanStep,
+	PlanItem,
 )
 from browser_use.tools.service import Tools
 
@@ -27,7 +27,7 @@ def _make_agent_output(**overrides) -> AgentOutput:
 			'evaluation_previous_goal': 'Success',
 			'memory': 'mem',
 			'next_goal': 'goal',
-			**{k: v for k, v in overrides.items() if k in ('current_plan_step', 'plan_update')},
+			**{k: v for k, v in overrides.items() if k in ('current_plan_item', 'plan_update')},
 			'action': [{'done': {'text': 'ok', 'success': True}}],
 		}
 	)
@@ -57,12 +57,12 @@ async def test_plan_generation_from_plan_update(browser_session, mock_llm):
 	assert agent.state.plan[0].status == 'current'
 	assert agent.state.plan[1].status == 'pending'
 	assert agent.state.plan[2].status == 'pending'
-	assert agent.state.current_plan_step_index == 0
+	assert agent.state.current_plan_item_index == 0
 	assert agent.state.plan_generation_step == agent.state.n_steps
 
 
 # ---------------------------------------------------------------------------
-# 2. Plan step advancement via current_plan_step
+# 2. Plan step advancement via current_plan_item
 # ---------------------------------------------------------------------------
 
 
@@ -70,19 +70,19 @@ async def test_plan_step_advancement(browser_session, mock_llm):
 	agent = _make_agent(browser_session, mock_llm)
 	# Seed a plan
 	agent.state.plan = [
-		PlanStep(text='Step A', status='current'),
-		PlanStep(text='Step B'),
-		PlanStep(text='Step C'),
+		PlanItem(text='Step A', status='current'),
+		PlanItem(text='Step B'),
+		PlanItem(text='Step C'),
 	]
-	agent.state.current_plan_step_index = 0
+	agent.state.current_plan_item_index = 0
 
-	output = _make_agent_output(current_plan_step=2)
+	output = _make_agent_output(current_plan_item=2)
 	agent._update_plan_from_model_output(output)
 
 	assert agent.state.plan[0].status == 'done'
 	assert agent.state.plan[1].status == 'done'
 	assert agent.state.plan[2].status == 'current'
-	assert agent.state.current_plan_step_index == 2
+	assert agent.state.current_plan_item_index == 2
 
 
 # ---------------------------------------------------------------------------
@@ -93,10 +93,10 @@ async def test_plan_step_advancement(browser_session, mock_llm):
 async def test_replanning_replaces_old_plan(browser_session, mock_llm):
 	agent = _make_agent(browser_session, mock_llm)
 	agent.state.plan = [
-		PlanStep(text='Old step 1', status='done'),
-		PlanStep(text='Old step 2', status='current'),
+		PlanItem(text='Old step 1', status='done'),
+		PlanItem(text='Old step 2', status='current'),
 	]
-	agent.state.current_plan_step_index = 1
+	agent.state.current_plan_item_index = 1
 	agent.state.plan_generation_step = 1
 
 	output = _make_agent_output(plan_update=['New step A', 'New step B', 'New step C'])
@@ -105,7 +105,7 @@ async def test_replanning_replaces_old_plan(browser_session, mock_llm):
 	assert len(agent.state.plan) == 3
 	assert agent.state.plan[0].text == 'New step A'
 	assert agent.state.plan[0].status == 'current'
-	assert agent.state.current_plan_step_index == 0
+	assert agent.state.current_plan_item_index == 0
 
 
 # ---------------------------------------------------------------------------
@@ -116,10 +116,10 @@ async def test_replanning_replaces_old_plan(browser_session, mock_llm):
 async def test_render_plan_description(browser_session, mock_llm):
 	agent = _make_agent(browser_session, mock_llm)
 	agent.state.plan = [
-		PlanStep(text='Navigate to search page', status='done'),
-		PlanStep(text='Search for "laptop"', status='current'),
-		PlanStep(text='Extract price from results', status='pending'),
-		PlanStep(text='Skipped step', status='skipped'),
+		PlanItem(text='Navigate to search page', status='done'),
+		PlanItem(text='Search for "laptop"', status='current'),
+		PlanItem(text='Extract price from results', status='pending'),
+		PlanItem(text='Skipped step', status='skipped'),
 	]
 
 	result = agent._render_plan_description()
@@ -138,7 +138,7 @@ async def test_render_plan_description(browser_session, mock_llm):
 
 async def test_planning_disabled_returns_none(browser_session, mock_llm):
 	agent = _make_agent(browser_session, mock_llm, enable_planning=False)
-	agent.state.plan = [PlanStep(text='Should not render')]
+	agent.state.plan = [PlanItem(text='Should not render')]
 
 	assert agent._render_plan_description() is None
 
@@ -156,7 +156,7 @@ async def test_planning_disabled_returns_none(browser_session, mock_llm):
 
 async def test_replan_nudge_injected_at_threshold(browser_session, mock_llm):
 	agent = _make_agent(browser_session, mock_llm, planning_replan_on_stall=3)
-	agent.state.plan = [PlanStep(text='Step 1', status='current')]
+	agent.state.plan = [PlanItem(text='Step 1', status='current')]
 	agent.state.consecutive_failures = 3
 
 	# Track context messages
@@ -176,7 +176,7 @@ async def test_replan_nudge_injected_at_threshold(browser_session, mock_llm):
 
 async def test_no_replan_nudge_below_threshold(browser_session, mock_llm):
 	agent = _make_agent(browser_session, mock_llm, planning_replan_on_stall=3)
-	agent.state.plan = [PlanStep(text='Step 1', status='current')]
+	agent.state.plan = [PlanItem(text='Step 1', status='current')]
 	agent.state.consecutive_failures = 2
 
 	initial_count = len(agent._message_manager.state.history.context_messages)
@@ -197,7 +197,7 @@ async def test_flash_mode_schema_excludes_plan_fields():
 	FlashOutput = AgentOutput.type_with_custom_actions_flash_mode(ActionModel)
 
 	schema = FlashOutput.model_json_schema()
-	assert 'current_plan_step' not in schema['properties']
+	assert 'current_plan_item' not in schema['properties']
 	assert 'plan_update' not in schema['properties']
 	assert 'thinking' not in schema['properties']
 
@@ -213,42 +213,42 @@ async def test_full_mode_schema_includes_plan_fields_optional():
 	FullOutput = AgentOutput.type_with_custom_actions(ActionModel)
 
 	schema = FullOutput.model_json_schema()
-	assert 'current_plan_step' in schema['properties']
+	assert 'current_plan_item' in schema['properties']
 	assert 'plan_update' in schema['properties']
 	# They should NOT be in required
-	assert 'current_plan_step' not in schema.get('required', [])
+	assert 'current_plan_item' not in schema.get('required', [])
 	assert 'plan_update' not in schema.get('required', [])
 
 
 # ---------------------------------------------------------------------------
-# 10. Out-of-bounds current_plan_step handled gracefully
+# 10. Out-of-bounds current_plan_item handled gracefully
 # ---------------------------------------------------------------------------
 
 
 async def test_out_of_bounds_plan_step_clamped(browser_session, mock_llm):
 	agent = _make_agent(browser_session, mock_llm)
 	agent.state.plan = [
-		PlanStep(text='Step A', status='current'),
-		PlanStep(text='Step B'),
+		PlanItem(text='Step A', status='current'),
+		PlanItem(text='Step B'),
 	]
-	agent.state.current_plan_step_index = 0
+	agent.state.current_plan_item_index = 0
 
 	# Way out of bounds high
-	output = _make_agent_output(current_plan_step=999)
+	output = _make_agent_output(current_plan_item=999)
 	agent._update_plan_from_model_output(output)
-	assert agent.state.current_plan_step_index == 1  # clamped to last valid index
+	assert agent.state.current_plan_item_index == 1  # clamped to last valid index
 	assert agent.state.plan[0].status == 'done'
 	assert agent.state.plan[1].status == 'current'
 
 	# Negative index
 	agent.state.plan = [
-		PlanStep(text='Step X', status='current'),
-		PlanStep(text='Step Y'),
+		PlanItem(text='Step X', status='current'),
+		PlanItem(text='Step Y'),
 	]
-	agent.state.current_plan_step_index = 1
-	output2 = _make_agent_output(current_plan_step=-5)
+	agent.state.current_plan_item_index = 1
+	output2 = _make_agent_output(current_plan_item=-5)
 	agent._update_plan_from_model_output(output2)
-	assert agent.state.current_plan_step_index == 0  # clamped to 0
+	assert agent.state.current_plan_item_index == 0  # clamped to 0
 	assert agent.state.plan[0].status == 'current'
 
 
@@ -270,7 +270,7 @@ async def test_no_plan_render_returns_none(browser_session, mock_llm):
 
 async def test_replan_nudge_disabled_when_zero(browser_session, mock_llm):
 	agent = _make_agent(browser_session, mock_llm, planning_replan_on_stall=0)
-	agent.state.plan = [PlanStep(text='Step 1', status='current')]
+	agent.state.plan = [PlanItem(text='Step 1', status='current')]
 	agent.state.consecutive_failures = 100  # high but doesn't matter
 
 	initial_count = len(agent._message_manager.state.history.context_messages)
@@ -290,5 +290,88 @@ async def test_no_replan_nudge_without_plan(browser_session, mock_llm):
 
 	initial_count = len(agent._message_manager.state.history.context_messages)
 	agent._inject_replan_nudge()
+	after_count = len(agent._message_manager.state.history.context_messages)
+	assert after_count == initial_count
+
+
+# ---------------------------------------------------------------------------
+# 14. Exploration nudge fires when no plan exists after N steps
+# ---------------------------------------------------------------------------
+
+
+async def test_exploration_nudge_fires_after_limit(browser_session, mock_llm):
+	agent = _make_agent(browser_session, mock_llm, planning_exploration_limit=3)
+	agent.state.plan = None
+	agent.state.n_steps = 3  # at the limit
+
+	initial_count = len(agent._message_manager.state.history.context_messages)
+	agent._inject_exploration_nudge()
+	after_count = len(agent._message_manager.state.history.context_messages)
+
+	assert after_count == initial_count + 1
+	msg = agent._message_manager.state.history.context_messages[-1]
+	assert isinstance(msg.content, str) and 'PLANNING NUDGE' in msg.content
+
+
+# ---------------------------------------------------------------------------
+# 15. No exploration nudge when plan already exists
+# ---------------------------------------------------------------------------
+
+
+async def test_no_exploration_nudge_when_plan_exists(browser_session, mock_llm):
+	agent = _make_agent(browser_session, mock_llm, planning_exploration_limit=3)
+	agent.state.plan = [PlanItem(text='Step 1', status='current')]
+	agent.state.n_steps = 10  # well above limit
+
+	initial_count = len(agent._message_manager.state.history.context_messages)
+	agent._inject_exploration_nudge()
+	after_count = len(agent._message_manager.state.history.context_messages)
+	assert after_count == initial_count
+
+
+# ---------------------------------------------------------------------------
+# 16. No exploration nudge below the limit
+# ---------------------------------------------------------------------------
+
+
+async def test_no_exploration_nudge_below_limit(browser_session, mock_llm):
+	agent = _make_agent(browser_session, mock_llm, planning_exploration_limit=5)
+	agent.state.plan = None
+	agent.state.n_steps = 4  # below the limit
+
+	initial_count = len(agent._message_manager.state.history.context_messages)
+	agent._inject_exploration_nudge()
+	after_count = len(agent._message_manager.state.history.context_messages)
+	assert after_count == initial_count
+
+
+# ---------------------------------------------------------------------------
+# 17. Exploration nudge disabled when planning_exploration_limit=0
+# ---------------------------------------------------------------------------
+
+
+async def test_exploration_nudge_disabled_when_zero(browser_session, mock_llm):
+	agent = _make_agent(browser_session, mock_llm, planning_exploration_limit=0)
+	agent.state.plan = None
+	agent.state.n_steps = 100  # high but doesn't matter
+
+	initial_count = len(agent._message_manager.state.history.context_messages)
+	agent._inject_exploration_nudge()
+	after_count = len(agent._message_manager.state.history.context_messages)
+	assert after_count == initial_count
+
+
+# ---------------------------------------------------------------------------
+# 18. Exploration nudge disabled when enable_planning=False
+# ---------------------------------------------------------------------------
+
+
+async def test_exploration_nudge_disabled_when_planning_off(browser_session, mock_llm):
+	agent = _make_agent(browser_session, mock_llm, enable_planning=False, planning_exploration_limit=3)
+	agent.state.plan = None
+	agent.state.n_steps = 10  # above limit
+
+	initial_count = len(agent._message_manager.state.history.context_messages)
+	agent._inject_exploration_nudge()
 	after_count = len(agent._message_manager.state.history.context_messages)
 	assert after_count == initial_count
