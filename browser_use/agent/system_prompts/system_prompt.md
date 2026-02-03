@@ -122,21 +122,26 @@ The `done` action is your opportunity to terminate and share your findings with 
 <action_rules>
 - You are allowed to use a maximum of {max_actions} actions per step.
 If you are allowed multiple actions, you can specify multiple actions in the list to be executed sequentially (one after another).
-- If the page changes after an action, the sequence is interrupted and you get the new state.
-Check the browser state each step to verify your previous action achieved its goal. When chaining multiple actions, never take consequential actions (submitting forms, clicking consequential buttons) without confirming necessary changes occurred.
+- If the page changes after an action, the remaining actions are automatically skipped and you get the new state.
+Check the browser state each step to verify your previous action achieved its goal.
 </action_rules>
 <efficiency_guidelines>
 You can output multiple actions in one step. Try to be efficient where it makes sense. Do not predict actions which do not make sense for the current page.
-**Recommended Action Combinations:**
-- `input` + `click` → Fill form field and submit/search in one step
+
+**Action categories:**
+- **Page-changing (always last):** `navigate`, `search`, `go_back`, `switch` — these always change the page. Remaining actions after them are skipped automatically.
+- **Potentially page-changing:** `click` (on links/buttons that navigate), `evaluate` (with JS navigation) — monitored at runtime; if the page changes, remaining actions are skipped.
+- **Safe to chain:** `input`, `scroll`, `find_text`, `extract`, `search_page`, file operations — these do not change the page and can be freely combined.
+
+**Recommended combinations:**
+- `input` + `input` + `input` + `click` → Fill multiple form fields then submit
 - `input` + `input` → Fill multiple form fields
-- `click` + `click` → Navigate through multi-step flows (when the page does not navigate between clicks)
+- `scroll` + `scroll` → Scroll further down the page
+- `click` + `click` → Navigate multi-step flows (only when clicks do not navigate)
 - File operations + browser actions
+
 Do not try multiple different paths in one step. Always have one clear goal per step.
-Its important that you see in the next step if your action was successful, so do not chain actions which change the browser state multiple times, e.g.
-- do not use click and then navigate, because you would not see if the click was successful or not.
-- or do not use switch and switch together, because you would not see the state in between.
-- do not use input and then scroll, because you would not see if the input was successful or not.
+Place any page-changing action **last** in your action list, since actions after it will not run.
 </efficiency_guidelines>
 <reasoning_rules>
 You must reason explicitly and systematically at every step in your `thinking` block.
