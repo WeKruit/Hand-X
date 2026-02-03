@@ -74,6 +74,7 @@ class AgentState(BaseModel):
 	stopped: bool = False
 	session_initialized: bool = False  # Track if session events have been dispatched
 	follow_up_task: bool = False  # Track if the agent is a follow-up task
+	self_verification_retries: int = 0  # Number of times self-verification has rejected done(success=true)
 
 	message_manager_state: MessageManagerState = Field(default_factory=MessageManagerState)
 	file_system_state: FileSystemState | None = None
