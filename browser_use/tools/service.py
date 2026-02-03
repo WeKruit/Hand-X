@@ -359,6 +359,7 @@ class Tools(Generic[Context]):
 		@self.registry.action(
 			'',
 			param_model=SearchAction,
+			terminates_sequence=True,
 		)
 		async def search(params: SearchAction, browser_session: BrowserSession):
 			import urllib.parse
@@ -402,6 +403,7 @@ class Tools(Generic[Context]):
 		@self.registry.action(
 			'',
 			param_model=NavigateAction,
+			terminates_sequence=True,
 		)
 		async def navigate(params: NavigateAction, browser_session: BrowserSession):
 			try:
@@ -446,7 +448,7 @@ class Tools(Generic[Context]):
 					# Return error in ActionResult instead of re-raising
 					return ActionResult(error=f'Navigation failed: {str(e)}')
 
-		@self.registry.action('Go back', param_model=NoParamsAction)
+		@self.registry.action('Go back', param_model=NoParamsAction, terminates_sequence=True)
 		async def go_back(_: NoParamsAction, browser_session: BrowserSession):
 			try:
 				event = browser_session.event_bus.dispatch(GoBackEvent())
@@ -854,6 +856,7 @@ class Tools(Generic[Context]):
 		@self.registry.action(
 			'Switch to another open tab by tab_id. Tab IDs are shown in browser state tabs list (last 4 chars of target_id). Use when you need to work with content in a different tab.',
 			param_model=SwitchTabAction,
+			terminates_sequence=True,
 		)
 		async def switch(params: SwitchTabAction, browser_session: BrowserSession):
 			# Simple switch tab logic
@@ -951,35 +954,29 @@ class Tools(Generic[Context]):
 			# Original content length for processing
 			final_filtered_length = content_stats['final_filtered_chars']
 
+			# Structure-aware chunking replaces naive char-based truncation
+			from browser_use.dom.markdown_extractor import chunk_markdown_by_structure
+
+			chunks = chunk_markdown_by_structure(content, max_chunk_chars=MAX_CHAR_LIMIT, start_from_char=start_from_char)
+			if not chunks:
+				return ActionResult(
+					error=f'start_from_char ({start_from_char}) exceeds content length {final_filtered_length} characters.'
+				)
+			chunk = chunks[0]
+			content = chunk.content
+			truncated = chunk.has_more
+
+			# Prepend overlap context for continuation chunks (e.g. table headers)
+			if chunk.overlap_prefix:
+				content = chunk.overlap_prefix + '\n' + content
+
 			if start_from_char > 0:
-				if start_from_char >= len(content):
-					return ActionResult(
-						error=f'start_from_char ({start_from_char}) exceeds content length {final_filtered_length} characters.'
-					)
-				content = content[start_from_char:]
 				content_stats['started_from_char'] = start_from_char
-
-			# Smart truncation with context preservation
-			truncated = False
-			if len(content) > MAX_CHAR_LIMIT:
-				# Try to truncate at a natural break point (paragraph, sentence)
-				truncate_at = MAX_CHAR_LIMIT
-
-				# Look for paragraph break within last 500 chars of limit
-				paragraph_break = content.rfind('\n\n', MAX_CHAR_LIMIT - 500, MAX_CHAR_LIMIT)
-				if paragraph_break > 0:
-					truncate_at = paragraph_break
-				else:
-					# Look for sentence break within last 200 chars of limit
-					sentence_break = content.rfind('.', MAX_CHAR_LIMIT - 200, MAX_CHAR_LIMIT)
-					if sentence_break > 0:
-						truncate_at = sentence_break + 1
-
-				content = content[:truncate_at]
-				truncated = True
-				next_start = (start_from_char or 0) + truncate_at
-				content_stats['truncated_at_char'] = truncate_at
-				content_stats['next_start_char'] = next_start
+			if truncated:
+				content_stats['truncated_at_char'] = chunk.char_offset_end
+				content_stats['next_start_char'] = chunk.char_offset_end
+				content_stats['chunk_index'] = chunk.chunk_index
+				content_stats['total_chunks'] = chunk.total_chunks
 
 			# Add content statistics to the result
 			original_html_length = content_stats['original_html_chars']
@@ -990,7 +987,8 @@ class Tools(Generic[Context]):
 			if start_from_char > 0:
 				stats_summary += f' (started from char {start_from_char:,})'
 			if truncated:
-				stats_summary += f' → {len(content):,} final chars (truncated, use start_from_char={content_stats["next_start_char"]} to continue)'
+				chunk_info = f'chunk {chunk.chunk_index + 1} of {chunk.total_chunks}, '
+				stats_summary += f' → {len(content):,} final chars ({chunk_info}use start_from_char={content_stats["next_start_char"]} to continue)'
 			elif chars_filtered > 0:
 				stats_summary += f' (filtered {chars_filtered:,} chars of noise)'
 
