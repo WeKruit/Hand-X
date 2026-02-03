@@ -220,5 +220,3 @@ Evaluate this agent execution given the criteria and respond with the exact JSON
 		SystemMessage(content=system_prompt),
 		UserMessage(content=content_parts),
 	]
-
-
