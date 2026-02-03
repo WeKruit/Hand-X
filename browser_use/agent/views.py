@@ -107,7 +107,6 @@ class JudgementResult(BaseModel):
 	)
 
 
-
 class ActionResult(BaseModel):
 	"""Result of executing an action"""
 
