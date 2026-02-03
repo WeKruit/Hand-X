@@ -2027,8 +2027,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 						# No retries left — accept the failure
 						last_result = self.history.history[-1].result[-1]
 						last_result.success = False
+						verification_note = f'\n\n[Self-verification: {rejection_reason}]'
 						if last_result.extracted_content:
-							last_result.extracted_content += f'\n\n[Self-verification: {rejection_reason}]'
+							last_result.extracted_content += verification_note
+						else:
+							last_result.extracted_content = verification_note.strip()
 
 			await self.log_completion()
 
@@ -2243,8 +2246,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					else:
 						last_result = self.history.history[-1].result[-1]
 						last_result.success = False
+						verification_note = f'\n\n[Self-verification: {rejection_reason}]'
 						if last_result.extracted_content:
-							last_result.extracted_content += f'\n\n[Self-verification: {rejection_reason}]'
+							last_result.extracted_content += verification_note
+						else:
+							last_result.extracted_content = verification_note.strip()
 
 			await self.log_completion()
 
