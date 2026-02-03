@@ -1890,7 +1890,12 @@ class DefaultActionWatchdog(BaseWatchdog):
 			# yet is longer, the field had pre-existing text that wasn't cleared. Set directly.
 			if clear and not is_sensitive and input_coordinates and 'actual_value' in input_coordinates:
 				actual_value = input_coordinates['actual_value']
-				if actual_value is not None and actual_value != text and len(actual_value) > len(text) and text in actual_value:
+				if (
+					isinstance(actual_value, str)
+					and actual_value != text
+					and len(actual_value) > len(text)
+					and text in actual_value
+				):
 					self.logger.info(f'🔄 Concatenation detected: got "{actual_value}", expected "{text}" — auto-retrying')
 					try:
 						# Clear + set value via native setter in one JS call (works with React/Vue)
