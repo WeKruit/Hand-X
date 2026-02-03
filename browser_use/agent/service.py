@@ -36,7 +36,7 @@ from pydantic import BaseModel, ValidationError
 from uuid_extensions import uuid7str
 
 from browser_use import Browser, BrowserProfile, BrowserSession
-from browser_use.agent.judge import construct_judge_messages
+from browser_use.agent.judge import construct_judge_messages, construct_simple_judge_messages
 
 # Lazy import for gif to avoid heavy agent.views import at startup
 # from browser_use.agent.gif import create_history_gif
@@ -58,6 +58,7 @@ from browser_use.agent.views import (
 	DetectedVariable,
 	JudgementResult,
 	PlanItem,
+	SimpleJudgeResult,
 	StepMetadata,
 )
 from browser_use.browser.events import _get_timeout
@@ -1386,6 +1387,40 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self._message_manager._add_context_message(UserMessage(content=msg))
 			self.AgentOutput = self.DoneAgentOutput
 
+	async def _run_simple_judge(self) -> None:
+		"""Lightweight always-on judge that overrides agent success when it overclaims.
+
+		Runs regardless of use_judge setting. Only checks tasks where the agent
+		claimed success — if the agent already reports failure, there's nothing to correct.
+		"""
+		last_result = self.history.history[-1].result[-1]
+		if not last_result.is_done or not last_result.success:
+			return
+
+		task = self.task
+		final_result = self.history.final_result() or ''
+
+		messages = construct_simple_judge_messages(
+			task=task,
+			final_result=final_result,
+		)
+
+		try:
+			response = await self.llm.ainvoke(messages, output_format=SimpleJudgeResult)
+			result: SimpleJudgeResult = response.completion  # type: ignore[assignment]
+			if not result.is_correct:
+				reason = result.reason or 'Task requirements not fully met'
+				self.logger.info(f'⚠️  Simple judge overriding success to failure: {reason}')
+				last_result.success = False
+				note = f'[Simple judge: {reason}]'
+				if last_result.extracted_content:
+					last_result.extracted_content += f'\n\n{note}'
+				else:
+					last_result.extracted_content = note
+		except Exception as e:
+			self.logger.warning(f'Simple judge failed with error: {e}')
+			# Don't override on error — keep the agent's self-report
+
 	@observe(ignore_input=True, ignore_output=False)
 	async def _judge_trace(self) -> JudgementResult | None:
 		"""Judge the trace of the agent"""
@@ -1422,7 +1457,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			return None
 
 	async def _judge_and_log(self) -> None:
-		"""Run judge evaluation, override agent success with judge verdict, and log."""
+		"""Run judge evaluation and log the verdict.
+
+		The judge verdict is attached to the action result but does NOT override
+		last_result.success — that stays as the agent's self-report. Telemetry
+		sends both values so the eval platform can compare agent vs judge.
+		"""
 		judgement = await self._judge_trace()
 
 		# Attach judgement to last action result
@@ -1433,11 +1473,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			# Get self-reported success
 			self_reported_success = last_result.success
 
+			# Log the verdict based on self-reported success and judge verdict
 			if judgement:
-				# Override agent's success with judge verdict
-				if judgement.verdict is not None:
-					last_result.success = judgement.verdict
-
 				# If both self-reported and judge agree on success, don't log
 				if self_reported_success is True and judgement.verdict is True:
 					return
@@ -1445,7 +1482,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				judge_log = '\n'
 				# If agent reported success but judge thinks it failed, show warning
 				if self_reported_success is True and judgement.verdict is False:
-					judge_log += '⚠️  \033[33mAgent reported success but judge thinks task failed — overriding to failure\033[0m\n'
+					judge_log += '⚠️  \033[33mAgent reported success but judge thinks task failed\033[0m\n'
 
 				# Otherwise, show full judge result
 				verdict_color = '\033[32m' if judgement.verdict else '\033[31m'
@@ -2065,9 +2102,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		await self.step(step_info)
 
 		if self.history.is_done():
+			# Always run simple judge to align agent success with reality
+			await self._run_simple_judge()
+
 			await self.log_completion()
 
-			# Run judge before done callback if enabled
+			# Run full judge before done callback if enabled
 			if self.settings.use_judge:
 				await self._judge_and_log()
 
@@ -2266,9 +2306,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			await on_step_end(self)
 
 		if self.history.is_done():
+			# Always run simple judge to align agent success with reality
+			await self._run_simple_judge()
+
 			await self.log_completion()
 
-			# Run judge before done callback if enabled
+			# Run full judge before done callback if enabled
 			if self.settings.use_judge:
 				await self._judge_and_log()
 
