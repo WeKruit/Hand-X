@@ -213,12 +213,14 @@ def _parse_atomic_blocks(content: str) -> list[_AtomicBlock]:
 
 		# BLANK
 		if not line.strip():
-			blocks.append(_AtomicBlock(
-				block_type=_BlockType.BLANK,
-				lines=[line],
-				char_start=offset,
-				char_end=offset + line_len,
-			))
+			blocks.append(
+				_AtomicBlock(
+					block_type=_BlockType.BLANK,
+					lines=[line],
+					char_start=offset,
+					char_end=offset + line_len,
+				)
+			)
 			offset += line_len
 			i += 1
 			continue
@@ -237,23 +239,27 @@ def _parse_atomic_blocks(content: str) -> list[_AtomicBlock]:
 				i += 1
 				if fence_line.strip().startswith('```') and len(fence_lines) > 1:
 					break
-			blocks.append(_AtomicBlock(
-				block_type=_BlockType.CODE_FENCE,
-				lines=fence_lines,
-				char_start=offset,
-				char_end=fence_end,
-			))
+			blocks.append(
+				_AtomicBlock(
+					block_type=_BlockType.CODE_FENCE,
+					lines=fence_lines,
+					char_start=offset,
+					char_end=fence_end,
+				)
+			)
 			offset = fence_end
 			continue
 
 		# HEADER
 		if line.lstrip().startswith('#'):
-			blocks.append(_AtomicBlock(
-				block_type=_BlockType.HEADER,
-				lines=[line],
-				char_start=offset,
-				char_end=offset + line_len,
-			))
+			blocks.append(
+				_AtomicBlock(
+					block_type=_BlockType.HEADER,
+					lines=[line],
+					char_start=offset,
+					char_end=offset + line_len,
+				)
+			)
 			offset += line_len
 			i += 1
 			continue
@@ -273,23 +279,27 @@ def _parse_atomic_blocks(content: str) -> list[_AtomicBlock]:
 				header_end += sep_len
 				i += 1
 			# Emit header+separator as one atomic block
-			blocks.append(_AtomicBlock(
-				block_type=_BlockType.TABLE,
-				lines=header_lines,
-				char_start=offset,
-				char_end=header_end,
-			))
+			blocks.append(
+				_AtomicBlock(
+					block_type=_BlockType.TABLE,
+					lines=header_lines,
+					char_start=offset,
+					char_end=header_end,
+				)
+			)
 			offset = header_end
 			# Each subsequent table row is its own TABLE block (splittable between rows)
 			while i < len(lines) and _TABLE_ROW_RE.match(lines[i]):
 				row = lines[i]
 				row_len = len(row) + 1
-				blocks.append(_AtomicBlock(
-					block_type=_BlockType.TABLE,
-					lines=[row],
-					char_start=offset,
-					char_end=offset + row_len,
-				))
+				blocks.append(
+					_AtomicBlock(
+						block_type=_BlockType.TABLE,
+						lines=[row],
+						char_start=offset,
+						char_end=offset + row_len,
+					)
+				)
 				offset += row_len
 				i += 1
 			continue
@@ -316,12 +326,14 @@ def _parse_atomic_blocks(content: str) -> list[_AtomicBlock]:
 					i += 1
 					continue
 				break
-			blocks.append(_AtomicBlock(
-				block_type=_BlockType.LIST_ITEM,
-				lines=list_lines,
-				char_start=offset,
-				char_end=list_end,
-			))
+			blocks.append(
+				_AtomicBlock(
+					block_type=_BlockType.LIST_ITEM,
+					lines=list_lines,
+					char_start=offset,
+					char_end=list_end,
+				)
+			)
 			offset = list_end
 			continue
 
@@ -332,23 +344,20 @@ def _parse_atomic_blocks(content: str) -> list[_AtomicBlock]:
 		while i < len(lines) and lines[i].strip():
 			# Stop if next line starts a different block type
 			nl = lines[i]
-			if (
-				nl.lstrip().startswith('#')
-				or nl.strip().startswith('```')
-				or _TABLE_ROW_RE.match(nl)
-				or _LIST_ITEM_RE.match(nl)
-			):
+			if nl.lstrip().startswith('#') or nl.strip().startswith('```') or _TABLE_ROW_RE.match(nl) or _LIST_ITEM_RE.match(nl):
 				break
 			nl_len = len(nl) + 1
 			para_lines.append(nl)
 			para_end += nl_len
 			i += 1
-		blocks.append(_AtomicBlock(
-			block_type=_BlockType.PARAGRAPH,
-			lines=para_lines,
-			char_start=offset,
-			char_end=para_end,
-		))
+		blocks.append(
+			_AtomicBlock(
+				block_type=_BlockType.PARAGRAPH,
+				lines=para_lines,
+				char_start=offset,
+				char_end=para_end,
+			)
+		)
 		offset = para_end
 
 	# Fix last block char_end: content may not end with \n
@@ -403,15 +412,17 @@ def chunk_markdown_by_structure(
 	    List of MarkdownChunk. Empty if start_from_char is past end of content.
 	"""
 	if not content:
-		return [MarkdownChunk(
-			content='',
-			chunk_index=0,
-			total_chunks=1,
-			char_offset_start=0,
-			char_offset_end=0,
-			overlap_prefix='',
-			has_more=False,
-		)]
+		return [
+			MarkdownChunk(
+				content='',
+				chunk_index=0,
+				total_chunks=1,
+				char_offset_start=0,
+				char_offset_end=0,
+				overlap_prefix='',
+				has_more=False,
+			)
+		]
 
 	if start_from_char >= len(content):
 		return []
@@ -496,15 +507,17 @@ def chunk_markdown_by_structure(
 					prev_chunk_last_table_header = hdr
 
 		has_more = idx < total_chunks - 1
-		chunks.append(MarkdownChunk(
-			content=chunk_text,
-			chunk_index=idx,
-			total_chunks=total_chunks,
-			char_offset_start=char_start,
-			char_offset_end=char_end,
-			overlap_prefix=overlap,
-			has_more=has_more,
-		))
+		chunks.append(
+			MarkdownChunk(
+				content=chunk_text,
+				chunk_index=idx,
+				total_chunks=total_chunks,
+				char_offset_start=char_start,
+				char_offset_end=char_end,
+				overlap_prefix=overlap,
+				has_more=has_more,
+			)
+		)
 
 	# Apply start_from_char filter: return chunks from the one containing that offset
 	if start_from_char > 0:

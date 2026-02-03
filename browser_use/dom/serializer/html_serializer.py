@@ -199,10 +199,7 @@ class HTMLSerializer:
 		for i, child in enumerate(children):
 			if child.node_type == NodeType.ELEMENT_NODE and child.tag_name == 'tr':
 				# Check if this row contains <th> cells
-				has_th = any(
-					c.node_type == NodeType.ELEMENT_NODE and c.tag_name == 'th'
-					for c in child.children
-				)
+				has_th = any(c.node_type == NodeType.ELEMENT_NODE and c.tag_name == 'th' for c in child.children)
 				if has_th:
 					first_tr = child
 					first_tr_idx = i
@@ -232,7 +229,7 @@ class HTMLSerializer:
 		parts.append('</thead>')
 
 		# Collect remaining rows
-		remaining = children[first_tr_idx + 1:]
+		remaining = children[first_tr_idx + 1 :]
 		if remaining and not has_tbody:
 			parts.append('<tbody>')
 			for child in remaining:

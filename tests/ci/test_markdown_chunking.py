@@ -1,13 +1,9 @@
 """Tests for structure-aware markdown chunking."""
 
-import pytest
 from markdownify import markdownify as md
 from pytest_httpserver import HTTPServer
 
 from browser_use.dom.markdown_extractor import chunk_markdown_by_structure
-from browser_use.dom.serializer.html_serializer import HTMLSerializer
-from browser_use.dom.views import MarkdownChunk
-
 
 # ---------------------------------------------------------------------------
 # Unit tests — synchronous, no browser needed
@@ -170,12 +166,8 @@ class TestChunkMarkdownTable:
 
 		# Every chunk after the first should carry the table header in its overlap
 		for i in range(1, len(chunks)):
-			assert '| Col1 | Col2 |' in chunks[i].overlap_prefix, (
-				f'Chunk {i} missing table header in overlap'
-			)
-			assert '| --- | --- |' in chunks[i].overlap_prefix, (
-				f'Chunk {i} missing table separator in overlap'
-			)
+			assert '| Col1 | Col2 |' in chunks[i].overlap_prefix, f'Chunk {i} missing table header in overlap'
+			assert '| --- | --- |' in chunks[i].overlap_prefix, f'Chunk {i} missing table separator in overlap'
 
 
 class TestChunkMarkdownListItems:
