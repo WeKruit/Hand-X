@@ -359,6 +359,7 @@ class Tools(Generic[Context]):
 		@self.registry.action(
 			'',
 			param_model=SearchAction,
+			terminates_sequence=True,
 		)
 		async def search(params: SearchAction, browser_session: BrowserSession):
 			import urllib.parse
@@ -402,6 +403,7 @@ class Tools(Generic[Context]):
 		@self.registry.action(
 			'',
 			param_model=NavigateAction,
+			terminates_sequence=True,
 		)
 		async def navigate(params: NavigateAction, browser_session: BrowserSession):
 			try:
@@ -446,7 +448,7 @@ class Tools(Generic[Context]):
 					# Return error in ActionResult instead of re-raising
 					return ActionResult(error=f'Navigation failed: {str(e)}')
 
-		@self.registry.action('Go back', param_model=NoParamsAction)
+		@self.registry.action('Go back', param_model=NoParamsAction, terminates_sequence=True)
 		async def go_back(_: NoParamsAction, browser_session: BrowserSession):
 			try:
 				event = browser_session.event_bus.dispatch(GoBackEvent())
@@ -854,6 +856,7 @@ class Tools(Generic[Context]):
 		@self.registry.action(
 			'Switch to another open tab by tab_id. Tab IDs are shown in browser state tabs list (last 4 chars of target_id). Use when you need to work with content in a different tab.',
 			param_model=SwitchTabAction,
+			terminates_sequence=True,
 		)
 		async def switch(params: SwitchTabAction, browser_session: BrowserSession):
 			# Simple switch tab logic
