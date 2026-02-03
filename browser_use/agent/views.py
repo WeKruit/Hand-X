@@ -41,12 +41,15 @@ class AgentSettings(BaseModel):
 	override_system_message: str | None = None
 	extend_system_message: str | None = None
 	include_attributes: list[str] | None = DEFAULT_INCLUDE_ATTRIBUTES
-	max_actions_per_step: int = 3
+	max_actions_per_step: int = 5
 	use_thinking: bool = True
 	flash_mode: bool = False  # If enabled, disables evaluation_previous_goal and next_goal, and sets use_thinking = False
 	use_judge: bool = True
 	ground_truth: str | None = None  # Ground truth answer or criteria for judge validation
 	max_history_items: int | None = None
+	enable_planning: bool = True
+	planning_replan_on_stall: int = 3  # consecutive failures before replan nudge; 0 = disabled
+	planning_exploration_limit: int = 5  # steps without a plan before nudge; 0 = disabled
 
 	page_extraction_llm: BaseChatModel | None = None
 	calculate_cost: bool = False
@@ -65,7 +68,9 @@ class AgentState(BaseModel):
 	n_steps: int = 1
 	consecutive_failures: int = 0
 	last_result: list[ActionResult] | None = None
-	last_plan: str | None = None
+	plan: list[PlanItem] | None = None
+	current_plan_item_index: int = 0
+	plan_generation_step: int | None = None
 	last_model_output: AgentOutput | None = None
 
 	# Pause/resume state (kept serialisable for checkpointing)
@@ -105,6 +110,13 @@ class JudgementResult(BaseModel):
 		default=False,
 		description='True if the agent encountered captcha challenges during task execution',
 	)
+
+
+class SimpleJudgeResult(BaseModel):
+	"""Result of lightweight always-on judge that validates agent success claims."""
+
+	is_correct: bool = Field(description='True if the agent response genuinely satisfies the task requirements')
+	reason: str = Field(default='', description='Brief explanation if not correct')
 
 
 class ActionResult(BaseModel):
@@ -176,6 +188,11 @@ class StepMetadata(BaseModel):
 		return self.step_end_time - self.step_start_time
 
 
+class PlanItem(BaseModel):
+	text: str
+	status: Literal['pending', 'current', 'done', 'skipped'] = 'pending'
+
+
 class AgentBrain(BaseModel):
 	thinking: str | None = None
 	evaluation_previous_goal: str
@@ -190,6 +207,8 @@ class AgentOutput(BaseModel):
 	evaluation_previous_goal: str | None = None
 	memory: str | None = None
 	next_goal: str | None = None
+	current_plan_item: int | None = None
+	plan_update: list[str] | None = None
 	action: list[ActionModel] = Field(
 		...,
 		json_schema_extra={'min_items': 1},  # Ensure at least one action is provided
@@ -258,10 +277,12 @@ class AgentOutput(BaseModel):
 			@classmethod
 			def model_json_schema(cls, **kwargs):
 				schema = super().model_json_schema(**kwargs)
-				# Remove thinking, evaluation_previous_goal, and next_goal fields
+				# Remove thinking, evaluation_previous_goal, next_goal, and plan fields
 				del schema['properties']['thinking']
 				del schema['properties']['evaluation_previous_goal']
 				del schema['properties']['next_goal']
+				schema['properties'].pop('current_plan_item', None)
+				schema['properties'].pop('plan_update', None)
 				# Update required fields to only include remaining properties
 				schema['required'] = ['memory', 'action']
 				return schema
@@ -381,6 +402,10 @@ class AgentHistory(BaseModel):
 			# Only include thinking if it's present
 			if self.model_output.thinking is not None:
 				model_output_dump['thinking'] = self.model_output.thinking
+			if self.model_output.current_plan_item is not None:
+				model_output_dump['current_plan_item'] = self.model_output.current_plan_item
+			if self.model_output.plan_update is not None:
+				model_output_dump['plan_update'] = self.model_output.plan_update
 
 		# Handle result serialization - don't filter ActionResult data
 		# as it should contain meaningful information for the agent
