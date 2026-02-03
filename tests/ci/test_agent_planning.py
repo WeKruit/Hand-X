@@ -375,3 +375,13 @@ async def test_exploration_nudge_disabled_when_planning_off(browser_session, moc
 	agent._inject_exploration_nudge()
 	after_count = len(agent._message_manager.state.history.context_messages)
 	assert after_count == initial_count
+
+
+# ---------------------------------------------------------------------------
+# 19. Flash mode forces enable_planning=False
+# ---------------------------------------------------------------------------
+
+
+async def test_flash_mode_disables_planning(browser_session, mock_llm):
+	agent = _make_agent(browser_session, mock_llm, flash_mode=True)
+	assert agent.settings.enable_planning is False

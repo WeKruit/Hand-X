@@ -228,6 +228,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if llm.provider == 'browser-use':
 			flash_mode = True
 
+		# Flash mode strips plan fields from the output schema, so planning is structurally impossible
+		if flash_mode:
+			enable_planning = False
+
 		# Auto-configure llm_screenshot_size for Claude Sonnet models
 		if llm_screenshot_size is None:
 			model_name = getattr(llm, 'model', '')
