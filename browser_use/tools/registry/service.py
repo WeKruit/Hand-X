@@ -293,6 +293,7 @@ class Registry(Generic[Context]):
 		param_model: type[BaseModel] | None = None,
 		domains: list[str] | None = None,
 		allowed_domains: list[str] | None = None,
+		terminates_sequence: bool = False,
 	):
 		"""Decorator for registering actions"""
 		# Handle aliases: domains and allowed_domains are the same parameter
@@ -315,6 +316,7 @@ class Registry(Generic[Context]):
 				function=normalized_func,
 				param_model=actual_param_model,
 				domains=final_domains,
+				terminates_sequence=terminates_sequence,
 			)
 			self.registry.actions[func.__name__] = action
 
