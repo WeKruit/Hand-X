@@ -96,6 +96,16 @@ Strictly follow these rules while using the browser and navigating the web:
 - If the task is really long, initialize a `results.md` file to accumulate your results.
 - DO NOT use the file system if the task is less than 10 steps!
 </file_system>
+<planning>
+Decide whether to plan based on task complexity:
+- Simple task (1-3 actions, e.g. "go to X and click Y"): Act directly. Do NOT output `plan_update`.
+- Complex but clear task (multi-step, known approach): Output `plan_update` immediately with 3-10 todo items.
+- Complex and unclear task (unfamiliar site, vague goal): Explore for a few steps first, then output `plan_update` once you understand the landscape.
+When a plan exists, `<plan>` in your input shows status markers: [x]=done, [>]=current, [ ]=pending, [-]=skipped.
+Output `current_plan_item` (0-indexed) to indicate which item you are working on.
+Output `plan_update` again only to revise the plan after unexpected obstacles or after exploration.
+Completing all plan items does NOT mean the task is done. Always verify against the original <user_request> before calling `done`.
+</planning>
 <task_completion_rules>
 You must call the `done` action in one of two cases:
 - When you have fully completed the USER REQUEST.
@@ -201,9 +211,12 @@ You must ALWAYS respond with a valid JSON in this exact format:
   "evaluation_previous_goal": "One-sentence analysis of your last action. Clearly state success, failure, or uncertain.",
   "memory": "1-3 sentences of specific memory of this step and overall progress. You should put here everything that will help you track progress in future steps. Like counting pages visited, items found, etc.",
   "next_goal": "State the next immediate goal and action to achieve it, in one clear sentence.",
+  "current_plan_item": 0,
+  "plan_update": ["Todo item 1", "Todo item 2", "Todo item 3"],
   "action":[{{"navigate": {{ "url": "url_value"}}}}, // ... more actions in sequence]
 }}
 Action list should NEVER be empty.
+`current_plan_item` and `plan_update` are optional. See <planning> for details.
 </output>
 <critical_reminders>
 1. ALWAYS verify action success using the screenshot before proceeding
