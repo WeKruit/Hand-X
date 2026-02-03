@@ -10,8 +10,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-INVALID_FILENAME_ERROR_MESSAGE = 'Error: Invalid filename format. Must be alphanumeric with supported extension.'
-
 UNSUPPORTED_BINARY_EXTENSIONS = {
 	'png',
 	'jpg',
@@ -392,6 +390,27 @@ class FileSystem:
 
 		return f'{name_part}.{ext.lower()}'
 
+	def _resolve_filename(self, file_name: str) -> tuple[str, bool]:
+		"""Resolve a filename, attempting sanitization if the original is invalid.
+
+		Normalizes to basename first to prevent directory traversal (e.g. ../secret.md).
+
+		Returns:
+			(resolved_name, was_changed): The resolved filename and whether it differs from the input.
+			If resolution fails, returns (basename, was_changed).
+		"""
+		base_name = os.path.basename(file_name)
+		was_changed = base_name != file_name
+
+		if self._is_valid_filename(base_name):
+			return base_name, was_changed
+
+		sanitized = self.sanitize_filename(base_name)
+		if sanitized != base_name and self._is_valid_filename(sanitized):
+			return sanitized, True
+
+		return base_name, was_changed
+
 	def _parse_filename(self, filename: str) -> tuple[str, str]:
 		"""Parse filename into name and extension. Always check _is_valid_filename first."""
 		name, extension = filename.rsplit('.', 1)
@@ -402,12 +421,13 @@ class FileSystem:
 		return self.data_dir
 
 	def get_file(self, full_filename: str) -> BaseFile | None:
-		"""Get a file object by full filename"""
-		if not self._is_valid_filename(full_filename):
+		"""Get a file object by full filename, trying sanitization if the name is invalid."""
+		resolved, _ = self._resolve_filename(full_filename)
+		if not self._is_valid_filename(resolved):
 			return None
 
-		# Use full filename as key
-		return self.files.get(full_filename)
+		# Use resolved filename as key
+		return self.files.get(resolved)
 
 	def list_files(self) -> list[str]:
 		"""List all files in the system"""
@@ -415,10 +435,11 @@ class FileSystem:
 
 	def display_file(self, full_filename: str) -> str | None:
 		"""Display file content using file-specific display method"""
-		if not self._is_valid_filename(full_filename):
+		resolved, _ = self._resolve_filename(full_filename)
+		if not self._is_valid_filename(resolved):
 			return None
 
-		file_obj = self.get_file(full_filename)
+		file_obj = self.files.get(resolved)
 		if not file_obj:
 			return None
 
@@ -569,7 +590,7 @@ class FileSystem:
 						truncation_note = (
 							f'\n\n[Showing {len(pages_included)} of {num_pages} pages. '
 							f'Skipped pages: {skipped[:10]}{"..." if len(skipped) > 10 else ""}. '
-							f'Use search_content to find specific text.]'
+							f'Use search_page to find specific text.]'
 						)
 					else:
 						truncation_note = ''
@@ -608,18 +629,23 @@ class FileSystem:
 				return result
 
 		# For internal files, only non-image types are supported
-		if not self._is_valid_filename(full_filename):
-			result['message'] = INVALID_FILENAME_ERROR_MESSAGE
+		resolved, was_sanitized = self._resolve_filename(full_filename)
+		if not self._is_valid_filename(resolved):
+			result['message'] = _build_filename_error_message(full_filename, self.get_allowed_extensions())
 			return result
 
-		file_obj = self.get_file(full_filename)
+		file_obj = self.files.get(resolved)
 		if not file_obj:
-			result['message'] = f"File '{full_filename}' not found."
+			if was_sanitized:
+				result['message'] = f"File '{resolved}' not found. (Filename was auto-corrected from '{full_filename}')"
+			else:
+				result['message'] = f"File '{full_filename}' not found."
 			return result
 
 		try:
 			content = file_obj.read()
-			result['message'] = f'Read from file {full_filename}.\n<content>\n{content}\n</content>'
+			sanitize_note = f"Note: filename was auto-corrected from '{full_filename}' to '{resolved}'. " if was_sanitized else ''
+			result['message'] = f'{sanitize_note}Read from file {resolved}.\n<content>\n{content}\n</content>'
 			return result
 		except FileSystemError as e:
 			result['message'] = str(e)
@@ -638,13 +664,11 @@ class FileSystem:
 
 	async def write_file(self, full_filename: str, content: str) -> str:
 		"""Write content to file using file-specific write method"""
-		if not self._is_valid_filename(full_filename):
-			# Try sanitizing the filename before giving up
-			sanitized = self.sanitize_filename(full_filename)
-			if sanitized != os.path.basename(full_filename) and self._is_valid_filename(sanitized):
-				full_filename = sanitized
-			else:
-				return _build_filename_error_message(full_filename, self.get_allowed_extensions())
+		original_filename = full_filename
+		resolved, was_sanitized = self._resolve_filename(full_filename)
+		if not self._is_valid_filename(resolved):
+			return _build_filename_error_message(full_filename, self.get_allowed_extensions())
+		full_filename = resolved
 
 		try:
 			name_without_ext, extension = self._parse_filename(full_filename)
@@ -661,7 +685,8 @@ class FileSystem:
 
 			# Use file-specific write method
 			await file_obj.write(content, self.data_dir)
-			return f'Data written to file {full_filename} successfully.'
+			sanitize_note = f" (auto-corrected from '{original_filename}')" if was_sanitized else ''
+			return f'Data written to file {full_filename} successfully.{sanitize_note}'
 		except FileSystemError as e:
 			return str(e)
 		except Exception as e:
@@ -669,20 +694,22 @@ class FileSystem:
 
 	async def append_file(self, full_filename: str, content: str) -> str:
 		"""Append content to file using file-specific append method"""
-		if not self._is_valid_filename(full_filename):
-			sanitized = self.sanitize_filename(full_filename)
-			if sanitized != os.path.basename(full_filename) and self._is_valid_filename(sanitized):
-				full_filename = sanitized
-			else:
-				return _build_filename_error_message(full_filename, self.get_allowed_extensions())
+		original_filename = full_filename
+		resolved, was_sanitized = self._resolve_filename(full_filename)
+		if not self._is_valid_filename(resolved):
+			return _build_filename_error_message(full_filename, self.get_allowed_extensions())
+		full_filename = resolved
 
-		file_obj = self.get_file(full_filename)
+		file_obj = self.files.get(full_filename)
 		if not file_obj:
+			if was_sanitized:
+				return f"File '{full_filename}' not found. (Filename was auto-corrected from '{original_filename}')"
 			return f"File '{full_filename}' not found."
 
 		try:
 			await file_obj.append(content, self.data_dir)
-			return f'Data appended to file {full_filename} successfully.'
+			sanitize_note = f" (auto-corrected from '{original_filename}')" if was_sanitized else ''
+			return f'Data appended to file {full_filename} successfully.{sanitize_note}'
 		except FileSystemError as e:
 			return str(e)
 		except Exception as e:
@@ -690,25 +717,27 @@ class FileSystem:
 
 	async def replace_file_str(self, full_filename: str, old_str: str, new_str: str) -> str:
 		"""Replace old_str with new_str in file_name"""
-		if not self._is_valid_filename(full_filename):
-			sanitized = self.sanitize_filename(full_filename)
-			if sanitized != os.path.basename(full_filename) and self._is_valid_filename(sanitized):
-				full_filename = sanitized
-			else:
-				return _build_filename_error_message(full_filename, self.get_allowed_extensions())
+		original_filename = full_filename
+		resolved, was_sanitized = self._resolve_filename(full_filename)
+		if not self._is_valid_filename(resolved):
+			return _build_filename_error_message(full_filename, self.get_allowed_extensions())
+		full_filename = resolved
 
 		if not old_str:
 			return 'Error: Cannot replace empty string. Please provide a non-empty string to replace.'
 
-		file_obj = self.get_file(full_filename)
+		file_obj = self.files.get(full_filename)
 		if not file_obj:
+			if was_sanitized:
+				return f"File '{full_filename}' not found. (Filename was auto-corrected from '{original_filename}')"
 			return f"File '{full_filename}' not found."
 
 		try:
 			content = file_obj.read()
 			content = content.replace(old_str, new_str)
 			await file_obj.write(content, self.data_dir)
-			return f'Successfully replaced all occurrences of "{old_str}" with "{new_str}" in file {full_filename}'
+			sanitize_note = f" (auto-corrected from '{original_filename}')" if was_sanitized else ''
+			return f'Successfully replaced all occurrences of "{old_str}" with "{new_str}" in file {full_filename}{sanitize_note}'
 		except FileSystemError as e:
 			return str(e)
 		except Exception as e:

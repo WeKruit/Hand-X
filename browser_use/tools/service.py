@@ -42,6 +42,7 @@ from browser_use.tools.views import (
 	CloseTabAction,
 	DoneAction,
 	ExtractAction,
+	FindElementsAction,
 	GetDropdownOptionsAction,
 	InputTextAction,
 	NavigateAction,
@@ -50,7 +51,7 @@ from browser_use.tools.views import (
 	ScreenshotAction,
 	ScrollAction,
 	SearchAction,
-	SearchContentAction,
+	SearchPageAction,
 	SelectDropdownOptionAction,
 	SendKeysAction,
 	StructuredOutputAction,
@@ -107,6 +108,224 @@ def handle_browser_error(e: BrowserError) -> ActionResult:
 	raise e
 
 
+# --- JS templates for search_page and find_elements ---
+
+_SEARCH_PAGE_JS_BODY = """\
+try {
+	var scope = CSS_SCOPE ? document.querySelector(CSS_SCOPE) : document.body;
+	if (!scope) {
+		return {error: 'CSS scope selector not found: ' + CSS_SCOPE, matches: [], total: 0};
+	}
+	var walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+	var fullText = '';
+	var nodeOffsets = [];
+	while (walker.nextNode()) {
+		var node = walker.currentNode;
+		var text = node.textContent;
+		if (text && text.trim()) {
+			nodeOffsets.push({offset: fullText.length, length: text.length, node: node});
+			fullText += text;
+		}
+	}
+	var re;
+	try {
+		var flags = CASE_SENSITIVE ? 'g' : 'gi';
+		if (IS_REGEX) {
+			re = new RegExp(PATTERN, flags);
+		} else {
+			re = new RegExp(PATTERN.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&'), flags);
+		}
+	} catch (e) {
+		return {error: 'Invalid regex pattern: ' + e.message, matches: [], total: 0};
+	}
+	var matches = [];
+	var match;
+	var totalFound = 0;
+	while ((match = re.exec(fullText)) !== null) {
+		totalFound++;
+		if (matches.length < MAX_RESULTS) {
+			var start = Math.max(0, match.index - CONTEXT_CHARS);
+			var end = Math.min(fullText.length, match.index + match[0].length + CONTEXT_CHARS);
+			var context = fullText.slice(start, end);
+			var elementPath = '';
+			for (var i = 0; i < nodeOffsets.length; i++) {
+				var no = nodeOffsets[i];
+				if (no.offset <= match.index && no.offset + no.length > match.index) {
+					elementPath = _getPath(no.node.parentElement);
+					break;
+				}
+			}
+			matches.push({
+				match_text: match[0],
+				context: (start > 0 ? '...' : '') + context + (end < fullText.length ? '...' : ''),
+				element_path: elementPath,
+				char_position: match.index
+			});
+		}
+		if (match[0].length === 0) re.lastIndex++;
+	}
+	return {matches: matches, total: totalFound, has_more: totalFound > MAX_RESULTS};
+} catch (e) {
+	return {error: 'search_page error: ' + e.message, matches: [], total: 0};
+}
+function _getPath(el) {
+	var parts = [];
+	var current = el;
+	while (current && current !== document.body && current !== document) {
+		var desc = current.tagName ? current.tagName.toLowerCase() : '';
+		if (!desc) break;
+		if (current.id) desc += '#' + current.id;
+		else if (current.className && typeof current.className === 'string') {
+			var classes = current.className.trim().split(/\\s+/).slice(0, 2).join('.');
+			if (classes) desc += '.' + classes;
+		}
+		parts.unshift(desc);
+		current = current.parentElement;
+	}
+	return parts.join(' > ');
+}
+"""
+
+_FIND_ELEMENTS_JS_BODY = """\
+try {
+	var elements;
+	try {
+		elements = document.querySelectorAll(SELECTOR);
+	} catch (e) {
+		return {error: 'Invalid CSS selector: ' + e.message, elements: [], total: 0};
+	}
+	var total = elements.length;
+	var limit = Math.min(total, MAX_RESULTS);
+	var results = [];
+	for (var i = 0; i < limit; i++) {
+		var el = elements[i];
+		var item = {index: i, tag: el.tagName.toLowerCase()};
+		if (INCLUDE_TEXT) {
+			var text = (el.textContent || '').trim();
+			item.text = text.length > 300 ? text.slice(0, 300) + '...' : text;
+		}
+		if (ATTRIBUTES && ATTRIBUTES.length > 0) {
+			item.attrs = {};
+			for (var j = 0; j < ATTRIBUTES.length; j++) {
+				var val = el.getAttribute(ATTRIBUTES[j]);
+				if (val !== null) {
+					item.attrs[ATTRIBUTES[j]] = val.length > 500 ? val.slice(0, 500) + '...' : val;
+				}
+			}
+		}
+		item.children_count = el.children.length;
+		results.push(item);
+	}
+	return {elements: results, total: total, showing: limit};
+} catch (e) {
+	return {error: 'find_elements error: ' + e.message, elements: [], total: 0};
+}
+"""
+
+
+def _build_search_page_js(
+	pattern: str,
+	regex: bool,
+	case_sensitive: bool,
+	context_chars: int,
+	css_scope: str | None,
+	max_results: int,
+) -> str:
+	"""Build JS IIFE for search_page with safe parameter injection."""
+	params_js = (
+		f'var PATTERN = {json.dumps(pattern)};\n'
+		f'var IS_REGEX = {json.dumps(regex)};\n'
+		f'var CASE_SENSITIVE = {json.dumps(case_sensitive)};\n'
+		f'var CONTEXT_CHARS = {json.dumps(context_chars)};\n'
+		f'var CSS_SCOPE = {json.dumps(css_scope)};\n'
+		f'var MAX_RESULTS = {json.dumps(max_results)};\n'
+	)
+	return '(function() {\n' + params_js + _SEARCH_PAGE_JS_BODY + '\n})()'
+
+
+def _build_find_elements_js(
+	selector: str,
+	attributes: list[str] | None,
+	max_results: int,
+	include_text: bool,
+) -> str:
+	"""Build JS IIFE for find_elements with safe parameter injection."""
+	params_js = (
+		f'var SELECTOR = {json.dumps(selector)};\n'
+		f'var ATTRIBUTES = {json.dumps(attributes)};\n'
+		f'var MAX_RESULTS = {json.dumps(max_results)};\n'
+		f'var INCLUDE_TEXT = {json.dumps(include_text)};\n'
+	)
+	return '(function() {\n' + params_js + _FIND_ELEMENTS_JS_BODY + '\n})()'
+
+
+def _format_search_results(data: dict, pattern: str) -> str:
+	"""Format search_page CDP result into human-readable text for the agent."""
+	if not isinstance(data, dict):
+		return f'search_page returned unexpected result: {data}'
+
+	matches = data.get('matches', [])
+	total = data.get('total', 0)
+	has_more = data.get('has_more', False)
+
+	if total == 0:
+		return f'No matches found for "{pattern}" on page.'
+
+	lines = [f'Found {total} match{"es" if total != 1 else ""} for "{pattern}" on page:']
+	lines.append('')
+	for i, m in enumerate(matches):
+		context = m.get('context', '')
+		path = m.get('element_path', '')
+		loc = f' (in {path})' if path else ''
+		lines.append(f'[{i + 1}] {context}{loc}')
+
+	if has_more:
+		lines.append(f'\n... showing {len(matches)} of {total} total matches. Increase max_results to see more.')
+
+	return '\n'.join(lines)
+
+
+def _format_find_results(data: dict, selector: str) -> str:
+	"""Format find_elements CDP result into human-readable text for the agent."""
+	if not isinstance(data, dict):
+		return f'find_elements returned unexpected result: {data}'
+
+	elements = data.get('elements', [])
+	total = data.get('total', 0)
+	showing = data.get('showing', 0)
+
+	if total == 0:
+		return f'No elements found matching "{selector}".'
+
+	lines = [f'Found {total} element{"s" if total != 1 else ""} matching "{selector}":']
+	lines.append('')
+	for el in elements:
+		idx = el.get('index', 0)
+		tag = el.get('tag', '?')
+		text = el.get('text', '')
+		attrs = el.get('attrs', {})
+		children = el.get('children_count', 0)
+
+		# Build element description
+		parts = [f'[{idx}] <{tag}>']
+		if text:
+			# Collapse whitespace for readability
+			display_text = ' '.join(text.split())
+			if len(display_text) > 120:
+				display_text = display_text[:120] + '...'
+			parts.append(f'"{display_text}"')
+		if attrs:
+			attr_strs = [f'{k}="{v}"' for k, v in attrs.items()]
+			parts.append('{' + ', '.join(attr_strs) + '}')
+		parts.append(f'({children} children)')
+		lines.append(' '.join(parts))
+
+	if showing < total:
+		lines.append(f'\nShowing {showing} of {total} total elements. Increase max_results to see more.')
+
+	return '\n'.join(lines)
+
+
 def _is_autocomplete_field(node: EnhancedDOMTreeNode) -> bool:
 	"""Detect if a node is an autocomplete/combobox field from its attributes."""
 	attrs = node.attributes or {}
@@ -143,6 +362,7 @@ class Tools(Generic[Context]):
 		@self.registry.action(
 			'',
 			param_model=SearchAction,
+			terminates_sequence=True,
 		)
 		async def search(params: SearchAction, browser_session: BrowserSession):
 			import urllib.parse
@@ -186,6 +406,7 @@ class Tools(Generic[Context]):
 		@self.registry.action(
 			'',
 			param_model=NavigateAction,
+			terminates_sequence=True,
 		)
 		async def navigate(params: NavigateAction, browser_session: BrowserSession):
 			try:
@@ -230,7 +451,7 @@ class Tools(Generic[Context]):
 					# Return error in ActionResult instead of re-raising
 					return ActionResult(error=f'Navigation failed: {str(e)}')
 
-		@self.registry.action('Go back', param_model=NoParamsAction)
+		@self.registry.action('Go back', param_model=NoParamsAction, terminates_sequence=True)
 		async def go_back(_: NoParamsAction, browser_session: BrowserSession):
 			try:
 				event = browser_session.event_bus.dispatch(GoBackEvent())
@@ -638,6 +859,7 @@ class Tools(Generic[Context]):
 		@self.registry.action(
 			'Switch to another open tab by tab_id. Tab IDs are shown in browser state tabs list (last 4 chars of target_id). Use when you need to work with content in a different tab.',
 			param_model=SwitchTabAction,
+			terminates_sequence=True,
 		)
 		async def switch(params: SwitchTabAction, browser_session: BrowserSession):
 			# Simple switch tab logic
@@ -698,12 +920,29 @@ class Tools(Generic[Context]):
 			browser_session: BrowserSession,
 			page_extraction_llm: BaseChatModel,
 			file_system: FileSystem,
+			extraction_schema: dict | None = None,
 		):
 			# Constants
 			MAX_CHAR_LIMIT = 100000
 			query = params['query'] if isinstance(params, dict) else params.query
 			extract_links = params['extract_links'] if isinstance(params, dict) else params.extract_links
 			start_from_char = params['start_from_char'] if isinstance(params, dict) else params.start_from_char
+			output_schema: dict | None = params.get('output_schema') if isinstance(params, dict) else params.output_schema
+
+			# If the LLM didn't provide an output_schema, use the agent-injected extraction_schema
+			if output_schema is None and extraction_schema is not None:
+				output_schema = extraction_schema
+
+			# Attempt to convert output_schema to a pydantic model upfront; fall back to free-text on failure
+			structured_model: type[BaseModel] | None = None
+			if output_schema is not None:
+				try:
+					from browser_use.tools.extraction.schema_utils import schema_dict_to_pydantic_model
+
+					structured_model = schema_dict_to_pydantic_model(output_schema)
+				except (ValueError, TypeError) as exc:
+					logger.warning(f'Invalid output_schema, falling back to free-text extraction: {exc}')
+					output_schema = None
 
 			# Extract clean markdown using the unified method
 			try:
@@ -718,35 +957,29 @@ class Tools(Generic[Context]):
 			# Original content length for processing
 			final_filtered_length = content_stats['final_filtered_chars']
 
+			# Structure-aware chunking replaces naive char-based truncation
+			from browser_use.dom.markdown_extractor import chunk_markdown_by_structure
+
+			chunks = chunk_markdown_by_structure(content, max_chunk_chars=MAX_CHAR_LIMIT, start_from_char=start_from_char)
+			if not chunks:
+				return ActionResult(
+					error=f'start_from_char ({start_from_char}) exceeds content length {final_filtered_length} characters.'
+				)
+			chunk = chunks[0]
+			content = chunk.content
+			truncated = chunk.has_more
+
+			# Prepend overlap context for continuation chunks (e.g. table headers)
+			if chunk.overlap_prefix:
+				content = chunk.overlap_prefix + '\n' + content
+
 			if start_from_char > 0:
-				if start_from_char >= len(content):
-					return ActionResult(
-						error=f'start_from_char ({start_from_char}) exceeds content length {final_filtered_length} characters.'
-					)
-				content = content[start_from_char:]
 				content_stats['started_from_char'] = start_from_char
-
-			# Smart truncation with context preservation
-			truncated = False
-			if len(content) > MAX_CHAR_LIMIT:
-				# Try to truncate at a natural break point (paragraph, sentence)
-				truncate_at = MAX_CHAR_LIMIT
-
-				# Look for paragraph break within last 500 chars of limit
-				paragraph_break = content.rfind('\n\n', MAX_CHAR_LIMIT - 500, MAX_CHAR_LIMIT)
-				if paragraph_break > 0:
-					truncate_at = paragraph_break
-				else:
-					# Look for sentence break within last 200 chars of limit
-					sentence_break = content.rfind('.', MAX_CHAR_LIMIT - 200, MAX_CHAR_LIMIT)
-					if sentence_break > 0:
-						truncate_at = sentence_break + 1
-
-				content = content[:truncate_at]
-				truncated = True
-				next_start = (start_from_char or 0) + truncate_at
-				content_stats['truncated_at_char'] = truncate_at
-				content_stats['next_start_char'] = next_start
+			if truncated:
+				content_stats['truncated_at_char'] = chunk.char_offset_end
+				content_stats['next_start_char'] = chunk.char_offset_end
+				content_stats['chunk_index'] = chunk.chunk_index
+				content_stats['total_chunks'] = chunk.total_chunks
 
 			# Add content statistics to the result
 			original_html_length = content_stats['original_html_chars']
@@ -757,10 +990,89 @@ class Tools(Generic[Context]):
 			if start_from_char > 0:
 				stats_summary += f' (started from char {start_from_char:,})'
 			if truncated:
-				stats_summary += f' → {len(content):,} final chars (truncated, use start_from_char={content_stats["next_start_char"]} to continue)'
+				chunk_info = f'chunk {chunk.chunk_index + 1} of {chunk.total_chunks}, '
+				stats_summary += f' → {len(content):,} final chars ({chunk_info}use start_from_char={content_stats["next_start_char"]} to continue)'
 			elif chars_filtered > 0:
 				stats_summary += f' (filtered {chars_filtered:,} chars of noise)'
 
+			# Sanitize surrogates from content to prevent UTF-8 encoding errors
+			content = sanitize_surrogates(content)
+			query = sanitize_surrogates(query)
+
+			# --- Structured extraction path ---
+			if structured_model is not None:
+				assert output_schema is not None
+				system_prompt = """
+You are an expert at extracting structured data from the markdown of a webpage.
+
+<input>
+You will be given a query, a JSON Schema, and the markdown of a webpage that has been filtered to remove noise and advertising content.
+</input>
+
+<instructions>
+- Extract ONLY information present in the webpage. Do not guess or fabricate values.
+- Your response MUST conform to the provided JSON Schema exactly.
+- If a required field's value cannot be found on the page, use null (if the schema allows it) or an empty string / empty array as appropriate.
+- If the content was truncated, extract what is available from the visible portion.
+</instructions>
+""".strip()
+
+				schema_json = json.dumps(output_schema, indent=2)
+				prompt = (
+					f'<query>\n{query}\n</query>\n\n'
+					f'<output_schema>\n{schema_json}\n</output_schema>\n\n'
+					f'<content_stats>\n{stats_summary}\n</content_stats>\n\n'
+					f'<webpage_content>\n{content}\n</webpage_content>'
+				)
+
+				try:
+					response = await asyncio.wait_for(
+						page_extraction_llm.ainvoke(
+							[SystemMessage(content=system_prompt), UserMessage(content=prompt)],
+							output_format=structured_model,
+						),
+						timeout=120.0,
+					)
+
+					# response.completion is a pydantic model instance
+					result_data: dict = response.completion.model_dump(mode='json')  # type: ignore[union-attr]
+					result_json = json.dumps(result_data)
+
+					current_url = await browser_session.get_current_page_url()
+					extracted_content = f'<url>\n{current_url}\n</url>\n<query>\n{query}\n</query>\n<structured_result>\n{result_json}\n</structured_result>'
+
+					from browser_use.tools.extraction.views import ExtractionResult
+
+					extraction_meta = ExtractionResult(
+						data=result_data,
+						schema_used=output_schema,
+						is_partial=truncated,
+						source_url=current_url,
+						content_stats=content_stats,
+					)
+
+					# Simple memory handling
+					MAX_MEMORY_LENGTH = 10000
+					if len(extracted_content) < MAX_MEMORY_LENGTH:
+						memory = extracted_content
+						include_extracted_content_only_once = False
+					else:
+						file_name = await file_system.save_extracted_content(extracted_content)
+						memory = f'Query: {query}\nContent in {file_name} and once in <read_state>.'
+						include_extracted_content_only_once = True
+
+					logger.info(f'📄 {memory}')
+					return ActionResult(
+						extracted_content=extracted_content,
+						include_extracted_content_only_once=include_extracted_content_only_once,
+						long_term_memory=memory,
+						metadata={'structured_extraction': True, 'extraction_result': extraction_meta.model_dump(mode='json')},
+					)
+				except Exception as e:
+					logger.debug(f'Error in structured extraction: {e}')
+					raise RuntimeError(str(e))
+
+			# --- Free-text extraction path (default) ---
 			system_prompt = """
 You are an expert at extracting data from the markdown of a webpage.
 
@@ -781,10 +1093,6 @@ You will be given a query and the markdown of a webpage that has been filtered t
 - Do not answer in conversational format - directly output the relevant information or that the information is unavailable.
 </output>
 """.strip()
-
-			# Sanitize surrogates from content to prevent UTF-8 encoding errors
-			content = sanitize_surrogates(content)
-			query = sanitize_surrogates(query)
 
 			prompt = f'<query>\n{query}\n</query>\n\n<content_stats>\n{stats_summary}\n</content_stats>\n\n<webpage_content>\n{content}\n</webpage_content>'
 
@@ -818,6 +1126,80 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			except Exception as e:
 				logger.debug(f'Error extracting content: {e}')
 				raise RuntimeError(str(e))
+
+		# --- Page search and exploration tools (zero LLM cost) ---
+
+		@self.registry.action(
+			"""Search page text for a pattern (like grep). Zero LLM cost, instant. Returns matches with surrounding context. Use to find specific text, verify content exists, or locate data on the page. Set regex=True for regex patterns. Use css_scope to search within a specific section.""",
+			param_model=SearchPageAction,
+		)
+		async def search_page(params: SearchPageAction, browser_session: BrowserSession):
+			js_code = _build_search_page_js(
+				pattern=params.pattern,
+				regex=params.regex,
+				case_sensitive=params.case_sensitive,
+				context_chars=params.context_chars,
+				css_scope=params.css_scope,
+				max_results=params.max_results,
+			)
+
+			cdp_session = await browser_session.get_or_create_cdp_session()
+			result = await cdp_session.cdp_client.send.Runtime.evaluate(
+				params={'expression': js_code, 'returnByValue': True, 'awaitPromise': True},
+				session_id=cdp_session.session_id,
+			)
+
+			if result.get('exceptionDetails'):
+				error_text = result['exceptionDetails'].get('text', 'Unknown JS error')
+				return ActionResult(error=f'search_page failed: {error_text}')
+
+			data = result.get('result', {}).get('value')
+			if data is None:
+				return ActionResult(error='search_page returned no result')
+
+			if isinstance(data, dict) and data.get('error'):
+				return ActionResult(error=f'search_page: {data["error"]}')
+
+			formatted = _format_search_results(data, params.pattern)
+			total = data.get('total', 0)
+			memory = f'Searched page for "{params.pattern}": {total} match{"es" if total != 1 else ""} found.'
+			logger.info(f'🔎 {memory}')
+			return ActionResult(extracted_content=formatted, long_term_memory=memory)
+
+		@self.registry.action(
+			"""Query DOM elements by CSS selector (like find). Zero LLM cost, instant. Returns matching elements with tag, text, and attributes. Use to explore page structure, count items, get links/attributes. Use attributes=["href","src"] to extract specific attributes.""",
+			param_model=FindElementsAction,
+		)
+		async def find_elements(params: FindElementsAction, browser_session: BrowserSession):
+			js_code = _build_find_elements_js(
+				selector=params.selector,
+				attributes=params.attributes,
+				max_results=params.max_results,
+				include_text=params.include_text,
+			)
+
+			cdp_session = await browser_session.get_or_create_cdp_session()
+			result = await cdp_session.cdp_client.send.Runtime.evaluate(
+				params={'expression': js_code, 'returnByValue': True, 'awaitPromise': True},
+				session_id=cdp_session.session_id,
+			)
+
+			if result.get('exceptionDetails'):
+				error_text = result['exceptionDetails'].get('text', 'Unknown JS error')
+				return ActionResult(error=f'find_elements failed: {error_text}')
+
+			data = result.get('result', {}).get('value')
+			if data is None:
+				return ActionResult(error='find_elements returned no result')
+
+			if isinstance(data, dict) and data.get('error'):
+				return ActionResult(error=f'find_elements: {data["error"]}')
+
+			formatted = _format_find_results(data, params.selector)
+			total = data.get('total', 0)
+			memory = f'Found {total} element{"s" if total != 1 else ""} matching "{params.selector}".'
+			logger.info(f'🔍 {memory}')
+			return ActionResult(extracted_content=formatted, long_term_memory=memory)
 
 		@self.registry.action(
 			"""Scroll by pages. REQUIRED: down=True/False (True=scroll down, False=scroll up, default=True). Optional: pages=0.5-10.0 (default 1.0). Use index for scroll elements (dropdowns/custom UI). High pages (10) reaches bottom. Multi-page scrolls sequentially. Viewport-based height, fallback 1000px/page.""",
@@ -1103,8 +1485,9 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			else:
 				result = await file_system.write_file(file_name, content)
 
-			# Log the full path where the file is stored
-			file_path = file_system.get_dir() / file_name
+			# Log the full path where the file is stored (use resolved name)
+			resolved_name, _ = file_system._resolve_filename(file_name)
+			file_path = file_system.get_dir() / resolved_name
 			logger.info(f'💾 {result} File location: {file_path}')
 
 			return ActionResult(extracted_content=result, long_term_memory=result)
@@ -1417,172 +1800,6 @@ Context: {context}"""
 				error_msg = f'Error reading content: {str(e)}'
 				logger.error(error_msg)
 				return ActionResult(extracted_content=error_msg, long_term_memory=error_msg)
-
-		@self.registry.action(
-			'Search for text or regex patterns. Use source="page" to search current webpage, or provide a file path to search files. Returns matches with surrounding context. Faster than extract for finding specific text.',
-			param_model=SearchContentAction,
-		)
-		async def search_content(
-			params: SearchContentAction,
-			browser_session: BrowserSession,
-			available_file_paths: list[str],
-		):
-			import re
-
-			query = params.query
-			source = params.source
-
-			# Compile regex pattern
-			try:
-				pattern = re.compile(query, re.IGNORECASE)
-			except re.error:
-				pattern = re.compile(re.escape(query), re.IGNORECASE)
-
-			def find_matches(text: str, context_chars: int = 100) -> list[dict]:
-				"""Find all matches with context."""
-				matches = []
-				for match in pattern.finditer(text):
-					start = max(0, match.start() - context_chars)
-					end = min(len(text), match.end() + context_chars)
-					snippet = text[start:end].replace('\n', ' ')
-					matches.append(
-						{
-							'position': match.start(),
-							'snippet': snippet,
-						}
-					)
-				return matches
-
-			if source.lower() == 'page':
-				# Search current webpage
-				try:
-					from browser_use.dom.markdown_extractor import extract_clean_markdown
-
-					# Clear DOM cache and wait for page to settle before extracting
-					if browser_session._dom_watchdog:
-						browser_session._dom_watchdog.clear_cache()
-
-					# Wait for network to settle
-					wait_time = browser_session.browser_profile.wait_for_network_idle_page_load_time
-					await asyncio.sleep(wait_time)
-
-					page_text, _ = await extract_clean_markdown(browser_session=browser_session, extract_links=False)
-
-					if not page_text:
-						return ActionResult(
-							extracted_content='Error: No page content available to search',
-							long_term_memory='Search failed: no page content',
-						)
-
-					matches = find_matches(page_text, context_chars=150)
-
-					if not matches:
-						result_text = f'No matches found for "{query}" on current page'
-					else:
-						result_parts = [f'Found {len(matches)} matches for "{query}" on current page:']
-						for i, m in enumerate(matches[:20], 1):
-							result_parts.append(f'  {i}. (char {m["position"]}): ...{m["snippet"]}...')
-						if len(matches) > 20:
-							result_parts.append(f'  ... and {len(matches) - 20} more matches')
-						result_text = '\n'.join(result_parts)
-
-					memory = f'Searched page for "{query}": {len(matches)} matches'
-					logger.info(f'🔍 {memory}')
-					return ActionResult(extracted_content=result_text, long_term_memory=memory)
-
-				except Exception as e:
-					error_msg = f'Error searching page: {str(e)}'
-					logger.error(error_msg)
-					return ActionResult(extracted_content=error_msg, long_term_memory=error_msg)
-
-			else:
-				# Search a file
-				file_path = source
-
-				if available_file_paths and file_path in available_file_paths:
-					pass
-				elif not os.path.isabs(file_path):
-					return ActionResult(
-						extracted_content=f'Error: File path must be absolute or in available_file_paths: {file_path}',
-						long_term_memory='Failed to search: invalid path',
-					)
-
-				if not os.path.exists(file_path):
-					return ActionResult(
-						extracted_content=f'Error: File not found: {file_path}',
-						long_term_memory='Failed to search: file not found',
-					)
-
-				# Determine file type and search accordingly
-				ext = os.path.splitext(file_path)[1].lower()
-
-				try:
-					if ext == '.pdf':
-						# Search PDF directly using pypdf
-						import pypdf
-
-						reader = pypdf.PdfReader(file_path)
-						results = []
-
-						for page_num, page in enumerate(reader.pages, 1):
-							text = page.extract_text() or ''
-							if not text:
-								continue
-							for match in pattern.finditer(text):
-								start = max(0, match.start() - 150)
-								end = min(len(text), match.end() + 150)
-								snippet = text[start:end].replace('\n', ' ')
-								results.append({'page': page_num, 'snippet': snippet})
-
-						if not results:
-							result_text = f'No matches found for "{query}" in {file_path}'
-						else:
-							result_parts = [f'Found {len(results)} matches for "{query}":']
-							for r in results[:20]:
-								result_parts.append(f'  Page {r["page"]}: ...{r["snippet"]}...')
-							if len(results) > 20:
-								result_parts.append(f'  ... and {len(results) - 20} more matches')
-							result_text = '\n'.join(result_parts)
-
-						memory = f'Searched file for "{query}": {len(results)} matches'
-
-					else:
-						# Text file search
-						async with await anyio.open_file(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-							content = await f.read()
-
-						lines = content.split('\n')
-						matches = []
-						for line_num, line in enumerate(lines, 1):
-							for match in pattern.finditer(line):
-								start = max(0, match.start() - 50)
-								end = min(len(line), match.end() + 50)
-								matches.append(
-									{
-										'line': line_num,
-										'snippet': line[start:end],
-									}
-								)
-
-						if not matches:
-							result_text = f'No matches found for "{query}" in {file_path}'
-						else:
-							result_parts = [f'Found {len(matches)} matches for "{query}" in file:']
-							for m in matches[:20]:
-								result_parts.append(f'  Line {m["line"]}: ...{m["snippet"]}...')
-							if len(matches) > 20:
-								result_parts.append(f'  ... and {len(matches) - 20} more matches')
-							result_text = '\n'.join(result_parts)
-
-						memory = f'Searched file for "{query}": {len(matches)} matches'
-
-					logger.info(f'🔍 {memory}')
-					return ActionResult(extracted_content=result_text, long_term_memory=memory)
-
-				except Exception as e:
-					error_msg = f'Error searching file: {str(e)}'
-					logger.error(error_msg)
-					return ActionResult(extracted_content=error_msg, long_term_memory=error_msg)
 
 		@self.registry.action(
 			"""Execute browser JavaScript. Best practice: wrap in IIFE (function(){...})() with try-catch for safety. Use ONLY browser APIs (document, window, DOM). NO Node.js APIs (fs, require, process). Example: (function(){try{const el=document.querySelector('#id');return el?el.value:'not found'}catch(e){return 'Error: '+e.message}})() Avoid comments. Use for hover, drag, zoom, custom selectors, extract/filter links, shadow DOM, or analysing page structure. Limit output size.""",
@@ -1916,6 +2133,7 @@ Validated Code (after quote fixing):
 		sensitive_data: dict[str, str | dict[str, str]] | None = None,
 		available_file_paths: list[str] | None = None,
 		file_system: FileSystem | None = None,
+		extraction_schema: dict | None = None,
 	) -> ActionResult:
 		"""Execute an action"""
 
@@ -1947,6 +2165,7 @@ Validated Code (after quote fixing):
 							file_system=file_system,
 							sensitive_data=sensitive_data,
 							available_file_paths=available_file_paths,
+							extraction_schema=extraction_schema,
 						)
 					except BrowserError as e:
 						logger.error(f'❌ Action {action_name} failed with BrowserError: {str(e)}')
@@ -1997,6 +2216,7 @@ Validated Code (after quote fixing):
 					'file_system',
 					'available_file_paths',
 					'sensitive_data',
+					'extraction_schema',
 				}
 
 				# Extract action params (params for the action itself)

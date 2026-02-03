@@ -1,6 +1,7 @@
 from typing import Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.json_schema import SkipJsonSchema
 
 
 # Action Input Models
@@ -12,6 +13,29 @@ class ExtractAction(BaseModel):
 	start_from_char: int = Field(
 		default=0, description='Use this for long markdowns to start from a specific character (not index in browser_state)'
 	)
+	output_schema: SkipJsonSchema[dict | None] = Field(
+		default=None,
+		description='Optional JSON Schema dict. When provided, extraction returns validated JSON matching this schema instead of free-text.',
+	)
+
+
+class SearchPageAction(BaseModel):
+	pattern: str = Field(description='Text or regex pattern to search for in page content')
+	regex: bool = Field(default=False, description='Treat pattern as regex (default: literal text match)')
+	case_sensitive: bool = Field(default=False, description='Case-sensitive search (default: case-insensitive)')
+	context_chars: int = Field(default=150, description='Characters of surrounding context per match')
+	css_scope: str | None = Field(default=None, description='CSS selector to limit search scope (e.g. "div#main")')
+	max_results: int = Field(default=25, description='Maximum matches to return')
+
+
+class FindElementsAction(BaseModel):
+	selector: str = Field(description='CSS selector to query elements (e.g. "table tr", "a.link", "div.product")')
+	attributes: list[str] | None = Field(
+		default=None,
+		description='Specific attributes to extract (e.g. ["href", "src", "class"]). If not set, returns tag and text only.',
+	)
+	max_results: int = Field(default=50, description='Maximum elements to return')
+	include_text: bool = Field(default=True, description='Include text content of each element')
 
 
 class SearchAction(BaseModel):
@@ -104,16 +128,6 @@ class ScreenshotAction(BaseModel):
 	file_name: str | None = Field(
 		default=None,
 		description='If provided, saves screenshot to this file and returns path. Otherwise screenshot is included in next observation.',
-	)
-
-
-class SearchContentAction(BaseModel):
-	"""Action for searching text/regex across current page or files."""
-
-	query: str = Field(description='Text or regex pattern to search for')
-	source: str = Field(
-		default='page',
-		description='What to search: "page" for current webpage, or a file path',
 	)
 
 
