@@ -1713,7 +1713,7 @@ Context: {context}"""
 								break  # no room for meaningful content
 							page_content = page_header + text
 							if len(page_content) > remaining:
-								page_content = page_content[:remaining - len('\n[...truncated]')] + '\n[...truncated]'
+								page_content = page_content[: remaining - len('\n[...truncated]')] + '\n[...truncated]'
 							content_parts.append(page_content)
 							chars_used += len(page_content)
 							pages_included.append(page_num)
