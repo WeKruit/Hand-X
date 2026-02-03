@@ -255,7 +255,7 @@ Respond with EXACTLY this JSON structure:
 Be strict: if the response doesn't clearly satisfy every requirement, set verified to false."""
 
 	user_prompt = f"""<task>
-{task_truncated}
+{task_truncated or 'No task provided'}
 </task>
 
 <agent_final_response>
