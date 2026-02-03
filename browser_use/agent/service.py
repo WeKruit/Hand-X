@@ -1289,15 +1289,15 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self._message_manager._add_context_message(UserMessage(content=msg))
 			self.AgentOutput = self.DoneAgentOutput
 
-	async def _self_verify_success(self) -> bool:
+	async def _self_verify_success(self) -> str | None:
 		"""Lightweight self-verification when agent claims success.
 
 		Uses the agent's own LLM to verify that the final response actually satisfies the task.
-		Returns True if verification passes, False if success should be overridden to False.
+		Returns None if verification passes, or a reason string if it should be rejected.
 		"""
 		last_result = self.history.history[-1].result[-1]
 		if not last_result.success:
-			return True  # Agent already says failure, no need to verify
+			return None  # Agent already says failure, no need to verify
 
 		task = self.task
 		final_result = self.history.final_result() or ''
@@ -1314,14 +1314,28 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			response = await self.llm.ainvoke(verify_messages, output_format=SelfVerifyResult)
 			result: SelfVerifyResult = response.completion  # type: ignore[assignment]
 			if not result.verified:
-				self.logger.info(f'⚠️  Self-verification failed: {result.reason}')
-				last_result.success = False
-				if last_result.extracted_content:
-					last_result.extracted_content += f'\n\n[Self-verification: {result.reason}]'
-			return result.verified
+				reason = result.reason or 'Verification found unmet requirements'
+				self.logger.info(f'⚠️  Self-verification failed: {reason}')
+				return reason
+			return None
 		except Exception as e:
 			self.logger.warning(f'Self-verification failed with error: {e}')
-			return True  # Don't override on error
+			return None  # Don't override on error
+
+	def _undo_done_and_inject_retry(self, reason: str, steps_remaining: int) -> None:
+		"""Undo the done action result and inject a retry message so the agent continues."""
+		last_result = self.history.history[-1].result[-1]
+		# Clear the done state so the step loop continues
+		last_result.is_done = False
+		last_result.success = None
+
+		self.state.self_verification_retries += 1
+
+		msg = (
+			f'Your previous done(success=true) was rejected by verification: "{reason}" '
+			f'Continue working to address this. You have {steps_remaining} steps remaining.'
+		)
+		self._message_manager._add_context_message(UserMessage(content=msg))
 
 	@observe(ignore_input=True, ignore_output=False)
 	async def _judge_trace(self) -> JudgementResult | None:
@@ -2001,7 +2015,20 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if self.history.is_done():
 			# Self-verify before logging completion
 			if self.settings.use_self_verification:
-				await self._self_verify_success()
+				rejection_reason = await self._self_verify_success()
+				if rejection_reason is not None:
+					# Check if we can retry: have steps left and haven't exceeded retry cap
+					steps_remaining = (step_info.max_steps - step_info.step_number - 1) if step_info else 0
+					can_retry = steps_remaining > 0 and self.state.self_verification_retries < 1
+					if can_retry:
+						self._undo_done_and_inject_retry(rejection_reason, steps_remaining)
+						return False, False
+					else:
+						# No retries left — accept the failure
+						last_result = self.history.history[-1].result[-1]
+						last_result.success = False
+						if last_result.extracted_content:
+							last_result.extracted_content += f'\n\n[Self-verification: {rejection_reason}]'
 
 			await self.log_completion()
 
@@ -2206,7 +2233,18 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if self.history.is_done():
 			# Self-verify before logging completion
 			if self.settings.use_self_verification:
-				await self._self_verify_success()
+				rejection_reason = await self._self_verify_success()
+				if rejection_reason is not None:
+					steps_remaining = max_steps - step - 1
+					can_retry = steps_remaining > 0 and self.state.self_verification_retries < 1
+					if can_retry:
+						self._undo_done_and_inject_retry(rejection_reason, steps_remaining)
+						return False
+					else:
+						last_result = self.history.history[-1].result[-1]
+						last_result.success = False
+						if last_result.extracted_content:
+							last_result.extracted_content += f'\n\n[Self-verification: {rejection_reason}]'
 
 			await self.log_completion()
 
