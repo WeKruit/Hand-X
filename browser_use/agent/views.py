@@ -46,7 +46,6 @@ class AgentSettings(BaseModel):
 	flash_mode: bool = False  # If enabled, disables evaluation_previous_goal and next_goal, and sets use_thinking = False
 	use_judge: bool = True
 	ground_truth: str | None = None  # Ground truth answer or criteria for judge validation
-	use_self_verification: bool = True  # Run lightweight self-check before accepting done(success=True)
 	max_history_items: int | None = None
 
 	page_extraction_llm: BaseChatModel | None = None
@@ -74,7 +73,6 @@ class AgentState(BaseModel):
 	stopped: bool = False
 	session_initialized: bool = False  # Track if session events have been dispatched
 	follow_up_task: bool = False  # Track if the agent is a follow-up task
-	self_verification_retries: int = 0  # Number of times self-verification has rejected done(success=true)
 
 	message_manager_state: MessageManagerState = Field(default_factory=MessageManagerState)
 	file_system_state: FileSystemState | None = None
@@ -108,12 +106,6 @@ class JudgementResult(BaseModel):
 		description='True if the agent encountered captcha challenges during task execution',
 	)
 
-
-class SelfVerifyResult(BaseModel):
-	"""Result of lightweight self-verification before done."""
-
-	verified: bool = Field(description='True if the task appears completed correctly')
-	reason: str = Field(default='', description='Brief explanation if not verified')
 
 
 class ActionResult(BaseModel):

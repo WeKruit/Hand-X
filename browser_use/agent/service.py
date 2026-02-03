@@ -36,7 +36,7 @@ from pydantic import BaseModel, ValidationError
 from uuid_extensions import uuid7str
 
 from browser_use import Browser, BrowserProfile, BrowserSession
-from browser_use.agent.judge import construct_judge_messages, construct_self_verify_messages
+from browser_use.agent.judge import construct_judge_messages
 
 # Lazy import for gif to avoid heavy agent.views import at startup
 # from browser_use.agent.gif import create_history_gif
@@ -57,7 +57,6 @@ from browser_use.agent.views import (
 	BrowserStateHistory,
 	DetectedVariable,
 	JudgementResult,
-	SelfVerifyResult,
 	StepMetadata,
 )
 from browser_use.browser.events import _get_timeout
@@ -179,7 +178,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		page_extraction_llm: BaseChatModel | None = None,
 		fallback_llm: BaseChatModel | None = None,
 		use_judge: bool = True,
-		use_self_verification: bool = True,
 		ground_truth: str | None = None,
 		judge_llm: BaseChatModel | None = None,
 		injected_agent_state: AgentState | None = None,
@@ -388,7 +386,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			step_timeout=step_timeout,
 			final_response_after_failure=final_response_after_failure,
 			use_judge=use_judge,
-			use_self_verification=use_self_verification,
 			ground_truth=ground_truth,
 		)
 
@@ -1289,54 +1286,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self._message_manager._add_context_message(UserMessage(content=msg))
 			self.AgentOutput = self.DoneAgentOutput
 
-	async def _self_verify_success(self) -> str | None:
-		"""Lightweight self-verification when agent claims success.
-
-		Uses the agent's own LLM to verify that the final response actually satisfies the task.
-		Returns None if verification passes, or a reason string if it should be rejected.
-		"""
-		last_result = self.history.history[-1].result[-1]
-		if not last_result.success:
-			return None  # Agent already says failure, no need to verify
-
-		task = self.task
-		final_result = self.history.final_result() or ''
-		screenshot_paths = [p for p in self.history.screenshot_paths() if p is not None]
-
-		verify_messages = construct_self_verify_messages(
-			task=task,
-			final_result=final_result,
-			last_screenshot_path=screenshot_paths[-1] if screenshot_paths else None,
-			use_vision=self.settings.use_vision,
-		)
-
-		try:
-			response = await self.llm.ainvoke(verify_messages, output_format=SelfVerifyResult)
-			result: SelfVerifyResult = response.completion  # type: ignore[assignment]
-			if not result.verified:
-				reason = result.reason or 'Verification found unmet requirements'
-				self.logger.info(f'⚠️  Self-verification failed: {reason}')
-				return reason
-			return None
-		except Exception as e:
-			self.logger.warning(f'Self-verification failed with error: {e}')
-			return None  # Don't override on error
-
-	def _undo_done_and_inject_retry(self, reason: str, steps_remaining: int) -> None:
-		"""Undo the done action result and inject a retry message so the agent continues."""
-		last_result = self.history.history[-1].result[-1]
-		# Clear the done state so the step loop continues
-		last_result.is_done = False
-		last_result.success = None
-
-		self.state.self_verification_retries += 1
-
-		msg = (
-			f'Your previous done(success=true) was rejected by verification: "{reason}" '
-			f'Continue working to address this. You have {steps_remaining} steps remaining.'
-		)
-		self._message_manager._add_context_message(UserMessage(content=msg))
-
 	@observe(ignore_input=True, ignore_output=False)
 	async def _judge_trace(self) -> JudgementResult | None:
 		"""Judge the trace of the agent"""
@@ -2013,26 +1962,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		await self.step(step_info)
 
 		if self.history.is_done():
-			# Self-verify before logging completion
-			if self.settings.use_self_verification:
-				rejection_reason = await self._self_verify_success()
-				if rejection_reason is not None:
-					# Check if we can retry: have steps left and haven't exceeded retry cap
-					steps_remaining = (step_info.max_steps - step_info.step_number - 1) if step_info else 0
-					can_retry = steps_remaining > 0 and self.state.self_verification_retries < 1
-					if can_retry:
-						self._undo_done_and_inject_retry(rejection_reason, steps_remaining)
-						return False, False
-					else:
-						# No retries left — accept the failure
-						last_result = self.history.history[-1].result[-1]
-						last_result.success = False
-						verification_note = f'\n\n[Self-verification: {rejection_reason}]'
-						if last_result.extracted_content:
-							last_result.extracted_content += verification_note
-						else:
-							last_result.extracted_content = verification_note.strip()
-
 			await self.log_completion()
 
 			# Run judge before done callback if enabled
@@ -2234,24 +2163,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			await on_step_end(self)
 
 		if self.history.is_done():
-			# Self-verify before logging completion
-			if self.settings.use_self_verification:
-				rejection_reason = await self._self_verify_success()
-				if rejection_reason is not None:
-					steps_remaining = max_steps - step - 1
-					can_retry = steps_remaining > 0 and self.state.self_verification_retries < 1
-					if can_retry:
-						self._undo_done_and_inject_retry(rejection_reason, steps_remaining)
-						return False
-					else:
-						last_result = self.history.history[-1].result[-1]
-						last_result.success = False
-						verification_note = f'\n\n[Self-verification: {rejection_reason}]'
-						if last_result.extracted_content:
-							last_result.extracted_content += verification_note
-						else:
-							last_result.extracted_content = verification_note.strip()
-
 			await self.log_completion()
 
 			# Run judge before done callback if enabled
