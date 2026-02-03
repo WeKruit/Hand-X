@@ -1627,12 +1627,14 @@ Context: {context}"""
 					# Read from file
 					file_path = source
 
-					if available_file_paths and file_path in available_file_paths:
-						pass
-					elif not os.path.isabs(file_path):
+					# Validate file path against whitelist (available_file_paths + downloaded files)
+					allowed_paths = set(available_file_paths or [])
+					allowed_paths.update(browser_session.downloaded_files)
+					if file_path not in allowed_paths:
 						return ActionResult(
-							extracted_content=f'Error: File path must be absolute or in available_file_paths: {file_path}',
-							long_term_memory='Failed to read: invalid path',
+							extracted_content=f'Error: File path not in available_file_paths: {file_path}. '
+							f'The user must add this path to available_file_paths when creating the Agent.',
+							long_term_memory=f'Failed to read: file path not allowed: {file_path}',
 						)
 
 					if not os.path.exists(file_path):
@@ -1699,15 +1701,19 @@ Context: {context}"""
 							if page_num not in pages_to_read:
 								pages_to_read.append(page_num)
 
-						# Build result respecting char limit
+						# Build result respecting char limit, truncating pages if needed
 						content_parts = []
 						chars_used = 0
 						pages_included = []
 						for page_num in sorted(set(pages_to_read)):
 							text = page_texts[page_num - 1]
-							page_content = f'--- Page {page_num} ---\n{text}'
-							if chars_used + len(page_content) > max_chars:
-								break
+							page_header = f'--- Page {page_num} ---\n'
+							remaining = max_chars - chars_used
+							if remaining < len(page_header) + 50:
+								break  # no room for meaningful content
+							page_content = page_header + text
+							if len(page_content) > remaining:
+								page_content = page_content[:remaining - len('\n[...truncated]')] + '\n[...truncated]'
 							content_parts.append(page_content)
 							chars_used += len(page_content)
 							pages_included.append(page_num)
