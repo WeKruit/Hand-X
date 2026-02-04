@@ -667,7 +667,11 @@ class Tools(Generic[Context]):
 				# Check for autocomplete/combobox field — add mechanical delay for dropdown
 				if _is_autocomplete_field(node):
 					msg += '\n💡 This is an autocomplete field. Wait for suggestions to appear, then click the correct suggestion instead of pressing Enter.'
-					await asyncio.sleep(0.4)  # let dropdown populate before next action
+					# Only delay for true JS-driven autocomplete (combobox / aria-autocomplete),
+					# not native <datalist> or loose aria-haspopup which the browser handles instantly
+					attrs = node.attributes or {}
+					if attrs.get('role') == 'combobox' or (attrs.get('aria-autocomplete', '') not in ('', 'none')):
+						await asyncio.sleep(0.4)  # let JS dropdown populate before next action
 
 				# Include input coordinates in metadata if available
 				return ActionResult(
