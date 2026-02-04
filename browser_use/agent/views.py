@@ -107,14 +107,9 @@ def _normalize_action_for_hash(action_name: str, params: dict[str, Any]) -> str:
 
 	if action_name == 'navigate':
 		url = str(params.get('url', ''))
-		# Hash by domain only — navigating to same domain with different paths is still exploration
-		try:
-			from urllib.parse import urlparse
-
-			domain = urlparse(url).netloc
-			return f'navigate|{domain}'
-		except Exception:
-			return f'navigate|{url}'
+		# Hash by full URL — navigating to different paths is genuine exploration,
+		# only repeated navigation to the exact same URL is a loop signal.
+		return f'navigate|{url}'
 
 	if action_name == 'scroll':
 		direction = 'down' if params.get('down', True) else 'up'
