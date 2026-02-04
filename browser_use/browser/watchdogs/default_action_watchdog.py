@@ -1894,7 +1894,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 					isinstance(actual_value, str)
 					and actual_value != text
 					and len(actual_value) > len(text)
-					and text in actual_value
+					and (actual_value.endswith(text) or actual_value.startswith(text))
 				):
 					self.logger.info(f'🔄 Concatenation detected: got "{actual_value}", expected "{text}" — auto-retrying')
 					try:

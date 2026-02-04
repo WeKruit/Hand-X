@@ -346,8 +346,8 @@ class TestAutocompleteInteraction:
 		# on how the JS listener interacts, but it should not be "prefix_typed_text" (raw concatenation).
 		assert actual != 'prefix_typed_text', f'Got raw concatenation "{actual}" — retry should have prevented this'
 
-	async def test_autocomplete_field_adds_delay(self, tools: Tools, browser_session: BrowserSession, base_url: str):
-		"""Typing into an autocomplete field should take >= 400ms due to the mechanical delay."""
+	async def test_combobox_field_adds_delay(self, tools: Tools, browser_session: BrowserSession, base_url: str):
+		"""Typing into a combobox (role=combobox) field should take >= 400ms due to the mechanical delay."""
 		import time
 
 		await tools.navigate(url=f'{base_url}/combobox-field', new_tab=False, browser_session=browser_session)
@@ -361,4 +361,22 @@ class TestAutocompleteInteraction:
 		duration = time.monotonic() - t0
 
 		# The 400ms sleep is a hard floor — total duration must exceed it
-		assert duration >= 0.4, f'Autocomplete delay not present: input took only {duration:.3f}s (expected >= 0.4s)'
+		assert duration >= 0.4, f'Combobox delay not present: input took only {duration:.3f}s (expected >= 0.4s)'
+
+	async def test_datalist_field_no_delay(self, tools: Tools, browser_session: BrowserSession, base_url: str):
+		"""Native datalist fields should NOT get the 400ms delay — browser handles them instantly."""
+		import time
+
+		await tools.navigate(url=f'{base_url}/datalist-field', new_tab=False, browser_session=browser_session)
+		await asyncio.sleep(0.3)
+		await browser_session.get_browser_state_summary()
+		city_idx = await browser_session.get_index_by_id('city')
+		assert city_idx is not None
+
+		t0 = time.monotonic()
+		await tools.input(index=city_idx, text='Chi', browser_session=browser_session)
+		duration = time.monotonic() - t0
+
+		# Datalist fields should complete without the 400ms tax.
+		# Normal typing for 3 chars takes well under 400ms.
+		assert duration < 0.4, f'Datalist field got unexpected delay: {duration:.3f}s (should be < 0.4s)'
