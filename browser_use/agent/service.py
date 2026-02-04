@@ -1089,8 +1089,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		await self._inject_budget_warning(step_info)
 		self._inject_replan_nudge()
 		self._inject_exploration_nudge()
-		self._inject_loop_detection_nudge()
 		self._update_loop_detector_page_state(browser_state_summary)
+		self._inject_loop_detection_nudge()
 		await self._force_done_after_last_step(step_info)
 		await self._force_done_after_failure()
 		return browser_state_summary

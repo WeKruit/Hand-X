@@ -82,11 +82,18 @@ def test_input_text_different_text_different_hash():
 	assert h1 != h2
 
 
-def test_navigate_same_domain_same_hash():
-	"""Navigate to same domain with different paths produces the same hash."""
+def test_navigate_same_url_same_hash():
+	"""Navigating to the exact same URL produces the same hash."""
+	h1 = compute_action_hash('navigate', {'url': 'https://example.com/page1'})
+	h2 = compute_action_hash('navigate', {'url': 'https://example.com/page1'})
+	assert h1 == h2
+
+
+def test_navigate_different_paths_different_hash():
+	"""Navigating to different paths on the same domain produces different hashes — this is genuine exploration."""
 	h1 = compute_action_hash('navigate', {'url': 'https://example.com/page1'})
 	h2 = compute_action_hash('navigate', {'url': 'https://example.com/page2'})
-	assert h1 == h2
+	assert h1 != h2
 
 
 def test_navigate_different_domain_different_hash():
