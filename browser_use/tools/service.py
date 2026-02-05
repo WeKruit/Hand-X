@@ -497,6 +497,27 @@ class Tools(Generic[Context]):
 			return llm_x, llm_y
 
 		# Element Interaction Actions
+		async def _detect_new_tab_opened(
+			browser_session: BrowserSession,
+			tabs_before: set[str],
+		) -> str:
+			"""Detect if a click opened a new tab, and return a note for the agent.
+			Waits briefly for CDP events to propagate, then checks if any new tabs appeared.
+			"""
+			try:
+				# Brief delay to allow CDP Target.attachedToTarget events to propagate
+				# and be processed by SessionManager._handle_target_attached
+				await asyncio.sleep(0.05)
+
+				tabs_after = await browser_session.get_tabs()
+				new_tabs = [t for t in tabs_after if t.target_id not in tabs_before]
+				if new_tabs:
+					new_tab_id = new_tabs[0].target_id[-4:]
+					return f'. Note: This opened a new tab (tab_id: {new_tab_id}) - switch to it if you need to interact with the new page.'
+			except Exception:
+				pass
+			return ''
+
 		async def _click_by_coordinate(params: ClickElementAction, browser_session: BrowserSession) -> ActionResult:
 			# Ensure coordinates are provided (type safety)
 			if params.coordinate_x is None or params.coordinate_y is None:
@@ -528,15 +549,7 @@ class Tools(Generic[Context]):
 					return ActionResult(error=error_msg)
 
 				memory = f'Clicked on coordinate {params.coordinate_x}, {params.coordinate_y}'
-
-				# Check if click opened a new tab
-				tabs_after = await browser_session.get_tabs()
-				new_tabs = [t for t in tabs_after if t.target_id not in tabs_before]
-				if new_tabs:
-					new_tab = new_tabs[0]
-					new_tab_id = new_tab.target_id[-4:]
-					memory += f'. Note: This opened a new tab (tab_id: {new_tab_id}) - switch to it if you need to interact with the new page.'
-
+				memory += await _detect_new_tab_opened(browser_session, tabs_before)
 				logger.info(f'🖱️ {memory}')
 
 				return ActionResult(
@@ -598,15 +611,7 @@ class Tools(Generic[Context]):
 
 				# Build memory with element info
 				memory = f'Clicked {element_desc}'
-
-				# Check if click opened a new tab
-				tabs_after = await browser_session.get_tabs()
-				new_tabs = [t for t in tabs_after if t.target_id not in tabs_before]
-				if new_tabs:
-					new_tab = new_tabs[0]
-					new_tab_id = new_tab.target_id[-4:]
-					memory += f'. Note: This opened a new tab (tab_id: {new_tab_id}) - switch to it if you need to interact with the new page.'
-
+				memory += await _detect_new_tab_opened(browser_session, tabs_before)
 				logger.info(f'🖱️ {memory}')
 
 				# Include click coordinates in metadata if available
