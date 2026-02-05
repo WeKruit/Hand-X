@@ -508,6 +508,9 @@ class Tools(Generic[Context]):
 					params.coordinate_x, params.coordinate_y, browser_session
 				)
 
+				# Capture tab IDs before click to detect new tabs
+				tabs_before = {t.target_id for t in await browser_session.get_tabs()}
+
 				# Highlight the coordinate being clicked (truly non-blocking)
 				asyncio.create_task(browser_session.highlight_coordinate_click(actual_x, actual_y))
 
@@ -525,8 +528,16 @@ class Tools(Generic[Context]):
 					return ActionResult(error=error_msg)
 
 				memory = f'Clicked on coordinate {params.coordinate_x}, {params.coordinate_y}'
-				msg = f'🖱️ {memory}'
-				logger.info(msg)
+
+				# Check if click opened a new tab
+				tabs_after = await browser_session.get_tabs()
+				new_tabs = [t for t in tabs_after if t.target_id not in tabs_before]
+				if new_tabs:
+					new_tab = new_tabs[0]
+					new_tab_id = new_tab.target_id[-4:]
+					memory += f'. Note: This opened a new tab (tab_id: {new_tab_id}) - switch to it if you need to interact with the new page.'
+
+				logger.info(f'🖱️ {memory}')
 
 				return ActionResult(
 					extracted_content=memory,
@@ -557,6 +568,9 @@ class Tools(Generic[Context]):
 				# Get description of clicked element
 				element_desc = get_click_description(node)
 
+				# Capture tab IDs before click to detect new tabs
+				tabs_before = {t.target_id for t in await browser_session.get_tabs()}
+
 				# Highlight the element being clicked (truly non-blocking)
 				create_task_with_error_handling(
 					browser_session.highlight_interaction_element(node), name='highlight_click_element', suppress_exceptions=True
@@ -584,6 +598,15 @@ class Tools(Generic[Context]):
 
 				# Build memory with element info
 				memory = f'Clicked {element_desc}'
+
+				# Check if click opened a new tab
+				tabs_after = await browser_session.get_tabs()
+				new_tabs = [t for t in tabs_after if t.target_id not in tabs_before]
+				if new_tabs:
+					new_tab = new_tabs[0]
+					new_tab_id = new_tab.target_id[-4:]
+					memory += f'. Note: This opened a new tab (tab_id: {new_tab_id}) - switch to it if you need to interact with the new page.'
+
 				logger.info(f'🖱️ {memory}')
 
 				# Include click coordinates in metadata if available
