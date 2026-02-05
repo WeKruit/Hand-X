@@ -199,7 +199,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		enable_planning: bool = True,
 		planning_replan_on_stall: int = 3,
 		planning_exploration_limit: int = 5,
-		loop_detection_window: int = 10,
+		loop_detection_window: int = 20,
 		loop_detection_enabled: bool = True,
 		llm_screenshot_size: tuple[int, int] | None = None,
 		_url_shortening_limit: int = 25,
@@ -1367,9 +1367,14 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			return
 		if self.state.last_model_output is None:
 			return
+		# Actions to exclude: wait always hashes identically (instant false positive),
+		# done is terminal, go_back is navigation recovery
+		_LOOP_EXEMPT_ACTIONS = {'wait', 'done', 'go_back'}
 		for action in self.state.last_model_output.action:
 			action_data = action.model_dump(exclude_unset=True)
 			action_name = next(iter(action_data.keys()), 'unknown')
+			if action_name in _LOOP_EXEMPT_ACTIONS:
+				continue
 			params = action_data.get(action_name, {})
 			if not isinstance(params, dict):
 				params = {}
