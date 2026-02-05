@@ -2387,7 +2387,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	@time_execution_async('--run')
 	async def run(
 		self,
-		max_steps: int = 100,
+		max_steps: int = 500,
 		on_step_start: AgentHookFunc | None = None,
 		on_step_end: AgentHookFunc | None = None,
 	) -> AgentHistoryList[AgentStructuredOutput]:
@@ -3911,7 +3911,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 	def run_sync(
 		self,
-		max_steps: int = 100,
+		max_steps: int = 500,
 		on_step_start: AgentHookFunc | None = None,
 		on_step_end: AgentHookFunc | None = None,
 	) -> AgentHistoryList[AgentStructuredOutput]:
