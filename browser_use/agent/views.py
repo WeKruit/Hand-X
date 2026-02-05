@@ -61,7 +61,7 @@ class AgentSettings(BaseModel):
 	final_response_after_failure: bool = True  # If True, attempt one final recovery call after max_failures
 
 	# Loop detection settings
-	loop_detection_window: int = 10  # Rolling window size for action similarity tracking
+	loop_detection_window: int = 20  # Rolling window size for action similarity tracking
 	loop_detection_enabled: bool = True  # Whether to enable loop detection nudges
 
 
@@ -95,15 +95,15 @@ def _normalize_action_for_hash(action_name: str, params: dict[str, Any]) -> str:
 		engine = params.get('engine', 'google')
 		return f'search|{engine}|{"|".join(tokens)}'
 
-	if action_name in ('click_element', 'input_text'):
+	if action_name in ('click', 'input'):
 		# For element-interaction actions, we only use the index (element identity).
 		# Two clicks on the same element index are the same action.
 		index = params.get('index')
-		if action_name == 'input_text':
+		if action_name == 'input':
 			text = str(params.get('text', ''))
 			# Normalize input text: lowercase, strip whitespace
-			return f'input_text|{index}|{text.strip().lower()}'
-		return f'click_element|{index}'
+			return f'input|{index}|{text.strip().lower()}'
+		return f'click|{index}'
 
 	if action_name == 'navigate':
 		url = str(params.get('url', ''))
@@ -113,7 +113,8 @@ def _normalize_action_for_hash(action_name: str, params: dict[str, Any]) -> str:
 
 	if action_name == 'scroll':
 		direction = 'down' if params.get('down', True) else 'up'
-		return f'scroll|{direction}'
+		index = params.get('index')
+		return f'scroll|{direction}|{index}'
 
 	# Default: hash by action name + sorted params (excluding None values)
 	filtered = {k: v for k, v in sorted(params.items()) if v is not None}
@@ -136,7 +137,7 @@ class ActionLoopDetector(BaseModel):
 	model_config = ConfigDict(arbitrary_types_allowed=True)
 
 	# Rolling window of recent action hashes
-	window_size: int = 10
+	window_size: int = 20
 	recent_action_hashes: list[str] = Field(default_factory=list)
 
 	# Page fingerprint tracking for stagnation detection
@@ -184,30 +185,30 @@ class ActionLoopDetector(BaseModel):
 		"""Return an escalating nudge message based on repetition severity, or None if no loop detected."""
 		messages: list[str] = []
 
-		# Action repetition nudges (escalating at 3, 5, 8)
-		if self.max_repetition_count >= 8:
+		# Action repetition nudges (escalating at 5, 8, 12)
+		if self.max_repetition_count >= 12:
 			messages.append(
 				f'CRITICAL LOOP DETECTED: You have repeated a similar action {self.max_repetition_count} times '
 				f'in the last {len(self.recent_action_hashes)} actions. '
-				'Your remaining action budget is low. Extract what you can and report results using the done action. '
+				'Try a fundamentally different approach, or if the task is partially complete, report your progress. '
 				'Continuing to repeat the same action will not yield different results.'
 			)
-		elif self.max_repetition_count >= 5:
+		elif self.max_repetition_count >= 8:
 			messages.append(
 				f'STRONG LOOP WARNING: You have repeated a similar action {self.max_repetition_count} times '
 				f'in the last {len(self.recent_action_hashes)} actions. '
 				'Strongly consider abandoning this approach. Try a fundamentally different strategy '
 				'or report that the task cannot be completed with the current approach.'
 			)
-		elif self.max_repetition_count >= 3:
+		elif self.max_repetition_count >= 5:
 			messages.append(
 				f'LOOP DETECTED: You have repeated a similar action {self.max_repetition_count} times '
 				f'in the last {len(self.recent_action_hashes)} actions without meaningful progress. '
-				'Try a fundamentally different approach or report that the task cannot be completed on this site.'
+				'Consider trying a different approach.'
 			)
 
 		# Page stagnation nudge
-		if self.consecutive_stagnant_pages >= 3:
+		if self.consecutive_stagnant_pages >= 5:
 			messages.append(
 				f'PAGE STAGNATION: The page content has not changed across {self.consecutive_stagnant_pages} '
 				'consecutive actions. Your actions are not affecting the page state. '
