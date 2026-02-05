@@ -31,6 +31,40 @@ from browser_use.tools.registry.views import ActionModel
 logger = logging.getLogger(__name__)
 
 
+class MessageCompactionSettings(BaseModel):
+	"""Configuration options for message compaction.
+
+	Thresholds can be specified as either char count or token count (not both).
+	Token counts are converted to char counts using chars_per_token as a rough
+	approximation — we deliberately avoid provider-specific tokenizers to keep
+	dependencies light. The default of ~4 chars/token is a reasonable average
+	for English text; set lower (~3) for code-heavy workloads.
+	"""
+
+	enabled: bool = True
+	trigger_char_count: int | None = None  # Trigger when history exceeds this many chars; set via trigger_token_count if preferred
+	trigger_token_count: int | None = None  # Trigger when history exceeds this many estimated tokens
+	chars_per_token: float = 4.0  # Rough chars-per-token ratio for token estimation
+	min_history_items: int = 12
+	keep_last_items: int = 6
+	summary_max_chars: int = 6000
+	cooldown_steps: int = 3
+	include_read_state: bool = False
+	compaction_llm: BaseChatModel | None = None
+
+	@model_validator(mode='after')
+	def _resolve_trigger_threshold(self) -> MessageCompactionSettings:
+		"""Resolve trigger_char_count from trigger_token_count if needed."""
+		if self.trigger_char_count is not None and self.trigger_token_count is not None:
+			raise ValueError('Set trigger_char_count or trigger_token_count, not both.')
+		if self.trigger_token_count is not None:
+			self.trigger_char_count = int(self.trigger_token_count * self.chars_per_token)
+		elif self.trigger_char_count is None:
+			# Default: ~62k tokens worth of chars
+			self.trigger_char_count = 250000
+		return self
+
+
 class AgentSettings(BaseModel):
 	"""Configuration options for the Agent"""
 
@@ -49,6 +83,7 @@ class AgentSettings(BaseModel):
 	use_judge: bool = True
 	ground_truth: str | None = None  # Ground truth answer or criteria for judge validation
 	max_history_items: int | None = None
+	message_compaction: MessageCompactionSettings | None = None
 	enable_planning: bool = True
 	planning_replan_on_stall: int = 3  # consecutive failures before replan nudge; 0 = disabled
 	planning_exploration_limit: int = 5  # steps without a plan before nudge; 0 = disabled
