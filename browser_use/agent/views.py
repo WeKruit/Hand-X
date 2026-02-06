@@ -207,37 +207,38 @@ class ActionLoopDetector(BaseModel):
 		self.max_repetition_count = counts[self.most_repeated_hash]
 
 	def get_nudge_message(self) -> str | None:
-		"""Return an escalating nudge message based on repetition severity, or None if no loop detected."""
+		"""Return an escalating awareness nudge based on repetition severity, or None if no loop detected."""
 		messages: list[str] = []
 
 		# Action repetition nudges (escalating at 5, 8, 12)
 		if self.max_repetition_count >= 12:
 			messages.append(
-				f'CRITICAL LOOP DETECTED: You have repeated a similar action {self.max_repetition_count} times '
+				f'Heads up: you have repeated a similar action {self.max_repetition_count} times '
 				f'in the last {len(self.recent_action_hashes)} actions. '
-				'Try a fundamentally different approach, or if the task is partially complete, report your progress. '
-				'Continuing to repeat the same action will not yield different results.'
+				'If you are making progress with each repetition, keep going. '
+				'If not, a different approach might get you there faster.'
 			)
 		elif self.max_repetition_count >= 8:
 			messages.append(
-				f'STRONG LOOP WARNING: You have repeated a similar action {self.max_repetition_count} times '
+				f'Heads up: you have repeated a similar action {self.max_repetition_count} times '
 				f'in the last {len(self.recent_action_hashes)} actions. '
-				'Strongly consider abandoning this approach. Try a fundamentally different strategy '
-				'or report that the task cannot be completed with the current approach.'
+				'Are you still making progress with each attempt? '
+				'If so, carry on. Otherwise, it might be worth trying a different approach.'
 			)
 		elif self.max_repetition_count >= 5:
 			messages.append(
-				f'LOOP DETECTED: You have repeated a similar action {self.max_repetition_count} times '
-				f'in the last {len(self.recent_action_hashes)} actions without meaningful progress. '
-				'Consider trying a different approach.'
+				f'Heads up: you have repeated a similar action {self.max_repetition_count} times '
+				f'in the last {len(self.recent_action_hashes)} actions. '
+				'If this is intentional and making progress, carry on. '
+				'If not, it might be worth reconsidering your approach.'
 			)
 
 		# Page stagnation nudge
 		if self.consecutive_stagnant_pages >= 5:
 			messages.append(
-				f'PAGE STAGNATION: The page content has not changed across {self.consecutive_stagnant_pages} '
-				'consecutive actions. Your actions are not affecting the page state. '
-				'Try a different element, navigate to a different page, or conclude the task.'
+				f'The page content has not changed across {self.consecutive_stagnant_pages} consecutive actions. '
+				'Your actions might not be having the intended effect. '
+				'It could be worth trying a different element or approach.'
 			)
 
 		if messages:
