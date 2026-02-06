@@ -153,7 +153,7 @@ def test_detector_nudge_at_5_repeats():
 		detector.record_action('search', {'query': 'site:hinative.com answers votes'})
 	msg = detector.get_nudge_message()
 	assert msg is not None
-	assert 'LOOP DETECTED' in msg
+	assert 'repeated a similar action' in msg
 	assert '5 times' in msg
 
 
@@ -172,41 +172,41 @@ def test_detector_nudge_escalates_at_8_repeats():
 		detector.record_action('search', {'query': 'site:hinative.com answers votes'})
 	msg = detector.get_nudge_message()
 	assert msg is not None
-	assert 'STRONG LOOP WARNING' in msg
+	assert 'still making progress' in msg
 	assert '8 times' in msg
 
 
 def test_detector_nudge_escalates_at_12_repeats():
-	"""Critical nudge at 12 repetitions."""
+	"""Most urgent nudge at 12 repetitions."""
 	detector = ActionLoopDetector(window_size=20)
 	for _ in range(12):
 		detector.record_action('search', {'query': 'site:hinative.com answers votes'})
 	msg = detector.get_nudge_message()
 	assert msg is not None
-	assert 'CRITICAL LOOP DETECTED' in msg
+	assert 'making progress with each repetition' in msg
 	assert '12 times' in msg
 
 
 def test_detector_critical_message_no_done_directive():
-	"""Critical nudge should NOT tell the agent to call done — just suggest a different approach."""
+	"""Critical nudge should NOT tell the agent to call done — just a gentle heads up."""
 	detector = ActionLoopDetector(window_size=20)
 	for _ in range(12):
 		detector.record_action('search', {'query': 'site:hinative.com answers votes'})
 	msg = detector.get_nudge_message()
 	assert msg is not None
 	assert 'done action' not in msg
-	assert 'report your progress' in msg
+	assert 'different approach' in msg
 
 
 def test_detector_first_nudge_no_cannot_complete():
-	"""First nudge should NOT say task 'cannot be completed on this site'."""
+	"""First nudge should NOT say task 'cannot be completed' — just raise awareness."""
 	detector = ActionLoopDetector(window_size=20)
 	for _ in range(5):
 		detector.record_action('search', {'query': 'site:hinative.com answers votes'})
 	msg = detector.get_nudge_message()
 	assert msg is not None
 	assert 'cannot be completed' not in msg
-	assert 'Consider trying a different approach' in msg
+	assert 'reconsidering your approach' in msg
 
 
 def test_detector_window_slides():
@@ -264,7 +264,7 @@ def test_page_stagnation_nudge_at_5_identical_pages():
 	assert detector.consecutive_stagnant_pages >= 5
 	msg = detector.get_nudge_message()
 	assert msg is not None
-	assert 'PAGE STAGNATION' in msg
+	assert 'page content has not changed' in msg
 
 
 def test_page_stagnation_no_nudge_at_4_identical_pages():
@@ -301,8 +301,8 @@ def test_combined_loop_and_stagnation():
 		detector.record_page_state('https://example.com', 'same', 50)
 	msg = detector.get_nudge_message()
 	assert msg is not None
-	assert 'STRONG LOOP WARNING' in msg
-	assert 'PAGE STAGNATION' in msg
+	assert 'still making progress' in msg
+	assert 'page content has not changed' in msg
 
 
 # ─── PageFingerprint tests ───────────────────────────────────────────────────
@@ -352,7 +352,7 @@ async def test_loop_nudge_injected_into_context():
 
 	messages = _get_context_messages(agent)
 	assert len(messages) == 1
-	assert 'LOOP DETECTED' in messages[0]
+	assert 'repeated a similar action' in messages[0]
 
 
 async def test_no_loop_nudge_when_disabled():
