@@ -189,16 +189,11 @@ class MessageManager:
 		sensitive_data=None,
 	) -> None:
 		"""Prepare state for the next LLM call without building the final state message."""
-		# Clear contextual messages from previous steps to prevent accumulation
 		self.state.history.context_messages.clear()
-
-		# Update the agent history items with the latest step results
 		self._update_agent_history_description(model_output, result, step_info)
 
-		# Update sensitive data description for this page
 		effective_sensitive_data = sensitive_data if sensitive_data is not None else self.sensitive_data
 		if effective_sensitive_data is not None:
-			# Update instance variable to keep it in sync
 			self.sensitive_data = effective_sensitive_data
 			self.sensitive_data_description = self._get_sensitive_data_description(browser_state_summary.url)
 
@@ -208,45 +203,32 @@ class MessageManager:
 		settings: MessageCompactionSettings | None,
 		step_info: AgentStepInfo | None = None,
 	) -> bool:
-		"""Compact message history into a short memory block when thresholds are exceeded."""
+		"""Summarize older history into a compact memory block.
+
+		Step interval is the primary trigger; char count is a minimum floor.
+		"""
 		if not settings or not settings.enabled:
 			return False
 		if llm is None:
-			logger.debug('Message compaction enabled but no LLM provided; skipping.')
+			return False
+		if step_info is None:
 			return False
 
-		# Respect cooldown to avoid repeated compaction loops
-		if (
-			step_info is not None
-			and self.state.last_compaction_step is not None
-			and step_info.step_number - self.state.last_compaction_step < settings.cooldown_steps
-		):
+		# Step cadence gate
+		steps_since = step_info.step_number - (self.state.last_compaction_step or 0)
+		if steps_since < settings.compact_every_n_steps:
 			return False
 
+		# Char floor gate
 		history_items = self.state.agent_history_items
-		if settings.min_history_items and len(history_items) < settings.min_history_items:
-			return False
-
 		full_history_text = '\n'.join(item.to_string() for item in history_items).strip()
-		current_char_count = len(full_history_text)
-		# trigger_char_count is always resolved to an int by the model validator
-		trigger_char_count = settings.trigger_char_count or 250000
-		if current_char_count < trigger_char_count:
+		trigger_char_count = settings.trigger_char_count or 40000
+		if len(full_history_text) < trigger_char_count:
 			return False
 
-		# After the first compaction, only re-trigger when history has grown by at least
-		# trigger_char_count beyond the post-compaction baseline. This prevents a cycle
-		# where verbose retained items immediately re-trigger compaction after cooldown.
-		if self.state.post_compaction_char_count > 0:
-			growth = current_char_count - self.state.post_compaction_char_count
-			if growth < trigger_char_count:
-				return False
+		logger.debug(f'Compacting message history (items={len(history_items)}, chars={len(full_history_text)})')
 
-		logger.debug(
-			f'Compacting message history (items={len(history_items)}, chars={len(full_history_text)})'
-		)
-
-		# Build compaction input, optionally including prior compacted memory
+		# Build compaction input
 		compaction_sections = []
 		if self.state.compacted_memory:
 			compaction_sections.append(
@@ -257,7 +239,6 @@ class MessageManager:
 			compaction_sections.append(f'<read_state>\n{self.state.read_state_description}\n</read_state>')
 		compaction_input = '\n\n'.join(compaction_sections)
 
-		# Filter sensitive data before sending to LLM
 		if self.sensitive_data:
 			filtered = self._filter_sensitive_data(UserMessage(content=compaction_input))
 			compaction_input = filtered.text
@@ -280,7 +261,6 @@ class MessageManager:
 			return False
 
 		if not summary:
-			logger.debug('Message compaction produced empty summary; skipping.')
 			return False
 
 		if settings.summary_max_chars and len(summary) > settings.summary_max_chars:
@@ -288,10 +268,9 @@ class MessageManager:
 
 		self.state.compacted_memory = summary
 		self.state.compaction_count += 1
-		if step_info is not None:
-			self.state.last_compaction_step = step_info.step_number
+		self.state.last_compaction_step = step_info.step_number
 
-		# Trim history to keep only the first item and the most recent items
+		# Keep first item + most recent items
 		keep_last = max(0, settings.keep_last_items)
 		if len(history_items) > keep_last + 1:
 			if keep_last == 0:
@@ -299,13 +278,7 @@ class MessageManager:
 			else:
 				self.state.agent_history_items = [history_items[0]] + history_items[-keep_last:]
 
-		# Record post-compaction char count so we only re-trigger after meaningful growth
-		post_text = '\n'.join(item.to_string() for item in self.state.agent_history_items).strip()
-		self.state.post_compaction_char_count = len(post_text)
-
-		logger.debug(
-			f'Compaction complete (summary_chars={len(summary)}, history_items={len(self.state.agent_history_items)})'
-		)
+		logger.debug(f'Compaction complete (summary_chars={len(summary)}, history_items={len(self.state.agent_history_items)})')
 
 		return True
 
