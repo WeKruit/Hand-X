@@ -97,6 +97,5 @@ class MessageManagerState(BaseModel):
 	compacted_memory: str | None = None
 	compaction_count: int = 0
 	last_compaction_step: int | None = None
-	post_compaction_char_count: int = 0  # History char count right after last compaction; used to gate re-triggers
 
 	model_config = ConfigDict(arbitrary_types_allowed=True)
