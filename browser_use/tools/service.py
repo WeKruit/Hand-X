@@ -2023,7 +2023,7 @@ Validated Code (after quote fixing):
 				param_model=StructuredOutputAction[output_model],
 			)
 			async def done(params: StructuredOutputAction):
-				# Exclude success from the output JSON since it's an internal parameter
+				# Exclude success from the output JSON
 				# Use mode='json' to properly serialize enums at all nesting levels
 				output_dict = params.data.model_dump(mode='json')
 
