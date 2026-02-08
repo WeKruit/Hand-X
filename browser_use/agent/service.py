@@ -1185,8 +1185,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Record executed actions for loop detection
 		self._update_loop_detector_actions()
 
-		# check for action errors  and len more than 1
-		if self.state.last_result and len(self.state.last_result) == 1 and self.state.last_result[-1].error:
+		# check for action errors - increment on any step where the last result has an error
+		if self.state.last_result and self.state.last_result[-1].error:
 			self.state.consecutive_failures += 1
 			self.logger.debug(f'🔄 Step {self.state.n_steps}: Consecutive failures: {self.state.consecutive_failures}')
 			return
