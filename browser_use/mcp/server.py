@@ -26,11 +26,11 @@ Or as an MCP server in Claude Desktop or other MCP clients:
 import os
 import sys
 
-from browser_use.llm import ChatAWSBedrock
-
 # Set environment variables BEFORE any browser_use imports to prevent early logging
 os.environ['BROWSER_USE_LOGGING_LEVEL'] = 'critical'
 os.environ['BROWSER_USE_SETUP_LOGGING'] = 'false'
+
+from browser_use.llm import ChatAWSBedrock
 
 import asyncio
 import json
