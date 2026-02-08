@@ -246,20 +246,20 @@ class ChatOpenAI(BaseChatModel):
 							ChatCompletionContentPartTextParam(text=schema_text, type='text')
 						]
 
-					if self.dont_force_structured_output:
-						response = await self.get_client().chat.completions.create(
-							model=self.model,
-							messages=openai_messages,
-							**model_params,
-						)
-					else:
-						# Return structured response
-						response = await self.get_client().chat.completions.create(
-							model=self.model,
-							messages=openai_messages,
-							response_format=ResponseFormatJSONSchema(json_schema=response_format, type='json_schema'),
-							**model_params,
-						)
+				if self.dont_force_structured_output:
+					response = await self.get_client().chat.completions.create(
+						model=self.model,
+						messages=openai_messages,
+						**model_params,
+					)
+				else:
+					# Return structured response
+					response = await self.get_client().chat.completions.create(
+						model=self.model,
+						messages=openai_messages,
+						response_format=ResponseFormatJSONSchema(json_schema=response_format, type='json_schema'),
+						**model_params,
+					)
 
 				choice = response.choices[0] if response.choices else None
 				if choice is None:
