@@ -30,14 +30,14 @@ import sys
 os.environ['BROWSER_USE_LOGGING_LEVEL'] = 'critical'
 os.environ['BROWSER_USE_SETUP_LOGGING'] = 'false'
 
-from browser_use.llm import ChatAWSBedrock
-
 import asyncio
 import json
 import logging
 import time
 from pathlib import Path
 from typing import Any
+
+from browser_use.llm import ChatAWSBedrock
 
 # Configure logging for MCP mode - redirect to stderr but preserve critical diagnostics
 logging.basicConfig(
