@@ -103,7 +103,7 @@ class SessionServer:
 
 		try:
 			# Import command handlers
-			from browser_use.skill_cli.commands import agent, browser, python_exec, session
+			from browser_use.skill_cli.commands import agent, browser, python_exec, session, tunnel
 
 			# Handle shutdown
 			if action == 'shutdown':
@@ -128,6 +128,8 @@ class SessionServer:
 			# Dispatch to handler
 			if action in browser.COMMANDS:
 				result = await browser.handle(action, session_info, params)
+			elif action in tunnel.COMMANDS:
+				result = await tunnel.handle(action, session_info, params)
 			elif action == 'python':
 				result = await python_exec.handle(session_info, params)
 			elif action == 'run':

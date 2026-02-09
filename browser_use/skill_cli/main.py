@@ -506,6 +506,19 @@ Examples:
 	p.add_argument('--max-steps', type=int, default=100, help='Maximum steps')
 
 	# -------------------------------------------------------------------------
+	# Tunnel Commands
+	# -------------------------------------------------------------------------
+
+	tunnel_p = subparsers.add_parser('tunnel', help='Expose localhost via Cloudflare tunnel')
+	tunnel_p.add_argument(
+		'port_or_subcommand',
+		nargs='?',
+		default=None,
+		help='Port number to tunnel, or subcommand (list, stop)',
+	)
+	tunnel_p.add_argument('port_arg', nargs='?', type=int, help='Port number (for stop subcommand)')
+
+	# -------------------------------------------------------------------------
 	# Session Management
 	# -------------------------------------------------------------------------
 
@@ -1165,6 +1178,28 @@ def main() -> int:
 				print('No active sessions')
 		return 0
 
+	# Handle tunnel subcommand parsing
+	if args.command == 'tunnel':
+		pos = getattr(args, 'port_or_subcommand', None)
+		if pos == 'list':
+			params = {'subcommand': 'list'}
+		elif pos == 'stop':
+			port_arg = getattr(args, 'port_arg', None)
+			if port_arg is None:
+				print('Usage: browser-use tunnel stop <port>', file=sys.stderr)
+				return 1
+			params = {'subcommand': 'stop', 'port': port_arg}
+		elif pos is not None:
+			try:
+				port = int(pos)
+			except ValueError:
+				print(f'Unknown tunnel subcommand: {pos}', file=sys.stderr)
+				return 1
+			params = {'subcommand': 'start', 'port': port}
+		else:
+			print('Usage: browser-use tunnel <port> | list | stop <port>', file=sys.stderr)
+			return 0
+
 	# Set API key in environment if provided
 	if args.api_key:
 		os.environ['BROWSER_USE_API_KEY'] = args.api_key
@@ -1184,13 +1219,14 @@ def main() -> int:
 	# Ensure server is running
 	ensure_server(args.session, args.browser, args.headed, args.profile, args.api_key)
 
-	# Build params from args
-	params = {}
-	skip_keys = {'command', 'session', 'browser', 'headed', 'profile', 'json', 'api_key', 'server_command'}
+	# Build params from args (unless already built for tunnel)
+	if args.command != 'tunnel':
+		params = {}
+		skip_keys = {'command', 'session', 'browser', 'headed', 'profile', 'json', 'api_key', 'server_command'}
 
-	for key, value in vars(args).items():
-		if key not in skip_keys and value is not None:
-			params[key] = value
+		for key, value in vars(args).items():
+			if key not in skip_keys and value is not None:
+				params[key] = value
 
 	# Send command to server
 	response = send_command(args.session, args.command, params)
