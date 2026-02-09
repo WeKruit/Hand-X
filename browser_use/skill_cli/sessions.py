@@ -1,5 +1,6 @@
 """Session registry - manages BrowserSession instances."""
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -8,6 +9,15 @@ from browser_use.browser.session import BrowserSession
 from browser_use.skill_cli.python_session import PythonSession
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TunnelInfo:
+	"""Information about an active cloudflare tunnel."""
+
+	port: int
+	url: str
+	process: asyncio.subprocess.Process
 
 
 @dataclass
@@ -20,6 +30,7 @@ class SessionInfo:
 	profile: str | None
 	browser_session: BrowserSession
 	python_session: PythonSession = field(default_factory=PythonSession)
+	tunnels: dict[int, TunnelInfo] = field(default_factory=dict)
 
 
 class SessionRegistry:
@@ -81,6 +92,16 @@ class SessionRegistry:
 
 		session = self._sessions.pop(name)
 		logger.info(f'Closing session: {name}')
+
+		# Stop all tunnels first
+		if session.tunnels:
+			from browser_use.skill_cli.commands.tunnel import stop_all_tunnels
+
+			try:
+				await stop_all_tunnels(session)
+			except Exception as e:
+				logger.warning(f'Error stopping tunnels for session {name}: {e}')
+
 		try:
 			await session.browser_session.kill()
 		except Exception as e:
