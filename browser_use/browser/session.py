@@ -1524,7 +1524,9 @@ class BrowserSession(BaseModel):
 			)
 
 			# Run a tiny HTTP client to query for the WebSocket URL from the /json/version endpoint
-			async with httpx.AsyncClient() as client:
+			# Use trust_env=False to prevent proxy env vars (HTTP_PROXY, HTTPS_PROXY) from
+			# routing localhost requests through a proxy, which causes 502 errors on Windows
+			async with httpx.AsyncClient(trust_env=False) as client:
 				headers = self.browser_profile.headers or {}
 				version_info = await client.get(url, headers=headers)
 				self.logger.debug(f'Raw version info: {str(version_info)}')
