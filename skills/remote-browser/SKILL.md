@@ -187,6 +187,186 @@ browser-use close-tab <tab>         # Close specific tab
 ```bash
 browser-use run "Fill the contact form with test data"   # AI agent
 browser-use run "Extract all product prices" --max-steps 50
+
+# Specify LLM model
+browser-use run "task" --llm gpt-4o
+browser-use run "task" --llm claude-sonnet-4-20250514
+browser-use run "task" --llm gemini-2.0-flash
+
+# Proxy configuration (default: us)
+browser-use run "task" --proxy-country gb    # UK proxy
+browser-use run "task" --proxy-country de    # Germany proxy
+
+# Session reuse (run multiple tasks in same browser session)
+browser-use run "task 1" --keep-alive
+# Returns: session_id: abc-123
+browser-use run "task 2" --session-id abc-123
+
+# Execution modes
+browser-use run "task" --no-wait     # Async, returns task_id immediately
+browser-use run "task" --stream      # Stream status updates
+browser-use run "task" --flash       # Fast execution mode
+
+# Advanced options
+browser-use run "task" --thinking    # Extended reasoning mode
+browser-use run "task" --vision      # Enable vision (default)
+browser-use run "task" --no-vision   # Disable vision
+
+# Use cloud profile (preserves cookies across sessions)
+browser-use run "task" --profile <cloud-profile-id>
+```
+
+### Task Management
+
+Manage cloud tasks:
+
+```bash
+browser-use task list                     # List recent tasks
+browser-use task list --limit 20          # Show more tasks
+browser-use task list --status running    # Filter by status
+browser-use task list --status finished
+browser-use task list --json              # JSON output
+
+browser-use task status <task-id>         # Get task status and output
+browser-use task status <task-id> --json
+
+browser-use task stop <task-id>           # Stop a running task
+
+browser-use task logs <task-id>           # Get task execution logs
+```
+
+### Cloud Session Management
+
+Manage cloud browser sessions:
+
+```bash
+browser-use session list                  # List cloud sessions
+browser-use session list --limit 20       # Show more sessions
+browser-use session list --status active  # Filter by status
+browser-use session list --json           # JSON output
+
+browser-use session get <session-id>      # Get session details
+browser-use session get <session-id> --json
+
+browser-use session stop <session-id>     # Stop a session
+browser-use session stop --all            # Stop all active sessions
+```
+
+## Running Subagents
+
+Cloud sessions and tasks provide a powerful model for running **subagents** - autonomous browser agents that execute tasks in parallel.
+
+### Key Concepts
+
+- **Session = Agent**: Each cloud session is a browser agent with its own state (cookies, tabs, history)
+- **Task = Work**: Tasks are jobs given to an agent. An agent can run multiple tasks sequentially
+- **Parallel agents**: Run multiple sessions simultaneously for parallel work
+- **Session reuse**: While a session is alive, you can assign it more tasks
+- **Session lifecycle**: Once stopped, a session cannot be revived - start a new one
+
+### Basic Subagent Workflow
+
+```bash
+# 1. Start a subagent task (creates new session automatically)
+browser-use run "Search for AI news and summarize top 3 articles" --no-wait
+# Returns: task_id: task-abc, session_id: sess-123
+
+# 2. Check task progress
+browser-use task status task-abc
+# Shows: Status: running, or finished with output
+
+# 3. View execution logs
+browser-use task logs task-abc
+```
+
+### Running Parallel Subagents
+
+Launch multiple agents to work simultaneously:
+
+```bash
+# Start 3 parallel research agents
+browser-use run "Research competitor A pricing" --no-wait
+# → task_id: task-1, session_id: sess-a
+
+browser-use run "Research competitor B pricing" --no-wait
+# → task_id: task-2, session_id: sess-b
+
+browser-use run "Research competitor C pricing" --no-wait
+# → task_id: task-3, session_id: sess-c
+
+# Monitor all running tasks
+browser-use task list --status running
+# Shows all 3 tasks with their status
+
+# Check individual task results as they complete
+browser-use task status task-1
+browser-use task status task-2
+browser-use task status task-3
+```
+
+### Reusing an Agent for Multiple Tasks
+
+Keep a session alive to run sequential tasks in the same browser context:
+
+```bash
+# Start first task, keep session alive
+browser-use run "Log into example.com" --keep-alive --no-wait
+# → task_id: task-1, session_id: sess-123
+
+# Wait for login to complete...
+browser-use task status task-1
+# → Status: finished
+
+# Give the same agent another task (reuses login session)
+browser-use run "Navigate to settings and export data" --session-id sess-123 --no-wait
+# → task_id: task-2, session_id: sess-123 (same session!)
+
+# Agent retains cookies, login state, etc. from previous task
+```
+
+### Managing Active Agents
+
+```bash
+# List all active agents (sessions)
+browser-use session list --status active
+# Shows: sess-123 [active], sess-456 [active], ...
+
+# Get details on a specific agent
+browser-use session get sess-123
+# Shows: status, started time, live URL for viewing
+
+# Stop a specific agent
+browser-use session stop sess-123
+
+# Stop all agents at once
+browser-use session stop --all
+```
+
+### Stopping Tasks vs Sessions
+
+```bash
+# Stop a running task (session may continue if --keep-alive was used)
+browser-use task stop task-abc
+
+# Stop an entire agent/session (terminates all its tasks)
+browser-use session stop sess-123
+```
+
+### Custom Agent Configuration
+
+```bash
+# Default: US proxy, auto LLM selection
+browser-use run "task" --no-wait
+
+# Explicit configuration
+browser-use run "task" \
+  --llm gpt-4o \
+  --proxy-country gb \
+  --keep-alive \
+  --no-wait
+
+# With cloud profile (preserves cookies across sessions)
+browser-use run "task" --profile <profile-id> --no-wait
 ```
 
 ### Session Management

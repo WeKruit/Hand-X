@@ -1,13 +1,10 @@
 """Setup command - configure browser-use for first-time use.
 
-Handles dependency installation and configuration with profile-based
+Handles dependency installation and configuration with mode-based
 setup (local/remote/full) and optional automatic fixes.
 """
 
-import asyncio
-import json
 import logging
-import sys
 from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
@@ -22,40 +19,40 @@ async def handle(
 	"""Handle setup command."""
 	assert action == 'setup'
 
-	profile: Literal['local', 'remote', 'full'] = params.get('profile', 'local')
+	mode: Literal['local', 'remote', 'full'] = params.get('mode', 'local')
 	yes: bool = params.get('yes', False)
 	api_key: str | None = params.get('api_key')
 	json_output: bool = params.get('json', False)
 
-	# Validate profile
-	if profile not in ('local', 'remote', 'full'):
-		return {'error': f'Invalid profile: {profile}. Must be local, remote, or full'}
+	# Validate mode
+	if mode not in ('local', 'remote', 'full'):
+		return {'error': f'Invalid mode: {mode}. Must be local, remote, or full'}
 
 	# Run setup flow
 	try:
-		checks = await run_checks(profile)
+		checks = await run_checks(mode)
 
 		if not json_output:
 			_log_checks(checks)
 
 		# Plan actions
-		actions = plan_actions(checks, profile, yes, api_key)
+		actions = plan_actions(checks, mode, yes, api_key)
 
 		if not json_output:
 			_log_actions(actions)
 
 		# Execute actions
-		await execute_actions(actions, profile, api_key, json_output)
+		await execute_actions(actions, mode, api_key, json_output)
 
 		# Validate
-		validation = await validate_setup(profile)
+		validation = await validate_setup(mode)
 
 		if not json_output:
 			_log_validation(validation)
 
 		return {
 			'status': 'success',
-			'profile': profile,
+			'mode': mode,
 			'checks': checks,
 			'validation': validation,
 		}
@@ -68,7 +65,7 @@ async def handle(
 		return {'error': error_msg}
 
 
-async def run_checks(profile: Literal['local', 'remote', 'full']) -> dict[str, Any]:
+async def run_checks(mode: Literal['local', 'remote', 'full']) -> dict[str, Any]:
 	"""Run pre-flight checks without making changes.
 
 	Returns:
@@ -89,12 +86,12 @@ async def run_checks(profile: Literal['local', 'remote', 'full']) -> dict[str, A
 			'message': 'browser-use not installed',
 		}
 
-	# Browser check (local and full profiles)
-	if profile in ('local', 'full'):
+	# Browser check (local and full modes)
+	if mode in ('local', 'full'):
 		checks['browser'] = await _check_browser()
 
-	# API key check (remote and full profiles)
-	if profile in ('remote', 'full'):
+	# API key check (remote and full modes)
+	if mode in ('remote', 'full'):
 		from browser_use.skill_cli.api_key import check_api_key
 
 		api_status = check_api_key()
@@ -109,8 +106,8 @@ async def run_checks(profile: Literal['local', 'remote', 'full']) -> dict[str, A
 				'message': 'Not configured',
 			}
 
-	# Cloudflared check (remote and full profiles)
-	if profile in ('remote', 'full'):
+	# Cloudflared check (remote and full modes)
+	if mode in ('remote', 'full'):
 		from browser_use.skill_cli.tunnel_manager import get_tunnel_manager
 
 		tunnel_mgr = get_tunnel_manager()
@@ -126,7 +123,6 @@ async def run_checks(profile: Literal['local', 'remote', 'full']) -> dict[str, A
 async def _check_browser() -> dict[str, Any]:
 	"""Check if browser is available."""
 	try:
-		from browser_use.browser.session import BrowserSession
 		from browser_use.browser.profile import BrowserProfile
 
 		profile = BrowserProfile(headless=True)
@@ -144,7 +140,7 @@ async def _check_browser() -> dict[str, Any]:
 
 def plan_actions(
 	checks: dict[str, Any],
-	profile: Literal['local', 'remote', 'full'],
+	mode: Literal['local', 'remote', 'full'],
 	yes: bool,
 	api_key: str | None,
 ) -> list[dict[str, Any]]:
@@ -156,7 +152,7 @@ def plan_actions(
 	actions: list[dict[str, Any]] = []
 
 	# Browser installation (local/full)
-	if profile in ('local', 'full'):
+	if mode in ('local', 'full'):
 		browser_check = checks.get('browser', {})
 		if browser_check.get('status') != 'ok':
 			actions.append({
@@ -166,13 +162,13 @@ def plan_actions(
 			})
 
 	# API key configuration (remote/full)
-	if profile in ('remote', 'full'):
+	if mode in ('remote', 'full'):
 		api_check = checks.get('api_key', {})
 		if api_check.get('status') != 'ok':
 			if api_key:
 				actions.append({
 					'type': 'configure_api_key',
-					'description': f'Configure API key',
+					'description': 'Configure API key',
 					'required': True,
 					'api_key': api_key,
 				})
@@ -184,7 +180,7 @@ def plan_actions(
 				})
 
 	# Cloudflared (remote/full)
-	if profile in ('remote', 'full'):
+	if mode in ('remote', 'full'):
 		cloudflared_check = checks.get('cloudflared', {})
 		if cloudflared_check.get('status') != 'ok':
 			actions.append({
@@ -198,7 +194,7 @@ def plan_actions(
 
 async def execute_actions(
 	actions: list[dict[str, Any]],
-	profile: Literal['local', 'remote', 'full'],
+	mode: Literal['local', 'remote', 'full'],
 	api_key: str | None,
 	json_output: bool,
 ) -> None:
@@ -206,7 +202,7 @@ async def execute_actions(
 
 	Args:
 		actions: List of actions to execute
-		profile: Setup profile (local/remote/full)
+		mode: Setup mode (local/remote/full)
 		api_key: Optional API key to configure
 		json_output: Whether to output JSON
 	"""
@@ -248,7 +244,7 @@ async def execute_actions(
 
 
 async def validate_setup(
-	profile: Literal['local', 'remote', 'full'],
+	mode: Literal['local', 'remote', 'full'],
 ) -> dict[str, Any]:
 	"""Validate that setup worked.
 
@@ -264,17 +260,17 @@ async def validate_setup(
 	except ImportError:
 		results['browser_use_import'] = 'failed'
 
-	# Validate profile requirements
-	if profile in ('local', 'full'):
+	# Validate mode requirements
+	if mode in ('local', 'full'):
 		try:
 			from browser_use.browser.profile import BrowserProfile
 
-			profile_obj = BrowserProfile(headless=True)
-			results['browser_profile'] = 'ok'
+			browser_profile = BrowserProfile(headless=True)
+			results['browser_available'] = 'ok'
 		except Exception as e:
-			results['browser_profile'] = f'failed: {e}'
+			results['browser_available'] = f'failed: {e}'
 
-	if profile in ('remote', 'full'):
+	if mode in ('remote', 'full'):
 		from browser_use.skill_cli.api_key import check_api_key
 		from browser_use.skill_cli.tunnel_manager import get_tunnel_manager
 
