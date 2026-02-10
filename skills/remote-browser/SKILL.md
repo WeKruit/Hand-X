@@ -10,22 +10,33 @@ This skill is for agents running on **sandboxed remote machines** (cloud VMs, CI
 
 ## Setup
 
-**Option 1: One-command install (recommended)**
+**Remote-only install (recommended for sandboxed agents)**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ShawnPana/browser-use/frictionless-install/install.sh | BROWSER_USE_BRANCH=frictionless-install bash
+curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only
 ```
 
-This installs Python, uv, browser-use CLI, cloudflared (for tunneling), and validates the setup automatically.
+This configures browser-use to only use cloud browsers:
+- No Chromium download (~300MB saved)
+- `browser-use open <url>` automatically uses remote mode (no `--browser` flag needed)
+- If API key is available, you can also pass it during install:
+  ```bash
+  curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only --api-key bu_xxx
+  ```
 
-**Option 2: Manual install**
+**For development testing (from GitHub branch):**
 ```bash
-# For dev testing (from this branch):
+curl -fsSL https://raw.githubusercontent.com/ShawnPana/browser-use/frictionless-install/install.sh | BROWSER_USE_BRANCH=frictionless-install bash -s -- --remote-only
+```
+
+**Manual install (alternative)**
+```bash
+# Install from PyPI (once released):
+pip install "browser-use[cli]"
+
+# Or from this branch for dev testing:
 pip install "git+https://github.com/ShawnPana/browser-use@frictionless-install"
 
-# For production (once released):
-# pip install "browser-use[cli]"
-
-# Install cloudflared for tunneling (required for browser-use tunnel command):
+# Install cloudflared for tunneling:
 # macOS:
 brew install cloudflared
 
@@ -48,14 +59,14 @@ browser-use doctor
 
 ## Core Workflow
 
-**IMPORTANT: Use `--browser remote` on your FIRST command to create a cloud browser session.**
+When installed with `--remote-only`, commands automatically use the cloud browser — no `--browser` flag needed:
 
 ```bash
-# Step 1: Start session with --browser remote (REQUIRED on first command)
-browser-use --browser remote open https://example.com
+# Step 1: Start session (automatically uses remote mode)
+browser-use open https://example.com
 # Returns: url, live_url (view the browser in real-time)
 
-# Step 2+: All subsequent commands use the existing session (no flag needed)
+# Step 2+: All subsequent commands use the existing session
 browser-use state                   # Get page elements with indices
 browser-use click 5                 # Click element by index
 browser-use type "Hello World"      # Type into focused element
@@ -67,32 +78,15 @@ browser-use screenshot page.png     # Save screenshot to file
 browser-use close                   # Close browser and release resources
 ```
 
-The `--browser remote` flag only matters on the **first command** that creates the session. After that, all commands automatically use the existing cloud browser.
+### Understanding Installation Modes
 
-### Understanding Session Modes
+| Install Command | Available Modes | Default Mode | Use Case |
+|-----------------|-----------------|--------------|----------|
+| `--remote-only` | remote | remote | Sandboxed agents, no GUI |
+| `--local-only` | chromium, real | chromium | Local development |
+| `--full` | chromium, real, remote | chromium | Full flexibility |
 
-| First Command | Session Type | Subsequent Commands |
-|---------------|--------------|---------------------|
-| `browser-use --browser remote open <url>` | Cloud browser | No flag needed |
-| `browser-use open <url>` | Local browser | No flag needed |
-
-### What Happens If You Forget `--browser remote`?
-
-```bash
-# WRONG: Starting without --browser remote creates a LOCAL session
-browser-use open https://example.com          # Creates LOCAL session (no live_url!)
-
-# Then trying to switch to remote will ERROR:
-browser-use --browser remote open https://other.com
-# Error: Session 'default' is running with --browser chromium,
-# but --browser remote was requested.
-#
-# Options:
-#   1. Close and restart: browser-use close && browser-use --browser remote open <url>
-#   2. Use different session: browser-use --browser remote --session other <command>
-```
-
-**Fix:** Always close the session first, then start fresh with `--browser remote`.
+When only one mode is installed, it becomes the default and no `--browser` flag is needed.
 
 ## Exposing Local Dev Servers
 
@@ -107,7 +101,7 @@ browser-use tunnel 3000
 # → url: https://abc.trycloudflare.com
 
 # Now the cloud browser can reach your local server
-browser-use --browser remote open https://abc.trycloudflare.com
+browser-use open https://abc.trycloudflare.com
 ```
 
 Tunnel commands:
@@ -121,7 +115,7 @@ browser-use tunnel stop --all       # Stop all tunnels
 
 **Note:** Tunnels are independent of browser sessions. They persist across `browser-use close` and can be managed separately.
 
-Cloudflared is installed by `install.sh`. If missing, install manually (see Setup section).
+Cloudflared is installed by `install.sh --remote-only`. If missing, install manually (see Setup section).
 
 ## Commands
 
@@ -207,7 +201,7 @@ browser-use close --all             # Close all sessions
 | Option | Description |
 |--------|-------------|
 | `--session NAME` | Named session (default: "default") |
-| `--browser remote` | Cloud browser (always use this on sandboxed machines) |
+| `--browser MODE` | Browser mode (only if multiple modes installed) |
 | `--profile ID` | Cloud profile ID for persistent cookies |
 | `--json` | Output as JSON |
 | `--api-key KEY` | Override API key |
@@ -225,7 +219,7 @@ browser-use tunnel 3000
 # → url: https://abc.trycloudflare.com
 
 # Browse with cloud browser
-browser-use --browser remote open https://abc.trycloudflare.com
+browser-use open https://abc.trycloudflare.com
 browser-use state
 browser-use screenshot
 ```
@@ -233,7 +227,7 @@ browser-use screenshot
 ### Form Submission
 
 ```bash
-browser-use --browser remote open https://example.com/contact
+browser-use open https://example.com/contact
 browser-use state
 # Shows: [0] input "Name", [1] input "Email", [2] textarea "Message", [3] button "Submit"
 browser-use input 0 "John Doe"
@@ -246,7 +240,7 @@ browser-use state   # Verify success
 ### Screenshot Loop for Visual Verification
 
 ```bash
-browser-use --browser remote open https://example.com
+browser-use open https://example.com
 for i in 1 2 3 4 5; do
   browser-use scroll down
   browser-use screenshot "page_$i.png"
@@ -255,21 +249,20 @@ done
 
 ## Tips
 
-1. **Use `--browser remote` on your FIRST command** — this creates a cloud browser session. Subsequent commands don't need the flag.
-2. **Don't mix modes** — if you started with local, close first before switching to remote
-3. **Always run `state` first** to see available elements and their indices
-4. **Sessions persist** across commands — the browser stays open until you close it
-5. **Tunnels are independent** — they don't require or create a browser session, and persist across `browser-use close`
-6. **Use `--json`** for programmatic parsing
-7. **`tunnel` is idempotent** — calling it again for the same port returns the existing URL
-8. **Close when done** — `browser-use close` closes the browser; `browser-use tunnel stop --all` stops tunnels
+1. **Install with `--remote-only`** for sandboxed environments — no `--browser` flag needed
+2. **Always run `state` first** to see available elements and their indices
+3. **Sessions persist** across commands — the browser stays open until you close it
+4. **Tunnels are independent** — they don't require or create a browser session, and persist across `browser-use close`
+5. **Use `--json`** for programmatic parsing
+6. **`tunnel` is idempotent** — calling it again for the same port returns the existing URL
+7. **Close when done** — `browser-use close` closes the browser; `browser-use tunnel stop --all` stops tunnels
 
 ## Troubleshooting
 
-**"Session is running with --browser chromium but --browser remote was requested"?**
-- You started a local session and then tried to use `--browser remote`
-- Fix: `browser-use close` then restart with `browser-use --browser remote open <url>`
-- Prevention: Always use `--browser remote` on your first command
+**"Browser mode 'chromium' not installed"?**
+- You installed with `--remote-only` which doesn't include local modes
+- This is expected behavior for sandboxed agents
+- If you need local browser, reinstall with `--full`
 
 **Cloud browser won't start?**
 - Verify `BROWSER_USE_API_KEY` is set
@@ -277,7 +270,7 @@ done
 
 **Tunnel not working?**
 - Verify cloudflared is installed: `which cloudflared`
-- If missing, install manually (see Setup section) or re-run `install.sh`
+- If missing, install manually (see Setup section) or re-run `install.sh --remote-only`
 - `browser-use tunnel list` to check active tunnels
 - `browser-use tunnel stop <port>` and retry
 
