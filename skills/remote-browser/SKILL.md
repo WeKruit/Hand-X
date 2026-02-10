@@ -369,6 +369,96 @@ browser-use run "task" \
 browser-use run "task" --profile <profile-id> --no-wait
 ```
 
+### Monitoring Subagents
+
+**Task status is designed for token efficiency.** Default output is minimal - only expand when needed:
+
+| Mode | Flag | Tokens | Use When |
+|------|------|--------|----------|
+| Default | (none) | Low | Polling progress |
+| Compact | `-c` | Medium | Need full reasoning |
+| Verbose | `-v` | High | Debugging actions |
+
+**Recommended workflow:**
+
+```bash
+# 1. Launch task
+browser-use run "task" --no-wait
+# → task_id: abc-123
+
+# 2. Poll with default (token efficient) - only latest step
+browser-use task status abc-123
+# ✅ abc-123... [finished] $0.009 15s
+#   ... 1 earlier steps
+#   2. I found the information and extracted...
+
+# 3. ONLY IF task failed or need context: use --compact
+browser-use task status abc-123 -c
+
+# 4. ONLY IF debugging specific actions: use --verbose
+browser-use task status abc-123 -v
+```
+
+**For long tasks (50+ steps):**
+```bash
+browser-use task status <id> -c --last 5   # Last 5 steps only
+browser-use task status <id> -c --reverse  # Newest first
+browser-use task status <id> -v --step 10  # Inspect specific step
+```
+
+**Live view**: Watch an agent work in real-time:
+```bash
+browser-use session get <session-id>
+# → Live URL: https://live.browser-use.com?wss=...
+```
+
+**Detect stuck tasks**: If cost/duration stops increasing, the task may be stuck:
+```bash
+browser-use task status <task-id>
+# 🔄 abc-123... [started] $0.009 45s  ← if cost doesn't change, task is stuck
+```
+
+**Logs**: Only available after task completes:
+```bash
+browser-use task logs <task-id>  # Works after task finishes
+```
+
+### Cleanup
+
+Always clean up sessions after parallel work:
+```bash
+# Stop all active agents
+browser-use session stop --all
+
+# Or stop specific sessions
+browser-use session stop <session-id>
+```
+
+### Troubleshooting
+
+**Session reuse fails after `task stop`**:
+If you stop a task and try to reuse its session, the new task may get stuck at "created" status. Solution: create a new agent instead.
+```bash
+# This may fail:
+browser-use task stop <task-id>
+browser-use run "new task" --session-id <same-session>  # Might get stuck
+
+# Do this instead:
+browser-use run "new task" --profile <profile-id>  # Fresh session
+```
+
+**Task stuck at "started"**:
+- Check cost with `task status` - if not increasing, task is stuck
+- View live URL with `session get` to see what's happening
+- Stop the task and create a new agent
+
+**Sessions persist after tasks complete**:
+Tasks finishing doesn't auto-stop sessions. Clean up manually:
+```bash
+browser-use session list --status active  # See lingering sessions
+browser-use session stop --all            # Clean up
+```
+
 ### Session Management
 ```bash
 browser-use sessions                # List active sessions

@@ -71,6 +71,39 @@ def _run_async(coro: Any) -> Any:
 		return asyncio.run(coro)
 
 
+def _format_duration(started_at: str | None, finished_at: str | None) -> str:
+	"""Format duration between two timestamps, or elapsed time if still running."""
+	if not started_at:
+		return ''
+
+	from datetime import datetime, timezone
+
+	try:
+		# Parse ISO format timestamp
+		start = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+
+		if finished_at:
+			end = datetime.fromisoformat(finished_at.replace('Z', '+00:00'))
+		else:
+			end = datetime.now(timezone.utc)
+
+		delta = end - start
+		total_seconds = int(delta.total_seconds())
+
+		if total_seconds < 60:
+			return f'{total_seconds}s'
+		elif total_seconds < 3600:
+			minutes = total_seconds // 60
+			seconds = total_seconds % 60
+			return f'{minutes}m {seconds}s'
+		else:
+			hours = total_seconds // 3600
+			minutes = (total_seconds % 3600) // 60
+			return f'{hours}h {minutes}m'
+	except Exception:
+		return ''
+
+
 def _handle_list(args: argparse.Namespace) -> int:
 	"""Handle 'session list' command."""
 	try:
@@ -95,7 +128,8 @@ def _handle_list(args: argparse.Namespace) -> int:
 				session_id = s.get('id', 'unknown')
 				status = s.get('status', 'unknown')
 				live_url = s.get('liveUrl')
-				started_at = s.get('startedAt', '')[:19] if s.get('startedAt') else ''
+				started_at = s.get('startedAt')
+				finished_at = s.get('finishedAt')
 				keep_alive = '🔄' if s.get('keepAlive') else ''
 
 				# Status emoji
@@ -107,11 +141,13 @@ def _handle_list(args: argparse.Namespace) -> int:
 				# Truncate ID for display
 				short_id = session_id[:8] + '...' if len(session_id) > 8 else session_id
 
+				# Build line with duration
+				duration = _format_duration(started_at, finished_at)
 				line = f'  {status_emoji} {short_id} [{status}]'
+				if duration:
+					line += f' {duration}'
 				if keep_alive:
 					line += f' {keep_alive}'
-				if started_at:
-					line += f' started: {started_at}'
 				if live_url and status == 'active':
 					line += f'\n      live: {live_url}'
 				print(line)
@@ -144,18 +180,24 @@ def _handle_get(args: argparse.Namespace) -> int:
 			'stopped': '⏹️',
 		}.get(status, '❓')
 
-		print(f'Session: {session_id}')
-		print(f'Status: {status_emoji} {status}')
-		if keep_alive:
-			print('Keep Alive: Yes')
-		if started_at:
-			print(f'Started: {started_at}')
-		if finished_at:
-			print(f'Finished: {finished_at}')
+		# Build header with duration
+		duration = _format_duration(started_at, finished_at)
+		header_parts = [f'{status_emoji} {session_id[:8]}... [{status}]']
+		if duration:
+			header_parts.append(duration)
 		if proxy_cost:
-			print(f'Proxy Cost: ${proxy_cost}')
+			# Format proxy cost to 2 decimal places
+			try:
+				cost_val = float(proxy_cost)
+				header_parts.append(f'${cost_val:.2f}')
+			except (ValueError, TypeError):
+				header_parts.append(f'${proxy_cost}')
+		print(' '.join(header_parts))
+
+		if keep_alive:
+			print('  Keep Alive: Yes')
 		if live_url:
-			print(f'Live URL: {live_url}')
+			print(f'  Live URL: {live_url}')
 
 	return 0
 
