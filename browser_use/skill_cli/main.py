@@ -907,7 +907,7 @@ def main() -> int:
 			setup.handle(
 				'setup',
 				{
-					'profile': args.profile,
+					'mode': args.mode,
 					'api_key': args.api_key,
 					'yes': args.yes,
 					'json': args.json,
@@ -923,7 +923,7 @@ def main() -> int:
 		else:
 			if result.get('status') == 'success':
 				print('\n✓ Setup complete!')
-				print(f'\nProfile: {result["profile"]}')
+				print(f'\nMode: {result["mode"]}')
 				print('Next: browser-use open https://example.com')
 		return 0
 
