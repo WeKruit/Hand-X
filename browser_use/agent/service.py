@@ -1514,7 +1514,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				self.logger.info(f'⚠️  Simple judge overriding success to failure: {reason}')
 				last_result.success = False
 				note = f'[Simple judge: {reason}]'
-				if last_result.extracted_content:
+				# When structured output is expected, don't append judge text to extracted_content
+				# as it would corrupt the JSON and break end-user parsers
+				if self.output_model_schema is not None:
+					if last_result.metadata is None:
+						last_result.metadata = {}
+					last_result.metadata['simple_judge'] = note
+				elif last_result.extracted_content:
 					last_result.extracted_content += f'\n\n{note}'
 				else:
 					last_result.extracted_content = note
