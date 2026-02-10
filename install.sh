@@ -278,8 +278,8 @@ show_bash_menu() {
 	echo "Press Enter for default [1]"
 	echo ""
 
-	# Read with timeout and default
-	read -t 60 -p "> " choices || choices="1"
+	# Read from /dev/tty to work even when script is piped
+	read -t 60 -p "> " choices < /dev/tty || choices="1"
 	choices=${choices:-1}
 
 	[[ "$choices" == *"1"* ]] && INSTALL_LOCAL=true
