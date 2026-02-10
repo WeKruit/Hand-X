@@ -4,8 +4,6 @@ These tests call real functions without mocking. They verify the
 structure and logic of the setup command against actual system state.
 """
 
-import pytest
-
 from browser_use.skill_cli.commands import setup
 
 
