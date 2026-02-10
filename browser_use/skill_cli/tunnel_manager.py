@@ -199,40 +199,56 @@ async def start_tunnel(port: int) -> dict[str, Any]:
 	except RuntimeError as e:
 		return {'error': str(e)}
 
-	# Spawn cloudflared as a daemon (start_new_session=True makes it survive parent exit)
+	# Create log file for cloudflared stderr (avoids SIGPIPE when parent exits)
+	_TUNNELS_DIR.mkdir(parents=True, exist_ok=True)
+	log_file_path = _TUNNELS_DIR / f'{port}.log'
+	log_file = open(log_file_path, 'w')
+
+	# Spawn cloudflared as a daemon
+	# - start_new_session=True: survives parent exit
+	# - stderr to file: avoids SIGPIPE when parent's pipe closes
 	process = await asyncio.create_subprocess_exec(
 		cloudflared_binary,
 		'tunnel',
 		'--url',
 		f'http://localhost:{port}',
 		stdout=asyncio.subprocess.DEVNULL,
-		stderr=asyncio.subprocess.PIPE,
-		start_new_session=True,  # Daemon mode - survives parent exit
+		stderr=log_file,
+		start_new_session=True,
 	)
 
-	# Read stderr lines until we find the tunnel URL
-	assert process.stderr is not None
+	# Poll the log file until we find the tunnel URL
 	url: str | None = None
 	try:
-		deadline = asyncio.get_event_loop().time() + 15
-		while asyncio.get_event_loop().time() < deadline:
+		import time
+
+		deadline = time.time() + 15
+		while time.time() < deadline:
+			# Check if process died
+			if process.returncode is not None:
+				log_file.close()
+				content = log_file_path.read_text() if log_file_path.exists() else ''
+				return {'error': f'cloudflared exited unexpectedly: {content[:500]}'}
+
+			# Read log file content
 			try:
-				line_bytes = await asyncio.wait_for(process.stderr.readline(), timeout=1.0)
-			except TimeoutError:
-				continue
-			if not line_bytes:
-				break
-			line = line_bytes.decode(errors='replace')
-			match = _URL_PATTERN.search(line)
-			if match:
-				url = match.group(1)
-				break
+				content = log_file_path.read_text()
+				match = _URL_PATTERN.search(content)
+				if match:
+					url = match.group(1)
+					break
+			except OSError:
+				pass
+
+			await asyncio.sleep(0.2)
 	except Exception as e:
 		process.terminate()
+		log_file.close()
 		return {'error': f'Failed to start tunnel: {e}'}
 
 	if url is None:
 		process.terminate()
+		log_file.close()
 		return {'error': 'Timed out waiting for cloudflare tunnel URL (15s)'}
 
 	# Save tunnel info to disk so it persists across CLI invocations
@@ -278,6 +294,9 @@ async def stop_tunnel(port: int) -> dict[str, Any]:
 	pid = info['pid']
 	_kill_process(pid)
 	_delete_tunnel_info(port)
+	# Clean up log file
+	log_file = _TUNNELS_DIR / f'{port}.log'
+	log_file.unlink(missing_ok=True)
 	logger.info(f'Tunnel stopped: localhost:{port}')
 
 	return {'stopped': port, 'url': url}
