@@ -1,29 +1,45 @@
 #!/usr/bin/env bash
-# Browser-Use Bootstrap Installer (DEV TESTING)
-#
-# NOTE: This script is for development testing only. Production version will
-# install from PyPI. For now, use BROWSER_USE_BRANCH to install from GitHub.
+# Browser-Use Bootstrap Installer
 #
 # Usage:
-#   # Install from GitHub branch (for testing)
-#   curl -fsSL <raw-url> | BROWSER_USE_BRANCH=frictionless-install bash
-#
-#   # With profile
-#   curl -fsSL <raw-url> | BROWSER_USE_BRANCH=frictionless-install bash -s -- --profile remote
-#
-# Once released, production usage will be:
+#   # Interactive install (shows mode selection TUI)
 #   curl -fsSL https://browser-use.com/install.sh | bash
+#
+#   # Non-interactive install with flags
+#   curl -fsSL https://browser-use.com/install.sh | bash -s -- --full
+#   curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only
+#   curl -fsSL https://browser-use.com/install.sh | bash -s -- --local-only
+#
+#   # With API key
+#   curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only --api-key bu_xxx
+#
+# For development testing:
+#   curl -fsSL <raw-url> | BROWSER_USE_BRANCH=frictionless-install bash
 
 set -e
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+# Mode flags (set by parse_args or TUI)
+INSTALL_LOCAL=false
+INSTALL_REMOTE=false
+SKIP_INTERACTIVE=false
+API_KEY=""
 
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+BOLD='\033[1m'
 NC='\033[0m' # No Color
 
+# =============================================================================
 # Logging functions
+# =============================================================================
+
 log_info() {
 	echo -e "${BLUE}ℹ${NC} $1"
 }
@@ -40,7 +56,59 @@ log_error() {
 	echo -e "${RED}✗${NC} $1"
 }
 
-# Detect platform
+# =============================================================================
+# Argument parsing
+# =============================================================================
+
+parse_args() {
+	while [[ $# -gt 0 ]]; do
+		case $1 in
+			--full|--all)
+				INSTALL_LOCAL=true
+				INSTALL_REMOTE=true
+				SKIP_INTERACTIVE=true
+				shift
+				;;
+			--remote-only)
+				INSTALL_REMOTE=true
+				SKIP_INTERACTIVE=true
+				shift
+				;;
+			--local-only)
+				INSTALL_LOCAL=true
+				SKIP_INTERACTIVE=true
+				shift
+				;;
+			--api-key)
+				API_KEY="$2"
+				shift 2
+				;;
+			--help|-h)
+				echo "Browser-Use Installer"
+				echo ""
+				echo "Usage: install.sh [OPTIONS]"
+				echo ""
+				echo "Options:"
+				echo "  --full, --all     Install all modes (local + remote)"
+				echo "  --remote-only     Install remote mode only (no Chromium)"
+				echo "  --local-only      Install local modes only (no cloudflared)"
+				echo "  --api-key KEY     Set Browser-Use API key"
+				echo "  --help, -h        Show this help"
+				echo ""
+				echo "Without options, shows interactive mode selection."
+				exit 0
+				;;
+			*)
+				shift
+				;;
+		esac
+	done
+}
+
+# =============================================================================
+# Platform detection
+# =============================================================================
+
 detect_platform() {
 	local os=$(uname -s | tr '[:upper:]' '[:lower:]')
 	local arch=$(uname -m)
@@ -64,7 +132,10 @@ detect_platform() {
 	log_info "Detected platform: $PLATFORM ($arch)"
 }
 
-# Check Python version
+# =============================================================================
+# Python management
+# =============================================================================
+
 check_python() {
 	log_info "Checking Python installation..."
 
@@ -92,7 +163,6 @@ check_python() {
 	fi
 }
 
-# Install Python (platform-specific)
 install_python() {
 	log_info "Installing Python 3.11+..."
 
@@ -131,7 +201,10 @@ install_python() {
 	fi
 }
 
-# Install uv package manager
+# =============================================================================
+# uv package manager
+# =============================================================================
+
 install_uv() {
 	log_info "Installing uv package manager..."
 
@@ -154,7 +227,69 @@ install_uv() {
 	fi
 }
 
-# Install browser-use
+# =============================================================================
+# Interactive mode selection TUI
+# =============================================================================
+
+show_mode_menu() {
+	# Check for TUI tools in order of preference
+	if command -v gum &> /dev/null; then
+		show_gum_menu
+	elif command -v whiptail &> /dev/null; then
+		show_whiptail_menu
+	else
+		show_bash_menu
+	fi
+}
+
+show_gum_menu() {
+	echo ""
+	echo "Select browser modes to install:"
+	echo ""
+
+	SELECTED=$(gum choose --no-limit --height 10 \
+		"Local browser  (chromium/real - requires Chromium download)" \
+		"Remote browser (cloud - requires API key)")
+
+	# Parse selections
+	[[ "$SELECTED" == *"Local"*  ]] && INSTALL_LOCAL=true
+	[[ "$SELECTED" == *"Remote"* ]] && INSTALL_REMOTE=true
+}
+
+show_whiptail_menu() {
+	# Use whiptail for interactive menu
+	local result=$(whiptail --title "Browser-Use Installer" \
+		--checklist "Select browser modes to install:" 12 60 2 \
+		"local"  "Local browser (chromium/real)"  ON \
+		"remote" "Remote browser (cloud)"         OFF \
+		3>&1 1>&2 2>&3) || true
+
+	[[ "$result" == *"local"*  ]] && INSTALL_LOCAL=true
+	[[ "$result" == *"remote"* ]] && INSTALL_REMOTE=true
+}
+
+show_bash_menu() {
+	echo ""
+	echo "Select browser modes to install (space-separated numbers):"
+	echo ""
+	echo "  1) Local browser  (chromium/real - requires Chromium download)"
+	echo "  2) Remote browser (cloud - requires API key)"
+	echo ""
+	echo "Press Enter for default [1]"
+	echo ""
+
+	# Read with timeout and default
+	read -t 60 -p "> " choices || choices="1"
+	choices=${choices:-1}
+
+	[[ "$choices" == *"1"* ]] && INSTALL_LOCAL=true
+	[[ "$choices" == *"2"* ]] && INSTALL_REMOTE=true
+}
+
+# =============================================================================
+# Browser-Use installation
+# =============================================================================
+
 install_browser_use() {
 	log_info "Installing browser-use..."
 
@@ -182,7 +317,23 @@ install_browser_use() {
 	log_success "browser-use installed"
 }
 
-# Install cloudflared for tunneling
+install_chromium() {
+	log_info "Installing Chromium browser..."
+
+	source "$HOME/.browser-use-env/bin/activate"
+
+	# Build command - only use --with-deps on Linux (it fails on Windows/macOS)
+	local cmd="uvx playwright install chromium"
+	if [ "$PLATFORM" = "linux" ]; then
+		cmd="$cmd --with-deps"
+	fi
+	cmd="$cmd --no-shell"
+
+	eval $cmd
+
+	log_success "Chromium installed"
+}
+
 install_cloudflared() {
 	log_info "Installing cloudflared..."
 
@@ -199,6 +350,7 @@ install_cloudflared() {
 				brew install cloudflared
 			else
 				# Direct download for macOS without Homebrew
+				mkdir -p "$HOME/.local/bin"
 				if [ "$arch" = "arm64" ]; then
 					curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz -o /tmp/cloudflared.tgz
 				else
@@ -233,7 +385,66 @@ install_cloudflared() {
 	fi
 }
 
-# Add to PATH permanently
+# =============================================================================
+# Install dependencies based on selected modes
+# =============================================================================
+
+install_dependencies() {
+	# Install base package (always needed)
+	install_browser_use
+
+	# Install Chromium only if local mode selected
+	if [ "$INSTALL_LOCAL" = true ]; then
+		install_chromium
+	else
+		log_info "Skipping Chromium (remote-only mode)"
+	fi
+
+	# Install cloudflared only if remote mode selected
+	if [ "$INSTALL_REMOTE" = true ]; then
+		install_cloudflared
+	else
+		log_info "Skipping cloudflared (local-only mode)"
+	fi
+}
+
+# =============================================================================
+# Write install configuration
+# =============================================================================
+
+write_install_config() {
+	# Determine installed modes and default
+	local modes=""
+	local default_mode=""
+
+	if [ "$INSTALL_LOCAL" = true ] && [ "$INSTALL_REMOTE" = true ]; then
+		modes='["chromium", "real", "remote"]'
+		default_mode="chromium"
+	elif [ "$INSTALL_REMOTE" = true ]; then
+		modes='["remote"]'
+		default_mode="remote"
+	else
+		modes='["chromium", "real"]'
+		default_mode="chromium"
+	fi
+
+	# Write config file
+	mkdir -p "$HOME/.browser-use"
+	cat > "$HOME/.browser-use/install-config.json" << EOF
+{
+  "installed_modes": $modes,
+  "default_mode": "$default_mode"
+}
+EOF
+
+	local mode_names=$(echo $modes | tr -d '[]"' | tr ',' ' ')
+	log_success "Configured: $mode_names"
+}
+
+# =============================================================================
+# PATH configuration
+# =============================================================================
+
 configure_path() {
 	local shell_rc=""
 	local bin_path="$HOME/.browser-use-env/bin"
@@ -260,47 +471,38 @@ configure_path() {
 	echo "export PATH=\"$bin_path:$local_bin:\$PATH\"" >> "$shell_rc"
 
 	log_success "Added to PATH in $shell_rc"
-	log_warn "Restart your shell or run: source $shell_rc"
 }
 
-# Run setup wizard
+# =============================================================================
+# Setup wizard
+# =============================================================================
+
 run_setup() {
 	log_info "Running setup wizard..."
 
 	# Activate venv
 	source "$HOME/.browser-use-env/bin/activate"
 
-	# Parse profile from arguments
+	# Determine profile based on mode selections
 	local profile="local"
-	while [[ $# -gt 0 ]]; do
-		case $1 in
-			--profile)
-				profile="$2"
-				shift 2
-				;;
-			*)
-				shift
-				;;
-		esac
-	done
+	if [ "$INSTALL_REMOTE" = true ] && [ "$INSTALL_LOCAL" = true ]; then
+		profile="full"
+	elif [ "$INSTALL_REMOTE" = true ]; then
+		profile="remote"
+	fi
 
-	# Run setup
-	if [ "$profile" = "remote" ] || [ "$profile" = "full" ]; then
-		log_info "Setup requires API key for $profile profile"
-		read -p "Enter Browser-Use API key (or leave empty to skip): " api_key
-
-		if [ -n "$api_key" ]; then
-			browser-use setup --profile "$profile" --api-key "$api_key"
-		else
-			log_warn "Skipping API key configuration"
-			browser-use setup --profile local
-		fi
+	# Run setup with API key if provided
+	if [ -n "$API_KEY" ]; then
+		browser-use setup --profile "$profile" --api-key "$API_KEY" --yes
 	else
-		browser-use setup --profile "$profile"
+		browser-use setup --profile "$profile" --yes
 	fi
 }
 
-# Validate installation
+# =============================================================================
+# Validation
+# =============================================================================
+
 validate() {
 	log_info "Validating installation..."
 
@@ -315,30 +517,77 @@ validate() {
 	fi
 }
 
-# Print next steps
+# =============================================================================
+# Print completion message
+# =============================================================================
+
 print_next_steps() {
+	# Detect shell for source command
+	local shell_rc=".bashrc"
+	if [ -n "$ZSH_VERSION" ]; then
+		shell_rc=".zshrc"
+	fi
+
 	echo ""
 	echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	echo ""
 	log_success "Browser-Use installed successfully!"
 	echo ""
+	echo "Installed modes:"
+	[ "$INSTALL_LOCAL" = true ]  && echo "  ✓ Local (chromium, real)"
+	[ "$INSTALL_REMOTE" = true ] && echo "  ✓ Remote (cloud)"
+	echo ""
+
+	# Show API key instructions if remote selected but no key provided
+	if [ "$INSTALL_REMOTE" = true ] && [ -z "$API_KEY" ]; then
+		echo "⚠ API key required for remote mode:"
+		echo "  export BROWSER_USE_API_KEY=<your-api-key>"
+		echo ""
+		echo "  Get your API key at: https://browser-use.com"
+		echo ""
+	fi
+
 	echo "Next steps:"
-	echo "  1. Restart your shell or run: source ~/.bashrc"
-	echo "  2. Try: browser-use open https://example.com"
-	echo "  3. For help: browser-use --help"
+	echo "  1. Restart your shell or run: source ~/$shell_rc"
+
+	if [ "$INSTALL_REMOTE" = true ] && [ -z "$API_KEY" ]; then
+		echo "  2. Set your API key (see above)"
+		echo "  3. Try: browser-use open https://example.com"
+	else
+		echo "  2. Try: browser-use open https://example.com"
+	fi
+
 	echo ""
 	echo "Documentation: https://docs.browser-use.com"
 	echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	echo ""
 }
 
+# =============================================================================
 # Main installation flow
+# =============================================================================
+
 main() {
 	echo ""
 	echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	echo "  Browser-Use Installer"
 	echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	echo ""
+
+	# Parse command-line flags
+	parse_args "$@"
+
+	# Show install mode if flags provided
+	if [ "$SKIP_INTERACTIVE" = true ]; then
+		if [ "$INSTALL_LOCAL" = true ] && [ "$INSTALL_REMOTE" = true ]; then
+			log_info "Install mode: full (local + remote)"
+		elif [ "$INSTALL_REMOTE" = true ]; then
+			log_info "Install mode: remote-only"
+		else
+			log_info "Install mode: local-only"
+		fi
+		echo ""
+	fi
 
 	# Step 1: Detect platform
 	detect_platform
@@ -358,22 +607,35 @@ main() {
 	# Step 3: Install uv
 	install_uv
 
-	# Step 4: Install browser-use
-	install_browser_use
+	# Step 4: Show mode selection TUI (unless skipped via flags)
+	if [ "$SKIP_INTERACTIVE" = false ]; then
+		show_mode_menu
+	fi
 
-	# Step 5: Install cloudflared (for tunneling)
-	install_cloudflared
+	# Default to local-only if nothing selected
+	if [ "$INSTALL_LOCAL" = false ] && [ "$INSTALL_REMOTE" = false ]; then
+		log_warn "No modes selected, defaulting to local"
+		INSTALL_LOCAL=true
+	fi
 
-	# Step 6: Configure PATH
+	echo ""
+
+	# Step 5: Install dependencies
+	install_dependencies
+
+	# Step 6: Write install config
+	write_install_config
+
+	# Step 7: Configure PATH
 	configure_path
 
-	# Step 7: Run setup wizard
-	run_setup "$@"
+	# Step 8: Run setup wizard
+	run_setup
 
-	# Step 8: Validate
+	# Step 9: Validate
 	validate
 
-	# Step 9: Show next steps
+	# Step 10: Show next steps
 	print_next_steps
 }
 

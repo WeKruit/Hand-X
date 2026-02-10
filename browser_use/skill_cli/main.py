@@ -210,12 +210,12 @@ def ensure_server(session: str, browser: str, headed: bool, profile: str | None,
 						if browser == 'remote' and existing_mode != 'remote':
 							print(
 								f"Error: Session '{session}' is running with --browser {existing_mode}, "
-								f"but --browser remote was requested.\n\n"
-								f"Cloud browser features (live_url) require a remote session.\n\n"
-								f"Options:\n"
-								f"  1. Close and restart: browser-use close && browser-use --browser remote open <url>\n"
-								f"  2. Use different session: browser-use --browser remote --session other <command>\n"
-								f"  3. Use existing local browser: browser-use --browser {existing_mode} <command>",
+								f'but --browser remote was requested.\n\n'
+								f'Cloud browser features (live_url) require a remote session.\n\n'
+								f'Options:\n'
+								f'  1. Close and restart: browser-use close && browser-use --browser remote open <url>\n'
+								f'  2. Use different session: browser-use --browser remote --session other <command>\n'
+								f'  3. Use existing local browser: browser-use --browser {existing_mode} <command>',
 								file=sys.stderr,
 							)
 							sys.exit(1)
@@ -275,11 +275,13 @@ def ensure_server(session: str, browser: str, headed: bool, profile: str | None,
 
 				# Write metadata file to track session config
 				meta_path.write_text(
-					json.dumps({
-						'browser_mode': browser,
-						'headed': headed,
-						'profile': profile,
-					})
+					json.dumps(
+						{
+							'browser_mode': browser,
+							'headed': headed,
+							'profile': profile,
+						}
+					)
 				)
 
 				return True
@@ -328,6 +330,12 @@ def send_command(session: str, action: str, params: dict) -> dict:
 
 def build_parser() -> argparse.ArgumentParser:
 	"""Build argument parser with all commands."""
+	# Import install config to get available modes and default
+	from browser_use.skill_cli.install_config import get_available_modes, get_default_mode
+
+	available_modes = get_available_modes()
+	default_mode = get_default_mode()
+
 	parser = argparse.ArgumentParser(
 		prog='browser-use',
 		description='Browser automation CLI for browser-use',
@@ -350,7 +358,13 @@ Examples:
 
 	# Global flags
 	parser.add_argument('--session', '-s', default='default', help='Session name (default: default)')
-	parser.add_argument('--browser', '-b', choices=['chromium', 'real', 'remote'], default='chromium', help='Browser mode')
+	parser.add_argument(
+		'--browser',
+		'-b',
+		choices=available_modes,
+		default=default_mode,
+		help=f'Browser mode (available: {", ".join(available_modes)})',
+	)
 	parser.add_argument('--headed', action='store_true', help='Show browser window')
 	parser.add_argument('--profile', help='Chrome profile (real browser mode)')
 	parser.add_argument('--json', action='store_true', help='Output as JSON')
@@ -1261,7 +1275,7 @@ def main() -> int:
 			if result.get('status') == 'success':
 				print('\n✓ Setup complete!')
 				print(f'\nProfile: {result["profile"]}')
-				print(f'Next: browser-use open https://example.com')
+				print('Next: browser-use open https://example.com')
 		return 0
 
 	# Handle doctor command
@@ -1335,6 +1349,13 @@ def main() -> int:
 				else:
 					print(f'Stopped tunnel on port {result["stopped"]}')
 		return 0
+
+	# Validate requested mode is available based on installation config
+	from browser_use.skill_cli.install_config import get_mode_unavailable_error, is_mode_available
+
+	if not is_mode_available(args.browser):
+		print(get_mode_unavailable_error(args.browser), file=sys.stderr)
+		return 1
 
 	# Set API key in environment if provided
 	if args.api_key:
