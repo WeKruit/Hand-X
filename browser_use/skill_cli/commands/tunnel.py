@@ -41,18 +41,18 @@ async def start_tunnel(session_info: SessionInfo, port: int) -> dict[str, Any]:
 		info = session_info.tunnels[port]
 		return {'url': info.url, 'port': port, 'existing': True}
 
-	# Check cloudflared binary
-	if not shutil.which('cloudflared'):
-		return {
-			'error': 'cloudflared not found. Install it:\n'
-			'  macOS:   brew install cloudflared\n'
-			'  Linux:   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/\n'
-			'  Windows: winget install Cloudflare.cloudflared',
-		}
+	# Get cloudflared binary (auto-installs if needed)
+	from browser_use.skill_cli.tunnel_manager import get_tunnel_manager
+
+	try:
+		tunnel_manager = get_tunnel_manager()
+		cloudflared_binary = tunnel_manager.get_binary_path()
+	except RuntimeError as e:
+		return {'error': str(e)}
 
 	# Spawn cloudflared process
 	process = await asyncio.create_subprocess_exec(
-		'cloudflared',
+		cloudflared_binary,
 		'tunnel',
 		'--url',
 		f'http://localhost:{port}',
