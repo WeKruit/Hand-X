@@ -168,8 +168,9 @@ install_browser_use() {
 
 	# Install from GitHub branch (for testing) or PyPI (production)
 	if [ -n "$BROWSER_USE_BRANCH" ]; then
-		log_info "Installing from GitHub branch: $BROWSER_USE_BRANCH"
-		uv pip install "git+https://github.com/browser-use/browser-use@$BROWSER_USE_BRANCH"
+		BROWSER_USE_REPO="${BROWSER_USE_REPO:-ShawnPana/browser-use}"
+		log_info "Installing from GitHub: $BROWSER_USE_REPO@$BROWSER_USE_BRANCH"
+		uv pip install "git+https://github.com/$BROWSER_USE_REPO@$BROWSER_USE_BRANCH"
 	else
 		uv pip install browser-use
 	fi
