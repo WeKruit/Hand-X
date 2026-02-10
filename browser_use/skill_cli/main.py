@@ -182,14 +182,41 @@ def connect_to_server(session: str, timeout: float = 60.0) -> socket.socket:
 	return sock
 
 
+def get_session_metadata_path(session: str) -> Path:
+	"""Get path to session metadata file (stores browser_mode, headed, profile)."""
+	return Path(tempfile.gettempdir()) / f'browser-use-{session}.meta'
+
+
 def ensure_server(session: str, browser: str, headed: bool, profile: str | None, api_key: str | None) -> bool:
 	"""Start server if not running. Returns True if started."""
+	meta_path = get_session_metadata_path(session)
+
 	# Check if server is already running and responsive
 	if is_server_running(session):
 		try:
 			sock = connect_to_server(session, timeout=0.1)
 			sock.close()
-			return False  # Already running
+
+			# Check browser mode matches existing session
+			if meta_path.exists():
+				try:
+					meta = json.loads(meta_path.read_text())
+					existing_mode = meta.get('browser_mode', 'chromium')
+					if existing_mode != browser:
+						print(
+							f"Error: Session '{session}' is running with --browser {existing_mode}, "
+							f"but --browser {browser} was requested.\n\n"
+							f"Options:\n"
+							f"  1. Use existing browser: browser-use --browser {existing_mode} <command>\n"
+							f"  2. Use different session: browser-use --browser {browser} --session other <command>\n"
+							f"  3. Close existing session: browser-use close",
+							file=sys.stderr,
+						)
+						sys.exit(1)
+				except (json.JSONDecodeError, OSError):
+					pass  # Metadata file corrupt, ignore
+
+			return False  # Already running with correct mode
 		except Exception:
 			pass  # Server dead, restart
 
@@ -239,6 +266,16 @@ def ensure_server(session: str, browser: str, headed: bool, profile: str | None,
 			try:
 				sock = connect_to_server(session, timeout=0.1)
 				sock.close()
+
+				# Write metadata file to track session config
+				meta_path.write_text(
+					json.dumps({
+						'browser_mode': browser,
+						'headed': headed,
+						'profile': profile,
+					})
+				)
+
 				return True
 			except Exception:
 				pass
@@ -1176,6 +1213,10 @@ def main() -> int:
 				response = send_command(name, 'close', {})
 				if response.get('success'):
 					closed.append(name)
+					# Clean up metadata file
+					meta_path = get_session_metadata_path(name)
+					if meta_path.exists():
+						meta_path.unlink()
 			except Exception:
 				pass  # Server may already be stopping
 
@@ -1285,6 +1326,12 @@ def main() -> int:
 
 	# Send command to server
 	response = send_command(args.session, args.command, params)
+
+	# Clean up metadata file on successful close
+	if args.command == 'close' and response.get('success'):
+		meta_path = get_session_metadata_path(args.session)
+		if meta_path.exists():
+			meta_path.unlink()
 
 	# Output response
 	if args.json:
