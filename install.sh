@@ -280,8 +280,10 @@ show_bash_menu() {
 	echo -n "> "
 
 	# Read from /dev/tty to work even when script is piped
-	# Use subshell to prevent set -e from killing script on read timeout/empty
-	choices=$(head -n1 < /dev/tty 2>/dev/null) || true
+	# Temporarily disable set -e to handle read edge cases
+	set +e
+	read -r choices < /dev/tty
+	set -e
 	choices=${choices:-1}
 
 	[[ "$choices" == *"1"* ]] && INSTALL_LOCAL=true
