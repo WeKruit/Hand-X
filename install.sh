@@ -228,15 +228,59 @@ install_uv() {
 }
 
 # =============================================================================
+# Gum TUI installation
+# =============================================================================
+
+install_gum() {
+	# Install gum for beautiful TUI - silent and fast
+	if command -v gum &> /dev/null; then
+		return 0
+	fi
+
+	local arch=$(uname -m)
+	local gum_version="0.14.5"
+
+	case "$PLATFORM" in
+		macos)
+			if command -v brew &> /dev/null; then
+				brew install gum &> /dev/null || return 1
+			else
+				# Direct download for macOS
+				if [ "$arch" = "arm64" ]; then
+					curl -sL "https://github.com/charmbracelet/gum/releases/download/v${gum_version}/gum_${gum_version}_Darwin_arm64.tar.gz" | tar -xz -C /tmp
+				else
+					curl -sL "https://github.com/charmbracelet/gum/releases/download/v${gum_version}/gum_${gum_version}_Darwin_x86_64.tar.gz" | tar -xz -C /tmp
+				fi
+				mkdir -p "$HOME/.local/bin"
+				mv /tmp/gum "$HOME/.local/bin/" 2>/dev/null || return 1
+			fi
+			;;
+		linux)
+			mkdir -p "$HOME/.local/bin"
+			if [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; then
+				curl -sL "https://github.com/charmbracelet/gum/releases/download/v${gum_version}/gum_${gum_version}_Linux_arm64.tar.gz" | tar -xz -C /tmp
+			else
+				curl -sL "https://github.com/charmbracelet/gum/releases/download/v${gum_version}/gum_${gum_version}_Linux_x86_64.tar.gz" | tar -xz -C /tmp
+			fi
+			mv /tmp/gum "$HOME/.local/bin/" 2>/dev/null || return 1
+			export PATH="$HOME/.local/bin:$PATH"
+			;;
+		*)
+			return 1
+			;;
+	esac
+
+	command -v gum &> /dev/null
+}
+
+# =============================================================================
 # Interactive mode selection TUI
 # =============================================================================
 
 show_mode_menu() {
-	# Check for TUI tools in order of preference
-	if command -v gum &> /dev/null; then
+	# Try to install gum for nice TUI
+	if install_gum; then
 		show_gum_menu
-	elif command -v whiptail &> /dev/null; then
-		show_whiptail_menu
 	else
 		show_bash_menu
 	fi
@@ -244,28 +288,25 @@ show_mode_menu() {
 
 show_gum_menu() {
 	echo ""
-	echo "Select browser modes to install:"
+
+	# Styled header
+	gum style --foreground 212 --bold "Select browser modes to install"
+	gum style --foreground 240 "Use arrow keys to navigate, space to select, enter to confirm"
 	echo ""
 
-	SELECTED=$(gum choose --no-limit --height 10 \
-		"Local browser  (chromium/real - requires Chromium download)" \
-		"Remote browser (cloud - requires API key)")
+	# Checkbox selection with gum choose
+	set +e
+	SELECTED=$(gum choose --no-limit --cursor-prefix "[ ] " --selected-prefix "[✓] " --unselected-prefix "[ ] " \
+		--header "" \
+		--cursor.foreground 212 \
+		--selected.foreground 212 \
+		"Local browser   (chromium/real - requires Chromium)" \
+		"Remote browser  (cloud - requires API key)" < /dev/tty)
+	set -e
 
 	# Parse selections
-	[[ "$SELECTED" == *"Local"*  ]] && INSTALL_LOCAL=true
-	[[ "$SELECTED" == *"Remote"* ]] && INSTALL_REMOTE=true
-}
-
-show_whiptail_menu() {
-	# Use whiptail for interactive menu
-	local result=$(whiptail --title "Browser-Use Installer" \
-		--checklist "Select browser modes to install:" 12 60 2 \
-		"local"  "Local browser (chromium/real)"  ON \
-		"remote" "Remote browser (cloud)"         OFF \
-		3>&1 1>&2 2>&3) || true
-
-	[[ "$result" == *"local"*  ]] && INSTALL_LOCAL=true
-	[[ "$result" == *"remote"* ]] && INSTALL_REMOTE=true
+	if [[ "$SELECTED" == *"Local"* ]]; then INSTALL_LOCAL=true; fi
+	if [[ "$SELECTED" == *"Remote"* ]]; then INSTALL_REMOTE=true; fi
 }
 
 show_bash_menu() {
