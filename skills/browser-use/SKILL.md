@@ -206,16 +206,18 @@ Manage cloud tasks when using remote mode:
 browser-use task list                     # List recent tasks
 browser-use task list --limit 20          # Show more tasks
 browser-use task list --status running    # Filter by status
-browser-use task list --status finished
 browser-use task list --json              # JSON output
 
-browser-use task status <task-id>         # Get task status and output
-browser-use task status <task-id> --json
+browser-use task status <task-id>         # Get task status (token efficient)
+browser-use task status <task-id> -c      # Show all steps with reasoning
+browser-use task status <task-id> -v      # Show all steps with URLs + actions
+browser-use task status <task-id> --last 5  # Show only last 5 steps
 
 browser-use task stop <task-id>           # Stop a running task
-
 browser-use task logs <task-id>           # Get task execution logs
 ```
+
+**Token-efficient monitoring:** Default `task status` shows only the latest step. Use `-c` (compact) or `-v` (verbose) only when you need more context.
 
 ### Cloud Session Management (Remote Mode)
 
@@ -349,6 +351,62 @@ browser-use -b remote run "task" \
 
 # With cloud profile (preserves cookies across sessions)
 browser-use -b remote run "task" --profile <profile-id> --no-wait
+```
+
+### Debugging & Monitoring
+
+**Live view**: Watch an agent work in real-time:
+```bash
+browser-use session get <session-id>
+# → Live URL: https://live.browser-use.com?wss=...
+# Open this URL in your browser to watch the agent
+```
+
+**Detect stuck tasks**: If cost stops increasing, the task may be stuck:
+```bash
+browser-use task status <task-id>
+# Cost: $0.009  ← if this doesn't change over time, task is stuck
+```
+
+**Logs**: Only available after task completes (not during execution):
+```bash
+browser-use task logs <task-id>  # Works after task finishes
+```
+
+### Cleanup
+
+Always clean up sessions after parallel work:
+```bash
+# Stop all active agents
+browser-use session stop --all
+
+# Or stop specific sessions
+browser-use session stop <session-id>
+```
+
+### Troubleshooting Subagents
+
+**Session reuse fails after `task stop`**:
+If you stop a task and try to reuse its session, the new task may get stuck at "created" status. Solution: create a new agent instead.
+```bash
+# This may fail:
+browser-use task stop <task-id>
+browser-use -b remote run "new task" --session-id <same-session>  # Might get stuck
+
+# Do this instead:
+browser-use -b remote run "new task" --profile <profile-id>  # Fresh session
+```
+
+**Task stuck at "started"**:
+- Check cost with `task status` - if not increasing, task is stuck
+- View live URL with `session get` to see what's happening
+- Stop the task and create a new agent
+
+**Sessions persist after tasks complete**:
+Tasks finishing doesn't auto-stop sessions. Clean up manually:
+```bash
+browser-use session list --status active  # See lingering sessions
+browser-use session stop --all            # Clean up
 ```
 
 ### Session Management

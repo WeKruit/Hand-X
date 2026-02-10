@@ -643,6 +643,11 @@ Setup:
 		# task status <task_id>
 		p = task_sub.add_parser('status', help='Get task status')
 		p.add_argument('task_id', help='Task ID')
+		p.add_argument('--compact', '-c', action='store_true', help='Show all steps with reasoning')
+		p.add_argument('--verbose', '-v', action='store_true', help='Show all steps with full details (URLs, actions)')
+		p.add_argument('--last', '-n', type=int, metavar='N', help='Show only the last N steps')
+		p.add_argument('--reverse', '-r', action='store_true', help='Show steps newest first (100, 99, 98...)')
+		p.add_argument('--step', '-s', type=int, metavar='N', help='Show specific step number')
 		p.add_argument('--json', action='store_true', help='Output as JSON')
 
 		# task stop <task_id>

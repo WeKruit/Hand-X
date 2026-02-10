@@ -115,21 +115,70 @@ def _handle_list(args: argparse.Namespace) -> int:
 	return 0
 
 
+def _format_duration(started_at: str | None, finished_at: str | None) -> str:
+	"""Format duration between two timestamps, or elapsed time if still running."""
+	if not started_at:
+		return ''
+
+	from datetime import datetime, timezone
+
+	try:
+		# Parse ISO format timestamp
+		start = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+
+		if finished_at:
+			end = datetime.fromisoformat(finished_at.replace('Z', '+00:00'))
+		else:
+			end = datetime.now(timezone.utc)
+
+		delta = end - start
+		total_seconds = int(delta.total_seconds())
+
+		if total_seconds < 60:
+			return f'{total_seconds}s'
+		elif total_seconds < 3600:
+			minutes = total_seconds // 60
+			seconds = total_seconds % 60
+			return f'{minutes}m {seconds}s'
+		else:
+			hours = total_seconds // 3600
+			minutes = (total_seconds % 3600) // 60
+			return f'{hours}h {minutes}m'
+	except Exception:
+		return ''
+
+
 def _handle_status(args: argparse.Namespace) -> int:
 	"""Handle 'task status <task_id>' command."""
 	try:
-		status = _run_async(cloud_task.get_task_status(args.task_id))
+		# Use get_task() for full details including steps
+		task_data = _run_async(cloud_task.get_task(args.task_id))
 	except Exception as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1
 
 	if getattr(args, 'json', False):
-		print(json.dumps(status))
+		print(json.dumps(task_data))
 	else:
-		task_id = status.get('id', args.task_id)
-		task_status = status.get('status', 'unknown')
-		output = status.get('output')
-		cost = status.get('cost')
+		task_id = task_data.get('id', args.task_id)
+		task_status = task_data.get('status', 'unknown')
+		output = task_data.get('output')
+		cost = task_data.get('cost')
+		steps = task_data.get('steps', [])
+		started_at = task_data.get('startedAt')
+		finished_at = task_data.get('finishedAt')
+
+		compact = getattr(args, 'compact', False)
+		verbose = getattr(args, 'verbose', False)
+		last_n = getattr(args, 'last', None)
+		reverse = getattr(args, 'reverse', False)
+		specific_step = getattr(args, 'step', None)
+
+		# Determine display mode:
+		# - Default: show only latest step
+		# - --compact: show all steps with reasoning
+		# - --verbose: show all steps with full details
+		show_all_steps = compact or verbose
 
 		# Status emoji
 		status_emoji = {
@@ -140,16 +189,93 @@ def _handle_status(args: argparse.Namespace) -> int:
 			'failed': '❌',
 		}.get(task_status, '❓')
 
-		print(f'Task: {task_id}')
-		print(f'Status: {status_emoji} {task_status}')
-
+		# Build header line: status, cost, duration
+		parts = [f'{status_emoji} {task_id[:8]}... [{task_status}]']
 		if cost is not None:
-			print(f'Cost: ${cost}')
+			parts.append(f'${cost}')
+		duration = _format_duration(started_at, finished_at)
+		if duration:
+			parts.append(duration)
+		print(' '.join(parts))
+
+		# Show steps
+		if steps:
+			total_steps = len(steps)
+
+			# Filter to specific step if requested
+			if specific_step is not None:
+				steps = [s for s in steps if s.get('number') == specific_step]
+				if not steps:
+					print(f'  Step {specific_step} not found (task has {total_steps} steps)')
+				else:
+					print(f'  (showing step {specific_step} of {total_steps})')
+				# Display the specific step
+				for step in steps:
+					_print_step(step, verbose)
+			elif not show_all_steps:
+				# Default mode: show only the latest step
+				latest_step = steps[-1]
+				earlier_count = total_steps - 1
+				if earlier_count > 0:
+					print(f'  ... {earlier_count} earlier steps')
+				_print_step(latest_step, verbose=False)
+			else:
+				# --compact or --verbose: show all steps (with optional filters)
+				skipped_earlier = 0
+				if last_n is not None and last_n < total_steps:
+					skipped_earlier = total_steps - last_n
+					steps = steps[-last_n:]
+
+				# Apply --reverse
+				if reverse:
+					steps = list(reversed(steps))
+
+				# Show count info
+				if skipped_earlier > 0:
+					print(f'  ... {skipped_earlier} earlier steps')
+
+				# Display steps
+				for step in steps:
+					_print_step(step, verbose)
 
 		if output:
-			print(f'Output: {output}')
+			print(f'\nOutput: {output}')
 
 	return 0
+
+
+def _print_step(step: dict, verbose: bool) -> None:
+	"""Print a single step in compact or verbose format."""
+	step_num = step.get('number', '?')
+	memory = step.get('memory', '')
+
+	if verbose:
+		url = step.get('url', '')
+		actions = step.get('actions', [])
+
+		# Truncate URL for display
+		short_url = url[:60] + '...' if len(url) > 60 else url
+
+		print(f'  [{step_num}] {short_url}')
+		if memory:
+			# Truncate memory/reasoning for display
+			short_memory = memory[:100] + '...' if len(memory) > 100 else memory
+			print(f'      Reasoning: {short_memory}')
+		if actions:
+			for action in actions[:2]:  # Show max 2 actions per step
+				# Truncate action for display
+				short_action = action[:70] + '...' if len(action) > 70 else action
+				print(f'      Action: {short_action}')
+			if len(actions) > 2:
+				print(f'      ... and {len(actions) - 2} more actions')
+	else:
+		# Compact mode: just step number and reasoning
+		if memory:
+			# Truncate reasoning for compact display
+			short_memory = memory[:80] + '...' if len(memory) > 80 else memory
+			print(f'  {step_num}. {short_memory}')
+		else:
+			print(f'  {step_num}. (no reasoning)')
 
 
 def _handle_stop(args: argparse.Namespace) -> int:
