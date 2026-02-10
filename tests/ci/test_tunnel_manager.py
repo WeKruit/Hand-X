@@ -1,8 +1,6 @@
 """Tests for TunnelManager - cloudflared binary management."""
 
-import shutil
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -16,11 +14,10 @@ def tunnel_manager():
 
 
 def test_tunnel_manager_system_cloudflared(tunnel_manager):
-	"""Test that system cloudflared is preferred."""
+	"""Test that system cloudflared is found."""
 	with patch('shutil.which', return_value='/usr/local/bin/cloudflared'):
 		binary_path = tunnel_manager.get_binary_path()
 		assert binary_path == '/usr/local/bin/cloudflared'
-		assert tunnel_manager._installation_status == 'system'
 
 
 def test_tunnel_manager_caches_result(tunnel_manager):
@@ -33,18 +30,12 @@ def test_tunnel_manager_caches_result(tunnel_manager):
 		assert path1 == path2
 
 
-def test_tunnel_manager_pycloudflared_fallback(tunnel_manager):
-	"""Test that pycloudflared is used when system cloudflared not found."""
+def test_tunnel_manager_not_installed(tunnel_manager):
+	"""Test that RuntimeError is raised when cloudflared not found."""
 	with patch('shutil.which', return_value=None):
-		# Mock the pycloudflared module
-		mock_cloudflared_path = MagicMock(return_value=Path('/home/user/.cache/pycloudflared/cloudflared'))
-		mock_module = MagicMock()
-		mock_module.cloudflared_path = mock_cloudflared_path
-
-		with patch.dict('sys.modules', {'pycloudflared': mock_module}):
-			binary_path = tunnel_manager.get_binary_path()
-			assert str(binary_path) == '/home/user/.cache/pycloudflared/cloudflared'
-			assert tunnel_manager._installation_status == 'pycloudflared'
+		with pytest.raises(RuntimeError) as exc_info:
+			tunnel_manager.get_binary_path()
+		assert 'cloudflared not installed' in str(exc_info.value)
 
 
 def test_tunnel_manager_is_available_cached(tunnel_manager):
@@ -65,23 +56,22 @@ def test_tunnel_manager_is_available_not_found(tunnel_manager):
 		assert tunnel_manager.is_available() is False
 
 
-def test_tunnel_manager_status_system(tunnel_manager):
-	"""Test get_status returns correct info for system cloudflared."""
+def test_tunnel_manager_status_installed(tunnel_manager):
+	"""Test get_status returns correct info when cloudflared installed."""
 	with patch('shutil.which', return_value='/usr/local/bin/cloudflared'):
-		tunnel_manager.get_binary_path()  # Initialize
 		status = tunnel_manager.get_status()
 		assert status['available'] is True
 		assert status['source'] == 'system'
 		assert status['path'] == '/usr/local/bin/cloudflared'
 
 
-def test_tunnel_manager_status_not_initialized(tunnel_manager):
-	"""Test get_status before initialization."""
+def test_tunnel_manager_status_not_installed(tunnel_manager):
+	"""Test get_status when cloudflared not installed."""
 	with patch('shutil.which', return_value=None):
 		status = tunnel_manager.get_status()
-		assert status['available'] is True
-		assert 'pycloudflared' in status['source']
-		assert 'download' in status['note']
+		assert status['available'] is False
+		assert status['source'] is None
+		assert 'not installed' in status['note']
 
 
 def test_get_tunnel_manager_singleton():

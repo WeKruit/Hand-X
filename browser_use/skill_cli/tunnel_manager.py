@@ -1,125 +1,75 @@
-"""Cloudflared tunnel binary management via pycloudflared.
+"""Cloudflared tunnel binary management.
 
-This module manages the cloudflared binary for tunnel support, following
-the same pattern as Playwright's Chromium auto-install.
-
-Preference order:
-1. System cloudflared (if user installed via brew/apt/winget)
-2. pycloudflared (auto-downloaded from official Cloudflare releases)
+This module manages the cloudflared binary for tunnel support.
+Cloudflared must be installed via install.sh or manually by the user.
 """
 
 import logging
 import shutil
-from typing import Any, Literal
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 class TunnelManager:
-	"""Manages cloudflared binary installation and execution.
-
-	Respects user's explicit choice (system install) while providing
-	automatic fallback for seamless first-time experience.
-	"""
+	"""Manages cloudflared binary location."""
 
 	def __init__(self) -> None:
 		self._binary_path: str | None = None
-		self._installation_status: Literal['system', 'pycloudflared', 'none'] = 'none'
 
 	def get_binary_path(self) -> str:
-		"""Get cloudflared binary path, installing if needed.
+		"""Get cloudflared binary path.
 
 		Returns:
 			Absolute path to cloudflared binary
 
 		Raises:
-			RuntimeError: If installation fails (network, disk space, etc.)
+			RuntimeError: If cloudflared is not installed
 		"""
 		# Cached result from previous call
 		if self._binary_path:
 			return self._binary_path
 
-		# Check system installation first (user preference)
+		# Check system installation
 		system_binary = shutil.which('cloudflared')
 		if system_binary:
-			logger.info('Using system cloudflared: %s', system_binary)
+			logger.info('Using cloudflared: %s', system_binary)
 			self._binary_path = system_binary
-			self._installation_status = 'system'
 			return system_binary
 
-		# Fallback to pycloudflared (auto-install)
-		try:
-			from pycloudflared import cloudflared_path  # type: ignore
-
-			# First import triggers auto-download if needed
-			logger.info('📦 Downloading cloudflared (~20MB, one-time setup)...')
-			binary = cloudflared_path()
-
-			logger.info('✓ Cloudflared ready: %s', binary)
-			self._binary_path = str(binary)
-			self._installation_status = 'pycloudflared'
-			return self._binary_path
-
-		except ImportError:
-			# Should never happen (pycloudflared is in dependencies)
-			raise RuntimeError(
-				'pycloudflared not installed. This is a bug - '
-				'please report to browser-use maintainers.'
-			)
-		except Exception as e:
-			# Network failure, disk full, platform unsupported, etc.
-			raise RuntimeError(
-				f'Failed to initialize cloudflared: {e}\n\n'
-				'Possible causes:\n'
-				'  - Network error during download\n'
-				'  - Insufficient disk space (~20MB needed)\n'
-				'  - Platform not supported (ARM Mac needs Rosetta 2)\n\n'
-				'Workaround - install manually:\n'
-				'  macOS:   brew install cloudflared\n'
-				'  Linux:   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/\n'
-				'  Windows: winget install Cloudflare.cloudflared\n\n'
-				'Then retry: browser-use tunnel <port>'
-			) from e
+		# Not found
+		raise RuntimeError(
+			'cloudflared not installed.\n\n'
+			'Install cloudflared:\n'
+			'  macOS:   brew install cloudflared\n'
+			'  Linux:   curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o ~/.local/bin/cloudflared && chmod +x ~/.local/bin/cloudflared\n'
+			'  Windows: winget install Cloudflare.cloudflared\n\n'
+			'Or re-run install.sh which installs cloudflared automatically.\n\n'
+			'Then retry: browser-use tunnel <port>'
+		)
 
 	def is_available(self) -> bool:
-		"""Check if cloudflared is available (without triggering download)."""
+		"""Check if cloudflared is available."""
 		if self._binary_path:
 			return True
 		return shutil.which('cloudflared') is not None
 
 	def get_status(self) -> dict[str, Any]:
 		"""Get tunnel capability status for doctor command."""
-		if self._installation_status == 'system':
-			return {
-				'available': True,
-				'source': 'system',
-				'path': self._binary_path,
-				'note': 'Using system cloudflared (user installed)',
-			}
-		elif self._installation_status == 'pycloudflared':
-			return {
-				'available': True,
-				'source': 'pycloudflared',
-				'path': self._binary_path,
-				'note': 'Auto-downloaded from Cloudflare releases',
-			}
-
-		# Not yet initialized - check what would happen
 		system_binary = shutil.which('cloudflared')
 		if system_binary:
 			return {
 				'available': True,
-				'source': 'system (not yet used)',
+				'source': 'system',
 				'path': system_binary,
-				'note': 'Will use system cloudflared',
+				'note': 'cloudflared installed',
 			}
 
-		# Would auto-download on first tunnel
 		return {
-			'available': True,
-			'source': 'pycloudflared (will auto-download)',
+			'available': False,
+			'source': None,
 			'path': None,
-			'note': 'Will download on first tunnel (~20MB, one-time)',
+			'note': 'cloudflared not installed - run install.sh or install manually',
 		}
 
 

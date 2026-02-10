@@ -48,7 +48,6 @@ dependencies = [
     "markdownify>=1.2.0",
     "python-docx>=1.2.0",
     "browser-use-sdk>=2.0.12",
-    "pycloudflared>=0.3.0",
 ]
 # google-api-core: only used for Google LLM APIs
 # pyperclip: only used for examples that use copy/paste
