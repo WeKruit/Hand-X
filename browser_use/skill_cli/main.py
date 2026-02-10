@@ -584,6 +584,7 @@ Examples:
 		help='Port number to tunnel, or subcommand (list, stop)',
 	)
 	tunnel_p.add_argument('port_arg', nargs='?', type=int, help='Port number (for stop subcommand)')
+	tunnel_p.add_argument('--all', action='store_true', help='Stop all tunnels (use with: tunnel stop --all)')
 
 	# -------------------------------------------------------------------------
 	# Session Management
@@ -1304,15 +1305,14 @@ def main() -> int:
 			result = tunnel_manager.list_tunnels()
 		elif pos == 'stop':
 			port_arg = getattr(args, 'port_arg', None)
-			if port_arg is None:
-				# Check if it's 'stop --all'
-				if '--all' in sys.argv:
-					result = asyncio.get_event_loop().run_until_complete(tunnel_manager.stop_all_tunnels())
-				else:
-					print('Usage: browser-use tunnel stop <port>', file=sys.stderr)
-					return 1
-			else:
+			if getattr(args, 'all', False):
+				# stop --all
+				result = asyncio.get_event_loop().run_until_complete(tunnel_manager.stop_all_tunnels())
+			elif port_arg is not None:
 				result = asyncio.get_event_loop().run_until_complete(tunnel_manager.stop_tunnel(port_arg))
+			else:
+				print('Usage: browser-use tunnel stop <port> | --all', file=sys.stderr)
+				return 1
 		elif pos is not None:
 			try:
 				port = int(pos)
