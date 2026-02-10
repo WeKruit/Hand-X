@@ -76,9 +76,12 @@ async def run_checks(mode: Literal['local', 'remote', 'full']) -> dict[str, Any]
 	# Package check
 	try:
 		import browser_use
+
 		checks['browser_use_package'] = {
 			'status': 'ok',
-			'message': f'browser-use {browser_use.__version__}' if hasattr(browser_use, '__version__') else 'browser-use installed',
+			'message': f'browser-use {browser_use.__version__}'
+			if hasattr(browser_use, '__version__')
+			else 'browser-use installed',
 		}
 	except ImportError:
 		checks['browser_use_package'] = {
@@ -155,39 +158,47 @@ def plan_actions(
 	if mode in ('local', 'full'):
 		browser_check = checks.get('browser', {})
 		if browser_check.get('status') != 'ok':
-			actions.append({
-				'type': 'install_browser',
-				'description': 'Install browser (Chromium)',
-				'required': True,
-			})
+			actions.append(
+				{
+					'type': 'install_browser',
+					'description': 'Install browser (Chromium)',
+					'required': True,
+				}
+			)
 
 	# API key configuration (remote/full)
 	if mode in ('remote', 'full'):
 		api_check = checks.get('api_key', {})
 		if api_check.get('status') != 'ok':
 			if api_key:
-				actions.append({
-					'type': 'configure_api_key',
-					'description': 'Configure API key',
-					'required': True,
-					'api_key': api_key,
-				})
+				actions.append(
+					{
+						'type': 'configure_api_key',
+						'description': 'Configure API key',
+						'required': True,
+						'api_key': api_key,
+					}
+				)
 			elif not yes:
-				actions.append({
-					'type': 'prompt_api_key',
-					'description': 'Prompt for API key',
-					'required': False,
-				})
+				actions.append(
+					{
+						'type': 'prompt_api_key',
+						'description': 'Prompt for API key',
+						'required': False,
+					}
+				)
 
 	# Cloudflared (remote/full)
 	if mode in ('remote', 'full'):
 		cloudflared_check = checks.get('cloudflared', {})
 		if cloudflared_check.get('status') != 'ok':
-			actions.append({
-				'type': 'install_cloudflared',
-				'description': 'Install cloudflared (for tunneling)',
-				'required': True,
-			})
+			actions.append(
+				{
+					'type': 'install_cloudflared',
+					'description': 'Install cloudflared (for tunneling)',
+					'required': True,
+				}
+			)
 
 	return actions
 
@@ -237,7 +248,9 @@ async def execute_actions(
 				print('⚠ cloudflared not installed')
 				print('   Install via:')
 				print('   macOS:   brew install cloudflared')
-				print('   Linux:   curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o ~/.local/bin/cloudflared && chmod +x ~/.local/bin/cloudflared')
+				print(
+					'   Linux:   curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o ~/.local/bin/cloudflared && chmod +x ~/.local/bin/cloudflared'
+				)
 				print('   Windows: winget install Cloudflare.cloudflared')
 				print()
 				print('   Or re-run install.sh which installs cloudflared automatically.')
@@ -255,7 +268,8 @@ async def validate_setup(
 
 	# Check imports
 	try:
-		import browser_use
+		import browser_use  # noqa: F401
+
 		results['browser_use_import'] = 'ok'
 	except ImportError:
 		results['browser_use_import'] = 'failed'

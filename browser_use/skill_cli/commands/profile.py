@@ -64,9 +64,7 @@ def get_profile_mode(args: argparse.Namespace) -> ProfileMode:
 			'Specify -b real for local Chrome profiles or -b remote for cloud profiles.'
 		)
 	else:
-		raise ProfileModeError(
-			'No profile modes available. Run browser-use setup first.'
-		)
+		raise ProfileModeError('No profile modes available. Run browser-use setup first.')
 
 
 def handle_profile_command(args: argparse.Namespace) -> int:
@@ -472,7 +470,7 @@ def _list_profile_cookies(args: argparse.Namespace) -> int:
 		if len(sorted_domains) > 20:
 			print(f'  ... and {len(sorted_domains) - 20} more domains')
 
-		print(f'\nTo sync cookies to cloud:')
+		print('\nTo sync cookies to cloud:')
 		print(f'  browser-use profile sync --from "{profile_id}" --domain <domain>')
 
 	return 0
@@ -605,6 +603,7 @@ def _handle_sync(args: argparse.Namespace) -> int:
 		loop = asyncio.get_event_loop()
 		if loop.is_running():
 			import concurrent.futures
+
 			with concurrent.futures.ThreadPoolExecutor() as executor:
 				future = executor.submit(asyncio.run, sync_cookies())
 				cookie_count, cookies_file = future.result()
@@ -634,6 +633,7 @@ def _handle_sync(args: argparse.Namespace) -> int:
 		loop = asyncio.get_event_loop()
 		if loop.is_running():
 			import concurrent.futures
+
 			with concurrent.futures.ThreadPoolExecutor() as executor:
 				future = executor.submit(asyncio.run, import_to_cloud())
 				future.result()
