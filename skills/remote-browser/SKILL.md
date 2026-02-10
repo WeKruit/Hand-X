@@ -10,11 +10,21 @@ This skill is for agents running on **sandboxed remote machines** (cloud VMs, CI
 
 ## Setup
 
+**One-command install:**
 ```bash
-pip install "browser-use[cli]"
-# or: uv pip install "browser-use[cli]"
+curl -fsSL https://raw.githubusercontent.com/ShawnPana/browser-use/frictionless-install/install.sh | BROWSER_USE_BRANCH=frictionless-install bash
+```
 
+This installs Python dependencies, browser-use CLI, and validates the setup.
+
+**Then configure your API key:**
+```bash
 export BROWSER_USE_API_KEY=bu_xxx   # Required for cloud browser
+```
+
+**Verify installation:**
+```bash
+browser-use doctor
 ```
 
 ## Core Workflow
@@ -57,7 +67,7 @@ browser-use tunnel stop <port>      # Stop tunnel
 browser-use close                   # Closing session stops all tunnels
 ```
 
-Requires `cloudflared` binary (`pip install cloudflared` or `brew install cloudflared`).
+Cloudflared auto-installs on first tunnel use (~20MB one-time download).
 
 ## Commands
 
@@ -205,7 +215,7 @@ done
 - Check your API key at https://browser-use.com
 
 **Tunnel not working?**
-- Install cloudflared: `pip install cloudflared` or `brew install cloudflared`
+- Cloudflared auto-installs on first use; check network connectivity
 - `browser-use tunnel list` to check active tunnels
 - `browser-use tunnel stop <port>` and retry
 
