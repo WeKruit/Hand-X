@@ -1,7 +1,6 @@
 """Tests for install configuration module."""
 
 import json
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -35,9 +34,7 @@ class TestInstallConfig:
 
 		# Create config file with remote-only mode
 		temp_config_dir.parent.mkdir(parents=True, exist_ok=True)
-		temp_config_dir.write_text(
-			json.dumps({'installed_modes': ['remote'], 'default_mode': 'remote'})
-		)
+		temp_config_dir.write_text(json.dumps({'installed_modes': ['remote'], 'default_mode': 'remote'}))
 
 		config = get_config()
 		assert config['installed_modes'] == ['remote']

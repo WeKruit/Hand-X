@@ -50,7 +50,6 @@ async def test_doctor_issues():
 
 def test_check_package_installed():
 	"""Test _check_package when installed."""
-	import browser_use
 
 	result = doctor._check_package()
 	assert result['status'] == 'ok'

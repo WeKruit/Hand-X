@@ -7,9 +7,6 @@ subsequent commands with a different mode should error with helpful guidance.
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
-
-import pytest
 
 from browser_use.skill_cli.main import get_session_metadata_path
 
@@ -33,11 +30,13 @@ def test_metadata_file_format():
 	try:
 		# Write metadata as the code does
 		meta_path.write_text(
-			json.dumps({
-				'browser_mode': 'chromium',
-				'headed': False,
-				'profile': None,
-			})
+			json.dumps(
+				{
+					'browser_mode': 'chromium',
+					'headed': False,
+					'profile': None,
+				}
+			)
 		)
 
 		# Read and verify
@@ -55,11 +54,13 @@ def test_metadata_file_remote_mode():
 	meta_path = get_session_metadata_path('test-remote')
 	try:
 		meta_path.write_text(
-			json.dumps({
-				'browser_mode': 'remote',
-				'headed': True,
-				'profile': 'cloud-profile-123',
-			})
+			json.dumps(
+				{
+					'browser_mode': 'remote',
+					'headed': True,
+					'profile': 'cloud-profile-123',
+				}
+			)
 		)
 
 		meta = json.loads(meta_path.read_text())
