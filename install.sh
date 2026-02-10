@@ -298,7 +298,8 @@ show_gum_menu() {
 
 	# Checkbox selection with gum choose
 	set +e
-	SELECTED=$(gum choose --no-limit --cursor-prefix "[ ] " --selected-prefix "[✓] " --unselected-prefix "[ ] " \
+	SELECTED=$(gum choose --no-limit --height 10 \
+		--cursor-prefix "[ ] " --selected-prefix "[✓] " --unselected-prefix "[ ] " \
 		--header "" \
 		--cursor.foreground 212 \
 		--selected.foreground 212 \
