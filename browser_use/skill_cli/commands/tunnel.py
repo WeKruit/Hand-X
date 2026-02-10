@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import re
-import shutil
 from typing import Any
 
 from browser_use.skill_cli.sessions import SessionInfo

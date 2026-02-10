@@ -336,24 +336,57 @@ def build_parser() -> argparse.ArgumentParser:
 	available_modes = get_available_modes()
 	default_mode = get_default_mode()
 
+	# Build epilog dynamically based on available modes
+	epilog_parts = []
+
+	if 'chromium' in available_modes or 'real' in available_modes:
+		epilog_parts.append("""Local Mode (default):
+  browser-use run "Fill the form"               # Uses local browser + your API keys
+  browser-use run "task" --llm gpt-4o           # Specify model (requires API key)
+  browser-use open https://example.com""")
+
+	if 'remote' in available_modes:
+		if 'chromium' in available_modes:
+			# Full install - show how to switch to remote
+			epilog_parts.append("""
+Remote Mode (--browser remote):
+  browser-use -b remote run "task"              # Cloud execution (US proxy default)
+  browser-use -b remote run "task" --llm gpt-4o # Specify cloud model
+  browser-use -b remote --profile <id> run "task"  # Use cloud profile
+  browser-use -b remote run "task" --proxy-country gb     # UK proxy
+  browser-use -b remote run "task" --session-id <id>      # Reuse session
+  browser-use -b remote run "task" --no-wait    # Async (returns task_id)
+
+Task Management:
+  browser-use task list                         # List recent cloud tasks
+  browser-use task status <task-id>             # Check task status
+  browser-use task stop <task-id>               # Stop running task""")
+		else:
+			# Remote-only install
+			epilog_parts.append("""
+Examples:
+  browser-use run "task"                        # Cloud execution (US proxy default)
+  browser-use run "task" --llm gpt-4o           # Specify model
+  browser-use --profile <id> run "task"         # Use cloud profile
+  browser-use run "task" --proxy-country gb     # UK proxy
+  browser-use run "task" --session-id <id>      # Reuse existing session
+  browser-use run "task" --no-wait              # Async (returns task_id)
+
+Task Management:
+  browser-use task list                         # List recent cloud tasks
+  browser-use task status <task-id>             # Check task status
+  browser-use task stop <task-id>               # Stop running task""")
+
+	epilog_parts.append("""
+Setup:
+  browser-use install                           # Install Chromium browser
+  browser-use init                              # Generate template file""")
+
 	parser = argparse.ArgumentParser(
 		prog='browser-use',
 		description='Browser automation CLI for browser-use',
 		formatter_class=argparse.RawDescriptionHelpFormatter,
-		epilog="""
-Examples:
-  browser-use install                    # Install Chromium browser
-  browser-use init                       # Generate template file (interactive)
-  browser-use init --template default    # Generate specific template
-  browser-use --mcp                      # Run as MCP server
-  browser-use open https://example.com
-  browser-use click 5
-  browser-use type "Hello World"
-  browser-use python "print(browser.url)"
-  browser-use run "Fill the contact form"
-  browser-use sessions
-  browser-use close
-""",
+		epilog='\n'.join(epilog_parts),
 	)
 
 	# Global flags
@@ -366,7 +399,7 @@ Examples:
 		help=f'Browser mode (available: {", ".join(available_modes)})',
 	)
 	parser.add_argument('--headed', action='store_true', help='Show browser window')
-	parser.add_argument('--profile', help='Chrome profile (real browser mode)')
+	parser.add_argument('--profile', help='Browser profile (local name or cloud ID)')
 	parser.add_argument('--json', action='store_true', help='Output as JSON')
 	parser.add_argument('--api-key', help='Browser-Use API key')
 	parser.add_argument('--mcp', action='store_true', help='Run as MCP server (JSON-RPC via stdin/stdout)')
@@ -390,7 +423,7 @@ Examples:
 
 	# setup
 	p = subparsers.add_parser('setup', help='Configure browser-use for first-time use')
-	p.add_argument('--profile', choices=['local', 'remote', 'full'], default='local', help='Setup profile (local/remote/full)')
+	p.add_argument('--mode', choices=['local', 'remote', 'full'], default='local', help='Setup mode (local/remote/full)')
 	p.add_argument('--api-key', help='Browser-Use API key')
 	p.add_argument('--yes', '-y', action='store_true', help='Skip interactive prompts')
 
@@ -568,9 +601,84 @@ Examples:
 	# Agent Tasks
 	# -------------------------------------------------------------------------
 
+	from browser_use.skill_cli.install_config import is_mode_available
+
+	remote_available = is_mode_available('remote')
+	local_available = is_mode_available('chromium')
+
 	p = subparsers.add_parser('run', help='Run agent task (requires API key)')
 	p.add_argument('task', help='Task description')
 	p.add_argument('--max-steps', type=int, default=100, help='Maximum steps')
+	# Model selection (works both locally and remotely)
+	p.add_argument('--llm', help='LLM model (gpt-4o, claude-sonnet-4-20250514, gemini-2.0-flash)')
+
+	# Cloud-only flags - only show if remote mode is available
+	if remote_available:
+		# Add [remote] hint only if both modes are available (--full install)
+		remote_hint = '[remote] ' if local_available else ''
+		p.add_argument('--session-id', help=f'{remote_hint}Reuse existing cloud session ID')
+		p.add_argument('--proxy-country', help=f'{remote_hint}Proxy country code (default: us)')
+		p.add_argument('--stream', action='store_true', help=f'{remote_hint}Stream output in real-time')
+		p.add_argument('--no-wait', action='store_true', help=f'{remote_hint}Return task ID immediately (async)')
+		p.add_argument('--flash', action='store_true', help=f'{remote_hint}Enable flash mode')
+		p.add_argument('--keep-alive', action='store_true', help=f'{remote_hint}Keep session alive after task')
+		p.add_argument('--thinking', action='store_true', help=f'{remote_hint}Enable extended reasoning')
+		p.add_argument('--vision', action='store_true', default=None, help=f'{remote_hint}Enable vision')
+		p.add_argument('--no-vision', action='store_true', help=f'{remote_hint}Disable vision')
+
+	# -------------------------------------------------------------------------
+	# Task Management (Cloud) - only available if remote mode is installed
+	# -------------------------------------------------------------------------
+
+	if remote_available:
+		task_p = subparsers.add_parser('task', help='Manage cloud tasks')
+		task_sub = task_p.add_subparsers(dest='task_command')
+
+		# task list
+		p = task_sub.add_parser('list', help='List recent tasks')
+		p.add_argument('--limit', type=int, default=10, help='Maximum number of tasks to list')
+		p.add_argument('--status', choices=['running', 'finished', 'stopped', 'failed'], help='Filter by status')
+		p.add_argument('--json', action='store_true', help='Output as JSON')
+
+		# task status <task_id>
+		p = task_sub.add_parser('status', help='Get task status')
+		p.add_argument('task_id', help='Task ID')
+		p.add_argument('--json', action='store_true', help='Output as JSON')
+
+		# task stop <task_id>
+		p = task_sub.add_parser('stop', help='Stop running task')
+		p.add_argument('task_id', help='Task ID')
+		p.add_argument('--json', action='store_true', help='Output as JSON')
+
+		# task logs <task_id>
+		p = task_sub.add_parser('logs', help='Get task logs')
+		p.add_argument('task_id', help='Task ID')
+		p.add_argument('--json', action='store_true', help='Output as JSON')
+
+	# -------------------------------------------------------------------------
+	# Cloud Session Management - only available if remote mode is installed
+	# -------------------------------------------------------------------------
+
+	if remote_available:
+		session_p = subparsers.add_parser('session', help='Manage cloud sessions')
+		session_sub = session_p.add_subparsers(dest='session_command')
+
+		# session list
+		p = session_sub.add_parser('list', help='List cloud sessions')
+		p.add_argument('--limit', type=int, default=10, help='Maximum number of sessions to list')
+		p.add_argument('--status', choices=['active', 'stopped'], help='Filter by status')
+		p.add_argument('--json', action='store_true', help='Output as JSON')
+
+		# session get <session_id>
+		p = session_sub.add_parser('get', help='Get session details')
+		p.add_argument('session_id', help='Session ID')
+		p.add_argument('--json', action='store_true', help='Output as JSON')
+
+		# session stop <session_id> or session stop --all
+		p = session_sub.add_parser('stop', help='Stop cloud session(s)')
+		p.add_argument('session_id', nargs='?', help='Session ID (or use --all)')
+		p.add_argument('--all', action='store_true', help='Stop all active sessions')
+		p.add_argument('--json', action='store_true', help='Output as JSON')
 
 	# -------------------------------------------------------------------------
 	# Tunnel Commands
@@ -608,41 +716,37 @@ Examples:
 	server_sub.add_parser('logs', help='View server logs')
 
 	# -------------------------------------------------------------------------
-	# Profile Management
+	# Profile Management (mode-aware: use -b real or -b remote)
 	# -------------------------------------------------------------------------
 
-	profile_p = subparsers.add_parser('profile', help='Manage browser profiles')
+	profile_p = subparsers.add_parser('profile', help='Manage browser profiles (use -b real or -b remote)')
 	profile_sub = profile_p.add_subparsers(dest='profile_command')
 
-	# profile list-local
-	profile_sub.add_parser('list-local', help='List local Chrome profiles')
-
-	# Cloud profile commands
-	# profile list
-	p = profile_sub.add_parser('list', help='List cloud profiles')
-	p.add_argument('--page', type=int, default=1, help='Page number')
-	p.add_argument('--page-size', type=int, default=10, help='Items per page')
-
-	# profile create
-	p = profile_sub.add_parser('create', help='Create cloud profile')
-	p.add_argument('--name', help='Profile name')
+	# profile list - lists local or cloud profiles based on -b flag
+	p = profile_sub.add_parser('list', help='List profiles (local with -b real, cloud with -b remote)')
+	p.add_argument('--page', type=int, default=1, help='Page number (cloud only)')
+	p.add_argument('--page-size', type=int, default=20, help='Items per page (cloud only)')
 
 	# profile get <id>
-	p = profile_sub.add_parser('get', help='Get cloud profile details')
-	p.add_argument('id', help='Profile ID')
+	p = profile_sub.add_parser('get', help='Get profile details')
+	p.add_argument('id', help='Profile ID or name')
 
-	# profile update <id>
-	p = profile_sub.add_parser('update', help='Update cloud profile')
+	# profile create (cloud only)
+	p = profile_sub.add_parser('create', help='Create profile (cloud only)')
+	p.add_argument('--name', help='Profile name')
+
+	# profile update <id> (cloud only)
+	p = profile_sub.add_parser('update', help='Update profile (cloud only)')
 	p.add_argument('id', help='Profile ID')
 	p.add_argument('--name', required=True, help='New profile name')
 
-	# profile delete <id>
-	p = profile_sub.add_parser('delete', help='Delete cloud profile')
+	# profile delete <id> (cloud only)
+	p = profile_sub.add_parser('delete', help='Delete profile (cloud only)')
 	p.add_argument('id', help='Profile ID')
 
-	# profile cookies <profile> - list cookies by domain in a local profile
-	p = profile_sub.add_parser('cookies', help='List cookies by domain in a local profile')
-	p.add_argument('profile', help='Local profile name (e.g. "Default", "Profile 1")')
+	# profile cookies <id> - list cookies by domain (local only)
+	p = profile_sub.add_parser('cookies', help='List cookies by domain (local only, requires -b real)')
+	p.add_argument('id', help='Profile ID or name (e.g. "Default", "Profile 1")')
 
 	# profile sync - sync local profile to cloud
 	p = profile_sub.add_parser('sync', help='Sync local Chrome profile to cloud')
@@ -693,469 +797,6 @@ def cloud_api_request(method: str, endpoint: str, body: dict | None = None) -> d
 		return {'success': False, 'error': f'Connection error: {e.reason}'}
 
 
-def handle_profile_command(args: argparse.Namespace) -> int:
-	"""Handle profile subcommands."""
-	if args.profile_command == 'list-local':
-		profiles = list_local_chrome_profiles()
-
-		if args.json:
-			print(json.dumps({'profiles': profiles}))
-		else:
-			if profiles:
-				print('Local Chrome profiles:')
-				for p in profiles:
-					email_str = f' ({p["email"]})' if p['email'] != 'local' else ''
-					print(f'  {p["id"]}: {p["name"]}{email_str}')
-			else:
-				print('No Chrome profiles found')
-		return 0
-
-	elif args.profile_command == 'list':
-		# List cloud profiles
-		endpoint = f'/profiles?pageNumber={args.page}&pageSize={args.page_size}'
-		result = cloud_api_request('GET', endpoint)
-
-		if not result['success']:
-			print(f'Error: {result["error"]}', file=sys.stderr)
-			return 1
-
-		data = result['data']
-		if args.json:
-			print(json.dumps(data))
-		else:
-			items = data.get('items', [])
-			total = data.get('totalItems', 0)
-			if items:
-				print(f'Cloud profiles ({len(items)}/{total}):')
-				for p in items:
-					name = p.get('name') or '(unnamed)'
-					domains = p.get('cookieDomains') or []
-					domain_str = f' [{len(domains)} domains]' if domains else ''
-					print(f'  {p["id"]}: {name}{domain_str}')
-			else:
-				print('No cloud profiles found')
-		return 0
-
-	elif args.profile_command == 'create':
-		# Create cloud profile
-		body = {}
-		if args.name:
-			body['name'] = args.name
-
-		result = cloud_api_request('POST', '/profiles', body)
-
-		if not result['success']:
-			print(f'Error: {result["error"]}', file=sys.stderr)
-			return 1
-
-		data = result['data']
-		if args.json:
-			print(json.dumps(data))
-		else:
-			name = data.get('name') or '(unnamed)'
-			print(f'Created profile: {data["id"]}')
-			print(f'  Name: {name}')
-		return 0
-
-	elif args.profile_command == 'get':
-		# Get cloud profile details
-		result = cloud_api_request('GET', f'/profiles/{args.id}')
-
-		if not result['success']:
-			print(f'Error: {result["error"]}', file=sys.stderr)
-			return 1
-
-		data = result['data']
-		if args.json:
-			print(json.dumps(data))
-		else:
-			print(f'Profile: {data["id"]}')
-			print(f'  Name: {data.get("name") or "(unnamed)"}')
-			print(f'  Created: {data.get("createdAt", "unknown")}')
-			print(f'  Updated: {data.get("updatedAt", "unknown")}')
-			print(f'  Last used: {data.get("lastUsedAt") or "never"}')
-			domains = data.get('cookieDomains') or []
-			if domains:
-				print(f'  Cookie domains ({len(domains)}):')
-				for d in domains[:10]:
-					print(f'    - {d}')
-				if len(domains) > 10:
-					print(f'    ... and {len(domains) - 10} more')
-		return 0
-
-	elif args.profile_command == 'update':
-		# Update cloud profile
-		body = {'name': args.name}
-		result = cloud_api_request('PATCH', f'/profiles/{args.id}', body)
-
-		if not result['success']:
-			print(f'Error: {result["error"]}', file=sys.stderr)
-			return 1
-
-		data = result['data']
-		if args.json:
-			print(json.dumps(data))
-		else:
-			print(f'Updated profile: {data["id"]}')
-			print(f'  Name: {data.get("name") or "(unnamed)"}')
-		return 0
-
-	elif args.profile_command == 'delete':
-		# Delete cloud profile
-		result = cloud_api_request('DELETE', f'/profiles/{args.id}')
-
-		if not result['success']:
-			print(f'Error: {result["error"]}', file=sys.stderr)
-			return 1
-
-		if args.json:
-			print(json.dumps({'deleted': args.id}))
-		else:
-			print(f'Deleted profile: {args.id}')
-		return 0
-
-	elif args.profile_command == 'cookies':
-		# List cookies by domain in a local profile
-		return handle_profile_cookies(args)
-
-	elif args.profile_command == 'sync':
-		# Sync local profile to cloud
-		return handle_profile_sync(args)
-
-	# No subcommand specified
-	print('Usage: browser-use profile <command>')
-	print('Commands: list-local, list, create, get, update, delete, cookies, sync')
-	return 1
-
-
-def list_local_chrome_profiles() -> list[dict]:
-	"""List local Chrome profiles from the Local State file."""
-	local_state_paths = [
-		Path.home() / 'Library/Application Support/Google/Chrome/Local State',  # macOS
-		Path.home() / '.config/google-chrome/Local State',  # Linux
-		Path.home() / 'AppData/Local/Google/Chrome/User Data/Local State',  # Windows
-	]
-
-	local_state = None
-	for path in local_state_paths:
-		if path.exists():
-			local_state = path
-			break
-
-	if not local_state:
-		return []
-
-	try:
-		data = json.loads(local_state.read_text())
-		profiles_info = data.get('profile', {}).get('info_cache', {})
-
-		profiles = []
-		for profile_id, info in profiles_info.items():
-			profiles.append(
-				{
-					'id': profile_id,
-					'name': info.get('name', 'Unknown'),
-					'email': info.get('user_name') or info.get('gaia_name') or 'local',
-				}
-			)
-
-		return profiles
-	except Exception:
-		return []
-
-
-def handle_profile_cookies(args: argparse.Namespace) -> int:
-	"""List cookies by domain in a local Chrome profile."""
-	import asyncio
-	from collections import defaultdict
-
-	# Get local profiles
-	local_profiles = list_local_chrome_profiles()
-	if not local_profiles:
-		print('Error: No local Chrome profiles found', file=sys.stderr)
-		return 1
-
-	# Find the matching profile
-	profile_arg = args.profile
-	selected_profile = None
-	for p in local_profiles:
-		if p['id'] == profile_arg or p['name'] == profile_arg:
-			selected_profile = p
-			break
-
-	if not selected_profile:
-		print(f'Error: Profile "{profile_arg}" not found', file=sys.stderr)
-		print('Available profiles:')
-		for p in local_profiles:
-			print(f'  {p["id"]}: {p["name"]}')
-		return 1
-
-	profile_id = selected_profile['id']
-	print(f'Loading cookies from: {selected_profile["name"]} ({selected_profile["email"]})')
-
-	async def get_cookies() -> list:
-		from browser_use.skill_cli.sessions import create_browser_session
-
-		# Start local browser headless
-		local_session = await create_browser_session('real', headed=False, profile=profile_id)
-		await local_session.start()
-
-		try:
-			return await local_session._cdp_get_cookies() or []
-		finally:
-			await local_session.kill()
-
-	try:
-		cookies = asyncio.get_event_loop().run_until_complete(get_cookies())
-	except RuntimeError:
-		cookies = asyncio.run(get_cookies())
-
-	if not cookies:
-		print('No cookies found')
-		return 0
-
-	# Group by domain
-	domain_counts: dict[str, int] = defaultdict(int)
-	for c in cookies:
-		domain = c.get('domain', 'unknown')
-		# Remove leading dot for grouping
-		if domain.startswith('.'):
-			domain = domain[1:]
-		domain_counts[domain] += 1
-
-	# Sort by count (descending)
-	sorted_domains = sorted(domain_counts.items(), key=lambda x: (-x[1], x[0]))
-
-	if args.json:
-		print(json.dumps({'domains': dict(sorted_domains), 'total': len(cookies)}))
-	else:
-		print(f'\nCookies by domain ({len(cookies)} total):')
-		for domain, count in sorted_domains:
-			print(f'  {domain}: {count}')
-		print()
-		print('To sync a specific domain:')
-		print(f'  browser-use profile sync --from "{profile_id}" --domain <domain>')
-
-	return 0
-
-
-def handle_profile_sync(args: argparse.Namespace) -> int:
-	"""Sync a local Chrome profile to Browser-Use Cloud.
-
-	This command:
-	1. Lists local profiles (if --from not specified)
-	2. Creates a cloud profile
-	3. Exports cookies from local Chrome (headless)
-	4. Imports cookies to cloud profile
-	"""
-	import asyncio
-	import tempfile
-
-	from browser_use.skill_cli.api_key import APIKeyRequired, require_api_key
-
-	# Check API key first
-	try:
-		require_api_key('Profile sync')
-	except APIKeyRequired as e:
-		print(f'Error: {e}', file=sys.stderr)
-		return 1
-
-	# Get local profiles
-	local_profiles = list_local_chrome_profiles()
-	if not local_profiles:
-		print('Error: No local Chrome profiles found', file=sys.stderr)
-		return 1
-
-	# Determine which profile to sync
-	from_profile = args.from_profile
-	if not from_profile:
-		# Show available profiles and ask user to specify
-		print('Available local profiles:')
-		for p in local_profiles:
-			print(f'  {p["id"]}: {p["name"]} ({p["email"]})')
-		print()
-		print('Use --from to specify a profile:')
-		print('  browser-use profile sync --from "Default"')
-		print('  browser-use profile sync --from "Profile 1"')
-		return 1
-
-	# Find the matching profile
-	selected_profile = None
-	for p in local_profiles:
-		if p['id'] == from_profile or p['name'] == from_profile:
-			selected_profile = p
-			break
-
-	if not selected_profile:
-		print(f'Error: Profile "{from_profile}" not found', file=sys.stderr)
-		print('Available profiles:')
-		for p in local_profiles:
-			print(f'  {p["id"]}: {p["name"]}')
-		return 1
-
-	profile_id = selected_profile['id']
-	profile_name = selected_profile['name']
-	domain_filter = args.domain
-
-	# Generate cloud profile name
-	if args.name:
-		cloud_name = args.name
-	elif domain_filter:
-		cloud_name = f'Chrome - {profile_name} ({domain_filter})'
-	else:
-		cloud_name = f'Chrome - {profile_name}'
-
-	if domain_filter:
-		print(f'Syncing: {profile_name} → {domain_filter} cookies only')
-	else:
-		print(f'Syncing: {profile_name} ({selected_profile["email"]})')
-
-	# Step 1: Create cloud profile
-	print('  Creating cloud profile...')
-	result = cloud_api_request('POST', '/profiles', {'name': cloud_name})
-	if not result['success']:
-		print(f'Error creating cloud profile: {result["error"]}', file=sys.stderr)
-		return 1
-
-	cloud_profile_id = result['data']['id']
-	print(f'  ✓ Created: {cloud_profile_id}')
-
-	# Step 2: Export cookies from local Chrome (headless)
-	print('  Extracting cookies from local Chrome...')
-
-	async def sync_cookies() -> tuple[int, str | None]:
-		from browser_use.skill_cli.sessions import create_browser_session
-
-		# Start local browser headless
-		local_session = await create_browser_session('real', headed=False, profile=profile_id)
-		await local_session.start()
-
-		try:
-			# Get cookies via direct CDP
-			cookies = await local_session._cdp_get_cookies()
-
-			if not cookies:
-				return 0, 'No cookies found in local profile'
-
-			# Filter by domain if specified
-			if domain_filter:
-				filtered = []
-				for c in cookies:
-					cookie_domain = c.get('domain', '')
-					# Remove leading dot for comparison
-					if cookie_domain.startswith('.'):
-						cookie_domain = cookie_domain[1:]
-					# Match if domain ends with filter (e.g. "youtube.com" matches ".youtube.com" and "www.youtube.com")
-					if cookie_domain == domain_filter or cookie_domain.endswith('.' + domain_filter):
-						filtered.append(c)
-				cookies = filtered
-				if not cookies:
-					return 0, f'No cookies found for domain: {domain_filter}'
-
-			# Save to temp file
-			cookies_file = Path(tempfile.gettempdir()) / f'browser-use-sync-{cloud_profile_id}.json'
-			cookies_file.write_text(json.dumps(cookies, indent=2))
-
-			return len(cookies), str(cookies_file)
-		finally:
-			await local_session.kill()
-
-	try:
-		cookie_count, cookies_file = asyncio.get_event_loop().run_until_complete(sync_cookies())
-	except RuntimeError:
-		# No event loop running
-		cookie_count, cookies_file = asyncio.run(sync_cookies())
-
-	if cookie_count == 0:
-		print(f'  ⚠ {cookies_file}')  # cookies_file contains error message
-		return 1
-
-	assert cookies_file is not None  # Type guard: if cookie_count > 0, cookies_file is a valid path
-	print(f'  ✓ Extracted {cookie_count} cookies')
-
-	# Step 3: Import cookies to cloud profile
-	print('  Uploading cookies to cloud...')
-
-	async def upload_cookies(cookies_path: str) -> tuple[int, str | None]:
-		from browser_use.skill_cli.sessions import create_browser_session
-
-		# Start remote browser with the new profile
-		remote_session = await create_browser_session('remote', headed=False, profile=cloud_profile_id)
-		await remote_session.start()
-
-		try:
-			# Load cookies
-			cookies = json.loads(Path(cookies_path).read_text())
-
-			# Set cookies via CDP
-			cdp_session = await remote_session.get_or_create_cdp_session(target_id=None, focus=False)
-			if not cdp_session:
-				return 0, 'Failed to connect to remote browser'
-
-			# Build cookie list for bulk set
-			cookie_list = []
-			for c in cookies:
-				cookie_params = {
-					'name': c['name'],
-					'value': c['value'],
-					'domain': c.get('domain'),
-					'path': c.get('path', '/'),
-					'secure': c.get('secure', False),
-					'httpOnly': c.get('httpOnly', False),
-				}
-				if c.get('sameSite'):
-					cookie_params['sameSite'] = c['sameSite']
-				if c.get('expires'):
-					cookie_params['expires'] = c['expires']
-				cookie_list.append(cookie_params)
-
-			# Set all cookies in one call
-			try:
-				await cdp_session.cdp_client.send.Network.setCookies(
-					params={'cookies': cookie_list},
-					session_id=cdp_session.session_id,
-				)
-				return len(cookie_list), None
-			except Exception as e:
-				return 0, f'Failed to set cookies: {e}'
-		finally:
-			await remote_session.kill()
-
-	try:
-		uploaded_count, error = asyncio.get_event_loop().run_until_complete(upload_cookies(cookies_file))
-	except RuntimeError:
-		uploaded_count, error = asyncio.run(upload_cookies(cookies_file))
-
-	# Clean up temp file
-	Path(cookies_file).unlink(missing_ok=True)
-
-	if error:
-		print(f'  Error: {error}', file=sys.stderr)
-		return 1
-
-	print(f'  ✓ Uploaded {uploaded_count} cookies')
-	print()
-	print('✓ Profile synced successfully!')
-	print(f'  Cloud profile ID: {cloud_profile_id}')
-	print(f'  Name: {cloud_name}')
-	print()
-	print('Use with:')
-	print(f'  browser-use --browser remote --profile {cloud_profile_id} open <url>')
-
-	if args.json:
-		print(
-			json.dumps(
-				{
-					'profile_id': cloud_profile_id,
-					'name': cloud_name,
-					'cookies_synced': uploaded_count,
-				}
-			)
-		)
-
-	return 0
-
-
 def handle_server_command(args: argparse.Namespace) -> int:
 	"""Handle server subcommands."""
 	if args.server_command == 'status':
@@ -1204,6 +845,8 @@ def main() -> int:
 
 	# Handle profile subcommands without starting server
 	if args.command == 'profile':
+		from browser_use.skill_cli.commands.profile import handle_profile_command
+
 		return handle_profile_command(args)
 
 	# Handle sessions list - find all running sessions
@@ -1295,6 +938,18 @@ def main() -> int:
 				print('⚠ Some checks failed. See details above.')
 		return 0
 
+	# Handle task command - cloud task management
+	if args.command == 'task':
+		from browser_use.skill_cli.commands.task_management import handle_task_command
+
+		return handle_task_command(args)
+
+	# Handle session command - cloud session management
+	if args.command == 'session':
+		from browser_use.skill_cli.commands.session_management import handle_session_command
+
+		return handle_session_command(args)
+
 	# Handle tunnel command - runs independently of browser session
 	if args.command == 'tunnel':
 		from browser_use.skill_cli import tunnel_manager
@@ -1373,16 +1028,31 @@ def main() -> int:
 			print(f'Error: {e}', file=sys.stderr)
 			return 1
 
+	# Validate --profile flag usage
+	if args.profile and args.browser == 'chromium':
+		print(
+			'Error: --profile is not supported in chromium mode.\n'
+			'Use -b real for local Chrome profiles or -b remote for cloud profiles.',
+			file=sys.stderr,
+		)
+		return 1
+
 	# Ensure server is running
 	ensure_server(args.session, args.browser, args.headed, args.profile, args.api_key)
 
 	# Build params from args
 	params = {}
-	skip_keys = {'command', 'session', 'browser', 'headed', 'profile', 'json', 'api_key', 'server_command'}
+	skip_keys = {'command', 'session', 'browser', 'headed', 'json', 'api_key', 'server_command'}
 
 	for key, value in vars(args).items():
 		if key not in skip_keys and value is not None:
 			params[key] = value
+
+	# Add profile to params for commands that need it (agent tasks, etc.)
+	# Note: profile is passed to ensure_server for local browser profile,
+	# but also needs to be in params for cloud profile ID in remote mode
+	if args.profile:
+		params['profile'] = args.profile
 
 	# Send command to server
 	response = send_command(args.session, args.command, params)
@@ -1395,10 +1065,16 @@ def main() -> int:
 
 	# Output response
 	if args.json:
+		# Add mode to JSON output for browser-related commands
+		if args.command in ('open', 'run', 'state', 'click', 'type', 'input', 'scroll', 'screenshot'):
+			response['mode'] = args.browser
 		print(json.dumps(response))
 	else:
 		if response.get('success'):
 			data = response.get('data')
+			# Show mode for browser-related commands (first line of output)
+			if args.command in ('open', 'run'):
+				print(f'mode: {args.browser}')
 			if data is not None:
 				if isinstance(data, dict):
 					# Special case: raw text output (e.g., state command)
