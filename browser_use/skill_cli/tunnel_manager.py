@@ -251,6 +251,9 @@ async def start_tunnel(port: int) -> dict[str, Any]:
 		log_file.close()
 		return {'error': 'Timed out waiting for cloudflare tunnel URL (15s)'}
 
+	# Close log file handle to avoid leaking file descriptors
+	log_file.close()
+
 	# Save tunnel info to disk so it persists across CLI invocations
 	_save_tunnel_info(port, process.pid, url)
 	logger.info(f'Tunnel started: localhost:{port} -> {url} (pid={process.pid})')
