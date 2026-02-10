@@ -239,36 +239,38 @@ install_gum() {
 
 	local arch=$(uname -m)
 	local gum_version="0.14.5"
+	local gum_dir=""
+
+	mkdir -p "$HOME/.local/bin"
+	export PATH="$HOME/.local/bin:$PATH"
 
 	case "$PLATFORM" in
 		macos)
-			if command -v brew &> /dev/null; then
-				brew install gum &> /dev/null || return 1
+			if [ "$arch" = "arm64" ]; then
+				gum_dir="gum_${gum_version}_Darwin_arm64"
+				curl -sL "https://github.com/charmbracelet/gum/releases/download/v${gum_version}/gum_${gum_version}_Darwin_arm64.tar.gz" | tar -xz -C /tmp
 			else
-				# Direct download for macOS
-				if [ "$arch" = "arm64" ]; then
-					curl -sL "https://github.com/charmbracelet/gum/releases/download/v${gum_version}/gum_${gum_version}_Darwin_arm64.tar.gz" | tar -xz -C /tmp
-				else
-					curl -sL "https://github.com/charmbracelet/gum/releases/download/v${gum_version}/gum_${gum_version}_Darwin_x86_64.tar.gz" | tar -xz -C /tmp
-				fi
-				mkdir -p "$HOME/.local/bin"
-				mv /tmp/gum "$HOME/.local/bin/" 2>/dev/null || return 1
+				gum_dir="gum_${gum_version}_Darwin_x86_64"
+				curl -sL "https://github.com/charmbracelet/gum/releases/download/v${gum_version}/gum_${gum_version}_Darwin_x86_64.tar.gz" | tar -xz -C /tmp
 			fi
 			;;
 		linux)
-			mkdir -p "$HOME/.local/bin"
 			if [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; then
+				gum_dir="gum_${gum_version}_Linux_arm64"
 				curl -sL "https://github.com/charmbracelet/gum/releases/download/v${gum_version}/gum_${gum_version}_Linux_arm64.tar.gz" | tar -xz -C /tmp
 			else
+				gum_dir="gum_${gum_version}_Linux_x86_64"
 				curl -sL "https://github.com/charmbracelet/gum/releases/download/v${gum_version}/gum_${gum_version}_Linux_x86_64.tar.gz" | tar -xz -C /tmp
 			fi
-			mv /tmp/gum "$HOME/.local/bin/" 2>/dev/null || return 1
-			export PATH="$HOME/.local/bin:$PATH"
 			;;
 		*)
 			return 1
 			;;
 	esac
+
+	# Move binary from extracted directory
+	mv "/tmp/${gum_dir}/gum" "$HOME/.local/bin/" 2>/dev/null || return 1
+	rm -rf "/tmp/${gum_dir}" 2>/dev/null
 
 	command -v gum &> /dev/null
 }
