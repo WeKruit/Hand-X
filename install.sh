@@ -541,9 +541,9 @@ run_setup() {
 
 	# Run setup with API key if provided
 	if [ -n "$API_KEY" ]; then
-		browser-use setup --profile "$profile" --api-key "$API_KEY" --yes
+		browser-use setup --mode "$profile" --api-key "$API_KEY" --yes
 	else
-		browser-use setup --profile "$profile" --yes
+		browser-use setup --mode "$profile" --yes
 	fi
 }
 
