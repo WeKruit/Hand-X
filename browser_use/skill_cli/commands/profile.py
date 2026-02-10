@@ -542,13 +542,20 @@ def _handle_sync(args: argparse.Namespace) -> int:
 		else:
 			cloud_name = f'Chrome - {profile_name}'
 
+	# Use stderr for progress when JSON output is requested
+	json_output = getattr(args, 'json', False)
+	out = sys.stderr if json_output else sys.stdout
+
+	def log(msg: str) -> None:
+		print(msg, file=out)
+
 	if domain_filter:
-		print(f'Syncing: {profile_name} → {domain_filter} cookies only')
+		log(f'Syncing: {profile_name} → {domain_filter} cookies only')
 	else:
-		print(f'Syncing: {profile_name} ({selected_profile["email"]})')
+		log(f'Syncing: {profile_name} ({selected_profile["email"]})')
 
 	# Step 1: Create cloud profile
-	print('  Creating cloud profile...')
+	log('  Creating cloud profile...')
 	from browser_use.skill_cli.main import cloud_api_request
 
 	result = cloud_api_request('POST', '/profiles', {'name': cloud_name})
@@ -557,11 +564,18 @@ def _handle_sync(args: argparse.Namespace) -> int:
 		return 1
 
 	cloud_profile_id = result['data']['id']
-	print(f'  ✓ Created: {cloud_profile_id}')
+	log(f'  ✓ Created: {cloud_profile_id}')
+
+	def cleanup_cloud_profile() -> None:
+		"""Delete the cloud profile on failure."""
+		try:
+			cloud_api_request('DELETE', f'/profiles/{cloud_profile_id}')
+		except Exception:
+			pass
 
 	# Step 2: Export cookies from local profile
 	async def sync_cookies():
-		print('  Exporting cookies from local profile...')
+		log('  Exporting cookies from local profile...')
 		local_session = await create_browser_session('real', headed=False, profile=profile_id)
 		await local_session.start()
 		try:
@@ -576,7 +590,7 @@ def _handle_sync(args: argparse.Namespace) -> int:
 			if not cookies:
 				return 0, f'No cookies found for domain: {domain_filter}'
 
-			print(f'  ✓ Found {len(cookies)} cookies')
+			log(f'  ✓ Found {len(cookies)} cookies')
 
 			# Save to temp file - convert Cookie objects to dicts for JSON serialization
 			cookies_file = Path(tempfile.gettempdir()) / f'browser-use-sync-{cloud_profile_id}.json'
@@ -600,12 +614,13 @@ def _handle_sync(args: argparse.Namespace) -> int:
 		cookie_count, cookies_file = asyncio.run(sync_cookies())
 
 	if cookie_count == 0:
-		print(f'  ⚠ {cookies_file}')  # cookies_file contains error message
+		log(f'  ⚠ {cookies_file}')  # cookies_file contains error message
+		cleanup_cloud_profile()
 		return 1
 
 	# Step 3: Import cookies to cloud profile
 	async def import_to_cloud():
-		print('  Importing cookies to cloud profile...')
+		log('  Importing cookies to cloud profile...')
 		remote_session = await create_browser_session('remote', headed=False, profile=cloud_profile_id)
 		await remote_session.start()
 		try:
@@ -626,6 +641,10 @@ def _handle_sync(args: argparse.Namespace) -> int:
 			loop.run_until_complete(import_to_cloud())
 	except RuntimeError:
 		asyncio.run(import_to_cloud())
+	except Exception as e:
+		log(f'  ⚠ Failed to import cookies: {e}')
+		cleanup_cloud_profile()
+		return 1
 
 	# Cleanup temp file
 	try:
@@ -633,13 +652,13 @@ def _handle_sync(args: argparse.Namespace) -> int:
 	except Exception:
 		pass
 
-	print('✓ Profile synced successfully!')
-	print(f'  Cloud profile ID: {cloud_profile_id}')
-	print()
-	print('To use this profile:')
-	print(f'  browser-use -b remote --profile {cloud_profile_id} open <url>')
+	log('✓ Profile synced successfully!')
+	log(f'  Cloud profile ID: {cloud_profile_id}')
+	log('')
+	log('To use this profile:')
+	log(f'  browser-use -b remote --profile {cloud_profile_id} open <url>')
 
-	if getattr(args, 'json', False):
+	if json_output:
 		print(
 			json.dumps(
 				{

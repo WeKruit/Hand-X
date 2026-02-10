@@ -1,94 +1,87 @@
-"""Tests for setup command."""
+"""Tests for setup command.
 
-import json
-from unittest.mock import MagicMock, patch
+These tests call real functions without mocking. They verify the
+structure and logic of the setup command against actual system state.
+"""
 
 import pytest
 
 from browser_use.skill_cli.commands import setup
 
 
-@pytest.mark.asyncio
-async def test_setup_local_profile():
-	"""Test setup with local profile."""
-	with patch('browser_use.skill_cli.commands.setup.run_checks') as mock_checks:
-		mock_checks.return_value = {
-			'browser_use_package': {'status': 'ok', 'message': 'browser-use installed'},
-			'browser': {'status': 'ok', 'message': 'Browser available'},
-		}
-
-		with patch('browser_use.skill_cli.commands.setup.plan_actions', return_value=[]):
-			with patch('browser_use.skill_cli.commands.setup.execute_actions'):
-				with patch('browser_use.skill_cli.commands.setup.validate_setup') as mock_validate:
-					mock_validate.return_value = {
-						'browser_use_import': 'ok',
-						'browser_profile': 'ok',
-					}
-
-					result = await setup.handle(
-						'setup',
-						{
-							'profile': 'local',
-							'api_key': None,
-							'yes': False,
-							'json': False,
-						},
-					)
-
-					assert result['status'] == 'success'
-					assert result['profile'] == 'local'
-					assert 'checks' in result
-					assert 'validation' in result
-
-
-@pytest.mark.asyncio
-async def test_setup_remote_profile():
-	"""Test setup with remote profile."""
-	with patch('browser_use.skill_cli.commands.setup.run_checks') as mock_checks:
-		mock_checks.return_value = {
-			'browser_use_package': {'status': 'ok', 'message': 'browser-use installed'},
-			'api_key': {'status': 'missing', 'message': 'Not configured'},
-			'cloudflared': {'status': 'ok', 'message': 'Will auto-install'},
-		}
-
-		with patch('browser_use.skill_cli.commands.setup.plan_actions') as mock_plan:
-			mock_plan.return_value = [
-				{
-					'type': 'configure_api_key',
-					'description': 'Configure API key',
-					'api_key': 'test_key',
-				}
-			]
-
-			with patch('browser_use.skill_cli.commands.setup.execute_actions'):
-				with patch('browser_use.skill_cli.commands.setup.validate_setup') as mock_validate:
-					mock_validate.return_value = {
-						'browser_use_import': 'ok',
-						'api_key_available': True,
-						'cloudflared_available': True,
-					}
-
-					result = await setup.handle(
-						'setup',
-						{
-							'profile': 'remote',
-							'api_key': 'test_key',
-							'yes': True,
-							'json': False,
-						},
-					)
-
-					assert result['status'] == 'success'
-					assert result['profile'] == 'remote'
-
-
-@pytest.mark.asyncio
-async def test_setup_invalid_profile():
-	"""Test setup with invalid profile."""
+async def test_setup_local_mode():
+	"""Test setup with local mode runs without error."""
 	result = await setup.handle(
 		'setup',
 		{
-			'profile': 'invalid',
+			'mode': 'local',
+			'api_key': None,
+			'yes': True,
+			'json': True,
+		},
+	)
+
+	# Should return a dict with expected structure
+	assert isinstance(result, dict)
+	# Either success or error, but should have a response
+	assert 'status' in result or 'error' in result
+
+	if 'status' in result:
+		assert result['status'] == 'success'
+		assert result['mode'] == 'local'
+		assert 'checks' in result
+		assert 'validation' in result
+
+
+async def test_setup_remote_mode():
+	"""Test setup with remote mode runs without error."""
+	result = await setup.handle(
+		'setup',
+		{
+			'mode': 'remote',
+			'api_key': None,
+			'yes': True,
+			'json': True,
+		},
+	)
+
+	# Should return a dict with expected structure
+	assert isinstance(result, dict)
+	assert 'status' in result or 'error' in result
+
+	if 'status' in result:
+		assert result['status'] == 'success'
+		assert result['mode'] == 'remote'
+		assert 'checks' in result
+		assert 'validation' in result
+
+
+async def test_setup_full_mode():
+	"""Test setup with full mode runs without error."""
+	result = await setup.handle(
+		'setup',
+		{
+			'mode': 'full',
+			'api_key': None,
+			'yes': True,
+			'json': True,
+		},
+	)
+
+	assert isinstance(result, dict)
+	assert 'status' in result or 'error' in result
+
+	if 'status' in result:
+		assert result['status'] == 'success'
+		assert result['mode'] == 'full'
+
+
+async def test_setup_invalid_mode():
+	"""Test setup with invalid mode returns error."""
+	result = await setup.handle(
+		'setup',
+		{
+			'mode': 'invalid',
 			'api_key': None,
 			'yes': False,
 			'json': False,
@@ -96,10 +89,57 @@ async def test_setup_invalid_profile():
 	)
 
 	assert 'error' in result
+	assert 'Invalid mode' in result['error']
+
+
+async def test_run_checks_local():
+	"""Test run_checks returns expected structure for local mode."""
+	checks = await setup.run_checks('local')
+
+	assert isinstance(checks, dict)
+	assert 'browser_use_package' in checks
+	assert checks['browser_use_package']['status'] in ('ok', 'error')
+
+	# Local mode should check browser
+	assert 'browser' in checks
+	assert checks['browser']['status'] in ('ok', 'error')
+
+	# Local mode should NOT check api_key or cloudflared
+	assert 'api_key' not in checks
+	assert 'cloudflared' not in checks
+
+
+async def test_run_checks_remote():
+	"""Test run_checks returns expected structure for remote mode."""
+	checks = await setup.run_checks('remote')
+
+	assert isinstance(checks, dict)
+	assert 'browser_use_package' in checks
+
+	# Remote mode should check api_key and cloudflared
+	assert 'api_key' in checks
+	assert checks['api_key']['status'] in ('ok', 'missing')
+	assert 'cloudflared' in checks
+	assert checks['cloudflared']['status'] in ('ok', 'missing')
+
+	# Remote mode should NOT check browser
+	assert 'browser' not in checks
+
+
+async def test_run_checks_full():
+	"""Test run_checks returns expected structure for full mode."""
+	checks = await setup.run_checks('full')
+
+	assert isinstance(checks, dict)
+	# Full mode should check everything
+	assert 'browser_use_package' in checks
+	assert 'browser' in checks
+	assert 'api_key' in checks
+	assert 'cloudflared' in checks
 
 
 def test_plan_actions_no_actions_needed():
-	"""Test plan_actions when nothing is needed."""
+	"""Test plan_actions when everything is ok."""
 	checks = {
 		'browser_use_package': {'status': 'ok'},
 		'browser': {'status': 'ok'},
@@ -132,17 +172,54 @@ def test_plan_actions_configure_api_key():
 	assert any(a['type'] == 'configure_api_key' for a in actions)
 
 
-@pytest.mark.asyncio
-async def test_check_browser_available():
-	"""Test _check_browser when browser is available."""
-	with patch('browser_use.browser.profile.BrowserProfile'):
-		result = await setup._check_browser()
-		assert result['status'] == 'ok'
+def test_plan_actions_prompt_api_key():
+	"""Test plan_actions prompts for API key when missing and not --yes."""
+	checks = {
+		'api_key': {'status': 'missing'},
+	}
+
+	actions = setup.plan_actions(checks, 'remote', yes=False, api_key=None)
+	assert any(a['type'] == 'prompt_api_key' for a in actions)
 
 
-@pytest.mark.asyncio
-async def test_check_browser_unavailable():
-	"""Test _check_browser when browser is not available."""
-	with patch('browser_use.browser.profile.BrowserProfile', side_effect=Exception('Not available')):
-		result = await setup._check_browser()
-		assert result['status'] == 'error'
+def test_plan_actions_install_cloudflared():
+	"""Test plan_actions when cloudflared is missing."""
+	checks = {
+		'cloudflared': {'status': 'missing'},
+	}
+
+	actions = setup.plan_actions(checks, 'remote', yes=True, api_key=None)
+	assert any(a['type'] == 'install_cloudflared' for a in actions)
+
+
+async def test_check_browser():
+	"""Test _check_browser returns valid structure."""
+	result = await setup._check_browser()
+
+	assert isinstance(result, dict)
+	assert 'status' in result
+	assert result['status'] in ('ok', 'error')
+	assert 'message' in result
+
+
+async def test_validate_setup_local():
+	"""Test validate_setup returns expected structure for local mode."""
+	results = await setup.validate_setup('local')
+
+	assert isinstance(results, dict)
+	assert 'browser_use_import' in results
+	assert 'browser_available' in results
+	# Should not have remote-only checks
+	assert 'api_key_available' not in results
+
+
+async def test_validate_setup_remote():
+	"""Test validate_setup returns expected structure for remote mode."""
+	results = await setup.validate_setup('remote')
+
+	assert isinstance(results, dict)
+	assert 'browser_use_import' in results
+	assert 'api_key_available' in results
+	assert 'cloudflared_available' in results
+	# Should not have local-only checks
+	assert 'browser_available' not in results

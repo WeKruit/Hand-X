@@ -80,6 +80,10 @@ parse_args() {
 				shift
 				;;
 			--api-key)
+				if [ -z "$2" ] || [[ "$2" == --* ]]; then
+					log_error "--api-key requires a value"
+					exit 1
+				fi
 				API_KEY="$2"
 				shift 2
 				;;
@@ -99,6 +103,7 @@ parse_args() {
 				exit 0
 				;;
 			*)
+				log_warn "Unknown argument: $1 (ignored)"
 				shift
 				;;
 		esac
@@ -642,7 +647,7 @@ main() {
 
 	# Step 2: Check/install Python
 	if ! check_python; then
-		read -p "Python 3.11+ not found. Install now? [y/N] " -n 1 -r
+		read -p "Python 3.11+ not found. Install now? [y/N] " -n 1 -r < /dev/tty
 		echo
 		if [[ $REPLY =~ ^[Yy]$ ]]; then
 			install_python

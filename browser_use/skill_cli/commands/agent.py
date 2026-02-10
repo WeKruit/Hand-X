@@ -24,14 +24,13 @@ async def handle(session: SessionInfo, params: dict[str, Any]) -> Any:
 	if not task:
 		return {'success': False, 'error': 'No task provided'}
 
-	# Check API key for LLM/Cloud access
-	try:
-		require_api_key('Agent tasks')
-	except APIKeyRequired as e:
-		return {'success': False, 'error': str(e)}
-
 	# Route based on browser mode
 	if session.browser_mode == 'remote':
+		# Remote mode requires Browser-Use API key
+		try:
+			require_api_key('Cloud agent tasks')
+		except APIKeyRequired as e:
+			return {'success': False, 'error': str(e)}
 		return await _handle_cloud_task(params)
 	else:
 		# Check if user tried to use cloud-only flags in local mode
