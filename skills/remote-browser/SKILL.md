@@ -116,8 +116,10 @@ browser-use tunnel <port>           # Start tunnel (returns URL)
 browser-use tunnel <port>           # Idempotent - returns existing URL
 browser-use tunnel list             # Show active tunnels
 browser-use tunnel stop <port>      # Stop tunnel
-browser-use close                   # Closing session stops all tunnels
+browser-use tunnel stop --all       # Stop all tunnels
 ```
+
+**Note:** Tunnels are independent of browser sessions. They persist across `browser-use close` and can be managed separately.
 
 Cloudflared is installed by `install.sh`. If missing, install manually (see Setup section).
 
@@ -257,9 +259,10 @@ done
 2. **Don't mix modes** — if you started with local, close first before switching to remote
 3. **Always run `state` first** to see available elements and their indices
 4. **Sessions persist** across commands — the browser stays open until you close it
-5. **Use `--json`** for programmatic parsing
-6. **`tunnel` is idempotent** — calling it again for the same port returns the existing URL
-7. **Close when done** — `browser-use close` cleans up browser and tunnels
+5. **Tunnels are independent** — they don't require or create a browser session, and persist across `browser-use close`
+6. **Use `--json`** for programmatic parsing
+7. **`tunnel` is idempotent** — calling it again for the same port returns the existing URL
+8. **Close when done** — `browser-use close` closes the browser; `browser-use tunnel stop --all` stops tunnels
 
 ## Troubleshooting
 
@@ -285,10 +288,11 @@ done
 
 ## Cleanup
 
-**Always close the browser when done:**
+**Close the browser when done:**
 
 ```bash
-browser-use close
+browser-use close              # Close browser session
+browser-use tunnel stop --all  # Stop all tunnels (if any)
 ```
 
-This stops all tunnels and releases the cloud browser session.
+Browser sessions and tunnels are managed separately, so close each as needed.
