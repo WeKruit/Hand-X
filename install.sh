@@ -280,14 +280,14 @@ show_bash_menu() {
 	echo -n "> "
 
 	# Read from /dev/tty to work even when script is piped
-	# Temporarily disable set -e to handle read edge cases
+	# Keep set +e for the whole function to avoid issues with pattern matching
 	set +e
 	read -r choices < /dev/tty
-	set -e
 	choices=${choices:-1}
 
-	[[ "$choices" == *"1"* ]] && INSTALL_LOCAL=true
-	[[ "$choices" == *"2"* ]] && INSTALL_REMOTE=true
+	if [[ "$choices" == *"1"* ]]; then INSTALL_LOCAL=true; fi
+	if [[ "$choices" == *"2"* ]]; then INSTALL_REMOTE=true; fi
+	set -e
 }
 
 # =============================================================================
