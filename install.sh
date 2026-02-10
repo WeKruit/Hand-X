@@ -277,9 +277,11 @@ show_bash_menu() {
 	echo ""
 	echo "Press Enter for default [1]"
 	echo ""
+	echo -n "> "
 
 	# Read from /dev/tty to work even when script is piped
-	read -t 60 -p "> " choices < /dev/tty || choices="1"
+	# Use subshell to prevent set -e from killing script on read timeout/empty
+	choices=$(head -n1 < /dev/tty 2>/dev/null) || true
 	choices=${choices:-1}
 
 	[[ "$choices" == *"1"* ]] && INSTALL_LOCAL=true
