@@ -7,6 +7,7 @@ server which loads once and stays running.
 """
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -329,6 +330,15 @@ Examples:
 	p.add_argument('--output', '-o', help='Output file path')
 	p.add_argument('--force', '-f', action='store_true', help='Overwrite existing files')
 	p.add_argument('--list', '-l', action='store_true', help='List available templates')
+
+	# setup
+	p = subparsers.add_parser('setup', help='Configure browser-use for first-time use')
+	p.add_argument('--profile', choices=['local', 'remote', 'full'], default='local', help='Setup profile (local/remote/full)')
+	p.add_argument('--api-key', help='Browser-Use API key')
+	p.add_argument('--yes', '-y', action='store_true', help='Skip interactive prompts')
+
+	# doctor
+	subparsers.add_parser('doctor', help='Check browser-use installation and dependencies')
 
 	# -------------------------------------------------------------------------
 	# Browser Control Commands
@@ -1176,6 +1186,51 @@ def main() -> int:
 				print(f'Closed {len(closed)} session(s): {", ".join(closed)}')
 			else:
 				print('No active sessions')
+		return 0
+
+	# Handle setup command
+	if args.command == 'setup':
+		from browser_use.skill_cli.commands import setup
+
+		loop = asyncio.get_event_loop()
+		result = loop.run_until_complete(
+			setup.handle(
+				'setup',
+				{
+					'profile': args.profile,
+					'api_key': args.api_key,
+					'yes': args.yes,
+					'json': args.json,
+				},
+			)
+		)
+
+		if args.json:
+			print(json.dumps(result))
+		elif 'error' in result:
+			print(f'Error: {result["error"]}', file=sys.stderr)
+			return 1
+		else:
+			if result.get('status') == 'success':
+				print('\n✓ Setup complete!')
+				print(f'\nProfile: {result["profile"]}')
+				print(f'Next: browser-use open https://example.com')
+		return 0
+
+	# Handle doctor command
+	if args.command == 'doctor':
+		from browser_use.skill_cli.commands import doctor
+
+		loop = asyncio.get_event_loop()
+		result = loop.run_until_complete(doctor.handle())
+
+		if args.json:
+			print(json.dumps(result))
+		else:
+			if result.get('status') == 'healthy':
+				print('✓ All checks passed!')
+			else:
+				print('⚠ Some checks failed. See details above.')
 		return 0
 
 	# Handle tunnel subcommand parsing
