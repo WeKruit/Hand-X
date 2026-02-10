@@ -10,12 +10,21 @@ This skill is for agents running on **sandboxed remote machines** (cloud VMs, CI
 
 ## Setup
 
-**One-command install:**
+**Option 1: One-command install (recommended)**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ShawnPana/browser-use/frictionless-install/install.sh | BROWSER_USE_BRANCH=frictionless-install bash
 ```
 
-This installs Python dependencies, browser-use CLI, and validates the setup.
+This installs Python, uv, browser-use CLI, and validates the setup automatically.
+
+**Option 2: Manual install**
+```bash
+# For dev testing (from this branch):
+pip install "git+https://github.com/ShawnPana/browser-use@frictionless-install"
+
+# For production (once released):
+# pip install "browser-use[cli]"
+```
 
 **Then configure your API key:**
 ```bash
