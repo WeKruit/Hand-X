@@ -48,18 +48,51 @@ browser-use doctor
 
 ## Core Workflow
 
+**IMPORTANT: Use `--browser remote` on your FIRST command to create a cloud browser session.**
+
 ```bash
-browser-use --browser remote open https://example.com  # Open URL in cloud browser
-browser-use state                                       # Get page elements with indices
-browser-use click 5                                     # Click element by index
-browser-use type "Hello World"                          # Type into focused element
-browser-use input 3 "text"                              # Click element, then type
-browser-use screenshot                                  # Take screenshot (base64)
-browser-use screenshot page.png                         # Save screenshot to file
-browser-use close                                       # Close browser
+# Step 1: Start session with --browser remote (REQUIRED on first command)
+browser-use --browser remote open https://example.com
+# Returns: url, live_url (view the browser in real-time)
+
+# Step 2+: All subsequent commands use the existing session (no flag needed)
+browser-use state                   # Get page elements with indices
+browser-use click 5                 # Click element by index
+browser-use type "Hello World"      # Type into focused element
+browser-use input 3 "text"          # Click element, then type
+browser-use screenshot              # Take screenshot (base64)
+browser-use screenshot page.png     # Save screenshot to file
+
+# Done: Close the session
+browser-use close                   # Close browser and release resources
 ```
 
-The `open` command returns a `live_url` for cloud browsers — a real-time browser viewport you can view in any browser.
+The `--browser remote` flag only matters on the **first command** that creates the session. After that, all commands automatically use the existing cloud browser.
+
+### Understanding Session Modes
+
+| First Command | Session Type | Subsequent Commands |
+|---------------|--------------|---------------------|
+| `browser-use --browser remote open <url>` | Cloud browser | No flag needed |
+| `browser-use open <url>` | Local browser | No flag needed |
+
+### What Happens If You Forget `--browser remote`?
+
+```bash
+# WRONG: Starting without --browser remote creates a LOCAL session
+browser-use open https://example.com          # Creates LOCAL session (no live_url!)
+
+# Then trying to switch to remote will ERROR:
+browser-use --browser remote open https://other.com
+# Error: Session 'default' is running with --browser chromium,
+# but --browser remote was requested.
+#
+# Options:
+#   1. Close and restart: browser-use close && browser-use --browser remote open <url>
+#   2. Use different session: browser-use --browser remote --session other <command>
+```
+
+**Fix:** Always close the session first, then start fresh with `--browser remote`.
 
 ## Exposing Local Dev Servers
 
@@ -220,14 +253,20 @@ done
 
 ## Tips
 
-1. **Always use `--browser remote`** on sandboxed machines (no local Chrome available)
-2. **Always run `state` first** to see available elements and their indices
-3. **Sessions persist** across commands — the browser stays open
-4. **Use `--json`** for programmatic parsing
-5. **`tunnel` is idempotent** — calling it again for the same port returns the existing URL
-6. **Close when done** — `browser-use close` cleans up browser and tunnels
+1. **Use `--browser remote` on your FIRST command** — this creates a cloud browser session. Subsequent commands don't need the flag.
+2. **Don't mix modes** — if you started with local, close first before switching to remote
+3. **Always run `state` first** to see available elements and their indices
+4. **Sessions persist** across commands — the browser stays open until you close it
+5. **Use `--json`** for programmatic parsing
+6. **`tunnel` is idempotent** — calling it again for the same port returns the existing URL
+7. **Close when done** — `browser-use close` cleans up browser and tunnels
 
 ## Troubleshooting
+
+**"Session is running with --browser chromium but --browser remote was requested"?**
+- You started a local session and then tried to use `--browser remote`
+- Fix: `browser-use close` then restart with `browser-use --browser remote open <url>`
+- Prevention: Always use `--browser remote` on your first command
 
 **Cloud browser won't start?**
 - Verify `BROWSER_USE_API_KEY` is set

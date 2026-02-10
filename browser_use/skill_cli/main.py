@@ -203,16 +203,22 @@ def ensure_server(session: str, browser: str, headed: bool, profile: str | None,
 					meta = json.loads(meta_path.read_text())
 					existing_mode = meta.get('browser_mode', 'chromium')
 					if existing_mode != browser:
-						print(
-							f"Error: Session '{session}' is running with --browser {existing_mode}, "
-							f"but --browser {browser} was requested.\n\n"
-							f"Options:\n"
-							f"  1. Use existing browser: browser-use --browser {existing_mode} <command>\n"
-							f"  2. Use different session: browser-use --browser {browser} --session other <command>\n"
-							f"  3. Close existing session: browser-use close",
-							file=sys.stderr,
-						)
-						sys.exit(1)
+						# Only error if user explicitly requested 'remote' but session is local
+						# This prevents losing cloud features (live_url, etc.)
+						# The reverse case (requesting local but having remote) is fine -
+						# user still gets a working browser, just with more features
+						if browser == 'remote' and existing_mode != 'remote':
+							print(
+								f"Error: Session '{session}' is running with --browser {existing_mode}, "
+								f"but --browser remote was requested.\n\n"
+								f"Cloud browser features (live_url) require a remote session.\n\n"
+								f"Options:\n"
+								f"  1. Close and restart: browser-use close && browser-use --browser remote open <url>\n"
+								f"  2. Use different session: browser-use --browser remote --session other <command>\n"
+								f"  3. Use existing local browser: browser-use --browser {existing_mode} <command>",
+								file=sys.stderr,
+							)
+							sys.exit(1)
 				except (json.JSONDecodeError, OSError):
 					pass  # Metadata file corrupt, ignore
 

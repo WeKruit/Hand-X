@@ -82,21 +82,50 @@ def test_metadata_cleanup():
 	assert not meta_path.exists()
 
 
-def test_mode_mismatch_detection_logic():
-	"""Test the mode mismatch detection logic directly."""
-	meta_path = get_session_metadata_path('test-mismatch')
+def test_mode_mismatch_remote_on_local_should_error():
+	"""Test that requesting remote on local session triggers error condition.
+
+	This is the problematic case: user wants cloud features (live_url) but
+	session is running locally. They would silently lose those features.
+	"""
+	meta_path = get_session_metadata_path('test-mismatch-error')
 	try:
-		# Simulate existing session with chromium mode
+		# Simulate existing session with chromium (local) mode
 		meta_path.write_text(json.dumps({'browser_mode': 'chromium'}))
 
-		# Check mismatch detection
 		meta = json.loads(meta_path.read_text())
 		existing_mode = meta.get('browser_mode', 'chromium')
 		requested_mode = 'remote'
 
-		assert existing_mode != requested_mode
-		assert existing_mode == 'chromium'
-		assert requested_mode == 'remote'
+		# This combination should trigger an error
+		should_error = requested_mode == 'remote' and existing_mode != 'remote'
+		assert should_error is True
+	finally:
+		if meta_path.exists():
+			meta_path.unlink()
+
+
+def test_mode_mismatch_local_on_remote_should_allow():
+	"""Test that requesting local on remote session is allowed.
+
+	This case is fine: user gets a remote browser (more features than requested).
+	The remote session works just like a local one, just with extra features.
+	"""
+	meta_path = get_session_metadata_path('test-mismatch-allow')
+	try:
+		# Simulate existing session with remote mode
+		meta_path.write_text(json.dumps({'browser_mode': 'remote'}))
+
+		meta = json.loads(meta_path.read_text())
+		existing_mode = meta.get('browser_mode')
+		assert existing_mode == 'remote'
+
+		requested_mode = 'chromium'  # Default mode when user doesn't specify --browser
+
+		# This combination should NOT trigger an error
+		# (user requested chromium, but session is remote - that's fine)
+		should_error = requested_mode == 'remote' and existing_mode != 'remote'
+		assert should_error is False
 	finally:
 		if meta_path.exists():
 			meta_path.unlink()
