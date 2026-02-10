@@ -202,7 +202,7 @@ async def start_tunnel(port: int) -> dict[str, Any]:
 	# Create log file for cloudflared stderr (avoids SIGPIPE when parent exits)
 	_TUNNELS_DIR.mkdir(parents=True, exist_ok=True)
 	log_file_path = _TUNNELS_DIR / f'{port}.log'
-	log_file = open(log_file_path, 'w')
+	log_file = open(log_file_path, 'w')  # noqa: ASYNC230
 
 	# Spawn cloudflared as a daemon
 	# - start_new_session=True: survives parent exit
