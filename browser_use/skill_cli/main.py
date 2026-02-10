@@ -1280,27 +1280,61 @@ def main() -> int:
 				print('⚠ Some checks failed. See details above.')
 		return 0
 
-	# Handle tunnel subcommand parsing
+	# Handle tunnel command - runs independently of browser session
 	if args.command == 'tunnel':
+		from browser_use.skill_cli import tunnel_manager
+
 		pos = getattr(args, 'port_or_subcommand', None)
+
 		if pos == 'list':
-			params = {'subcommand': 'list'}
+			result = tunnel_manager.list_tunnels()
 		elif pos == 'stop':
 			port_arg = getattr(args, 'port_arg', None)
 			if port_arg is None:
-				print('Usage: browser-use tunnel stop <port>', file=sys.stderr)
-				return 1
-			params = {'subcommand': 'stop', 'port': port_arg}
+				# Check if it's 'stop --all'
+				if '--all' in sys.argv:
+					result = asyncio.get_event_loop().run_until_complete(tunnel_manager.stop_all_tunnels())
+				else:
+					print('Usage: browser-use tunnel stop <port>', file=sys.stderr)
+					return 1
+			else:
+				result = asyncio.get_event_loop().run_until_complete(tunnel_manager.stop_tunnel(port_arg))
 		elif pos is not None:
 			try:
 				port = int(pos)
 			except ValueError:
 				print(f'Unknown tunnel subcommand: {pos}', file=sys.stderr)
 				return 1
-			params = {'subcommand': 'start', 'port': port}
+			result = asyncio.get_event_loop().run_until_complete(tunnel_manager.start_tunnel(port))
 		else:
 			print('Usage: browser-use tunnel <port> | list | stop <port>', file=sys.stderr)
 			return 0
+
+		# Output result
+		if args.json:
+			print(json.dumps(result))
+		else:
+			if 'error' in result:
+				print(f'Error: {result["error"]}', file=sys.stderr)
+				return 1
+			elif 'url' in result:
+				existing = ' (existing)' if result.get('existing') else ''
+				print(f'url: {result["url"]}{existing}')
+			elif 'tunnels' in result:
+				if result['tunnels']:
+					for t in result['tunnels']:
+						print(f'  port {t["port"]}: {t["url"]}')
+				else:
+					print('No active tunnels')
+			elif 'stopped' in result:
+				if isinstance(result['stopped'], list):
+					if result['stopped']:
+						print(f'Stopped {len(result["stopped"])} tunnel(s): {", ".join(map(str, result["stopped"]))}')
+					else:
+						print('No tunnels to stop')
+				else:
+					print(f'Stopped tunnel on port {result["stopped"]}')
+		return 0
 
 	# Set API key in environment if provided
 	if args.api_key:
@@ -1321,14 +1355,13 @@ def main() -> int:
 	# Ensure server is running
 	ensure_server(args.session, args.browser, args.headed, args.profile, args.api_key)
 
-	# Build params from args (unless already built for tunnel)
-	if args.command != 'tunnel':
-		params = {}
-		skip_keys = {'command', 'session', 'browser', 'headed', 'profile', 'json', 'api_key', 'server_command'}
+	# Build params from args
+	params = {}
+	skip_keys = {'command', 'session', 'browser', 'headed', 'profile', 'json', 'api_key', 'server_command'}
 
-		for key, value in vars(args).items():
-			if key not in skip_keys and value is not None:
-				params[key] = value
+	for key, value in vars(args).items():
+		if key not in skip_keys and value is not None:
+			params[key] = value
 
 	# Send command to server
 	response = send_command(args.session, args.command, params)

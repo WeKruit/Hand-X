@@ -93,14 +93,8 @@ class SessionRegistry:
 		session = self._sessions.pop(name)
 		logger.info(f'Closing session: {name}')
 
-		# Stop all tunnels first
-		if session.tunnels:
-			from browser_use.skill_cli.commands.tunnel import stop_all_tunnels
-
-			try:
-				await stop_all_tunnels(session)
-			except Exception as e:
-				logger.warning(f'Error stopping tunnels for session {name}: {e}')
+		# Note: Tunnels are now managed independently via tunnel_manager.py
+		# They persist across session close/open cycles
 
 		try:
 			await session.browser_session.kill()
