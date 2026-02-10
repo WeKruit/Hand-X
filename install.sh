@@ -143,13 +143,13 @@ install_uv() {
 	# Use official uv installer
 	curl -LsSf https://astral.sh/uv/install.sh | sh
 
-	# Add to PATH for current session
-	export PATH="$HOME/.cargo/bin:$PATH"
+	# Add common uv install locations to PATH for current session
+	export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
 	if command -v uv &> /dev/null; then
 		log_success "uv installed successfully"
 	else
-		log_error "uv installation failed"
+		log_error "uv installation failed. Try restarting your shell and run the installer again."
 		exit 1
 	fi
 }
