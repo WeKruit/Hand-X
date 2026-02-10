@@ -15,7 +15,7 @@ This skill is for agents running on **sandboxed remote machines** (cloud VMs, CI
 curl -fsSL https://raw.githubusercontent.com/ShawnPana/browser-use/frictionless-install/install.sh | BROWSER_USE_BRANCH=frictionless-install bash
 ```
 
-This installs Python, uv, browser-use CLI, and validates the setup automatically.
+This installs Python, uv, browser-use CLI, cloudflared (for tunneling), and validates the setup automatically.
 
 **Option 2: Manual install**
 ```bash
@@ -24,6 +24,16 @@ pip install "git+https://github.com/ShawnPana/browser-use@frictionless-install"
 
 # For production (once released):
 # pip install "browser-use[cli]"
+
+# Install cloudflared for tunneling (required for browser-use tunnel command):
+# macOS:
+brew install cloudflared
+
+# Linux:
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o ~/.local/bin/cloudflared && chmod +x ~/.local/bin/cloudflared
+
+# Windows:
+winget install Cloudflare.cloudflared
 ```
 
 **Then configure your API key:**
@@ -76,7 +86,7 @@ browser-use tunnel stop <port>      # Stop tunnel
 browser-use close                   # Closing session stops all tunnels
 ```
 
-Cloudflared auto-installs on first tunnel use (~20MB one-time download).
+Cloudflared is installed by `install.sh`. If missing, install manually (see Setup section).
 
 ## Commands
 
@@ -224,7 +234,8 @@ done
 - Check your API key at https://browser-use.com
 
 **Tunnel not working?**
-- Cloudflared auto-installs on first use; check network connectivity
+- Verify cloudflared is installed: `which cloudflared`
+- If missing, install manually (see Setup section) or re-run `install.sh`
 - `browser-use tunnel list` to check active tunnels
 - `browser-use tunnel stop <port>` and retry
 

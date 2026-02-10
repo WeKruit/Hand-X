@@ -170,7 +170,11 @@ install_browser_use() {
 	if [ -n "$BROWSER_USE_BRANCH" ]; then
 		BROWSER_USE_REPO="${BROWSER_USE_REPO:-ShawnPana/browser-use}"
 		log_info "Installing from GitHub: $BROWSER_USE_REPO@$BROWSER_USE_BRANCH"
-		uv pip install "git+https://github.com/$BROWSER_USE_REPO@$BROWSER_USE_BRANCH"
+		# Clone and install locally to ensure all dependencies are resolved
+		local tmp_dir=$(mktemp -d)
+		git clone --depth 1 --branch "$BROWSER_USE_BRANCH" "https://github.com/$BROWSER_USE_REPO.git" "$tmp_dir"
+		uv pip install "$tmp_dir"
+		rm -rf "$tmp_dir"
 	else
 		uv pip install browser-use
 	fi
@@ -178,10 +182,62 @@ install_browser_use() {
 	log_success "browser-use installed"
 }
 
+# Install cloudflared for tunneling
+install_cloudflared() {
+	log_info "Installing cloudflared..."
+
+	if command -v cloudflared &> /dev/null; then
+		log_success "cloudflared already installed"
+		return 0
+	fi
+
+	local arch=$(uname -m)
+
+	case "$PLATFORM" in
+		macos)
+			if command -v brew &> /dev/null; then
+				brew install cloudflared
+			else
+				# Direct download for macOS without Homebrew
+				if [ "$arch" = "arm64" ]; then
+					curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz -o /tmp/cloudflared.tgz
+				else
+					curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.tgz -o /tmp/cloudflared.tgz
+				fi
+				tar -xzf /tmp/cloudflared.tgz -C "$HOME/.local/bin/"
+				rm /tmp/cloudflared.tgz
+			fi
+			;;
+		linux)
+			mkdir -p "$HOME/.local/bin"
+			if [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; then
+				curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64 -o "$HOME/.local/bin/cloudflared"
+			else
+				curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o "$HOME/.local/bin/cloudflared"
+			fi
+			chmod +x "$HOME/.local/bin/cloudflared"
+			;;
+		windows)
+			log_warn "Please install cloudflared manually: winget install Cloudflare.cloudflared"
+			return 0
+			;;
+	esac
+
+	# Add ~/.local/bin to PATH for current session
+	export PATH="$HOME/.local/bin:$PATH"
+
+	if command -v cloudflared &> /dev/null; then
+		log_success "cloudflared installed successfully"
+	else
+		log_warn "cloudflared installation failed. You can install it manually later."
+	fi
+}
+
 # Add to PATH permanently
 configure_path() {
 	local shell_rc=""
 	local bin_path="$HOME/.browser-use-env/bin"
+	local local_bin="$HOME/.local/bin"
 
 	# Detect shell
 	if [ -n "$BASH_VERSION" ]; then
@@ -198,10 +254,10 @@ configure_path() {
 		return 0
 	fi
 
-	# Add to shell config
+	# Add to shell config (includes ~/.local/bin for cloudflared)
 	echo "" >> "$shell_rc"
 	echo "# Browser-Use" >> "$shell_rc"
-	echo "export PATH=\"$bin_path:\$PATH\"" >> "$shell_rc"
+	echo "export PATH=\"$bin_path:$local_bin:\$PATH\"" >> "$shell_rc"
 
 	log_success "Added to PATH in $shell_rc"
 	log_warn "Restart your shell or run: source $shell_rc"
@@ -305,16 +361,19 @@ main() {
 	# Step 4: Install browser-use
 	install_browser_use
 
-	# Step 5: Configure PATH
+	# Step 5: Install cloudflared (for tunneling)
+	install_cloudflared
+
+	# Step 6: Configure PATH
 	configure_path
 
-	# Step 6: Run setup wizard
+	# Step 7: Run setup wizard
 	run_setup "$@"
 
-	# Step 7: Validate
+	# Step 8: Validate
 	validate
 
-	# Step 8: Show next steps
+	# Step 9: Show next steps
 	print_next_steps
 }
 

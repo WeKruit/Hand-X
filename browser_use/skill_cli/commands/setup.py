@@ -188,9 +188,9 @@ def plan_actions(
 		cloudflared_check = checks.get('cloudflared', {})
 		if cloudflared_check.get('status') != 'ok':
 			actions.append({
-				'type': 'note_cloudflared',
-				'description': 'Cloudflared will auto-install on first tunnel use',
-				'required': False,
+				'type': 'install_cloudflared',
+				'description': 'Install cloudflared (for tunneling)',
+				'required': True,
 			})
 
 	return actions
@@ -236,9 +236,15 @@ async def execute_actions(
 				print('   Set via: export BROWSER_USE_API_KEY=your_key')
 				print('   Or: browser-use setup --api-key <key>')
 
-		elif action_type == 'note_cloudflared':
+		elif action_type == 'install_cloudflared':
 			if not json_output:
-				print('📦 Cloudflared will auto-install on first tunnel use (~20MB)')
+				print('⚠ cloudflared not installed')
+				print('   Install via:')
+				print('   macOS:   brew install cloudflared')
+				print('   Linux:   curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o ~/.local/bin/cloudflared && chmod +x ~/.local/bin/cloudflared')
+				print('   Windows: winget install Cloudflare.cloudflared')
+				print()
+				print('   Or re-run install.sh which installs cloudflared automatically.')
 
 
 async def validate_setup(
