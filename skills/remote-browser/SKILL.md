@@ -23,18 +23,9 @@ This configures browser-use to only use cloud browsers:
   curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only --api-key bu_xxx
   ```
 
-**For development testing (from GitHub branch):**
-```bash
-curl -fsSL https://raw.githubusercontent.com/ShawnPana/browser-use/frictionless-install/install.sh | BROWSER_USE_BRANCH=frictionless-install bash -s -- --remote-only
-```
-
 **Manual install (alternative)**
 ```bash
-# Install from PyPI (once released):
 pip install "browser-use[cli]"
-
-# Or from this branch for dev testing:
-pip install "git+https://github.com/ShawnPana/browser-use@frictionless-install"
 
 # Install cloudflared for tunneling:
 # macOS:
