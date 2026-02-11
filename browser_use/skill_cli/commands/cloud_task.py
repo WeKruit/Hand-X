@@ -145,6 +145,40 @@ async def stop_session(session_id: str) -> dict[str, Any]:
 	return result['data']
 
 
+async def stop_sessions_parallel(session_ids: list[str]) -> tuple[list[str], list[dict]]:
+	"""Stop multiple cloud sessions in parallel using thread pool.
+
+	Args:
+		session_ids: List of session IDs to stop
+
+	Returns:
+		Tuple of (stopped_ids, errors) where errors is list of {id, error} dicts
+	"""
+
+	def _stop_one_sync(session_id: str) -> tuple[str, str | None]:
+		"""Stop one session synchronously, return (id, error_or_none)."""
+		try:
+			result = _api_request('PATCH', f'/sessions/{session_id}', {'action': 'stop'})
+			if not result['success']:
+				return (session_id, result['error'])
+			return (session_id, None)
+		except Exception as e:
+			return (session_id, str(e))
+
+	# Run all stops in parallel using thread pool
+	results = await asyncio.gather(*[asyncio.to_thread(_stop_one_sync, sid) for sid in session_ids])
+
+	stopped = []
+	errors = []
+	for session_id, error in results:
+		if error is None:
+			stopped.append(session_id)
+		else:
+			errors.append({'id': session_id, 'error': error})
+
+	return stopped, errors
+
+
 async def delete_session(session_id: str) -> dict[str, Any]:
 	"""Delete a cloud session and all its tasks.
 
