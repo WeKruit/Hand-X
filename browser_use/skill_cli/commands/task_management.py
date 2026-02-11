@@ -58,19 +58,8 @@ def handle_task_command(args: argparse.Namespace) -> int:
 
 
 def _run_async(coro: Any) -> Any:
-	"""Run an async coroutine, handling event loop creation."""
-	try:
-		loop = asyncio.get_event_loop()
-		if loop.is_running():
-			# If already running, create a new loop
-			import concurrent.futures
-
-			with concurrent.futures.ThreadPoolExecutor() as executor:
-				future = executor.submit(asyncio.run, coro)
-				return future.result()
-		return loop.run_until_complete(coro)
-	except RuntimeError:
-		return asyncio.run(coro)
+	"""Run an async coroutine in a new event loop."""
+	return asyncio.run(coro)
 
 
 def _handle_list(args: argparse.Namespace) -> int:
