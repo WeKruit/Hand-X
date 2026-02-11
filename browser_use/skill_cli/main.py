@@ -272,11 +272,12 @@ def ensure_server(session: str, browser: str, headed: bool, profile: str | None,
 
 	# Start server as background process
 	if sys.platform == 'win32':
-		# Windows: use CREATE_NEW_PROCESS_GROUP
+		# Windows: CREATE_NO_WINDOW prevents console window from appearing
+		# CREATE_NEW_PROCESS_GROUP allows the process to survive parent exit
 		subprocess.Popen(
 			cmd,
 			env=env,
-			creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+			creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
 			stdout=subprocess.DEVNULL,
 			stderr=subprocess.DEVNULL,
 		)
