@@ -21,6 +21,52 @@ uv pip install "browser-use[cli]"
 browser-use install
 ```
 
+## Setup
+
+**One-line install (recommended)**
+```bash
+curl -fsSL https://browser-use.com/install.sh | bash
+```
+
+This interactive installer lets you choose your installation mode and configures everything automatically.
+
+**Installation modes:**
+```bash
+curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only  # Cloud browser only
+curl -fsSL https://browser-use.com/install.sh | bash -s -- --local-only   # Local browser only
+curl -fsSL https://browser-use.com/install.sh | bash -s -- --full         # All modes
+```
+
+| Install Mode | Available Browsers | Default | Use Case |
+|--------------|-------------------|---------|----------|
+| `--remote-only` | remote | remote | Sandboxed agents, CI, no GUI |
+| `--local-only` | chromium, real | chromium | Local development |
+| `--full` | chromium, real, remote | chromium | Full flexibility |
+
+When only one mode is installed, it becomes the default and no `--browser` flag is needed.
+
+**Pass API key during install:**
+```bash
+curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only --api-key bu_xxx
+```
+
+**Verify installation:**
+```bash
+browser-use doctor
+```
+
+**Manual cloudflared install (for tunneling):**
+```bash
+# macOS:
+brew install cloudflared
+
+# Linux:
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o ~/.local/bin/cloudflared && chmod +x ~/.local/bin/cloudflared
+
+# Windows:
+winget install Cloudflare.cloudflared
+```
+
 ## Quick Start
 
 ```bash
@@ -236,6 +282,35 @@ browser-use session stop <session-id>     # Stop a session
 browser-use session stop --all            # Stop all active sessions
 ```
 
+## Exposing Local Dev Servers
+
+If you're running a dev server locally and need a cloud browser to reach it, use Cloudflare tunnels:
+
+```bash
+# Start your dev server
+npm run dev &  # localhost:3000
+
+# Expose it via Cloudflare tunnel
+browser-use tunnel 3000
+# → url: https://abc.trycloudflare.com
+
+# Now the cloud browser can reach your local server
+browser-use --browser remote open https://abc.trycloudflare.com
+```
+
+**Tunnel commands:**
+```bash
+browser-use tunnel <port>           # Start tunnel (returns URL)
+browser-use tunnel <port>           # Idempotent - returns existing URL
+browser-use tunnel list             # Show active tunnels
+browser-use tunnel stop <port>      # Stop tunnel
+browser-use tunnel stop --all       # Stop all tunnels
+```
+
+**Note:** Tunnels are independent of browser sessions. They persist across `browser-use close` and can be managed separately.
+
+Cloudflared is installed by `install.sh`. If missing, install manually (see Setup section).
+
 ## Running Subagents (Remote Mode)
 
 Cloud sessions and tasks provide a powerful model for running **subagents** - autonomous browser agents that execute tasks in parallel.
@@ -353,7 +428,42 @@ browser-use -b remote run "task" \
 browser-use -b remote run "task" --profile <profile-id> --no-wait
 ```
 
-### Debugging & Monitoring
+### Monitoring Subagents
+
+**Task status is designed for token efficiency.** Default output is minimal - only expand when needed:
+
+| Mode | Flag | Tokens | Use When |
+|------|------|--------|----------|
+| Default | (none) | Low | Polling progress |
+| Compact | `-c` | Medium | Need full reasoning |
+| Verbose | `-v` | High | Debugging actions |
+
+**Recommended workflow:**
+
+```bash
+# 1. Launch task
+browser-use -b remote run "task" --no-wait
+# → task_id: abc-123
+
+# 2. Poll with default (token efficient) - only latest step
+browser-use task status abc-123
+# ✅ abc-123... [finished] $0.009 15s
+#   ... 1 earlier steps
+#   2. I found the information and extracted...
+
+# 3. ONLY IF task failed or need context: use --compact
+browser-use task status abc-123 -c
+
+# 4. ONLY IF debugging specific actions: use --verbose
+browser-use task status abc-123 -v
+```
+
+**For long tasks (50+ steps):**
+```bash
+browser-use task status <id> -c --last 5   # Last 5 steps only
+browser-use task status <id> -c --reverse  # Newest first
+browser-use task status <id> -v --step 10  # Inspect specific step
+```
 
 **Live view**: Watch an agent work in real-time:
 ```bash
@@ -362,13 +472,13 @@ browser-use session get <session-id>
 # Open this URL in your browser to watch the agent
 ```
 
-**Detect stuck tasks**: If cost stops increasing, the task may be stuck:
+**Detect stuck tasks**: If cost/duration stops increasing, the task may be stuck:
 ```bash
 browser-use task status <task-id>
-# Cost: $0.009  ← if this doesn't change over time, task is stuck
+# 🔄 abc-123... [started] $0.009 45s  ← if cost doesn't change, task is stuck
 ```
 
-**Logs**: Only available after task completes (not during execution):
+**Logs**: Only available after task completes:
 ```bash
 browser-use task logs <task-id>  # Works after task finishes
 ```
@@ -610,6 +720,34 @@ browser-use --browser real open https://gmail.com
 browser-use state  # Already logged in!
 ```
 
+## Common Patterns
+
+### Test a Local Dev Server with Cloud Browser
+
+```bash
+# Start dev server
+npm run dev &  # localhost:3000
+
+# Tunnel it
+browser-use tunnel 3000
+# → url: https://abc.trycloudflare.com
+
+# Browse with cloud browser
+browser-use --browser remote open https://abc.trycloudflare.com
+browser-use state
+browser-use screenshot
+```
+
+### Screenshot Loop for Visual Verification
+
+```bash
+browser-use open https://example.com
+for i in 1 2 3 4 5; do
+  browser-use scroll down
+  browser-use screenshot "page_$i.png"
+done
+```
+
 ## Tips
 
 1. **Always run `browser-use state` first** to see available elements and their indices
@@ -621,6 +759,11 @@ browser-use state  # Already logged in!
 7. **CLI aliases**: `bu`, `browser`, and `browseruse` all work identically to `browser-use`
 
 ## Troubleshooting
+
+**Run diagnostics first:**
+```bash
+browser-use doctor                    # Check installation status
+```
 
 **Browser won't start?**
 ```bash
