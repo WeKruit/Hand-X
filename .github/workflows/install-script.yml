@@ -109,7 +109,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, macos-13]
+        os: [macos-latest, macos-14]
         mode: [--remote-only, --local-only, --full]
     runs-on: ${{ matrix.os }}
     steps:
