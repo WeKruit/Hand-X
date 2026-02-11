@@ -1185,8 +1185,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Record executed actions for loop detection
 		self._update_loop_detector_actions()
 
-		# check for action errors - count the whole step as 1 failure if any action in the step errored
-		if self.state.last_result and any(r.error for r in self.state.last_result):
+		# check for action errors - only count single-action steps toward consecutive failures;
+		# multi-action steps with errors are handled by loop detection and replan nudges instead
+		if self.state.last_result and len(self.state.last_result) == 1 and self.state.last_result[-1].error:
 			self.state.consecutive_failures += 1
 			self.logger.debug(f'🔄 Step {self.state.n_steps}: Consecutive failures: {self.state.consecutive_failures}')
 			return
