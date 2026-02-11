@@ -51,10 +51,11 @@
 #    - Then delete:
 #      Remove-Item -Recurse -Force "$env:USERPROFILE\.browser-use-env"
 #
-# 5. PATH not updated in PowerShell
-#    - The script updates ~/.bashrc, not PowerShell profile
-#    - For PowerShell, add to PATH manually:
-#      $env:PATH += ";$env:USERPROFILE\.browser-use-env\Scripts;$env:USERPROFILE\.local\bin"
+# 5. PATH not working in PowerShell after install
+#    - The script auto-configures PowerShell profile, but you must restart PowerShell
+#    - If it still doesn't work, check your profile:
+#      notepad $PROFILE
+#    - Should contain: $env:PATH += ";$env:USERPROFILE\.browser-use-env\Scripts;..."
 #    - Or run commands through Git Bash:
 #      & "C:\Program Files\Git\bin\bash.exe" -c 'browser-use open https://example.com'
 #
@@ -645,16 +646,49 @@ configure_path() {
 
 	# Check if already in PATH (browser-use-env matches both /bin and /Scripts)
 	if grep -q "browser-use-env" "$shell_rc" 2>/dev/null; then
-		log_info "PATH already configured"
+		log_info "PATH already configured in $shell_rc"
+	else
+		# Add to shell config (includes ~/.local/bin for cloudflared)
+		echo "" >> "$shell_rc"
+		echo "# Browser-Use" >> "$shell_rc"
+		echo "export PATH=\"$bin_path:$local_bin:\$PATH\"" >> "$shell_rc"
+		log_success "Added to PATH in $shell_rc"
+	fi
+
+	# On Windows, also configure PowerShell profile
+	if [ "$PLATFORM" = "windows" ]; then
+		configure_powershell_path
+	fi
+}
+
+configure_powershell_path() {
+	# PowerShell profile paths (try both PS7 and PS5)
+	local ps_profile_dir="$HOME/Documents/PowerShell"
+	local ps_profile="$ps_profile_dir/Microsoft.PowerShell_profile.ps1"
+
+	# Fall back to Windows PowerShell 5.x path if PS7 dir doesn't exist
+	if [ ! -d "$ps_profile_dir" ]; then
+		ps_profile_dir="$HOME/Documents/WindowsPowerShell"
+		ps_profile="$ps_profile_dir/Microsoft.PowerShell_profile.ps1"
+	fi
+
+	# Check if already configured
+	if grep -q "browser-use-env" "$ps_profile" 2>/dev/null; then
+		log_info "PATH already configured in PowerShell profile"
 		return 0
 	fi
 
-	# Add to shell config (includes ~/.local/bin for cloudflared)
-	echo "" >> "$shell_rc"
-	echo "# Browser-Use" >> "$shell_rc"
-	echo "export PATH=\"$bin_path:$local_bin:\$PATH\"" >> "$shell_rc"
+	# Create profile directory if needed
+	mkdir -p "$ps_profile_dir"
 
-	log_success "Added to PATH in $shell_rc"
+	# Add to PowerShell profile
+	cat >> "$ps_profile" << 'PSEOF'
+
+# Browser-Use
+$env:PATH += ";$env:USERPROFILE\.browser-use-env\Scripts;$env:USERPROFILE\.local\bin"
+PSEOF
+
+	log_success "Added to PATH in PowerShell profile"
 }
 
 # =============================================================================
@@ -737,8 +771,7 @@ print_next_steps() {
 
 	echo "Next steps:"
 	if [ "$PLATFORM" = "windows" ]; then
-		echo "  1. Restart PowerShell, or add to PATH for this session:"
-		echo "     \$env:PATH += \";\$env:USERPROFILE\\.browser-use-env\\Scripts\""
+		echo "  1. Restart PowerShell (PATH is now configured automatically)"
 	else
 		echo "  1. Restart your shell or run: source ~/$shell_rc"
 	fi
