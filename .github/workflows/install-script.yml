@@ -20,8 +20,9 @@ concurrency:
 
 env:
   # Use current branch for testing install.sh
+  # For PRs, use the fork's repo (head.repo), otherwise use the base repo
   BROWSER_USE_BRANCH: ${{ github.head_ref || github.ref_name }}
-  BROWSER_USE_REPO: ${{ github.repository }}
+  BROWSER_USE_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
 
 jobs:
   # ===========================================================================
@@ -243,7 +244,7 @@ jobs:
           # Install from current branch
           uv pip install .
 
-      - name: Run browser-use install (should install Chromium + cloudflared)
+      - name: Run browser-use install (installs Chromium only, not cloudflared)
         run: |
           source .venv/bin/activate
           browser-use install
@@ -260,10 +261,8 @@ jobs:
           ls ~/.cache/ms-playwright/chromium-*/chrome-linux/chromium 2>/dev/null || \
           echo "Chromium check completed"
 
-      - name: Verify cloudflared installed
-        run: |
-          which cloudflared || ls ~/.local/bin/cloudflared
-          cloudflared --version
+      # Note: browser-use install only installs Chromium, not cloudflared
+      # Users should install cloudflared separately if needed for tunneling
 
       - name: Run browser-use doctor
         run: |
@@ -310,10 +309,7 @@ jobs:
           ls ~/.cache/ms-playwright/chromium-*/chrome-linux/chromium 2>/dev/null || \
           echo "Chromium check completed"
 
-      - name: Verify cloudflared installed after uvx install
-        run: |
-          which cloudflared || ls ~/.local/bin/cloudflared
-          cloudflared --version
+      # Note: browser-use install only installs Chromium, not cloudflared
 
       - name: Test uvx browser-use doctor
         run: |
@@ -348,10 +344,7 @@ jobs:
           ls ~/.cache/ms-playwright/chromium-*/chrome-linux/chromium 2>/dev/null || \
           echo "Chromium check completed"
 
-      - name: Verify cloudflared installed
-        run: |
-          which cloudflared || ls ~/.local/bin/cloudflared
-          cloudflared --version
+      # Note: browser-use install only installs Chromium, not cloudflared
 
       - name: Test uvx browser-use doctor
         run: uvx "browser-use[cli]" doctor
