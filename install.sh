@@ -394,7 +394,8 @@ install_gum() {
 			# Download and extract Windows binary
 			curl -sL "https://github.com/charmbracelet/gum/releases/download/v${gum_version}/gum_${gum_version}_Windows_x86_64.zip" -o /tmp/gum.zip
 			unzip -q /tmp/gum.zip -d /tmp/gum_windows 2>/dev/null || return 1
-			mv /tmp/gum_windows/gum.exe "$HOME/.local/bin/" 2>/dev/null || return 1
+			# Binary is inside a subdirectory: gum_x.x.x_Windows_x86_64/gum.exe
+			mv "/tmp/gum_windows/gum_${gum_version}_Windows_x86_64/gum.exe" "$HOME/.local/bin/" 2>/dev/null || return 1
 			rm -rf /tmp/gum.zip /tmp/gum_windows 2>/dev/null
 			;;
 		*)
