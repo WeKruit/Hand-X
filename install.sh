@@ -45,7 +45,10 @@
 #    - Solution: Uninstall unwanted Python versions, or set PY_PYTHON=3.13
 #
 # 4. Stale virtual environment
-#    - If you reinstall with a different Python version, delete the old venv:
+#    - If you reinstall with a different Python version, delete the old venv
+#    - First kill any Python processes holding it open:
+#      taskkill /IM python.exe /F
+#    - Then delete:
 #      Remove-Item -Recurse -Force "$env:USERPROFILE\.browser-use-env"
 #
 # 5. PATH not updated in PowerShell
@@ -56,8 +59,27 @@
 #      & "C:\Program Files\Git\bin\bash.exe" -c 'browser-use open https://example.com'
 #
 # 6. "Failed to start session server" error
-#    - First run may fail, try again
-#    - Or run with --headed to see browser: browser-use --headed open https://example.com
+#    This generic error usually means a zombie server process is holding the port.
+#
+#    Step 1: Find the process using the port
+#      netstat -ano | findstr 49698
+#      # Output shows PID in last column, e.g.: TCP 127.0.0.1:49698 ... LISTENING 1234
+#
+#    Step 2: Kill the zombie process
+#      taskkill /PID 1234 /F
+#
+#    Step 3: Try again
+#      bu open https://example.com
+#
+#    If it keeps happening after bu close:
+#    - The server cleanup may be hanging during browser shutdown
+#    - Always kill stale processes before retrying
+#    - Or kill all Python: taskkill /IM python.exe /F
+#
+# 7. Debugging server issues
+#    To see actual error messages instead of "Failed to start session server":
+#      & "$env:USERPROFILE\.browser-use-env\Scripts\python.exe" -m browser_use.skill_cli.server --session default --browser chromium
+#    This runs the server in foreground and shows all errors.
 #
 # =============================================================================
 
