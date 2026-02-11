@@ -138,6 +138,30 @@ detect_platform() {
 }
 
 # =============================================================================
+# Virtual environment helpers
+# =============================================================================
+
+# Get the correct venv bin directory (Scripts on Windows, bin on Unix)
+get_venv_bin_dir() {
+	if [ "$PLATFORM" = "windows" ]; then
+		echo "$HOME/.browser-use-env/Scripts"
+	else
+		echo "$HOME/.browser-use-env/bin"
+	fi
+}
+
+# Activate the virtual environment (handles Windows vs Unix paths)
+activate_venv() {
+	local venv_bin=$(get_venv_bin_dir)
+	if [ -f "$venv_bin/activate" ]; then
+		source "$venv_bin/activate"
+	else
+		log_error "Virtual environment not found at $venv_bin"
+		exit 1
+	fi
+}
+
+# =============================================================================
 # Python management
 # =============================================================================
 
@@ -352,7 +376,7 @@ install_browser_use() {
 	fi
 
 	# Activate venv and install
-	source "$HOME/.browser-use-env/bin/activate"
+	activate_venv
 
 	# Install from GitHub branch (for testing) or PyPI (production)
 	if [ -n "$BROWSER_USE_BRANCH" ]; then
@@ -373,7 +397,7 @@ install_browser_use() {
 install_chromium() {
 	log_info "Installing Chromium browser..."
 
-	source "$HOME/.browser-use-env/bin/activate"
+	activate_venv
 
 	# Build command - only use --with-deps on Linux (it fails on Windows/macOS)
 	local cmd="uvx playwright install chromium"
@@ -500,7 +524,7 @@ EOF
 
 configure_path() {
 	local shell_rc=""
-	local bin_path="$HOME/.browser-use-env/bin"
+	local bin_path=$(get_venv_bin_dir)
 	local local_bin="$HOME/.local/bin"
 
 	# Detect shell
@@ -512,8 +536,8 @@ configure_path() {
 		shell_rc="$HOME/.profile"
 	fi
 
-	# Check if already in PATH
-	if grep -q "browser-use-env/bin" "$shell_rc" 2>/dev/null; then
+	# Check if already in PATH (browser-use-env matches both /bin and /Scripts)
+	if grep -q "browser-use-env" "$shell_rc" 2>/dev/null; then
 		log_info "PATH already configured"
 		return 0
 	fi
@@ -534,7 +558,7 @@ run_setup() {
 	log_info "Running setup wizard..."
 
 	# Activate venv
-	source "$HOME/.browser-use-env/bin/activate"
+	activate_venv
 
 	# Determine profile based on mode selections
 	local profile="local"
@@ -559,7 +583,7 @@ run_setup() {
 validate() {
 	log_info "Validating installation..."
 
-	source "$HOME/.browser-use-env/bin/activate"
+	activate_venv
 
 	if browser-use doctor; then
 		log_success "Installation validated successfully!"
@@ -647,13 +671,19 @@ main() {
 
 	# Step 2: Check/install Python
 	if ! check_python; then
-		read -p "Python 3.11+ not found. Install now? [y/N] " -n 1 -r < /dev/tty
-		echo
-		if [[ $REPLY =~ ^[Yy]$ ]]; then
+		# In CI or non-interactive mode (no tty), auto-install Python
+		if [ ! -t 0 ] || [ "$SKIP_INTERACTIVE" = true ]; then
+			log_info "Python 3.11+ not found. Installing automatically..."
 			install_python
 		else
-			log_error "Python 3.11+ required. Exiting."
-			exit 1
+			read -p "Python 3.11+ not found. Install now? [y/N] " -n 1 -r < /dev/tty
+			echo
+			if [[ $REPLY =~ ^[Yy]$ ]]; then
+				install_python
+			else
+				log_error "Python 3.11+ required. Exiting."
+				exit 1
+			fi
 		fi
 	fi
 
