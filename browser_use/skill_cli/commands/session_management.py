@@ -235,18 +235,15 @@ def _handle_stop_all(args: argparse.Namespace) -> int:
 		print('No active sessions to stop')
 		return 0
 
-	stopped = []
-	errors = []
+	# Extract session IDs
+	session_ids = [s.get('id') for s in sessions if s.get('id')]
 
-	for s in sessions:
-		session_id = s.get('id')
-		if not session_id:
-			continue
-		try:
-			_run_async(cloud_task.stop_session(session_id))
-			stopped.append(session_id)
-		except Exception as e:
-			errors.append({'id': session_id, 'error': str(e)})
+	if not session_ids:
+		print('No active sessions to stop')
+		return 0
+
+	# Stop all sessions in parallel
+	stopped, errors = _run_async(cloud_task.stop_sessions_parallel(session_ids))
 
 	if getattr(args, 'json', False):
 		print(json.dumps({'stopped': stopped, 'errors': errors}))
