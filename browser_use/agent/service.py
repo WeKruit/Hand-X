@@ -167,7 +167,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		use_vision: bool | Literal['auto'] = True,
 		save_conversation_path: str | Path | None = None,
 		save_conversation_path_encoding: str | None = 'utf-8',
-		max_failures: int = 7,
+		max_failures: int = 5,
 		override_system_message: str | None = None,
 		extend_system_message: str | None = None,
 		generate_gif: bool | str = False,
