@@ -48,9 +48,8 @@ jobs:
       - name: Run install.sh ${{ matrix.mode }}
         run: bash install.sh ${{ matrix.mode }}
 
-      - name: Source shell config
+      - name: Add to PATH
         run: |
-          source ~/.bashrc || true
           echo "$HOME/.browser-use-env/bin" >> $GITHUB_PATH
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
@@ -119,9 +118,8 @@ jobs:
       - name: Run install.sh ${{ matrix.mode }}
         run: bash install.sh ${{ matrix.mode }}
 
-      - name: Source shell config
+      - name: Add to PATH
         run: |
-          source ~/.zshrc || source ~/.bashrc || true
           echo "$HOME/.browser-use-env/bin" >> $GITHUB_PATH
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
@@ -183,6 +181,9 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      # Fix Unicode output on Windows (checkmarks, etc.)
+      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
 
