@@ -937,10 +937,35 @@ def main() -> int:
 		if args.json:
 			print(json.dumps(result))
 		else:
+			# Print check results
+			checks = result.get('checks', {})
+			print('\nDiagnostics:\n')
+			for name, check in checks.items():
+				status = check.get('status', 'unknown')
+				message = check.get('message', '')
+				note = check.get('note', '')
+				fix = check.get('fix', '')
+
+				if status == 'ok':
+					icon = '✓'
+				elif status == 'warning':
+					icon = '⚠'
+				elif status == 'missing':
+					icon = '○'
+				else:
+					icon = '✗'
+
+				print(f'  {icon} {name}: {message}')
+				if note:
+					print(f'      {note}')
+				if fix:
+					print(f'      Fix: {fix}')
+
+			print('')
 			if result.get('status') == 'healthy':
 				print('✓ All checks passed!')
 			else:
-				print('⚠ Some checks failed. See details above.')
+				print(f'⚠ {result.get("summary", "Some checks need attention")}')
 		return 0
 
 	# Handle task command - cloud task management
