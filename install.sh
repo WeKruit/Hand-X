@@ -195,6 +195,12 @@ check_python() {
 install_python() {
 	log_info "Installing Python 3.11+..."
 
+	# Use sudo only if not root and sudo is available
+	SUDO=""
+	if [ "$(id -u)" -ne 0 ] && command -v sudo &> /dev/null; then
+		SUDO="sudo"
+	fi
+
 	case "$PLATFORM" in
 		macos)
 			if command -v brew &> /dev/null; then
@@ -206,10 +212,10 @@ install_python() {
 			;;
 		linux)
 			if command -v apt-get &> /dev/null; then
-				sudo apt-get update
-				sudo apt-get install -y python3.11 python3.11-venv python3-pip
+				$SUDO apt-get update
+				$SUDO apt-get install -y python3.11 python3.11-venv python3-pip
 			elif command -v yum &> /dev/null; then
-				sudo yum install -y python311 python311-pip
+				$SUDO yum install -y python311 python311-pip
 			else
 				log_error "Unsupported package manager. Install Python 3.11+ manually."
 				exit 1
