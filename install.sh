@@ -14,7 +14,7 @@
 #   curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only --api-key bu_xxx
 #
 # For development testing:
-#   curl -fsSL <raw-url> | BROWSER_USE_BRANCH=frictionless-install bash
+#   curl -fsSL <raw-url> | BROWSER_USE_BRANCH=<branch-name> bash
 
 set -e
 
@@ -356,7 +356,7 @@ install_browser_use() {
 
 	# Install from GitHub branch (for testing) or PyPI (production)
 	if [ -n "$BROWSER_USE_BRANCH" ]; then
-		BROWSER_USE_REPO="${BROWSER_USE_REPO:-ShawnPana/browser-use}"
+		BROWSER_USE_REPO="${BROWSER_USE_REPO:-browser-use/browser-use}"
 		log_info "Installing from GitHub: $BROWSER_USE_REPO@$BROWSER_USE_BRANCH"
 		# Clone and install locally to ensure all dependencies are resolved
 		local tmp_dir=$(mktemp -d)
