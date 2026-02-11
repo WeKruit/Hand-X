@@ -724,7 +724,12 @@ print_next_steps() {
 	fi
 
 	echo "Next steps:"
-	echo "  1. Restart your shell or run: source ~/$shell_rc"
+	if [ "$PLATFORM" = "windows" ]; then
+		echo "  1. Restart PowerShell, or add to PATH for this session:"
+		echo "     \$env:PATH += \";\$env:USERPROFILE\\.browser-use-env\\Scripts\""
+	else
+		echo "  1. Restart your shell or run: source ~/$shell_rc"
+	fi
 
 	if [ "$INSTALL_REMOTE" = true ] && [ -z "$API_KEY" ]; then
 		echo "  2. Set your API key (see above)"
