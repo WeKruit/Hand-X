@@ -3411,7 +3411,9 @@ class DefaultActionWatchdog(BaseWatchdog):
 						for opt in available_options
 					)
 					if all_empty:
-						self.logger.info('⚠️ All dropdown options are empty — options may be lazily loaded. Focusing element and retrying...')
+						self.logger.info(
+							'⚠️ All dropdown options are empty — options may be lazily loaded. Focusing element and retrying...'
+						)
 
 						# Use element.focus() only — no synthetic mouse events that leak isTrusted=false
 						try:
