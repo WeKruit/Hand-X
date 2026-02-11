@@ -4,6 +4,14 @@ Fast, persistent browser automation from the command line.
 
 ## Installation
 
+### Prerequisites
+
+| Platform | Requirements |
+|----------|-------------|
+| **macOS** | Python 3.11+ (installer will use Homebrew if needed) |
+| **Linux** | Python 3.11+ (installer will use apt if needed) |
+| **Windows** | [Git for Windows](https://git-scm.com/download/win), Python 3.11+ |
+
 ### One-Line Install (Recommended)
 
 **macOS / Linux:**
@@ -11,24 +19,10 @@ Fast, persistent browser automation from the command line.
 curl -fsSL https://browser-use.com/install.sh | bash
 ```
 
-**Windows** (requires Git Bash):
+**Windows** (run in PowerShell):
 ```powershell
 & "C:\Program Files\Git\bin\bash.exe" -c 'curl -fsSL https://browser-use.com/install.sh | bash'
 ```
-
-<details>
-<summary>Platform requirements</summary>
-
-Requires Python 3.11+ (3.14+ not yet supported).
-
-- **macOS**: `brew install python@3.11`
-- **Linux**: `sudo apt install python3.11 python3.11-venv` (Ubuntu/Debian)
-- **Windows**:
-  - Install [Git for Windows](https://git-scm.com/download/win): `winget install Git.Git`
-  - Install Python: `winget install Python.Python.3.11`
-  - Restart PowerShell/Command Prompt after install for PATH changes
-
-</details>
 
 ### Installation Modes
 ```bash
@@ -38,10 +32,10 @@ curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only # Cloud
 curl -fsSL https://browser-use.com/install.sh | bash -s -- --api-key bu_xxx  # With API key
 ```
 
-### Post-Install Commands
+### Post-Install
 ```bash
 browser-use doctor   # Validate installation
-browser-use setup    # Run setup wizard
+browser-use setup    # Run setup wizard (optional)
 ```
 
 ### From Source
@@ -61,7 +55,7 @@ pip install browser-use
 browser-use install
 
 # 3. Configure API key (for remote mode)
-export BROWSER_USE_API_KEY=your_key
+export BROWSER_USE_API_KEY=your_key  # or $env:BROWSER_USE_API_KEY on Windows
 
 # 4. Validate
 browser-use doctor
@@ -381,3 +375,51 @@ The CLI uses a session server architecture:
 4. Server auto-starts when needed, stops with `browser-use server stop`
 
 This gives you ~50ms command latency instead of waiting for browser startup each time.
+
+<details>
+<summary>Windows Troubleshooting</summary>
+
+### ARM64 Windows (Surface Pro X, Snapdragon laptops)
+Install x64 Python (runs via emulation):
+```powershell
+winget install Python.Python.3.11 --architecture x64
+```
+
+### Multiple Python versions
+Set the version explicitly:
+```powershell
+set PY_PYTHON=3.11
+```
+
+### PATH not working after install
+Restart your terminal. If still not working:
+```powershell
+# Check PATH
+echo $env:PATH
+
+# Or run via Git Bash
+& "C:\Program Files\Git\bin\bash.exe" -c 'browser-use --help'
+```
+
+### "Failed to start session server" error
+Kill zombie processes:
+```powershell
+# Find process on port
+netstat -ano | findstr 49698
+
+# Kill by PID
+taskkill /PID <pid> /F
+
+# Or kill all Python
+taskkill /IM python.exe /F
+```
+
+### Stale virtual environment
+Delete and reinstall:
+```powershell
+taskkill /IM python.exe /F
+Remove-Item -Recurse -Force "$env:USERPROFILE\.browser-use-env"
+# Then run installer again
+```
+
+</details>
