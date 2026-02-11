@@ -52,10 +52,10 @@
 #      Remove-Item -Recurse -Force "$env:USERPROFILE\.browser-use-env"
 #
 # 5. PATH not working in PowerShell after install
-#    - The script auto-configures PowerShell profile, but you must restart PowerShell
-#    - If it still doesn't work, check your profile:
-#      notepad $PROFILE
-#    - Should contain: $env:PATH += ";$env:USERPROFILE\.browser-use-env\Scripts;..."
+#    - The script modifies your Windows user PATH directly (no execution policy needed)
+#    - You must restart PowerShell for changes to take effect
+#    - If it still doesn't work, check your PATH:
+#      echo $env:PATH
 #    - Or run commands through Git Bash:
 #      & "C:\Program Files\Git\bin\bash.exe" -c 'browser-use open https://example.com'
 #
@@ -555,8 +555,14 @@ install_cloudflared() {
 			chmod +x "$HOME/.local/bin/cloudflared"
 			;;
 		windows)
-			log_warn "Please install cloudflared manually: winget install Cloudflare.cloudflared"
-			return 0
+			# Auto-install via winget (comes pre-installed on Windows 10/11)
+			if command -v winget.exe &> /dev/null; then
+				winget.exe install --id Cloudflare.cloudflared --accept-source-agreements --accept-package-agreements --silent
+			else
+				log_warn "winget not found. Install cloudflared manually:"
+				log_warn "  Download from: https://github.com/cloudflare/cloudflared/releases"
+				return 0
+			fi
 			;;
 	esac
 
@@ -662,33 +668,45 @@ configure_path() {
 }
 
 configure_powershell_path() {
-	# PowerShell profile paths (try both PS7 and PS5)
-	local ps_profile_dir="$HOME/Documents/PowerShell"
-	local ps_profile="$ps_profile_dir/Microsoft.PowerShell_profile.ps1"
+	# Use PowerShell to modify user PATH in registry (no execution policy needed)
+	# This persists across sessions without requiring profile script execution
 
-	# Fall back to Windows PowerShell 5.x path if PS7 dir doesn't exist
-	if [ ! -d "$ps_profile_dir" ]; then
-		ps_profile_dir="$HOME/Documents/WindowsPowerShell"
-		ps_profile="$ps_profile_dir/Microsoft.PowerShell_profile.ps1"
-	fi
+	local scripts_path='\\.browser-use-env\\Scripts'
+	local local_bin='\\.local\\bin'
 
-	# Check if already configured
-	if grep -q "browser-use-env" "$ps_profile" 2>/dev/null; then
-		log_info "PATH already configured in PowerShell profile"
+	# Check if already in user PATH
+	local current_path=$(powershell.exe -Command "[Environment]::GetEnvironmentVariable('Path', 'User')" 2>/dev/null | tr -d '\r')
+
+	if echo "$current_path" | grep -q "browser-use-env"; then
+		log_info "PATH already configured"
 		return 0
 	fi
 
-	# Create profile directory if needed
-	mkdir -p "$ps_profile_dir"
+	# Ask for confirmation before modifying registry
+	echo ""
+	echo "To use 'browser-use' from PowerShell/Command Prompt, we need to add it to your PATH."
+	echo ""
+	echo "This will modify: HKEY_CURRENT_USER\\Environment\\Path"
+	echo "Adding: %USERPROFILE%\\.browser-use-env\\Scripts"
+	echo ""
+	read -p "Add to Windows PATH? [Y/n] " -n 1 -r < /dev/tty
+	echo ""
 
-	# Add to PowerShell profile
-	cat >> "$ps_profile" << 'PSEOF'
+	if [[ $REPLY =~ ^[Nn]$ ]]; then
+		log_info "Skipped PATH configuration"
+		log_info "To use browser-use, add to PATH manually or run via Git Bash"
+		return 0
+	fi
 
-# Browser-Use
-$env:PATH += ";$env:USERPROFILE\.browser-use-env\Scripts;$env:USERPROFILE\.local\bin"
-PSEOF
+	# Append to user PATH via registry (safe, no truncation, no execution policy needed)
+	powershell.exe -Command "[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + \$env:USERPROFILE + '$scripts_path;' + \$env:USERPROFILE + '$local_bin', 'User')" 2>/dev/null
 
-	log_success "Added to PATH in PowerShell profile"
+	if [ $? -eq 0 ]; then
+		log_success "Added to Windows PATH (restart PowerShell to use)"
+	else
+		log_warn "Could not update PATH automatically. Add manually:"
+		log_warn "  \$env:PATH += \";\$env:USERPROFILE\\.browser-use-env\\Scripts\""
+	fi
 }
 
 # =============================================================================
