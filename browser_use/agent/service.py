@@ -167,7 +167,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		use_vision: bool | Literal['auto'] = True,
 		save_conversation_path: str | Path | None = None,
 		save_conversation_path_encoding: str | None = 'utf-8',
-		max_failures: int = 3,
+		max_failures: int = 5,
 		override_system_message: str | None = None,
 		extend_system_message: str | None = None,
 		generate_gif: bool | str = False,
@@ -1185,8 +1185,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Record executed actions for loop detection
 		self._update_loop_detector_actions()
 
-		# check for action errors - increment on any step where the last result has an error
-		if self.state.last_result and self.state.last_result[-1].error:
+		# check for action errors - count the whole step as 1 failure if any action in the step errored
+		if self.state.last_result and any(r.error for r in self.state.last_result):
 			self.state.consecutive_failures += 1
 			self.logger.debug(f'🔄 Step {self.state.n_steps}: Consecutive failures: {self.state.consecutive_failures}')
 			return
