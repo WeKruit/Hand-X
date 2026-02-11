@@ -15,6 +15,51 @@
 #
 # For development testing:
 #   curl -fsSL <raw-url> | BROWSER_USE_BRANCH=<branch-name> bash
+#
+# =============================================================================
+# WINDOWS INSTALLATION NOTES
+# =============================================================================
+#
+# Windows requires Git Bash to run this script. Install Git for Windows first:
+#   winget install Git.Git
+#
+# Then run from PowerShell:
+#   & "C:\Program Files\Git\bin\bash.exe" -c 'curl -fsSL https://browser-use.com/install.sh | bash -s -- --full'
+#
+# KNOWN ISSUES AND SOLUTIONS:
+#
+# 1. Python 3.14+ not supported
+#    - Python 3.14 has breaking asyncio changes that cause RuntimeError
+#    - Solution: Install Python 3.11, 3.12, or 3.13
+#    - If you have 3.14 installed, uninstall it or install 3.13 alongside:
+#      winget install Python.Python.3.13
+#
+# 2. ARM64 Windows (Surface Pro X, Snapdragon laptops)
+#    - Many Python packages don't have pre-built ARM64 wheels
+#    - Solution: Install x64 Python (runs via emulation):
+#      winget install Python.Python.3.13 --architecture x64
+#
+# 3. Multiple Python versions installed
+#    - Windows uses the 'py' launcher, not 'python3.x' commands
+#    - The script may pick the wrong version if multiple are installed
+#    - Solution: Uninstall unwanted Python versions, or set PY_PYTHON=3.13
+#
+# 4. Stale virtual environment
+#    - If you reinstall with a different Python version, delete the old venv:
+#      Remove-Item -Recurse -Force "$env:USERPROFILE\.browser-use-env"
+#
+# 5. PATH not updated in PowerShell
+#    - The script updates ~/.bashrc, not PowerShell profile
+#    - For PowerShell, add to PATH manually:
+#      $env:PATH += ";$env:USERPROFILE\.browser-use-env\Scripts;$env:USERPROFILE\.local\bin"
+#    - Or run commands through Git Bash:
+#      & "C:\Program Files\Git\bin\bash.exe" -c 'browser-use open https://example.com'
+#
+# 6. "Failed to start session server" error
+#    - First run may fail, try again
+#    - Or run with --headed to see browser: browser-use --headed open https://example.com
+#
+# =============================================================================
 
 set -e
 
