@@ -4,9 +4,67 @@ Fast, persistent browser automation from the command line.
 
 ## Installation
 
+### One-Line Install (Recommended)
+
+**macOS / Linux:**
 ```bash
-# From the browser-use repo directory
+curl -fsSL https://browser-use.com/install.sh | bash
+```
+
+**Windows** (requires Git Bash):
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" -c 'curl -fsSL https://browser-use.com/install.sh | bash'
+```
+
+<details>
+<summary>Platform requirements</summary>
+
+Requires Python 3.11+ (3.14+ not yet supported).
+
+- **macOS**: `brew install python@3.11`
+- **Linux**: `sudo apt install python3.11 python3.11-venv` (Ubuntu/Debian)
+- **Windows**:
+  - Install [Git for Windows](https://git-scm.com/download/win): `winget install Git.Git`
+  - Install Python: `winget install Python.Python.3.11`
+  - Restart PowerShell/Command Prompt after install for PATH changes
+
+</details>
+
+### Installation Modes
+```bash
+curl -fsSL https://browser-use.com/install.sh | bash -s -- --full        # All modes
+curl -fsSL https://browser-use.com/install.sh | bash -s -- --local-only  # Local browser only
+curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only # Cloud browser only
+curl -fsSL https://browser-use.com/install.sh | bash -s -- --api-key bu_xxx  # With API key
+```
+
+### Post-Install Commands
+```bash
+browser-use doctor   # Validate installation
+browser-use setup    # Run setup wizard
+```
+
+### From Source
+```bash
 uv pip install -e .
+```
+
+### Manual Installation
+
+If you prefer not to use the one-line installer:
+
+```bash
+# 1. Install the package
+pip install browser-use
+
+# 2. Install Chromium (for local browser mode)
+browser-use install
+
+# 3. Configure API key (for remote mode)
+export BROWSER_USE_API_KEY=your_key
+
+# 4. Validate
+browser-use doctor
 ```
 
 ## Quick Start
@@ -55,40 +113,75 @@ browser-use --browser remote open https://example.com
 ### Navigation
 | Command | Description |
 |---------|-------------|
-| `browser-use open <url>` | Navigate to URL |
-| `browser-use back` | Go back in history |
-| `browser-use scroll down` | Scroll down |
-| `browser-use scroll up` | Scroll up |
+| `open <url>` | Navigate to URL |
+| `back` | Go back in history |
+| `scroll down` | Scroll down |
+| `scroll up` | Scroll up |
+| `scroll down --amount 1000` | Scroll by pixels |
 
 ### Inspection
 | Command | Description |
 |---------|-------------|
-| `browser-use state` | Get URL, title, and clickable elements |
-| `browser-use screenshot [path]` | Take screenshot (base64 if no path) |
-| `browser-use screenshot --full path.png` | Full page screenshot |
+| `state` | Get URL, title, and clickable elements |
+| `screenshot [path]` | Take screenshot (base64 if no path) |
+| `screenshot --full path.png` | Full page screenshot |
 
 ### Interaction
 | Command | Description |
 |---------|-------------|
-| `browser-use click <index>` | Click element by index |
-| `browser-use type "text"` | Type into focused element |
-| `browser-use input <index> "text"` | Click element, then type |
-| `browser-use keys "Enter"` | Send keyboard keys |
-| `browser-use keys "Control+a"` | Send key combination |
-| `browser-use select <index> "value"` | Select dropdown option |
+| `click <index>` | Click element by index |
+| `type "text"` | Type into focused element |
+| `input <index> "text"` | Click element, then type |
+| `keys "Enter"` | Send keyboard keys |
+| `keys "Control+a"` | Send key combination |
+| `select <index> "value"` | Select dropdown option |
+| `hover <index>` | Hover over element |
+| `dblclick <index>` | Double-click element |
+| `rightclick <index>` | Right-click element |
 
 ### Tabs
 | Command | Description |
 |---------|-------------|
-| `browser-use switch <tab>` | Switch to tab by index |
-| `browser-use close-tab` | Close current tab |
-| `browser-use close-tab <tab>` | Close specific tab |
+| `switch <tab>` | Switch to tab by index |
+| `close-tab` | Close current tab |
+| `close-tab <tab>` | Close specific tab |
+
+### Cookies
+| Command | Description |
+|---------|-------------|
+| `cookies get` | Get all cookies |
+| `cookies get --url <url>` | Get cookies for URL |
+| `cookies set <name> <value>` | Set a cookie |
+| `cookies set name val --domain .example.com --secure` | Set with options |
+| `cookies clear` | Clear all cookies |
+| `cookies clear --url <url>` | Clear cookies for URL |
+| `cookies export <file>` | Export to JSON file |
+| `cookies import <file>` | Import from JSON file |
+
+### Wait
+| Command | Description |
+|---------|-------------|
+| `wait selector "css"` | Wait for element to be visible |
+| `wait selector ".loading" --state hidden` | Wait for element to disappear |
+| `wait text "Success"` | Wait for text to appear |
+| `wait selector "h1" --timeout 5000` | Custom timeout (ms) |
+
+### Get (Information Retrieval)
+| Command | Description |
+|---------|-------------|
+| `get title` | Get page title |
+| `get html` | Get full page HTML |
+| `get html --selector "h1"` | Get HTML of element |
+| `get text <index>` | Get text content of element |
+| `get value <index>` | Get value of input/textarea |
+| `get attributes <index>` | Get all attributes of element |
+| `get bbox <index>` | Get bounding box (x, y, width, height) |
 
 ### JavaScript & Data
 | Command | Description |
 |---------|-------------|
-| `browser-use eval "js code"` | Execute JavaScript |
-| `browser-use extract "query"` | Extract data with LLM |
+| `eval "js code"` | Execute JavaScript |
+| `extract "query"` | Extract data with LLM |
 
 ### Python (Persistent Session)
 ```bash
@@ -100,14 +193,109 @@ browser-use python --reset            # Clear namespace
 browser-use python --file script.py   # Run Python file
 ```
 
-### Session Management
+## Agent Tasks
+
+Run AI-powered browser automation tasks.
+
+### Local Mode
+```bash
+browser-use run "Fill the contact form with test data"
+browser-use run "Extract all product prices" --max-steps 50
+browser-use run "task" --llm gpt-4o   # Specify LLM model
+```
+
+Requires an LLM API key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.).
+
+### Remote Mode (Cloud)
+```bash
+browser-use -b remote run "Search for AI news"              # US proxy default
+browser-use -b remote run "task" --llm gpt-4o               # Specify LLM
+browser-use -b remote run "task" --proxy-country gb         # UK proxy
+browser-use -b remote run "task" --session-id <id>          # Reuse session
+browser-use -b remote run "task" --no-wait                  # Async (returns task ID)
+browser-use -b remote run "task" --stream                   # Stream output
+browser-use -b remote run "task" --flash                    # Fast mode
+browser-use -b remote run "task" --keep-alive               # Keep session alive
+browser-use -b remote run "task" --thinking                 # Extended reasoning
+browser-use -b remote run "task" --profile <id>             # Use cloud profile
+```
+
+Requires `BROWSER_USE_API_KEY`.
+
+## Task Management (Remote Mode)
+
+Manage cloud tasks when using `--browser remote`.
+
 | Command | Description |
 |---------|-------------|
-| `browser-use sessions` | List active sessions |
-| `browser-use close` | Close browser session |
-| `browser-use close --all` | Close all sessions |
-| `browser-use server status` | Check if server is running |
-| `browser-use server stop` | Stop server |
+| `task list` | List recent tasks |
+| `task list --status running` | Filter by status |
+| `task status <id>` | Get task status (latest step only) |
+| `task status <id> -c` | Compact: all steps with reasoning |
+| `task status <id> -v` | Verbose: full details |
+| `task status <id> --last 5` | Show last 5 steps |
+| `task stop <id>` | Stop running task |
+| `task logs <id>` | Get execution logs |
+
+## Cloud Sessions (Remote Mode)
+
+Manage cloud browser sessions.
+
+| Command | Description |
+|---------|-------------|
+| `session list` | List cloud sessions |
+| `session list --status active` | Filter by status |
+| `session get <id>` | Get session details + live URL |
+| `session stop <id>` | Stop session |
+| `session stop --all` | Stop all active sessions |
+
+## Tunnels
+
+Expose local dev servers to cloud browsers via Cloudflare tunnels.
+
+| Command | Description |
+|---------|-------------|
+| `tunnel <port>` | Start tunnel, get public URL |
+| `tunnel list` | List active tunnels |
+| `tunnel stop <port>` | Stop tunnel for port |
+| `tunnel stop --all` | Stop all tunnels |
+
+```bash
+# Example: Test local dev server with cloud browser
+npm run dev &                              # localhost:3000
+browser-use tunnel 3000                    # → https://abc.trycloudflare.com
+browser-use -b remote open https://abc.trycloudflare.com
+```
+
+## Profile Management
+
+### Local Profiles (`-b real`)
+| Command | Description |
+|---------|-------------|
+| `profile list` | List Chrome profiles |
+| `profile cookies <name>` | Show cookies by domain |
+| `profile sync --from <name>` | Sync local profile to cloud |
+| `profile sync --from Default --domain youtube.com` | Sync specific domain only |
+
+### Cloud Profiles (`-b remote`)
+| Command | Description |
+|---------|-------------|
+| `profile list` | List cloud profiles |
+| `profile get <id>` | Get profile details |
+| `profile create --name <name>` | Create profile |
+| `profile update <id> --name <name>` | Rename profile |
+| `profile delete <id>` | Delete profile |
+
+## Local Session Management
+
+| Command | Description |
+|---------|-------------|
+| `sessions` | List active sessions |
+| `close` | Close browser session |
+| `close --all` | Close all sessions |
+| `server status` | Check if server is running |
+| `server stop` | Stop server |
+| `server logs` | View server logs |
 
 ## Global Options
 
@@ -116,7 +304,7 @@ browser-use python --file script.py   # Run Python file
 | `--session NAME` | Use named session (default: "default") |
 | `--browser MODE` | Browser mode: chromium, real, remote |
 | `--headed` | Show browser window |
-| `--profile NAME` | Chrome profile (real mode) |
+| `--profile NAME` | Browser profile (local name or cloud ID) |
 | `--json` | Output as JSON |
 | `--api-key KEY` | Override API key |
 
@@ -160,6 +348,19 @@ browser.screenshot('scrolled.png')
 "
 ```
 
+### Cloud Agent with Session Reuse
+```bash
+# Start task, keep session alive
+browser-use -b remote run "Log into example.com" --keep-alive --no-wait
+# → task_id: task-123, session_id: sess-456
+
+# Check task status
+browser-use task status task-123
+
+# Run another task in same session (preserves login)
+browser-use -b remote run "Go to settings" --session-id sess-456
+```
+
 ## Claude Code Skill
 
 For [Claude Code](https://claude.ai/code), a skill provides richer context for browser automation:
@@ -175,7 +376,7 @@ curl -o ~/.claude/skills/browser-use/SKILL.md \
 The CLI uses a session server architecture:
 
 1. First command starts a background server (browser stays open)
-2. Subsequent commands communicate via Unix socket
+2. Subsequent commands communicate via Unix socket (or TCP on Windows)
 3. Browser persists across commands for fast interaction
 4. Server auto-starts when needed, stops with `browser-use server stop`
 
