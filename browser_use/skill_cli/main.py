@@ -139,14 +139,38 @@ if '--template' in sys.argv:
 def get_socket_path(session: str) -> str:
 	"""Get socket path for session."""
 	if sys.platform == 'win32':
+		# Use 127.0.0.1 explicitly (not localhost) to avoid IPv6 binding issues
 		port = 49152 + (int(hashlib.md5(session.encode()).hexdigest()[:4], 16) % 16383)
-		return f'tcp://localhost:{port}'
+		return f'tcp://127.0.0.1:{port}'
 	return str(Path(tempfile.gettempdir()) / f'browser-use-{session}.sock')
 
 
 def get_pid_path(session: str) -> Path:
 	"""Get PID file path for session."""
 	return Path(tempfile.gettempdir()) / f'browser-use-{session}.pid'
+
+
+def _pid_exists(pid: int) -> bool:
+	"""Check if a process with given PID exists.
+
+	On Windows, uses ctypes to call OpenProcess (os.kill doesn't work reliably).
+	On Unix, uses os.kill(pid, 0) which is the standard approach.
+	"""
+	if sys.platform == 'win32':
+		import ctypes
+
+		PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+		handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+		if handle:
+			ctypes.windll.kernel32.CloseHandle(handle)
+			return True
+		return False
+	else:
+		try:
+			os.kill(pid, 0)
+			return True
+		except OSError:
+			return False
 
 
 def is_server_running(session: str) -> bool:
@@ -156,9 +180,9 @@ def is_server_running(session: str) -> bool:
 		return False
 	try:
 		pid = int(pid_path.read_text().strip())
-		os.kill(pid, 0)
-		return True
+		return _pid_exists(pid)
 	except (OSError, ValueError):
+		# Can't read PID file or invalid PID
 		return False
 
 
