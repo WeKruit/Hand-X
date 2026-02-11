@@ -168,28 +168,49 @@ activate_venv() {
 check_python() {
 	log_info "Checking Python installation..."
 
-	# Try python3 first, then python
+	# Check versioned python commands first (python3.13, python3.12, python3.11)
+	# This handles Ubuntu/Debian where python3 may point to older version
+	# Also check common install locations directly in case PATH isn't updated
+	local py_candidates="python3.13 python3.12 python3.11 python3 python"
+	local py_paths="/usr/bin/python3.11 /usr/local/bin/python3.11"
+
+	for py_cmd in $py_candidates; do
+		if command -v "$py_cmd" &> /dev/null; then
+			local version=$($py_cmd --version 2>&1 | awk '{print $2}')
+			local major=$(echo $version | cut -d. -f1)
+			local minor=$(echo $version | cut -d. -f2)
+
+			if [ "$major" -ge 3 ] && [ "$minor" -ge 11 ]; then
+				PYTHON_CMD="$py_cmd"
+				log_success "Python $version found ($py_cmd)"
+				return 0
+			fi
+		fi
+	done
+
+	# Also check common paths directly (in case command -v doesn't find them)
+	for py_path in $py_paths; do
+		if [ -x "$py_path" ]; then
+			local version=$($py_path --version 2>&1 | awk '{print $2}')
+			local major=$(echo $version | cut -d. -f1)
+			local minor=$(echo $version | cut -d. -f2)
+
+			if [ "$major" -ge 3 ] && [ "$minor" -ge 11 ]; then
+				PYTHON_CMD="$py_path"
+				log_success "Python $version found ($py_path)"
+				return 0
+			fi
+		fi
+	done
+
+	# No suitable Python found
 	if command -v python3 &> /dev/null; then
-		PYTHON_CMD="python3"
-	elif command -v python &> /dev/null; then
-		PYTHON_CMD="python"
+		local version=$(python3 --version 2>&1 | awk '{print $2}')
+		log_warn "Python $version found, but 3.11+ required"
 	else
 		log_warn "Python not found"
-		return 1
 	fi
-
-	# Check version
-	local version=$($PYTHON_CMD --version 2>&1 | awk '{print $2}')
-	local major=$(echo $version | cut -d. -f1)
-	local minor=$(echo $version | cut -d. -f2)
-
-	if [ "$major" -ge 3 ] && [ "$minor" -ge 11 ]; then
-		log_success "Python $version found"
-		return 0
-	else
-		log_warn "Python $version found, but 3.11+ required"
-		return 1
-	fi
+	return 1
 }
 
 install_python() {
@@ -378,7 +399,12 @@ install_browser_use() {
 
 	# Create or use existing virtual environment
 	if [ ! -d "$HOME/.browser-use-env" ]; then
-		uv venv "$HOME/.browser-use-env" --python 3.11
+		# Use discovered Python command (e.g., python3.11) or fall back to version spec
+		if [ -n "$PYTHON_CMD" ]; then
+			uv venv "$HOME/.browser-use-env" --python "$PYTHON_CMD"
+		else
+			uv venv "$HOME/.browser-use-env" --python 3.11
+		fi
 	fi
 
 	# Activate venv and install
