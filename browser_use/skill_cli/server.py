@@ -207,6 +207,7 @@ class SessionServer:
 				self.handle_connection,
 				host,
 				int(port),
+				reuse_address=True,  # Allow rebinding ports in TIME_WAIT state
 			)
 			logger.info(f'Listening on TCP {host}:{port}')
 		else:
