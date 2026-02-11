@@ -376,6 +376,8 @@ install_gum() {
 				gum_dir="gum_${gum_version}_Darwin_x86_64"
 				curl -sL "https://github.com/charmbracelet/gum/releases/download/v${gum_version}/gum_${gum_version}_Darwin_x86_64.tar.gz" | tar -xz -C /tmp
 			fi
+			mv "/tmp/${gum_dir}/gum" "$HOME/.local/bin/" 2>/dev/null || return 1
+			rm -rf "/tmp/${gum_dir}" 2>/dev/null
 			;;
 		linux)
 			if [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; then
@@ -385,15 +387,20 @@ install_gum() {
 				gum_dir="gum_${gum_version}_Linux_x86_64"
 				curl -sL "https://github.com/charmbracelet/gum/releases/download/v${gum_version}/gum_${gum_version}_Linux_x86_64.tar.gz" | tar -xz -C /tmp
 			fi
+			mv "/tmp/${gum_dir}/gum" "$HOME/.local/bin/" 2>/dev/null || return 1
+			rm -rf "/tmp/${gum_dir}" 2>/dev/null
+			;;
+		windows)
+			# Download and extract Windows binary
+			curl -sL "https://github.com/charmbracelet/gum/releases/download/v${gum_version}/gum_${gum_version}_Windows_x86_64.zip" -o /tmp/gum.zip
+			unzip -q /tmp/gum.zip -d /tmp/gum_windows 2>/dev/null || return 1
+			mv /tmp/gum_windows/gum.exe "$HOME/.local/bin/" 2>/dev/null || return 1
+			rm -rf /tmp/gum.zip /tmp/gum_windows 2>/dev/null
 			;;
 		*)
 			return 1
 			;;
 	esac
-
-	# Move binary from extracted directory
-	mv "/tmp/${gum_dir}/gum" "$HOME/.local/bin/" 2>/dev/null || return 1
-	rm -rf "/tmp/${gum_dir}" 2>/dev/null
 
 	command -v gum &> /dev/null
 }
@@ -717,7 +724,11 @@ print_next_steps() {
 	# Show API key instructions if remote selected but no key provided
 	if [ "$INSTALL_REMOTE" = true ] && [ -z "$API_KEY" ]; then
 		echo "⚠ API key required for remote mode:"
-		echo "  export BROWSER_USE_API_KEY=<your-api-key>"
+		if [ "$PLATFORM" = "windows" ]; then
+			echo "  \$env:BROWSER_USE_API_KEY=\"<your-api-key>\""
+		else
+			echo "  export BROWSER_USE_API_KEY=<your-api-key>"
+		fi
 		echo ""
 		echo "  Get your API key at: https://browser-use.com"
 		echo ""
