@@ -9,7 +9,6 @@ from browser_use.skill_cli.commands import (
 	python_exec,
 	session,
 	setup,
-	tunnel,
 )
 
 __all__ = [
@@ -21,5 +20,4 @@ __all__ = [
 	'python_exec',
 	'session',
 	'setup',
-	'tunnel',
 ]

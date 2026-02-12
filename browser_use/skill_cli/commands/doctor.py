@@ -98,7 +98,7 @@ def _check_api_key_config() -> dict[str, Any]:
 
 def _check_cloudflared() -> dict[str, Any]:
 	"""Check if cloudflared is available."""
-	from browser_use.skill_cli.tunnel_manager import get_tunnel_manager
+	from browser_use.skill_cli.tunnel import get_tunnel_manager
 
 	tunnel_mgr = get_tunnel_manager()
 	status_info = tunnel_mgr.get_status()
