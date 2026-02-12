@@ -193,7 +193,8 @@ async def poll_until_complete(
 	last_status = None
 
 	while True:
-		task = client.tasks.get_task(task_id)
+		# Run blocking SDK call in thread to avoid blocking event loop
+		task = await asyncio.to_thread(client.tasks.get_task, task_id)
 		current_status = task.status
 
 		if stream and current_status != last_status:

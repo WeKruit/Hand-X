@@ -848,6 +848,18 @@ def handle_server_command(args: argparse.Namespace) -> int:
 	return 0
 
 
+def _parse_key_value_list(items: list[str] | None) -> dict[str, str | None] | None:
+	"""Parse a list of 'key=value' strings into a dict."""
+	if not items:
+		return None
+	result: dict[str, str | None] = {}
+	for item in items:
+		if '=' in item:
+			key, value = item.split('=', 1)
+			result[key] = value
+	return result if result else None
+
+
 def _handle_remote_run_with_wait(args: argparse.Namespace) -> int:
 	"""Handle remote run with --wait directly (prints task info immediately, then waits)."""
 	import asyncio
@@ -859,14 +871,48 @@ def _handle_remote_run_with_wait(args: argparse.Namespace) -> int:
 		return 1
 
 	try:
-		# Create task
+		# Handle vision flag (--vision vs --no-vision)
+		vision: bool | None = None
+		if getattr(args, 'vision', False):
+			vision = True
+		elif getattr(args, 'no_vision', False):
+			vision = False
+
+		# Parse key=value list params
+		metadata = _parse_key_value_list(getattr(args, 'metadata', None))
+		secrets = _parse_key_value_list(getattr(args, 'secret', None))
+
+		# Build session params
+		session_id = getattr(args, 'session_id', None)
+		profile_id = getattr(args, 'profile', None)
+		proxy_country = getattr(args, 'proxy_country', None)
+
+		# Create session first if profile or proxy specified and no session_id
+		if (profile_id or proxy_country) and not session_id:
+			session = cloud_task.create_session(
+				profile_id=profile_id,
+				proxy_country=proxy_country,
+				keep_alive=getattr(args, 'keep_alive', None),
+			)
+			session_id = session.id
+
+		# Create task with all cloud-only flags
 		task_response = cloud_task.create_task(
 			task=args.task,
 			llm=args.llm,
+			session_id=session_id,
 			max_steps=args.max_steps,
-			flash_mode=args.flash,
-			thinking=args.thinking,
-			start_url=args.start_url,
+			flash_mode=getattr(args, 'flash', None),
+			thinking=getattr(args, 'thinking', None),
+			vision=vision,
+			start_url=getattr(args, 'start_url', None),
+			metadata=metadata,
+			secrets=secrets,
+			allowed_domains=getattr(args, 'allowed_domain', None),
+			skill_ids=getattr(args, 'skill_id', None),
+			structured_output=getattr(args, 'structured_output', None),
+			judge=getattr(args, 'judge', None),
+			judge_ground_truth=getattr(args, 'judge_ground_truth', None),
 		)
 
 		# Print initial info immediately
