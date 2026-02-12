@@ -10,7 +10,23 @@ from browser_use.skill_cli.sessions import SessionInfo
 logger = logging.getLogger(__name__)
 
 # Cloud-only flags that only work in remote mode
-CLOUD_ONLY_FLAGS = ['session_id', 'proxy_country', 'no_wait', 'stream', 'flash', 'keep_alive', 'thinking']
+CLOUD_ONLY_FLAGS = [
+	'session_id',
+	'proxy_country',
+	'wait',
+	'stream',
+	'flash',
+	'keep_alive',
+	'thinking',
+	'start_url',
+	'metadata',
+	'secret',
+	'allowed_domain',
+	'skill_id',
+	'structured_output',
+	'judge',
+	'judge_ground_truth',
+]
 
 
 async def handle(session: SessionInfo, params: dict[str, Any]) -> Any:
@@ -65,50 +81,57 @@ async def _handle_cloud_task(params: dict[str, Any]) -> Any:
 	from browser_use.skill_cli.commands import cloud_task
 
 	task = params['task']
-	max_steps = params.get('max_steps', 100)
-
-	# Extract cloud-specific parameters
-	llm = params.get('llm')
-	# Session reuse: explicit session_id takes priority
-	session_id = params.get('session_id')
-	# Profile from global --profile flag (used for cloud profile when in remote mode)
-	profile_id = params.get('profile')
-	# Default to US proxy if not specified (only applies when creating new session)
-	proxy_country = params.get('proxy_country') or 'us'
-	no_wait = params.get('no_wait', False)
-	stream = params.get('stream', False)
-	flash_mode = params.get('flash', False)
-	keep_alive = params.get('keep_alive', False)
-	thinking = params.get('thinking', False)
 
 	# Handle vision flag (--vision vs --no-vision)
-	vision = None
+	vision: bool | None = None
 	if params.get('vision'):
 		vision = True
 	elif params.get('no_vision'):
 		vision = False
 
+	# Parse key=value list params
+	metadata = _parse_key_value_list(params.get('metadata'))
+	secrets = _parse_key_value_list(params.get('secret'))
+
+	# Build session params - only include what user explicitly set
+	session_id = params.get('session_id')
+	profile_id = params.get('profile')
+	proxy_country = params.get('proxy_country')
+
 	try:
 		logger.info(f'Creating cloud task: {task}')
 
-		# Create cloud task
-		# If session_id provided, reuse that session
-		# Otherwise, create new session (with profile/proxy if specified)
-		task_response = await cloud_task.create_task(
+		# Create session first if profile or proxy specified and no session_id
+		if (profile_id or proxy_country) and not session_id:
+			session = cloud_task.create_session(
+				profile_id=profile_id,
+				proxy_country=proxy_country,
+				keep_alive=params.get('keep_alive'),
+			)
+			session_id = session.id
+			logger.info(f'Created cloud session: {session_id}')
+
+		# Create cloud task - only pass what user explicitly set
+		task_response = cloud_task.create_task(
 			task=task,
-			llm=llm,
+			llm=params.get('llm'),
 			session_id=session_id,
-			profile_id=profile_id,
-			proxy_country=proxy_country,
-			max_steps=max_steps,
-			flash_mode=flash_mode,
-			thinking=thinking,
+			max_steps=params.get('max_steps'),
+			flash_mode=params.get('flash'),
+			thinking=params.get('thinking'),
 			vision=vision,
-			keep_alive=keep_alive,
+			start_url=params.get('start_url'),
+			metadata=metadata,
+			secrets=secrets,
+			allowed_domains=params.get('allowed_domain'),
+			skill_ids=params.get('skill_id'),
+			structured_output=params.get('structured_output'),
+			judge=params.get('judge'),
+			judge_ground_truth=params.get('judge_ground_truth'),
 		)
 
-		task_id = task_response.get('id')
-		response_session_id = task_response.get('sessionId')
+		task_id = task_response.id
+		response_session_id = task_response.session_id
 
 		if not task_id:
 			return {
@@ -119,8 +142,8 @@ async def _handle_cloud_task(params: dict[str, Any]) -> Any:
 
 		logger.info(f'Cloud task created: {task_id}')
 
-		# If no-wait mode, return immediately
-		if no_wait:
+		# Return immediately unless --wait is specified
+		if not params.get('wait'):
 			return {
 				'success': True,
 				'task_id': task_id,
@@ -130,17 +153,17 @@ async def _handle_cloud_task(params: dict[str, Any]) -> Any:
 
 		# Poll until complete
 		logger.info('Waiting for task completion...')
-		result = await cloud_task.poll_until_complete(task_id, stream=stream)
+		result = cloud_task.poll_until_complete(task_id, stream=params.get('stream', False))
 
 		return {
 			'success': True,
 			'task': task,
 			'task_id': task_id,
 			'session_id': response_session_id,
-			'status': result.get('status'),
-			'output': result.get('output'),
-			'cost': result.get('cost'),
-			'done': result.get('status') == 'finished',
+			'status': result.status,
+			'output': result.output,
+			'cost': result.cost,
+			'done': result.status == 'finished',
 		}
 
 	except Exception as e:
@@ -152,10 +175,22 @@ async def _handle_cloud_task(params: dict[str, Any]) -> Any:
 		}
 
 
+def _parse_key_value_list(items: list[str] | None) -> dict[str, str | None] | None:
+	"""Parse a list of 'key=value' strings into a dict."""
+	if not items:
+		return None
+	result: dict[str, str | None] = {}
+	for item in items:
+		if '=' in item:
+			key, value = item.split('=', 1)
+			result[key] = value
+	return result if result else None
+
+
 async def _handle_local_task(session: SessionInfo, params: dict[str, Any]) -> Any:
 	"""Handle task execution locally with browser-use agent."""
 	task = params['task']
-	max_steps = params.get('max_steps', 100)
+	max_steps = params.get('max_steps')
 	model = params.get('llm')  # Optional model override
 
 	try:
@@ -184,7 +219,10 @@ async def _handle_local_task(session: SessionInfo, params: dict[str, Any]) -> An
 		)
 
 		logger.info(f'Running local agent task: {task}')
-		result = await agent.run(max_steps=max_steps)
+		run_kwargs = {}
+		if max_steps is not None:
+			run_kwargs['max_steps'] = max_steps
+		result = await agent.run(**run_kwargs)
 
 		# Extract result info
 		final_result = result.final_result() if result else None

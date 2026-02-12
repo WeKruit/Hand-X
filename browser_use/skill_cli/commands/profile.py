@@ -12,17 +12,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
-from browser_use_sdk import BrowserUse
+from browser_use.skill_cli.sdk import get_sdk_client
 
 logger = logging.getLogger(__name__)
-
-
-def _get_sdk_client() -> BrowserUse:
-	"""Get authenticated SDK client for cloud profile operations."""
-	from browser_use.skill_cli.api_key import require_api_key
-
-	api_key = require_api_key('Cloud profiles')
-	return BrowserUse(api_key=api_key)
 
 
 ProfileMode = Literal['real', 'remote']
@@ -175,7 +167,7 @@ def _list_cloud_profiles(args: argparse.Namespace) -> int:
 	page_size = getattr(args, 'page_size', 20)
 
 	try:
-		client = _get_sdk_client()
+		client = get_sdk_client()
 		response = client.profiles.list_profiles(page_number=page, page_size=page_size)
 	except APIKeyRequired as e:
 		print(f'Error: {e}', file=sys.stderr)
@@ -242,7 +234,7 @@ def _get_cloud_profile(args: argparse.Namespace) -> int:
 	from browser_use.skill_cli.api_key import APIKeyRequired
 
 	try:
-		client = _get_sdk_client()
+		client = get_sdk_client()
 		profile = client.profiles.get_profile(args.id)
 	except APIKeyRequired as e:
 		print(f'Error: {e}', file=sys.stderr)
@@ -291,8 +283,11 @@ def _create_cloud_profile(args: argparse.Namespace) -> int:
 	from browser_use.skill_cli.api_key import APIKeyRequired
 
 	try:
-		client = _get_sdk_client()
-		profile = client.profiles.create_profile(name=args.name if args.name else None)
+		client = get_sdk_client()
+		params = {}
+		if args.name:
+			params['name'] = args.name
+		profile = client.profiles.create_profile(**params)
 	except APIKeyRequired as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1
@@ -328,8 +323,11 @@ def _update_cloud_profile(args: argparse.Namespace) -> int:
 	from browser_use.skill_cli.api_key import APIKeyRequired
 
 	try:
-		client = _get_sdk_client()
-		profile = client.profiles.update_profile(args.id, name=args.name)
+		client = get_sdk_client()
+		params = {}
+		if args.name:
+			params['name'] = args.name
+		profile = client.profiles.update_profile(args.id, **params)
 	except APIKeyRequired as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1
@@ -365,7 +363,7 @@ def _delete_cloud_profile(args: argparse.Namespace) -> int:
 	from browser_use.skill_cli.api_key import APIKeyRequired
 
 	try:
-		client = _get_sdk_client()
+		client = get_sdk_client()
 		client.profiles.delete_browser_profile(args.id)
 	except APIKeyRequired as e:
 		print(f'Error: {e}', file=sys.stderr)
@@ -482,7 +480,7 @@ def _handle_sync(args: argparse.Namespace) -> int:
 
 	# Get SDK client (validates API key)
 	try:
-		client = _get_sdk_client()
+		client = get_sdk_client()
 	except APIKeyRequired as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1

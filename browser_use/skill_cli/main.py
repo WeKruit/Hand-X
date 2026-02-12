@@ -380,7 +380,7 @@ Remote Mode (--browser remote):
   browser-use -b remote --profile <id> run "task"  # Use cloud profile
   browser-use -b remote run "task" --proxy-country gb     # UK proxy
   browser-use -b remote run "task" --session-id <id>      # Reuse session
-  browser-use -b remote run "task" --no-wait    # Async (returns task_id)
+  browser-use -b remote run "task" --wait       # Wait for completion
 
 Task Management:
   browser-use task list                         # List recent cloud tasks
@@ -395,7 +395,7 @@ Examples:
   browser-use --profile <id> run "task"         # Use cloud profile
   browser-use run "task" --proxy-country gb     # UK proxy
   browser-use run "task" --session-id <id>      # Reuse existing session
-  browser-use run "task" --no-wait              # Async (returns task_id)
+  browser-use run "task" --wait                 # Wait for completion
 
 Task Management:
   browser-use task list                         # List recent cloud tasks
@@ -633,7 +633,7 @@ Setup:
 
 	p = subparsers.add_parser('run', help='Run agent task (requires API key)')
 	p.add_argument('task', help='Task description')
-	p.add_argument('--max-steps', type=int, default=100, help='Maximum steps')
+	p.add_argument('--max-steps', type=int, help='Maximum steps')
 	# Model selection (works both locally and remotely)
 	p.add_argument('--llm', help='LLM model (gpt-4o, claude-sonnet-4-20250514, gemini-2.0-flash)')
 
@@ -642,14 +642,23 @@ Setup:
 		# Add [remote] hint only if both modes are available (--full install)
 		remote_hint = '[remote] ' if local_available else ''
 		p.add_argument('--session-id', help=f'{remote_hint}Reuse existing cloud session ID')
-		p.add_argument('--proxy-country', help=f'{remote_hint}Proxy country code (default: us)')
+		p.add_argument('--proxy-country', help=f'{remote_hint}Proxy country code')
 		p.add_argument('--stream', action='store_true', help=f'{remote_hint}Stream output in real-time')
-		p.add_argument('--no-wait', action='store_true', help=f'{remote_hint}Return task ID immediately (async)')
+		p.add_argument('--wait', action='store_true', help=f'{remote_hint}Wait for task to complete (default: async)')
 		p.add_argument('--flash', action='store_true', help=f'{remote_hint}Enable flash mode')
 		p.add_argument('--keep-alive', action='store_true', help=f'{remote_hint}Keep session alive after task')
 		p.add_argument('--thinking', action='store_true', help=f'{remote_hint}Enable extended reasoning')
 		p.add_argument('--vision', action='store_true', default=None, help=f'{remote_hint}Enable vision')
 		p.add_argument('--no-vision', action='store_true', help=f'{remote_hint}Disable vision')
+		# New SDK features
+		p.add_argument('--start-url', help=f'{remote_hint}URL to start the task from')
+		p.add_argument('--metadata', action='append', metavar='KEY=VALUE', help=f'{remote_hint}Task metadata (can repeat)')
+		p.add_argument('--secret', action='append', metavar='KEY=VALUE', help=f'{remote_hint}Task secrets (can repeat)')
+		p.add_argument('--allowed-domain', action='append', metavar='DOMAIN', help=f'{remote_hint}Restrict navigation to domains (can repeat)')
+		p.add_argument('--skill-id', action='append', metavar='ID', help=f'{remote_hint}Enable skill IDs (can repeat)')
+		p.add_argument('--structured-output', metavar='SCHEMA', help=f'{remote_hint}JSON schema for structured output')
+		p.add_argument('--judge', action='store_true', help=f'{remote_hint}Enable judge mode')
+		p.add_argument('--judge-ground-truth', metavar='TEXT', help=f'{remote_hint}Expected answer for judge evaluation')
 
 	# -------------------------------------------------------------------------
 	# Task Management (Cloud) - only available if remote mode is installed
@@ -663,6 +672,7 @@ Setup:
 		p = task_sub.add_parser('list', help='List recent tasks')
 		p.add_argument('--limit', type=int, default=10, help='Maximum number of tasks to list')
 		p.add_argument('--status', choices=['running', 'finished', 'stopped', 'failed'], help='Filter by status')
+		p.add_argument('--session', help='Filter by session ID')
 		p.add_argument('--json', action='store_true', help='Output as JSON')
 
 		# task status <task_id>
@@ -708,6 +718,24 @@ Setup:
 		p = session_sub.add_parser('stop', help='Stop cloud session(s)')
 		p.add_argument('session_id', nargs='?', help='Session ID (or use --all)')
 		p.add_argument('--all', action='store_true', help='Stop all active sessions')
+		p.add_argument('--json', action='store_true', help='Output as JSON')
+
+		# session create - Create session without task
+		p = session_sub.add_parser('create', help='Create a new cloud session')
+		p.add_argument('--profile', help='Cloud profile ID')
+		p.add_argument('--proxy-country', help='Proxy country code')
+		p.add_argument('--start-url', help='Initial URL to navigate to')
+		p.add_argument('--screen-size', metavar='WxH', help='Screen size (e.g., 1920x1080)')
+		p.add_argument('--keep-alive', action='store_true', default=None, help='Keep session alive')
+		p.add_argument('--no-keep-alive', dest='keep_alive', action='store_false', help='Do not keep session alive')
+		p.add_argument('--persist-memory', action='store_true', default=None, help='Persist memory between tasks')
+		p.add_argument('--no-persist-memory', dest='persist_memory', action='store_false', help='Do not persist memory')
+		p.add_argument('--json', action='store_true', help='Output as JSON')
+
+		# session share <session_id> - Create or delete public share
+		p = session_sub.add_parser('share', help='Manage public share URL')
+		p.add_argument('session_id', help='Session ID')
+		p.add_argument('--delete', action='store_true', help='Delete the public share')
 		p.add_argument('--json', action='store_true', help='Output as JSON')
 
 	# -------------------------------------------------------------------------

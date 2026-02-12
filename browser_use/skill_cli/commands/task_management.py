@@ -4,9 +4,9 @@ Handles: task list, task status, task stop, task logs
 """
 
 import argparse
-import asyncio
 import json
 import sys
+from datetime import datetime, timezone
 from typing import Any
 
 from browser_use.skill_cli.api_key import APIKeyRequired, require_api_key
@@ -57,35 +57,99 @@ def handle_task_command(args: argparse.Namespace) -> int:
 		return 1
 
 
-def _run_async(coro: Any) -> Any:
-	"""Run an async coroutine in a new event loop."""
-	return asyncio.run(coro)
+def _format_duration(started_at: datetime | None, finished_at: datetime | None) -> str:
+	"""Format duration between two timestamps, or elapsed time if still running."""
+	if not started_at:
+		return ''
+
+	try:
+		if finished_at:
+			end = finished_at
+		else:
+			end = datetime.now(timezone.utc)
+
+		delta = end - started_at
+		total_seconds = int(delta.total_seconds())
+
+		if total_seconds < 60:
+			return f'{total_seconds}s'
+		elif total_seconds < 3600:
+			minutes = total_seconds // 60
+			seconds = total_seconds % 60
+			return f'{minutes}m {seconds}s'
+		else:
+			hours = total_seconds // 3600
+			minutes = (total_seconds % 3600) // 60
+			return f'{hours}h {minutes}m'
+	except Exception:
+		return ''
+
+
+def _task_item_to_dict(task: Any) -> dict[str, Any]:
+	"""Convert SDK TaskItemView to dict for JSON output."""
+	return {
+		'id': task.id,
+		'status': task.status,
+		'task': task.task,
+		'sessionId': task.session_id,
+	}
+
+
+def _task_to_dict(task: Any) -> dict[str, Any]:
+	"""Convert SDK TaskView to dict for JSON output."""
+	return {
+		'id': task.id,
+		'status': task.status,
+		'task': task.task,
+		'output': task.output,
+		'cost': task.cost,
+		'sessionId': task.session_id,
+		'startedAt': task.started_at.isoformat() if task.started_at else None,
+		'finishedAt': task.finished_at.isoformat() if task.finished_at else None,
+		'steps': [_step_to_dict(s) for s in (task.steps or [])],
+	}
+
+
+def _step_to_dict(step: Any) -> dict[str, Any]:
+	"""Convert SDK step to dict for JSON output."""
+	return {
+		'number': step.number,
+		'url': step.url,
+		'memory': step.memory,
+		'actions': step.actions,
+	}
 
 
 def _handle_list(args: argparse.Namespace) -> int:
 	"""Handle 'task list' command."""
 	try:
 		status_filter = getattr(args, 'status', None)
-		tasks = _run_async(cloud_task.list_tasks(limit=args.limit, status=status_filter))
+		session_filter = getattr(args, 'session', None)
+		tasks = cloud_task.list_tasks(
+			limit=args.limit,
+			status=status_filter,
+			session_id=session_filter,
+		)
 	except Exception as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1
 
 	if getattr(args, 'json', False):
-		print(json.dumps(tasks))
+		print(json.dumps([_task_item_to_dict(t) for t in tasks]))
 	else:
 		if not tasks:
 			status_msg = f' with status "{status_filter}"' if status_filter else ''
-			print(f'No tasks found{status_msg}')
+			session_msg = f' in session "{session_filter}"' if session_filter else ''
+			print(f'No tasks found{status_msg}{session_msg}')
 		else:
 			header = f'Tasks ({len(tasks)})'
 			if status_filter:
 				header = f'{status_filter.capitalize()} tasks ({len(tasks)})'
 			print(f'{header}:')
 			for t in tasks:
-				task_id = t.get('id', 'unknown')
-				status = t.get('status', 'unknown')
-				task_desc = t.get('task', '')
+				task_id = t.id or 'unknown'
+				status = t.status or 'unknown'
+				task_desc = t.task or ''
 				# Truncate long task descriptions
 				if len(task_desc) > 50:
 					task_desc = task_desc[:47] + '...'
@@ -104,58 +168,25 @@ def _handle_list(args: argparse.Namespace) -> int:
 	return 0
 
 
-def _format_duration(started_at: str | None, finished_at: str | None) -> str:
-	"""Format duration between two timestamps, or elapsed time if still running."""
-	if not started_at:
-		return ''
-
-	from datetime import datetime, timezone
-
-	try:
-		# Parse ISO format timestamp
-		start = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
-
-		if finished_at:
-			end = datetime.fromisoformat(finished_at.replace('Z', '+00:00'))
-		else:
-			end = datetime.now(timezone.utc)
-
-		delta = end - start
-		total_seconds = int(delta.total_seconds())
-
-		if total_seconds < 60:
-			return f'{total_seconds}s'
-		elif total_seconds < 3600:
-			minutes = total_seconds // 60
-			seconds = total_seconds % 60
-			return f'{minutes}m {seconds}s'
-		else:
-			hours = total_seconds // 3600
-			minutes = (total_seconds % 3600) // 60
-			return f'{hours}h {minutes}m'
-	except Exception:
-		return ''
-
-
 def _handle_status(args: argparse.Namespace) -> int:
 	"""Handle 'task status <task_id>' command."""
 	try:
 		# Use get_task() for full details including steps
-		task_data = _run_async(cloud_task.get_task(args.task_id))
+		task = cloud_task.get_task(args.task_id)
 	except Exception as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1
 
 	if getattr(args, 'json', False):
-		print(json.dumps(task_data))
+		print(json.dumps(_task_to_dict(task)))
 	else:
-		task_id = task_data.get('id', args.task_id)
-		task_status = task_data.get('status', 'unknown')
-		output = task_data.get('output')
-		cost = task_data.get('cost')
-		steps = task_data.get('steps', [])
-		started_at = task_data.get('startedAt')
-		finished_at = task_data.get('finishedAt')
+		task_id = task.id or args.task_id
+		task_status = task.status or 'unknown'
+		output = task.output
+		cost = task.cost
+		steps = task.steps or []
+		started_at = task.started_at
+		finished_at = task.finished_at
 
 		compact = getattr(args, 'compact', False)
 		verbose = getattr(args, 'verbose', False)
@@ -193,7 +224,7 @@ def _handle_status(args: argparse.Namespace) -> int:
 
 			# Filter to specific step if requested
 			if specific_step is not None:
-				steps = [s for s in steps if s.get('number') == specific_step]
+				steps = [s for s in steps if s.number == specific_step]
 				if not steps:
 					print(f'  Step {specific_step} not found (task has {total_steps} steps)')
 				else:
@@ -233,14 +264,14 @@ def _handle_status(args: argparse.Namespace) -> int:
 	return 0
 
 
-def _print_step(step: dict, verbose: bool) -> None:
+def _print_step(step: Any, verbose: bool) -> None:
 	"""Print a single step in compact or verbose format."""
-	step_num = step.get('number', '?')
-	memory = step.get('memory', '')
+	step_num = step.number if step.number is not None else '?'
+	memory = step.memory or ''
 
 	if verbose:
-		url = step.get('url', '')
-		actions = step.get('actions', [])
+		url = step.url or ''
+		actions = step.actions or []
 
 		# Truncate URL for display
 		short_url = url[:60] + '...' if len(url) > 60 else url
@@ -270,13 +301,13 @@ def _print_step(step: dict, verbose: bool) -> None:
 def _handle_stop(args: argparse.Namespace) -> int:
 	"""Handle 'task stop <task_id>' command."""
 	try:
-		result = _run_async(cloud_task.stop_task(args.task_id))
+		cloud_task.stop_task(args.task_id)
 	except Exception as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1
 
 	if getattr(args, 'json', False):
-		print(json.dumps(result))
+		print(json.dumps({'stopped': args.task_id}))
 	else:
 		print(f'Stopped task: {args.task_id}')
 
@@ -286,15 +317,15 @@ def _handle_stop(args: argparse.Namespace) -> int:
 def _handle_logs(args: argparse.Namespace) -> int:
 	"""Handle 'task logs <task_id>' command."""
 	try:
-		result = _run_async(cloud_task.get_task_logs(args.task_id))
+		result = cloud_task.get_task_logs(args.task_id)
 	except Exception as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1
 
 	if getattr(args, 'json', False):
-		print(json.dumps(result))
+		print(json.dumps({'downloadUrl': result.download_url}))
 	else:
-		download_url = result.get('downloadUrl')
+		download_url = result.download_url
 		if download_url:
 			print(f'Download logs: {download_url}')
 		else:
