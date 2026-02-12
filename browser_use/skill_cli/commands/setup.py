@@ -111,7 +111,7 @@ async def run_checks(mode: Literal['local', 'remote', 'full']) -> dict[str, Any]
 
 	# Cloudflared check (remote and full modes)
 	if mode in ('remote', 'full'):
-		from browser_use.skill_cli.tunnel_manager import get_tunnel_manager
+		from browser_use.skill_cli.tunnel import get_tunnel_manager
 
 		tunnel_mgr = get_tunnel_manager()
 		status = tunnel_mgr.get_status()
@@ -286,7 +286,7 @@ async def validate_setup(
 
 	if mode in ('remote', 'full'):
 		from browser_use.skill_cli.api_key import check_api_key
-		from browser_use.skill_cli.tunnel_manager import get_tunnel_manager
+		from browser_use.skill_cli.tunnel import get_tunnel_manager
 
 		api_check = check_api_key()
 		results['api_key_available'] = api_check['available']

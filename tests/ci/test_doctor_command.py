@@ -82,7 +82,7 @@ def test_check_api_key_missing():
 
 def test_check_cloudflared_available():
 	"""Test _check_cloudflared when available."""
-	with patch('browser_use.skill_cli.tunnel_manager.get_tunnel_manager') as mock_mgr:
+	with patch('browser_use.skill_cli.tunnel.get_tunnel_manager') as mock_mgr:
 		mock_instance = mock_mgr.return_value
 		mock_instance.get_status.return_value = {
 			'available': True,
@@ -95,7 +95,7 @@ def test_check_cloudflared_available():
 
 def test_check_cloudflared_missing():
 	"""Test _check_cloudflared when not available."""
-	with patch('browser_use.skill_cli.tunnel_manager.get_tunnel_manager') as mock_mgr:
+	with patch('browser_use.skill_cli.tunnel.get_tunnel_manager') as mock_mgr:
 		mock_instance = mock_mgr.return_value
 		mock_instance.get_status.return_value = {
 			'available': False,

@@ -1094,19 +1094,19 @@ def main() -> int:
 
 	# Handle tunnel command - runs independently of browser session
 	if args.command == 'tunnel':
-		from browser_use.skill_cli import tunnel_manager
+		from browser_use.skill_cli import tunnel
 
 		pos = getattr(args, 'port_or_subcommand', None)
 
 		if pos == 'list':
-			result = tunnel_manager.list_tunnels()
+			result = tunnel.list_tunnels()
 		elif pos == 'stop':
 			port_arg = getattr(args, 'port_arg', None)
 			if getattr(args, 'all', False):
 				# stop --all
-				result = asyncio.get_event_loop().run_until_complete(tunnel_manager.stop_all_tunnels())
+				result = asyncio.get_event_loop().run_until_complete(tunnel.stop_all_tunnels())
 			elif port_arg is not None:
-				result = asyncio.get_event_loop().run_until_complete(tunnel_manager.stop_tunnel(port_arg))
+				result = asyncio.get_event_loop().run_until_complete(tunnel.stop_tunnel(port_arg))
 			else:
 				print('Usage: browser-use tunnel stop <port> | --all', file=sys.stderr)
 				return 1
@@ -1116,7 +1116,7 @@ def main() -> int:
 			except ValueError:
 				print(f'Unknown tunnel subcommand: {pos}', file=sys.stderr)
 				return 1
-			result = asyncio.get_event_loop().run_until_complete(tunnel_manager.start_tunnel(port))
+			result = asyncio.get_event_loop().run_until_complete(tunnel.start_tunnel(port))
 		else:
 			print('Usage: browser-use tunnel <port> | list | stop <port>', file=sys.stderr)
 			return 0

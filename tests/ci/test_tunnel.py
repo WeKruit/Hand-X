@@ -1,10 +1,10 @@
-"""Tests for TunnelManager - cloudflared binary management."""
+"""Tests for tunnel module - cloudflared binary management."""
 
 from unittest.mock import patch
 
 import pytest
 
-from browser_use.skill_cli.tunnel_manager import TunnelManager, get_tunnel_manager
+from browser_use.skill_cli.tunnel import TunnelManager, get_tunnel_manager
 
 
 @pytest.fixture
@@ -77,9 +77,9 @@ def test_tunnel_manager_status_not_installed(tunnel_manager):
 def test_get_tunnel_manager_singleton():
 	"""Test that get_tunnel_manager returns a singleton."""
 	# Reset the global singleton
-	import browser_use.skill_cli.tunnel_manager as tm_module
+	import browser_use.skill_cli.tunnel as tunnel_module
 
-	tm_module._tunnel_manager = None
+	tunnel_module._tunnel_manager = None
 
 	mgr1 = get_tunnel_manager()
 	mgr2 = get_tunnel_manager()
