@@ -244,31 +244,54 @@ async def _handle_local_task(session: SessionInfo, params: dict[str, Any]) -> An
 		}
 
 
-def _get_provider_from_model(model: str) -> str | None:
-	"""Determine the provider from a model name.
+def _get_verified_models() -> dict[str, set[str]]:
+	"""Extract verified model names from SDK sources of truth."""
+	import typing
 
-	Returns 'openai', 'anthropic', 'google', or None if unknown.
-	"""
-	model_lower = model.lower()
+	from anthropic.types.model_param import ModelParam
+	from openai.types.shared.chat_model import ChatModel
 
-	# Check for explicit provider prefix (e.g., "openai/gpt-4o")
-	if '/' in model:
-		provider = model.split('/')[0].lower()
-		if provider in ('openai', 'anthropic', 'google'):
+	from browser_use.llm.browser_use.chat import VALID_BROWSER_USE_MODELS
+	from browser_use.llm.google.chat import VerifiedGeminiModels
+
+	# OpenAI: ChatModel is a Literal type
+	openai_models = set(typing.get_args(ChatModel))
+
+	# Anthropic: ModelParam is Union[Literal[...], str] - extract the Literal
+	anthropic_literal = typing.get_args(ModelParam)[0]
+	anthropic_models = set(typing.get_args(anthropic_literal))
+
+	# Google: VerifiedGeminiModels Literal
+	google_models = set(typing.get_args(VerifiedGeminiModels))
+
+	# Browser-Use: VALID_BROWSER_USE_MODELS constant
+	browser_use_models = VALID_BROWSER_USE_MODELS
+
+	return {
+		'openai': openai_models,
+		'anthropic': anthropic_models,
+		'google': google_models,
+		'browser-use': browser_use_models,
+	}
+
+
+_VERIFIED_MODELS: dict[str, set[str]] | None = None
+
+
+def _get_provider_for_model(model: str) -> str | None:
+	"""Determine the provider by checking SDK verified model lists."""
+	global _VERIFIED_MODELS
+	if _VERIFIED_MODELS is None:
+		_VERIFIED_MODELS = _get_verified_models()
+
+	for provider, models in _VERIFIED_MODELS.items():
+		if model in models:
 			return provider
-
-	# Infer from model name patterns
-	if model_lower.startswith('gpt-') or model_lower.startswith('o1') or model_lower.startswith('o3'):
-		return 'openai'
-	elif model_lower.startswith('claude-'):
-		return 'anthropic'
-	elif model_lower.startswith('gemini-'):
-		return 'google'
 
 	return None
 
 
-async def get_llm(model: str | None = None) -> Any:
+def get_llm(model: str | None = None) -> Any:
 	"""Get LLM instance from environment configuration.
 
 	Args:
@@ -276,103 +299,37 @@ async def get_llm(model: str | None = None) -> Any:
 		       the appropriate provider for that model. If not provided,
 		       auto-detects from available API keys.
 
-	Supported model patterns:
-		- gpt-*, o1*, o3* → OpenAI (requires OPENAI_API_KEY)
-		- claude-* → Anthropic (requires ANTHROPIC_API_KEY)
-		- gemini-* → Google (requires GOOGLE_API_KEY)
-		- openai/model, anthropic/model, google/model → Explicit provider
+	Supported providers: OpenAI, Anthropic, Google, Browser-Use.
+	Model names are validated against each SDK's verified model list.
 	"""
-	# If model specified, use that provider
-	if model:
-		provider = _get_provider_from_model(model)
+	from browser_use.llm import ChatAnthropic, ChatBrowserUse, ChatGoogle, ChatOpenAI
 
-		# Strip provider prefix if present (e.g., "openai/gpt-4o" → "gpt-4o")
-		model_name = model.split('/')[-1] if '/' in model else model
+	if model:
+		provider = _get_provider_for_model(model)
 
 		if provider == 'openai':
-			if not os.environ.get('OPENAI_API_KEY'):
-				logger.warning(f'Model {model} requires OPENAI_API_KEY')
-				return None
-			try:
-				from langchain_openai import ChatOpenAI  # type: ignore[import-not-found]
-
-				return ChatOpenAI(model=model_name)  # type: ignore[return-value]
-			except ImportError:
-				logger.warning('langchain-openai not installed')
-				return None
-
+			return ChatOpenAI(model=model)
 		elif provider == 'anthropic':
-			if not os.environ.get('ANTHROPIC_API_KEY'):
-				logger.warning(f'Model {model} requires ANTHROPIC_API_KEY')
-				return None
-			try:
-				from langchain_anthropic import ChatAnthropic  # type: ignore[import-not-found]
-
-				return ChatAnthropic(model=model_name)  # type: ignore[return-value]
-			except ImportError:
-				logger.warning('langchain-anthropic not installed')
-				return None
-
+			return ChatAnthropic(model=model)
 		elif provider == 'google':
-			if not os.environ.get('GOOGLE_API_KEY'):
-				logger.warning(f'Model {model} requires GOOGLE_API_KEY')
-				return None
-			try:
-				from langchain_google_genai import ChatGoogleGenerativeAI  # type: ignore[import-not-found]
-
-				return ChatGoogleGenerativeAI(model=model_name)  # type: ignore[return-value]
-			except ImportError:
-				logger.warning('langchain-google-genai not installed')
-				return None
-
+			return ChatGoogle(model=model)
+		elif provider == 'browser-use':
+			return ChatBrowserUse(model=model)
 		else:
-			logger.warning(f'Unknown model provider for: {model}')
+			logger.warning(f'Unknown model: {model}. Not in any verified model list.')
 			return None
 
 	# No model specified - auto-detect from available API keys
-
-	# Try ChatBrowserUse first (optimized for browser automation)
 	if os.environ.get('BROWSER_USE_API_KEY'):
-		try:
-			from browser_use.llm import ChatBrowserUse
+		return ChatBrowserUse()
 
-			return ChatBrowserUse()  # type: ignore[return-value]
-		except ImportError:
-			pass
-
-	# Try OpenAI
 	if os.environ.get('OPENAI_API_KEY'):
-		try:
-			from langchain_openai import ChatOpenAI  # type: ignore[import-not-found]
+		return ChatOpenAI(model='o3')
 
-			return ChatOpenAI(model='gpt-4o')  # type: ignore[return-value]
-		except ImportError:
-			pass
-
-	# Try Anthropic
 	if os.environ.get('ANTHROPIC_API_KEY'):
-		try:
-			from langchain_anthropic import ChatAnthropic  # type: ignore[import-not-found]
+		return ChatAnthropic(model='claude-sonnet-4-0')
 
-			return ChatAnthropic(model='claude-sonnet-4-20250514')  # type: ignore[return-value]
-		except ImportError:
-			pass
-
-	# Try Google
 	if os.environ.get('GOOGLE_API_KEY'):
-		try:
-			from langchain_google_genai import ChatGoogleGenerativeAI  # type: ignore[import-not-found]
-
-			return ChatGoogleGenerativeAI(model='gemini-2.0-flash')  # type: ignore[return-value]
-		except ImportError:
-			pass
-
-	# Try to use browser-use's default LLM setup
-	try:
-		from browser_use.llm import get_default_llm
-
-		return get_default_llm()  # type: ignore[return-value]
-	except Exception:
-		pass
+		return ChatGoogle(model='gemini-flash-latest')
 
 	return None
