@@ -1,5 +1,6 @@
 """Agent task command handler."""
 
+import asyncio
 import logging
 import os
 from typing import Any
@@ -151,9 +152,11 @@ async def _handle_cloud_task(params: dict[str, Any]) -> Any:
 				'message': 'Task started. Use "browser-use task status <task_id>" to check progress.',
 			}
 
-		# Poll until complete
+		# Poll until complete (run in thread to avoid blocking event loop)
 		logger.info('Waiting for task completion...')
-		result = cloud_task.poll_until_complete(task_id, stream=params.get('stream', False))
+		result = await asyncio.to_thread(
+			cloud_task.poll_until_complete, task_id, stream=params.get('stream', False)
+		)
 
 		return {
 			'success': True,
