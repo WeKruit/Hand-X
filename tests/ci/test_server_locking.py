@@ -212,6 +212,7 @@ time.sleep(60)  # Hold lock
 	)
 
 	# Wait for lock acquisition
+	assert proc.stdout is not None
 	line = proc.stdout.readline()
 	assert 'LOCKED' in line
 
