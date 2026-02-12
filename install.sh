@@ -681,27 +681,11 @@ configure_powershell_path() {
 		return 0
 	fi
 
-	# Ask for confirmation before modifying registry
-	echo ""
-	echo "To use 'browser-use' from PowerShell/Command Prompt, we need to add it to your PATH."
-	echo ""
-	echo "This will modify: HKEY_CURRENT_USER\\Environment\\Path"
-	echo "Adding: %USERPROFILE%\\.browser-use-env\\Scripts"
-	echo ""
-	read -p "Add to Windows PATH? [Y/n] " -n 1 -r < /dev/tty
-	echo ""
-
-	if [[ $REPLY =~ ^[Nn]$ ]]; then
-		log_info "Skipped PATH configuration"
-		log_info "To use browser-use, add to PATH manually or run via Git Bash"
-		return 0
-	fi
-
 	# Append to user PATH via registry (safe, no truncation, no execution policy needed)
 	powershell.exe -Command "[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + \$env:USERPROFILE + '$scripts_path;' + \$env:USERPROFILE + '$local_bin', 'User')" 2>/dev/null
 
 	if [ $? -eq 0 ]; then
-		log_success "Added to Windows PATH (restart PowerShell to use)"
+		log_success "Added to Windows PATH: %USERPROFILE%\\.browser-use-env\\Scripts"
 	else
 		log_warn "Could not update PATH automatically. Add manually:"
 		log_warn "  \$env:PATH += \";\$env:USERPROFILE\\.browser-use-env\\Scripts\""
