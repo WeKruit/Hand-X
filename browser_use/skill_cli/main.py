@@ -213,12 +213,14 @@ def get_session_metadata_path(session: str) -> Path:
 
 def ensure_server(session: str, browser: str, headed: bool, profile: str | None, api_key: str | None) -> bool:
 	"""Start server if not running. Returns True if started."""
+	from browser_use.skill_cli.utils import is_session_locked, kill_orphaned_server
+
 	meta_path = get_session_metadata_path(session)
 
-	# Check if server is already running and responsive
-	if is_server_running(session):
+	# Check if server is already running AND holding its lock (healthy server)
+	if is_server_running(session) and is_session_locked(session):
 		try:
-			sock = connect_to_server(session, timeout=0.1)
+			sock = connect_to_server(session, timeout=0.5)  # Increased from 0.1s
 			sock.close()
 
 			# Check browser mode matches existing session
@@ -248,7 +250,10 @@ def ensure_server(session: str, browser: str, headed: bool, profile: str | None,
 
 			return False  # Already running with correct mode
 		except Exception:
-			pass  # Server dead, restart
+			pass  # Server not responsive, continue to restart logic
+
+	# Kill any orphaned server (has PID file but no lock)
+	kill_orphaned_server(session)
 
 	# Build server command
 	cmd = [
@@ -291,11 +296,11 @@ def ensure_server(session: str, browser: str, headed: bool, profile: str | None,
 			stderr=subprocess.DEVNULL,
 		)
 
-	# Wait for server to be ready
+	# Wait for server to be ready (must have PID, lock, and responsive socket)
 	for _ in range(100):  # 5 seconds max
-		if is_server_running(session):
+		if is_server_running(session) and is_session_locked(session):
 			try:
-				sock = connect_to_server(session, timeout=0.1)
+				sock = connect_to_server(session, timeout=0.5)
 				sock.close()
 
 				# Write metadata file to track session config
