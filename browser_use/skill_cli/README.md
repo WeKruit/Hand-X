@@ -36,6 +36,17 @@ curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --api-key bu_xxx 
 ```bash
 browser-use doctor   # Validate installation
 browser-use setup    # Run setup wizard (optional)
+browser-use setup --mode local|remote|full  # Non-interactive setup
+browser-use setup --api-key bu_xxx --yes    # With API key, skip prompts
+```
+
+### Generate Templates
+```bash
+browser-use init                          # Interactive template selection
+browser-use init --list                   # List available templates
+browser-use init --template basic         # Generate specific template
+browser-use init --output my_script.py    # Specify output file
+browser-use init --force                  # Overwrite existing files
 ```
 
 ### From Source
@@ -147,6 +158,8 @@ browser-use --browser remote open https://example.com
 | `cookies get --url <url>` | Get cookies for URL |
 | `cookies set <name> <value>` | Set a cookie |
 | `cookies set name val --domain .example.com --secure` | Set with options |
+| `cookies set name val --same-site Strict` | SameSite: Strict, Lax, None |
+| `cookies set name val --expires 1735689600` | Set expiration timestamp |
 | `cookies clear` | Clear all cookies |
 | `cookies clear --url <url>` | Clear cookies for URL |
 | `cookies export <file>` | Export to JSON file |
@@ -207,11 +220,26 @@ browser-use -b remote run "task" --llm gpt-4o               # Specify LLM
 browser-use -b remote run "task" --proxy-country gb         # UK proxy
 browser-use -b remote run "task" --session-id <id>          # Reuse session
 browser-use -b remote run "task" --no-wait                  # Async (returns task ID)
+browser-use -b remote run "task" --wait                     # Wait for completion
 browser-use -b remote run "task" --stream                   # Stream output
 browser-use -b remote run "task" --flash                    # Fast mode
 browser-use -b remote run "task" --keep-alive               # Keep session alive
 browser-use -b remote run "task" --thinking                 # Extended reasoning
+browser-use -b remote run "task" --vision                   # Enable vision (default)
+browser-use -b remote run "task" --no-vision                # Disable vision
 browser-use -b remote run "task" --profile <id>             # Use cloud profile
+
+# Task configuration
+browser-use -b remote run "task" --start-url https://example.com  # Start from URL
+browser-use -b remote run "task" --allowed-domain example.com     # Restrict navigation (repeatable)
+browser-use -b remote run "task" --metadata key=value             # Task metadata (repeatable)
+browser-use -b remote run "task" --secret API_KEY=xxx             # Task secrets (repeatable)
+browser-use -b remote run "task" --skill-id skill-123             # Enable skills (repeatable)
+
+# Structured output and evaluation
+browser-use -b remote run "task" --structured-output '{"type":"object"}'  # JSON schema
+browser-use -b remote run "task" --judge                          # Enable judge mode
+browser-use -b remote run "task" --judge-ground-truth "answer"    # Expected answer
 ```
 
 Requires `BROWSER_USE_API_KEY`.
@@ -224,10 +252,13 @@ Manage cloud tasks when using `--browser remote`.
 |---------|-------------|
 | `task list` | List recent tasks |
 | `task list --status running` | Filter by status |
+| `task list --session <id>` | Filter by session ID |
 | `task status <id>` | Get task status (latest step only) |
 | `task status <id> -c` | Compact: all steps with reasoning |
 | `task status <id> -v` | Verbose: full details |
 | `task status <id> --last 5` | Show last 5 steps |
+| `task status <id> --step 3` | Show specific step number |
+| `task status <id> --reverse` | Show steps newest first |
 | `task stop <id>` | Stop running task |
 | `task logs <id>` | Get execution logs |
 
@@ -242,6 +273,15 @@ Manage cloud browser sessions.
 | `session get <id>` | Get session details + live URL |
 | `session stop <id>` | Stop session |
 | `session stop --all` | Stop all active sessions |
+| `session create` | Create new session |
+| `session create --profile <id>` | With cloud profile |
+| `session create --proxy-country gb` | With geographic proxy |
+| `session create --start-url <url>` | Start at specific URL |
+| `session create --screen-size 1920x1080` | Custom screen size |
+| `session create --keep-alive` | Keep session alive |
+| `session create --persist-memory` | Persist memory between tasks |
+| `session share <id>` | Create public share URL |
+| `session share <id> --delete` | Delete public share |
 
 ## Tunnels
 
@@ -275,8 +315,10 @@ browser-use -b remote open https://abc.trycloudflare.com
 | Command | Description |
 |---------|-------------|
 | `profile list` | List cloud profiles |
+| `profile list --page 2 --page-size 50` | Pagination |
 | `profile get <id>` | Get profile details |
-| `profile create --name <name>` | Create profile |
+| `profile create` | Create profile |
+| `profile create --name "My Profile"` | Create with name |
 | `profile update <id> --name <name>` | Rename profile |
 | `profile delete <id>` | Delete profile |
 
@@ -301,6 +343,7 @@ browser-use -b remote open https://abc.trycloudflare.com
 | `--profile NAME` | Browser profile (local name or cloud ID) |
 | `--json` | Output as JSON |
 | `--api-key KEY` | Override API key |
+| `--mcp` | Run as MCP server via stdin/stdout |
 
 **Session behavior**: All commands without `--session` use the same "default" session. The browser stays open and is reused across commands. Use `--session NAME` to run multiple browsers in parallel.
 

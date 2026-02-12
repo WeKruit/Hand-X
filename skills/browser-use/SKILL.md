@@ -55,6 +55,25 @@ curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --remote-only --a
 browser-use doctor
 ```
 
+**Setup wizard (first-time configuration):**
+```bash
+browser-use setup                         # Interactive setup
+browser-use setup --mode local            # Configure for local browser only
+browser-use setup --mode remote           # Configure for cloud browser only
+browser-use setup --mode full             # Configure all modes
+browser-use setup --api-key bu_xxx        # Set API key during setup
+browser-use setup --yes                   # Skip interactive prompts
+```
+
+**Generate template files:**
+```bash
+browser-use init                          # Interactive template selection
+browser-use init --list                   # List available templates
+browser-use init --template basic         # Generate specific template
+browser-use init --output my_script.py    # Specify output file
+browser-use init --force                  # Overwrite existing files
+```
+
 **Manual cloudflared install (for tunneling):**
 ```bash
 # macOS:
@@ -107,6 +126,7 @@ browser-use open <url>                    # Navigate to URL
 browser-use back                          # Go back in history
 browser-use scroll down                   # Scroll down
 browser-use scroll up                     # Scroll up
+browser-use scroll down --amount 1000     # Scroll by specific pixels (default: 500)
 ```
 
 ### Page State
@@ -146,6 +166,8 @@ browser-use cookies get                   # Get all cookies
 browser-use cookies get --url <url>       # Get cookies for specific URL
 browser-use cookies set <name> <value>    # Set a cookie
 browser-use cookies set name val --domain .example.com --secure --http-only
+browser-use cookies set name val --same-site Strict  # SameSite: Strict, Lax, or None
+browser-use cookies set name val --expires 1735689600  # Expiration timestamp
 browser-use cookies clear                 # Clear all cookies
 browser-use cookies clear --url <url>     # Clear cookies for specific URL
 browser-use cookies export <file>         # Export all cookies to JSON file
@@ -193,12 +215,17 @@ browser-use python --file script.py       # Execute Python file
 The Python session maintains state across commands. The `browser` object provides:
 - `browser.url` - Current page URL
 - `browser.title` - Page title
+- `browser.html` - Get page HTML
 - `browser.goto(url)` - Navigate
 - `browser.click(index)` - Click element
 - `browser.type(text)` - Type text
+- `browser.input(index, text)` - Click element, then type
+- `browser.keys(keys)` - Send keyboard keys (e.g., "Enter", "Control+a")
 - `browser.screenshot(path)` - Take screenshot
-- `browser.scroll()` - Scroll page
-- `browser.html` - Get page HTML
+- `browser.scroll(direction, amount)` - Scroll page
+- `browser.back()` - Go back in history
+- `browser.wait(seconds)` - Sleep/pause execution
+- `browser.extract(query)` - Extract data using LLM
 
 ### Agent Tasks (Requires API Key)
 ```bash
@@ -239,9 +266,22 @@ browser-use -b remote run "task" --flash       # Fast execution mode
 browser-use -b remote run "task" --thinking    # Extended reasoning mode
 browser-use -b remote run "task" --vision      # Enable vision (default)
 browser-use -b remote run "task" --no-vision   # Disable vision
+browser-use -b remote run "task" --wait        # Wait for completion (default: async)
 
 # Use cloud profile (preserves cookies across sessions)
 browser-use -b remote run "task" --profile <cloud-profile-id>
+
+# Task configuration
+browser-use -b remote run "task" --start-url https://example.com  # Start from specific URL
+browser-use -b remote run "task" --allowed-domain example.com     # Restrict navigation (repeatable)
+browser-use -b remote run "task" --metadata key=value             # Task metadata (repeatable)
+browser-use -b remote run "task" --secret API_KEY=xxx             # Task secrets (repeatable)
+browser-use -b remote run "task" --skill-id skill-123             # Enable skills (repeatable)
+
+# Structured output and evaluation
+browser-use -b remote run "task" --structured-output '{"type":"object"}'  # JSON schema for output
+browser-use -b remote run "task" --judge                 # Enable judge mode
+browser-use -b remote run "task" --judge-ground-truth "expected answer"   # Expected answer for judge
 ```
 
 ### Task Management (Remote Mode)
@@ -252,12 +292,15 @@ Manage cloud tasks when using remote mode:
 browser-use task list                     # List recent tasks
 browser-use task list --limit 20          # Show more tasks
 browser-use task list --status running    # Filter by status
+browser-use task list --session <id>      # Filter by session ID
 browser-use task list --json              # JSON output
 
 browser-use task status <task-id>         # Get task status (token efficient)
 browser-use task status <task-id> -c      # Show all steps with reasoning
 browser-use task status <task-id> -v      # Show all steps with URLs + actions
 browser-use task status <task-id> --last 5  # Show only last 5 steps
+browser-use task status <task-id> --step 3  # Show specific step number
+browser-use task status <task-id> --reverse # Show steps newest first
 
 browser-use task stop <task-id>           # Stop a running task
 browser-use task logs <task-id>           # Get task execution logs
@@ -280,6 +323,19 @@ browser-use session get <session-id> --json
 
 browser-use session stop <session-id>     # Stop a session
 browser-use session stop --all            # Stop all active sessions
+
+# Create a new cloud session manually
+browser-use session create                          # Create with defaults
+browser-use session create --profile <id>           # With cloud profile
+browser-use session create --proxy-country gb       # With geographic proxy
+browser-use session create --start-url https://example.com  # Start at URL
+browser-use session create --screen-size 1920x1080  # Custom screen size
+browser-use session create --keep-alive             # Keep session alive
+browser-use session create --persist-memory         # Persist memory between tasks
+
+# Share session publicly (for collaboration/debugging)
+browser-use session share <session-id>    # Create public share URL
+browser-use session share <session-id> --delete  # Delete public share
 ```
 
 ## Exposing Local Dev Servers
@@ -527,14 +583,16 @@ browser-use close --all                   # Close all sessions
 ```
 
 ### Profile Management
+
+#### Local Chrome Profiles (`--browser real`)
 ```bash
-browser-use profile list-local            # List local Chrome profiles
+browser-use -b real profile list          # List local Chrome profiles
 ```
 
-**Before opening a real browser (`--browser real`)**, always ask the user if they want to use a specific Chrome profile or no profile. Use `profile list-local` to show available profiles:
+**Before opening a real browser (`--browser real`)**, always ask the user if they want to use a specific Chrome profile or no profile. Use `profile list` to show available profiles:
 
 ```bash
-browser-use profile list-local
+browser-use -b real profile list
 # Output: Default: Person 1 (user@gmail.com)
 #         Profile 1: Work (work@company.com)
 
@@ -550,15 +608,18 @@ browser-use --browser real --profile "Default" cookies export /tmp/cookies.json
 
 Each Chrome profile has its own cookies, history, and logged-in sessions. Choosing the right profile determines whether sites will be pre-authenticated.
 
-### Cloud Profiles
+#### Cloud Profiles (`--browser remote`)
 
 Cloud profiles store browser state (cookies) in Browser-Use Cloud, persisting across sessions. Requires `BROWSER_USE_API_KEY`.
 
 ```bash
-browser-use profile list                      # List cloud profiles
-browser-use profile get <id>                  # Get profile details
-browser-use profile update <id> --name "New"  # Rename profile
-browser-use profile delete <id>               # Delete profile
+browser-use -b remote profile list            # List cloud profiles
+browser-use -b remote profile list --page 2 --page-size 50  # Pagination
+browser-use -b remote profile get <id>        # Get profile details
+browser-use -b remote profile create          # Create new cloud profile
+browser-use -b remote profile create --name "My Profile"  # Create with name
+browser-use -b remote profile update <id> --name "New"    # Rename profile
+browser-use -b remote profile delete <id>     # Delete profile
 ```
 
 Use a cloud profile with `--browser remote --profile <id>`:
@@ -570,7 +631,7 @@ browser-use --browser remote --profile abc-123 open https://example.com
 ### Syncing Cookies to Cloud
 
 **⚠️ IMPORTANT: Before syncing cookies from a local browser to the cloud, the agent MUST:**
-1. Ask the user which local Chrome profile to use (`browser-use profile list-local`)
+1. Ask the user which local Chrome profile to use (`browser-use -b real profile list`)
 2. Ask which domain(s) to sync - do NOT default to syncing the full profile
 3. Confirm before proceeding
 
@@ -580,12 +641,12 @@ browser-use --browser remote --profile abc-123 open https://example.com
 
 ```bash
 # List local Chrome profiles
-browser-use profile list-local
+browser-use -b real profile list
 # → Default: Person 1 (user@gmail.com)
 # → Profile 1: Work (work@company.com)
 
 # See what cookies are in a profile
-browser-use profile cookies "Default"
+browser-use -b real profile cookies "Default"
 # → youtube.com: 23
 # → google.com: 18
 # → github.com: 2
@@ -661,6 +722,7 @@ browser-use install                       # Install Chromium and system dependen
 | `--profile NAME` | Browser profile (local name or cloud ID) |
 | `--json` | Output as JSON |
 | `--api-key KEY` | Override API key |
+| `--mcp` | Run as MCP server via stdin/stdout |
 
 **Session behavior**: All commands without `--session` use the same "default" session. The browser stays open and is reused across commands. Use `--session NAME` to run multiple browsers in parallel.
 
