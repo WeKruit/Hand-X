@@ -251,7 +251,6 @@ def _get_verified_models() -> dict[str, set[str]]:
 	from anthropic.types.model_param import ModelParam
 	from openai.types.shared.chat_model import ChatModel
 
-	from browser_use.llm.browser_use.chat import VALID_BROWSER_USE_MODELS
 	from browser_use.llm.google.chat import VerifiedGeminiModels
 
 	# OpenAI: ChatModel is a Literal type
@@ -264,8 +263,8 @@ def _get_verified_models() -> dict[str, set[str]]:
 	# Google: VerifiedGeminiModels Literal
 	google_models = set(typing.get_args(VerifiedGeminiModels))
 
-	# Browser-Use: VALID_BROWSER_USE_MODELS constant
-	browser_use_models = VALID_BROWSER_USE_MODELS
+	# Browser-Use: cloud models
+	browser_use_models = {'bu-latest', 'bu-1-0', 'bu-2-0'}
 
 	return {
 		'openai': openai_models,
