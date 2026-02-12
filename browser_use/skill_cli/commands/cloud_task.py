@@ -5,7 +5,6 @@ for creating and managing cloud-based agent tasks and sessions.
 """
 
 import logging
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -182,12 +181,14 @@ def get_task_logs(task_id: str) -> TaskLogFileResponse:
 # ============ Polling ============
 
 
-def poll_until_complete(
+async def poll_until_complete(
 	task_id: str,
 	stream: bool = False,
 	poll_interval: float = 1.0,
 ) -> TaskView:
 	"""Poll task status until finished."""
+	import asyncio
+
 	client = get_sdk_client()
 	last_status = None
 
@@ -202,4 +203,4 @@ def poll_until_complete(
 		if current_status in ('finished', 'stopped', 'failed'):
 			return task
 
-		time.sleep(poll_interval)
+		await asyncio.sleep(poll_interval)

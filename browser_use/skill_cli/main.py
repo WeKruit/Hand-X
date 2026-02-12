@@ -848,6 +848,54 @@ def handle_server_command(args: argparse.Namespace) -> int:
 	return 0
 
 
+def _handle_remote_run_with_wait(args: argparse.Namespace) -> int:
+	"""Handle remote run with --wait directly (prints task info immediately, then waits)."""
+	import asyncio
+
+	from browser_use.skill_cli.commands import cloud_task
+
+	if not args.task:
+		print('Error: No task provided', file=sys.stderr)
+		return 1
+
+	try:
+		# Create task
+		task_response = cloud_task.create_task(
+			task=args.task,
+			llm=args.llm,
+			max_steps=args.max_steps,
+			flash_mode=args.flash,
+			thinking=args.thinking,
+			start_url=args.start_url,
+		)
+
+		# Print initial info immediately
+		print(f'mode: {args.browser}')
+		print(f'task_id: {task_response.id}')
+		print(f'session_id: {task_response.session_id}')
+		print('waiting...', end='', flush=True)
+
+		# Wait for completion
+		try:
+			result = asyncio.run(cloud_task.poll_until_complete(task_response.id))
+		except KeyboardInterrupt:
+			print(f'\nInterrupted. Task {task_response.id} continues remotely.')
+			return 0
+
+		# Print final result
+		print(' done.')
+		print(f'status: {result.status}')
+		print(f'output: {result.output}')
+		if result.cost:
+			print(f'cost: {result.cost}')
+
+		return 0
+
+	except Exception as e:
+		print(f'Error: {e}', file=sys.stderr)
+		return 1
+
+
 def main() -> int:
 	"""Main entry point."""
 	parser = build_parser()
@@ -1079,6 +1127,10 @@ def main() -> int:
 			file=sys.stderr,
 		)
 		return 1
+
+	# Handle remote run with --wait directly (prints task_id immediately, then waits)
+	if args.browser == 'remote' and args.command == 'run' and getattr(args, 'wait', False):
+		return _handle_remote_run_with_wait(args)
 
 	# Ensure server is running
 	ensure_server(args.session, args.browser, args.headed, args.profile, args.api_key)
