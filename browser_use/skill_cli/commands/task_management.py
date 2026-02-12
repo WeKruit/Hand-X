@@ -31,7 +31,7 @@ def handle_task_command(args: argparse.Namespace) -> int:
 		print(
 			'Error: Task management requires remote mode.\n'
 			'Remote mode is not installed. Reinstall with --full to enable:\n'
-			'  curl -fsSL https://browser-use.com/install.sh | bash -s -- --full',
+			'  curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --full',
 			file=sys.stderr,
 		)
 		return 1

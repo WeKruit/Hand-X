@@ -107,5 +107,5 @@ def get_mode_unavailable_error(mode: str) -> str:
 		f"Error: {mode_desc} '{mode}' not installed.\n"
 		f'Available modes: {", ".join(available)}\n\n'
 		f'To install all modes, reinstall with:\n'
-		f'  curl -fsSL https://browser-use.com/install.sh | bash -s -- {install_flag}'
+		f'  curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- {install_flag}'
 	)
