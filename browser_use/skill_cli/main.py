@@ -869,7 +869,7 @@ def _handle_remote_run_with_wait(args: argparse.Namespace) -> int:
 	"""Handle remote run with --wait directly (prints task info immediately, then waits)."""
 	import asyncio
 
-	from browser_use.skill_cli.commands import cloud_task
+	from browser_use.skill_cli.commands import cloud_session, cloud_task
 
 	if not args.task:
 		print('Error: No task provided', file=sys.stderr)
@@ -894,7 +894,7 @@ def _handle_remote_run_with_wait(args: argparse.Namespace) -> int:
 
 		# Create session first if profile or proxy specified and no session_id
 		if (profile_id or proxy_country) and not session_id:
-			session = cloud_task.create_session(
+			session = cloud_session.create_session(
 				profile_id=profile_id,
 				proxy_country=proxy_country,
 				keep_alive=getattr(args, 'keep_alive', None),
@@ -1082,13 +1082,13 @@ def main() -> int:
 
 	# Handle task command - cloud task management
 	if args.command == 'task':
-		from browser_use.skill_cli.commands.task_management import handle_task_command
+		from browser_use.skill_cli.commands.cloud_task import handle_task_command
 
 		return handle_task_command(args)
 
 	# Handle session command - cloud session management
 	if args.command == 'session':
-		from browser_use.skill_cli.commands.session_management import handle_session_command
+		from browser_use.skill_cli.commands.cloud_session import handle_session_command
 
 		return handle_session_command(args)
 

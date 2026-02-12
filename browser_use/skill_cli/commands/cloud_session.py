@@ -1,16 +1,119 @@
-"""Session management command handlers for browser-use CLI.
+"""Cloud session SDK wrappers and CLI handlers.
 
-Handles: session list, session get, session stop, session create, session share
+This module provides:
+- SDK wrapper functions for the Browser-Use Cloud Session API
+- CLI command handlers for `browser-use session <command>`
 """
 
 import argparse
 import json
+import logging
 import sys
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from browser_use.skill_cli.api_key import APIKeyRequired, require_api_key
-from browser_use.skill_cli.commands import cloud_task
+from browser_use_sdk.types.session_item_view import SessionItemView
+from browser_use_sdk.types.session_view import SessionView
+from browser_use_sdk.types.share_view import ShareView
+
+from browser_use.skill_cli.commands.utils import format_duration, get_sdk_client
+
+logger = logging.getLogger(__name__)
+
+
+# ============ SDK Wrappers ============
+
+
+def create_session(**kwargs: Any) -> SessionItemView:
+	"""Create a cloud browser session.
+
+	Args:
+		profile_id: Cloud profile ID for persistent auth/cookies
+		proxy_country: Proxy country code (us, gb, de, etc.)
+		keep_alive: Keep session alive after task completes
+		persist_memory: Share memory between tasks in session
+		start_url: URL to navigate to when session starts
+		screen_width: Browser screen width in pixels
+		screen_height: Browser screen height in pixels
+
+	Returns:
+		SessionItemView with session details
+	"""
+	# Map our param names to SDK param names
+	param_map = {
+		'proxy_country': 'proxy_country_code',
+		'screen_width': 'browser_screen_width',
+		'screen_height': 'browser_screen_height',
+	}
+	params = {}
+	for k, v in kwargs.items():
+		if v is not None:
+			params[param_map.get(k, k)] = v
+
+	return get_sdk_client().sessions.create_session(**params)
+
+
+def list_sessions(limit: int = 10, status: str | None = None) -> list[SessionItemView]:
+	"""List cloud browser sessions."""
+	client = get_sdk_client()
+	response = client.sessions.list_sessions(
+		page_size=min(limit, 100),
+		filter_by=status,
+	)
+	return list(response.items) if response.items else []
+
+
+def get_session(session_id: str) -> SessionView:
+	"""Get details of a specific session."""
+	return get_sdk_client().sessions.get_session(session_id)
+
+
+def stop_session(session_id: str) -> SessionView:
+	"""Stop a cloud session."""
+	return get_sdk_client().sessions.update_session(session_id, action='stop')
+
+
+def delete_session(session_id: str) -> None:
+	"""Delete a cloud session and all its tasks."""
+	get_sdk_client().sessions.delete_session(session_id)
+
+
+def create_public_share(session_id: str) -> ShareView:
+	"""Create a public share URL for a session."""
+	return get_sdk_client().sessions.create_session_public_share(session_id)
+
+
+def delete_public_share(session_id: str) -> None:
+	"""Delete the public share for a session."""
+	get_sdk_client().sessions.delete_session_public_share(session_id)
+
+
+def stop_sessions_parallel(session_ids: list[str]) -> tuple[list[str], list[dict[str, Any]]]:
+	"""Stop multiple cloud sessions in parallel."""
+	client = get_sdk_client()
+	stopped: list[str] = []
+	errors: list[dict[str, Any]] = []
+
+	def stop_one(sid: str) -> tuple[str, str | None]:
+		try:
+			client.sessions.update_session(sid, action='stop')
+			return (sid, None)
+		except Exception as e:
+			return (sid, str(e))
+
+	with ThreadPoolExecutor(max_workers=10) as executor:
+		futures = {executor.submit(stop_one, sid): sid for sid in session_ids}
+		for future in as_completed(futures):
+			sid, error = future.result()
+			if error:
+				errors.append({'id': sid, 'error': error})
+			else:
+				stopped.append(sid)
+
+	return stopped, errors
+
+
+# ============ CLI Handlers ============
 
 
 def handle_session_command(args: argparse.Namespace) -> int:
@@ -24,6 +127,7 @@ def handle_session_command(args: argparse.Namespace) -> int:
 	Returns:
 		Exit code (0 for success, 1 for error)
 	"""
+	from browser_use.skill_cli.api_key import APIKeyRequired, require_api_key
 	from browser_use.skill_cli.install_config import is_mode_available
 
 	# Check if remote mode is available
@@ -59,32 +163,7 @@ def handle_session_command(args: argparse.Namespace) -> int:
 		return 1
 
 
-def _format_duration(started_at: datetime | None, finished_at: datetime | None) -> str:
-	"""Format duration between two timestamps, or elapsed time if still running."""
-	if not started_at:
-		return ''
-
-	try:
-		if finished_at:
-			end = finished_at
-		else:
-			end = datetime.now(timezone.utc)
-
-		delta = end - started_at
-		total_seconds = int(delta.total_seconds())
-
-		if total_seconds < 60:
-			return f'{total_seconds}s'
-		elif total_seconds < 3600:
-			minutes = total_seconds // 60
-			seconds = total_seconds % 60
-			return f'{minutes}m {seconds}s'
-		else:
-			hours = total_seconds // 3600
-			minutes = (total_seconds % 3600) // 60
-			return f'{hours}h {minutes}m'
-	except Exception:
-		return ''
+# ============ CLI Helper Functions ============
 
 
 def _session_to_dict(session: Any) -> dict[str, Any]:
@@ -106,7 +185,7 @@ def _handle_list(args: argparse.Namespace) -> int:
 	"""Handle 'session list' command."""
 	try:
 		status_filter = getattr(args, 'status', None)
-		sessions = cloud_task.list_sessions(limit=args.limit, status=status_filter)
+		sessions = list_sessions(limit=args.limit, status=status_filter)
 	except Exception as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1
@@ -140,7 +219,7 @@ def _handle_list(args: argparse.Namespace) -> int:
 				short_id = session_id[:8] + '...' if len(session_id) > 8 else session_id
 
 				# Build line with duration
-				duration = _format_duration(started_at, finished_at)
+				duration = format_duration(started_at, finished_at)
 				line = f'  {status_emoji} {short_id} [{status}]'
 				if duration:
 					line += f' {duration}'
@@ -156,7 +235,7 @@ def _handle_list(args: argparse.Namespace) -> int:
 def _handle_get(args: argparse.Namespace) -> int:
 	"""Handle 'session get <session_id>' command."""
 	try:
-		session = cloud_task.get_session(args.session_id)
+		session = get_session(args.session_id)
 	except Exception as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1
@@ -180,7 +259,7 @@ def _handle_get(args: argparse.Namespace) -> int:
 		}.get(status, '❓')
 
 		# Build header with duration
-		duration = _format_duration(started_at, finished_at)
+		duration = format_duration(started_at, finished_at)
 		header_parts = [f'{status_emoji} {session_id[:8]}... [{status}]']
 		if duration:
 			header_parts.append(duration)
@@ -210,7 +289,7 @@ def _handle_stop(args: argparse.Namespace) -> int:
 		return _handle_stop_all(args)
 
 	try:
-		cloud_task.stop_session(args.session_id)
+		stop_session(args.session_id)
 	except Exception as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1
@@ -227,7 +306,7 @@ def _handle_stop_all(args: argparse.Namespace) -> int:
 	"""Handle 'session stop --all' command."""
 	try:
 		# Get all active sessions
-		sessions = cloud_task.list_sessions(limit=100, status='active')
+		sessions = list_sessions(limit=100, status='active')
 	except Exception as e:
 		print(f'Error listing sessions: {e}', file=sys.stderr)
 		return 1
@@ -244,7 +323,7 @@ def _handle_stop_all(args: argparse.Namespace) -> int:
 		return 0
 
 	# Stop all sessions in parallel
-	stopped, errors = cloud_task.stop_sessions_parallel(session_ids)
+	stopped, errors = stop_sessions_parallel(session_ids)
 
 	if getattr(args, 'json', False):
 		print(json.dumps({'stopped': stopped, 'errors': errors}))
@@ -276,7 +355,7 @@ def _handle_create(args: argparse.Namespace) -> int:
 			return 1
 
 	try:
-		session = cloud_task.create_session(
+		session = create_session(
 			profile_id=getattr(args, 'profile', None),
 			proxy_country=getattr(args, 'proxy_country', None),
 			keep_alive=getattr(args, 'keep_alive', None),
@@ -306,7 +385,7 @@ def _handle_share(args: argparse.Namespace) -> int:
 	# Delete share if requested
 	if getattr(args, 'delete', False):
 		try:
-			cloud_task.delete_public_share(session_id)
+			delete_public_share(session_id)
 		except Exception as e:
 			print(f'Error: {e}', file=sys.stderr)
 			return 1
@@ -319,7 +398,7 @@ def _handle_share(args: argparse.Namespace) -> int:
 
 	# Create share
 	try:
-		share = cloud_task.create_public_share(session_id)
+		share = create_public_share(session_id)
 	except Exception as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1

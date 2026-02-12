@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
-from browser_use.skill_cli.sdk import get_sdk_client
+from browser_use.skill_cli.commands.utils import get_sdk_client
 
 logger = logging.getLogger(__name__)
 

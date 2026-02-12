@@ -78,7 +78,7 @@ async def _handle_cloud_task(params: dict[str, Any]) -> Any:
 
 	By default uses US proxy for all cloud tasks.
 	"""
-	from browser_use.skill_cli.commands import cloud_task
+	from browser_use.skill_cli.commands import cloud_session, cloud_task
 
 	task = params['task']
 
@@ -103,7 +103,7 @@ async def _handle_cloud_task(params: dict[str, Any]) -> Any:
 
 		# Create session first if profile or proxy specified and no session_id
 		if (profile_id or proxy_country) and not session_id:
-			session = cloud_task.create_session(
+			session = cloud_session.create_session(
 				profile_id=profile_id,
 				proxy_country=proxy_country,
 				keep_alive=params.get('keep_alive'),
