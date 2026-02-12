@@ -787,46 +787,6 @@ Setup:
 	return parser
 
 
-def cloud_api_request(method: str, endpoint: str, body: dict | None = None) -> dict:
-	"""Make authenticated request to Browser-Use Cloud API.
-
-	Returns dict with 'success', 'data' or 'error'.
-	"""
-	import urllib.error
-	import urllib.request
-
-	from browser_use.skill_cli.api_key import APIKeyRequired, require_api_key
-
-	try:
-		api_key = require_api_key('Cloud profiles')
-	except APIKeyRequired as e:
-		return {'success': False, 'error': str(e)}
-
-	url = f'https://api.browser-use.com/api/v2{endpoint}'
-	headers = {
-		'X-Browser-Use-API-Key': api_key,
-		'Content-Type': 'application/json',
-	}
-
-	data = json.dumps(body).encode() if body else None
-	req = urllib.request.Request(url, data=data, headers=headers, method=method)
-
-	try:
-		with urllib.request.urlopen(req) as resp:
-			if resp.status == 204:  # No content (e.g., delete)
-				return {'success': True, 'data': {}}
-			return {'success': True, 'data': json.loads(resp.read().decode())}
-	except urllib.error.HTTPError as e:
-		try:
-			error_body = json.loads(e.read().decode())
-			error_msg = error_body.get('detail', str(e))
-		except Exception:
-			error_msg = str(e)
-		return {'success': False, 'error': f'{e.code}: {error_msg}'}
-	except urllib.error.URLError as e:
-		return {'success': False, 'error': f'Connection error: {e.reason}'}
-
-
 def handle_server_command(args: argparse.Namespace) -> int:
 	"""Handle server subcommands."""
 	if args.server_command == 'status':

@@ -12,7 +12,18 @@ import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
+from browser_use_sdk import BrowserUse
+
 logger = logging.getLogger(__name__)
+
+
+def _get_sdk_client() -> BrowserUse:
+	"""Get authenticated SDK client for cloud profile operations."""
+	from browser_use.skill_cli.api_key import require_api_key
+
+	api_key = require_api_key('Cloud profiles')
+	return BrowserUse(api_key=api_key)
+
 
 ProfileMode = Literal['real', 'remote']
 
@@ -158,37 +169,36 @@ def _list_local_profiles(args: argparse.Namespace) -> int:
 
 def _list_cloud_profiles(args: argparse.Namespace) -> int:
 	"""List cloud profiles."""
-	from browser_use.skill_cli.api_key import APIKeyRequired, require_api_key
-
-	try:
-		require_api_key('Cloud profiles')
-	except APIKeyRequired as e:
-		print(f'Error: {e}', file=sys.stderr)
-		return 1
-
-	from browser_use.skill_cli.main import cloud_api_request
+	from browser_use.skill_cli.api_key import APIKeyRequired
 
 	page = getattr(args, 'page', 1)
 	page_size = getattr(args, 'page_size', 20)
 
-	endpoint = f'/profiles?pageNumber={page}&pageSize={page_size}'
-	result = cloud_api_request('GET', endpoint)
-
-	if not result['success']:
-		print(f'Error: {result["error"]}', file=sys.stderr)
+	try:
+		client = _get_sdk_client()
+		response = client.profiles.list_profiles(page_number=page, page_size=page_size)
+	except APIKeyRequired as e:
+		print(f'Error: {e}', file=sys.stderr)
+		return 1
+	except Exception as e:
+		print(f'Error: {e}', file=sys.stderr)
 		return 1
 
 	if getattr(args, 'json', False):
-		print(json.dumps(result['data']))
+		# Convert to dict for JSON output
+		data = {
+			'items': [{'id': p.id, 'name': p.name} for p in response.items],
+			'totalItems': response.total_items,
+			'pageNumber': response.page_number,
+			'pageSize': response.page_size,
+		}
+		print(json.dumps(data))
 	else:
-		items = result['data'].get('items', [])
-		total = result['data'].get('totalItems', len(items))
-		if items:
-			print(f'Cloud profiles ({len(items)}/{total}):')
-			for p in items:
-				name = p.get('name', 'Unnamed')
-				profile_id = p.get('id', 'unknown')
-				print(f'  {profile_id}: {name}')
+		if response.items:
+			print(f'Cloud profiles ({len(response.items)}/{response.total_items}):')
+			for p in response.items:
+				name = p.name or 'Unnamed'
+				print(f'  {p.id}: {name}')
 		else:
 			print('No cloud profiles found')
 
@@ -229,33 +239,34 @@ def _get_local_profile(args: argparse.Namespace) -> int:
 
 def _get_cloud_profile(args: argparse.Namespace) -> int:
 	"""Get cloud profile details."""
-	from browser_use.skill_cli.api_key import APIKeyRequired, require_api_key
+	from browser_use.skill_cli.api_key import APIKeyRequired
 
 	try:
-		require_api_key('Cloud profiles')
+		client = _get_sdk_client()
+		profile = client.profiles.get_profile(args.id)
 	except APIKeyRequired as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1
-
-	from browser_use.skill_cli.main import cloud_api_request
-
-	result = cloud_api_request('GET', f'/profiles/{args.id}')
-
-	if not result['success']:
-		print(f'Error: {result["error"]}', file=sys.stderr)
+	except Exception as e:
+		print(f'Error: {e}', file=sys.stderr)
 		return 1
 
-	data = result['data']
 	if getattr(args, 'json', False):
+		data = {
+			'id': profile.id,
+			'name': profile.name,
+			'createdAt': profile.created_at.isoformat() if profile.created_at else None,
+			'updatedAt': profile.updated_at.isoformat() if profile.updated_at else None,
+		}
 		print(json.dumps(data))
 	else:
-		print(f'Profile: {data["id"]}')
-		if data.get('name'):
-			print(f'  Name: {data["name"]}')
-		if data.get('createdAt'):
-			print(f'  Created: {data["createdAt"]}')
-		if data.get('updatedAt'):
-			print(f'  Updated: {data["updatedAt"]}')
+		print(f'Profile: {profile.id}')
+		if profile.name:
+			print(f'  Name: {profile.name}')
+		if profile.created_at:
+			print(f'  Created: {profile.created_at.isoformat()}')
+		if profile.updated_at:
+			print(f'  Updated: {profile.updated_at.isoformat()}')
 
 	return 0
 
@@ -277,31 +288,22 @@ def _handle_create(args: argparse.Namespace, mode: ProfileMode) -> int:
 
 def _create_cloud_profile(args: argparse.Namespace) -> int:
 	"""Create a cloud profile."""
-	from browser_use.skill_cli.api_key import APIKeyRequired, require_api_key
+	from browser_use.skill_cli.api_key import APIKeyRequired
 
 	try:
-		require_api_key('Cloud profiles')
+		client = _get_sdk_client()
+		profile = client.profiles.create_profile(name=args.name if args.name else None)
 	except APIKeyRequired as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1
-
-	from browser_use.skill_cli.main import cloud_api_request
-
-	body: dict[str, Any] = {}
-	if args.name:
-		body['name'] = args.name
-
-	result = cloud_api_request('POST', '/profiles', body)
-
-	if not result['success']:
-		print(f'Error: {result["error"]}', file=sys.stderr)
+	except Exception as e:
+		print(f'Error: {e}', file=sys.stderr)
 		return 1
 
-	data = result['data']
 	if getattr(args, 'json', False):
-		print(json.dumps(data))
+		print(json.dumps({'id': profile.id, 'name': profile.name}))
 	else:
-		print(f'Created profile: {data["id"]}')
+		print(f'Created profile: {profile.id}')
 
 	return 0
 
@@ -323,28 +325,22 @@ def _handle_update(args: argparse.Namespace, mode: ProfileMode) -> int:
 
 def _update_cloud_profile(args: argparse.Namespace) -> int:
 	"""Update a cloud profile."""
-	from browser_use.skill_cli.api_key import APIKeyRequired, require_api_key
+	from browser_use.skill_cli.api_key import APIKeyRequired
 
 	try:
-		require_api_key('Cloud profiles')
+		client = _get_sdk_client()
+		profile = client.profiles.update_profile(args.id, name=args.name)
 	except APIKeyRequired as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1
-
-	from browser_use.skill_cli.main import cloud_api_request
-
-	body = {'name': args.name}
-	result = cloud_api_request('PATCH', f'/profiles/{args.id}', body)
-
-	if not result['success']:
-		print(f'Error: {result["error"]}', file=sys.stderr)
+	except Exception as e:
+		print(f'Error: {e}', file=sys.stderr)
 		return 1
 
-	data = result['data']
 	if getattr(args, 'json', False):
-		print(json.dumps(data))
+		print(json.dumps({'id': profile.id, 'name': profile.name}))
 	else:
-		print(f'Updated profile: {data["id"]}')
+		print(f'Updated profile: {profile.id}')
 
 	return 0
 
@@ -366,20 +362,16 @@ def _handle_delete(args: argparse.Namespace, mode: ProfileMode) -> int:
 
 def _delete_cloud_profile(args: argparse.Namespace) -> int:
 	"""Delete a cloud profile."""
-	from browser_use.skill_cli.api_key import APIKeyRequired, require_api_key
+	from browser_use.skill_cli.api_key import APIKeyRequired
 
 	try:
-		require_api_key('Cloud profiles')
+		client = _get_sdk_client()
+		client.profiles.delete_browser_profile(args.id)
 	except APIKeyRequired as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1
-
-	from browser_use.skill_cli.main import cloud_api_request
-
-	result = cloud_api_request('DELETE', f'/profiles/{args.id}')
-
-	if not result['success']:
-		print(f'Error: {result["error"]}', file=sys.stderr)
+	except Exception as e:
+		print(f'Error: {e}', file=sys.stderr)
 		return 1
 
 	if getattr(args, 'json', False):
@@ -485,13 +477,16 @@ def _handle_sync(args: argparse.Namespace) -> int:
 	"""Handle 'profile sync' command - sync local profile to cloud."""
 	import asyncio
 
-	from browser_use.skill_cli.api_key import APIKeyRequired, require_api_key
+	from browser_use.skill_cli.api_key import APIKeyRequired
 	from browser_use.skill_cli.sessions import create_browser_session
 
-	# Require API key for cloud upload
+	# Get SDK client (validates API key)
 	try:
-		require_api_key('Profile sync')
+		client = _get_sdk_client()
 	except APIKeyRequired as e:
+		print(f'Error: {e}', file=sys.stderr)
+		return 1
+	except Exception as e:
 		print(f'Error: {e}', file=sys.stderr)
 		return 1
 
@@ -554,20 +549,19 @@ def _handle_sync(args: argparse.Namespace) -> int:
 
 	# Step 1: Create cloud profile
 	log('  Creating cloud profile...')
-	from browser_use.skill_cli.main import cloud_api_request
-
-	result = cloud_api_request('POST', '/profiles', {'name': cloud_name})
-	if not result['success']:
-		print(f'Error creating cloud profile: {result["error"]}', file=sys.stderr)
+	try:
+		cloud_profile = client.profiles.create_profile(name=cloud_name)
+		cloud_profile_id = cloud_profile.id
+	except Exception as e:
+		print(f'Error creating cloud profile: {e}', file=sys.stderr)
 		return 1
 
-	cloud_profile_id = result['data']['id']
 	log(f'  ✓ Created: {cloud_profile_id}')
 
 	def cleanup_cloud_profile() -> None:
 		"""Delete the cloud profile on failure."""
 		try:
-			cloud_api_request('DELETE', f'/profiles/{cloud_profile_id}')
+			client.profiles.delete_browser_profile(cloud_profile_id)
 		except Exception:
 			pass
 
