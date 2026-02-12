@@ -116,6 +116,7 @@ browser-use open <url>              # Navigate to URL
 browser-use back                    # Go back in history
 browser-use scroll down             # Scroll down
 browser-use scroll up               # Scroll up
+browser-use scroll down --amount 1000  # Scroll by specific pixels (default: 500)
 ```
 
 ### Page State
@@ -142,12 +143,14 @@ browser-use rightclick <index>      # Right-click
 ### JavaScript & Data
 ```bash
 browser-use eval "document.title"   # Execute JavaScript
+browser-use extract "all prices"    # Extract data using LLM
 browser-use get title               # Get page title
 browser-use get html                # Get page HTML
 browser-use get html --selector "h1"  # Scoped HTML
 browser-use get text <index>        # Get element text
 browser-use get value <index>       # Get input value
 browser-use get attributes <index>  # Get element attributes
+browser-use get bbox <index>        # Get bounding box (x, y, width, height)
 ```
 
 ### Wait Conditions
@@ -161,8 +164,13 @@ browser-use wait selector "#btn" --timeout 5000        # Custom timeout (ms)
 ### Cookies
 ```bash
 browser-use cookies get             # Get all cookies
+browser-use cookies get --url <url> # Get cookies for specific URL
 browser-use cookies set <name> <val>  # Set a cookie
+browser-use cookies set name val --domain .example.com --secure  # With options
+browser-use cookies set name val --same-site Strict  # SameSite: Strict, Lax, None
+browser-use cookies set name val --expires 1735689600  # Expiration timestamp
 browser-use cookies clear           # Clear all cookies
+browser-use cookies clear --url <url>  # Clear cookies for specific URL
 browser-use cookies export <file>   # Export to JSON
 browser-use cookies import <file>   # Import from JSON
 ```
@@ -173,6 +181,31 @@ browser-use switch <tab>            # Switch tab by index
 browser-use close-tab               # Close current tab
 browser-use close-tab <tab>         # Close specific tab
 ```
+
+### Python Execution (Persistent Session)
+```bash
+browser-use python "x = 42"           # Set variable
+browser-use python "print(x)"         # Access variable (prints: 42)
+browser-use python "print(browser.url)"  # Access browser object
+browser-use python --vars             # Show defined variables
+browser-use python --reset            # Clear namespace
+browser-use python --file script.py   # Run Python file
+```
+
+The Python session maintains state across commands. The `browser` object provides:
+- `browser.url` - Current page URL
+- `browser.title` - Page title
+- `browser.html` - Get page HTML
+- `browser.goto(url)` - Navigate
+- `browser.click(index)` - Click element
+- `browser.type(text)` - Type text
+- `browser.input(index, text)` - Click element, then type
+- `browser.keys(keys)` - Send keyboard keys
+- `browser.screenshot(path)` - Take screenshot
+- `browser.scroll(direction, amount)` - Scroll page
+- `browser.back()` - Go back in history
+- `browser.wait(seconds)` - Sleep/pause execution
+- `browser.extract(query)` - Extract data using LLM
 
 ### Agent Tasks
 ```bash
@@ -195,6 +228,7 @@ browser-use run "task 2" --session-id abc-123
 
 # Execution modes
 browser-use run "task" --no-wait     # Async, returns task_id immediately
+browser-use run "task" --wait        # Wait for completion
 browser-use run "task" --stream      # Stream status updates
 browser-use run "task" --flash       # Fast execution mode
 
@@ -205,6 +239,18 @@ browser-use run "task" --no-vision   # Disable vision
 
 # Use cloud profile (preserves cookies across sessions)
 browser-use run "task" --profile <cloud-profile-id>
+
+# Task configuration
+browser-use run "task" --start-url https://example.com  # Start from specific URL
+browser-use run "task" --allowed-domain example.com     # Restrict navigation (repeatable)
+browser-use run "task" --metadata key=value             # Task metadata (repeatable)
+browser-use run "task" --secret API_KEY=xxx             # Task secrets (repeatable)
+browser-use run "task" --skill-id skill-123             # Enable skills (repeatable)
+
+# Structured output and evaluation
+browser-use run "task" --structured-output '{"type":"object"}'  # JSON schema for output
+browser-use run "task" --judge                          # Enable judge mode
+browser-use run "task" --judge-ground-truth "answer"    # Expected answer for judge
 ```
 
 ### Task Management
@@ -216,9 +262,15 @@ browser-use task list                     # List recent tasks
 browser-use task list --limit 20          # Show more tasks
 browser-use task list --status running    # Filter by status
 browser-use task list --status finished
+browser-use task list --session <id>      # Filter by session ID
 browser-use task list --json              # JSON output
 
-browser-use task status <task-id>         # Get task status and output
+browser-use task status <task-id>         # Get task status (latest step only)
+browser-use task status <task-id> -c      # Compact: all steps with reasoning
+browser-use task status <task-id> -v      # Verbose: full details with URLs + actions
+browser-use task status <task-id> --last 5   # Show only last 5 steps
+browser-use task status <task-id> --step 3   # Show specific step number
+browser-use task status <task-id> --reverse  # Show steps newest first
 browser-use task status <task-id> --json
 
 browser-use task stop <task-id>           # Stop a running task
@@ -236,11 +288,59 @@ browser-use session list --limit 20       # Show more sessions
 browser-use session list --status active  # Filter by status
 browser-use session list --json           # JSON output
 
-browser-use session get <session-id>      # Get session details
+browser-use session get <session-id>      # Get session details + live URL
 browser-use session get <session-id> --json
 
 browser-use session stop <session-id>     # Stop a session
 browser-use session stop --all            # Stop all active sessions
+
+# Create a new cloud session manually
+browser-use session create                          # Create with defaults
+browser-use session create --profile <id>           # With cloud profile
+browser-use session create --proxy-country gb       # With geographic proxy
+browser-use session create --start-url https://example.com  # Start at URL
+browser-use session create --screen-size 1920x1080  # Custom screen size
+browser-use session create --keep-alive             # Keep session alive
+browser-use session create --persist-memory         # Persist memory between tasks
+
+# Share session publicly (for collaboration/debugging)
+browser-use session share <session-id>    # Create public share URL
+browser-use session share <session-id> --delete  # Delete public share
+```
+
+### Cloud Profile Management
+
+Cloud profiles store browser state (cookies) persistently across sessions. Use profiles to maintain login sessions.
+
+```bash
+browser-use profile list                  # List cloud profiles
+browser-use profile list --page 2 --page-size 50  # Pagination
+browser-use profile get <id>              # Get profile details
+browser-use profile create                # Create new profile
+browser-use profile create --name "My Profile"  # Create with name
+browser-use profile update <id> --name "New Name"  # Rename profile
+browser-use profile delete <id>           # Delete profile
+```
+
+**Using profiles:**
+```bash
+# Run task with profile (preserves cookies)
+browser-use run "Log into site" --profile <profile-id> --keep-alive
+
+# Create session with profile
+browser-use session create --profile <profile-id>
+
+# Open URL with profile
+browser-use open https://example.com --profile <profile-id>
+```
+
+**Import cookies to cloud profile:**
+```bash
+# Export cookies from current session
+browser-use cookies export /tmp/cookies.json
+
+# Import to cloud profile
+browser-use cookies import /tmp/cookies.json --profile <profile-id>
 ```
 
 ## Running Subagents
