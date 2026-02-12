@@ -388,7 +388,7 @@ winget install Python.Python.3.11 --architecture x64
 ### Multiple Python versions
 Set the version explicitly:
 ```powershell
-set PY_PYTHON=3.11
+$env:PY_PYTHON=3.11
 ```
 
 ### PATH not working after install
