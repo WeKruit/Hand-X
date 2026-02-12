@@ -5,11 +5,11 @@ on:
     branches:
       - main
     paths:
-      - 'install.sh'
+      - 'browser_use/skill_cli/install.sh'
       - '.github/workflows/install-script.yml'
   pull_request:
     paths:
-      - 'install.sh'
+      - 'browser_use/skill_cli/install.sh'
       - '.github/workflows/install-script.yml'
   workflow_dispatch:
 
@@ -46,7 +46,7 @@ jobs:
           python-version: '3.11'
 
       - name: Run install.sh ${{ matrix.mode }}
-        run: bash install.sh ${{ matrix.mode }}
+        run: bash browser_use/skill_cli/install.sh ${{ matrix.mode }}
 
       - name: Add to PATH
         run: |
@@ -116,7 +116,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run install.sh ${{ matrix.mode }}
-        run: bash install.sh ${{ matrix.mode }}
+        run: bash browser_use/skill_cli/install.sh ${{ matrix.mode }}
 
       - name: Add to PATH
         run: |
@@ -193,7 +193,7 @@ jobs:
           python-version: '3.11'
 
       - name: Run install.sh ${{ matrix.mode }}
-        run: bash install.sh ${{ matrix.mode }}
+        run: bash browser_use/skill_cli/install.sh ${{ matrix.mode }}
 
       - name: Add to PATH
         run: |
