@@ -485,18 +485,15 @@ install_browser_use() {
 	# Activate venv and install
 	activate_venv
 
-	# Install from GitHub branch (for testing) or PyPI (production)
-	if [ -n "$BROWSER_USE_BRANCH" ]; then
-		BROWSER_USE_REPO="${BROWSER_USE_REPO:-browser-use/browser-use}"
-		log_info "Installing from GitHub: $BROWSER_USE_REPO@$BROWSER_USE_BRANCH"
-		# Clone and install locally to ensure all dependencies are resolved
-		local tmp_dir=$(mktemp -d)
-		git clone --depth 1 --branch "$BROWSER_USE_BRANCH" "https://github.com/$BROWSER_USE_REPO.git" "$tmp_dir"
-		uv pip install "$tmp_dir"
-		rm -rf "$tmp_dir"
-	else
-		uv pip install browser-use
-	fi
+	# Install from GitHub (main branch by default, or custom branch for testing)
+	BROWSER_USE_BRANCH="${BROWSER_USE_BRANCH:-main}"
+	BROWSER_USE_REPO="${BROWSER_USE_REPO:-browser-use/browser-use}"
+	log_info "Installing from GitHub: $BROWSER_USE_REPO@$BROWSER_USE_BRANCH"
+	# Clone and install locally to ensure all dependencies are resolved
+	local tmp_dir=$(mktemp -d)
+	git clone --depth 1 --branch "$BROWSER_USE_BRANCH" "https://github.com/$BROWSER_USE_REPO.git" "$tmp_dir"
+	uv pip install "$tmp_dir"
+	rm -rf "$tmp_dir"
 
 	log_success "browser-use installed"
 }
