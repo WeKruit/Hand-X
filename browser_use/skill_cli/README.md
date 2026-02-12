@@ -16,20 +16,20 @@ Fast, persistent browser automation from the command line.
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://browser-use.com/install.sh | bash
+curl -fsSL https://browser-use.com/cli/install.sh | bash
 ```
 
 **Windows** (run in PowerShell):
 ```powershell
-& "C:\Program Files\Git\bin\bash.exe" -c 'curl -fsSL https://browser-use.com/install.sh | bash'
+& "C:\Program Files\Git\bin\bash.exe" -c 'curl -fsSL https://browser-use.com/cli/install.sh | bash'
 ```
 
 ### Installation Modes
 ```bash
-curl -fsSL https://browser-use.com/install.sh | bash -s -- --full        # All modes
-curl -fsSL https://browser-use.com/install.sh | bash -s -- --local-only  # Local browser only
-curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only # Cloud browser only
-curl -fsSL https://browser-use.com/install.sh | bash -s -- --api-key bu_xxx  # With API key
+curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --full        # All modes
+curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --local-only  # Local browser only
+curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --remote-only # Cloud browser only
+curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --api-key bu_xxx  # With API key
 ```
 
 ### Post-Install

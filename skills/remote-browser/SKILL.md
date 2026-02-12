@@ -12,7 +12,7 @@ This skill is for agents running on **sandboxed remote machines** (cloud VMs, CI
 
 **Remote-only install (recommended for sandboxed agents)**
 ```bash
-curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only
+curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --remote-only
 ```
 
 This configures browser-use to only use cloud browsers:
@@ -20,7 +20,7 @@ This configures browser-use to only use cloud browsers:
 - `browser-use open <url>` automatically uses remote mode (no `--browser` flag needed)
 - If API key is available, you can also pass it during install:
   ```bash
-  curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only --api-key bu_xxx
+  curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --remote-only --api-key bu_xxx
   ```
 
 **Manual install (alternative)**

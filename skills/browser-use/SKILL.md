@@ -25,16 +25,16 @@ browser-use install
 
 **One-line install (recommended)**
 ```bash
-curl -fsSL https://browser-use.com/install.sh | bash
+curl -fsSL https://browser-use.com/cli/install.sh | bash
 ```
 
 This interactive installer lets you choose your installation mode and configures everything automatically.
 
 **Installation modes:**
 ```bash
-curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only  # Cloud browser only
-curl -fsSL https://browser-use.com/install.sh | bash -s -- --local-only   # Local browser only
-curl -fsSL https://browser-use.com/install.sh | bash -s -- --full         # All modes
+curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --remote-only  # Cloud browser only
+curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --local-only   # Local browser only
+curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --full         # All modes
 ```
 
 | Install Mode | Available Browsers | Default | Use Case |
@@ -47,7 +47,7 @@ When only one mode is installed, it becomes the default and no `--browser` flag 
 
 **Pass API key during install:**
 ```bash
-curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only --api-key bu_xxx
+curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --remote-only --api-key bu_xxx
 ```
 
 **Verify installation:**

@@ -3,15 +3,15 @@
 #
 # Usage:
 #   # Interactive install (shows mode selection TUI)
-#   curl -fsSL https://browser-use.com/install.sh | bash
+#   curl -fsSL https://browser-use.com/cli/install.sh | bash
 #
 #   # Non-interactive install with flags
-#   curl -fsSL https://browser-use.com/install.sh | bash -s -- --full
-#   curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only
-#   curl -fsSL https://browser-use.com/install.sh | bash -s -- --local-only
+#   curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --full
+#   curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --remote-only
+#   curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --local-only
 #
 #   # With API key
-#   curl -fsSL https://browser-use.com/install.sh | bash -s -- --remote-only --api-key bu_xxx
+#   curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --remote-only --api-key bu_xxx
 #
 # For development testing:
 #   curl -fsSL <raw-url> | BROWSER_USE_BRANCH=<branch-name> bash
@@ -24,7 +24,7 @@
 #   winget install Git.Git
 #
 # Then run from PowerShell:
-#   & "C:\Program Files\Git\bin\bash.exe" -c 'curl -fsSL https://browser-use.com/install.sh | bash -s -- --full'
+#   & "C:\Program Files\Git\bin\bash.exe" -c 'curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --full'
 #
 # KNOWN ISSUES AND SOLUTIONS:
 #
