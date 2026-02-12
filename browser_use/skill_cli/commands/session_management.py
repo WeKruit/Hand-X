@@ -272,7 +272,7 @@ def _handle_create(args: argparse.Namespace) -> int:
 			screen_width = int(w)
 			screen_height = int(h)
 		except ValueError:
-			print(f'Error: Invalid screen size format. Use WxH (e.g., 1920x1080)', file=sys.stderr)
+			print('Error: Invalid screen size format. Use WxH (e.g., 1920x1080)', file=sys.stderr)
 			return 1
 
 	try:
@@ -325,12 +325,16 @@ def _handle_share(args: argparse.Namespace) -> int:
 		return 1
 
 	if getattr(args, 'json', False):
-		print(json.dumps({
-			'sessionId': session_id,
-			'url': share.share_url,
-			'shareToken': share.share_token,
-			'viewCount': share.view_count,
-		}))
+		print(
+			json.dumps(
+				{
+					'sessionId': session_id,
+					'url': share.share_url,
+					'shareToken': share.share_token,
+					'viewCount': share.view_count,
+				}
+			)
+		)
 	else:
 		print(f'Public share created for session: {session_id}')
 		if share.share_url:

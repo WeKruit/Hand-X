@@ -654,7 +654,12 @@ Setup:
 		p.add_argument('--start-url', help=f'{remote_hint}URL to start the task from')
 		p.add_argument('--metadata', action='append', metavar='KEY=VALUE', help=f'{remote_hint}Task metadata (can repeat)')
 		p.add_argument('--secret', action='append', metavar='KEY=VALUE', help=f'{remote_hint}Task secrets (can repeat)')
-		p.add_argument('--allowed-domain', action='append', metavar='DOMAIN', help=f'{remote_hint}Restrict navigation to domains (can repeat)')
+		p.add_argument(
+			'--allowed-domain',
+			action='append',
+			metavar='DOMAIN',
+			help=f'{remote_hint}Restrict navigation to domains (can repeat)',
+		)
 		p.add_argument('--skill-id', action='append', metavar='ID', help=f'{remote_hint}Enable skill IDs (can repeat)')
 		p.add_argument('--structured-output', metavar='SCHEMA', help=f'{remote_hint}JSON schema for structured output')
 		p.add_argument('--judge', action='store_true', help=f'{remote_hint}Enable judge mode')
