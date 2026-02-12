@@ -67,7 +67,8 @@ async def handle(session: SessionInfo, params: dict[str, Any]) -> Any:
 				return {
 					'success': False,
 					'error': f'Cloud-only flags require remote mode: {flags_str}\n'
-					f'Remote mode is not installed. Reinstall with --full to enable:\n'
+					f'Remote mode is not installed. Reinstall to enable:\n'
+					f'  curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --remote-only\n'
 					f'  curl -fsSL https://browser-use.com/cli/install.sh | bash -s -- --full',
 				}
 		return await _handle_local_task(session, params)
