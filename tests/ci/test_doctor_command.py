@@ -1,7 +1,5 @@
 """Tests for doctor command."""
 
-import os
-
 import pytest
 
 from browser_use.skill_cli.commands import doctor
