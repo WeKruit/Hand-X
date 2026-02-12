@@ -28,10 +28,9 @@
 #
 # KNOWN ISSUES AND SOLUTIONS:
 #
-# 1. Python 3.14+ not supported
-#    - Python 3.14 has breaking asyncio changes that cause RuntimeError
-#    - Solution: Install Python 3.11, 3.12, or 3.13
-#    - If you have 3.14 installed, uninstall it or install 3.13 alongside:
+# 1. Python 3.14+ not yet tested
+#    - If you encounter asyncio/runtime issues on 3.14, use Python 3.11, 3.12, or 3.13
+#    - You can install 3.13 alongside an existing 3.14:
 #      winget install Python.Python.3.13
 #
 # 2. ARM64 Windows (Surface Pro X, Snapdragon laptops)
