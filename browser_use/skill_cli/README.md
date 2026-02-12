@@ -49,7 +49,7 @@ If you prefer not to use the one-line installer:
 
 ```bash
 # 1. Install the package
-pip install browser-use
+uv pip install browser-use
 
 # 2. Install Chromium (for local browser mode)
 browser-use install
