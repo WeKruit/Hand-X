@@ -13,6 +13,17 @@ if TYPE_CHECKING:
 	from browser_use.filesystem.file_system import FileSystem
 
 
+def _is_anthropic_4_5_model(model_name: str | None) -> bool:
+	"""Check if the model is Claude Opus 4.5 or Haiku 4.5 (requires 4096+ token prompts for caching)."""
+	if not model_name:
+		return False
+	model_lower = model_name.lower()
+	# Check for Opus 4.5 or Haiku 4.5 variants
+	is_opus_4_5 = 'opus' in model_lower and ('4.5' in model_lower or '4-5' in model_lower)
+	is_haiku_4_5 = 'haiku' in model_lower and ('4.5' in model_lower or '4-5' in model_lower)
+	return is_opus_4_5 or is_haiku_4_5
+
+
 class SystemPrompt:
 	def __init__(
 		self,
@@ -22,11 +33,17 @@ class SystemPrompt:
 		use_thinking: bool = True,
 		flash_mode: bool = False,
 		is_anthropic: bool = False,
+		is_browser_use_model: bool = False,
+		model_name: str | None = None,
 	):
 		self.max_actions_per_step = max_actions_per_step
 		self.use_thinking = use_thinking
 		self.flash_mode = flash_mode
 		self.is_anthropic = is_anthropic
+		self.is_browser_use_model = is_browser_use_model
+		self.model_name = model_name
+		# Check if this is an Anthropic 4.5 model that needs longer prompts for caching
+		self.is_anthropic_4_5 = _is_anthropic_4_5_model(model_name)
 		prompt = ''
 		if override_system_message is not None:
 			prompt = override_system_message
@@ -42,8 +59,19 @@ class SystemPrompt:
 	def _load_prompt_template(self) -> None:
 		"""Load the prompt template from the markdown file."""
 		try:
-			# Choose the appropriate template based on flash_mode, use_thinking, and is_anthropic
-			if self.flash_mode and self.is_anthropic:
+			# Choose the appropriate template based on model type and mode
+			# Browser-use models use simplified prompts optimized for fine-tuned models
+			if self.is_browser_use_model:
+				if self.flash_mode:
+					template_filename = 'system_prompt_browser_use_flash.md'
+				elif self.use_thinking:
+					template_filename = 'system_prompt_browser_use.md'
+				else:
+					template_filename = 'system_prompt_browser_use_no_thinking.md'
+			# Anthropic 4.5 models (Opus 4.5, Haiku 4.5) need 4096+ token prompts for caching
+			elif self.is_anthropic_4_5 and self.flash_mode:
+				template_filename = 'system_prompt_anthropic_flash.md'
+			elif self.flash_mode and self.is_anthropic:
 				template_filename = 'system_prompt_flash_anthropic.md'
 			elif self.flash_mode:
 				template_filename = 'system_prompt_flash.md'
@@ -53,7 +81,11 @@ class SystemPrompt:
 				template_filename = 'system_prompt_no_thinking.md'
 
 			# This works both in development and when installed as a package
-			with importlib.resources.files('browser_use.agent').joinpath(template_filename).open('r', encoding='utf-8') as f:
+			with (
+				importlib.resources.files('browser_use.agent.system_prompts')
+				.joinpath(template_filename)
+				.open('r', encoding='utf-8') as f
+			):
 				self.prompt_template = f.read()
 		except Exception as e:
 			raise RuntimeError(f'Failed to load system prompt template: {e}')
@@ -90,6 +122,8 @@ class AgentMessagePrompt:
 		sample_images: list[ContentPartTextParam | ContentPartImageParam] | None = None,
 		read_state_images: list[dict] | None = None,
 		llm_screenshot_size: tuple[int, int] | None = None,
+		unavailable_skills_info: str | None = None,
+		plan_description: str | None = None,
 	):
 		self.browser_state: 'BrowserStateSummary' = browser_state_summary
 		self.file_system: 'FileSystem | None' = file_system
@@ -107,6 +141,8 @@ class AgentMessagePrompt:
 		self.include_recent_events = include_recent_events
 		self.sample_images = sample_images or []
 		self.read_state_images = read_state_images or []
+		self.unavailable_skills_info: str | None = unavailable_skills_info
+		self.plan_description: str | None = plan_description
 		self.llm_screenshot_size = llm_screenshot_size
 		assert self.browser_state
 
@@ -184,12 +220,12 @@ class AgentMessagePrompt:
 		# Extract page statistics first
 		page_stats = self._extract_page_statistics()
 
-		# Format statistics for LLM
+		# Format statistics
 		stats_text = '<page_stats>'
 		if page_stats['total_elements'] < 10:
 			stats_text += 'Page appears empty (SPA not loaded?) - '
 		stats_text += f'{page_stats["links"]} links, {page_stats["interactive_elements"]} interactive, '
-		stats_text += f'{page_stats["iframes"]} iframes, {page_stats["scroll_containers"]} scroll containers'
+		stats_text += f'{page_stats["iframes"]} iframes'
 		if page_stats['shadow_open'] > 0 or page_stats['shadow_closed'] > 0:
 			stats_text += f', {page_stats["shadow_open"]} shadow(open), {page_stats["shadow_closed"]} shadow(closed)'
 		if page_stats['images'] > 0:
@@ -219,25 +255,15 @@ class AgentMessagePrompt:
 			total_pages = pi.page_height / pi.viewport_height if pi.viewport_height > 0 else 0
 			current_page_position = pi.scroll_y / max(pi.page_height - pi.viewport_height, 1)
 			page_info_text = '<page_info>'
-			page_info_text += f'{pages_above:.1f} pages above, '
-			page_info_text += f'{pages_below:.1f} pages below, '
-			page_info_text += f'{total_pages:.1f} total pages'
+			page_info_text += f'{pages_above:.1f} above, '
+			page_info_text += f'{pages_below:.1f} below '
+
 			page_info_text += '</page_info>\n'
 			# , at {current_page_position:.0%} of page
 		if elements_text != '':
-			if has_content_above:
-				if self.browser_state.page_info:
-					pi = self.browser_state.page_info
-					pages_above = pi.pixels_above / pi.viewport_height if pi.viewport_height > 0 else 0
-					elements_text = f'... {pages_above:.1f} pages above ...\n{elements_text}'
-			else:
+			if not has_content_above:
 				elements_text = f'[Start of page]\n{elements_text}'
-			if has_content_below:
-				if self.browser_state.page_info:
-					pi = self.browser_state.page_info
-					pages_below = pi.pixels_below / pi.viewport_height if pi.viewport_height > 0 else 0
-					elements_text = f'{elements_text}\n... {pages_below:.1f} pages below ...'
-			else:
+			if not has_content_below:
 				elements_text = f'{elements_text}\n[End of page]'
 		else:
 			elements_text = 'empty page'
@@ -315,6 +341,9 @@ Available tabs:
 {_todo_contents}
 </todo_contents>
 """
+		if self.plan_description:
+			agent_state += f'<plan>\n{self.plan_description}\n</plan>\n'
+
 		if self.sensitive_data:
 			agent_state += f'<sensitive_data>{self.sensitive_data}</sensitive_data>\n'
 
@@ -381,6 +410,10 @@ Available tabs:
 			state_description += '<page_specific_actions>\n'
 			state_description += self.page_filtered_actions + '\n'
 			state_description += '</page_specific_actions>\n'
+
+		# Add unavailable skills information if any
+		if self.unavailable_skills_info:
+			state_description += '\n' + self.unavailable_skills_info + '\n'
 
 		# Sanitize surrogates from all text content
 		state_description = sanitize_surrogates(state_description)
@@ -498,3 +531,50 @@ def get_rerun_summary_message(prompt: str, screenshot_b64: str | None = None) ->
 	else:
 		# Without screenshot: use simple string content
 		return UserMessage(content=prompt)
+
+
+def get_ai_step_system_prompt() -> str:
+	"""
+	Get system prompt for AI step action used during rerun.
+
+	Returns:
+		System prompt string for AI step
+	"""
+	return """
+You are an expert at extracting data from webpages.
+
+<input>
+You will be given:
+1. A query describing what to extract
+2. The markdown of the webpage (filtered to remove noise)
+3. Optionally, a screenshot of the current page state
+</input>
+
+<instructions>
+- Extract information from the webpage that is relevant to the query
+- ONLY use the information available in the webpage - do not make up information
+- If the information is not available, mention that clearly
+- If the query asks for all items, list all of them
+</instructions>
+
+<output>
+- Present ALL relevant information in a concise way
+- Do not use conversational format - directly output the relevant information
+- If information is unavailable, state that clearly
+</output>
+""".strip()
+
+
+def get_ai_step_user_prompt(query: str, stats_summary: str, content: str) -> str:
+	"""
+	Build user prompt for AI step action.
+
+	Args:
+		query: What to extract or analyze
+		stats_summary: Content statistics summary
+		content: Page markdown content
+
+	Returns:
+		Formatted prompt string
+	"""
+	return f'<query>\n{query}\n</query>\n\n<content_stats>\n{stats_summary}\n</content_stats>\n\n<webpage_content>\n{content}\n</webpage_content>'

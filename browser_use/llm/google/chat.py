@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar, overload
@@ -31,6 +32,8 @@ VerifiedGeminiModels = Literal[
 	'gemini-flash-latest',
 	'gemini-flash-lite-latest',
 	'gemini-2.5-pro',
+	'gemini-3-pro-preview',
+	'gemini-3-flash-preview',
 	'gemma-3-27b-it',
 	'gemma-3-4b',
 	'gemma-3-12b',
@@ -60,9 +63,10 @@ class ChatGoogle(BaseChatModel):
 		http_options: HTTP options for the client
 		include_system_in_user: If True, system messages are included in the first user message
 		supports_structured_output: If True, uses native JSON mode; if False, uses prompt-based fallback
-		max_retries: Number of retries for retryable errors (default: 3)
-		retryable_status_codes: List of HTTP status codes to retry on (default: [403,  503])
-		retry_delay: Delay in seconds between retries (default: 0.01)
+		max_retries: Number of retries for retryable errors (default: 5)
+		retryable_status_codes: List of HTTP status codes to retry on (default: [429, 500, 502, 503, 504])
+		retry_base_delay: Base delay in seconds for exponential backoff (default: 1.0)
+		retry_max_delay: Maximum delay in seconds between retries (default: 60.0)
 
 	Example:
 		from google.genai import types
@@ -73,8 +77,9 @@ class ChatGoogle(BaseChatModel):
 				'tools': [types.Tool(code_execution=types.ToolCodeExecution())]
 			},
 			max_retries=5,
-			retryable_status_codes=[403, 503],
-			retry_delay=0.02
+			retryable_status_codes=[429, 500, 502, 503, 504],
+			retry_base_delay=1.0,
+			retry_max_delay=60.0,
 		)
 	"""
 
@@ -83,14 +88,18 @@ class ChatGoogle(BaseChatModel):
 	temperature: float | None = 0.5
 	top_p: float | None = None
 	seed: int | None = None
-	thinking_budget: int | None = None  # for gemini-2.5 flash and flash-lite models, default will be set to 0
+	thinking_budget: int | None = None  # for Gemini 2.5: -1 for dynamic (default), 0 disables, or token count
+	thinking_level: Literal['minimal', 'low', 'medium', 'high'] | None = (
+		None  # for Gemini 3: Pro supports low/high, Flash supports all levels
+	)
 	max_output_tokens: int | None = 8096
 	config: types.GenerateContentConfigDict | None = None
 	include_system_in_user: bool = False
 	supports_structured_output: bool = True  # New flag
-	max_retries: int = 3  # Number of retries for retryable errors
-	retryable_status_codes: list[int] = field(default_factory=lambda: [403, 503])  # Status codes to retry on
-	retry_delay: float = 0.01  # Delay in seconds between retries
+	max_retries: int = 5  # Number of retries for retryable errors
+	retryable_status_codes: list[int] = field(default_factory=lambda: [429, 500, 502, 503, 504])  # Status codes to retry on
+	retry_base_delay: float = 1.0  # Base delay in seconds for exponential backoff
+	retry_max_delay: float = 60.0  # Maximum delay in seconds between retries
 
 	# Client initialization parameters
 	api_key: str | None = None
@@ -179,13 +188,15 @@ class ChatGoogle(BaseChatModel):
 		return usage
 
 	@overload
-	async def ainvoke(self, messages: list[BaseMessage], output_format: None = None) -> ChatInvokeCompletion[str]: ...
+	async def ainvoke(
+		self, messages: list[BaseMessage], output_format: None = None, **kwargs: Any
+	) -> ChatInvokeCompletion[str]: ...
 
 	@overload
-	async def ainvoke(self, messages: list[BaseMessage], output_format: type[T]) -> ChatInvokeCompletion[T]: ...
+	async def ainvoke(self, messages: list[BaseMessage], output_format: type[T], **kwargs: Any) -> ChatInvokeCompletion[T]: ...
 
 	async def ainvoke(
-		self, messages: list[BaseMessage], output_format: type[T] | None = None
+		self, messages: list[BaseMessage], output_format: type[T] | None = None, **kwargs: Any
 	) -> ChatInvokeCompletion[T] | ChatInvokeCompletion[str]:
 		"""
 		Invoke the model with the given messages.
@@ -222,13 +233,58 @@ class ChatGoogle(BaseChatModel):
 		if self.seed is not None:
 			config['seed'] = self.seed
 
-		# set default for flash, flash-lite, gemini-flash-lite-latest, and gemini-flash-latest models
-		if self.thinking_budget is None and ('gemini-2.5-flash' in self.model or 'gemini-flash' in self.model):
-			self.thinking_budget = 0
+		# Configure thinking based on model version
+		# Gemini 3 Pro: uses thinking_level only
+		# Gemini 3 Flash: supports both, defaults to thinking_budget=-1
+		# Gemini 2.5: uses thinking_budget only
+		is_gemini_3_pro = 'gemini-3-pro' in self.model
+		is_gemini_3_flash = 'gemini-3-flash' in self.model
 
-		if self.thinking_budget is not None:
-			thinking_config_dict: types.ThinkingConfigDict = {'thinking_budget': self.thinking_budget}
-			config['thinking_config'] = thinking_config_dict
+		if is_gemini_3_pro:
+			# Validate: thinking_budget should not be set for Gemini 3 Pro
+			if self.thinking_budget is not None:
+				self.logger.warning(
+					f'thinking_budget={self.thinking_budget} is deprecated for Gemini 3 Pro and may cause '
+					f'suboptimal performance. Use thinking_level instead.'
+				)
+
+			# Validate: minimal/medium only supported on Flash, not Pro
+			if self.thinking_level in ('minimal', 'medium'):
+				self.logger.warning(
+					f'thinking_level="{self.thinking_level}" is not supported for Gemini 3 Pro. '
+					f'Only "low" and "high" are valid. Falling back to "low".'
+				)
+				self.thinking_level = 'low'
+
+			# Default to 'low' for Gemini 3 Pro
+			if self.thinking_level is None:
+				self.thinking_level = 'low'
+
+			# Map to ThinkingLevel enum (SDK accepts string values)
+			level = types.ThinkingLevel(self.thinking_level.upper())
+			config['thinking_config'] = types.ThinkingConfigDict(thinking_level=level)
+		elif is_gemini_3_flash:
+			# Gemini 3 Flash supports both thinking_level and thinking_budget
+			# If user set thinking_level, use that; otherwise default to thinking_budget=-1
+			if self.thinking_level is not None:
+				level = types.ThinkingLevel(self.thinking_level.upper())
+				config['thinking_config'] = types.ThinkingConfigDict(thinking_level=level)
+			else:
+				if self.thinking_budget is None:
+					self.thinking_budget = -1
+				config['thinking_config'] = types.ThinkingConfigDict(thinking_budget=self.thinking_budget)
+		else:
+			# Gemini 2.5 and earlier: use thinking_budget only
+			if self.thinking_level is not None:
+				self.logger.warning(
+					f'thinking_level="{self.thinking_level}" is not supported for this model. '
+					f'Use thinking_budget instead (0 to disable, -1 for dynamic, or token count).'
+				)
+			# Default to -1 for dynamic/auto on 2.5 models
+			if self.thinking_budget is None and ('gemini-2.5' in self.model or 'gemini-flash' in self.model):
+				self.thinking_budget = -1
+			if self.thinking_budget is not None:
+				config['thinking_config'] = types.ThinkingConfigDict(thinking_budget=self.thinking_budget)
 
 		if self.max_output_tokens is not None:
 			config['max_output_tokens'] = self.max_output_tokens
@@ -411,7 +467,7 @@ class ChatGoogle(BaseChatModel):
 				# Re-raise the exception
 				raise
 
-		# Retry logic for certain errors
+		# Retry logic for certain errors with exponential backoff
 		assert self.max_retries >= 1, 'max_retries must be at least 1'
 
 		for attempt in range(self.max_retries):
@@ -420,8 +476,14 @@ class ChatGoogle(BaseChatModel):
 			except ModelProviderError as e:
 				# Retry if status code is in retryable list and we have attempts left
 				if e.status_code in self.retryable_status_codes and attempt < self.max_retries - 1:
-					self.logger.warning(f'⚠️ Got {e.status_code} error, retrying... (attempt {attempt + 1}/{self.max_retries})')
-					await asyncio.sleep(self.retry_delay)
+					# Exponential backoff with jitter: base_delay * 2^attempt + random jitter
+					delay = min(self.retry_base_delay * (2**attempt), self.retry_max_delay)
+					jitter = random.uniform(0, delay * 0.1)  # 10% jitter
+					total_delay = delay + jitter
+					self.logger.warning(
+						f'⚠️ Got {e.status_code} error, retrying in {total_delay:.1f}s... (attempt {attempt + 1}/{self.max_retries})'
+					)
+					await asyncio.sleep(total_delay)
 					continue
 				# Otherwise raise
 				raise
@@ -500,13 +562,16 @@ class ChatGoogle(BaseChatModel):
 			schema = resolve_refs(schema)
 
 		# Remove unsupported properties
-		def clean_schema(obj: Any) -> Any:
+		def clean_schema(obj: Any, parent_key: str | None = None) -> Any:
 			if isinstance(obj, dict):
 				# Remove unsupported properties
 				cleaned = {}
 				for key, value in obj.items():
-					if key not in ['additionalProperties', 'title', 'default']:
-						cleaned_value = clean_schema(value)
+					# Only strip 'title' when it's a JSON Schema metadata field (not inside 'properties')
+					# 'title' as a metadata field appears at schema level, not as a property name
+					is_metadata_title = key == 'title' and parent_key != 'properties'
+					if key not in ['additionalProperties', 'default'] and not is_metadata_title:
+						cleaned_value = clean_schema(value, parent_key=key)
 						# Handle empty object properties - Gemini doesn't allow empty OBJECT types
 						if (
 							key == 'properties'
@@ -530,13 +595,9 @@ class ChatGoogle(BaseChatModel):
 				):
 					cleaned['properties'] = {'_placeholder': {'type': 'string'}}
 
-				# Also remove 'title' from the required list if it exists
-				if 'required' in cleaned and isinstance(cleaned.get('required'), list):
-					cleaned['required'] = [p for p in cleaned['required'] if p != 'title']
-
 				return cleaned
 			elif isinstance(obj, list):
-				return [clean_schema(item) for item in obj]
+				return [clean_schema(item, parent_key=parent_key) for item in obj]
 			return obj
 
 		return clean_schema(schema)

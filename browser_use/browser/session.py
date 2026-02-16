@@ -140,6 +140,7 @@ class BrowserSession(BaseModel):
 		id: str | None = None,
 		headers: dict[str, str] | None = None,
 		allowed_domains: list[str] | None = None,
+		prohibited_domains: list[str] | None = None,
 		keep_alive: bool | None = None,
 		minimum_wait_page_load_time: float | None = None,
 		wait_for_network_idle_page_load_time: float | None = None,
@@ -172,6 +173,7 @@ class BrowserSession(BaseModel):
 		# Common params
 		headers: dict[str, str] | None = None,
 		allowed_domains: list[str] | None = None,
+		prohibited_domains: list[str] | None = None,
 		keep_alive: bool | None = None,
 		minimum_wait_page_load_time: float | None = None,
 		wait_for_network_idle_page_load_time: float | None = None,
@@ -271,6 +273,7 @@ class BrowserSession(BaseModel):
 		disable_security: bool | None = None,
 		deterministic_rendering: bool | None = None,
 		allowed_domains: list[str] | None = None,
+		prohibited_domains: list[str] | None = None,
 		keep_alive: bool | None = None,
 		proxy: ProxySettings | None = None,
 		enable_default_extensions: bool | None = None,
@@ -910,11 +913,8 @@ class BrowserSession(BaseModel):
 
 		# Switch to the target
 		assert event.target_id is not None, 'target_id must be set at this point'
-		# Ensure session exists
+		# Ensure session exists and update agent focus (only for page/tab targets)
 		cdp_session = await self.get_or_create_cdp_session(target_id=event.target_id, focus=True)
-
-		# Update agent focus to this target
-		self.agent_focus_target_id = event.target_id
 
 		# Visually switch to the tab in the browser
 		# The Force Background Tab extension prevents Chrome from auto-switching when links create new tabs,
@@ -995,13 +995,24 @@ class BrowserSession(BaseModel):
 		self._cached_selector_map.clear()
 		self.logger.debug('🔄 Cached browser state cleared')
 
-		# Update agent focus if a specific target_id is provided
+		# Update agent focus if a specific target_id is provided (only for page/tab targets)
 		if event.target_id:
-			# Ensure session exists for this target
+			# Ensure session exists and update agent focus (validates target_type internally)
 			await self.get_or_create_cdp_session(target_id=event.target_id, focus=True)
-			# Update agent focus target
-			self.agent_focus_target_id = event.target_id
-			self.logger.debug(f'🔄 Updated agent focus to tab target_id=...{event.target_id[-4:]}')
+
+			# Apply viewport settings to the newly focused tab
+			if self.browser_profile.viewport and not self.browser_profile.no_viewport:
+				try:
+					viewport_width = self.browser_profile.viewport.width
+					viewport_height = self.browser_profile.viewport.height
+					device_scale_factor = self.browser_profile.device_scale_factor or 1.0
+
+					# Use the helper method with the current tab's target_id
+					await self._cdp_set_viewport(viewport_width, viewport_height, device_scale_factor, target_id=event.target_id)
+
+					self.logger.debug(f'Applied viewport {viewport_width}x{viewport_height} to tab {event.target_id[-8:]}')
+				except Exception as e:
+					self.logger.warning(f'Failed to set viewport for tab {event.target_id[-8:]}: {e}')
 		else:
 			raise RuntimeError('AgentFocusChangedEvent received with no target_id for newly focused tab')
 
@@ -1111,6 +1122,26 @@ class BrowserSession(BaseModel):
 
 		return targets
 
+	def get_focused_target(self) -> 'Target | None':
+		"""Get the target that currently has agent focus.
+
+		Returns:
+			Target object if agent has focus, None otherwise.
+		"""
+		if not self.session_manager:
+			return None
+		return self.session_manager.get_focused_target()
+
+	def get_page_targets(self) -> list['Target']:
+		"""Get all page/tab targets (excludes iframes, workers, etc.).
+
+		Returns:
+			List of Target objects for all page/tab targets.
+		"""
+		if not self.session_manager:
+			return []
+		return self.session_manager.get_all_page_targets()
+
 	async def close_page(self, page: 'Union[Page, str]') -> None:
 		"""Close a page by Page object or target ID."""
 		from cdp_use.cdp.target.commands import CloseTargetParameters
@@ -1126,15 +1157,10 @@ class BrowserSession(BaseModel):
 		params: CloseTargetParameters = {'targetId': target_id}
 		await self.cdp_client.send.Target.closeTarget(params)
 
-	async def cookies(self, urls: list[str] | None = None) -> list['Cookie']:
+	async def cookies(self) -> list['Cookie']:
 		"""Get cookies, optionally filtered by URLs."""
-		from cdp_use.cdp.network.library import GetCookiesParameters
 
-		params: GetCookiesParameters = {}
-		if urls:
-			params['urls'] = urls
-
-		result = await self.cdp_client.send.Network.getCookies(params)
+		result = await self.cdp_client.send.Storage.getCookies()
 		return result['cookies']
 
 	async def clear_cookies(self) -> None:
@@ -1333,6 +1359,7 @@ class BrowserSession(BaseModel):
 		from browser_use.browser.watchdogs.default_action_watchdog import DefaultActionWatchdog
 		from browser_use.browser.watchdogs.dom_watchdog import DOMWatchdog
 		from browser_use.browser.watchdogs.downloads_watchdog import DownloadsWatchdog
+		from browser_use.browser.watchdogs.har_recording_watchdog import HarRecordingWatchdog
 		from browser_use.browser.watchdogs.local_browser_watchdog import LocalBrowserWatchdog
 		from browser_use.browser.watchdogs.permissions_watchdog import PermissionsWatchdog
 		from browser_use.browser.watchdogs.popups_watchdog import PopupsWatchdog
@@ -1454,6 +1481,12 @@ class BrowserSession(BaseModel):
 		self._recording_watchdog = RecordingWatchdog(event_bus=self.event_bus, browser_session=self)
 		self._recording_watchdog.attach_to_session()
 
+		# Initialize HarRecordingWatchdog if record_har_path is configured (handles HTTPS HAR capture)
+		if self.browser_profile.record_har_path:
+			HarRecordingWatchdog.model_rebuild()
+			self._har_recording_watchdog = HarRecordingWatchdog(event_bus=self.event_bus, browser_session=self)
+			self._har_recording_watchdog.attach_to_session()
+
 		# Mark watchdogs as attached to prevent duplicate attachment
 		self._watchdogs_attached = True
 
@@ -1504,9 +1537,12 @@ class BrowserSession(BaseModel):
 
 		try:
 			# Create and store the CDP client for direct CDP communication
+			headers = getattr(self.browser_profile, 'headers', None)
 			self._cdp_client_root = CDPClient(
-				self.cdp_url, max_ws_frame_size=200 * 1024 * 1024
-			)  # Use 200MB limit to handle pages with very large DOMs
+				self.cdp_url,
+				additional_headers=headers,
+				max_ws_frame_size=200 * 1024 * 1024,  # Use 200MB limit to handle pages with very large DOMs
+			)
 			assert self._cdp_client_root is not None
 			await self._cdp_client_root.start()
 

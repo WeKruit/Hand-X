@@ -8,8 +8,11 @@ import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Generic, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, cast
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+	from browser_use.skills.views import Skill
 
 from dotenv import load_dotenv
 
@@ -22,6 +25,7 @@ from browser_use.agent.cloud_events import (
 )
 from browser_use.agent.message_manager.utils import save_conversation
 from browser_use.llm.base import BaseChatModel
+from browser_use.llm.exceptions import ModelProviderError, ModelRateLimitError
 from browser_use.llm.messages import BaseMessage, ContentPartImageParam, ContentPartTextParam, UserMessage
 from browser_use.tokens.service import TokenCost
 
@@ -32,7 +36,7 @@ from pydantic import BaseModel, ValidationError
 from uuid_extensions import uuid7str
 
 from browser_use import Browser, BrowserProfile, BrowserSession
-from browser_use.agent.judge import construct_judge_messages
+from browser_use.agent.judge import construct_judge_messages, construct_simple_judge_messages
 
 # Lazy import for gif to avoid heavy agent.views import at startup
 # from browser_use.agent.gif import create_history_gif
@@ -53,12 +57,16 @@ from browser_use.agent.views import (
 	BrowserStateHistory,
 	DetectedVariable,
 	JudgementResult,
+	MessageCompactionSettings,
+	PlanItem,
+	SimpleJudgeResult,
 	StepMetadata,
 )
+from browser_use.browser.events import _get_timeout
 from browser_use.browser.session import DEFAULT_BROWSER_PROFILE
 from browser_use.browser.views import BrowserStateSummary
 from browser_use.config import CONFIG
-from browser_use.dom.views import DOMInteractedElement
+from browser_use.dom.views import DOMInteractedElement, MatchLevel
 from browser_use.filesystem.file_system import FileSystem
 from browser_use.observability import observe, observe_debug
 from browser_use.telemetry.service import ProductTelemetry
@@ -133,6 +141,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		browser: Browser | None = None,  # Alias for browser_session
 		tools: Tools[Context] | None = None,
 		controller: Tools[Context] | None = None,  # Alias for tools
+		# Skills integration
+		skill_ids: list[str | Literal['*']] | None = None,
+		skills: list[str | Literal['*']] | None = None,  # Alias for skill_ids
+		skill_service: Any | None = None,
 		# Initial agent run parameters
 		sensitive_data: dict[str, str | dict[str, str]] | None = None,
 		initial_actions: list[dict[str, dict[str, Any]]] | None = None,
@@ -151,21 +163,23 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		register_should_stop_callback: Callable[[], Awaitable[bool]] | None = None,
 		# Agent settings
 		output_model_schema: type[AgentStructuredOutput] | None = None,
+		extraction_schema: dict | None = None,
 		use_vision: bool | Literal['auto'] = True,
 		save_conversation_path: str | Path | None = None,
 		save_conversation_path_encoding: str | None = 'utf-8',
-		max_failures: int = 3,
+		max_failures: int = 5,
 		override_system_message: str | None = None,
 		extend_system_message: str | None = None,
 		generate_gif: bool | str = False,
 		available_file_paths: list[str] | None = None,
 		include_attributes: list[str] | None = None,
-		max_actions_per_step: int = 3,
+		max_actions_per_step: int = 5,
 		use_thinking: bool = True,
 		flash_mode: bool = False,
 		demo_mode: bool | None = None,
 		max_history_items: int | None = None,
 		page_extraction_llm: BaseChatModel | None = None,
+		fallback_llm: BaseChatModel | None = None,
 		use_judge: bool = True,
 		ground_truth: str | None = None,
 		judge_llm: BaseChatModel | None = None,
@@ -178,12 +192,18 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		include_tool_call_examples: bool = False,
 		vision_detail_level: Literal['auto', 'low', 'high'] = 'auto',
 		llm_timeout: int | None = None,
-		step_timeout: int = 120,
+		step_timeout: int = 180,
 		directly_open_url: bool = True,
 		include_recent_events: bool = False,
 		sample_images: list[ContentPartTextParam | ContentPartImageParam] | None = None,
 		final_response_after_failure: bool = True,
+		enable_planning: bool = True,
+		planning_replan_on_stall: int = 3,
+		planning_exploration_limit: int = 5,
+		loop_detection_window: int = 20,
+		loop_detection_enabled: bool = True,
 		llm_screenshot_size: tuple[int, int] | None = None,
+		message_compaction: MessageCompactionSettings | bool | None = True,
 		_url_shortening_limit: int = 25,
 		**kwargs,
 	):
@@ -213,6 +233,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if llm.provider == 'browser-use':
 			flash_mode = True
 
+		# Flash mode strips plan fields from the output schema, so planning is structurally impossible
+		if flash_mode:
+			enable_planning = False
+
 		# Auto-configure llm_screenshot_size for Claude Sonnet models
 		if llm_screenshot_size is None:
 			model_name = getattr(llm, 'model', '')
@@ -236,13 +260,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				if 'gemini' in model_name:
 					if '3-pro' in model_name:
 						return 90
-					return 45
+					return 75
 				elif 'groq' in model_name:
 					return 30
 				elif 'o3' in model_name or 'claude' in model_name or 'sonnet' in model_name or 'deepseek' in model_name:
 					return 90
 				else:
-					return 60  # Default timeout
+					return 75  # Default timeout
 
 			llm_timeout = _get_model_timeout(llm)
 
@@ -279,13 +303,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Initialize available file paths as direct attribute
 		self.available_file_paths = available_file_paths
 
-		# Core components
-		self.task = self._enhance_task_with_schema(task, output_model_schema)
-		self.llm = llm
-		self.judge_llm = judge_llm
-		self.directly_open_url = directly_open_url
-		self.include_recent_events = include_recent_events
-		self._url_shortening_limit = _url_shortening_limit
+		# Set up tools first (needed to detect output_model_schema)
 		if tools is not None:
 			self.tools = tools
 		elif controller is not None:
@@ -299,14 +317,69 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if use_vision != 'auto':
 			self.tools.exclude_action('screenshot')
 
-		# Structured output
+		# Enable coordinate clicking for models that support it
+		model_name = getattr(llm, 'model', '').lower()
+		supports_coordinate_clicking = any(
+			pattern in model_name for pattern in ['claude-sonnet-4', 'claude-opus-4', 'gemini-3-pro', 'browser-use/']
+		)
+		if supports_coordinate_clicking:
+			self.tools.set_coordinate_clicking(True)
+
+		# Handle skills vs skill_ids parameter (skills takes precedence)
+		if skills and skill_ids:
+			raise ValueError('Cannot specify both "skills" and "skill_ids" parameters. Use "skills" for the cleaner API.')
+		skill_ids = skills or skill_ids
+
+		# Skills integration - use injected service or create from skill_ids
+		self.skill_service = None
+		self._skills_registered = False
+		if skill_service is not None:
+			self.skill_service = skill_service
+		elif skill_ids:
+			from browser_use.skills import SkillService
+
+			self.skill_service = SkillService(skill_ids=skill_ids)
+
+		# Structured output - use explicit param or detect from tools
+		tools_output_model = self.tools.get_output_model()
+		if output_model_schema is not None and tools_output_model is not None:
+			# Both provided - warn if they differ
+			if output_model_schema is not tools_output_model:
+				logger.warning(
+					f'output_model_schema ({output_model_schema.__name__}) differs from Tools output_model '
+					f'({tools_output_model.__name__}). Using Agent output_model_schema.'
+				)
+		elif output_model_schema is None and tools_output_model is not None:
+			# Only tools has it - use that (cast is safe: both are BaseModel subclasses)
+			output_model_schema = cast(type[AgentStructuredOutput], tools_output_model)
 		self.output_model_schema = output_model_schema
 		if self.output_model_schema is not None:
 			self.tools.use_structured_output_action(self.output_model_schema)
 
+		# Extraction schema: explicit param takes priority, otherwise auto-bridge from output_model_schema
+		self.extraction_schema = extraction_schema
+		if self.extraction_schema is None and self.output_model_schema is not None:
+			self.extraction_schema = self.output_model_schema.model_json_schema()
+
+		# Core components - task enhancement now has access to output_model_schema from tools
+		self.task = self._enhance_task_with_schema(task, output_model_schema)
+		self.llm = llm
+		self.judge_llm = judge_llm
+
+		# Fallback LLM configuration
+		self._fallback_llm: BaseChatModel | None = fallback_llm
+		self._using_fallback_llm: bool = False
+		self._original_llm: BaseChatModel = llm  # Store original for reference
+		self.directly_open_url = directly_open_url
+		self.include_recent_events = include_recent_events
+		self._url_shortening_limit = _url_shortening_limit
+
 		self.sensitive_data = sensitive_data
 
 		self.sample_images = sample_images
+
+		if isinstance(message_compaction, bool):
+			message_compaction = MessageCompactionSettings(enabled=message_compaction)
 
 		self.settings = AgentSettings(
 			use_vision=use_vision,
@@ -330,6 +403,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			final_response_after_failure=final_response_after_failure,
 			use_judge=use_judge,
 			ground_truth=ground_truth,
+			enable_planning=enable_planning,
+			planning_replan_on_stall=planning_replan_on_stall,
+			planning_exploration_limit=planning_exploration_limit,
+			loop_detection_window=loop_detection_window,
+			loop_detection_enabled=loop_detection_enabled,
+			message_compaction=message_compaction,
 		)
 
 		# Token cost service
@@ -337,9 +416,14 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self.token_cost_service.register_llm(llm)
 		self.token_cost_service.register_llm(page_extraction_llm)
 		self.token_cost_service.register_llm(judge_llm)
+		if self.settings.message_compaction and self.settings.message_compaction.compaction_llm:
+			self.token_cost_service.register_llm(self.settings.message_compaction.compaction_llm)
 
 		# Initialize state
 		self.state = injected_agent_state or AgentState()
+
+		# Configure loop detector window size from settings
+		self.state.loop_detector.window_size = self.settings.loop_detection_window
 
 		# Initialize history
 		self.history = AgentHistoryList(history=[], usage=None)
@@ -380,9 +464,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.logger.warning('⚠️ DeepSeek models do not support use_vision=True yet. Setting use_vision=False for now...')
 			self.settings.use_vision = False
 
-		# Handle users trying to use use_vision=True with XAI models
-		if 'grok' in self.llm.model.lower():
-			self.logger.warning('⚠️ XAI models do not support use_vision=True yet. Setting use_vision=False for now...')
+		# Handle users trying to use use_vision=True with XAI models that don't support it
+		# grok-3 variants and grok-code don't support vision; grok-2 and grok-4 do
+		model_lower = self.llm.model.lower()
+		if 'grok-3' in model_lower or 'grok-code' in model_lower:
+			self.logger.warning('⚠️ This XAI model does not support use_vision=True yet. Setting use_vision=False for now...')
 			self.settings.use_vision = False
 
 		logger.debug(
@@ -399,6 +485,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		is_anthropic = isinstance(self.llm, ChatAnthropic)
 
+		# Check if model is a browser-use fine-tuned model (uses simplified prompts)
+		is_browser_use_model = 'browser-use/' in self.llm.model.lower()
+
 		# Initialize message manager with state
 		# Initial system prompt with all actions - will be updated during each step
 		self._message_manager = MessageManager(
@@ -410,6 +499,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				use_thinking=self.settings.use_thinking,
 				flash_mode=self.settings.flash_mode,
 				is_anthropic=is_anthropic,
+				is_browser_use_model=is_browser_use_model,
+				model_name=self.llm.model,
 			).get_system_message(),
 			file_system=self.file_system,
 			state=self.state.message_manager_state,
@@ -524,19 +615,30 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	@property
 	def logger(self) -> logging.Logger:
 		"""Get instance-specific logger with task ID in the name"""
-
-		_browser_session_id = self.browser_session.id if self.browser_session else '----'
+		# logger may be called in __init__ so we don't assume self.* attributes have been initialized
+		_task_id = task_id[-4:] if (task_id := getattr(self, 'task_id', None)) else '----'
+		_browser_session_id = browser_session.id[-4:] if (browser_session := getattr(self, 'browser_session', None)) else '----'
 		_current_target_id = (
-			self.browser_session.agent_focus_target_id[-2:]
-			if self.browser_session and self.browser_session.agent_focus_target_id
+			browser_session.agent_focus_target_id[-2:]
+			if (browser_session := getattr(self, 'browser_session', None)) and browser_session.agent_focus_target_id
 			else '--'
 		)
-		return logging.getLogger(f'browser_use.Agent🅰 {self.task_id[-4:]} ⇢ 🅑 {_browser_session_id[-4:]} 🅣 {_current_target_id}')
+		return logging.getLogger(f'browser_use.Agent🅰 {_task_id} ⇢ 🅑 {_browser_session_id} 🅣 {_current_target_id}')
 
 	@property
 	def browser_profile(self) -> BrowserProfile:
 		assert self.browser_session is not None, 'BrowserSession is not set up'
 		return self.browser_session.browser_profile
+
+	@property
+	def is_using_fallback_llm(self) -> bool:
+		"""Check if the agent is currently using the fallback LLM."""
+		return self._using_fallback_llm
+
+	@property
+	def current_llm_model(self) -> str:
+		"""Get the model name of the currently active LLM."""
+		return self.llm.model if hasattr(self.llm, 'model') else 'unknown'
 
 	async def _check_and_update_downloads(self, context: str = '') -> None:
 		"""Check for new downloads and update available file paths."""
@@ -677,6 +779,202 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		else:
 			self.DoneAgentOutput = AgentOutput.type_with_custom_actions_no_thinking(self.DoneActionModel)
 
+	def _get_skill_slug(self, skill: 'Skill', all_skills: list['Skill']) -> str:
+		"""Generate a clean slug from skill title for action names
+
+		Converts title to lowercase, removes special characters, replaces spaces with underscores.
+		Adds UUID suffix if there are duplicate slugs.
+
+		Args:
+			skill: The skill to get slug for
+			all_skills: List of all skills to check for duplicates
+
+		Returns:
+			Slug like "cloned_github_stars_tracker" or "get_weather_data_a1b2" if duplicate
+
+		Examples:
+			"[Cloned] Github Stars Tracker" -> "cloned_github_stars_tracker"
+			"Get Weather Data" -> "get_weather_data"
+		"""
+		import re
+
+		# Remove special characters and convert to lowercase
+		slug = re.sub(r'[^\w\s]', '', skill.title.lower())
+		# Replace whitespace and hyphens with underscores
+		slug = re.sub(r'[\s\-]+', '_', slug)
+		# Remove leading/trailing underscores
+		slug = slug.strip('_')
+
+		# Check for duplicates and add UUID suffix if needed
+		same_slug_count = sum(
+			1 for s in all_skills if re.sub(r'[\s\-]+', '_', re.sub(r'[^\w\s]', '', s.title.lower()).strip('_')) == slug
+		)
+		if same_slug_count > 1:
+			return f'{slug}_{skill.id[:4]}'
+		else:
+			return slug
+
+	async def _register_skills_as_actions(self) -> None:
+		"""Register each skill as a separate action using slug as action name"""
+		if not self.skill_service or self._skills_registered:
+			return
+
+		self.logger.info('🔧 Registering skill actions...')
+
+		# Fetch all skills (auto-initializes if needed)
+		skills = await self.skill_service.get_all_skills()
+
+		if not skills:
+			self.logger.warning('No skills loaded from SkillService')
+			return
+
+		# Register each skill as its own action
+		for skill in skills:
+			slug = self._get_skill_slug(skill, skills)
+			param_model = skill.parameters_pydantic(exclude_cookies=True)
+
+			# Create description with skill title in quotes
+			description = f'{skill.description} (Skill: "{skill.title}")'
+
+			# Create handler for this specific skill
+			def make_skill_handler(skill_id: str):
+				async def skill_handler(params: BaseModel) -> ActionResult:
+					"""Execute a specific skill"""
+					assert self.skill_service is not None, 'SkillService not initialized'
+
+					# Convert parameters to dict
+					if isinstance(params, BaseModel):
+						skill_params = params.model_dump()
+					elif isinstance(params, dict):
+						skill_params = params
+					else:
+						return ActionResult(extracted_content=None, error=f'Invalid parameters type: {type(params)}')
+
+					# Get cookies from browser
+					_cookies = await self.browser_session.cookies()
+
+					try:
+						result = await self.skill_service.execute_skill(
+							skill_id=skill_id, parameters=skill_params, cookies=_cookies
+						)
+
+						if result.success:
+							return ActionResult(
+								extracted_content=str(result.result) if result.result else None,
+								error=None,
+							)
+						else:
+							return ActionResult(extracted_content=None, error=result.error or 'Skill execution failed')
+					except Exception as e:
+						# Check if it's a MissingCookieException
+						if type(e).__name__ == 'MissingCookieException':
+							# Format: "Missing cookies (name): description"
+							cookie_name = getattr(e, 'cookie_name', 'unknown')
+							cookie_description = getattr(e, 'cookie_description', str(e))
+							error_msg = f'Missing cookies ({cookie_name}): {cookie_description}'
+							return ActionResult(extracted_content=None, error=error_msg)
+						return ActionResult(extracted_content=None, error=f'Skill execution error: {type(e).__name__}: {e}')
+
+				return skill_handler
+
+			# Create the handler for this skill
+			handler = make_skill_handler(skill.id)
+			handler.__name__ = slug
+
+			# Register the action with the slug as the action name
+			self.tools.registry.action(description=description, param_model=param_model)(handler)
+
+		# Mark as registered
+		self._skills_registered = True
+
+		# Rebuild action models to include the new skill actions
+		self._setup_action_models()
+
+		# Reconvert initial actions with the new ActionModel type if they exist
+		if self.initial_actions:
+			# Convert back to dict form first
+			initial_actions_dict = []
+			for action in self.initial_actions:
+				action_dump = action.model_dump(exclude_unset=True)
+				initial_actions_dict.append(action_dump)
+			# Reconvert using new ActionModel
+			self.initial_actions = self._convert_initial_actions(initial_actions_dict)
+
+		self.logger.info(f'✓ Registered {len(skills)} skill actions')
+
+	async def _get_unavailable_skills_info(self) -> str:
+		"""Get information about skills that are unavailable due to missing cookies
+
+		Returns:
+			Formatted string describing unavailable skills and how to make them available
+		"""
+		if not self.skill_service:
+			return ''
+
+		try:
+			# Get all skills
+			skills = await self.skill_service.get_all_skills()
+			if not skills:
+				return ''
+
+			# Get current cookies
+			current_cookies = await self.browser_session.cookies()
+			cookie_dict = {cookie['name']: cookie['value'] for cookie in current_cookies}
+
+			# Check each skill for missing required cookies
+			unavailable_skills: list[dict[str, Any]] = []
+
+			for skill in skills:
+				# Get cookie parameters for this skill
+				cookie_params = [p for p in skill.parameters if p.type == 'cookie']
+
+				if not cookie_params:
+					# No cookies needed, skip
+					continue
+
+				# Check for missing required cookies
+				missing_cookies: list[dict[str, str]] = []
+				for cookie_param in cookie_params:
+					is_required = cookie_param.required if cookie_param.required is not None else True
+
+					if is_required and cookie_param.name not in cookie_dict:
+						missing_cookies.append(
+							{'name': cookie_param.name, 'description': cookie_param.description or 'No description provided'}
+						)
+
+				if missing_cookies:
+					unavailable_skills.append(
+						{
+							'id': skill.id,
+							'title': skill.title,
+							'description': skill.description,
+							'missing_cookies': missing_cookies,
+						}
+					)
+
+			if not unavailable_skills:
+				return ''
+
+			# Format the unavailable skills info with slugs
+			lines = ['Unavailable Skills (missing required cookies):']
+			for skill_info in unavailable_skills:
+				# Get the full skill object to use the slug helper
+				skill_obj = next((s for s in skills if s.id == skill_info['id']), None)
+				slug = self._get_skill_slug(skill_obj, skills) if skill_obj else skill_info['title']
+				title = skill_info['title']
+
+				lines.append(f'\n  • {slug} ("{title}")')
+				lines.append(f'    Description: {skill_info["description"]}')
+				lines.append('    Missing cookies:')
+				for cookie in skill_info['missing_cookies']:
+					lines.append(f'      - {cookie["name"]}: {cookie["description"]}')
+
+			return '\n'.join(lines)
+
+		except Exception as e:
+			self.logger.error(f'Error getting unavailable skills info: {type(e).__name__}: {e}')
+			return ''
+
 	def add_new_task(self, new_task: str) -> None:
 		"""Add a new task to the agent, keeping the same task_id as tasks are continuous"""
 		# Simply delegate to message manager - no need for new task_id or events
@@ -775,6 +1073,24 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Page-specific actions will be included directly in the browser_state message
 		self.logger.debug(f'💬 Step {self.state.n_steps}: Creating state messages for context...')
 
+		# Get unavailable skills info if skills service is enabled
+		unavailable_skills_info = None
+		if self.skill_service is not None:
+			unavailable_skills_info = await self._get_unavailable_skills_info()
+
+		# Render plan description for injection into agent context
+		plan_description = self._render_plan_description()
+
+		self._message_manager.prepare_step_state(
+			browser_state_summary=browser_state_summary,
+			model_output=self.state.last_model_output,
+			result=self.state.last_result,
+			step_info=step_info,
+			sensitive_data=self.sensitive_data,
+		)
+
+		await self._maybe_compact_messages(step_info)
+
 		self._message_manager.create_state_messages(
 			browser_state_summary=browser_state_summary,
 			model_output=self.state.last_model_output,
@@ -784,11 +1100,32 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			page_filtered_actions=page_filtered_actions if page_filtered_actions else None,
 			sensitive_data=self.sensitive_data,
 			available_file_paths=self.available_file_paths,  # Always pass current available_file_paths
+			unavailable_skills_info=unavailable_skills_info,
+			plan_description=plan_description,
+			skip_state_update=True,
 		)
 
+		await self._inject_budget_warning(step_info)
+		self._inject_replan_nudge()
+		self._inject_exploration_nudge()
+		self._update_loop_detector_page_state(browser_state_summary)
+		self._inject_loop_detection_nudge()
 		await self._force_done_after_last_step(step_info)
 		await self._force_done_after_failure()
 		return browser_state_summary
+
+	async def _maybe_compact_messages(self, step_info: AgentStepInfo | None = None) -> None:
+		"""Optionally compact message history to keep prompts small."""
+		settings = self.settings.message_compaction
+		if not settings or not settings.enabled:
+			return
+
+		compaction_llm = settings.compaction_llm or self.settings.page_extraction_llm or self.llm
+		await self._message_manager.maybe_compact_messages(
+			llm=compaction_llm,
+			settings=settings,
+			step_info=step_info,
+		)
 
 	@observe_debug(ignore_input=True, name='get_next_action')
 	async def _get_next_action(self, browser_state_summary: BrowserStateSummary) -> None:
@@ -841,7 +1178,15 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Check for new downloads after executing actions
 		await self._check_and_update_downloads('after executing actions')
 
-		# check for action errors  and len more than 1
+		# Update plan state from model output
+		if self.state.last_model_output is not None:
+			self._update_plan_from_model_output(self.state.last_model_output)
+
+		# Record executed actions for loop detection
+		self._update_loop_detector_actions()
+
+		# check for action errors - only count single-action steps toward consecutive failures;
+		# multi-action steps with errors are handled by loop detection and replan nudges instead
 		if self.state.last_result and len(self.state.last_result) == 1 and self.state.last_result[-1].error:
 			self.state.consecutive_failures += 1
 			self.logger.debug(f'🔄 Step {self.state.n_steps}: Consecutive failures: {self.state.consecutive_failures}')
@@ -875,6 +1220,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.logger.warning(f'{error_msg}')
 			return
 
+		# Handle browser closed/disconnected errors - stop immediately instead of retrying
+		if self._is_browser_closed_error(error):
+			self.logger.warning(f'🛑 Browser closed or disconnected: {error}')
+			self.state.stopped = True
+			self._external_pause_event.set()
+			return
+
 		# Handle all other exceptions
 		include_trace = self.logger.isEnabledFor(logging.DEBUG)
 		error_msg = AgentError.format_error(error, include_trace=include_trace)
@@ -896,6 +1248,25 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		await self._demo_mode_log(f'Step error: {error_msg}', 'error', {'step': self.state.n_steps})
 		self.state.last_result = [ActionResult(error=error_msg)]
 		return None
+
+	def _is_browser_closed_error(self, error: Exception) -> bool:
+		"""Check if the browser has been closed or disconnected.
+
+		Only returns True when the error itself is a CDP/WebSocket connection failure
+		AND the CDP client is gone. Avoids false positives on unrelated errors
+		(element not found, timeouts, parse errors) that happen to coincide with
+		a transient None state during reconnects or resets.
+		"""
+		error_str = str(error).lower()
+		is_connection_error = (
+			isinstance(error, ConnectionError)
+			or 'websocket connection closed' in error_str
+			or 'connection closed' in error_str
+			or 'browser has been closed' in error_str
+			or 'browser closed' in error_str
+			or 'no browser' in error_str
+		)
+		return is_connection_error and self.browser_session._cdp_client_root is None
 
 	async def _finalize(self, browser_state_summary: BrowserStateSummary | None) -> None:
 		"""Finalize the step with history, logging, and events"""
@@ -958,6 +1329,157 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		# Increment step counter after step is fully completed
 		self.state.n_steps += 1
 
+	def _update_plan_from_model_output(self, model_output: AgentOutput) -> None:
+		"""Update the plan state from model output fields (current_plan_item, plan_update)."""
+		if not self.settings.enable_planning:
+			return
+
+		# If model provided a new plan via plan_update, replace the current plan
+		if model_output.plan_update is not None:
+			self.state.plan = [PlanItem(text=step_text) for step_text in model_output.plan_update]
+			self.state.current_plan_item_index = 0
+			self.state.plan_generation_step = self.state.n_steps
+			if self.state.plan:
+				self.state.plan[0].status = 'current'
+			self.logger.info(
+				f'📋 Plan {"updated" if self.state.plan_generation_step else "created"} with {len(self.state.plan)} steps'
+			)
+			return
+
+		# If model provided a step index update, advance the plan
+		if model_output.current_plan_item is not None and self.state.plan is not None:
+			new_idx = model_output.current_plan_item
+			# Clamp to valid range
+			new_idx = max(0, min(new_idx, len(self.state.plan) - 1))
+			old_idx = self.state.current_plan_item_index
+
+			# Mark steps between old and new as done
+			for i in range(old_idx, new_idx):
+				if i < len(self.state.plan) and self.state.plan[i].status in ('current', 'pending'):
+					self.state.plan[i].status = 'done'
+
+			# Mark the new step as current
+			if new_idx < len(self.state.plan):
+				self.state.plan[new_idx].status = 'current'
+
+			self.state.current_plan_item_index = new_idx
+
+	def _render_plan_description(self) -> str | None:
+		"""Render the current plan as a text description for injection into agent context."""
+		if not self.settings.enable_planning or self.state.plan is None:
+			return None
+
+		markers = {'done': '[x]', 'current': '[>]', 'pending': '[ ]', 'skipped': '[-]'}
+		lines = []
+		for i, step in enumerate(self.state.plan):
+			marker = markers.get(step.status, '[ ]')
+			lines.append(f'{marker} {i}: {step.text}')
+		return '\n'.join(lines)
+
+	def _inject_replan_nudge(self) -> None:
+		"""Inject a replan nudge when stall detection threshold is met."""
+		if not self.settings.enable_planning or self.state.plan is None:
+			return
+		if self.settings.planning_replan_on_stall <= 0:
+			return
+		if self.state.consecutive_failures >= self.settings.planning_replan_on_stall:
+			msg = (
+				'REPLAN SUGGESTED: You have failed '
+				f'{self.state.consecutive_failures} consecutive times. '
+				'Your current plan may need revision. '
+				'Output a new `plan_update` with revised steps to recover.'
+			)
+			self.logger.info(f'📋 Replan nudge injected after {self.state.consecutive_failures} consecutive failures')
+			self._message_manager._add_context_message(UserMessage(content=msg))
+
+	def _inject_exploration_nudge(self) -> None:
+		"""Nudge the agent to create a plan (or call done) after exploring without one."""
+		if not self.settings.enable_planning or self.state.plan is not None:
+			return
+		if self.settings.planning_exploration_limit <= 0:
+			return
+		if self.state.n_steps >= self.settings.planning_exploration_limit:
+			msg = (
+				'PLANNING NUDGE: You have taken '
+				f'{self.state.n_steps} steps without creating a plan. '
+				'If the task is complex, output a `plan_update` with clear todo items now. '
+				'If the task is already done or nearly done, call `done` instead.'
+			)
+			self.logger.info(f'📋 Exploration nudge injected after {self.state.n_steps} steps without a plan')
+			self._message_manager._add_context_message(UserMessage(content=msg))
+
+	def _inject_loop_detection_nudge(self) -> None:
+		"""Inject an escalating nudge when behavioral loops are detected."""
+		if not self.settings.loop_detection_enabled:
+			return
+		nudge = self.state.loop_detector.get_nudge_message()
+		if nudge:
+			self.logger.info(
+				f'🔁 Loop detection nudge injected (repetition={self.state.loop_detector.max_repetition_count}, '
+				f'stagnation={self.state.loop_detector.consecutive_stagnant_pages})'
+			)
+			self._message_manager._add_context_message(UserMessage(content=nudge))
+
+	def _update_loop_detector_actions(self) -> None:
+		"""Record the actions from the latest step into the loop detector."""
+		if not self.settings.loop_detection_enabled:
+			return
+		if self.state.last_model_output is None:
+			return
+		# Actions to exclude: wait always hashes identically (instant false positive),
+		# done is terminal, go_back is navigation recovery
+		_LOOP_EXEMPT_ACTIONS = {'wait', 'done', 'go_back'}
+		for action in self.state.last_model_output.action:
+			action_data = action.model_dump(exclude_unset=True)
+			action_name = next(iter(action_data.keys()), 'unknown')
+			if action_name in _LOOP_EXEMPT_ACTIONS:
+				continue
+			params = action_data.get(action_name, {})
+			if not isinstance(params, dict):
+				params = {}
+			self.state.loop_detector.record_action(action_name, params)
+
+	def _update_loop_detector_page_state(self, browser_state_summary: BrowserStateSummary) -> None:
+		"""Record the current page state for stagnation detection."""
+		if not self.settings.loop_detection_enabled:
+			return
+		url = browser_state_summary.url or ''
+		element_count = len(browser_state_summary.dom_state.selector_map) if browser_state_summary.dom_state else 0
+		# Use the DOM text representation for fingerprinting
+		dom_text = ''
+		if browser_state_summary.dom_state:
+			try:
+				dom_text = browser_state_summary.dom_state.llm_representation()
+			except Exception:
+				dom_text = ''
+		self.state.loop_detector.record_page_state(url, dom_text, element_count)
+
+	async def _inject_budget_warning(self, step_info: AgentStepInfo | None = None) -> None:
+		"""Inject a prominent budget warning when the agent has used >= 75% of its step budget.
+
+		This gives the LLM advance notice to wrap up, save partial results, and call done
+		rather than exhausting all steps with nothing saved.
+		"""
+		if step_info is None:
+			return
+
+		steps_used = step_info.step_number + 1  # Convert 0-indexed to 1-indexed
+		budget_ratio = steps_used / step_info.max_steps
+
+		if budget_ratio >= 0.75 and not step_info.is_last_step():
+			steps_remaining = step_info.max_steps - steps_used
+			pct = int(budget_ratio * 100)
+			msg = (
+				f'BUDGET WARNING: You have used {steps_used}/{step_info.max_steps} steps '
+				f'({pct}%). {steps_remaining} steps remaining. '
+				f'If the task cannot be completed in the remaining steps, prioritize: '
+				f'(1) consolidate your results (save to files if the file system is in use), '
+				f'(2) call done with what you have. '
+				f'Partial results are far more valuable than exhausting all steps with nothing saved.'
+			)
+			self.logger.info(f'Step budget warning: {steps_used}/{step_info.max_steps} ({pct}%)')
+			self._message_manager._add_context_message(UserMessage(content=msg))
+
 	async def _force_done_after_last_step(self, step_info: AgentStepInfo | None = None) -> None:
 		"""Handle special processing for the last step"""
 		if step_info and step_info.is_last_step():
@@ -982,6 +1504,46 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self._message_manager._add_context_message(UserMessage(content=msg))
 			self.AgentOutput = self.DoneAgentOutput
 
+	async def _run_simple_judge(self) -> None:
+		"""Lightweight always-on judge that overrides agent success when it overclaims.
+
+		Runs regardless of use_judge setting. Only checks tasks where the agent
+		claimed success — if the agent already reports failure, there's nothing to correct.
+		"""
+		last_result = self.history.history[-1].result[-1]
+		if not last_result.is_done or not last_result.success:
+			return
+
+		task = self.task
+		final_result = self.history.final_result() or ''
+
+		messages = construct_simple_judge_messages(
+			task=task,
+			final_result=final_result,
+		)
+
+		try:
+			response = await self.llm.ainvoke(messages, output_format=SimpleJudgeResult)
+			result: SimpleJudgeResult = response.completion  # type: ignore[assignment]
+			if not result.is_correct:
+				reason = result.reason or 'Task requirements not fully met'
+				self.logger.info(f'⚠️  Simple judge overriding success to failure: {reason}')
+				last_result.success = False
+				note = f'[Simple judge: {reason}]'
+				# When structured output is expected, don't append judge text to extracted_content
+				# as it would corrupt the JSON and break end-user parsers
+				if self.output_model_schema is not None:
+					if last_result.metadata is None:
+						last_result.metadata = {}
+					last_result.metadata['simple_judge'] = note
+				elif last_result.extracted_content:
+					last_result.extracted_content += f'\n\n{note}'
+				else:
+					last_result.extracted_content = note
+		except Exception as e:
+			self.logger.warning(f'Simple judge failed with error: {e}')
+			# Don't override on error — keep the agent's self-report
+
 	@observe(ignore_input=True, ignore_output=False)
 	async def _judge_trace(self) -> JudgementResult | None:
 		"""Judge the trace of the agent"""
@@ -998,6 +1560,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			screenshot_paths=screenshot_paths,
 			max_images=10,
 			ground_truth=self.settings.ground_truth,
+			use_vision=self.settings.use_vision,
 		)
 
 		# Call LLM with JudgementResult as output format
@@ -1017,7 +1580,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			return None
 
 	async def _judge_and_log(self) -> None:
-		"""Run judge evaluation and log the verdict"""
+		"""Run judge evaluation and log the verdict.
+
+		The judge verdict is attached to the action result but does NOT override
+		last_result.success — that stays as the agent's self-report. Telemetry
+		sends both values so the eval platform can compare agent vs judge.
+		"""
 		judgement = await self._judge_trace()
 
 		# Attach judgement to last action result
@@ -1333,7 +1901,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		# Build kwargs for ainvoke
 		# Note: ChatBrowserUse will automatically generate action descriptions from output_format schema
-		kwargs: dict = {'output_format': self.AgentOutput}
+		kwargs: dict = {'output_format': self.AgentOutput, 'session_id': self.session_id}
 
 		try:
 			response = await self.llm.ainvoke(input_messages, **kwargs)
@@ -1356,6 +1924,68 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		except ValidationError:
 			# Just re-raise - Pydantic's validation errors are already descriptive
 			raise
+		except (ModelRateLimitError, ModelProviderError) as e:
+			# Check if we can switch to a fallback LLM
+			if not self._try_switch_to_fallback_llm(e):
+				# No fallback available, re-raise the original error
+				raise
+			# Retry with the fallback LLM
+			return await self.get_model_output(input_messages)
+
+	def _try_switch_to_fallback_llm(self, error: ModelRateLimitError | ModelProviderError) -> bool:
+		"""
+		Attempt to switch to a fallback LLM after a rate limit or provider error.
+
+		Returns True if successfully switched to a fallback, False if no fallback available.
+		Once switched, the agent will use the fallback LLM for the rest of the run.
+		"""
+		# Already using fallback - can't switch again
+		if self._using_fallback_llm:
+			self.logger.warning(
+				f'⚠️ Fallback LLM also failed ({type(error).__name__}: {error.message}), no more fallbacks available'
+			)
+			return False
+
+		# Check if error is retryable (rate limit, auth errors, or server errors)
+		# 401: API key invalid/expired - fallback to different provider
+		# 402: Insufficient credits/payment required - fallback to different provider
+		# 429: Rate limit exceeded
+		# 500, 502, 503, 504: Server errors
+		retryable_status_codes = {401, 402, 429, 500, 502, 503, 504}
+		is_retryable = isinstance(error, ModelRateLimitError) or (
+			hasattr(error, 'status_code') and error.status_code in retryable_status_codes
+		)
+
+		if not is_retryable:
+			return False
+
+		# Check if we have a fallback LLM configured
+		if self._fallback_llm is None:
+			self.logger.warning(f'⚠️ LLM error ({type(error).__name__}: {error.message}) but no fallback_llm configured')
+			return False
+
+		self._log_fallback_switch(error, self._fallback_llm)
+
+		# Switch to the fallback LLM
+		self.llm = self._fallback_llm
+		self._using_fallback_llm = True
+
+		# Register the fallback LLM for token cost tracking
+		self.token_cost_service.register_llm(self._fallback_llm)
+
+		return True
+
+	def _log_fallback_switch(self, error: ModelRateLimitError | ModelProviderError, fallback: BaseChatModel) -> None:
+		"""Log when switching to a fallback LLM."""
+		original_model = self._original_llm.model if hasattr(self._original_llm, 'model') else 'unknown'
+		fallback_model = fallback.model if hasattr(fallback, 'model') else 'unknown'
+		error_type = type(error).__name__
+		status_code = getattr(error, 'status_code', 'N/A')
+
+		self.logger.warning(
+			f'⚠️ Primary LLM ({original_model}) failed with {error_type} (status={status_code}), '
+			f'switching to fallback LLM ({fallback_model})'
+		)
 
 	async def _log_agent_run(self) -> None:
 		"""Log the agent run"""
@@ -1365,11 +1995,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		self.logger.debug(f'🤖 Browser-Use Library Version {self.version} ({self.source})')
 
 		# Check for latest version and log upgrade message if needed
-		latest_version = await check_latest_browser_use_version()
-		if latest_version and latest_version != self.version:
-			self.logger.info(
-				f'📦 Newer version available: {latest_version} (current: {self.version}). Upgrade with: uv add browser-use=={latest_version}'
-			)
+		if CONFIG.BROWSER_USE_VERSION_CHECK:
+			latest_version = await check_latest_browser_use_version()
+			if latest_version and latest_version != self.version:
+				self.logger.info(
+					f'📦 Newer version available: {latest_version} (current: {self.version}). Upgrade with: uv add browser-use=={latest_version}'
+				)
 
 	def _log_first_step_startup(self) -> None:
 		"""Log startup message only on the first step"""
@@ -1594,9 +2225,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		await self.step(step_info)
 
 		if self.history.is_done():
+			# Always run simple judge to align agent success with reality
+			await self._run_simple_judge()
+
 			await self.log_completion()
 
-			# Run judge before done callback if enabled
+			# Run full judge before done callback if enabled
 			if self.settings.use_judge:
 				await self._judge_and_log()
 
@@ -1795,9 +2429,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			await on_step_end(self)
 
 		if self.history.is_done():
+			# Always run simple judge to align agent success with reality
+			await self._run_simple_judge()
+
 			await self.log_completion()
 
-			# Run judge before done callback if enabled
+			# Run full judge before done callback if enabled
 			if self.settings.use_judge:
 				await self._judge_and_log()
 
@@ -1815,7 +2452,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	@time_execution_async('--run')
 	async def run(
 		self,
-		max_steps: int = 100,
+		max_steps: int = 500,
 		on_step_start: AgentHookFunc | None = None,
 		on_step_end: AgentHookFunc | None = None,
 	) -> AgentHistoryList[AgentStructuredOutput]:
@@ -1880,6 +2517,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					'info',
 					{'tag': 'status'},
 				)
+
+			# Register skills as actions if SkillService is configured
+			await self._register_skills_as_actions()
 
 			# Normally there was no try catch here but the callback can raise an InterruptedError
 			try:
@@ -2015,15 +2655,22 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self._log_final_outcome_messages()
 
 			# Stop the event bus gracefully, waiting for all events to be processed
-			# Use longer timeout to avoid deadlocks in tests with multiple agents
-			await self.eventbus.stop(timeout=3.0)
+			# Configurable via TIMEOUT_AgentEventBusStop env var (default: 3.0s)
+			await self.eventbus.stop(clear=True, timeout=_get_timeout('TIMEOUT_AgentEventBusStop', 3.0))
 
 			await self.close()
 
 	@observe_debug(ignore_input=True, ignore_output=True)
 	@time_execution_async('--multi_act')
 	async def multi_act(self, actions: list[ActionModel]) -> list[ActionResult]:
-		"""Execute multiple actions"""
+		"""Execute multiple actions with page-change guards.
+
+		Two layers of protection prevent executing actions against stale DOM:
+		  1. Static flag: actions tagged with terminates_sequence=True (navigate, search, go_back, switch)
+		     automatically abort remaining queued actions.
+		  2. Runtime detection: after every action, the current URL and focused target are compared
+		     to pre-action values. Any change aborts the remaining queue.
+		"""
 		results: list[ActionResult] = []
 		time_elapsed = 0
 		total_actions = len(actions)
@@ -2066,6 +2713,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				# Log action before execution
 				await self._log_action(action, action_name, i + 1, total_actions)
 
+				# Capture pre-action state for runtime page-change detection
+				pre_action_url = await self.browser_session.get_current_page_url()
+				pre_action_focus = self.browser_session.agent_focus_target_id
+
 				time_start = time.time()
 
 				result = await self.tools.act(
@@ -2075,6 +2726,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					page_extraction_llm=self.settings.page_extraction_llm,
 					sensitive_data=self.sensitive_data,
 					available_file_paths=self.available_file_paths,
+					extraction_schema=self.extraction_schema,
 				)
 
 				time_end = time.time()
@@ -2098,6 +2750,24 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				results.append(result)
 
 				if results[-1].is_done or results[-1].error or i == total_actions - 1:
+					break
+
+				# --- Page-change guards (only when more actions remain) ---
+
+				# Layer 1: Static flag — action metadata declares it changes the page
+				registered_action = self.tools.registry.registry.actions.get(action_name)
+				if registered_action and registered_action.terminates_sequence:
+					self.logger.info(
+						f'Action "{action_name}" terminates sequence — skipping {total_actions - i - 1} remaining action(s)'
+					)
+					break
+
+				# Layer 2: Runtime detection — URL or focus target changed
+				post_action_url = await self.browser_session.get_current_page_url()
+				post_action_focus = self.browser_session.agent_focus_target_id
+
+				if post_action_url != pre_action_url or post_action_focus != pre_action_focus:
+					self.logger.info(f'Page changed after "{action_name}" — skipping {total_actions - i - 1} remaining action(s)')
 					break
 
 			except Exception as e:
@@ -2260,13 +2930,121 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				long_term_memory=f'Rerun completed: {success_count} steps succeeded, {error_count} errors',
 			)
 
+	async def _execute_ai_step(
+		self,
+		query: str,
+		include_screenshot: bool = False,
+		extract_links: bool = False,
+		ai_step_llm: BaseChatModel | None = None,
+	) -> ActionResult:
+		"""
+		Execute an AI step during rerun to re-evaluate extract actions.
+		Analyzes full page DOM/markdown + optional screenshot.
+
+		Args:
+			query: What to analyze or extract from the current page
+			include_screenshot: Whether to include screenshot in analysis
+			extract_links: Whether to include links in markdown extraction
+			ai_step_llm: Optional LLM to use. If not provided, uses agent's LLM
+
+		Returns:
+			ActionResult with extracted content
+		"""
+		from browser_use.agent.prompts import get_ai_step_system_prompt, get_ai_step_user_prompt, get_rerun_summary_message
+		from browser_use.llm.messages import SystemMessage, UserMessage
+		from browser_use.utils import sanitize_surrogates
+
+		# Use provided LLM or agent's LLM
+		llm = ai_step_llm or self.llm
+		self.logger.debug(f'Using LLM for AI step: {llm.model}')
+
+		# Extract clean markdown
+		try:
+			from browser_use.dom.markdown_extractor import extract_clean_markdown
+
+			content, content_stats = await extract_clean_markdown(
+				browser_session=self.browser_session, extract_links=extract_links
+			)
+		except Exception as e:
+			return ActionResult(error=f'Could not extract clean markdown: {type(e).__name__}: {e}')
+
+		# Get screenshot if requested
+		screenshot_b64 = None
+		if include_screenshot:
+			try:
+				screenshot = await self.browser_session.take_screenshot(full_page=False)
+				if screenshot:
+					import base64
+
+					screenshot_b64 = base64.b64encode(screenshot).decode('utf-8')
+			except Exception as e:
+				self.logger.warning(f'Failed to capture screenshot for ai_step: {e}')
+
+		# Build prompt with content stats
+		original_html_length = content_stats['original_html_chars']
+		initial_markdown_length = content_stats['initial_markdown_chars']
+		final_filtered_length = content_stats['final_filtered_chars']
+		chars_filtered = content_stats['filtered_chars_removed']
+
+		stats_summary = f"""Content processed: {original_html_length:,} HTML chars → {initial_markdown_length:,} initial markdown → {final_filtered_length:,} filtered markdown"""
+		if chars_filtered > 0:
+			stats_summary += f' (filtered {chars_filtered:,} chars of noise)'
+
+		# Sanitize content
+		content = sanitize_surrogates(content)
+		query = sanitize_surrogates(query)
+
+		# Get prompts from prompts.py
+		system_prompt = get_ai_step_system_prompt()
+		prompt_text = get_ai_step_user_prompt(query, stats_summary, content)
+
+		# Build user message with optional screenshot
+		if screenshot_b64:
+			user_message = get_rerun_summary_message(prompt_text, screenshot_b64)
+		else:
+			user_message = UserMessage(content=prompt_text)
+
+		try:
+			import asyncio
+
+			response = await asyncio.wait_for(llm.ainvoke([SystemMessage(content=system_prompt), user_message]), timeout=120.0)
+
+			current_url = await self.browser_session.get_current_page_url()
+			extracted_content = (
+				f'<url>\n{current_url}\n</url>\n<query>\n{query}\n</query>\n<result>\n{response.completion}\n</result>'
+			)
+
+			# Simple memory handling
+			MAX_MEMORY_LENGTH = 1000
+			if len(extracted_content) < MAX_MEMORY_LENGTH:
+				memory = extracted_content
+				include_extracted_content_only_once = False
+			else:
+				file_name = await self.file_system.save_extracted_content(extracted_content)
+				memory = f'Query: {query}\nContent in {file_name} and once in <read_state>.'
+				include_extracted_content_only_once = True
+
+			self.logger.info(f'🤖 AI Step: {memory}')
+			return ActionResult(
+				extracted_content=extracted_content,
+				include_extracted_content_only_once=include_extracted_content_only_once,
+				long_term_memory=memory,
+			)
+		except Exception as e:
+			self.logger.warning(f'Failed to execute AI step: {e.__class__.__name__}: {e}')
+			self.logger.debug('Full error traceback:', exc_info=True)
+			return ActionResult(error=f'AI step failed: {e}')
+
 	async def rerun_history(
 		self,
 		history: AgentHistoryList,
 		max_retries: int = 3,
-		skip_failures: bool = True,
+		skip_failures: bool = False,
 		delay_between_actions: float = 2.0,
+		max_step_interval: float = 45.0,
 		summary_llm: BaseChatModel | None = None,
+		ai_step_llm: BaseChatModel | None = None,
+		wait_for_elements: bool = False,
 	) -> list[ActionResult]:
 		"""
 		Rerun a saved history of actions with error handling and retry logic.
@@ -2274,9 +3052,16 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		Args:
 		                history: The history to replay
 		                max_retries: Maximum number of retries per action
-		                skip_failures: Whether to skip failed actions or stop execution
-		                delay_between_actions: Delay between actions in seconds
+		                skip_failures: Whether to skip failed actions or stop execution. When True, also skips
+		                               steps that had errors in the original run (e.g., modal close buttons that
+		                               auto-dismissed, or elements that became non-interactable)
+		                delay_between_actions: Delay between actions in seconds (used when no saved interval)
+		                max_step_interval: Maximum delay from saved step_interval (caps LLM time from original run)
 		                summary_llm: Optional LLM to use for generating the final summary. If not provided, uses the agent's LLM
+		                ai_step_llm: Optional LLM to use for AI steps (extract actions). If not provided, uses the agent's LLM
+		                wait_for_elements: If True, wait for minimum number of elements before attempting element
+		                               matching. Useful for SPA pages where shadow DOM content loads dynamically.
+		                               Default is False.
 
 		Returns:
 		                List of action results (including AI summary as the final result)
@@ -2289,65 +3074,147 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		results = []
 
-		for i, history_item in enumerate(history.history):
-			goal = history_item.model_output.current_state.next_goal if history_item.model_output else ''
-			step_num = history_item.metadata.step_number if history_item.metadata else i
-			step_name = 'Initial actions' if step_num == 0 else f'Step {step_num}'
+		# Track previous step for redundant retry detection
+		previous_item: AgentHistory | None = None
+		previous_step_succeeded: bool = False
 
-			# Determine step delay
-			if history_item.metadata and history_item.metadata.step_interval is not None:
-				step_delay = history_item.metadata.step_interval
-				# Format delay nicely - show ms for values < 1s, otherwise show seconds
-				if step_delay < 1.0:
-					delay_str = f'{step_delay * 1000:.0f}ms'
-				else:
-					delay_str = f'{step_delay:.1f}s'
-				delay_source = f'using saved step_interval={delay_str}'
-			else:
-				step_delay = delay_between_actions
-				if step_delay < 1.0:
-					delay_str = f'{step_delay * 1000:.0f}ms'
-				else:
-					delay_str = f'{step_delay:.1f}s'
-				delay_source = f'using default delay={delay_str}'
+		try:
+			for i, history_item in enumerate(history.history):
+				goal = history_item.model_output.current_state.next_goal if history_item.model_output else ''
+				step_num = history_item.metadata.step_number if history_item.metadata else i
+				step_name = 'Initial actions' if step_num == 0 else f'Step {step_num}'
 
-			self.logger.info(f'Replaying {step_name} ({i + 1}/{len(history.history)}) [{delay_source}]: {goal}')
-
-			if (
-				not history_item.model_output
-				or not history_item.model_output.action
-				or history_item.model_output.action == [None]
-			):
-				self.logger.warning(f'{step_name}: No action to replay, skipping')
-				results.append(ActionResult(error='No action to replay'))
-				continue
-
-			retry_count = 0
-			while retry_count < max_retries:
-				try:
-					result = await self._execute_history_step(history_item, step_delay)
-					results.extend(result)
-					break
-
-				except Exception as e:
-					retry_count += 1
-					if retry_count == max_retries:
-						error_msg = f'{step_name} failed after {max_retries} attempts: {str(e)}'
-						self.logger.error(error_msg)
-						if not skip_failures:
-							results.append(ActionResult(error=error_msg))
-							raise RuntimeError(error_msg)
+				# Determine step delay
+				if history_item.metadata and history_item.metadata.step_interval is not None:
+					# Cap the saved interval to max_step_interval (saved interval includes LLM time)
+					step_delay = min(history_item.metadata.step_interval, max_step_interval)
+					# Format delay nicely - show ms for values < 1s, otherwise show seconds
+					if step_delay < 1.0:
+						delay_str = f'{step_delay * 1000:.0f}ms'
 					else:
-						self.logger.warning(f'{step_name} failed (attempt {retry_count}/{max_retries}), retrying...')
-						await asyncio.sleep(delay_between_actions)
+						delay_str = f'{step_delay:.1f}s'
+					if history_item.metadata.step_interval > max_step_interval:
+						delay_source = f'capped to {delay_str} (saved was {history_item.metadata.step_interval:.1f}s)'
+					else:
+						delay_source = f'using saved step_interval={delay_str}'
+				else:
+					step_delay = delay_between_actions
+					if step_delay < 1.0:
+						delay_str = f'{step_delay * 1000:.0f}ms'
+					else:
+						delay_str = f'{step_delay:.1f}s'
+					delay_source = f'using default delay={delay_str}'
 
-		# Generate AI summary of rerun completion
-		self.logger.info('🤖 Generating AI summary of rerun completion...')
-		summary_result = await self._generate_rerun_summary(self.task, results, summary_llm)
-		results.append(summary_result)
+				self.logger.info(f'Replaying {step_name} ({i + 1}/{len(history.history)}) [{delay_source}]: {goal}')
 
-		await self.close()
-		return results
+				if (
+					not history_item.model_output
+					or not history_item.model_output.action
+					or history_item.model_output.action == [None]
+				):
+					self.logger.warning(f'{step_name}: No action to replay, skipping')
+					results.append(ActionResult(error='No action to replay'))
+					continue
+
+				# Check if the original step had errors - skip if skip_failures is enabled
+				original_had_error = any(r.error for r in history_item.result if r.error)
+				if original_had_error and skip_failures:
+					error_msgs = [r.error for r in history_item.result if r.error]
+					self.logger.warning(
+						f'{step_name}: Original step had error(s), skipping (skip_failures=True): {error_msgs[0][:100] if error_msgs else "unknown"}'
+					)
+					results.append(
+						ActionResult(
+							error=f'Skipped - original step had error: {error_msgs[0][:100] if error_msgs else "unknown"}'
+						)
+					)
+					continue
+
+				# Check if this step is a redundant retry of the previous step
+				# This handles cases where original run needed to click same element multiple times
+				# due to slow page response, but during replay the first click already worked
+				if self._is_redundant_retry_step(history_item, previous_item, previous_step_succeeded):
+					self.logger.info(f'{step_name}: Skipping redundant retry (previous step already succeeded with same element)')
+					results.append(
+						ActionResult(
+							extracted_content='Skipped - redundant retry of previous step',
+							include_in_memory=False,
+						)
+					)
+					# Don't update previous_item/previous_step_succeeded - keep tracking the original step
+					continue
+
+				retry_count = 0
+				step_succeeded = False
+				menu_reopened = False  # Track if we've already tried reopening the menu
+				# Exponential backoff: 5s base, doubling each retry, capped at 30s
+				base_retry_delay = 5.0
+				max_retry_delay = 30.0
+				while retry_count < max_retries:
+					try:
+						result = await self._execute_history_step(history_item, step_delay, ai_step_llm, wait_for_elements)
+						results.extend(result)
+						step_succeeded = True
+						break
+
+					except Exception as e:
+						error_str = str(e)
+						retry_count += 1
+
+						# Check if this is a "Could not find matching element" error for a menu item
+						# If so, try to re-open the dropdown from the previous step before retrying
+						if (
+							not menu_reopened
+							and 'Could not find matching element' in error_str
+							and previous_item is not None
+							and self._is_menu_opener_step(previous_item)
+						):
+							# Check if current step targets a menu item element
+							curr_elements = history_item.state.interacted_element if history_item.state else []
+							curr_elem = curr_elements[0] if curr_elements else None
+							if self._is_menu_item_element(curr_elem):
+								self.logger.info(
+									'🔄 Dropdown may have closed. Attempting to re-open by re-executing previous step...'
+								)
+								reopened = await self._reexecute_menu_opener(previous_item, ai_step_llm)
+								if reopened:
+									menu_reopened = True
+									# Don't increment retry_count for the menu reopen attempt
+									# Retry immediately with minimal delay
+									retry_count -= 1
+									step_delay = 0.5  # Use short delay after reopening
+									self.logger.info('🔄 Dropdown re-opened, retrying element match...')
+									continue
+
+						if retry_count == max_retries:
+							error_msg = f'{step_name} failed after {max_retries} attempts: {error_str}'
+							self.logger.error(error_msg)
+							# Always record the error in results so AI summary counts it correctly
+							results.append(ActionResult(error=error_msg))
+							if not skip_failures:
+								raise RuntimeError(error_msg)
+							# With skip_failures=True, continue to next step
+						else:
+							# Exponential backoff: 5s, 10s, 20s, ... capped at 30s
+							retry_delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
+							self.logger.warning(
+								f'{step_name} failed (attempt {retry_count}/{max_retries}), retrying in {retry_delay}s...'
+							)
+							await asyncio.sleep(retry_delay)
+
+				# Update tracking for redundant retry detection
+				previous_item = history_item
+				previous_step_succeeded = step_succeeded
+
+			# Generate AI summary of rerun completion
+			self.logger.info('🤖 Generating AI summary of rerun completion...')
+			summary_result = await self._generate_rerun_summary(self.task, results, summary_llm)
+			results.append(summary_result)
+
+			return results
+		finally:
+			# Always close resources, even on failure
+			await self.close()
 
 	async def _execute_initial_actions(self) -> None:
 		# Execute initial actions if provided
@@ -2398,28 +3265,202 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.logger.debug('📝 Saved initial actions to history as step 0')
 			self.logger.debug('Initial actions completed')
 
-	async def _execute_history_step(self, history_item: AgentHistory, delay: float) -> list[ActionResult]:
-		"""Execute a single step from history with element validation"""
+	async def _wait_for_minimum_elements(
+		self,
+		min_elements: int,
+		timeout: float = 30.0,
+		poll_interval: float = 1.0,
+	) -> BrowserStateSummary | None:
+		"""Wait for the page to have at least min_elements interactive elements.
+
+		This helps handle SPA pages where shadow DOM and dynamic content
+		may not be immediately available even when document.readyState is 'complete'.
+
+		Args:
+			min_elements: Minimum number of interactive elements to wait for
+			timeout: Maximum time to wait in seconds
+			poll_interval: Time between polling attempts in seconds
+
+		Returns:
+			BrowserStateSummary if minimum elements found, None if timeout
+		"""
+		assert self.browser_session is not None, 'BrowserSession is not set up'
+
+		start_time = time.time()
+		last_count = 0
+
+		while (time.time() - start_time) < timeout:
+			state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
+			if state and state.dom_state.selector_map:
+				current_count = len(state.dom_state.selector_map)
+				if current_count >= min_elements:
+					self.logger.debug(f'✅ Page has {current_count} elements (needed {min_elements}), proceeding with action')
+					return state
+				if current_count != last_count:
+					self.logger.debug(
+						f'⏳ Waiting for elements: {current_count}/{min_elements} '
+						f'(timeout in {timeout - (time.time() - start_time):.1f}s)'
+					)
+					last_count = current_count
+			await asyncio.sleep(poll_interval)
+
+		# Return last state even if we didn't reach min_elements
+		self.logger.warning(f'⚠️ Timeout waiting for {min_elements} elements, proceeding with {last_count} elements')
+		return await self.browser_session.get_browser_state_summary(include_screenshot=False)
+
+	def _count_expected_elements_from_history(self, history_item: AgentHistory) -> int:
+		"""Estimate the minimum number of elements expected based on history.
+
+		Uses the action indices from the history to determine the minimum
+		number of elements the page should have. If an action targets index N,
+		the page needs at least N+1 elements in the selector_map.
+		"""
+		if not history_item.model_output or not history_item.model_output.action:
+			return 0
+
+		max_index = -1  # Use -1 to indicate no index found yet
+		for action in history_item.model_output.action:
+			# Get the element index this action targets
+			index = action.get_index()
+			if index is not None:
+				max_index = max(max_index, index)
+
+		# Need at least max_index + 1 elements (indices are 0-based)
+		# Cap at 50 to avoid waiting forever for very high indices
+		# max_index >= 0 means we found at least one action with an index
+		return min(max_index + 1, 50) if max_index >= 0 else 0
+
+	async def _execute_history_step(
+		self,
+		history_item: AgentHistory,
+		delay: float,
+		ai_step_llm: BaseChatModel | None = None,
+		wait_for_elements: bool = False,
+	) -> list[ActionResult]:
+		"""Execute a single step from history with element validation.
+
+		For extract actions, uses AI to re-evaluate the content since page content may have changed.
+
+		Args:
+			history_item: The history step to execute
+			delay: Delay before executing the step
+			ai_step_llm: Optional LLM to use for AI steps
+			wait_for_elements: If True, wait for minimum elements before element matching
+		"""
 		assert self.browser_session is not None, 'BrowserSession is not set up'
 
 		await asyncio.sleep(delay)
-		state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
+
+		# Optionally wait for minimum elements before element matching (useful for SPAs)
+		if wait_for_elements:
+			# Determine if we need to wait for elements (actions that interact with DOM elements)
+			needs_element_matching = False
+			if history_item.model_output:
+				for i, action in enumerate(history_item.model_output.action):
+					action_data = action.model_dump(exclude_unset=True)
+					action_name = next(iter(action_data.keys()), None)
+					# Actions that need element matching
+					if action_name in ('click', 'input', 'hover', 'select_option', 'drag_and_drop'):
+						historical_elem = (
+							history_item.state.interacted_element[i] if i < len(history_item.state.interacted_element) else None
+						)
+						if historical_elem is not None:
+							needs_element_matching = True
+							break
+
+			# If we need element matching, wait for minimum elements before proceeding
+			if needs_element_matching:
+				min_elements = self._count_expected_elements_from_history(history_item)
+				if min_elements > 0:
+					state = await self._wait_for_minimum_elements(min_elements, timeout=15.0, poll_interval=1.0)
+				else:
+					state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
+			else:
+				state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
+		else:
+			state = await self.browser_session.get_browser_state_summary(include_screenshot=False)
 		if not state or not history_item.model_output:
 			raise ValueError('Invalid state or model output')
-		updated_actions = []
+
+		results = []
+		pending_actions = []
+
 		for i, action in enumerate(history_item.model_output.action):
-			updated_action = await self._update_action_indices(
-				history_item.state.interacted_element[i],
-				action,
-				state,
-			)
-			updated_actions.append(updated_action)
+			# Check if this is an extract action - use AI step instead
+			action_data = action.model_dump(exclude_unset=True)
+			action_name = next(iter(action_data.keys()), None)
 
-			if updated_action is None:
-				raise ValueError(f'Could not find matching element {i} in current page')
+			if action_name == 'extract':
+				# Execute any pending actions first to maintain correct order
+				# (e.g., if step is [click, extract], click must happen before extract)
+				if pending_actions:
+					batch_results = await self.multi_act(pending_actions)
+					results.extend(batch_results)
+					pending_actions = []
 
-		result = await self.multi_act(updated_actions)
-		return result
+				# Now execute AI step for extract action
+				extract_params = action_data['extract']
+				query = extract_params.get('query', '')
+				extract_links = extract_params.get('extract_links', False)
+
+				self.logger.info(f'🤖 Using AI step for extract action: {query[:50]}...')
+				ai_result = await self._execute_ai_step(
+					query=query,
+					include_screenshot=False,  # Match original extract behavior
+					extract_links=extract_links,
+					ai_step_llm=ai_step_llm,
+				)
+				results.append(ai_result)
+			else:
+				# For non-extract actions, update indices and collect for batch execution
+				historical_elem = history_item.state.interacted_element[i]
+				updated_action = await self._update_action_indices(
+					historical_elem,
+					action,
+					state,
+				)
+				if updated_action is None:
+					# Build informative error message with diagnostic info
+					elem_info = self._format_element_for_error(historical_elem)
+					selector_map = state.dom_state.selector_map or {}
+					selector_count = len(selector_map)
+
+					# Find elements with same node_name for diagnostics
+					hist_node = historical_elem.node_name.lower() if historical_elem else ''
+					similar_elements = []
+					if historical_elem and historical_elem.attributes:
+						hist_aria = historical_elem.attributes.get('aria-label', '')
+						for idx, elem in selector_map.items():
+							if elem.node_name.lower() == hist_node and elem.attributes:
+								elem_aria = elem.attributes.get('aria-label', '')
+								if elem_aria:
+									similar_elements.append(f'{idx}:{elem_aria[:30]}')
+									if len(similar_elements) >= 5:
+										break
+
+					diagnostic = ''
+					if similar_elements:
+						diagnostic = f'\n  Available <{hist_node.upper()}> with aria-label: {similar_elements}'
+					elif hist_node:
+						same_node_count = sum(1 for e in selector_map.values() if e.node_name.lower() == hist_node)
+						diagnostic = (
+							f'\n  Found {same_node_count} <{hist_node.upper()}> elements (none with matching identifiers)'
+						)
+
+					raise ValueError(
+						f'Could not find matching element for action {i} in current page.\n'
+						f'  Looking for: {elem_info}\n'
+						f'  Page has {selector_count} interactive elements.{diagnostic}\n'
+						f'  Tried: EXACT hash → STABLE hash → XPATH → AX_NAME → ATTRIBUTE matching'
+					)
+				pending_actions.append(updated_action)
+
+		# Execute any remaining pending actions
+		if pending_actions:
+			batch_results = await self.multi_act(pending_actions)
+			results.extend(batch_results)
+
+		return results
 
 	async def _update_action_indices(
 		self,
@@ -2430,30 +3471,339 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		"""
 		Update action indices based on current page state.
 		Returns updated action or None if element cannot be found.
+
+		Cascading matching strategy (tries each level in order):
+		1. EXACT: Full element_hash match (includes all attributes + ax_name)
+		2. STABLE: Hash with dynamic CSS classes filtered out (focus, hover, animation, etc.)
+		3. XPATH: XPath string match (structural position in DOM)
+		4. AX_NAME: Accessible name match from accessibility tree (robust for dynamic menus)
+		5. ATTRIBUTE: Unique attribute match (name, id, aria-label) for old history files
 		"""
 		if not historical_element or not browser_state_summary.dom_state.selector_map:
 			return action
 
-		# selector_hash_map = {hash(e): e for e in browser_state_summary.dom_state.selector_map.values()}
+		selector_map = browser_state_summary.dom_state.selector_map
+		highlight_index: int | None = None
+		match_level: MatchLevel | None = None
 
-		highlight_index, current_element = next(
-			(
-				(highlight_index, element)
-				for highlight_index, element in browser_state_summary.dom_state.selector_map.items()
-				if element.element_hash == historical_element.element_hash
-			),
-			(None, None),
+		# Debug: log what we're looking for and what's available
+		self.logger.info(
+			f'🔍 Searching for element: <{historical_element.node_name}> '
+			f'hash={historical_element.element_hash} stable_hash={historical_element.stable_hash}'
 		)
+		# Log what elements are in selector_map for debugging
+		if historical_element.node_name:
+			hist_name = historical_element.node_name.lower()
+			matching_nodes = [
+				(idx, elem.node_name, elem.attributes.get('name') if elem.attributes else None)
+				for idx, elem in selector_map.items()
+				if elem.node_name.lower() == hist_name
+			]
+			self.logger.info(
+				f'🔍 Selector map has {len(selector_map)} elements, '
+				f'{len(matching_nodes)} are <{hist_name.upper()}>: {matching_nodes}'
+			)
 
-		if not current_element or highlight_index is None:
+		# Level 1: EXACT hash match
+		for idx, elem in selector_map.items():
+			if elem.element_hash == historical_element.element_hash:
+				highlight_index = idx
+				match_level = MatchLevel.EXACT
+				break
+
+		if highlight_index is None:
+			self.logger.debug(f'EXACT hash match failed (checked {len(selector_map)} elements)')
+
+		# Level 2: STABLE hash match (dynamic classes filtered)
+		# Use stored stable_hash (computed at save time from EnhancedDOMTreeNode - single source of truth)
+		if highlight_index is None and historical_element.stable_hash is not None:
+			for idx, elem in selector_map.items():
+				if elem.compute_stable_hash() == historical_element.stable_hash:
+					highlight_index = idx
+					match_level = MatchLevel.STABLE
+					self.logger.info('Element matched at STABLE level (dynamic classes filtered)')
+					break
+			if highlight_index is None:
+				self.logger.debug('STABLE hash match failed')
+		elif highlight_index is None:
+			self.logger.debug('STABLE hash match skipped (no stable_hash in history)')
+
+		# Level 3: XPATH match
+		if highlight_index is None and historical_element.x_path:
+			for idx, elem in selector_map.items():
+				if elem.xpath == historical_element.x_path:
+					highlight_index = idx
+					match_level = MatchLevel.XPATH
+					self.logger.info(f'Element matched at XPATH level: {historical_element.x_path}')
+					break
+			if highlight_index is None:
+				self.logger.debug(f'XPATH match failed for: {historical_element.x_path[-60:]}')
+
+		# Level 4: ax_name (accessible name) match - robust for dynamic SPAs with menus
+		# This uses the accessible name from the accessibility tree which is stable
+		# even when DOM structure changes (e.g., dynamically generated menu items)
+		if highlight_index is None and historical_element.ax_name:
+			hist_name = historical_element.node_name.lower()
+			hist_ax_name = historical_element.ax_name
+			for idx, elem in selector_map.items():
+				# Match by node type and accessible name
+				elem_ax_name = elem.ax_node.name if elem.ax_node else None
+				if elem.node_name.lower() == hist_name and elem_ax_name == hist_ax_name:
+					highlight_index = idx
+					match_level = MatchLevel.AX_NAME
+					self.logger.info(f'Element matched at AX_NAME level: "{hist_ax_name}"')
+					break
+			if highlight_index is None:
+				# Log available ax_names for debugging
+				same_type_ax_names = [
+					(idx, elem.ax_node.name if elem.ax_node else None)
+					for idx, elem in selector_map.items()
+					if elem.node_name.lower() == hist_name and elem.ax_node and elem.ax_node.name
+				]
+				self.logger.debug(
+					f'AX_NAME match failed for <{hist_name.upper()}> ax_name="{hist_ax_name}". '
+					f'Page has {len(same_type_ax_names)} <{hist_name.upper()}> with ax_names: '
+					f'{same_type_ax_names[:5]}{"..." if len(same_type_ax_names) > 5 else ""}'
+				)
+
+		# Level 5: Unique attribute fallback (for old history files without stable_hash)
+		if highlight_index is None and historical_element.attributes:
+			hist_attrs = historical_element.attributes
+			hist_name = historical_element.node_name.lower()
+
+			# Try matching by unique identifiers: name, id, or aria-label
+			for attr_key in ['name', 'id', 'aria-label']:
+				if attr_key in hist_attrs and hist_attrs[attr_key]:
+					for idx, elem in selector_map.items():
+						if (
+							elem.node_name.lower() == hist_name
+							and elem.attributes
+							and elem.attributes.get(attr_key) == hist_attrs[attr_key]
+						):
+							highlight_index = idx
+							match_level = MatchLevel.ATTRIBUTE
+							self.logger.info(f'Element matched via {attr_key} attribute: {hist_attrs[attr_key]}')
+							break
+					if highlight_index is not None:
+						break
+
+			if highlight_index is None:
+				tried_attrs = [k for k in ['name', 'id', 'aria-label'] if k in hist_attrs and hist_attrs[k]]
+				# Log what was tried and what's available on the page for debugging
+				same_node_elements = [
+					(idx, elem.attributes.get('aria-label') or elem.attributes.get('id') or elem.attributes.get('name'))
+					for idx, elem in selector_map.items()
+					if elem.node_name.lower() == hist_name and elem.attributes
+				]
+				self.logger.info(
+					f'🔍 ATTRIBUTE match failed for <{hist_name.upper()}> '
+					f'(tried: {tried_attrs}, looking for: {[hist_attrs.get(k) for k in tried_attrs]}). '
+					f'Page has {len(same_node_elements)} <{hist_name.upper()}> elements with identifiers: '
+					f'{same_node_elements[:5]}{"..." if len(same_node_elements) > 5 else ""}'
+				)
+
+		if highlight_index is None:
 			return None
 
 		old_index = action.get_index()
 		if old_index != highlight_index:
 			action.set_index(highlight_index)
-			self.logger.info(f'Element moved in DOM, updated index from {old_index} to {highlight_index}')
+			level_name = match_level.name if match_level else 'UNKNOWN'
+			self.logger.info(f'Element index updated {old_index} → {highlight_index} (matched at {level_name} level)')
 
 		return action
+
+	def _format_element_for_error(self, elem: DOMInteractedElement | None) -> str:
+		"""Format element info for error messages during history rerun."""
+		if elem is None:
+			return '<no element recorded>'
+
+		parts = [f'<{elem.node_name}>']
+
+		# Add key identifying attributes
+		if elem.attributes:
+			for key in ['name', 'id', 'aria-label', 'type']:
+				if key in elem.attributes and elem.attributes[key]:
+					parts.append(f'{key}="{elem.attributes[key]}"')
+
+		# Add hash info
+		parts.append(f'hash={elem.element_hash}')
+		if elem.stable_hash:
+			parts.append(f'stable_hash={elem.stable_hash}')
+
+		# Add xpath (truncated)
+		if elem.x_path:
+			xpath_short = elem.x_path if len(elem.x_path) <= 60 else f'...{elem.x_path[-57:]}'
+			parts.append(f'xpath="{xpath_short}"')
+
+		return ' '.join(parts)
+
+	def _is_redundant_retry_step(
+		self,
+		current_item: AgentHistory,
+		previous_item: AgentHistory | None,
+		previous_step_succeeded: bool,
+	) -> bool:
+		"""
+		Detect if current step is a redundant retry of the previous step.
+
+		This handles cases where the original run needed to click the same element multiple
+		times due to slow page response, but during replay the first click already succeeded.
+		When the page has already navigated, subsequent retry clicks on the same element
+		would fail because that element no longer exists.
+
+		Returns True if:
+		- Previous step succeeded
+		- Both steps target the same element (by element_hash, stable_hash, or xpath)
+		- Both steps perform the same action type (e.g., both are clicks)
+		"""
+		if not previous_item or not previous_step_succeeded:
+			return False
+
+		# Get interacted elements from both steps (first action in each)
+		curr_elements = current_item.state.interacted_element
+		prev_elements = previous_item.state.interacted_element
+
+		if not curr_elements or not prev_elements:
+			return False
+
+		curr_elem = curr_elements[0] if curr_elements else None
+		prev_elem = prev_elements[0] if prev_elements else None
+
+		if not curr_elem or not prev_elem:
+			return False
+
+		# Check if same element by various matching strategies
+		same_by_hash = curr_elem.element_hash == prev_elem.element_hash
+		same_by_stable_hash = (
+			curr_elem.stable_hash is not None
+			and prev_elem.stable_hash is not None
+			and curr_elem.stable_hash == prev_elem.stable_hash
+		)
+		same_by_xpath = curr_elem.x_path == prev_elem.x_path
+
+		if not (same_by_hash or same_by_stable_hash or same_by_xpath):
+			return False
+
+		# Check if same action type
+		curr_actions = current_item.model_output.action if current_item.model_output else []
+		prev_actions = previous_item.model_output.action if previous_item.model_output else []
+
+		if not curr_actions or not prev_actions:
+			return False
+
+		# Get the action type (first key in the action dict)
+		curr_action_data = curr_actions[0].model_dump(exclude_unset=True)
+		prev_action_data = prev_actions[0].model_dump(exclude_unset=True)
+
+		curr_action_type = next(iter(curr_action_data.keys()), None)
+		prev_action_type = next(iter(prev_action_data.keys()), None)
+
+		if curr_action_type != prev_action_type:
+			return False
+
+		self.logger.debug(
+			f'🔄 Detected redundant retry: both steps target same element '
+			f'<{curr_elem.node_name}> with action "{curr_action_type}"'
+		)
+
+		return True
+
+	def _is_menu_opener_step(self, history_item: AgentHistory | None) -> bool:
+		"""
+		Detect if a step opens a dropdown/menu.
+
+		Checks for common patterns indicating a menu opener:
+		- Element has aria-haspopup attribute
+		- Element has data-gw-click="toggleSubMenu" (Guidewire pattern)
+		- Element has expand-button in class name
+		- Element role is "menuitem" with aria-expanded
+
+		Returns True if the step appears to open a dropdown/submenu.
+		"""
+		if not history_item or not history_item.state or not history_item.state.interacted_element:
+			return False
+
+		elem = history_item.state.interacted_element[0] if history_item.state.interacted_element else None
+		if not elem:
+			return False
+
+		attrs = elem.attributes or {}
+
+		# Check for common menu opener indicators
+		if attrs.get('aria-haspopup') in ('true', 'menu', 'listbox'):
+			return True
+		if attrs.get('data-gw-click') == 'toggleSubMenu':
+			return True
+		if 'expand-button' in attrs.get('class', ''):
+			return True
+		if attrs.get('role') == 'menuitem' and attrs.get('aria-expanded') in ('false', 'true'):
+			return True
+		if attrs.get('role') == 'button' and attrs.get('aria-expanded') in ('false', 'true'):
+			return True
+
+		return False
+
+	def _is_menu_item_element(self, elem: 'DOMInteractedElement | None') -> bool:
+		"""
+		Detect if an element is a menu item that appears inside a dropdown/menu.
+
+		Checks for:
+		- role="menuitem", "option", "menuitemcheckbox", "menuitemradio"
+		- Element is inside a menu structure (has menu-related parent indicators)
+		- ax_name is set (menu items typically have accessible names)
+
+		Returns True if the element appears to be a menu item.
+		"""
+		if not elem:
+			return False
+
+		attrs = elem.attributes or {}
+
+		# Check for menu item roles
+		role = attrs.get('role', '')
+		if role in ('menuitem', 'option', 'menuitemcheckbox', 'menuitemradio', 'treeitem'):
+			return True
+
+		# Elements in Guidewire menus have these patterns
+		if 'gw-action--inner' in attrs.get('class', ''):
+			return True
+		if 'menuitem' in attrs.get('class', '').lower():
+			return True
+
+		# If element has an ax_name and looks like it could be in a menu
+		# This is a softer check - only used if the previous step was a menu opener
+		if elem.ax_name and elem.ax_name not in ('', None):
+			# Common menu container classes
+			elem_class = attrs.get('class', '').lower()
+			if any(x in elem_class for x in ['dropdown', 'popup', 'menu', 'submenu', 'action']):
+				return True
+
+		return False
+
+	async def _reexecute_menu_opener(
+		self,
+		opener_item: AgentHistory,
+		ai_step_llm: 'BaseChatModel | None' = None,
+	) -> bool:
+		"""
+		Re-execute a menu opener step to re-open a closed dropdown.
+
+		This is used when a menu item can't be found because the dropdown
+		closed during the wait between steps.
+
+		Returns True if re-execution succeeded, False otherwise.
+		"""
+		try:
+			self.logger.info('🔄 Re-opening dropdown/menu by re-executing previous step...')
+			# Use a minimal delay - we want to quickly re-open the menu
+			await self._execute_history_step(opener_item, delay=0.5, ai_step_llm=ai_step_llm, wait_for_elements=False)
+			# Small delay to let the menu render
+			await asyncio.sleep(0.3)
+			return True
+		except Exception as e:
+			self.logger.warning(f'Failed to re-open dropdown: {e}')
+			return False
 
 	async def load_and_rerun(
 		self,
@@ -2467,7 +3817,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		Args:
 			history_file: Path to the history file
 			variables: Optional dict mapping variable names to new values (e.g. {'email': 'new@example.com'})
-			**kwargs: Additional arguments passed to rerun_history
+			**kwargs: Additional arguments passed to rerun_history:
+				- max_retries: Maximum retries per action (default: 3)
+				- skip_failures: Continue on failure (default: True)
+				- delay_between_actions: Delay when no saved interval (default: 2.0s)
+				- max_step_interval: Cap on saved step_interval (default: 45.0s)
+				- summary_llm: Custom LLM for final summary
+				- ai_step_llm: Custom LLM for extract re-evaluation
 		"""
 		if not history_file:
 			history_file = 'AgentHistory.json'
@@ -2556,6 +3912,10 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					# stops the EventBus with clear=True, and recreates a fresh EventBus
 					await self.browser_session.kill()
 
+			# Close skill service if configured
+			if self.skill_service is not None:
+				await self.skill_service.close()
+
 			# Force garbage collection
 			gc.collect()
 
@@ -2616,7 +3976,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 	def run_sync(
 		self,
-		max_steps: int = 100,
+		max_steps: int = 500,
 		on_step_start: AgentHookFunc | None = None,
 		on_step_end: AgentHookFunc | None = None,
 	) -> AgentHistoryList[AgentStructuredOutput]:
