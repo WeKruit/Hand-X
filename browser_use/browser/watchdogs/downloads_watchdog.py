@@ -869,7 +869,6 @@ class DownloadsWatchdog(BaseWatchdog):
 			# We just need to wait for it to appear in the downloads directory
 			expected_path = downloads_dir / suggested_filename
 
- 
 			# For remote browsers, don't poll local filesystem; downloadProgress handler will emit the event
 			if not self.browser_session.is_local:
 				return
