@@ -38,9 +38,11 @@
 
 </br>
 
+🌤️ Want to skip the setup? Use our <b>[cloud](https://cloud.browser-use.com)</b> for faster, scalable, stealth-enabled browser automation!
+
 # 🤖 LLM Quickstart
 
-1. Direct your favorite coding agent (Cursor, ClaudeS, etc) to [Agents.md](https://docs.browser-use.com/llms-full.txt)
+1. Direct your favorite coding agent (Cursor, Claude Code, etc) to [Agents.md](https://docs.browser-use.com/llms-full.txt)
 2. Prompt away!
 
 <br/>
@@ -137,6 +139,33 @@ This creates a `browser_use_default.py` file with a working example. Available t
 You can also specify a custom output path:
 ```bash
 uvx browser-use init --template default --output my_agent.py
+```
+
+<br/>
+
+# 💻 CLI
+
+Fast, persistent browser automation from the command line:
+
+```bash
+browser-use open https://example.com    # Navigate to URL
+browser-use state                       # See clickable elements
+browser-use click 5                     # Click element by index
+browser-use type "Hello"                # Type text
+browser-use screenshot page.png         # Take screenshot
+browser-use close                       # Close browser
+```
+
+The CLI keeps the browser running between commands for fast iteration. See [CLI docs](browser_use/skill_cli/README.md) for all commands.
+
+### Claude Code Skill
+
+For [Claude Code](https://claude.ai/code), install the skill to enable AI-assisted browser automation:
+
+```bash
+mkdir -p ~/.claude/skills/browser-use
+curl -o ~/.claude/skills/browser-use/SKILL.md \
+  https://raw.githubusercontent.com/browser-use/browser-use/main/skills/browser-use/SKILL.md
 ```
 
 <br/>
