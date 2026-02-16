@@ -451,6 +451,14 @@ class DownloadsWatchdog(BaseWatchdog):
 						if not (is_pdf or is_download_attachment):
 							return
 
+						# If already downloaded this URL and file still exists, do nothing
+						existing_path = self._session_pdf_urls.get(url)
+						if existing_path:
+							if os.path.exists(existing_path):
+								return
+							# Stale cache entry, allow re-download
+							del self._session_pdf_urls[url]
+
 						# Check if we've already processed this URL in this session
 						if url in self._detected_downloads:
 							self.logger.debug(f'[DownloadsWatchdog] Already detected download: {url[:80]}...')
@@ -476,6 +484,7 @@ class DownloadsWatchdog(BaseWatchdog):
 
 						# Trigger download asynchronously in background (don't block event handler)
 						async def download_in_background():
+							# Don't permanently block re-processing this URL if download fails
 							try:
 								download_path = await self.download_file_from_url(
 									url=url,
@@ -486,12 +495,13 @@ class DownloadsWatchdog(BaseWatchdog):
 
 								if download_path:
 									self.logger.info(f'[DownloadsWatchdog] ✅ Successfully downloaded: {download_path}')
-									# Clean up from detected downloads set after success
-									self._detected_downloads.discard(url)
 								else:
 									self.logger.warning(f'[DownloadsWatchdog] ⚠️  Failed to download: {url[:80]}...')
 							except Exception as e:
 								self.logger.error(f'[DownloadsWatchdog] Error downloading in background: {type(e).__name__}: {e}')
+							finally:
+								# Allow future detections of the same URL
+								self._detected_downloads.discard(url)
 
 						# Create background task
 						task = create_task_with_error_handling(
@@ -546,8 +556,13 @@ class DownloadsWatchdog(BaseWatchdog):
 		# Check if already downloaded in this session
 		if url in self._session_pdf_urls:
 			existing_path = self._session_pdf_urls[url]
-			self.logger.debug(f'[DownloadsWatchdog] File already downloaded in session: {existing_path}')
-			return existing_path
+			if os.path.exists(existing_path):
+				self.logger.debug(f'[DownloadsWatchdog] File already downloaded in session: {existing_path}')
+				return existing_path
+
+			# Stale cache entry: the file was removed/cleaned up after we cached it.
+			self.logger.debug(f'[DownloadsWatchdog] Cached download path no longer exists, re-downloading: {existing_path}')
+			del self._session_pdf_urls[url]
 
 		try:
 			# Get or create CDP session for this target
