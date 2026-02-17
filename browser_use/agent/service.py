@@ -204,6 +204,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		loop_detection_enabled: bool = True,
 		llm_screenshot_size: tuple[int, int] | None = None,
 		message_compaction: MessageCompactionSettings | bool | None = True,
+		max_clickable_elements_length: int = 40000,
 		_url_shortening_limit: int = 25,
 		**kwargs,
 	):
@@ -409,6 +410,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			loop_detection_window=loop_detection_window,
 			loop_detection_enabled=loop_detection_enabled,
 			message_compaction=message_compaction,
+			max_clickable_elements_length=max_clickable_elements_length,
 		)
 
 		# Token cost service
@@ -514,6 +516,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			include_recent_events=self.include_recent_events,
 			sample_images=self.sample_images,
 			llm_screenshot_size=llm_screenshot_size,
+			max_clickable_elements_length=self.settings.max_clickable_elements_length,
 		)
 
 		if self.sensitive_data:

@@ -88,6 +88,7 @@ class AgentSettings(BaseModel):
 	# Loop detection settings
 	loop_detection_window: int = 20  # Rolling window size for action similarity tracking
 	loop_detection_enabled: bool = True  # Whether to enable loop detection nudges
+	max_clickable_elements_length: int = 40000  # Max characters for clickable elements in prompt
 
 
 class PageFingerprint(BaseModel):
