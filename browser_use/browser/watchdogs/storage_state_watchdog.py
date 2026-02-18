@@ -251,16 +251,16 @@ class StorageStateWatchdog(BaseWatchdog):
 			if 'cookies' in storage and storage['cookies']:
 				# Playwright exports session cookies with expires=0/-1. CDP treats expires=0 as expired.
 				# Normalize session cookies by omitting expires
-				normalized_cookies: list[dict[str, Any]] = []
+				normalized_cookies: list[Cookie] = []
 				for cookie in storage['cookies']:
 					if not isinstance(cookie, dict):
-						normalized_cookies.append(cookie)
+						normalized_cookies.append(cookie)  # type: ignore[arg-type]
 						continue
 					c = dict(cookie)
 					expires = c.get('expires')
 					if expires in (0, 0.0, -1, -1.0):
 						c.pop('expires', None)
-					normalized_cookies.append(c)
+					normalized_cookies.append(Cookie(**c))
 
 				await self.browser_session._cdp_set_cookies(normalized_cookies)
 				self._last_cookie_state = storage['cookies'].copy()
@@ -277,16 +277,14 @@ class StorageStateWatchdog(BaseWatchdog):
 					if origin.get('localStorage'):
 						lines = []
 						for item in origin['localStorage']:
-							lines.append(
-								f"window.localStorage.setItem({json.dumps(item['name'])}, {json.dumps(item['value'])});"
-							)
+							lines.append(f'window.localStorage.setItem({json.dumps(item["name"])}, {json.dumps(item["value"])});')
 						script = (
-							"(function(){\n"
-							f"  if (window.location && window.location.origin !== {json.dumps(origin_value)}) return;\n"
-							"  try {\n"
-							f"    {' '.join(lines)}\n"
-							"  } catch (e) {}\n"
-							"})();"
+							'(function(){\n'
+							f'  if (window.location && window.location.origin !== {json.dumps(origin_value)}) return;\n'
+							'  try {\n'
+							f'    {" ".join(lines)}\n'
+							'  } catch (e) {}\n'
+							'})();'
 						)
 						await self.browser_session._cdp_add_init_script(script)
 
@@ -294,15 +292,15 @@ class StorageStateWatchdog(BaseWatchdog):
 						lines = []
 						for item in origin['sessionStorage']:
 							lines.append(
-								f"window.sessionStorage.setItem({json.dumps(item['name'])}, {json.dumps(item['value'])});"
+								f'window.sessionStorage.setItem({json.dumps(item["name"])}, {json.dumps(item["value"])});'
 							)
 						script = (
-							"(function(){\n"
-							f"  if (window.location && window.location.origin !== {json.dumps(origin_value)}) return;\n"
-							"  try {\n"
-							f"    {' '.join(lines)}\n"
-							"  } catch (e) {}\n"
-							"})();"
+							'(function(){\n'
+							f'  if (window.location && window.location.origin !== {json.dumps(origin_value)}) return;\n'
+							'  try {\n'
+							f'    {" ".join(lines)}\n'
+							'  } catch (e) {}\n'
+							'})();'
 						)
 						await self.browser_session._cdp_add_init_script(script)
 				self.logger.debug(
