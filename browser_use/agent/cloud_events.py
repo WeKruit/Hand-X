@@ -38,6 +38,8 @@ class UpdateAgentTaskEvent(BaseEvent):
 			raise ValueError('Agent must have _task_start_time attribute')
 
 		done_output = agent.history.final_result() if agent.history else None
+		if done_output and len(done_output) > MAX_STRING_LENGTH:
+			done_output = done_output[:MAX_STRING_LENGTH]
 		return cls(
 			id=str(agent.task_id),
 			user_id='',  # To be filled by cloud handler
