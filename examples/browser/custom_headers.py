@@ -1,27 +1,34 @@
 """
-Custom HTTP Headers via CDP Events.
+Custom HTTP Headers via a custom Watchdog.
 
-Registers a CDP Target.attachedToTarget listener that injects custom
-headers on every newly created target (tab / iframe).  The listener only
-fires for targets created after registration, so we also apply the headers
-to the already-existing focused target with browser.set_extra_headers().
+Creates a custom watchdog that listens to TabCreatedEvent and injects
+custom HTTP headers into every new tab using Network.setExtraHTTPHeaders.
+
+Note: The CDP EventRegistry only supports one handler per event method,
+so registering directly on Target.attachedToTarget would replace the
+internal SessionManager handler.  Using the browser-use event system
+(TabCreatedEvent) avoids this and fires after the target is fully set up.
 
 Note: Network.setExtraHTTPHeaders is a full replacement (not additive).
 
-Verified by navigating to https://httpbin.org/headers.
+Verified by navigating to https://httpbin.org/headers in a new tab.
 """
 
 import asyncio
 import os
 import sys
+from typing import ClassVar
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+from bubus import BaseEvent
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from browser_use import Agent, Browser, ChatBrowserUse
+from browser_use.browser.events import AgentFocusChangedEvent, TabCreatedEvent
+from browser_use.browser.watchdog_base import BaseWatchdog
 
 CUSTOM_HEADERS = {
 	'X-Custom-Auth': 'Bearer my-secret-token',
@@ -30,53 +37,60 @@ CUSTOM_HEADERS = {
 }
 
 
+class CustomHeadersWatchdog(BaseWatchdog):
+	"""Injects custom HTTP headers on every new tab and focus change.
+
+	Listens to both TabCreatedEvent (new tabs) and AgentFocusChangedEvent
+	(tab switches) because headers are bound to a CDP session, and sessions
+	can be recreated on cross-origin navigations or tab switches.
+	"""
+
+	LISTENS_TO: ClassVar[list[type[BaseEvent]]] = [TabCreatedEvent, AgentFocusChangedEvent]
+	EMITS: ClassVar[list[type[BaseEvent]]] = []
+
+	async def on_TabCreatedEvent(self, event: TabCreatedEvent) -> None:
+		"""Set extra headers when a new tab is created."""
+		try:
+			await self.browser_session.set_extra_headers(CUSTOM_HEADERS, target_id=event.target_id)
+		except Exception as e:
+			self.logger.debug(f'Could not set headers on {event.target_id[:8]}: {e}')
+
+	async def on_AgentFocusChangedEvent(self, event: AgentFocusChangedEvent) -> None:
+		"""Re-apply headers when the agent switches to a different tab."""
+		try:
+			await self.browser_session.set_extra_headers(CUSTOM_HEADERS, target_id=event.target_id)
+		except Exception as e:
+			self.logger.debug(f'Could not set headers on {event.target_id[:8]}: {e}')
+
+
 async def main():
 	browser = Browser(headless=False)
+
+	# Start the browser so watchdogs are initialized
 	await browser.start()
 
-	# 1. Register a CDP listener so every NEW target gets custom headers.
-	#    Same pattern as _setup_proxy_auth() which uses Target.attachedToTarget
-	#    to call Fetch.enable on freshly-attached sessions.
-	def on_target_attached(event, session_id=None):
-		sid = event.get('sessionId') or event.get('session_id') or session_id
-		if not sid:
-			return
+	# Attach our custom watchdog to the browser session
+	CustomHeadersWatchdog.model_rebuild()
+	headers_watchdog = CustomHeadersWatchdog(event_bus=browser.event_bus, browser_session=browser)
+	headers_watchdog.attach_to_session()
 
-		async def _apply():
-			try:
-				assert browser._cdp_client_root is not None
-				await browser._cdp_client_root.send.Network.enable(session_id=sid)
-				await browser._cdp_client_root.send.Network.setExtraHTTPHeaders(
-					params={'headers': CUSTOM_HEADERS},  # type: ignore[arg-type]
-					session_id=sid,
-				)
-			except Exception:
-				pass  # short-lived targets (workers, temp iframes) may detach
-
-		asyncio.create_task(_apply())
-
-	browser.cdp_client.register.Target.attachedToTarget(on_target_attached)
-
-	# 2. The listener above only fires for future targets, so apply headers
-	#    to the already-existing focused target too.
-	await browser.set_extra_headers(CUSTOM_HEADERS)
-
-	# You can also call set_extra_headers() at any point to change the
-	# headers on a specific target without a listener:
+	# The watchdog only fires for tabs created AFTER registration.
+	# To apply headers to an already-existing tab, call set_extra_headers():
 	#
-	#   await browser.set_extra_headers({'Authorization': 'Bearer xyz'})
-	#   await browser.set_extra_headers({'Authorization': 'Bearer xyz'}, target_id=some_target_id)
+	#   await browser.set_extra_headers(CUSTOM_HEADERS)
+	#   await browser.set_extra_headers(CUSTOM_HEADERS, target_id=some_target_id)
 	#
 	# Keep in mind that setExtraHTTPHeaders is a full replacement – each
 	# call overwrites all previously set extra headers on that target.
 
-	# 3. Run the agent – httpbin.org/headers echoes all received HTTP headers
+	# Run the agent – open httpbin.org/headers in a new tab so the
+	# watchdog fires and injects the custom headers.
 	agent = Agent(
 		task=(
-			'Go to https://httpbin.org/headers and extract the full JSON response shown on the page. '
-			'Look for the custom headers X-Custom-Auth, X-Request-Source, and X-Trace-Id in the output.'
+			'Open https://httpbin.org/headers in two different tabs and extract the full JSON response. '
+			'Look for the custom headers X-Custom-Auth, X-Request-Source, and X-Trace-Id in the output and compare the results.'
 		),
-		llm=ChatBrowserUse(),
+		llm=ChatBrowserUse(model='bu-2-0'),
 		browser=browser,
 	)
 
