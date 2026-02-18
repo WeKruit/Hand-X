@@ -204,6 +204,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		loop_detection_enabled: bool = True,
 		llm_screenshot_size: tuple[int, int] | None = None,
 		message_compaction: MessageCompactionSettings | bool | None = True,
+		max_clickable_elements_length: int = 40000,
 		_url_shortening_limit: int = 25,
 		**kwargs,
 	):
@@ -409,6 +410,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			loop_detection_window=loop_detection_window,
 			loop_detection_enabled=loop_detection_enabled,
 			message_compaction=message_compaction,
+			max_clickable_elements_length=max_clickable_elements_length,
 		)
 
 		# Token cost service
@@ -514,6 +516,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			include_recent_events=self.include_recent_events,
 			sample_images=self.sample_images,
 			llm_screenshot_size=llm_screenshot_size,
+			max_clickable_elements_length=self.settings.max_clickable_elements_length,
 		)
 
 		if self.sensitive_data:
@@ -2692,9 +2695,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			cached_element_hashes = set()
 
 		for i, action in enumerate(actions):
+			# Get action name from the action model BEFORE try block to ensure it's always available in except
+			action_data = action.model_dump(exclude_unset=True)
+			action_name = next(iter(action_data.keys())) if action_data else 'unknown'
+
 			if i > 0:
 				# ONLY ALLOW TO CALL `done` IF IT IS A SINGLE ACTION
-				if action.model_dump(exclude_unset=True).get('done') is not None:
+				if action_data.get('done') is not None:
 					msg = f'Done action is allowed only as a single action - stopped after action {i} / {total_actions}.'
 					self.logger.debug(msg)
 					break
@@ -2706,9 +2713,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 			try:
 				await self._check_stop_or_pause()
-				# Get action name from the action model
-				action_data = action.model_dump(exclude_unset=True)
-				action_name = next(iter(action_data.keys())) if action_data else 'unknown'
 
 				# Log action before execution
 				await self._log_action(action, action_name, i + 1, total_actions)
@@ -3911,6 +3915,17 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					# Kill the browser session - this dispatches BrowserStopEvent,
 					# stops the EventBus with clear=True, and recreates a fresh EventBus
 					await self.browser_session.kill()
+				else:
+					# keep_alive=True sessions shouldn't keep the event loop alive after agent.run()
+					await self.browser_session.event_bus.stop(
+						clear=False,
+						timeout=_get_timeout('TIMEOUT_BrowserSessionEventBusStopOnAgentClose', 1.0),
+					)
+					try:
+						self.browser_session.event_bus.event_queue = None
+						self.browser_session.event_bus._on_idle = None
+					except Exception:
+						pass
 
 			# Close skill service if configured
 			if self.skill_service is not None:
