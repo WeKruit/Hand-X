@@ -8,7 +8,7 @@ from bubus import BaseEvent
 from pydantic import Field, field_validator
 from uuid_extensions import uuid7str
 
-MAX_STRING_LENGTH = 100000  # 100K chars ~ 25k tokens should be enough
+MAX_STRING_LENGTH = 500000  # 100K chars ~ 25k tokens should be enough
 MAX_URL_LENGTH = 100000
 MAX_TASK_LENGTH = 100000
 MAX_COMMENT_LENGTH = 2000
