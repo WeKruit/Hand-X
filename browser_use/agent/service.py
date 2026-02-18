@@ -2695,9 +2695,13 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			cached_element_hashes = set()
 
 		for i, action in enumerate(actions):
+			# Get action name from the action model BEFORE try block to ensure it's always available in except
+			action_data = action.model_dump(exclude_unset=True)
+			action_name = next(iter(action_data.keys())) if action_data else 'unknown'
+
 			if i > 0:
 				# ONLY ALLOW TO CALL `done` IF IT IS A SINGLE ACTION
-				if action.model_dump(exclude_unset=True).get('done') is not None:
+				if action_data.get('done') is not None:
 					msg = f'Done action is allowed only as a single action - stopped after action {i} / {total_actions}.'
 					self.logger.debug(msg)
 					break
@@ -2709,9 +2713,6 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 			try:
 				await self._check_stop_or_pause()
-				# Get action name from the action model
-				action_data = action.model_dump(exclude_unset=True)
-				action_name = next(iter(action_data.keys())) if action_data else 'unknown'
 
 				# Log action before execution
 				await self._log_action(action, action_name, i + 1, total_actions)
