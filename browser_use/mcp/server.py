@@ -254,6 +254,10 @@ class BrowserUseServer:
 								'default': False,
 							},
 						},
+						'oneOf': [
+							{'required': ['index']},
+							{'required': ['coordinate_x', 'coordinate_y']},
+						],
 					},
 				),
 				types.Tool(
