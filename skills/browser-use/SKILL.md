@@ -16,6 +16,8 @@ Before using this skill, `browser-use` must be installed and configured. Run dia
 browser-use doctor
 ```
 
+For more information, see https://github.com/browser-use/browser-use/blob/main/browser_use/skill_cli/README.md
+
 ## Core Workflow
 
 1. **Navigate**: `browser-use open <url>` - Opens URL (starts browser if needed)
