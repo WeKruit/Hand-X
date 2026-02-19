@@ -2023,16 +2023,34 @@ Validated Code (after quote fixing):
 				'Complete task with structured output.',
 				param_model=StructuredOutputAction[output_model],
 			)
-			async def done(params: StructuredOutputAction):
+			async def done(params: StructuredOutputAction, file_system: FileSystem, available_file_paths: list[str]):
 				# Exclude success from the output JSON
 				# Use mode='json' to properly serialize enums at all nesting levels
 				output_dict = params.data.model_dump(mode='json')
+
+				attachments: list[str] = []
+
+				# 1. Resolve any explicitly requested files via files_to_display
+				if params.files_to_display:
+					for file_name in params.files_to_display:
+						file_content = file_system.display_file(file_name)
+						if file_content:
+							attachments.append(str(file_system.get_dir() / file_name))
+
+				# 2. Auto-attach any session downloads (browser-downloaded files)
+				#    that weren't already covered by files_to_display
+				if available_file_paths:
+					existing = set(attachments)
+					for file_path in available_file_paths:
+						if file_path not in existing:
+							attachments.append(file_path)
 
 				return ActionResult(
 					is_done=True,
 					success=params.success,
 					extracted_content=json.dumps(output_dict, ensure_ascii=False),
 					long_term_memory=f'Task completed. Success Status: {params.success}',
+					attachments=attachments,
 				)
 
 		else:
