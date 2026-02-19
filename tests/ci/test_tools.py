@@ -1,8 +1,10 @@
 import asyncio
 import json
+import os
 import tempfile
 import time
 
+import anyio
 import pytest
 from pydantic import BaseModel, Field
 from pytest_httpserver import HTTPServer
@@ -519,6 +521,7 @@ class TestStructuredOutputDoneWithFiles:
 			assert isinstance(result, ActionResult)
 			assert result.is_done is True
 			assert result.success is True
+			assert result.extracted_content is not None
 			output = json.loads(result.extracted_content)
 			assert output == {'answer': 'hello'}
 			assert result.attachments == []
@@ -547,8 +550,10 @@ class TestStructuredOutputDoneWithFiles:
 			assert isinstance(result, ActionResult)
 			assert result.is_done is True
 			assert result.success is True
+			assert result.extracted_content is not None
 			output = json.loads(result.extracted_content)
 			assert output == {'summary': 'done'}
+			assert result.attachments is not None
 			assert len(result.attachments) == 1
 			assert result.attachments[0].endswith('report.txt')
 
@@ -564,11 +569,8 @@ class TestStructuredOutputDoneWithFiles:
 			file_system = FileSystem(temp_dir)
 
 			# Simulate a browser-downloaded file via available_file_paths
-			import os
-
 			fake_download = os.path.join(temp_dir, 'tax-bill.pdf')
-			with open(fake_download, 'wb') as f:
-				f.write(b'%PDF-1.4 fake pdf content')
+			await anyio.Path(fake_download).write_bytes(b'%PDF-1.4 fake pdf content')
 
 			result = await tools.done(
 				data={'url': 'https://example.com/bill.pdf'},
@@ -580,9 +582,11 @@ class TestStructuredOutputDoneWithFiles:
 
 			assert isinstance(result, ActionResult)
 			assert result.is_done is True
+			assert result.extracted_content is not None
 			output = json.loads(result.extracted_content)
 			assert output == {'url': 'https://example.com/bill.pdf'}
 			# The download should be auto-attached
+			assert result.attachments is not None
 			assert len(result.attachments) == 1
 			assert result.attachments[0] == fake_download
 
@@ -612,6 +616,7 @@ class TestStructuredOutputDoneWithFiles:
 
 			assert isinstance(result, ActionResult)
 			# Should have exactly 1 attachment, not 2
+			assert result.attachments is not None
 			assert len(result.attachments) == 1
 			assert result.attachments[0] == fs_path
 
@@ -637,6 +642,7 @@ class TestStructuredOutputDoneWithFiles:
 
 			assert isinstance(result, ActionResult)
 			assert result.is_done is True
+			assert result.extracted_content is not None
 			output = json.loads(result.extracted_content)
 			assert output == {'value': 42}
 			# nonexistent file should not appear in attachments
@@ -655,4 +661,3 @@ class TestStructuredOutputDoneWithFiles:
 		assert 'files_to_display' not in top_level_props
 		# data should still be present
 		assert 'data' in top_level_props
-
