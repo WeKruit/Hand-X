@@ -5,8 +5,6 @@ click commands, that the browser command handler dispatches the right events,
 and that the direct CLI selector map cache works correctly.
 """
 
-from unittest.mock import MagicMock
-
 import pytest
 
 from browser_use.skill_cli.main import build_parser
@@ -116,13 +114,74 @@ class TestClickCommandHandler:
 			await session.kill()
 
 	async def test_invalid_args_count(self):
-		"""Three args returns error."""
+		"""Three args returns error without touching the browser."""
+		from browser_use.browser.session import BrowserSession
 		from browser_use.skill_cli.commands.browser import handle
+		from browser_use.skill_cli.sessions import SessionInfo
 
-		session_info = MagicMock()
+		# BrowserSession constructed but not started — handler hits the
+		# 3-arg error branch before doing anything with the session.
+		session_info = SessionInfo(
+			name='test',
+			browser_mode='chromium',
+			headed=False,
+			profile=None,
+			browser_session=BrowserSession(headless=True),
+		)
+
 		result = await handle('click', session_info, {'args': [1, 2, 3]})
 		assert 'error' in result
 		assert 'Usage' in result['error']
+
+
+def _make_dom_node(
+	*,
+	node_name: str,
+	absolute_position: 'DOMRect | None' = None,
+	ax_name: str | None = None,
+	node_value: str = '',
+) -> 'EnhancedDOMTreeNode':
+	"""Build a real EnhancedDOMTreeNode for testing."""
+	from browser_use.dom.views import (
+		DOMRect,
+		EnhancedAXNode,
+		EnhancedDOMTreeNode,
+		NodeType,
+	)
+
+	ax_node = None
+	if ax_name is not None:
+		ax_node = EnhancedAXNode(
+			ax_node_id='ax-0',
+			ignored=False,
+			role='button',
+			name=ax_name,
+			description=None,
+			properties=None,
+			child_ids=None,
+		)
+
+	return EnhancedDOMTreeNode(
+		node_id=1,
+		backend_node_id=1,
+		node_type=NodeType.ELEMENT_NODE,
+		node_name=node_name,
+		node_value=node_value,
+		attributes={},
+		is_scrollable=None,
+		is_visible=True,
+		absolute_position=absolute_position,
+		target_id='target-0',
+		frame_id=None,
+		session_id=None,
+		content_document=None,
+		shadow_root_type=None,
+		shadow_roots=None,
+		parent_node=None,
+		children_nodes=None,
+		ax_node=ax_node,
+		snapshot_node=None,
+	)
 
 
 class TestSelectorCache:
@@ -138,31 +197,27 @@ class TestSelectorCache:
 
 	def test_save_and_load_cache_round_trip(self):
 		"""_save_selector_cache → _load_selector_cache preserves data."""
+		from browser_use.dom.views import DOMRect
 		from browser_use.skill_cli.direct import (
 			_load_selector_cache,
 			_save_selector_cache,
 			_save_state,
 		)
 
-		# Seed state file so _load_state works
 		_save_state({'cdp_url': 'ws://localhost:9222'})
 
-		# Build mock nodes with absolute_position
-		mock_node_1 = MagicMock()
-		mock_node_1.absolute_position = MagicMock(x=100.0, y=200.0, width=80.0, height=32.0)
-		mock_node_1.ax_node = MagicMock(name='Submit')
-		mock_node_1.ax_node.name = 'Submit'
-		mock_node_1.node_name = 'BUTTON'
-		mock_node_1.node_value = ''
+		node_1 = _make_dom_node(
+			node_name='BUTTON',
+			absolute_position=DOMRect(x=100.0, y=200.0, width=80.0, height=32.0),
+			ax_name='Submit',
+		)
+		node_2 = _make_dom_node(
+			node_name='A',
+			absolute_position=DOMRect(x=50.0, y=800.5, width=200.0, height=40.0),
+			node_value='Click here',
+		)
 
-		mock_node_2 = MagicMock()
-		mock_node_2.absolute_position = MagicMock(x=50.0, y=800.5, width=200.0, height=40.0)
-		mock_node_2.ax_node = None
-		mock_node_2.node_name = 'A'
-		mock_node_2.node_value = 'Click here'
-
-		selector_map = {5: mock_node_1, 12: mock_node_2}
-		_save_selector_cache(selector_map)
+		_save_selector_cache({5: node_1, 12: node_2})
 
 		loaded = _load_selector_cache()
 		assert 5 in loaded
@@ -196,24 +251,19 @@ class TestSelectorCache:
 
 		_save_state({'cdp_url': 'ws://localhost:9222'})
 
-		mock_node = MagicMock()
-		mock_node.absolute_position = None
-		mock_node.node_name = 'DIV'
-
-		_save_selector_cache({1: mock_node})
+		node = _make_dom_node(node_name='DIV', absolute_position=None)
+		_save_selector_cache({1: node})
 		loaded = _load_selector_cache()
 		assert loaded == {}
 
 	def test_viewport_coordinate_conversion(self):
 		"""Document coords + scroll offset → viewport coords."""
-		# Simulating what _cdp_click_index does
 		elem = {'x': 150.0, 'y': 900.0, 'w': 80.0, 'h': 32.0}
 		scroll_x, scroll_y = 0.0, 500.0
 
 		viewport_x = int(elem['x'] + elem['w'] / 2 - scroll_x)
 		viewport_y = int(elem['y'] + elem['h'] / 2 - scroll_y)
 
-		# Element center at doc (190, 916), viewport after scroll (190, 416)
 		assert viewport_x == 190
 		assert viewport_y == 416
 
@@ -225,8 +275,8 @@ class TestSelectorCache:
 		viewport_x = int(elem['x'] + elem['w'] / 2 - scroll_x)
 		viewport_y = int(elem['y'] + elem['h'] / 2 - scroll_y)
 
-		assert viewport_x == 450  # 1250 - 800
-		assert viewport_y == 225  # 325 - 100
+		assert viewport_x == 450
+		assert viewport_y == 225
 
 	def test_cache_invalidated_on_navigate(self):
 		"""Navigating clears selector_map from state."""
@@ -238,7 +288,6 @@ class TestSelectorCache:
 			'selector_map': {'1': {'x': 10, 'y': 20, 'w': 30, 'h': 40, 'tag': 'a', 'text': 'Link'}},
 		})
 
-		# Simulate what _cdp_navigate does to the state
 		state = _load_state()
 		state.pop('selector_map', None)
 		_save_state(state)
@@ -250,6 +299,7 @@ class TestSelectorCache:
 
 	def test_state_overwritten_on_fresh_cache(self):
 		"""Running state overwrites old cache with new data."""
+		from browser_use.dom.views import DOMRect
 		from browser_use.skill_cli.direct import (
 			_load_selector_cache,
 			_save_selector_cache,
@@ -261,18 +311,15 @@ class TestSelectorCache:
 			'selector_map': {'99': {'x': 0, 'y': 0, 'w': 0, 'h': 0, 'tag': 'old', 'text': 'old'}},
 		})
 
-		# New cache with different element
-		mock_node = MagicMock()
-		mock_node.absolute_position = MagicMock(x=5.0, y=10.0, width=20.0, height=15.0)
-		mock_node.ax_node = MagicMock(name='New')
-		mock_node.ax_node.name = 'New'
-		mock_node.node_name = 'SPAN'
-		mock_node.node_value = ''
+		node = _make_dom_node(
+			node_name='SPAN',
+			absolute_position=DOMRect(x=5.0, y=10.0, width=20.0, height=15.0),
+			ax_name='New',
+		)
 
-		_save_selector_cache({7: mock_node})
+		_save_selector_cache({7: node})
 		loaded = _load_selector_cache()
 
-		# Old index 99 should be gone, only new index 7
 		assert 99 not in loaded
 		assert 7 in loaded
 		assert loaded[7]['tag'] == 'span'
