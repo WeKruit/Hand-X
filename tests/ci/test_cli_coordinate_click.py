@@ -5,7 +5,14 @@ click commands, that the browser command handler dispatches the right events,
 and that the direct CLI selector map cache works correctly.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import pytest
+
+if TYPE_CHECKING:
+	from browser_use.dom.views import DOMRect, EnhancedDOMTreeNode
 
 from browser_use.skill_cli.main import build_parser
 
@@ -137,13 +144,12 @@ class TestClickCommandHandler:
 def _make_dom_node(
 	*,
 	node_name: str,
-	absolute_position: 'DOMRect | None' = None,
+	absolute_position: DOMRect | None = None,
 	ax_name: str | None = None,
 	node_value: str = '',
-) -> 'EnhancedDOMTreeNode':
+) -> EnhancedDOMTreeNode:
 	"""Build a real EnhancedDOMTreeNode for testing."""
 	from browser_use.dom.views import (
-		DOMRect,
 		EnhancedAXNode,
 		EnhancedDOMTreeNode,
 		NodeType,
