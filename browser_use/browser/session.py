@@ -675,6 +675,25 @@ class BrowserSession(BaseModel):
 					try:
 						await asyncio.wait_for(self.connect(cdp_url=self.cdp_url), timeout=15.0)
 					except TimeoutError:
+						# Timeout cancels connect() via CancelledError, which bypasses
+						# connect()'s `except Exception` cleanup (CancelledError is BaseException).
+						# Clean up the partially-initialized client so future start attempts
+						# don't skip reconnection due to _cdp_client_root being non-None.
+						cdp_client = cast(CDPClient | None, self._cdp_client_root)
+						if cdp_client is not None:
+							try:
+								await cdp_client.stop()
+							except Exception:
+								pass
+							self._cdp_client_root = None
+						manager = self.session_manager
+						if manager is not None:
+							try:
+								await manager.clear()
+							except Exception:
+								pass
+							self.session_manager = None
+						self.agent_focus_target_id = None
 						raise RuntimeError(
 							f'connect() timed out after 15s — CDP connection to {self.cdp_url} is too slow or unresponsive'
 						)
