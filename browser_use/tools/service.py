@@ -2023,7 +2023,7 @@ Validated Code (after quote fixing):
 				'Complete task with structured output.',
 				param_model=StructuredOutputAction[output_model],
 			)
-			async def done(params: StructuredOutputAction, file_system: FileSystem, available_file_paths: list[str]):
+			async def done(params: StructuredOutputAction, file_system: FileSystem, browser_session: BrowserSession):
 				# Exclude success from the output JSON
 				# Use mode='json' to properly serialize enums at all nesting levels
 				output_dict = params.data.model_dump(mode='json')
@@ -2037,11 +2037,12 @@ Validated Code (after quote fixing):
 						if file_content:
 							attachments.append(str(file_system.get_dir() / file_name))
 
-				# 2. Auto-attach any session downloads (browser-downloaded files)
-				#    that weren't already covered by files_to_display
-				if available_file_paths:
+				# 2. Auto-attach actual session downloads (CDP-tracked browser downloads)
+				#    but NOT user-supplied whitelist paths from available_file_paths
+				session_downloads = browser_session.downloaded_files
+				if session_downloads:
 					existing = set(attachments)
-					for file_path in available_file_paths:
+					for file_path in session_downloads:
 						if file_path not in existing:
 							attachments.append(file_path)
 

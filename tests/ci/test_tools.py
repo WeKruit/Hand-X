@@ -515,7 +515,6 @@ class TestStructuredOutputDoneWithFiles:
 				success=True,
 				browser_session=browser_session,
 				file_system=file_system,
-				available_file_paths=[],
 			)
 
 			assert isinstance(result, ActionResult)
@@ -544,7 +543,6 @@ class TestStructuredOutputDoneWithFiles:
 				files_to_display=['report.txt'],
 				browser_session=browser_session,
 				file_system=file_system,
-				available_file_paths=[],
 			)
 
 			assert isinstance(result, ActionResult)
@@ -557,7 +555,7 @@ class TestStructuredOutputDoneWithFiles:
 			assert len(result.attachments) == 1
 			assert result.attachments[0].endswith('report.txt')
 
-	async def test_structured_output_done_auto_attaches_downloads(self, browser_session):
+	async def test_structured_output_done_auto_attaches_downloads(self, browser_session, base_url):
 		"""Session downloads are auto-attached even without files_to_display."""
 
 		class MyOutput(BaseModel):
@@ -568,27 +566,31 @@ class TestStructuredOutputDoneWithFiles:
 		with tempfile.TemporaryDirectory() as temp_dir:
 			file_system = FileSystem(temp_dir)
 
-			# Simulate a browser-downloaded file via available_file_paths
+			# Simulate a CDP-tracked browser download
 			fake_download = os.path.join(temp_dir, 'tax-bill.pdf')
 			await anyio.Path(fake_download).write_bytes(b'%PDF-1.4 fake pdf content')
 
-			result = await tools.done(
-				data={'url': 'https://example.com/bill.pdf'},
-				success=True,
-				browser_session=browser_session,
-				file_system=file_system,
-				available_file_paths=[fake_download],
-			)
+			saved_downloads = browser_session._downloaded_files.copy()
+			browser_session._downloaded_files.append(fake_download)
+			try:
+				result = await tools.done(
+					data={'url': f'{base_url}/bill.pdf'},
+					success=True,
+					browser_session=browser_session,
+					file_system=file_system,
+				)
 
-			assert isinstance(result, ActionResult)
-			assert result.is_done is True
-			assert result.extracted_content is not None
-			output = json.loads(result.extracted_content)
-			assert output == {'url': 'https://example.com/bill.pdf'}
-			# The download should be auto-attached
-			assert result.attachments is not None
-			assert len(result.attachments) == 1
-			assert result.attachments[0] == fake_download
+				assert isinstance(result, ActionResult)
+				assert result.is_done is True
+				assert result.extracted_content is not None
+				output = json.loads(result.extracted_content)
+				assert output == {'url': f'{base_url}/bill.pdf'}
+				# The download should be auto-attached
+				assert result.attachments is not None
+				assert len(result.attachments) == 1
+				assert result.attachments[0] == fake_download
+			finally:
+				browser_session._downloaded_files = saved_downloads
 
 	async def test_structured_output_done_deduplicates_attachments(self, browser_session):
 		"""Downloads already covered by files_to_display are not duplicated."""
@@ -602,23 +604,27 @@ class TestStructuredOutputDoneWithFiles:
 			file_system = FileSystem(temp_dir)
 			await file_system.write_file('report.txt', 'content here')
 
-			# The same file appears in both files_to_display and available_file_paths
+			# The same file appears in both files_to_display and session downloads
 			fs_path = str(file_system.get_dir() / 'report.txt')
 
-			result = await tools.done(
-				data={'status': 'ok'},
-				success=True,
-				files_to_display=['report.txt'],
-				browser_session=browser_session,
-				file_system=file_system,
-				available_file_paths=[fs_path],
-			)
+			saved_downloads = browser_session._downloaded_files.copy()
+			browser_session._downloaded_files.append(fs_path)
+			try:
+				result = await tools.done(
+					data={'status': 'ok'},
+					success=True,
+					files_to_display=['report.txt'],
+					browser_session=browser_session,
+					file_system=file_system,
+				)
 
-			assert isinstance(result, ActionResult)
-			# Should have exactly 1 attachment, not 2
-			assert result.attachments is not None
-			assert len(result.attachments) == 1
-			assert result.attachments[0] == fs_path
+				assert isinstance(result, ActionResult)
+				# Should have exactly 1 attachment, not 2
+				assert result.attachments is not None
+				assert len(result.attachments) == 1
+				assert result.attachments[0] == fs_path
+			finally:
+				browser_session._downloaded_files = saved_downloads
 
 	async def test_structured_output_done_nonexistent_file_ignored(self, browser_session):
 		"""Files that don't exist in FileSystem are not included via files_to_display."""
@@ -637,7 +643,6 @@ class TestStructuredOutputDoneWithFiles:
 				files_to_display=['nonexistent.txt'],
 				browser_session=browser_session,
 				file_system=file_system,
-				available_file_paths=[],
 			)
 
 			assert isinstance(result, ActionResult)
