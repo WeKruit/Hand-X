@@ -391,6 +391,23 @@ class BrowserSession(BaseModel):
 		return self.browser_profile.is_local
 
 	@property
+	def is_cdp_connected(self) -> bool:
+		"""Check if the CDP WebSocket connection is alive and usable.
+
+		Returns True only if the root CDP client exists and its WebSocket is in OPEN state.
+		A dead/closing/closed WebSocket returns False, preventing handlers from dispatching
+		CDP commands that would hang until timeout on a broken connection.
+		"""
+		if self._cdp_client_root is None or self._cdp_client_root.ws is None:
+			return False
+		try:
+			from websockets.protocol import State
+
+			return self._cdp_client_root.ws.state is State.OPEN
+		except Exception:
+			return False
+
+	@property
 	def cloud_browser(self) -> bool:
 		"""Whether to use cloud browser service from browser profile."""
 		return self.browser_profile.use_cloud
@@ -653,7 +670,33 @@ class BrowserSession(BaseModel):
 				# Only connect if not already connected
 				if self._cdp_client_root is None:
 					# Setup browser via CDP (for both local and remote cases)
-					await self.connect(cdp_url=self.cdp_url)
+					# Global timeout prevents connect() from hanging indefinitely on
+					# slow/broken WebSocket connections (common on Lambda → remote browser)
+					try:
+						await asyncio.wait_for(self.connect(cdp_url=self.cdp_url), timeout=15.0)
+					except TimeoutError:
+						# Timeout cancels connect() via CancelledError, which bypasses
+						# connect()'s `except Exception` cleanup (CancelledError is BaseException).
+						# Clean up the partially-initialized client so future start attempts
+						# don't skip reconnection due to _cdp_client_root being non-None.
+						cdp_client = cast(CDPClient | None, self._cdp_client_root)
+						if cdp_client is not None:
+							try:
+								await cdp_client.stop()
+							except Exception:
+								pass
+							self._cdp_client_root = None
+						manager = self.session_manager
+						if manager is not None:
+							try:
+								await manager.clear()
+							except Exception:
+								pass
+							self.session_manager = None
+						self.agent_focus_target_id = None
+						raise RuntimeError(
+							f'connect() timed out after 15s — CDP connection to {self.cdp_url} is too slow or unresponsive'
+						)
 					assert self.cdp_client is not None
 
 					# Notify that browser is connected (single place)
@@ -1592,22 +1635,27 @@ class BrowserSession(BaseModel):
 			# SessionManager has already discovered all targets via start_monitoring()
 			page_targets_from_manager = self.session_manager.get_all_page_targets()
 
-			# Check for chrome://newtab pages and redirect them to about:blank
+			# Check for chrome://newtab pages and redirect them to about:blank (in parallel)
 			from browser_use.utils import is_new_tab_page
 
-			for target in page_targets_from_manager:
+			async def _redirect_newtab(target):
 				target_url = target.url
-				if is_new_tab_page(target_url) and target_url != 'about:blank':
-					target_id = target.target_id
-					self.logger.debug(f'🔄 Redirecting {target_url} to about:blank for target {target_id}')
-					try:
-						# Use public API with focus=False to avoid changing focus during init
-						session = await self.get_or_create_cdp_session(target_id, focus=False)
-						await session.cdp_client.send.Page.navigate(params={'url': 'about:blank'}, session_id=session.session_id)
-						# Update target url
-						target.url = 'about:blank'
-					except Exception as e:
-						self.logger.warning(f'Failed to redirect {target_url}: {e}')
+				target_id = target.target_id
+				self.logger.debug(f'🔄 Redirecting {target_url} to about:blank for target {target_id}')
+				try:
+					session = await self.get_or_create_cdp_session(target_id, focus=False)
+					await session.cdp_client.send.Page.navigate(params={'url': 'about:blank'}, session_id=session.session_id)
+					target.url = 'about:blank'
+				except Exception as e:
+					self.logger.warning(f'Failed to redirect {target_url}: {e}')
+
+			redirect_tasks = [
+				_redirect_newtab(target)
+				for target in page_targets_from_manager
+				if is_new_tab_page(target.url) and target.url != 'about:blank'
+			]
+			if redirect_tasks:
+				await asyncio.gather(*redirect_tasks, return_exceptions=True)
 
 			# Ensure we have at least one page
 			if not page_targets_from_manager:
