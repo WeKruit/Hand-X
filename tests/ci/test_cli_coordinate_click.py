@@ -288,11 +288,13 @@ class TestSelectorCache:
 		"""Navigating clears selector_map from state."""
 		from browser_use.skill_cli.direct import _load_state, _save_state
 
-		_save_state({
-			'cdp_url': 'ws://localhost:9222',
-			'target_id': 'abc',
-			'selector_map': {'1': {'x': 10, 'y': 20, 'w': 30, 'h': 40, 'tag': 'a', 'text': 'Link'}},
-		})
+		_save_state(
+			{
+				'cdp_url': 'ws://localhost:9222',
+				'target_id': 'abc',
+				'selector_map': {'1': {'x': 10, 'y': 20, 'w': 30, 'h': 40, 'tag': 'a', 'text': 'Link'}},
+			}
+		)
 
 		state = _load_state()
 		state.pop('selector_map', None)
@@ -312,10 +314,12 @@ class TestSelectorCache:
 			_save_state,
 		)
 
-		_save_state({
-			'cdp_url': 'ws://localhost:9222',
-			'selector_map': {'99': {'x': 0, 'y': 0, 'w': 0, 'h': 0, 'tag': 'old', 'text': 'old'}},
-		})
+		_save_state(
+			{
+				'cdp_url': 'ws://localhost:9222',
+				'selector_map': {'99': {'x': 0, 'y': 0, 'w': 0, 'h': 0, 'tag': 'old', 'text': 'old'}},
+			}
+		)
 
 		node = _make_dom_node(
 			node_name='SPAN',
