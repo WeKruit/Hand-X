@@ -924,7 +924,9 @@ class BrowserUseServer:
 			return 'Error: No active CDP session'
 
 		if selector:
-			js = f'(function(){{ const el = document.querySelector({json.dumps(selector)}); return el ? el.outerHTML : null; }})()'
+			js = (
+				f'(function(){{ const el = document.querySelector({json.dumps(selector)}); return el ? el.outerHTML : null; }})()'
+			)
 		else:
 			js = 'document.documentElement.outerHTML'
 

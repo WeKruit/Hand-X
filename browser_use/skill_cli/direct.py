@@ -145,9 +145,7 @@ async def _lightweight_cdp():
 			raise RuntimeError('No page target found in browser')
 
 	# Attach to the target
-	attach_result = await client.send.Target.attachToTarget(
-		params={'targetId': target_id, 'flatten': True}
-	)
+	attach_result = await client.send.Target.attachToTarget(params={'targetId': target_id, 'flatten': True})
 	session_id = attach_result.get('sessionId')
 	if not session_id:
 		await client.stop()
@@ -246,9 +244,7 @@ async def browser(use_remote: bool = False):
 
 async def _cdp_navigate(cdp: LightCDP, url: str) -> None:
 	"""Navigate to URL and invalidate selector cache."""
-	await cdp.client.send.Page.navigate(
-		params={'url': url}, session_id=cdp.session_id
-	)
+	await cdp.client.send.Page.navigate(params={'url': url}, session_id=cdp.session_id)
 	# Invalidate selector cache — page changed, elements are gone
 	state = _load_state()
 	state.pop('selector_map', None)
@@ -257,14 +253,12 @@ async def _cdp_navigate(cdp: LightCDP, url: str) -> None:
 
 async def _cdp_screenshot(cdp: LightCDP, path: str | None) -> None:
 	"""Take screenshot, save to file or print base64+dimensions."""
-	result = await cdp.client.send.Page.captureScreenshot(
-		params={'format': 'png'}, session_id=cdp.session_id
-	)
+	result = await cdp.client.send.Page.captureScreenshot(params={'format': 'png'}, session_id=cdp.session_id)
 	data = base64.b64decode(result['data'])
 
 	if path:
 		p = Path(path)
-		p.write_bytes(data)
+		p.write_bytes(data)  # noqa: ASYNC240
 		print(f'Screenshot saved to {p} ({len(data)} bytes)')
 	else:
 		# Get viewport dimensions
@@ -337,9 +331,7 @@ async def _cdp_click_index(cdp: LightCDP, index: int) -> None:
 
 async def _cdp_type(cdp: LightCDP, text: str) -> None:
 	"""Type text into focused element."""
-	await cdp.client.send.Input.insertText(
-		params={'text': text}, session_id=cdp.session_id
-	)
+	await cdp.client.send.Input.insertText(params={'text': text}, session_id=cdp.session_id)
 
 
 async def _cdp_input(cdp: LightCDP, index: int, text: str) -> None:
@@ -369,9 +361,7 @@ async def _cdp_back(cdp: LightCDP) -> None:
 	entries = nav.get('entries', [])
 	if current_index > 0:
 		prev_entry = entries[current_index - 1]
-		await cdp.client.send.Page.navigateToHistoryEntry(
-			params={'entryId': prev_entry['id']}, session_id=cdp.session_id
-		)
+		await cdp.client.send.Page.navigateToHistoryEntry(params={'entryId': prev_entry['id']}, session_id=cdp.session_id)
 		# Invalidate selector cache on navigation
 		state = _load_state()
 		state.pop('selector_map', None)
@@ -386,17 +376,30 @@ async def _cdp_keys(cdp: LightCDP, keys_str: str) -> None:
 
 	# Key alias normalization (same as default_action_watchdog)
 	key_aliases = {
-		'ctrl': 'Control', 'control': 'Control',
-		'alt': 'Alt', 'option': 'Alt',
-		'meta': 'Meta', 'cmd': 'Meta', 'command': 'Meta',
+		'ctrl': 'Control',
+		'control': 'Control',
+		'alt': 'Alt',
+		'option': 'Alt',
+		'meta': 'Meta',
+		'cmd': 'Meta',
+		'command': 'Meta',
 		'shift': 'Shift',
-		'enter': 'Enter', 'return': 'Enter',
-		'tab': 'Tab', 'delete': 'Delete', 'backspace': 'Backspace',
-		'escape': 'Escape', 'esc': 'Escape', 'space': ' ',
-		'up': 'ArrowUp', 'down': 'ArrowDown',
-		'left': 'ArrowLeft', 'right': 'ArrowRight',
-		'pageup': 'PageUp', 'pagedown': 'PageDown',
-		'home': 'Home', 'end': 'End',
+		'enter': 'Enter',
+		'return': 'Enter',
+		'tab': 'Tab',
+		'delete': 'Delete',
+		'backspace': 'Backspace',
+		'escape': 'Escape',
+		'esc': 'Escape',
+		'space': ' ',
+		'up': 'ArrowUp',
+		'down': 'ArrowDown',
+		'left': 'ArrowLeft',
+		'right': 'ArrowRight',
+		'pageup': 'PageUp',
+		'pagedown': 'PageDown',
+		'home': 'Home',
+		'end': 'End',
 	}
 
 	sid = cdp.session_id
@@ -432,12 +435,35 @@ async def _cdp_keys(cdp: LightCDP, keys_str: str) -> None:
 	else:
 		normalized = key_aliases.get(keys_str.strip().lower(), keys_str)
 		special_keys = {
-			'Enter', 'Tab', 'Delete', 'Backspace', 'Escape',
-			'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
-			'PageUp', 'PageDown', 'Home', 'End',
-			'Control', 'Alt', 'Meta', 'Shift',
-			'F1', 'F2', 'F3', 'F4', 'F5', 'F6',
-			'F7', 'F8', 'F9', 'F10', 'F11', 'F12',
+			'Enter',
+			'Tab',
+			'Delete',
+			'Backspace',
+			'Escape',
+			'ArrowUp',
+			'ArrowDown',
+			'ArrowLeft',
+			'ArrowRight',
+			'PageUp',
+			'PageDown',
+			'Home',
+			'End',
+			'Control',
+			'Alt',
+			'Meta',
+			'Shift',
+			'F1',
+			'F2',
+			'F3',
+			'F4',
+			'F5',
+			'F6',
+			'F7',
+			'F8',
+			'F9',
+			'F10',
+			'F11',
+			'F12',
 		}
 		if normalized in special_keys:
 			await dispatch_key('keyDown', normalized)
@@ -451,7 +477,8 @@ async def _cdp_keys(cdp: LightCDP, keys_str: str) -> None:
 			# Plain text — use insertText for each character
 			for char in normalized:
 				await cdp.client.send.Input.insertText(
-					params={'text': char}, session_id=sid,
+					params={'text': char},
+					session_id=sid,
 				)
 
 
@@ -461,9 +488,7 @@ async def _cdp_html(cdp: LightCDP, selector: str | None) -> None:
 		js = f'(function(){{ const el = document.querySelector({json.dumps(selector)}); return el ? el.outerHTML : null; }})()'
 	else:
 		js = 'document.documentElement.outerHTML'
-	result = await cdp.client.send.Runtime.evaluate(
-		params={'expression': js, 'returnByValue': True}, session_id=cdp.session_id
-	)
+	result = await cdp.client.send.Runtime.evaluate(params={'expression': js, 'returnByValue': True}, session_id=cdp.session_id)
 	html = result.get('result', {}).get('value')
 	if html:
 		print(html)
@@ -475,9 +500,7 @@ async def _cdp_html(cdp: LightCDP, selector: str | None) -> None:
 
 async def _cdp_eval(cdp: LightCDP, js: str) -> None:
 	"""Execute JavaScript and print result."""
-	result = await cdp.client.send.Runtime.evaluate(
-		params={'expression': js, 'returnByValue': True}, session_id=cdp.session_id
-	)
+	result = await cdp.client.send.Runtime.evaluate(params={'expression': js, 'returnByValue': True}, session_id=cdp.session_id)
 	value = result.get('result', {}).get('value')
 	print(json.dumps(value) if value is not None else 'undefined')
 
@@ -487,9 +510,19 @@ async def _cdp_eval(cdp: LightCDP, js: str) -> None:
 # ---------------------------------------------------------------------------
 
 # Commands that always use lightweight CDP (Tier 1)
-_LIGHTWEIGHT_COMMANDS = frozenset({
-	'screenshot', 'click', 'type', 'input', 'scroll', 'back', 'keys', 'html', 'eval',
-})
+_LIGHTWEIGHT_COMMANDS = frozenset(
+	{
+		'screenshot',
+		'click',
+		'type',
+		'input',
+		'scroll',
+		'back',
+		'keys',
+		'html',
+		'eval',
+	}
+)
 
 
 async def main() -> int:
