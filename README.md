@@ -71,9 +71,9 @@ from browser_use import Agent, Browser, ChatBrowserUse
 import asyncio
 
 async def main():
-    browser = Browser()
-    # browser = Browser(headless=True)  # Run headless (no visible window)
-    # browser = Browser(use_cloud=True)  # Use a stealth browser on Browser Use Cloud
+    browser = Browser(
+        # use_cloud=True,  # Use a stealth browser on Browser Use Cloud
+    )
 
     agent = Agent(
         task="Find the number of stars of the browser-use repo",
