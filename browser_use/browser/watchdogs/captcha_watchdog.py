@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, Optional
 
 from bubus import BaseEvent
+from cdp_use.cdp.browseruse.events import CaptchaSolverFinishedEvent as CDPCaptchaSolverFinishedEvent
+from cdp_use.cdp.browseruse.events import CaptchaSolverStartedEvent as CDPCaptchaSolverStartedEvent
 from pydantic import PrivateAttr
 
 from browser_use.browser.events import (
@@ -25,6 +27,8 @@ from browser_use.browser.events import (
 )
 from browser_use.browser.watchdog_base import BaseWatchdog
 
+CaptchaResultType = Literal['success', 'failed', 'timeout', 'unknown']
+
 
 @dataclass
 class CaptchaWaitResult:
@@ -34,7 +38,7 @@ class CaptchaWaitResult:
 	vendor: str
 	url: str
 	duration_ms: int
-	result: Literal['success', 'failed', 'timeout', 'unknown']
+	result: CaptchaResultType
 
 
 class CaptchaWatchdog(BaseWatchdog):
@@ -61,7 +65,7 @@ class CaptchaWatchdog(BaseWatchdog):
 	_captcha_solving: bool = PrivateAttr(default=False)
 	_captcha_solved_event: asyncio.Event = PrivateAttr(default_factory=asyncio.Event)
 	_captcha_info: dict[str, Any] = PrivateAttr(default_factory=dict)
-	_captcha_result: str = PrivateAttr(default='unknown')
+	_captcha_result: CaptchaResultType = PrivateAttr(default='unknown')
 	_captcha_duration_ms: int = PrivateAttr(default=0)
 	_cdp_handlers_registered: bool = PrivateAttr(default=False)
 
@@ -81,7 +85,7 @@ class CaptchaWatchdog(BaseWatchdog):
 
 		cdp_client = self.browser_session.cdp_client
 
-		def _on_captcha_started(event_data: dict, session_id: Optional[str]) -> None:
+		def _on_captcha_started(event_data: CDPCaptchaSolverStartedEvent, session_id: Optional[str]) -> None:
 			try:
 				self._captcha_solving = True
 				self._captcha_result = 'unknown'
@@ -113,7 +117,7 @@ class CaptchaWatchdog(BaseWatchdog):
 				self._captcha_solving = False
 				self._captcha_solved_event.set()
 
-		def _on_captcha_finished(event_data: dict, session_id: Optional[str]) -> None:
+		def _on_captcha_finished(event_data: CDPCaptchaSolverFinishedEvent, session_id: Optional[str]) -> None:
 			try:
 				success = event_data.get('success', False)
 				self._captcha_solving = False
@@ -175,6 +179,7 @@ class CaptchaWatchdog(BaseWatchdog):
 
 		if timeout is None:
 			timeout = _get_timeout('TIMEOUT_CaptchaSolverWait', 120.0)
+		assert timeout is not None
 		vendor = self._captcha_info.get('vendor', 'unknown')
 		url = self._captcha_info.get('url', '')
 		self.logger.info(f'⏳ Waiting for {vendor} captcha to be solved on {url} (timeout={timeout}s)...')
