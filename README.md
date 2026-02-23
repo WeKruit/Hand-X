@@ -219,6 +219,12 @@ Yes! Browser-Use is open source and free to use. You only need to choose an LLM 
 </details>
 
 <details>
+<summary><b>Which legal terms apply?</b></summary>
+
+This open-source library is licensed under the MIT License. For Browser Use hosted services (Cloud/API), see our [Terms of Service](https://browser-use.com/legal/terms-of-service) and [Privacy Policy](https://browser-use.com/privacy/).
+</details>
+
+<details>
 <summary><b>How do I handle authentication?</b></summary>
 
 Check out our authentication examples:
@@ -263,7 +269,3 @@ For production use cases, use our [Browser Use Cloud API](https://cloud.browser-
 </div>
 
 <div align="center"> Made with ❤️ in Zurich and San Francisco </div>
-
-<sub>
-Open-source library use is governed by the MIT License. Use of Browser Use hosted services (Cloud/API) is governed by our [Terms of Service](https://browser-use.com/legal/terms-of-service). Telemetry details and opt-out: [Telemetry](https://docs.browser-use.com/development/monitoring/telemetry). Privacy: [Privacy Policy](https://browser-use.com/privacy/).
-</sub>
