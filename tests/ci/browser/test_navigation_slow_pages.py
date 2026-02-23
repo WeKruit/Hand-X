@@ -21,7 +21,6 @@ from browser_use.browser.events import NavigateToUrlEvent
 from browser_use.browser.profile import BrowserProfile
 from tests.ci.conftest import create_mock_llm
 
-
 HEAVY_PDP_HTML = """
 <!DOCTYPE html>
 <html>
@@ -76,9 +75,7 @@ def heavy_base_url(heavy_page_server):
 
 @pytest.fixture(scope='function')
 async def browser_session():
-	session = BrowserSession(
-		browser_profile=BrowserProfile(headless=True, user_data_dir=None, keep_alive=True)
-	)
+	session = BrowserSession(browser_profile=BrowserProfile(headless=True, user_data_dir=None, keep_alive=True))
 	await session.start()
 	yield session
 	await session.kill()
@@ -109,7 +106,6 @@ def _nav_actions(url: str, msg: str = 'Done') -> list[str]:
 
 
 class TestHeavyPageNavigation:
-
 	async def test_slow_server_response_completes(self, browser_session, heavy_base_url):
 		"""Navigation succeeds even when server takes 6s to respond."""
 		url = f'{heavy_base_url}/slow-server-pdp'
@@ -189,6 +185,4 @@ class TestHeavyPageNavigation:
 		"""event_timeout should be >= 30s to handle slow servers + redirect chains."""
 		event = NavigateToUrlEvent(url='http://example.com')
 		assert event.event_timeout is not None
-		assert event.event_timeout >= 30.0, (
-			f'event_timeout={event.event_timeout}s is too low for heavy pages (need >= 30s)'
-		)
+		assert event.event_timeout >= 30.0, f'event_timeout={event.event_timeout}s is too low for heavy pages (need >= 30s)'
