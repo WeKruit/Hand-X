@@ -11,7 +11,7 @@ earlier in-flight waits may return prematurely.
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, ClassVar, Literal, Optional
+from typing import Any, ClassVar, Literal
 
 from bubus import BaseEvent
 from cdp_use.cdp.browseruse.events import CaptchaSolverFinishedEvent as CDPCaptchaSolverFinishedEvent
@@ -85,7 +85,7 @@ class CaptchaWatchdog(BaseWatchdog):
 
 		cdp_client = self.browser_session.cdp_client
 
-		def _on_captcha_started(event_data: CDPCaptchaSolverStartedEvent, session_id: Optional[str]) -> None:
+		def _on_captcha_started(event_data: CDPCaptchaSolverStartedEvent, session_id: str | None) -> None:
 			try:
 				self._captcha_solving = True
 				self._captcha_result = 'unknown'
@@ -117,7 +117,7 @@ class CaptchaWatchdog(BaseWatchdog):
 				self._captcha_solving = False
 				self._captcha_solved_event.set()
 
-		def _on_captcha_finished(event_data: CDPCaptchaSolverFinishedEvent, session_id: Optional[str]) -> None:
+		def _on_captcha_finished(event_data: CDPCaptchaSolverFinishedEvent, session_id: str | None) -> None:
 			try:
 				success = event_data.get('success', False)
 				self._captcha_solving = False
