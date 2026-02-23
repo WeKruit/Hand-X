@@ -89,6 +89,8 @@ if __name__ == "__main__":
 ```
 
 Check out the [library docs](https://docs.browser-use.com) and the [cloud docs](https://docs.cloud.browser-use.com) for more!
+By using Browser Use services, you agree to the [Terms of Service](https://browser-use.com/legal/terms-of-service)
+and [Privacy Policy](https://browser-use.com/privacy/).
 
 <br/>
 
