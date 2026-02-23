@@ -89,8 +89,6 @@ if __name__ == "__main__":
 ```
 
 Check out the [library docs](https://docs.browser-use.com) and the [cloud docs](https://docs.cloud.browser-use.com) for more!
-By using Browser Use services, you agree to the [Terms of Service](https://browser-use.com/legal/terms-of-service)
-and [Privacy Policy](https://browser-use.com/privacy/).
 
 <br/>
 
@@ -265,3 +263,7 @@ For production use cases, use our [Browser Use Cloud API](https://cloud.browser-
 </div>
 
 <div align="center"> Made with ❤️ in Zurich and San Francisco </div>
+
+<sub>
+Open-source library use is governed by the MIT License. Use of Browser Use hosted services (Cloud/API) is governed by our [Terms of Service](https://browser-use.com/legal/terms-of-service). Telemetry details and opt-out: [Telemetry](https://docs.browser-use.com/development/monitoring/telemetry). Privacy: [Privacy Policy](https://browser-use.com/privacy/).
+</sub>
