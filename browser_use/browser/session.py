@@ -925,8 +925,7 @@ class BrowserSession(BaseModel):
 			)
 		except TimeoutError:
 			duration_ms = (asyncio.get_event_loop().time() - nav_start_time) * 1000
-			self.logger.warning(f'⚠️ Page.navigate() timed out after {nav_timeout}s ({duration_ms:.0f}ms) for {url}')
-			return
+			raise RuntimeError(f'Page.navigate() timed out after {nav_timeout}s ({duration_ms:.0f}ms) for {url}')
 
 		if nav_result.get('errorText'):
 			raise RuntimeError(f'Navigation failed: {nav_result["errorText"]}')
