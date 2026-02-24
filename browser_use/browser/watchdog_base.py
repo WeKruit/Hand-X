@@ -98,14 +98,16 @@ class BaseWatchdog(BaseModel):
 				if event.event_type not in LIFECYCLE_EVENT_NAMES and not browser_session.is_cdp_connected:
 					# If reconnection is in progress, wait for it instead of silently skipping
 					if browser_session.is_reconnecting:
+						wait_timeout = browser_session.RECONNECT_WAIT_TIMEOUT
 						browser_session.logger.debug(
-							f'🚌 [{watchdog_class_name}.{actual_handler.__name__}] ⏳ Waiting for reconnection...'
+							f'🚌 [{watchdog_class_name}.{actual_handler.__name__}] ⏳ Waiting for reconnection ({wait_timeout}s)...'
 						)
 						try:
-							await asyncio.wait_for(browser_session._reconnect_event.wait(), timeout=20.0)
+							await asyncio.wait_for(browser_session._reconnect_event.wait(), timeout=wait_timeout)
 						except TimeoutError:
 							raise ConnectionError(
-								f'[{watchdog_class_name}.{actual_handler.__name__}] Reconnection wait timed out after 20s'
+								f'[{watchdog_class_name}.{actual_handler.__name__}] '
+								f'Reconnection wait timed out after {wait_timeout}s'
 							)
 						# After wait: check if reconnection actually succeeded
 						if not browser_session.is_cdp_connected:

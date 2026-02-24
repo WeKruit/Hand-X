@@ -517,6 +517,9 @@ class BrowserSession(BaseModel):
 	_demo_mode: 'DemoMode | None' = PrivateAttr(default=None)
 
 	# WebSocket reconnection state
+	# Max wait = attempts * timeout_per_attempt + sum(delays) + small buffer
+	# Default: 3 * 15s + (1+2+4)s + 2s = 54s
+	RECONNECT_WAIT_TIMEOUT: float = 54.0
 	_reconnecting: bool = PrivateAttr(default=False)
 	_reconnect_event: asyncio.Event = PrivateAttr(default_factory=asyncio.Event)
 	_reconnect_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
