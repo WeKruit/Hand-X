@@ -1226,9 +1226,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if self._is_connection_like_error(error):
 			# If reconnection is in progress, wait for it instead of stopping
 			if self.browser_session.is_reconnecting:
-				self.logger.warning(f'🔄 Connection error during reconnection, waiting for reconnect: {error}')
+				wait_timeout = self.browser_session.RECONNECT_WAIT_TIMEOUT
+				self.logger.warning(
+					f'🔄 Connection error during reconnection, waiting up to {wait_timeout}s for reconnect: {error}'
+				)
 				try:
-					await asyncio.wait_for(self.browser_session._reconnect_event.wait(), timeout=20.0)
+					await asyncio.wait_for(self.browser_session._reconnect_event.wait(), timeout=wait_timeout)
 				except TimeoutError:
 					pass
 
