@@ -1414,3 +1414,9 @@ class TestCsvNormalization:
 		csv_file.write_file_content('path,desc\n/tmp/a\\nb,test file')
 		# Real newlines present → no unescaping, literal \n stays in the field
 		assert csv_file.content == 'path,desc\n/tmp/a\\nb,test file'
+
+	def test_normalize_preserves_leading_trailing_spaces_in_fields(self):
+		"""Leading/trailing spaces in field values must not be stripped."""
+		csv_file = CsvFile(name='test')
+		csv_file.write_file_content(' name , age \nAlice, 30 ')
+		assert csv_file.content == ' name , age \nAlice, 30 '
