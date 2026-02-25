@@ -186,7 +186,7 @@ class CsvFile(BaseFile):
 		trailing/leading blank lines, and double-escaped JSON output
 		(literal backslash-n and backslash-quote instead of real newlines/quotes).
 		"""
-		stripped = raw.strip()
+		stripped = raw.strip('\n\r')
 		if not stripped:
 			return raw
 
@@ -220,7 +220,7 @@ class CsvFile(BaseFile):
 	def append_file_content(self, content: str) -> None:
 		"""Normalize the appended CSV rows and merge with existing content."""
 		normalized_new = self._normalize_csv(content)
-		if not normalized_new.strip():
+		if not normalized_new.strip('\n\r'):
 			return
 		existing = self.content
 		if existing and not existing.endswith('\n'):
