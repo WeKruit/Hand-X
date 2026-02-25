@@ -1436,12 +1436,15 @@ class BrowserSession(BaseModel):
 					f'(agent_focus stays on {current_focus}...)'
 				)
 
-		# Resume if waiting for debugger
+		# Resume if waiting for debugger (non-essential, don't let it block connect)
 		if focus:
 			try:
-				await session.cdp_client.send.Runtime.runIfWaitingForDebugger(session_id=session.session_id)
+				await asyncio.wait_for(
+					session.cdp_client.send.Runtime.runIfWaitingForDebugger(session_id=session.session_id),
+					timeout=3.0,
+				)
 			except Exception:
-				pass  # May fail if not waiting
+				pass  # May fail if not waiting, or timeout — either is fine
 
 		return session
 
@@ -1702,7 +1705,9 @@ class BrowserSession(BaseModel):
 			)
 
 			# Run a tiny HTTP client to query for the WebSocket URL from the /json/version endpoint
-			async with httpx.AsyncClient() as client:
+			# Default httpx timeout is 5s which can race the global wait_for(connect(), 15s).
+			# Use 30s as a safety net for direct connect() callers; the wait_for is the real deadline.
+			async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
 				headers = self.browser_profile.headers or {}
 				version_info = await client.get(url, headers=headers)
 				self.logger.debug(f'Raw version info: {str(version_info)}')
