@@ -53,6 +53,7 @@ from browser_use.utils import _log_pretty_url, create_task_with_error_handling, 
 if TYPE_CHECKING:
 	from browser_use.actor.page import Page
 	from browser_use.browser.demo_mode import DemoMode
+	from browser_use.browser.watchdogs.captcha_watchdog import CaptchaWaitResult
 
 DEFAULT_BROWSER_PROFILE = BrowserProfile()
 
@@ -148,6 +149,7 @@ class BrowserSession(BaseModel):
 		minimum_wait_page_load_time: float | None = None,
 		wait_for_network_idle_page_load_time: float | None = None,
 		wait_between_actions: float | None = None,
+		captcha_solver: bool | None = None,
 		auto_download_pdfs: bool | None = None,
 		cookie_whitelist_domains: list[str] | None = None,
 		cross_origin_iframes: bool | None = None,
@@ -214,6 +216,7 @@ class BrowserSession(BaseModel):
 		deterministic_rendering: bool | None = None,
 		proxy: ProxySettings | None = None,
 		enable_default_extensions: bool | None = None,
+		captcha_solver: bool | None = None,
 		window_size: dict | None = None,
 		window_position: dict | None = None,
 		filter_highlight_ids: bool | None = None,
@@ -280,6 +283,7 @@ class BrowserSession(BaseModel):
 		keep_alive: bool | None = None,
 		proxy: ProxySettings | None = None,
 		enable_default_extensions: bool | None = None,
+		captcha_solver: bool | None = None,
 		window_size: dict | None = None,
 		window_position: dict | None = None,
 		minimum_wait_page_load_time: float | None = None,
@@ -461,6 +465,16 @@ class BrowserSession(BaseModel):
 		except Exception:
 			return False
 
+	async def wait_if_captcha_solving(self, timeout: float | None = None) -> 'CaptchaWaitResult | None':
+		"""Wait if a captcha is currently being solved by the browser proxy.
+
+		Returns:
+			A CaptchaWaitResult if we had to wait, or None if no captcha was in progress.
+		"""
+		if self._captcha_watchdog is not None:
+			return await self._captcha_watchdog.wait_if_captcha_solving(timeout=timeout)
+		return None
+
 	@property
 	def is_reconnecting(self) -> bool:
 		"""Whether a WebSocket reconnection attempt is currently in progress."""
@@ -512,6 +526,8 @@ class BrowserSession(BaseModel):
 	_screenshot_watchdog: Any | None = PrivateAttr(default=None)
 	_permissions_watchdog: Any | None = PrivateAttr(default=None)
 	_recording_watchdog: Any | None = PrivateAttr(default=None)
+	_captcha_watchdog: Any | None = PrivateAttr(default=None)
+	_watchdogs_attached: bool = PrivateAttr(default=False)
 
 	_cloud_browser_client: CloudBrowserClient = PrivateAttr(default_factory=lambda: CloudBrowserClient())
 	_demo_mode: 'DemoMode | None' = PrivateAttr(default=None)
@@ -611,6 +627,8 @@ class BrowserSession(BaseModel):
 		self._screenshot_watchdog = None
 		self._permissions_watchdog = None
 		self._recording_watchdog = None
+		self._captcha_watchdog = None
+		self._watchdogs_attached = False
 		if self._demo_mode:
 			self._demo_mode.reset()
 			self._demo_mode = None
@@ -1502,11 +1520,12 @@ class BrowserSession(BaseModel):
 	async def attach_all_watchdogs(self) -> None:
 		"""Initialize and attach all watchdogs with explicit handler registration."""
 		# Prevent duplicate watchdog attachment
-		if hasattr(self, '_watchdogs_attached') and self._watchdogs_attached:
+		if self._watchdogs_attached:
 			self.logger.debug('Watchdogs already attached, skipping duplicate attachment')
 			return
 
 		from browser_use.browser.watchdogs.aboutblank_watchdog import AboutBlankWatchdog
+		from browser_use.browser.watchdogs.captcha_watchdog import CaptchaWatchdog
 
 		# from browser_use.browser.crash_watchdog import CrashWatchdog
 		from browser_use.browser.watchdogs.default_action_watchdog import DefaultActionWatchdog
@@ -1639,6 +1658,12 @@ class BrowserSession(BaseModel):
 			HarRecordingWatchdog.model_rebuild()
 			self._har_recording_watchdog = HarRecordingWatchdog(event_bus=self.event_bus, browser_session=self)
 			self._har_recording_watchdog.attach_to_session()
+
+		# Initialize CaptchaWatchdog (listens for captcha solver events from the browser proxy)
+		if self.browser_profile.captcha_solver:
+			CaptchaWatchdog.model_rebuild()
+			self._captcha_watchdog = CaptchaWatchdog(event_bus=self.event_bus, browser_session=self)
+			self._captcha_watchdog.attach_to_session()
 
 		# Mark watchdogs as attached to prevent duplicate attachment
 		self._watchdogs_attached = True
