@@ -14,7 +14,7 @@ from bubus import EventBus
 from cdp_use import CDPClient
 from cdp_use.cdp.fetch import AuthRequiredEvent, RequestPausedEvent
 from cdp_use.cdp.network import Cookie
-from cdp_use.cdp.target import AttachedToTargetEvent, SessionID, TargetID
+from cdp_use.cdp.target import SessionID, TargetID
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from uuid_extensions import uuid7str
 
