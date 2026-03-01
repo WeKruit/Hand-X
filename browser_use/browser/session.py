@@ -1357,7 +1357,7 @@ class BrowserSession(BaseModel):
 
 			output_file = Path(output_path).expanduser().resolve()
 			output_file.parent.mkdir(parents=True, exist_ok=True)
-			output_file.write_text(json.dumps(storage_state, indent=2))
+			output_file.write_text(json.dumps(storage_state, indent=2, ensure_ascii=False), encoding='utf-8')
 			self.logger.info(f'💾 Exported {len(cookies)} cookies to {output_file}')
 
 		return storage_state
