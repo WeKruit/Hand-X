@@ -1,5 +1,7 @@
 """Local browser watchdog for managing browser subprocess lifecycle."""
 
+from __future__ import annotations
+
 import asyncio
 import os
 import shutil
@@ -21,7 +23,7 @@ from browser_use.browser.watchdog_base import BaseWatchdog
 from browser_use.observability import observe_debug
 
 if TYPE_CHECKING:
-	pass
+	from browser_use.browser.profile import BrowserChannel
 
 
 class LocalBrowserWatchdog(BaseWatchdog):
@@ -215,7 +217,7 @@ class LocalBrowserWatchdog(BaseWatchdog):
 		raise RuntimeError(f'Failed to launch browser after {max_retries} attempts')
 
 	@staticmethod
-	def _find_installed_browser_path(channel: 'BrowserChannel | None' = None) -> str | None:
+	def _find_installed_browser_path(channel: BrowserChannel | None = None) -> str | None:
 		"""Try to find browser executable from common fallback locations.
 
 		If a channel is specified, paths for that browser are searched first.
