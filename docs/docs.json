@@ -3,9 +3,9 @@
   "theme": "aspen",
   "name": "Browser Use",
   "colors": {
-    "primary": "#FE750E",
-    "light": "#FE750E",
-    "dark": "#FE750E"
+    "primary": "#2563EB",
+    "light": "#2563EB",
+    "dark": "#2563EB"
   },
   "background": {
     "color": {
@@ -186,6 +186,7 @@
             "isDefaultOpen": false,
             "pages": [
               "customize/browser/basics",
+              "customize/browser/authentication",
               "customize/browser/real-browser",
               "customize/browser/remote",
               "customize/browser/all-parameters"
