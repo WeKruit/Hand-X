@@ -320,7 +320,7 @@ class BrowserUseServer:
 				),
 				types.Tool(
 					name='browser_screenshot',
-					description='Take a screenshot of the current page. Returns base64-encoded image with viewport dimensions.',
+					description='Take a screenshot of the current page. Returns viewport metadata as text and the screenshot as an image.',
 					inputSchema={
 						'type': 'object',
 						'properties': {
@@ -454,12 +454,14 @@ class BrowserUseServer:
 			return []
 
 		@self.server.call_tool()
-		async def handle_call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.TextContent]:
+		async def handle_call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.TextContent | types.ImageContent]:
 			"""Handle tool execution."""
 			start_time = time.time()
 			error_msg = None
 			try:
 				result = await self._execute_tool(name, arguments or {})
+				if isinstance(result, list):
+					return result
 				return [types.TextContent(type='text', text=result)]
 			except Exception as e:
 				error_msg = str(e)
@@ -478,8 +480,8 @@ class BrowserUseServer:
 					)
 				)
 
-	async def _execute_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
-		"""Execute a browser-use tool."""
+	async def _execute_tool(self, tool_name: str, arguments: dict[str, Any]) -> str | list[types.TextContent | types.ImageContent]:
+		"""Execute a browser-use tool. Returns str for most tools, or a content list for tools with image output."""
 
 		# Agent-based tools
 		if tool_name == 'retry_with_browser_use_agent':
@@ -522,13 +524,21 @@ class BrowserUseServer:
 				return await self._type_text(arguments['index'], arguments['text'])
 
 			elif tool_name == 'browser_get_state':
-				return await self._get_browser_state(arguments.get('include_screenshot', False))
+				state_json, screenshot_b64 = await self._get_browser_state(arguments.get('include_screenshot', False))
+				content: list[types.TextContent | types.ImageContent] = [types.TextContent(type='text', text=state_json)]
+				if screenshot_b64:
+					content.append(types.ImageContent(type='image', data=screenshot_b64, mimeType='image/png'))
+				return content
 
 			elif tool_name == 'browser_get_html':
 				return await self._get_html(arguments.get('selector'))
 
 			elif tool_name == 'browser_screenshot':
-				return await self._screenshot(arguments.get('full_page', False))
+				meta_json, screenshot_b64 = await self._screenshot(arguments.get('full_page', False))
+				content: list[types.TextContent | types.ImageContent] = [types.TextContent(type='text', text=meta_json)]
+				if screenshot_b64:
+					content.append(types.ImageContent(type='image', data=screenshot_b64, mimeType='image/png'))
+				return content
 
 			elif tool_name == 'browser_extract_content':
 				return await self._extract_content(arguments['query'], arguments.get('extract_links', False))
@@ -855,10 +865,10 @@ class BrowserUseServer:
 		else:
 			return f"Typed '{text}' into element {index}"
 
-	async def _get_browser_state(self, include_screenshot: bool = False) -> str:
-		"""Get current browser state."""
+	async def _get_browser_state(self, include_screenshot: bool = False) -> tuple[str, str | None]:
+		"""Get current browser state. Returns (state_json, screenshot_b64 | None)."""
 		if not self.browser_session:
-			return 'Error: No browser session active'
+			return 'Error: No browser session active', None
 
 		state = await self.browser_session.get_browser_state_summary()
 
@@ -898,16 +908,18 @@ class BrowserUseServer:
 				elem_info['href'] = element.attributes['href']
 			result['interactive_elements'].append(elem_info)
 
+		# Return screenshot separately as ImageContent instead of embedding base64 in JSON
+		screenshot_b64 = None
 		if include_screenshot and state.screenshot:
-			result['screenshot'] = state.screenshot
-			# Include viewport dimensions with screenshot so LLM can map pixels to coordinates
+			screenshot_b64 = state.screenshot
+			# Include viewport dimensions in JSON so LLM can map pixels to coordinates
 			if state.page_info:
 				result['screenshot_dimensions'] = {
 					'width': state.page_info.viewport_width,
 					'height': state.page_info.viewport_height,
 				}
 
-		return json.dumps(result, indent=2)
+		return json.dumps(result, indent=2), screenshot_b64
 
 	async def _get_html(self, selector: str | None = None) -> str:
 		"""Get raw HTML of the page or a specific element."""
@@ -936,10 +948,10 @@ class BrowserUseServer:
 			return f'No element found for selector: {selector}' if selector else 'Error: Could not get page HTML'
 		return html
 
-	async def _screenshot(self, full_page: bool = False) -> str:
-		"""Take a screenshot and return base64 with dimensions."""
+	async def _screenshot(self, full_page: bool = False) -> tuple[str, str | None]:
+		"""Take a screenshot. Returns (metadata_json, screenshot_b64 | None)."""
 		if not self.browser_session:
-			return 'Error: No browser session active'
+			return 'Error: No browser session active', None
 
 		import base64
 
@@ -948,10 +960,9 @@ class BrowserUseServer:
 		data = await self.browser_session.take_screenshot(full_page=full_page)
 		b64 = base64.b64encode(data).decode()
 
-		# Get viewport dimensions
+		# Return screenshot separately as ImageContent instead of embedding base64 in JSON
 		state = await self.browser_session.get_browser_state_summary()
 		result: dict[str, Any] = {
-			'screenshot': b64,
 			'size_bytes': len(data),
 		}
 		if state.page_info:
@@ -959,7 +970,7 @@ class BrowserUseServer:
 				'width': state.page_info.viewport_width,
 				'height': state.page_info.viewport_height,
 			}
-		return json.dumps(result)
+		return json.dumps(result), b64
 
 	async def _extract_content(self, query: str, extract_links: bool = False) -> str:
 		"""Extract content from current page."""
