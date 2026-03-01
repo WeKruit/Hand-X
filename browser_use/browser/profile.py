@@ -428,7 +428,6 @@ class BrowserLaunchArgs(BaseModel):
 	def set_default_downloads_path(self) -> Self:
 		"""Set a unique default downloads path if none is provided."""
 		if self.downloads_path is None:
-			import tempfile
 			import uuid
 
 			# Create unique directory in system temp folder for downloads
