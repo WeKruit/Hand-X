@@ -145,7 +145,7 @@
   "navigation": {
     "groups": [
       {
-        "group": "Get Started",
+        "group": "Get Started with Open Source",
         "pages": [
           "introduction",
           "quickstart",
@@ -155,7 +155,7 @@
         ]
       },
       {
-        "group": "Customize",
+        "group": "Customize OS",
         "pages": [
           {
             "group": "Agent",
@@ -244,7 +244,7 @@
         ]
       },
       {
-        "group": "Examples",
+        "group": "Examples OS",
         "pages": [
           {
             "group": "Templates",
@@ -272,7 +272,7 @@
         ]
       },
       {
-        "group": "Development",
+        "group": "Development OS",
         "pages": [
           {
             "group": "Contribution",
