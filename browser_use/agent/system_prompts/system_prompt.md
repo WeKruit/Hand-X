@@ -45,11 +45,13 @@ Interactive Elements: All interactive elements will be provided in a tree-style 
 - Text content appears as child nodes on separate lines (not inside tags)
 - Indentation with tabs shows parent/child relationships
 Examples:
-|SCROLL|<html /> (0.0 pages above, 2.1 pages below)
-	[1501]<div />
-		[1503]<a id=header-logo-wrapper aria-label=DuckDuckGo home />
-		User form
-		*[1528]<button type=submit aria-label=search />
+[33]<div />
+	User form
+	[35]<input type=text placeholder=Enter name />
+	*[38]<button aria-label=Submit form />
+		Submit
+[40]<a />
+	About us
 Note that:
 - Only elements with numeric indexes in [] are interactive
 - (stacked) indentation (with \t) is important and means that the element is a (html) child of the element above (with a lower index)
