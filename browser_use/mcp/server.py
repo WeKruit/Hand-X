@@ -399,8 +399,7 @@ class BrowserUseServer:
 							},
 							'model': {
 								'type': 'string',
-								'description': 'LLM model to use (e.g., gpt-4o, claude-3-opus-20240229)',
-								'default': 'gpt-4o',
+								'description': 'LLM model to use (e.g., gpt-4o, claude-3-opus-20240229). Defaults to the configured model.',
 							},
 							'allowed_domains': {
 								'type': 'array',
@@ -487,7 +486,7 @@ class BrowserUseServer:
 			return await self._retry_with_browser_use_agent(
 				task=arguments['task'],
 				max_steps=arguments.get('max_steps', 100),
-				model=arguments.get('model', 'gpt-4o'),
+				model=arguments.get('model'),
 				allowed_domains=arguments.get('allowed_domains', []),
 				use_vision=arguments.get('use_vision', True),
 			)
@@ -624,7 +623,7 @@ class BrowserUseServer:
 		self,
 		task: str,
 		max_steps: int = 100,
-		model: str = 'gpt-4o',
+		model: str | None = None,
 		allowed_domains: list[str] | None = None,
 		use_vision: bool = True,
 	) -> str:
@@ -653,11 +652,8 @@ class BrowserUseServer:
 			if not api_key:
 				return 'Error: OPENAI_API_KEY not set in config or environment'
 
-			# Override model if provided in tool call
-			if model != llm_config.get('model', 'gpt-4o'):
-				llm_model = model
-			else:
-				llm_model = llm_config.get('model', 'gpt-4o')
+			# Use explicit model from tool call, otherwise fall back to configured default
+			llm_model = model or llm_config.get('model', 'gpt-4o')
 
 			base_url = llm_config.get('base_url', None)
 			kwargs = {}
