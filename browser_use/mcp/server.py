@@ -480,7 +480,9 @@ class BrowserUseServer:
 					)
 				)
 
-	async def _execute_tool(self, tool_name: str, arguments: dict[str, Any]) -> str | list[types.TextContent | types.ImageContent]:
+	async def _execute_tool(
+		self, tool_name: str, arguments: dict[str, Any]
+	) -> str | list[types.TextContent | types.ImageContent]:
 		"""Execute a browser-use tool. Returns str for most tools, or a content list for tools with image output."""
 
 		# Agent-based tools
