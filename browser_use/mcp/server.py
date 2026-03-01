@@ -399,8 +399,7 @@ class BrowserUseServer:
 							},
 							'model': {
 								'type': 'string',
-								'description': 'LLM model to use (e.g., gpt-4o, claude-3-opus-20240229)',
-								'default': 'gpt-4o',
+								'description': 'LLM model to use (e.g., gpt-4o, claude-3-opus-20240229). Defaults to the configured model.',
 							},
 							'allowed_domains': {
 								'type': 'array',
@@ -487,7 +486,7 @@ class BrowserUseServer:
 			return await self._retry_with_browser_use_agent(
 				task=arguments['task'],
 				max_steps=arguments.get('max_steps', 100),
-				model=arguments.get('model', 'gpt-4o'),
+				model=arguments.get('model'),
 				allowed_domains=arguments.get('allowed_domains', []),
 				use_vision=arguments.get('use_vision', True),
 			)
@@ -624,7 +623,7 @@ class BrowserUseServer:
 		self,
 		task: str,
 		max_steps: int = 100,
-		model: str = 'gpt-4o',
+		model: str | None = None,
 		allowed_domains: list[str] | None = None,
 		use_vision: bool = True,
 	) -> str:
@@ -637,27 +636,25 @@ class BrowserUseServer:
 		# Get LLM provider
 		model_provider = llm_config.get('model_provider') or os.getenv('MODEL_PROVIDER')
 
-		# 如果model_provider不等于空，且等Bedrock
+		# Get Bedrock-specific config
 		if model_provider and model_provider.lower() == 'bedrock':
 			llm_model = llm_config.get('model') or os.getenv('MODEL') or 'us.anthropic.claude-sonnet-4-20250514-v1:0'
 			aws_region = llm_config.get('region') or os.getenv('REGION')
 			if not aws_region:
 				aws_region = 'us-east-1'
+			aws_sso_auth = llm_config.get('aws_sso_auth', False)
 			llm = ChatAWSBedrock(
 				model=llm_model,  # or any Bedrock model
 				aws_region=aws_region,
-				aws_sso_auth=True,
+				aws_sso_auth=aws_sso_auth,
 			)
 		else:
 			api_key = llm_config.get('api_key') or os.getenv('OPENAI_API_KEY')
 			if not api_key:
 				return 'Error: OPENAI_API_KEY not set in config or environment'
 
-			# Override model if provided in tool call
-			if model != llm_config.get('model', 'gpt-4o'):
-				llm_model = model
-			else:
-				llm_model = llm_config.get('model', 'gpt-4o')
+			# Use explicit model from tool call, otherwise fall back to configured default
+			llm_model = model or llm_config.get('model', 'gpt-4o')
 
 			base_url = llm_config.get('base_url', None)
 			kwargs = {}
