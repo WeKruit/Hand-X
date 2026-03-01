@@ -637,16 +637,17 @@ class BrowserUseServer:
 		# Get LLM provider
 		model_provider = llm_config.get('model_provider') or os.getenv('MODEL_PROVIDER')
 
-		# 如果model_provider不等于空，且等Bedrock
+		# Get Bedrock-specific config
 		if model_provider and model_provider.lower() == 'bedrock':
 			llm_model = llm_config.get('model') or os.getenv('MODEL') or 'us.anthropic.claude-sonnet-4-20250514-v1:0'
 			aws_region = llm_config.get('region') or os.getenv('REGION')
 			if not aws_region:
 				aws_region = 'us-east-1'
+			aws_sso_auth = llm_config.get('aws_sso_auth', False)
 			llm = ChatAWSBedrock(
 				model=llm_model,  # or any Bedrock model
 				aws_region=aws_region,
-				aws_sso_auth=True,
+				aws_sso_auth=aws_sso_auth,
 			)
 		else:
 			api_key = llm_config.get('api_key') or os.getenv('OPENAI_API_KEY')
