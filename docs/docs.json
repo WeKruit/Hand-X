@@ -35,7 +35,51 @@
     },
     {
       "source": "/production",
-      "destination": "/customize/sandbox/quickstart"
+      "destination": "/legacy/sandbox/quickstart"
+    },
+    {
+      "source": "/customize/code-agent/basics",
+      "destination": "/legacy/code-agent/basics"
+    },
+    {
+      "source": "/customize/code-agent/output-format",
+      "destination": "/legacy/code-agent/output-format"
+    },
+    {
+      "source": "/customize/code-agent/exporting",
+      "destination": "/legacy/code-agent/exporting"
+    },
+    {
+      "source": "/customize/code-agent/all-parameters",
+      "destination": "/legacy/code-agent/all-parameters"
+    },
+    {
+      "source": "/customize/code-agent/example-products",
+      "destination": "/legacy/code-agent/example-products"
+    },
+    {
+      "source": "/customize/actor/basics",
+      "destination": "/legacy/actor/basics"
+    },
+    {
+      "source": "/customize/actor/examples",
+      "destination": "/legacy/actor/examples"
+    },
+    {
+      "source": "/customize/actor/all-parameters",
+      "destination": "/legacy/actor/all-parameters"
+    },
+    {
+      "source": "/customize/sandbox/quickstart",
+      "destination": "/legacy/sandbox/quickstart"
+    },
+    {
+      "source": "/customize/sandbox/events",
+      "destination": "/legacy/sandbox/events"
+    },
+    {
+      "source": "/customize/sandbox/all-parameters",
+      "destination": "/legacy/sandbox/all-parameters"
     },
     {
       "source": "/customize/supported-models",
@@ -177,18 +221,6 @@
             ]
           },
           {
-            "group": "Code Agent",
-            "icon": "code",
-            "isDefaultOpen": false,
-            "pages": [
-              "customize/code-agent/basics",
-              "customize/code-agent/output-format",
-              "customize/code-agent/exporting",
-              "customize/code-agent/all-parameters",
-              "customize/code-agent/example-products"
-            ]
-          },
-          {
             "group": "Browser",
             "icon": "window",
             "isDefaultOpen": false,
@@ -221,16 +253,6 @@
             ]
           },
           {
-            "group": "Actor",
-            "icon": "terminal",
-            "isDefaultOpen": false,
-            "pages": [
-              "customize/actor/basics",
-              "customize/actor/examples",
-              "customize/actor/all-parameters"
-            ]
-          },
-          {
             "group": "Integration",
             "icon": "plug",
             "isDefaultOpen": false,
@@ -240,13 +262,36 @@
             ]
           },
           {
-            "group": "Sandbox",
-            "icon": "box",
+            "group": "Legacy",
+            "icon": "box-archive",
             "isDefaultOpen": false,
             "pages": [
-              "customize/sandbox/quickstart",
-              "customize/sandbox/events",
-              "customize/sandbox/all-parameters"
+              {
+                "group": "Code Agent",
+                "pages": [
+                  "legacy/code-agent/basics",
+                  "legacy/code-agent/output-format",
+                  "legacy/code-agent/exporting",
+                  "legacy/code-agent/all-parameters",
+                  "legacy/code-agent/example-products"
+                ]
+              },
+              {
+                "group": "Actor",
+                "pages": [
+                  "legacy/actor/basics",
+                  "legacy/actor/examples",
+                  "legacy/actor/all-parameters"
+                ]
+              },
+              {
+                "group": "Sandbox",
+                "pages": [
+                  "legacy/sandbox/quickstart",
+                  "legacy/sandbox/events",
+                  "legacy/sandbox/all-parameters"
+                ]
+              }
             ]
           }
         ]
