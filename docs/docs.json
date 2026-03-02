@@ -30,8 +30,12 @@
   },
   "redirects": [
     {
-      "source": "/use-claude",
+      "source": "/use-cloud",
       "destination": "https://docs.cloud.browser-use.com/introduction"
+    },
+    {
+      "source": "/use-claude",
+      "destination": "/use-cloud"
     },
     {
       "source": "/production",
@@ -203,7 +207,7 @@
           "quickstart",
           "quickstart_llm",
           "supported-models",
-          "use-claude"
+          "use-cloud"
         ]
       },
       {
