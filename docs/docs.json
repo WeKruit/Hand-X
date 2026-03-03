@@ -34,6 +34,10 @@
       "destination": "https://docs.cloud.browser-use.com/introduction"
     },
     {
+      "source": "/cloud",
+      "destination": "https://docs.cloud.browser-use.com/introduction"
+    },
+    {
       "source": "/use-claude",
       "destination": "/use-cloud"
     },
@@ -199,7 +203,10 @@
     }
   ],
   "navigation": {
-    "groups": [
+    "versions": [
+      {
+        "version": "Open Source",
+        "groups": [
       {
         "group": "Get Started with Open Source",
         "pages": [
@@ -360,6 +367,19 @@
             ]
           },
           "development/get-help"
+        ]
+      }
+    ]
+      },
+      {
+        "version": "Cloud",
+        "groups": [
+          {
+            "group": "Cloud",
+            "pages": [
+              "cloud"
+            ]
+          }
         ]
       }
     ]
