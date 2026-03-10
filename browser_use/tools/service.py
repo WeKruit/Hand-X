@@ -416,6 +416,23 @@ class Tools(Generic[Context]):
 				await event
 				await event.event_result(raise_if_any=True, raise_if_none=False)
 
+				# Health check: detect empty DOM for http/https pages and retry once
+				if not params.new_tab:
+					state = await browser_session.get_browser_state_summary(include_screenshot=False)
+					url_is_http = state.url.lower().startswith(('http://', 'https://'))
+					if url_is_http and state.dom_state._root is None:
+						browser_session.logger.warning(
+							f'⚠️ Empty DOM detected after navigation to {params.url}, waiting 3s and rechecking...'
+						)
+						await asyncio.sleep(3.0)
+						state = await browser_session.get_browser_state_summary(include_screenshot=False)
+						if url_is_http and state.dom_state._root is None:
+							return ActionResult(
+								error=f'Page loaded but returned empty content for {params.url}. '
+								f'The page may require JavaScript that failed to render, use anti-bot measures, '
+								f'or have a connection issue (e.g. tunnel/proxy error). Try a different URL or approach.'
+							)
+
 				if params.new_tab:
 					memory = f'Opened new tab with URL {params.url}'
 					msg = f'🔗  Opened new tab with url {params.url}'
@@ -442,6 +459,7 @@ class Tools(Generic[Context]):
 						'ERR_INTERNET_DISCONNECTED',
 						'ERR_CONNECTION_REFUSED',
 						'ERR_TIMED_OUT',
+						'ERR_TUNNEL_CONNECTION_FAILED',
 						'net::',
 					]
 				):
