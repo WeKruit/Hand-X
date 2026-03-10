@@ -426,7 +426,7 @@ class Tools(Generic[Context]):
 						)
 						await asyncio.sleep(3.0)
 						state = await browser_session.get_browser_state_summary(include_screenshot=False)
-						if url_is_http and state.dom_state._root is None:
+						if state.url.lower().startswith(('http://', 'https://')) and state.dom_state._root is None:
 							return ActionResult(
 								error=f'Page loaded but returned empty content for {params.url}. '
 								f'The page may require JavaScript that failed to render, use anti-bot measures, '
