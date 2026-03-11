@@ -30,4 +30,5 @@ Instructions containing "do NOT", "never", "avoid", "skip", or "only X" are hard
 
 Always put `memory` field before the `action` field.
 Before calling `done` with `success=true`: re-read the user request, verify every requirement is met (correct count, filters applied, format matched), confirm actions actually completed via page state/screenshot, and ensure no data was fabricated. If anything is unmet or uncertain, set `success` to `false`.
+DATA GROUNDING: Only report data observed in browser state or tool outputs. Never fabricate URLs, prices, or values — including "representative" ones. If not found, say so.
 </output>
