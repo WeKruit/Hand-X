@@ -86,8 +86,8 @@ def is_placeholder_value(value: str) -> bool:
 
 
 def normalize_name(s: str) -> str:
-	"""Normalize a field name for comparison: strip asterisks, collapse whitespace, lowercase."""
-	return re.sub(r'\s+', ' ', s.replace('*', '')).strip().lower()
+	"""Normalize a field name for comparison: strip asterisks/underscores, collapse whitespace, lowercase."""
+	return re.sub(r'\s+', ' ', s.replace('*', '').replace('_', ' ')).strip().lower()
 
 
 def get_stable_field_key(field: FormField) -> str:
