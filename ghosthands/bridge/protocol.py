@@ -28,12 +28,18 @@ stdin_executor = concurrent.futures.ThreadPoolExecutor(
 atexit.register(stdin_executor.shutdown, wait=False, cancel_futures=True)
 
 
+_STDIN_LINE_MAX_BYTES = 65536  # S-09: guard against memory exhaustion
+
+
 async def read_stdin_line(timeout: float | None = None) -> str:
     """Read a single line from stdin with optional timeout.
 
     Uses a module-level lock to ensure only one reader at a time (R-2 fix),
     and a dedicated daemon ThreadPoolExecutor so cancelled reads don't leak
     threads from the default pool (R-4 fix).
+
+    Lines longer than _STDIN_LINE_MAX_BYTES are rejected (S-09): an empty
+    string is returned so the caller treats the line as a no-op.
     """
     async with stdin_lock:
         loop = asyncio.get_running_loop()
@@ -53,15 +59,27 @@ async def read_stdin_line(timeout: float | None = None) -> str:
             loop.add_reader(fileno, _on_stdin_ready)
             try:
                 if timeout is None:
-                    return await future
-                return await asyncio.wait_for(future, timeout=timeout)
+                    line = await future
+                else:
+                    line = await asyncio.wait_for(future, timeout=timeout)
             finally:
                 loop.remove_reader(fileno)
         except (AttributeError, NotImplementedError, OSError, ValueError):
             line_future = loop.run_in_executor(stdin_executor, sys.stdin.readline)
             if timeout is None:
-                return await line_future
-            return await asyncio.wait_for(line_future, timeout=timeout)
+                line = await line_future
+            else:
+                line = await asyncio.wait_for(line_future, timeout=timeout)
+
+    # S-09: reject oversized lines to prevent memory exhaustion attacks.
+    if len(line) > _STDIN_LINE_MAX_BYTES:
+        logger.warning(
+            "stdin_line_too_large",
+            size=len(line),
+            limit=_STDIN_LINE_MAX_BYTES,
+        )
+        return ""
+    return line
 
 
 async def listen_for_cancel(
@@ -95,6 +113,10 @@ async def listen_for_cancel(
         try:
             cmd = json.loads(line)
         except json.JSONDecodeError:
+            continue
+
+        # S-12: ignore valid JSON that isn't an object (e.g. [], "str", 1)
+        if not isinstance(cmd, dict):
             continue
 
         cmd_type = cmd.get("type")
@@ -161,6 +183,10 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> s
             try:
                 cmd = json.loads(line)
             except json.JSONDecodeError:
+                continue
+
+            # S-12: ignore valid JSON that isn't an object (e.g. [], "str", 1)
+            if not isinstance(cmd, dict):
                 continue
 
             cmd_type = cmd.get("type", "")

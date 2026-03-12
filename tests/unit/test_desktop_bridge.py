@@ -228,33 +228,33 @@ class TestListenForCancel:
     @pytest.mark.asyncio
     async def test_cancel_command_stops_agent(self):
         """{"type": "cancel"} must set agent.state.stopped = True."""
-        from ghosthands.cli import _listen_for_cancel
+        from ghosthands.bridge.protocol import listen_for_cancel
 
         agent = _make_mock_agent()
 
         cancel_line = json.dumps({"type": "cancel"}) + "\n"
 
         with patch(
-            "ghosthands.cli._read_stdin_line",
+            "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(side_effect=[cancel_line, ""]),
         ):
-            await _listen_for_cancel(agent)
+            await listen_for_cancel(agent)
 
         assert agent.state.stopped is True
 
     @pytest.mark.asyncio
     async def test_eof_breaks_loop(self):
         """Empty readline (EOF / stdin closed) must exit without error."""
-        from ghosthands.cli import _listen_for_cancel
+        from ghosthands.bridge.protocol import listen_for_cancel
 
         agent = _make_mock_agent()
 
         # First call returns "" (EOF)
         with patch(
-            "ghosthands.cli._read_stdin_line",
+            "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(return_value=""),
         ):
-            await _listen_for_cancel(agent)
+            await listen_for_cancel(agent)
 
         # Agent should NOT be stopped — it was a clean EOF, not a cancel
         assert agent.state.stopped is False
@@ -262,56 +262,56 @@ class TestListenForCancel:
     @pytest.mark.asyncio
     async def test_invalid_json_is_ignored(self):
         """Malformed JSON lines must be silently ignored and not crash the listener."""
-        from ghosthands.cli import _listen_for_cancel
+        from ghosthands.bridge.protocol import listen_for_cancel
 
         agent = _make_mock_agent()
 
         # Sequence: bad JSON → EOF
         with patch(
-            "ghosthands.cli._read_stdin_line",
+            "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(side_effect=["not valid json\n", ""]),
         ):
             # Should not raise
-            await _listen_for_cancel(agent)
+            await listen_for_cancel(agent)
 
         assert agent.state.stopped is False
 
     @pytest.mark.asyncio
     async def test_non_cancel_command_is_ignored(self):
         """A valid JSON command that is not "cancel" must not stop the agent."""
-        from ghosthands.cli import _listen_for_cancel
+        from ghosthands.bridge.protocol import listen_for_cancel
 
         agent = _make_mock_agent()
 
         unknown_cmd = json.dumps({"type": "ping"}) + "\n"
 
         with patch(
-            "ghosthands.cli._read_stdin_line",
+            "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(side_effect=[unknown_cmd, ""]),
         ):
-            await _listen_for_cancel(agent)
+            await listen_for_cancel(agent)
 
         assert agent.state.stopped is False
 
     @pytest.mark.asyncio
     async def test_blank_lines_are_ignored(self):
         """Blank / whitespace-only lines must not crash or stop the agent."""
-        from ghosthands.cli import _listen_for_cancel
+        from ghosthands.bridge.protocol import listen_for_cancel
 
         agent = _make_mock_agent()
 
         with patch(
-            "ghosthands.cli._read_stdin_line",
+            "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(side_effect=["\n", "   \n", ""]),
         ):
-            await _listen_for_cancel(agent)
+            await listen_for_cancel(agent)
 
         assert agent.state.stopped is False
 
     @pytest.mark.asyncio
     async def test_cancel_after_other_commands(self):
         """Agent stops when cancel arrives after unrecognised commands."""
-        from ghosthands.cli import _listen_for_cancel
+        from ghosthands.bridge.protocol import listen_for_cancel
 
         agent = _make_mock_agent()
 
@@ -322,10 +322,10 @@ class TestListenForCancel:
         ]
 
         with patch(
-            "ghosthands.cli._read_stdin_line",
+            "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(side_effect=seq),
         ):
-            await _listen_for_cancel(agent)
+            await listen_for_cancel(agent)
 
         assert agent.state.stopped is True
 
@@ -1327,7 +1327,7 @@ class TestListenForCancelExtended:
     @pytest.mark.asyncio
     async def test_cancel_sets_cancel_requested_event(self):
         """cancel command must set the cancel_requested asyncio.Event."""
-        from ghosthands.cli import _listen_for_cancel
+        from ghosthands.bridge.protocol import listen_for_cancel
 
         agent = _make_mock_agent()
         cancel_requested = asyncio.Event()
@@ -1335,7 +1335,7 @@ class TestListenForCancelExtended:
         cancel_line = json.dumps({"type": "cancel"}) + "\n"
 
         with patch(
-            "ghosthands.cli._read_stdin_line",
+            "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(side_effect=[cancel_line, ""]),
         ):
             await _listen_for_cancel(agent, cancel_requested)
@@ -1346,7 +1346,7 @@ class TestListenForCancelExtended:
     @pytest.mark.asyncio
     async def test_cancel_job_command_stops_agent(self):
         """{"type": "cancel_job"} must also set agent.state.stopped = True."""
-        from ghosthands.cli import _listen_for_cancel
+        from ghosthands.bridge.protocol import listen_for_cancel
 
         agent = _make_mock_agent()
         cancel_requested = asyncio.Event()
@@ -1354,7 +1354,7 @@ class TestListenForCancelExtended:
         cancel_line = json.dumps({"type": "cancel_job"}) + "\n"
 
         with patch(
-            "ghosthands.cli._read_stdin_line",
+            "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(side_effect=[cancel_line, ""]),
         ):
             await _listen_for_cancel(agent, cancel_requested)
@@ -1365,7 +1365,7 @@ class TestListenForCancelExtended:
     @pytest.mark.asyncio
     async def test_timeout_on_stdin_continues_loop(self):
         """TimeoutError from _read_stdin_line should continue the loop."""
-        from ghosthands.cli import _listen_for_cancel
+        from ghosthands.bridge.protocol import listen_for_cancel
 
         agent = _make_mock_agent()
         call_count = 0
@@ -1377,8 +1377,8 @@ class TestListenForCancelExtended:
                 raise TimeoutError()
             return ""  # EOF after 2 timeouts
 
-        with patch("ghosthands.cli._read_stdin_line", new=_mock_read):
-            await _listen_for_cancel(agent)
+        with patch("ghosthands.bridge.protocol.read_stdin_line", new=_mock_read):
+            await listen_for_cancel(agent)
 
         assert call_count == 3
         assert agent.state.stopped is False
@@ -1401,7 +1401,7 @@ class TestWaitForReviewCommand:
         cmd = json.dumps({"type": "complete_review"}) + "\n"
 
         with patch(
-            "ghosthands.cli._read_stdin_line",
+            "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(side_effect=[cmd]),
         ):
             await _wait_for_review_command(browser, "j1", "l1")
@@ -1416,7 +1416,7 @@ class TestWaitForReviewCommand:
         cmd = json.dumps({"type": "cancel"}) + "\n"
 
         with patch(
-            "ghosthands.cli._read_stdin_line",
+            "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(side_effect=[cmd]),
         ):
             await _wait_for_review_command(browser, "j1", "l1")
@@ -1431,7 +1431,7 @@ class TestWaitForReviewCommand:
         browser = AsyncMock()
 
         with patch(
-            "ghosthands.cli._read_stdin_line",
+            "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(return_value=""),
         ):
             await _wait_for_review_command(browser, "j1", "l1")
@@ -1451,7 +1451,7 @@ class TestWaitForReviewCommand:
         ]
 
         with patch(
-            "ghosthands.cli._read_stdin_line",
+            "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(side_effect=seq),
         ):
             await _wait_for_review_command(browser, "j1", "l1")

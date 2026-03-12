@@ -758,7 +758,9 @@ function spawnHandX(params: {
   const cliArgs = [
     ...prependArgs,
     '--job-url', params.jobUrl,
-    '--profile', JSON.stringify(params.profile),
+    // SECURITY: prefer GH_USER_PROFILE_TEXT env var over --profile CLI arg.
+    // CLI args are visible via ps aux / Activity Monitor on shared systems.
+    // '--profile', JSON.stringify(params.profile),  // DEV USE ONLY
     '--resume', params.resumePath,
     '--output-format', 'jsonl',
     '--proxy-url', params.proxyUrl,
