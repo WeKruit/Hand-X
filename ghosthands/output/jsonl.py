@@ -209,3 +209,13 @@ def emit_account_created(
 def emit_awaiting_review(message: str = "Application filled — waiting for review") -> None:
     """Emit awaiting_review event when browser is open for user review."""
     emit_event("awaiting_review", message=message)
+
+
+# ── Protocol handshake ───────────────────────────────────────────────
+
+PROTOCOL_VERSION = 1
+
+
+def emit_handshake() -> None:
+    """Emit protocol version handshake as the first JSONL event."""
+    emit_event("handshake", protocol_version=PROTOCOL_VERSION, min_desktop_version="0.1.0")
