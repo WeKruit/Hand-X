@@ -1102,3 +1102,426 @@ class TestCredentialExtraction:
 
         result = _resolve_sensitive_data(args, settings, embedded_credentials={})
         assert result == {"email": "env@test.com", "password": "envPass"}
+
+
+# ---------------------------------------------------------------------------
+# Test 11 — Stdout guard mechanics
+# ---------------------------------------------------------------------------
+
+
+class TestStdoutGuard:
+    """install_stdout_guard must save the real stdout fd and redirect
+    sys.stdout to stderr so the JSONL stream is never corrupted."""
+
+    def test_guard_redirects_stdout_to_saved_fd(self):
+        """After install, emit_event writes to saved fd, not sys.stdout."""
+        import ghosthands.output.jsonl as jsonl_mod
+
+        fake_fd = io.StringIO()
+        original_guard = jsonl_mod._jsonl_out
+        jsonl_mod._jsonl_out = fake_fd
+
+        try:
+            fake_stdout = io.StringIO()
+            with patch("sys.stdout", fake_stdout):
+                jsonl_mod.emit_event("test_guard", value="hello")
+
+            # JSONL goes to the saved fd
+            assert fake_fd.getvalue().strip() != ""
+            event = json.loads(fake_fd.getvalue().strip())
+            assert event["event"] == "test_guard"
+            assert event["value"] == "hello"
+            # Nothing leaked to sys.stdout
+            assert fake_stdout.getvalue() == ""
+        finally:
+            jsonl_mod._jsonl_out = original_guard
+
+    def test_guard_idempotent(self):
+        """Calling install_stdout_guard twice should not raise or double-dup."""
+        import ghosthands.output.jsonl as jsonl_mod
+
+        original_guard = jsonl_mod._jsonl_out
+        # Simulate already installed
+        jsonl_mod._jsonl_out = io.StringIO()
+        try:
+            # Should return early without error
+            jsonl_mod.install_stdout_guard()
+        finally:
+            jsonl_mod._jsonl_out = original_guard
+
+    def test_fallback_when_guard_not_installed(self):
+        """When guard is NOT installed, emit_event falls back to sys.stdout."""
+        import ghosthands.output.jsonl as jsonl_mod
+
+        original_guard = jsonl_mod._jsonl_out
+        jsonl_mod._jsonl_out = None
+
+        try:
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                jsonl_mod.emit_event("fallback_test", data="yes")
+
+            event = json.loads(buf.getvalue().strip())
+            assert event["event"] == "fallback_test"
+        finally:
+            jsonl_mod._jsonl_out = original_guard
+
+
+# ---------------------------------------------------------------------------
+# Test 12 — Thread-safe JSONL emission
+# ---------------------------------------------------------------------------
+
+
+class TestThreadSafeEmission:
+    """emit_event uses a threading.Lock — concurrent calls must produce
+    valid, non-interleaved JSONL lines."""
+
+    def test_concurrent_emits_produce_valid_jsonl(self):
+        """Multiple threads emitting simultaneously must each produce a
+        complete, parseable JSONL line."""
+        import threading
+        import ghosthands.output.jsonl as jsonl_mod
+
+        buf = io.StringIO()
+        original_guard = jsonl_mod._jsonl_out
+        jsonl_mod._jsonl_out = None
+
+        try:
+            with patch("sys.stdout", buf):
+                threads = []
+                for i in range(20):
+                    t = threading.Thread(
+                        target=jsonl_mod.emit_event,
+                        args=("concurrent",),
+                        kwargs={"index": i},
+                    )
+                    threads.append(t)
+
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+
+            lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+            assert len(lines) == 20
+
+            indices = set()
+            for line in lines:
+                event = json.loads(line)
+                assert event["event"] == "concurrent"
+                indices.add(event["index"])
+            assert indices == set(range(20))
+        finally:
+            jsonl_mod._jsonl_out = original_guard
+
+
+# ---------------------------------------------------------------------------
+# Test 13 — field_events callback integration
+# ---------------------------------------------------------------------------
+
+
+class TestFieldEventsCallback:
+    """install_jsonl_callback must wire into domhand_fill and emit
+    field_filled / field_failed events as fields are processed."""
+
+    def _reset_field_events(self):
+        import ghosthands.output.field_events as fe
+
+        fe._installed = False
+        fe._counts["filled"] = 0
+        fe._counts["total"] = 0
+        fe._counts["last_round"] = 0
+
+    def _setup_mock_fill(self):
+        """Create mock modules that satisfy `from ghosthands.actions import domhand_fill`."""
+        mock_fill = types.ModuleType("ghosthands.actions.domhand_fill")
+        mock_fill._on_field_result = None
+
+        mock_actions = types.ModuleType("ghosthands.actions")
+        mock_actions.domhand_fill = mock_fill
+
+        return mock_fill, {
+            "ghosthands.actions": mock_actions,
+            "ghosthands.actions.domhand_fill": mock_fill,
+        }
+
+    def test_callback_emits_field_filled(self):
+        """A successful FillFieldResult should emit field_filled."""
+        self._reset_field_events()
+
+        import ghosthands.output.field_events as fe
+
+        mock_fill, modules = self._setup_mock_fill()
+
+        with patch.dict("sys.modules", modules):
+            fe._installed = False
+            fe.install_jsonl_callback()
+
+            callback = mock_fill._on_field_result
+            assert callback is not None
+
+            result = MagicMock()
+            result.success = True
+            result.name = "email"
+            result.value_set = "jane@test.com"
+
+            events = _capture_jsonl_output(callback, result, 1)
+
+        # Should have emitted field_filled + progress
+        assert len(events) == 2
+        assert events[0]["event"] == "field_filled"
+        assert events[0]["field"] == "email"
+        assert events[0]["value"] == "jane@test.com"
+        assert events[1]["event"] == "progress"
+
+    def test_callback_emits_field_failed(self):
+        """A failed FillFieldResult should emit field_failed."""
+        self._reset_field_events()
+
+        import ghosthands.output.field_events as fe
+
+        mock_fill, modules = self._setup_mock_fill()
+
+        with patch.dict("sys.modules", modules):
+            fe._installed = False
+            fe.install_jsonl_callback()
+
+            callback = mock_fill._on_field_result
+            result = MagicMock()
+            result.success = False
+            result.name = "phone"
+            result.error = "selector not found"
+
+            events = _capture_jsonl_output(callback, result, 1)
+
+        assert events[0]["event"] == "field_failed"
+        assert events[0]["field"] == "phone"
+        assert events[0]["reason"] == "selector not found"
+
+    def test_multi_round_counting(self):
+        """Counts must accumulate across multiple rounds."""
+        self._reset_field_events()
+
+        import ghosthands.output.field_events as fe
+
+        mock_fill, modules = self._setup_mock_fill()
+
+        with patch.dict("sys.modules", modules):
+            fe._installed = False
+            fe.install_jsonl_callback()
+
+            callback = mock_fill._on_field_result
+
+            # Round 1: 2 filled, 1 failed
+            for field_name in ("first_name", "last_name"):
+                r = MagicMock(success=True, value_set="val")
+                r.name = field_name  # .name is special in MagicMock
+                _capture_jsonl_output(callback, r, 1)
+            r = MagicMock(success=False, error="not found")
+            r.name = "phone"
+            _capture_jsonl_output(callback, r, 1)
+
+            # Round 2: 1 filled
+            r = MagicMock(success=True, value_set="+15551234567")
+            r.name = "phone"
+            _capture_jsonl_output(callback, r, 2)
+
+        # Cumulative: 3 filled, 1 failed out of 4 total
+        assert fe.get_field_counts() == (3, 1)
+
+
+# ---------------------------------------------------------------------------
+# Test 14 — _listen_for_cancel: cancel_requested event + cancel_job type
+# ---------------------------------------------------------------------------
+
+
+class TestListenForCancelExtended:
+    """Extended tests for _listen_for_cancel covering cancel_requested
+    event and the cancel_job command type."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_sets_cancel_requested_event(self):
+        """cancel command must set the cancel_requested asyncio.Event."""
+        from ghosthands.cli import _listen_for_cancel
+
+        agent = _make_mock_agent()
+        cancel_requested = asyncio.Event()
+
+        cancel_line = json.dumps({"type": "cancel"}) + "\n"
+
+        with patch(
+            "ghosthands.cli._read_stdin_line",
+            new=AsyncMock(side_effect=[cancel_line, ""]),
+        ):
+            await _listen_for_cancel(agent, cancel_requested)
+
+        assert cancel_requested.is_set()
+        assert agent.state.stopped is True
+
+    @pytest.mark.asyncio
+    async def test_cancel_job_command_stops_agent(self):
+        """{"type": "cancel_job"} must also set agent.state.stopped = True."""
+        from ghosthands.cli import _listen_for_cancel
+
+        agent = _make_mock_agent()
+        cancel_requested = asyncio.Event()
+
+        cancel_line = json.dumps({"type": "cancel_job"}) + "\n"
+
+        with patch(
+            "ghosthands.cli._read_stdin_line",
+            new=AsyncMock(side_effect=[cancel_line, ""]),
+        ):
+            await _listen_for_cancel(agent, cancel_requested)
+
+        assert agent.state.stopped is True
+        assert cancel_requested.is_set()
+
+    @pytest.mark.asyncio
+    async def test_timeout_on_stdin_continues_loop(self):
+        """TimeoutError from _read_stdin_line should continue the loop."""
+        from ghosthands.cli import _listen_for_cancel
+
+        agent = _make_mock_agent()
+        call_count = 0
+
+        async def _mock_read(timeout=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                raise TimeoutError()
+            return ""  # EOF after 2 timeouts
+
+        with patch("ghosthands.cli._read_stdin_line", new=_mock_read):
+            await _listen_for_cancel(agent)
+
+        assert call_count == 3
+        assert agent.state.stopped is False
+
+
+# ---------------------------------------------------------------------------
+# Test 15 — _wait_for_review_command
+# ---------------------------------------------------------------------------
+
+
+class TestWaitForReviewCommand:
+    """_wait_for_review_command must wait for stdin commands and handle
+    complete_review, cancel, and timeout scenarios."""
+
+    @pytest.mark.asyncio
+    async def test_complete_review_closes_browser(self):
+        from ghosthands.cli import _wait_for_review_command
+
+        browser = AsyncMock()
+        cmd = json.dumps({"type": "complete_review"}) + "\n"
+
+        with patch(
+            "ghosthands.cli._read_stdin_line",
+            new=AsyncMock(side_effect=[cmd]),
+        ):
+            await _wait_for_review_command(browser, "j1", "l1")
+
+        browser.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_review_closes_browser(self):
+        from ghosthands.cli import _wait_for_review_command
+
+        browser = AsyncMock()
+        cmd = json.dumps({"type": "cancel"}) + "\n"
+
+        with patch(
+            "ghosthands.cli._read_stdin_line",
+            new=AsyncMock(side_effect=[cmd]),
+        ):
+            await _wait_for_review_command(browser, "j1", "l1")
+
+        browser.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_eof_during_review_closes_browser(self):
+        """EOF (Electron crashed) should cleanly close browser."""
+        from ghosthands.cli import _wait_for_review_command
+
+        browser = AsyncMock()
+
+        with patch(
+            "ghosthands.cli._read_stdin_line",
+            new=AsyncMock(return_value=""),
+        ):
+            await _wait_for_review_command(browser, "j1", "l1")
+
+        browser.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_ignores_unknown_commands_during_review(self):
+        """Unknown commands should be ignored, loop continues."""
+        from ghosthands.cli import _wait_for_review_command
+
+        browser = AsyncMock()
+
+        seq = [
+            json.dumps({"type": "ping"}) + "\n",
+            json.dumps({"type": "complete_review"}) + "\n",
+        ]
+
+        with patch(
+            "ghosthands.cli._read_stdin_line",
+            new=AsyncMock(side_effect=seq),
+        ):
+            await _wait_for_review_command(browser, "j1", "l1")
+
+        browser.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test 16 — JSONL line buffering / output format
+# ---------------------------------------------------------------------------
+
+
+class TestJSONLOutputFormat:
+    """Each JSONL event must be exactly one newline-terminated line with
+    compact JSON (no spaces)."""
+
+    def test_compact_json_no_extra_whitespace(self):
+        """emit_event should use compact separators (no spaces)."""
+        from ghosthands.output.jsonl import emit_event
+
+        events_raw = io.StringIO()
+        import ghosthands.output.jsonl as jsonl_mod
+
+        original_guard = jsonl_mod._jsonl_out
+        jsonl_mod._jsonl_out = None
+        try:
+            with patch("sys.stdout", events_raw):
+                emit_event("compact_test", key="value", num=42)
+        finally:
+            jsonl_mod._jsonl_out = original_guard
+
+        raw = events_raw.getvalue()
+        # Should NOT contain ": " or ", " (compact separators)
+        assert '": ' not in raw
+        assert '", ' not in raw
+        # Should contain ":" and "," without spaces
+        assert '"event":"compact_test"' in raw
+
+    def test_each_event_ends_with_newline(self):
+        """Each emitted event must be terminated by exactly one \\n."""
+        from ghosthands.output.jsonl import emit_status
+
+        events = _capture_jsonl_output(emit_status, "hello", step=1, max_steps=10)
+        assert len(events) == 1
+
+    def test_multiple_events_produce_multiple_lines(self):
+        """Multiple calls must each produce separate lines."""
+
+        def emit_two():
+            from ghosthands.output.jsonl import emit_status, emit_progress
+
+            emit_status("step one")
+            emit_progress(1, 5)
+
+        events = _capture_jsonl_output(emit_two)
+        assert len(events) == 2
+        assert events[0]["event"] == "status"
+        assert events[1]["event"] == "progress"
