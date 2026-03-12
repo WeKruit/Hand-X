@@ -33,8 +33,14 @@ _FIND_AND_CLICK_JS = r"""(label, shouldClick) => {
 	var lower = (label || '').toLowerCase().trim();
 	var results = { found: false, buttons: [] };
 
-	// Collect ALL visible buttons
-	var allButtons = document.querySelectorAll(
+	// Shadow-DOM-aware query — uses __ff.queryAll when available
+	function qAll(sel) {
+		if (window.__ff && window.__ff.queryAll) return window.__ff.queryAll(sel);
+		return Array.from(document.querySelectorAll(sel));
+	}
+
+	// Collect ALL visible buttons (across shadow roots)
+	var allButtons = qAll(
 		'button, [role="button"], input[type="submit"], [data-automation-id*="utton"]'
 	);
 	var candidates = [];
@@ -153,7 +159,11 @@ _FIND_AND_CLICK_JS = r"""(label, shouldClick) => {
 # JS: Submit the form containing a specific button
 _SUBMIT_FORM_JS = r"""(label) => {
 	var lower = (label || '').toLowerCase().trim();
-	var buttons = document.querySelectorAll('button, [role="button"], input[type="submit"]');
+	function qAll(sel) {
+		if (window.__ff && window.__ff.queryAll) return window.__ff.queryAll(sel);
+		return Array.from(document.querySelectorAll(sel));
+	}
+	var buttons = qAll('button, [role="button"], input[type="submit"]');
 	for (var i = 0; i < buttons.length; i++) {
 		var text = (buttons[i].textContent || buttons[i].value || '').trim().toLowerCase();
 		if (text === lower || text.indexOf(lower) !== -1) {
@@ -172,6 +182,10 @@ _SUBMIT_FORM_JS = r"""(label) => {
 
 # JS: Check current page state for diagnostics
 _PAGE_STATE_JS = r"""() => {
+	function qAll(sel) {
+		if (window.__ff && window.__ff.queryAll) return window.__ff.queryAll(sel);
+		return Array.from(document.querySelectorAll(sel));
+	}
 	var state = {
 		url: window.location.href,
 		title: document.title,
@@ -179,8 +193,8 @@ _PAGE_STATE_JS = r"""() => {
 		hiddenErrors: []
 	};
 
-	// Check all forms for validity
-	document.querySelectorAll('form').forEach(function(form, i) {
+	// Check all forms for validity (across shadow roots)
+	qAll('form').forEach(function(form, i) {
 		var formInfo = { index: i, valid: form.checkValidity(), fields: [] };
 		form.querySelectorAll('input, select, textarea').forEach(function(field) {
 			if (!field.checkValidity()) {
@@ -201,7 +215,7 @@ _PAGE_STATE_JS = r"""() => {
 		'[role="alert"]', '[aria-invalid="true"]'
 	];
 	errorPatterns.forEach(function(sel) {
-		document.querySelectorAll(sel).forEach(function(el) {
+		qAll(sel).forEach(function(el) {
 			var text = (el.textContent || '').trim();
 			if (text && text.length < 200) {
 				state.hiddenErrors.push({ selector: sel, text: text });
@@ -209,9 +223,9 @@ _PAGE_STATE_JS = r"""() => {
 		});
 	});
 
-	// Check checkboxes state
+	// Check checkboxes state (across shadow roots)
 	var checkboxes = [];
-	document.querySelectorAll('input[type="checkbox"], [role="checkbox"]').forEach(function(cb) {
+	qAll('input[type="checkbox"], [role="checkbox"]').forEach(function(cb) {
 		var label = '';
 		var parent = cb.closest('label');
 		if (parent) label = parent.textContent || '';
@@ -248,6 +262,16 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
 	if not page:
 		return ActionResult(error="No active page found")
 
+	# Inject __ff shadow-DOM helpers if not present (auth pages skip domhand_fill)
+	try:
+		has_ff = await page.evaluate("() => { return !!(window.__ff); }")
+		if has_ff != "true" and has_ff is not True:
+			from ghosthands.dom.shadow_helpers import _build_inject_helpers_js
+			await page.evaluate(_build_inject_helpers_js())
+			logger.debug("domhand_click_button: injected __ff helpers")
+	except Exception as e:
+		logger.debug(f"Failed to inject __ff helpers: {e}")
+
 	label = params.button_label.strip()
 	logger.info("domhand_click_button.start", extra={"label": label})
 
@@ -263,6 +287,11 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
 		result_json = await page.evaluate(_FIND_AND_CLICK_JS, label, True)
 		result = json.loads(result_json)
 
+		# Visual highlight — show the user which button was clicked
+		if result.get("found") and result.get("selector"):
+			from ghosthands.actions._highlight import highlight_element
+			await highlight_element(page, result["selector"])
+
 		if result.get("found") and result.get("clicked"):
 			await asyncio.sleep(1.0)  # Wait for potential navigation
 
@@ -273,10 +302,12 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
 				url_after = url_before
 
 			method = result.get("clicked", "unknown")
+			matched_text = result.get("text", "")
 			logger.info("domhand_click_button.js_click", extra={
 				"label": label,
 				"method": method,
-				"text": result.get("text", ""),
+				"matched_text": matched_text,
+				"matched_automation_id": result.get("automationId", ""),
 				"url_changed": url_before != url_after,
 			})
 
@@ -366,9 +397,17 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
 
 		unchecked_boxes = [cb for cb in checkboxes if not cb.get("checked")]
 
-		# ── Auto-fix: if unchecked checkboxes are likely blocking submission,
-		#    check them automatically and retry the button click once.
-		if unchecked_boxes:
+		# Filter to agreement-related checkboxes only — don't auto-check
+		# unrelated boxes like "Remember me" or notification preferences.
+		_agree_kw = ["agree", "accept", "consent", "terms", "privacy", "acknowledge", "i understand", "certify"]
+		agreement_unchecked = [
+			cb for cb in unchecked_boxes
+			if any(kw in (cb.get("label") or "").lower() for kw in _agree_kw)
+		]
+
+		# ── Auto-fix: if unchecked AGREEMENT checkboxes are likely blocking
+		#    submission, check them automatically and retry the button click once.
+		if agreement_unchecked:
 			logger.info("domhand_click_button.auto_checking_boxes", extra={
 				"label": label,
 				"unchecked": [cb.get("label", "?")[:60] for cb in unchecked_boxes],
