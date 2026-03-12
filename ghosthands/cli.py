@@ -32,17 +32,25 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import concurrent.futures
 import contextlib
 import json
 import logging
 import os
 import sys
-import time as _time
 from pathlib import Path
 from typing import Any
 
 import structlog
+
+from ghosthands.agent.prompts import build_task_prompt
+from ghosthands.bridge.profile_adapter import (
+    camel_to_snake_profile,
+    normalize_profile_defaults,
+)
+from ghosthands.bridge.protocol import (
+    listen_for_cancel,
+    wait_for_review_command,
+)
 
 # Force unbuffered I/O for reliable JSONL streaming
 os.environ["PYTHONUNBUFFERED"] = "1"
@@ -169,140 +177,6 @@ def _load_profile(args: argparse.Namespace) -> dict:
         return json.loads(profile_text)
 
     raise ValueError("Either --profile, --test-data, or GH_USER_PROFILE_TEXT env var is required")
-
-
-# Defaults matching resume_loader.PROFILE_DEFAULTS — duplicated here to avoid
-# importing the integrations package (which pulls in asyncpg/database).
-_DOMHAND_PROFILE_DEFAULTS: dict[str, Any] = {
-    "phone_device_type": "Mobile",
-    "phone_country_code": "+1",
-    "address": {
-        "street": "",
-        "city": "",
-        "state": "",
-        "zip": "",
-        "country": "United States of America",
-    },
-    "work_authorization": "Yes",
-    "visa_sponsorship": "No",
-    "veteran_status": "I am not a protected veteran",
-    "disability_status": "No, I Don't Have A Disability",
-    "gender": "Male",
-    "race_ethnicity": "Asian (Not Hispanic or Latino)",
-}
-
-
-_CAMEL_TO_SNAKE_SCALAR: dict[str, str] = {
-    "firstName": "first_name",
-    "lastName": "last_name",
-    "linkedIn": "linkedin",
-    "zipCode": "zip",
-    "workAuthorization": "work_authorization",
-    "visaSponsorship": "visa_sponsorship",
-    "raceEthnicity": "race_ethnicity",
-    "veteranStatus": "veteran_status",
-    "disabilityStatus": "disability_status",
-    "phoneDeviceType": "phone_device_type",
-    "phoneCountryCode": "phone_country_code",
-}
-
-_CAMEL_TO_SNAKE_NESTED: dict[str, str] = {
-    "fieldOfStudy": "field_of_study",
-    "startDate": "start_date",
-    "endDate": "end_date",
-    "graduationDate": "graduation_date",
-}
-
-
-def _camel_to_snake_profile(profile: dict[str, Any]) -> dict[str, Any]:
-    """Convert known camelCase keys from the Desktop bridge to snake_case.
-
-    The Desktop app sends profile data with camelCase keys (matching the
-    VALET API's TypeScript conventions).  DomHand and the rest of the
-    Python codebase expect snake_case.
-
-    This function adds snake_case equivalents for known camelCase keys
-    without removing the originals, so both formats work downstream.
-
-    Also handles ``zipCode`` -> ``zip`` *and* ``postal_code`` (for prompts).
-    """
-    out = dict(profile)
-
-    # ── Scalar fields ────────────────────────────────────────────
-    for camel, snake in _CAMEL_TO_SNAKE_SCALAR.items():
-        if camel in out and snake not in out:
-            out[snake] = out[camel]
-
-    # zipCode also maps to postal_code for prompt templates
-    if "zipCode" in out and "postal_code" not in out:
-        out["postal_code"] = out["zipCode"]
-
-    # ── Nested arrays: education / experience ────────────────────
-    for array_key in ("education", "experience"):
-        items = out.get(array_key)
-        if not isinstance(items, list):
-            continue
-        converted = []
-        for item in items:
-            if not isinstance(item, dict):
-                converted.append(item)
-                continue
-            new_item = dict(item)
-            for camel, snake in _CAMEL_TO_SNAKE_NESTED.items():
-                if camel in new_item and snake not in new_item:
-                    new_item[snake] = new_item[camel]
-            converted.append(new_item)
-        out[array_key] = converted
-
-    return out
-
-
-def normalize_profile_defaults(profile: dict[str, Any]) -> dict[str, Any]:
-    """Add DomHand-expected default fields that the Desktop bridge omits.
-
-    When the Desktop app passes a raw ``UserProfile`` via ``--profile`` or
-    ``GH_USER_PROFILE_TEXT``, it may be missing fields that the old
-    TypeScript ``toWorkdayProfile()`` transformation would have added.
-    DomHand's ``_parse_profile_evidence`` and ``_known_profile_value``
-    rely on these fields being present in the profile.
-
-    This function fills in missing keys with sensible defaults, matching
-    the ``PROFILE_DEFAULTS`` from ``resume_loader``.  Existing values in
-    the profile are never overwritten.
-    """
-    defaults = _DOMHAND_PROFILE_DEFAULTS
-    normalized = dict(profile)
-
-    # ── Scalar defaults ──────────────────────────────────────────
-    for key in (
-        "phone_device_type",
-        "phone_country_code",
-        "work_authorization",
-        "visa_sponsorship",
-        "veteran_status",
-        "disability_status",
-        "gender",
-        "race_ethnicity",
-    ):
-        if key not in normalized or normalized[key] is None or normalized[key] == "":
-            normalized[key] = defaults[key]
-
-    # ── Address defaults (merge, don't overwrite) ────────────────
-    default_address = defaults["address"]
-    existing_address = normalized.get("address")
-
-    if existing_address is None or existing_address == "":
-        normalized["address"] = dict(default_address)
-    elif isinstance(existing_address, dict):
-        merged = dict(default_address)
-        for k, v in existing_address.items():
-            if v is not None and v != "":
-                merged[k] = v
-        normalized["address"] = merged
-    # If address is a string (e.g. "San Francisco, CA"), leave it as-is —
-    # _format_profile_summary handles string addresses fine.
-
-    return normalized
 
 
 def _apply_runtime_env(
@@ -433,7 +307,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # -- Convert camelCase keys from Desktop bridge to snake_case ----------
-    profile = _camel_to_snake_profile(profile)
+    profile = camel_to_snake_profile(profile)
 
     # -- Extract embedded credentials before they leak into env/profile ----
     # We pop them so they don't end up in GH_USER_PROFILE_TEXT env var.
@@ -504,7 +378,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     browser = BrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
-    task = _build_task_prompt(args.job_url, resume_path, sensitive_data)
+    task = build_task_prompt(args.job_url, resume_path, sensitive_data)
 
     emit_status(
         f"Starting application: {args.job_url}",
@@ -565,7 +439,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         )
 
         cancel_requested = asyncio.Event()
-        cancel_task = asyncio.create_task(_listen_for_cancel(agent, cancel_requested))
+        cancel_task = asyncio.create_task(listen_for_cancel(agent, cancel_requested))
         try:
             history = await agent.run(
                 max_steps=args.max_steps,
@@ -643,7 +517,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 result_data=result_data,
             )
             emit_awaiting_review()
-            await _wait_for_review_command(browser, job_id, lease_id)
+            await wait_for_review_command(browser, job_id, lease_id)
         else:
             emit_done(
                 success=False,
@@ -681,7 +555,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # -- Convert camelCase keys from Desktop bridge to snake_case ----------
-    profile = _camel_to_snake_profile(profile)
+    profile = camel_to_snake_profile(profile)
 
     # -- Extract embedded credentials before they leak into env/profile ----
     embedded_credentials = profile.pop("credentials", None)
@@ -738,7 +612,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     browser = BrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
-    task = _build_task_prompt(args.job_url, resume_path, sensitive_data)
+    task = build_task_prompt(args.job_url, resume_path, sensitive_data)
 
     # -- Agent --------------------------------------------------------------
     available_files = [resume_path] if resume_path else []
@@ -795,190 +669,6 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\nClosing browser...")
         await browser.close()
-
-
-# ── Shared helpers ────────────────────────────────────────────────────
-
-
-def _build_task_prompt(
-    job_url: str,
-    resume_path: str,
-    sensitive_data: dict | None,
-) -> str:
-    """Build the task prompt for the agent."""
-    task = (
-        f"Go to {job_url} and fill out the job application form completely.\n"
-        "\n"
-        "CRITICAL -- Action Order:\n"
-        "1. After navigating to the page, your FIRST action MUST be domhand_fill.\n"
-        "2. After domhand_fill completes, review its output to see which fields were filled and which failed.\n"
-        "3. For failed dropdowns/selects, use domhand_select.\n"
-        f"4. For file uploads (resume), use domhand_upload or upload_file action with path: {resume_path}\n"
-        "5. Only use generic browser-use actions (click, input_text) as a LAST RESORT.\n"
-        "6. After all fields on the current page are filled, click Next/Continue/Save to advance.\n"
-        "7. On each new page, call domhand_fill AGAIN as the first action.\n"
-        "\n"
-        "Other rules:\n"
-    )
-    if sensitive_data:
-        task += (
-            "- Use the provided credentials to log in or create an account if needed. "
-            "For Workday, fill email + password + confirm password on the Create Account page.\n"
-        )
-    else:
-        task += "- If a login wall appears, report it as a blocker.\n"
-    task += (
-        "- Do NOT click the final Submit button. Stop at the review page and use the done action.\n"
-        "- If anything pops up blocking the form, close it and continue.\n"
-    )
-    return task
-
-
-_stdin_lock = asyncio.Lock()
-_stdin_executor = concurrent.futures.ThreadPoolExecutor(
-    max_workers=1,
-    thread_name_prefix="hand-x-stdin",
-)
-# Mark the worker thread as daemon so it dies with the process (R-4 fix)
-_stdin_executor._thread_name_prefix = "hand-x-stdin"
-
-
-async def _read_stdin_line(timeout: float | None = None) -> str:
-    """Read a single line from stdin with optional timeout.
-
-    Uses a module-level lock to ensure only one reader at a time (R-2 fix),
-    and a dedicated daemon ThreadPoolExecutor so cancelled reads don't leak
-    threads from the default pool (R-4 fix).
-    """
-    async with _stdin_lock:
-        loop = asyncio.get_running_loop()
-
-        try:
-            fileno = sys.stdin.fileno()
-            future: asyncio.Future[str] = loop.create_future()
-
-            def _on_stdin_ready() -> None:
-                if future.done():
-                    return
-                try:
-                    future.set_result(sys.stdin.readline())
-                except Exception as exc:
-                    future.set_exception(exc)
-
-            loop.add_reader(fileno, _on_stdin_ready)
-            try:
-                if timeout is None:
-                    return await future
-                return await asyncio.wait_for(future, timeout=timeout)
-            finally:
-                loop.remove_reader(fileno)
-        except (AttributeError, NotImplementedError, OSError, ValueError):
-            line_future = loop.run_in_executor(_stdin_executor, sys.stdin.readline)
-            if timeout is None:
-                return await line_future
-            return await asyncio.wait_for(line_future, timeout=timeout)
-
-
-async def _listen_for_cancel(
-    agent: Any,
-    cancel_requested: asyncio.Event | None = None,
-) -> None:
-    """Read stdin concurrently during agent run for cancel commands."""
-    while not agent.state.stopped:
-        try:
-            line = await _read_stdin_line(timeout=1.0)
-        except TimeoutError:
-            continue
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            continue
-
-        if not line:
-            break
-
-        line = line.strip()
-        if not line:
-            continue
-
-        try:
-            cmd = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        cmd_type = cmd.get("type")
-        if cmd_type in {"cancel", "cancel_job"}:
-            logger.info("cancel_command_received_from_stdin", command_type=cmd_type)
-            if cancel_requested is not None:
-                cancel_requested.set()
-            agent.state.stopped = True
-            break
-
-
-async def _wait_for_review_command(browser, job_id: str, lease_id: str) -> None:
-    """Wait for a command from Electron on stdin.
-
-    Expected commands:
-    - {"type": "complete_review"} -- user approved, close browser
-    - {"type": "cancel_job"}     -- user cancelled, close browser
-    - {"type": "cancel"}         -- user cancelled, close browser
-
-    Times out after 30 minutes if no command is received.
-
-    NOTE: Does NOT emit a second ``done`` event.  The main flow already
-    emitted ``done`` before entering review.  Emitting another would
-    confuse the Desktop App event handler (R-1 fix).
-    """
-    from ghosthands.output.jsonl import emit_error, emit_status
-
-    review_timeout_seconds = 30 * 60  # 30 minutes
-    start_time = _time.monotonic()
-
-    try:
-        while True:
-            elapsed = _time.monotonic() - start_time
-            remaining = review_timeout_seconds - elapsed
-            if remaining <= 0:
-                logger.warning("review_timeout_exceeded", timeout_seconds=review_timeout_seconds)
-                emit_error(
-                    "Review timed out after 30 minutes",
-                    fatal=True,
-                    job_id=job_id,
-                )
-                break
-
-            try:
-                line = await _read_stdin_line(timeout=min(remaining, 5.0))
-            except TimeoutError:
-                continue
-
-            if not line:
-                break  # stdin closed -- Electron died
-
-            line = line.strip()
-            if not line:
-                continue
-
-            try:
-                cmd = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            cmd_type = cmd.get("type", "")
-
-            if cmd_type == "complete_review":
-                logger.info("review_completed", job_id=job_id, lease_id=lease_id)
-                emit_status("Review complete -- closing browser", job_id=job_id)
-                break
-            elif cmd_type in {"cancel", "cancel_job"}:
-                logger.info("review_cancelled", job_id=job_id, lease_id=lease_id)
-                emit_status("Review cancelled by user", job_id=job_id)
-                break
-    except (EOFError, KeyboardInterrupt):
-        pass
-    finally:
-        with contextlib.suppress(Exception):
-            await browser.close()
 
 
 # ── Entry point ───────────────────────────────────────────────────────
