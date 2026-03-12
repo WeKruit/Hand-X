@@ -637,10 +637,12 @@ _CLICK_RADIO_OPTION_JS = r"""(ffId, text) => {
 		var itemText = labelEl ? (labelEl.textContent || '').trim() : (item.textContent || '').trim();
 		var itemLower = itemText.toLowerCase();
 		if (itemLower === lower || itemLower.includes(lower) || lower.includes(itemLower)) {
-			item.click(); return JSON.stringify({clicked: true, text: itemText});
+			var clickable = item.matches('input[type="radio"], button, [role="radio"]')
+				? item
+				: item.querySelector('input[type="radio"], button, [role="radio"]') || item;
+			clickable.click(); return JSON.stringify({clicked: true, text: itemText});
 		}
 	}
-	if (items.length > 0) { items[0].click(); return JSON.stringify({clicked: true, text: '(first)'}); }
 	return JSON.stringify({clicked: false, error: 'No matching radio option'});
 }"""
 
@@ -697,11 +699,253 @@ _READ_BINARY_STATE_JS = r"""(ffId) => {
 	var ff = window.__ff;
 	var el = ff ? ff.byId(ffId) : null;
 	if (!el) return JSON.stringify(null);
-	if (el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) return JSON.stringify(el.checked);
-	var ac = el.getAttribute('aria-checked');
+	var getControl = function(node) {
+		if (!node) return null;
+		if (
+			node.matches &&
+			node.matches(
+				'input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"], [role="switch"], [aria-checked], [aria-pressed], [aria-selected]'
+			)
+		) {
+			return node;
+		}
+		return node.querySelector
+			? node.querySelector(
+				'input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"], [role="switch"], [aria-checked], [aria-pressed], [aria-selected]'
+			)
+			: null;
+	};
+	var control = getControl(el) || el;
+	if (control.tagName === 'INPUT' && (control.type === 'checkbox' || control.type === 'radio')) return JSON.stringify(control.checked);
+	var ac = control.getAttribute('aria-checked');
 	if (ac === 'true') return JSON.stringify(true);
 	if (ac === 'false') return JSON.stringify(false);
+	var ap = control.getAttribute('aria-pressed');
+	if (ap === 'true') return JSON.stringify(true);
+	if (ap === 'false') return JSON.stringify(false);
+	var as = control.getAttribute('aria-selected');
+	if (as === 'true') return JSON.stringify(true);
+	if (as === 'false') return JSON.stringify(false);
 	return JSON.stringify(null);
+}"""
+
+_CLICK_BINARY_FIELD_JS = r"""(ffId, desiredChecked) => {
+	var ff = window.__ff;
+	var el = ff ? ff.byId(ffId) : null;
+	if (!el) return JSON.stringify({clicked: false, error: 'Element not found'});
+
+	var getControl = function(node) {
+		if (!node) return null;
+		if (
+			node.matches &&
+			node.matches(
+				'input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"], [role="switch"], [aria-checked], [aria-pressed], [aria-selected]'
+			)
+		) {
+			return node;
+		}
+		return node.querySelector
+			? node.querySelector(
+				'input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"], [role="switch"], [aria-checked], [aria-pressed], [aria-selected]'
+			)
+			: null;
+	};
+	var getState = function(node) {
+		var control = getControl(node) || node;
+		if (!control) return null;
+		if (control.tagName === 'INPUT' && (control.type === 'checkbox' || control.type === 'radio')) return !!control.checked;
+		var ariaChecked = control.getAttribute('aria-checked');
+		if (ariaChecked === 'true') return true;
+		if (ariaChecked === 'false') return false;
+		var ariaPressed = control.getAttribute('aria-pressed');
+		if (ariaPressed === 'true') return true;
+		if (ariaPressed === 'false') return false;
+		var ariaSelected = control.getAttribute('aria-selected');
+		if (ariaSelected === 'true') return true;
+		if (ariaSelected === 'false') return false;
+		return null;
+	};
+	var dispatchClickSequence = function(node) {
+		if (!node) return;
+		var mouseOpts = { bubbles: true, cancelable: true, view: window };
+		node.dispatchEvent(new MouseEvent('mouseover', mouseOpts));
+		node.dispatchEvent(new MouseEvent('mouseenter', mouseOpts));
+		node.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
+		node.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
+		node.dispatchEvent(new MouseEvent('click', mouseOpts));
+	};
+	var control = getControl(el) || el;
+	var wrapper = ff.closestCrossRoot(
+		control,
+		'label, [role="row"], [role="cell"], [role="button"], .checkbox-card, .checkbox-option, .radio-card, .radio-option, [data-automation-id*="checkbox"], [data-automation-id*="radio"], [data-automation-id*="promptOption"]'
+	) || control.parentElement || control;
+
+	var currentState = getState(control);
+	if (currentState === desiredChecked) {
+		return JSON.stringify({clicked: true, alreadyChecked: true});
+	}
+
+	if (wrapper && wrapper.scrollIntoView) {
+		wrapper.scrollIntoView({block: 'center', behavior: 'instant'});
+	}
+	if (wrapper && wrapper !== control) {
+		if (wrapper.focus) wrapper.focus();
+		if (wrapper.click) wrapper.click();
+		dispatchClickSequence(wrapper);
+		if (getState(control) === desiredChecked) {
+			return JSON.stringify({clicked: true, strategy: 'wrapper'});
+		}
+	}
+
+	if (control.focus) control.focus();
+	if (control.click) control.click();
+	dispatchClickSequence(control);
+	if (control.tagName === 'INPUT' && (control.type === 'checkbox' || control.type === 'radio')) {
+		control.dispatchEvent(new Event('input', {bubbles: true}));
+		control.dispatchEvent(new Event('change', {bubbles: true}));
+	}
+	if (getState(control) === desiredChecked) {
+		return JSON.stringify({clicked: true, strategy: 'control'});
+	}
+
+	return JSON.stringify({clicked: true, strategy: 'unconfirmed'});
+}"""
+
+_GET_BINARY_CLICK_TARGET_JS = r"""(ffId) => {
+	var ff = window.__ff;
+	var el = ff ? ff.byId(ffId) : null;
+	if (!el) return JSON.stringify({found: false, error: 'Element not found'});
+
+	var getControl = function(node) {
+		if (!node) return null;
+		if (
+			node.matches &&
+			node.matches(
+				'input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"], [role="switch"], [aria-checked], [aria-pressed], [aria-selected]'
+			)
+		) {
+			return node;
+		}
+		return node.querySelector
+			? node.querySelector(
+				'input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"], [role="switch"], [aria-checked], [aria-pressed], [aria-selected]'
+			)
+			: null;
+	};
+	var control = getControl(el) || el;
+	var target = ff.closestCrossRoot(
+		control,
+		'label, [role="row"], [role="cell"], [role="button"], .checkbox-card, .checkbox-option, .radio-card, .radio-option, [data-automation-id*="checkbox"], [data-automation-id*="radio"], [data-automation-id*="promptOption"]'
+	) || control.parentElement || control;
+	var rect = target && target.getBoundingClientRect ? target.getBoundingClientRect() : null;
+	if (!rect || rect.width === 0 || rect.height === 0) {
+		rect = control && control.getBoundingClientRect ? control.getBoundingClientRect() : null;
+		target = control;
+	}
+	if (!rect || rect.width === 0 || rect.height === 0) {
+		return JSON.stringify({found: false, error: 'No visible click target'});
+	}
+	return JSON.stringify({
+		found: true,
+		text: ((target && target.textContent) || (control && control.getAttribute && control.getAttribute('aria-label')) || '').trim(),
+		x: Math.round(rect.left + (rect.width / 2)),
+		y: Math.round(rect.top + (rect.height / 2))
+	});
+}"""
+
+_READ_GROUP_SELECTION_JS = r"""(ffId) => {
+	var ff = window.__ff;
+	var el = ff ? ff.byId(ffId) : null;
+	if (!el) return JSON.stringify({selected: ''});
+	var group = ff.closestCrossRoot(el, '[role="radiogroup"], [role="group"], fieldset, .radio-group, .radio-cards') || el;
+	var nodes = Array.from(group.querySelectorAll('[role="radio"], input[type="radio"], label.radio-card, .radio-card, .radio-option, button, [role="button"], [role="cell"]'));
+	var seen = new Set();
+	var filtered = [];
+	for (var i = 0; i < nodes.length; i++) {
+		var node = nodes[i];
+		if (seen.has(node)) continue;
+		seen.add(node);
+		filtered.push(node);
+	}
+	var getLabel = function(node) {
+		if (!node) return '';
+		if (node.id) {
+			var byFor = ff.queryOne('label[for="' + CSS.escape(node.id) + '"]');
+			if (byFor && byFor.textContent && byFor.textContent.trim()) return byFor.textContent.trim();
+		}
+		var ariaLabel = node.getAttribute('aria-label');
+		if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
+		var wrap = ff.closestCrossRoot(node, 'label, [role="radio"], .radio-card, .radio-option, [role="button"], [role="cell"]') || node;
+		return (wrap.textContent || '').trim();
+	};
+	var isSelected = function(node) {
+		if (!node) return false;
+		if (node.matches && node.matches('input[type="radio"]') && node.checked) return true;
+		var ariaChecked = node.getAttribute && node.getAttribute('aria-checked');
+		if (ariaChecked === 'true') return true;
+		var ariaPressed = node.getAttribute && node.getAttribute('aria-pressed');
+		if (ariaPressed === 'true') return true;
+		var ariaSelected = node.getAttribute && node.getAttribute('aria-selected');
+		if (ariaSelected === 'true') return true;
+		var nested = node.querySelector && node.querySelector('input[type="radio"], [role="radio"]');
+		if (nested) {
+			if (nested.matches && nested.matches('input[type="radio"]') && nested.checked) return true;
+			if (nested.getAttribute && nested.getAttribute('aria-checked') === 'true') return true;
+		}
+		var className = typeof node.className === 'string' ? node.className : '';
+		return /\b(selected|checked|active)\b/i.test(className);
+	};
+	for (var j = 0; j < filtered.length; j++) {
+		var candidate = filtered[j];
+		if (isSelected(candidate)) return JSON.stringify({selected: getLabel(candidate)});
+	}
+	return JSON.stringify({selected: ''});
+}"""
+
+_GET_GROUP_OPTION_TARGET_JS = r"""(ffId, text) => {
+	var ff = window.__ff;
+	var el = ff ? ff.byId(ffId) : null;
+	if (!el) return JSON.stringify({found: false, error: 'Element not found'});
+	var group = ff.closestCrossRoot(el, '[role="radiogroup"], [role="group"], fieldset, .radio-group, .radio-cards') || el;
+	var nodes = Array.from(group.querySelectorAll('[role="radio"], input[type="radio"], label.radio-card, .radio-card, .radio-option, button, [role="button"], [role="cell"]'));
+	var lower = text.toLowerCase().trim();
+	var best = null;
+	var getLabel = function(node) {
+		if (!node) return '';
+		if (node.id) {
+			var byFor = ff.queryOne('label[for="' + CSS.escape(node.id) + '"]');
+			if (byFor && byFor.textContent && byFor.textContent.trim()) return byFor.textContent.trim();
+		}
+		var ariaLabel = node.getAttribute('aria-label');
+		if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
+		var wrap = ff.closestCrossRoot(node, 'label, [role="radio"], .radio-card, .radio-option, [role="button"], [role="cell"]') || node;
+		return (wrap.textContent || '').trim();
+	};
+	for (var i = 0; i < nodes.length; i++) {
+		var node = nodes[i];
+		var label = getLabel(node);
+		if (!label) continue;
+		var labelLower = label.toLowerCase().trim();
+		var score = 0;
+		if (labelLower === lower) score = 3;
+		else if (labelLower.includes(lower) || lower.includes(labelLower)) score = 2;
+		if (score === 0) continue;
+		var clickable = node.matches('input[type="radio"], button, [role="radio"], [role="button"], [role="cell"]')
+			? node
+			: node.querySelector('input[type="radio"], button, [role="radio"], [role="button"], [role="cell"]') || node;
+		var rect = clickable.getBoundingClientRect();
+		if (!rect || rect.width === 0 || rect.height === 0) continue;
+		if (!best || score > best.score) {
+			best = {
+				found: true,
+				score: score,
+				text: label,
+				x: Math.round(rect.left + (rect.width / 2)),
+				y: Math.round(rect.top + (rect.height / 2)),
+			};
+		}
+	}
+	return JSON.stringify(best || {found: false, error: 'No matching option'});
 }"""
 
 _READ_FIELD_VALUE_JS = r"""(ffId) => {
@@ -815,6 +1059,15 @@ _FOCUS_AND_CLEAR_JS = r"""(ffId) => {
 	return JSON.stringify({ok: true});
 }"""
 
+_FOCUS_FIELD_JS = r"""(ffId) => {
+	var ff = window.__ff;
+	var el = ff ? ff.byId(ffId) : document.querySelector('[data-ff-id="' + ffId + '"]');
+	if (!el) return JSON.stringify({ok: false, error: 'not found'});
+	if (el.scrollIntoView) el.scrollIntoView({block: 'center', behavior: 'instant'});
+	if (el.focus) el.focus();
+	return JSON.stringify({ok: true});
+}"""
+
 
 # ── Profile evidence extraction ──────────────────────────────────────
 
@@ -866,8 +1119,8 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
 				'address_line_2': str(data.get('address_line_2') or '').strip() or None,
 				'city': city, 'state': state, 'zip': zip_code,
 				'country': str(data.get('country') or '').strip() or None,
-				'phone_device_type': str(data.get('phone_device_type') or data.get('phone_type') or 'Mobile').strip() or None,
-				'phone_country_code': str(data.get('phone_country_code') or '+1').strip() or None,
+				'phone_device_type': str(data.get('phone_device_type') or data.get('phone_type') or '').strip() or None,
+				'phone_country_code': str(data.get('phone_country_code') or data.get('country_phone_code') or '').strip() or None,
 				'linkedin': str(data.get('linkedin') or data.get('linkedin_url') or '').strip() or None,
 				'portfolio': str(data.get('portfolio') or data.get('website') or data.get('personal_website') or '').strip() or None,
 				'github': github,
@@ -913,7 +1166,8 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
 		'address_line_2': read_line('Address line 2') or read_line('Address Line 2'),
 		'city': city, 'state': state, 'zip': zip_code,
 		'country': read_line('Country'),
-		'phone_device_type': 'Mobile', 'phone_country_code': '+1',
+		'phone_device_type': read_line('Phone Device Type') or read_line('Phone Type'),
+		'phone_country_code': read_line('Phone Country Code') or read_line('Country Phone Code'),
 		'linkedin': linkedin, 'portfolio': portfolio,
 		'github': github_match.group(0) if github_match else None,
 		'twitter': twitter_match.group(0) if twitter_match else None,
@@ -1087,6 +1341,44 @@ def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
 	return text
 
 
+def _extract_year_from_dateish(value: str | None) -> str | None:
+	"""Extract a 4-digit year from common date-ish strings."""
+	if not value:
+		return None
+	text = str(value).strip()
+	if not text:
+		return None
+	match = re.search(r'\b(19|20)\d{2}\b', text)
+	if match:
+		return match.group(0)
+	return None
+
+
+def _should_use_year_only(field: FormField) -> bool:
+	"""Return True for education/work range fields that visually want a bare year."""
+	label_norm = normalize_name(_preferred_field_label(field))
+	if not label_norm:
+		return False
+	if 'date' in label_norm or 'month' in label_norm or 'day' in label_norm:
+		return False
+	return (
+		label_norm in {'from', 'to'}
+		or label_norm.startswith('from ')
+		or label_norm.startswith('to ')
+		or 'actual or expected' in label_norm
+		or 'expected' in label_norm
+	)
+
+
+def _format_entry_value_for_field(field: FormField, value: str | None) -> str | None:
+	"""Adapt entry data to the specific field presentation without inventing data."""
+	if not value:
+		return None
+	if _should_use_year_only(field):
+		return _extract_year_from_dateish(value) or value
+	return value
+
+
 def _field_label_candidates(field: FormField) -> list[str]:
 	"""Return deduplicated field labels ordered from most to least descriptive."""
 	seen: set[str] = set()
@@ -1228,9 +1520,9 @@ def _known_entry_value(field_name: str, entry_data: dict[str, Any] | None) -> st
 		if current is None:
 			return None
 		return 'checked' if bool(current) else 'unchecked'
-	if any(kw in name for kw in ('start date', 'from date', 'date from', 'begin date', 'employment start')):
+	if name == 'from' or any(kw in name for kw in ('start date', 'from date', 'date from', 'begin date', 'employment start')):
 		return _entry_string('start_date')
-	if any(kw in name for kw in ('end date', 'to date', 'date to', 'graduation date', 'completion date')):
+	if name == 'to' or 'actual or expected' in name or any(kw in name for kw in ('end date', 'to date', 'date to', 'graduation date', 'completion date', 'expected graduation', 'expected completion')):
 		return _entry_string('end_date') or _entry_string('graduation_date')
 	if any(kw in name for kw in ('description', 'summary', 'responsibilities', 'responsibility', 'duties', 'details', 'accomplishments', 'achievements')):
 		return _entry_string('description')
@@ -1242,8 +1534,8 @@ def _known_entry_value_for_field(field: FormField, entry_data: dict[str, Any] | 
 	for label in _field_label_candidates(field):
 		value = _known_entry_value(label, entry_data)
 		if value:
-			return _coerce_answer_to_field(field, value)
-	return _coerce_answer_to_field(field, _known_entry_value(field.name, entry_data))
+			return _coerce_answer_to_field(field, _format_entry_value_for_field(field, value))
+	return _coerce_answer_to_field(field, _format_entry_value_for_field(field, _known_entry_value(field.name, entry_data)))
 
 
 def _parse_heading_index(scope: str | None) -> int | None:
@@ -1404,33 +1696,26 @@ def _find_best_profile_answer(
 
 
 def _default_screening_answer(field: FormField, profile_data: dict[str, Any]) -> str | None:
-	"""Return a conservative default for standard yes/no screening questions."""
+	"""Return policy answers that are explicitly backed by profile or date rules."""
 	label = _preferred_field_label(field)
 	norm = normalize_name(label)
 	options = [normalize_name(choice) for choice in (field.options or field.choices or [])]
 	if options and not ({'yes', 'no'} & set(options)):
 		return None
 
-	if any(phrase in norm for phrase in ('ever applied', 'previously applied', 'have you applied')):
-		return _coerce_answer_to_field(field, 'No')
-	if any(phrase in norm for phrase in ('ever worked', 'previously worked', 'worked at', 'worked for', 'been employed')):
-		return _coerce_answer_to_field(field, 'No')
-	if any(phrase in norm for phrase in ('relatives employed', 'relative employed', 'related to any employee', 'family employed')):
-		return _coerce_answer_to_field(field, 'No')
-	if any(phrase in norm for phrase in ('commitments to another employer', 'interfere with your employment', 'affect your employment', 'conflict of interest', 'obligation to another employer')):
-		return _coerce_answer_to_field(field, 'No')
-
 	sponsorship_value = profile_data.get('sponsorship_needed')
 	if sponsorship_value is None:
 		sponsorship_value = profile_data.get('visa_sponsorship')
-	if any(phrase in norm for phrase in ('sponsorship', 'visa sponsorship', 'require sponsorship', 'need sponsorship')):
-		return _coerce_answer_to_field(field, _normalize_bool_text(sponsorship_value) or 'No')
+	if sponsorship_value is not None and any(phrase in norm for phrase in ('sponsorship', 'visa sponsorship', 'require sponsorship', 'need sponsorship')):
+		answer = _normalize_bool_text(sponsorship_value)
+		return _coerce_answer_to_field(field, answer) if answer else None
 
 	authorized_value = profile_data.get('authorized_to_work')
 	if authorized_value is None:
 		authorized_value = profile_data.get('US_citizen')
-	if any(phrase in norm for phrase in ('authorized to work', 'legally authorized', 'eligible to work')):
-		return _coerce_answer_to_field(field, _normalize_bool_text(authorized_value) or 'Yes')
+	if authorized_value is not None and any(phrase in norm for phrase in ('authorized to work', 'legally authorized', 'eligible to work')):
+		answer = _normalize_bool_text(authorized_value)
+		return _coerce_answer_to_field(field, answer) if answer else None
 
 	return None
 
@@ -1506,6 +1791,167 @@ async def _wait_for_field_value(
 		await asyncio.sleep(poll_interval)
 
 
+async def _read_group_selection(page: Any, field_id: str) -> str:
+	"""Read the currently selected label for a radio/button-style group."""
+	try:
+		raw = await page.evaluate(_READ_GROUP_SELECTION_JS, field_id)
+	except Exception:
+		return ''
+	try:
+		parsed = json.loads(raw) if isinstance(raw, str) else raw
+	except json.JSONDecodeError:
+		return ''
+	if isinstance(parsed, dict):
+		return str(parsed.get('selected') or '').strip()
+	return ''
+
+
+async def _get_group_option_target(page: Any, field_id: str, text: str) -> dict[str, Any]:
+	"""Get clickable coordinates for a choice inside a custom group control."""
+	try:
+		raw = await page.evaluate(_GET_GROUP_OPTION_TARGET_JS, field_id, text)
+	except Exception:
+		return {'found': False}
+	try:
+		parsed = json.loads(raw) if isinstance(raw, str) else raw
+	except json.JSONDecodeError:
+		return {'found': False}
+	return parsed if isinstance(parsed, dict) else {'found': False}
+
+
+async def _read_binary_state(page: Any, field_id: str) -> bool | None:
+	"""Read the checked/pressed state of a checkbox/radio/toggle-like control."""
+	try:
+		raw = await page.evaluate(_READ_BINARY_STATE_JS, field_id)
+	except Exception:
+		return None
+	try:
+		parsed = json.loads(raw) if isinstance(raw, str) else raw
+	except json.JSONDecodeError:
+		return None
+	if isinstance(parsed, bool) or parsed is None:
+		return parsed
+	return None
+
+
+async def _get_binary_click_target(page: Any, field_id: str) -> dict[str, Any]:
+	"""Get visible click coordinates for a checkbox/radio/toggle control."""
+	try:
+		raw = await page.evaluate(_GET_BINARY_CLICK_TARGET_JS, field_id)
+	except Exception:
+		return {'found': False}
+	try:
+		parsed = json.loads(raw) if isinstance(raw, str) else raw
+	except json.JSONDecodeError:
+		return {'found': False}
+	return parsed if isinstance(parsed, dict) else {'found': False}
+
+
+async def _click_binary_with_gui(page: Any, field: FormField, tag: str, desired_checked: bool) -> bool:
+	"""Use a real trusted click on checkbox/radio/toggle-like controls."""
+	target = await _get_binary_click_target(page, field.field_id)
+	if not target.get('found'):
+		return False
+	try:
+		mouse = await page.mouse
+		await mouse.click(int(target['x']), int(target['y']))
+		await asyncio.sleep(0.25)
+	except Exception as exc:
+		logger.debug(f'gui click {tag} failed: {str(exc)[:60]}')
+		return False
+
+	current = await _read_binary_state(page, field.field_id)
+	if current is desired_checked:
+		logger.debug(f'gui-check {tag} -> "{target.get("text", field.name)}"')
+		return True
+	return False
+
+
+def _field_needs_enter_commit(field: FormField) -> bool:
+	"""Return True for fields that often need a real Enter to commit the value."""
+	label_norm = normalize_name(_preferred_field_label(field))
+	section_norm = normalize_name(field.section or '')
+	if field.field_type in {'search', 'date'}:
+		return True
+	if label_norm in {'name', 'date', 'month', 'day', 'year'}:
+		return True
+	return label_norm == 'name' and any(token in section_norm for token in ('self identify', 'voluntary disclosure'))
+
+
+async def _confirm_text_like_value(page: Any, field: FormField, value: str, tag: str) -> bool:
+	"""Verify a text-like field and use a narrow commit sequence when needed."""
+	current = await _wait_for_field_value(page, field, value, timeout=0.9, poll_interval=0.15)
+	if not _field_value_matches_expected(current, value):
+		return False
+	if not _field_needs_enter_commit(field):
+		return True
+	selector = f'[data-ff-id="{field.field_id}"]'
+	try:
+		await page.evaluate(_FOCUS_FIELD_JS, field.field_id)
+		await asyncio.sleep(0.05)
+		locator = page.locator(selector).first
+		await locator.click(timeout=500)
+		await asyncio.sleep(0.05)
+		await locator.press('Enter')
+		await asyncio.sleep(0.15)
+		await locator.press('Tab')
+		await asyncio.sleep(0.1)
+	except Exception:
+		try:
+			await page.evaluate(_FOCUS_FIELD_JS, field.field_id)
+			await asyncio.sleep(0.05)
+			await page.keyboard.press('Enter')
+			await asyncio.sleep(0.15)
+			await page.keyboard.press('Tab')
+			await asyncio.sleep(0.1)
+		except Exception:
+			return _field_value_matches_expected(current, value)
+	confirmed = await _wait_for_field_value(page, field, value, timeout=1.1, poll_interval=0.15)
+	if _field_value_matches_expected(confirmed, value):
+		logger.debug(f'confirm {tag} -> enter/tab commit')
+		return True
+	return False
+
+
+async def _fill_text_like_with_keyboard(page: Any, field: FormField, value: str, tag: str) -> bool:
+	"""Type into a field with browser-use actor events, then commit with Enter/Tab."""
+	try:
+		selector = f'[data-ff-id="{field.field_id}"]'
+		elements = await page.get_elements_by_css_selector(selector)
+		if not elements:
+			return False
+		await elements[0].fill(value, clear=True)
+		await asyncio.sleep(0.35)
+		if _field_needs_enter_commit(field):
+			await page.press('Enter')
+			await asyncio.sleep(0.15)
+		await page.press('Tab')
+		await asyncio.sleep(0.1)
+		return await _confirm_text_like_value(page, field, value, tag)
+	except Exception:
+		return False
+
+
+async def _click_group_option_with_gui(page: Any, field: FormField, value: str, tag: str) -> bool:
+	"""Use a real mouse click on the visible option when DOM clicks do not stick."""
+	target = await _get_group_option_target(page, field.field_id, value)
+	if not target.get('found'):
+		return False
+	try:
+		mouse = await page.mouse
+		await mouse.click(int(target['x']), int(target['y']))
+		await asyncio.sleep(0.25)
+	except Exception as exc:
+		logger.debug(f'gui click {tag} failed: {str(exc)[:60]}')
+		return False
+
+	current = await _read_group_selection(page, field.field_id)
+	if _field_value_matches_expected(current, value):
+		logger.debug(f'gui-select {tag} -> "{target.get("text", value)}"')
+		return True
+	return False
+
+
 def _known_profile_value(field_name: str, evidence: dict[str, str | None]) -> str | None:
 	"""Return a profile value if the field name matches a known personal field."""
 	name = normalize_name(field_name)
@@ -1515,6 +1961,11 @@ def _known_profile_value(field_name: str, evidence: dict[str, str | None]) -> st
 		return evidence['first_name']
 	if 'last name' in name and evidence.get('last_name'):
 		return evidence['last_name']
+	if name == 'name':
+		first = evidence.get('first_name', '')
+		last = evidence.get('last_name', '')
+		if first or last:
+			return f'{first} {last}'.strip()
 	if 'full name' in name:
 		first = evidence.get('first_name', '')
 		last = evidence.get('last_name', '')
@@ -1594,20 +2045,45 @@ def _known_profile_value_for_field(
 
 
 def _default_value(field: FormField) -> str:
-	"""Fallback default values for fields that the LLM didn't answer."""
-	name_lower = (field.name or '').lower()
+	"""Return narrow policy defaults only when the value is not profile-derived."""
+	name_lower = normalize_name(_preferred_field_label(field))
+	section_lower = normalize_name(field.section or '')
+	if (
+		field.field_type == 'date'
+		and (
+			'today' in name_lower
+			or 'current date' in name_lower
+			or 'signature date' in name_lower
+			or (name_lower == 'date' and any(token in section_lower for token in ('self identify', 'voluntary disclosure', 'disability')))
+		)
+	):
+		return date.today().isoformat()
+	return ''
 
-	# Referral source — always "Other" (every ATS has this option)
-	if ('hear' in name_lower and 'about' in name_lower) or 'referral' in name_lower:
-		return 'Other'
 
-	match field.field_type:
-		case 'number':
-			return '1'
-		case 'date':
-			return '2025-01-01'
-		case _:
-			return ''
+def _is_demographic_decline_field(field: FormField | None) -> bool:
+	"""Allow neutral-decline fallbacks only for recognized self-ID/EEO fields."""
+	if field is None:
+		return False
+	label_norm = normalize_name(_preferred_field_label(field))
+	section_norm = normalize_name(field.section or '')
+	haystack = f'{label_norm} {section_norm}'.strip()
+	return any(
+		token in haystack
+		for token in (
+			'self identify',
+			'voluntary disclosure',
+			'disability',
+			'veteran',
+			'race',
+			'ethnicity',
+			'hispanic',
+			'latino',
+			'gender',
+			'sex',
+			'sexual orientation',
+		)
+	)
 
 
 def _is_explicit_false(val: str | None) -> bool:
@@ -1688,9 +2164,9 @@ Rules:
 - NEVER fabricate personal identifiers or social handles/URLs not explicitly in the profile. If missing: return "" (empty string) regardless of whether the field is required or optional.
 - For dropdowns/radio groups with listed options, pick the EXACT text of one of the available options.
 - For hierarchical dropdown options (format "Category > SubOption"), pick the EXACT full path including the " > " separator.
-- For dropdowns WITHOUT listed options, provide the value from the profile if available. If the field name closely matches a profile entry, use that value.
-- For "How did you hear about us?" or similar source/referral fields: select the option closest to the applicant's answer. Map common sources like LinkedIn or Indeed to the best available category if needed. If the profile has no source, choose the closest "Job Board" or "Website"-style option. NEVER return "" for this field.
-- For "Phone Device Type" or similar phone type fields: select "Mobile" from the available options. NEVER return "" for this field.
+- For dropdowns WITHOUT listed options, provide the value from the profile if available. If the profile has no value for that field, return "".
+- For "How did you hear about us?" or similar source/referral fields: only choose an option when the applicant profile explicitly provides a source. If needed, map that source (for example LinkedIn) to the closest available category/leaf option. If the profile has no source, return "".
+- For "Phone Device Type" or similar phone type fields: only choose a value when the applicant profile explicitly provides the phone type. If absent, return "".
 - For skill typeahead fields, return an ARRAY of relevant skills from the applicant profile.
 - For multi-select fields, return a JSON array of ALL matching options (e.g., ["Python", "Java"]).
 - For checkboxes/toggles, respond with "checked" or "unchecked".
@@ -1698,9 +2174,10 @@ Rules:
 - For file upload fields, skip them (don't include in output).
 - For textarea fields, write 2-4 thoughtful sentences using the applicant's real background. NEVER return a single letter or placeholder.
 - For demographic/EEO fields, use the applicant's actual info. If no info, choose the most neutral "decline" option from the available options.
+- For work/education date ranges, map start-side fields like "From" only from start_date and end-side fields like "To", "End", or "Actual or Expected" only from end_date or graduation_date. NEVER copy a start year into an end field.
 - NEVER select a default placeholder value like "Select One", "Please select", etc.
 - NEVER use placeholder strings like "N/A", "NA", "None", "Not applicable", "Unknown". If you don't have data, return "" (empty string).
-- For salary fields, provide a realistic number based on role and experience level.
+- For salary fields, use the applicant's explicit salary expectation only. If missing, return "".
 - Use the EXACT field names shown above (including any "#N" suffix) as JSON keys.
 - Only include fields you have a real answer for. Omit fields you cannot answer from the JSON output.
 - Respond with ONLY a valid JSON object. No explanation, no markdown fences.
@@ -1781,15 +2258,16 @@ def _replace_placeholder_answers(
 		if field and not field.required:
 			parsed[key] = ''
 			continue
+		if not _is_demographic_decline_field(field):
+			parsed[key] = ''
+			continue
 		options = (field.options or field.choices or []) if field else []
 		neutral = next((o for o in options if any(p.search(o) for p in decline_patterns)), None)
 		if neutral:
 			logger.info(f'Replaced placeholder "{val}" -> "{neutral}" for field "{key}"')
 			parsed[key] = neutral
-		elif options:
-			non_placeholder = [o for o in options if not placeholder_re.match(o.strip())]
-			if non_placeholder:
-				parsed[key] = non_placeholder[-1]
+		else:
+			parsed[key] = ''
 
 
 # ── Field-answer matching ────────────────────────────────────────────
@@ -1799,10 +2277,6 @@ _AUTHORITATIVE_SELECT_KEYS: dict[str, list[str]] = {
 	'phone country code': ['Phone Country Code', 'Country Phone Code'],
 	'phone device type': ['Phone Device Type', 'Phone Type'],
 	'phone type': ['Phone Type', 'Phone Device Type'],
-}
-_AUTHORITATIVE_SELECT_DEFAULTS: dict[str, str] = {
-	'country phone code': '+1', 'phone country code': '+1',
-	'phone device type': 'Mobile', 'phone type': 'Mobile',
 }
 
 
@@ -1825,8 +2299,6 @@ def _match_answer(
 					for key, val in answers.items():
 						if normalize_name(key) == normalize_name(ck):
 							return val
-				if norm_name in _AUTHORITATIVE_SELECT_DEFAULTS:
-					return _AUTHORITATIVE_SELECT_DEFAULTS[norm_name]
 
 	profile_val = _known_profile_value_for_field(field, evidence, profile_data, minimum_confidence=minimum_confidence)
 	if profile_val:
@@ -2115,20 +2587,21 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 		f'  - "{r.name}" ({r.error or "DOM fill failed"})' for r in all_results if not r.success and r.actor == 'dom'
 	]
 	summary_lines = [
-		f'DomHand fill complete: {filled_count} filled, {failed_count} DOM failures, {skipped_count} skipped (no data), {unfilled_count} unfilled.',
-		f'LLM calls: {llm_calls} (input: {total_input_tokens} tokens, output: {total_output_tokens} tokens)',
+		f'DomHand: {filled_count} filled, {failed_count} failed, {skipped_count} skipped, {unfilled_count} unfilled.',
 	]
+	if llm_calls:
+		summary_lines.append(f'LLM: {llm_calls} call(s), {total_input_tokens} in / {total_output_tokens} out')
 	if required_skipped:
-		summary_lines.append('REQUIRED fields that need attention (fill these using click/select):')
-		summary_lines.extend(required_skipped[:20])
+		summary_lines.append('Required:')
+		summary_lines.extend(required_skipped[:8])
 	if optional_skipped:
-		summary_lines.append('Skipped optional fields (no confident profile match):')
-		summary_lines.extend(optional_skipped[:20])
-		if len(optional_skipped) > 20:
-			summary_lines.append(f'  ... and {len(optional_skipped) - 20} more')
+		summary_lines.append('Skipped optional:')
+		summary_lines.extend(optional_skipped[:8])
+		if len(optional_skipped) > 8:
+			summary_lines.append(f'  ... {len(optional_skipped) - 8} more')
 	if failed_descriptions:
-		summary_lines.append('Failed fields (retry even if optional when profile data exists):')
-		summary_lines.extend(failed_descriptions[:20])
+		summary_lines.append('Retry:')
+		summary_lines.extend(failed_descriptions[:8])
 
 	summary = '\n'.join(summary_lines)
 	logger.info(summary)
@@ -2197,28 +2670,27 @@ async def _fill_text_field(page: Any, field: FormField, value: str, tag: str) ->
 		logger.debug(f'skip {tag} (no value)')
 		return False
 
+	if _field_needs_enter_commit(field) and await _fill_text_like_with_keyboard(page, field, value, tag):
+		logger.debug(f'fill {tag} = "{value[:80]}{"..." if len(value) > 80 else ""}" (keyboard-first)')
+		return True
+
 	try:
 		result_json = await page.evaluate(_FILL_FIELD_JS, ff_id, value, field.field_type)
 		result = json.loads(result_json) if isinstance(result_json, str) else result_json
-		if isinstance(result, dict) and result.get('success'):
+		if isinstance(result, dict) and result.get('success') and await _confirm_text_like_value(page, field, value, tag):
 			logger.debug(f'fill {tag} = "{value[:80]}{"..." if len(value) > 80 else ""}"')
 			return True
 	except Exception:
 		pass
 
 	try:
-		await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
-		await asyncio.sleep(0.1)
-		await page.press('Home')
-		await page.press('Shift+End')
-		for char in value:
-			await page.press(char)
-		await page.press('Tab')
-		logger.debug(f'fill {tag} = "{value[:80]}..." (keyboard)')
-		return True
+		if await _fill_text_like_with_keyboard(page, field, value, tag):
+			logger.debug(f'fill {tag} = "{value[:80]}..." (keyboard)')
+			return True
 	except Exception:
-		logger.debug(f'skip {tag} (not fillable)')
-		return False
+		pass
+	logger.debug(f'skip {tag} (not fillable)')
+	return False
 
 
 async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag: str) -> bool:
@@ -2263,11 +2735,17 @@ async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag
 
 
 async def _fill_date_field(page: Any, field: FormField, value: str, tag: str) -> bool:
-	val = value or '2025-01-01'
+	val = (value or '').strip()
+	if not val:
+		logger.debug(f'skip {tag} (date, no value)')
+		return False
+	if await _fill_text_like_with_keyboard(page, field, val, tag):
+		logger.debug(f'fill {tag} = "{val}" (keyboard-first)')
+		return True
 	try:
 		result_json = await page.evaluate(_FILL_FIELD_JS, field.field_id, val, 'text')
 		result = json.loads(result_json) if isinstance(result_json, str) else result_json
-		if isinstance(result, dict) and result.get('success'):
+		if isinstance(result, dict) and result.get('success') and await _confirm_text_like_value(page, field, val, tag):
 			logger.debug(f'fill {tag} = "{val}"')
 			return True
 	except Exception:
@@ -2275,7 +2753,7 @@ async def _fill_date_field(page: Any, field: FormField, value: str, tag: str) ->
 	try:
 		result_json = await page.evaluate(_FILL_DATE_JS, field.field_id, val)
 		result = json.loads(result_json) if isinstance(result_json, str) else result_json
-		if isinstance(result, dict) and result.get('success'):
+		if isinstance(result, dict) and result.get('success') and await _confirm_text_like_value(page, field, val, tag):
 			logger.debug(f'fill {tag} = "{val}" (direct)')
 			return True
 	except Exception:
@@ -2495,10 +2973,24 @@ async def _fill_radio_group(page: Any, field: FormField, value: str, tag: str) -
 		result_json = await page.evaluate(_CLICK_RADIO_OPTION_JS, field.field_id, choice)
 		result = json.loads(result_json)
 		if result.get('clicked'):
-			logger.debug(f'radio {tag} -> "{choice}"')
-			return True
+			current = await _read_group_selection(page, field.field_id)
+			if _field_value_matches_expected(current, choice):
+				logger.debug(f'radio {tag} -> "{choice}"')
+				return True
 	except Exception:
 		pass
+	try:
+		result_json = await page.evaluate(_CLICK_RADIO_OPTION_JS, field.field_id, choice)
+		result = json.loads(result_json)
+		if result.get('clicked'):
+			current = await _read_group_selection(page, field.field_id)
+			if _field_value_matches_expected(current, choice):
+				logger.debug(f'radio {tag} -> "{choice}" (retry)')
+				return True
+	except Exception:
+		pass
+	if await _click_group_option_with_gui(page, field, choice, tag):
+		return True
 	logger.debug(f'skip {tag} (no matching radio option)')
 	return False
 
@@ -2513,11 +3005,15 @@ async def _fill_single_radio(page: Any, field: FormField, value: str, tag: str) 
 		if result.get('clicked'):
 			if result.get('alreadyChecked'):
 				logger.debug(f'skip {tag} (already selected)')
-			else:
+				return True
+			current = await _read_group_selection(page, field.field_id)
+			if _field_value_matches_expected(current, value):
 				logger.debug(f'radio {tag} -> "{value}"')
-			return True
+				return True
 	except Exception:
 		pass
+	if await _click_group_option_with_gui(page, field, value, tag):
+		return True
 	logger.debug(f'skip {tag} (no matching radio for "{value}")')
 	return False
 
@@ -2531,10 +3027,24 @@ async def _fill_button_group(page: Any, field: FormField, value: str, tag: str) 
 		result_json = await page.evaluate(_CLICK_BUTTON_GROUP_JS, field.field_id, choice)
 		result = json.loads(result_json)
 		if result.get('clicked'):
-			logger.debug(f'button-group {tag} -> "{choice}"')
-			return True
+			current = await _read_group_selection(page, field.field_id)
+			if _field_value_matches_expected(current, choice):
+				logger.debug(f'button-group {tag} -> "{choice}"')
+				return True
 	except Exception:
 		pass
+	try:
+		result_json = await page.evaluate(_CLICK_BUTTON_GROUP_JS, field.field_id, choice)
+		result = json.loads(result_json)
+		if result.get('clicked'):
+			current = await _read_group_selection(page, field.field_id)
+			if _field_value_matches_expected(current, choice):
+				logger.debug(f'button-group {tag} -> "{choice}" (retry)')
+				return True
+	except Exception:
+		pass
+	if await _click_group_option_with_gui(page, field, choice, tag):
+		return True
 	logger.debug(f'skip {tag} (button-group, no matching button)')
 	return False
 
@@ -2547,11 +3057,16 @@ async def _fill_checkbox_group(page: Any, field: FormField, value: str, tag: str
 		result_json = await page.evaluate(_CLICK_CHECKBOX_GROUP_JS, field.field_id)
 		result = json.loads(result_json)
 		if result.get('clicked'):
-			if result.get('alreadyChecked'):
+			current = await _read_binary_state(page, field.field_id)
+			if result.get('alreadyChecked') or current is True:
 				logger.debug(f'skip {tag} (already checked)')
+				return True
+			if await _click_binary_with_gui(page, field, tag, True):
+				return True
+			if current is True:
+				return True
 			else:
 				logger.debug(f'check {tag} -> first')
-			return True
 	except Exception:
 		pass
 	logger.debug(f'skip {tag} (checkbox-group)')
@@ -2563,29 +3078,24 @@ async def _fill_checkbox(page: Any, field: FormField, value: str, tag: str) -> b
 	if not desired_checked:
 		logger.debug(f'check {tag} -> skip (answer=unchecked)')
 		return True
-	try:
-		state_json = await page.evaluate(_READ_BINARY_STATE_JS, field.field_id)
-		state = json.loads(state_json)
-		if state is True:
-			logger.debug(f'skip {tag} (already checked)')
-			return True
-	except Exception:
-		pass
-	try:
-		await page.evaluate(r"""(ffId) => {
-			var ff = window.__ff; var el = ff ? ff.byId(ffId) : null;
-			if (!el) return 'not found';
-			var label = ff.closestCrossRoot(el, 'label') || el;
-			label.click(); return 'ok';
-		}""", field.field_id)
-		await asyncio.sleep(0.2)
-		state_json = await page.evaluate(_READ_BINARY_STATE_JS, field.field_id)
-		state = json.loads(state_json)
-		if state is True or state is None:
-			logger.debug(f'check {tag}')
-			return True
-	except Exception:
-		pass
+	state = await _read_binary_state(page, field.field_id)
+	if state is True:
+		logger.debug(f'skip {tag} (already checked)')
+		return True
+	for attempt in range(2):
+		try:
+			result_json = await page.evaluate(_CLICK_BINARY_FIELD_JS, field.field_id, desired_checked)
+			result = json.loads(result_json) if isinstance(result_json, str) else result_json
+			if isinstance(result, dict) and result.get('clicked'):
+				await asyncio.sleep(0.25)
+				state = await _read_binary_state(page, field.field_id)
+				if state is desired_checked:
+					logger.debug(f'check {tag}{" (retry)" if attempt else ""}')
+					return True
+		except Exception:
+			pass
+	if await _click_binary_with_gui(page, field, tag, desired_checked):
+		return True
 	logger.debug(f'skip {tag} (did not remain checked)')
 	return False
 
@@ -2595,27 +3105,24 @@ async def _fill_toggle(page: Any, field: FormField, value: str, tag: str) -> boo
 	if not desired_on:
 		logger.debug(f'toggle {tag} -> skip (answer=off)')
 		return True
-	try:
-		state_json = await page.evaluate(_READ_BINARY_STATE_JS, field.field_id)
-		state = json.loads(state_json)
-		if state is True:
-			logger.debug(f'skip {tag} (already on)')
-			return True
-	except Exception:
-		pass
-	try:
-		await page.evaluate(r"""(ffId) => {
-			var el = window.__ff ? window.__ff.byId(ffId) : null;
-			if (el) el.click(); return 'ok';
-		}""", field.field_id)
-		await asyncio.sleep(0.2)
-		state_json = await page.evaluate(_READ_BINARY_STATE_JS, field.field_id)
-		state = json.loads(state_json)
-		if state is True or state is None:
-			logger.debug(f'toggle {tag} -> on')
-			return True
-	except Exception:
-		pass
+	state = await _read_binary_state(page, field.field_id)
+	if state is True:
+		logger.debug(f'skip {tag} (already on)')
+		return True
+	for attempt in range(2):
+		try:
+			result_json = await page.evaluate(_CLICK_BINARY_FIELD_JS, field.field_id, desired_on)
+			result = json.loads(result_json) if isinstance(result_json, str) else result_json
+			if isinstance(result, dict) and result.get('clicked'):
+				await asyncio.sleep(0.25)
+				state = await _read_binary_state(page, field.field_id)
+				if state is desired_on:
+					logger.debug(f'toggle {tag} -> on{" (retry)" if attempt else ""}')
+					return True
+		except Exception:
+			pass
+	if await _click_binary_with_gui(page, field, tag, desired_on):
+		return True
 	logger.debug(f'skip {tag} (did not remain on)')
 	return False
 
