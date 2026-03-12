@@ -20,6 +20,22 @@ logger = logging.getLogger(__name__)
 
 _installed = False
 
+# Track cumulative fill counts across rounds (module-level for external access)
+_counts: dict[str, int] = {"filled": 0, "total": 0, "last_round": 0}
+
+
+def get_field_counts() -> tuple[int, int]:
+    """Return (filled, failed) counts from the installed callback.
+
+    Returns ``(0, 0)`` if the callback was never installed or no fields
+    have been processed yet.
+    """
+    if not _installed:
+        return (0, 0)
+    filled = _counts.get("filled", 0)
+    total = _counts.get("total", 0)
+    return (filled, total - filled)
+
 
 def install_jsonl_callback() -> None:
     """Wire the JSONL emitter into ``domhand_fill``'s field result callback.
@@ -42,9 +58,6 @@ def install_jsonl_callback() -> None:
             emit_field_filled,
             emit_progress,
         )
-
-        # Track cumulative fill counts across rounds
-        _counts = {"filled": 0, "total": 0, "last_round": 0}
 
         def _on_field_result(result, round_num: int) -> None:
             """Called by domhand_fill for each FillFieldResult."""
