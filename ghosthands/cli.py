@@ -36,6 +36,7 @@ import contextlib
 import json
 import logging
 import os
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -296,7 +297,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     try:
         profile = _load_profile(args)
     except (json.JSONDecodeError, OSError, ValueError) as e:
-        emit_error(f"Failed to load profile: {e}", fatal=True)
+        logger.error("profile_load_failed", error=str(e))
+        emit_error("Failed to load applicant profile", fatal=True)
         sys.exit(1)
 
     # -- Convert camelCase keys from Desktop bridge to snake_case ----------
@@ -564,7 +566,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             sys.exit(1)
 
     except Exception as e:
-        emit_error(str(e), fatal=True, job_id=job_id)
+        logger.error("agent_run_failed", error=str(e))
+        emit_error("Agent encountered an unexpected error", fatal=True, job_id=job_id)
         with contextlib.suppress(Exception):
             await browser.close()
         sys.exit(1)
@@ -709,6 +712,15 @@ async def run_agent_human(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    # S-08: Install SIGTERM handler so the process exits cleanly when the
+    # desktop app terminates the child process.  SystemExit is caught by
+    # the existing KeyboardInterrupt/Exception handlers in both
+    # run_agent_jsonl and run_agent_human.
+    def _handle_sigterm(signum: int, frame: object) -> None:
+        raise SystemExit(1)
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
     args = parse_args()
 
     is_jsonl = args.output_format == "jsonl"
@@ -734,7 +746,8 @@ def main() -> None:
         if is_jsonl:
             from ghosthands.output.jsonl import emit_error
 
-            emit_error(str(e), fatal=True)
+            logger.error("fatal_startup_error", error=str(e))
+            emit_error("Hand-X encountered a fatal error", fatal=True)
         else:
             print(f"Fatal error: {e}", file=sys.stderr)
         sys.exit(1)
