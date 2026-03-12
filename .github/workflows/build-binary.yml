@@ -8,6 +8,10 @@ on:
     branches: [main]
     tags: ['v*']
   workflow_dispatch:
+  workflow_run:
+    workflows: ['test']
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: write  # needed for creating releases
@@ -17,6 +21,7 @@ env:
 
 jobs:
   build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     strategy:
       fail-fast: false
       matrix:
