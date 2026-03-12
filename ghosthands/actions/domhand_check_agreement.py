@@ -120,6 +120,37 @@ _DISCOVER_CHECKBOXES_JS = r"""() => {
 		return null;
 	}
 
+	// Build a selector for the CLICKABLE WRAPPER around a checkbox.
+	// Many frameworks (Workday, etc.) hide the native input and overlay a
+	// custom visual div.  Clicking the wrapper is what actually toggles state.
+	function buildWrapperSelector(el) {
+		// 1. Ancestor <label> is always a valid click target for checkboxes
+		var label = el.closest('label');
+		if (label) {
+			if (label.id) return '#' + CSS.escape(label.id);
+			var forAttr = label.getAttribute('for');
+			if (forAttr) return 'label[for="' + forAttr + '"]';
+		}
+		// 2. Parent with data-automation-id (Workday pattern)
+		var parent = el.parentElement;
+		for (var depth = 0; parent && depth < 4; depth++) {
+			var aid = parent.getAttribute('data-automation-id');
+			if (aid) return '[data-automation-id="' + aid + '"]';
+			// Parent with role=checkbox (the visual wrapper IS the checkbox)
+			if (parent.getAttribute('role') === 'checkbox') {
+				if (parent.id) return '#' + CSS.escape(parent.id);
+				return null; // handled by the element selector itself
+			}
+			parent = parent.parentElement;
+		}
+		// 3. Immediate parent div (common wrapper pattern)
+		if (el.parentElement && el.parentElement.tagName === 'DIV') {
+			var pAid = el.parentElement.getAttribute('data-automation-id');
+			if (pAid) return '[data-automation-id="' + pAid + '"]';
+		}
+		return null;
+	}
+
 	var selectors = [
 		'input[type="checkbox"]',
 		'[role="checkbox"]',
@@ -150,6 +181,7 @@ _DISCOVER_CHECKBOXES_JS = r"""() => {
 			automationId: el.getAttribute('data-automation-id') || '',
 			checked: getState(el),
 			selector: buildSelector(el),
+			wrapperSelector: buildWrapperSelector(el),
 			isAgreement: isAgreement(labelText)
 		};
 		results.push(entry);
@@ -238,7 +270,12 @@ async def domhand_check_agreement(params: DomHandCheckAgreementParams, browser_s
 		"details": checkboxes,
 	})
 
-	# Step 2: Click each agreement checkbox via CDP Element.click() (trusted events)
+	# Step 2: Click each agreement checkbox.
+	#
+	# KEY INSIGHT: Many frameworks (Workday, etc.) hide the native <input>
+	# checkbox and overlay a custom visual div/label.  Clicking the hidden
+	# input does nothing visible — you must click the WRAPPER element.
+	# So we try wrapper first, verify, then fall back to the input itself.
 	results = []
 	for cb in checkboxes:
 		if not cb.get("isAgreement"):
@@ -246,32 +283,64 @@ async def domhand_check_agreement(params: DomHandCheckAgreementParams, browser_s
 
 		label = cb.get("label", "?")[:80]
 		selector = cb.get("selector")
+		wrapper_selector = cb.get("wrapperSelector")
 		was_checked = cb.get("checked")
 
 		if was_checked is True:
 			results.append({"label": label, "action": "already_checked"})
 			continue
 
-		clicked = False
+		confirmed = False
 
-		# Strategy 1: CSS selector + Element.click() via CDP (produces trusted events)
-		if selector and not clicked:
+		# Helper: re-check whether the checkbox is now checked
+		async def _is_now_checked() -> bool:
+			try:
+				v = await page.evaluate(_DISCOVER_CHECKBOXES_JS)
+				for c in json.loads(v):
+					if c.get("isAgreement") and c.get("selector") == selector:
+						return c.get("checked") is True
+			except Exception:
+				pass
+			return False
+
+		# Strategy 1: CDP click on the WRAPPER element (label/parent div).
+		# This is what actually works on Workday — the visual click target
+		# is the wrapper, not the hidden input.
+		if wrapper_selector and not confirmed:
+			try:
+				elements = await page.get_elements_by_css_selector(wrapper_selector)
+				if elements:
+					await elements[0].click()
+					await asyncio.sleep(0.5)
+					if await _is_now_checked():
+						confirmed = True
+						results.append({"label": label, "action": "wrapper_click", "selector": wrapper_selector})
+						logger.info("domhand_check_agreement.wrapper_click", extra={"label": label, "selector": wrapper_selector})
+					else:
+						logger.debug(f"Wrapper click didn't toggle state for '{label}'")
+			except Exception as e:
+				logger.debug(f"Wrapper click failed for '{label}': {e}")
+
+		# Strategy 2: CDP click on the checkbox element itself
+		if selector and not confirmed:
 			try:
 				elements = await page.get_elements_by_css_selector(selector)
 				if elements:
 					await elements[0].click()
 					await asyncio.sleep(0.5)
-					clicked = True
-					results.append({"label": label, "action": "cdp_click", "selector": selector})
-					logger.info("domhand_check_agreement.cdp_click", extra={"label": label, "selector": selector})
+					if await _is_now_checked():
+						confirmed = True
+						results.append({"label": label, "action": "cdp_click", "selector": selector})
+						logger.info("domhand_check_agreement.cdp_click", extra={"label": label, "selector": selector})
+					else:
+						logger.debug(f"CDP click didn't toggle state for '{label}'")
 			except Exception as e:
-				logger.debug(f"CDP Element click failed for '{label}': {e}")
+				logger.debug(f"CDP click failed for '{label}': {e}")
 
-		# Strategy 2: JS click with React-compatible event sequence
-		if not clicked:
+		# Strategy 3: JS click with React-compatible event sequence
+		if not confirmed:
 			try:
 				click_js = r"""(targetSelector) => {
-					// Use __ff.queryAll if available for shadow DOM
 					function qAll(sel) {
 						if (window.__ff && window.__ff.queryAll) return window.__ff.queryAll(sel);
 						return Array.from(document.querySelectorAll(sel));
@@ -291,9 +360,14 @@ async def domhand_check_agreement(params: DomHandCheckAgreementParams, browser_s
 					}
 					if (!el) return 'not_found';
 
-					el.scrollIntoView({ block: 'center' });
-					el.focus();
+					// Try clicking the label/wrapper first, then the element
+					var label = el.closest('label');
+					var clickTarget = label || el.parentElement || el;
+					clickTarget.scrollIntoView({ block: 'center' });
+					clickTarget.click();
 
+					// Also try the element directly with full event sequence
+					el.focus();
 					if (el.tagName === 'INPUT' && el.type === 'checkbox') {
 						el.click();
 						el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -313,14 +387,15 @@ async def domhand_check_agreement(params: DomHandCheckAgreementParams, browser_s
 				js_result = await page.evaluate(click_js, selector)
 				if js_result != "not_found":
 					await asyncio.sleep(0.5)
-					clicked = True
-					results.append({"label": label, "action": "js_click"})
-					logger.info("domhand_check_agreement.js_click", extra={"label": label})
+					if await _is_now_checked():
+						confirmed = True
+					results.append({"label": label, "action": "js_click", "confirmed": confirmed})
+					logger.info("domhand_check_agreement.js_click", extra={"label": label, "confirmed": confirmed})
 			except Exception as e:
 				logger.debug(f"JS click failed for '{label}': {e}")
 
-		# Strategy 3: Broad JS click on ALL unchecked checkboxes
-		if not clicked:
+		# Strategy 4: Broad JS click on ALL unchecked checkboxes + their wrappers
+		if not confirmed:
 			try:
 				broad_js = r"""() => {
 					function qAll(sel) {
@@ -330,13 +405,19 @@ async def domhand_check_agreement(params: DomHandCheckAgreementParams, browser_s
 					var count = 0;
 					var cbs = qAll('input[type="checkbox"], [role="checkbox"]');
 					cbs.forEach(function(el) {
-						if (el.tagName === 'INPUT' && !el.checked) {
+						var isUnchecked = (el.tagName === 'INPUT' && !el.checked) ||
+							(el.getAttribute('aria-checked') === 'false');
+						if (isUnchecked) {
+							// Click wrapper first (label or parent), then element
+							var wrapper = el.closest('label') || el.parentElement;
+							if (wrapper && wrapper !== el) {
+								wrapper.click();
+							}
 							el.focus();
 							el.click();
-							el.dispatchEvent(new Event('change', { bubbles: true }));
-							count++;
-						} else if (el.getAttribute('aria-checked') === 'false') {
-							el.click();
+							if (el.tagName === 'INPUT') {
+								el.dispatchEvent(new Event('change', { bubbles: true }));
+							}
 							count++;
 						}
 					});
@@ -344,9 +425,10 @@ async def domhand_check_agreement(params: DomHandCheckAgreementParams, browser_s
 				}"""
 				count = await page.evaluate(broad_js)
 				await asyncio.sleep(0.5)
-				results.append({"label": label, "action": "js_broad_click", "count": count})
-				clicked = True
-				logger.info("domhand_check_agreement.js_broad_click", extra={"label": label, "count": count})
+				if await _is_now_checked():
+					confirmed = True
+				results.append({"label": label, "action": "js_broad_click", "count": count, "confirmed": confirmed})
+				logger.info("domhand_check_agreement.js_broad_click", extra={"label": label, "count": count, "confirmed": confirmed})
 			except Exception as e:
 				results.append({"label": label, "action": "failed", "error": str(e)})
 
@@ -358,20 +440,27 @@ async def domhand_check_agreement(params: DomHandCheckAgreementParams, browser_s
 	except Exception:
 		final_state = {}
 
-	# Build summary — count ACTUAL click actions (not just "already_checked")
-	click_actions = {"cdp_click", "js_click", "js_broad_click"}
-	clicked_count = sum(1 for r in results if r.get("action") in click_actions)
+	# Build summary
+	confirmed_count = sum(1 for r in results if r.get("action") == "wrapper_click"
+						  or r.get("action") == "cdp_click"
+						  or r.get("confirmed") is True)
 	already_count = sum(1 for r in results if r.get("action") == "already_checked")
+	unconfirmed_count = sum(1 for r in results
+							if r.get("action") not in ("already_checked", "failed", "wrapper_click", "cdp_click")
+							and r.get("confirmed") is not True
+							and r.get("action") != "failed")
 	failed_count = sum(1 for r in results if r.get("action") == "failed")
 
 	# Check if any agreement checkbox ended up still unchecked
-	still_unchecked = [label for label, state in final_state.items() if state is not True]
+	still_unchecked = [lbl for lbl, state in final_state.items() if state is not True]
 
 	summary_parts = []
-	if clicked_count:
-		summary_parts.append(f"{clicked_count} checkbox(es) clicked")
+	if confirmed_count:
+		summary_parts.append(f"{confirmed_count} checkbox(es) checked successfully")
 	if already_count:
 		summary_parts.append(f"{already_count} already checked")
+	if unconfirmed_count:
+		summary_parts.append(f"{unconfirmed_count} clicked but state unconfirmed")
 	if failed_count:
 		summary_parts.append(f"{failed_count} failed")
 	if still_unchecked:
