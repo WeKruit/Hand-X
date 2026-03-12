@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
+from ghosthands.actions._highlight import highlight_element
 
 logger = logging.getLogger(__name__)
 
@@ -594,14 +595,31 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
         state_changed = bool(fingerprint_before and fingerprint_after and fingerprint_before != fingerprint_after)
         return url_after, fingerprint_after, state_changed
 
-    # ── Strategy 1: JS find + full event sequence ──────────────────
-    # Uses dispatchEvent with mousedown/mouseup/click sequence
+    # ── Strategy 1: preview, highlight, then JS event sequence ────────────
     try:
+        preview_json = await page.evaluate(_FIND_AND_CLICK_JS, label, False)
+        preview_result = json.loads(preview_json)
+
+        if preview_result.get("topCandidates"):
+            logger.info("domhand_click_button.candidates", extra=_candidate_log_payload(preview_result))
+
+        if preview_result.get("found"):
+            highlight_selector = preview_result.get("selector")
+            if not highlight_selector and preview_result.get("ffId"):
+                highlight_selector = f'[data-ff-id="{preview_result["ffId"]}"]'
+            if highlight_selector:
+                await highlight_element(page, highlight_selector)
+
         result_json = await page.evaluate(_FIND_AND_CLICK_JS, label, True)
         result = json.loads(result_json)
-
-        if result.get("topCandidates"):
-            logger.info("domhand_click_button.candidates", extra=_candidate_log_payload(result))
+        if not result.get("topCandidates") and preview_result.get("topCandidates"):
+            result["topCandidates"] = preview_result["topCandidates"]
+        if not result.get("selector") and preview_result.get("selector"):
+            result["selector"] = preview_result["selector"]
+        if not result.get("ffId") and preview_result.get("ffId"):
+            result["ffId"] = preview_result["ffId"]
+        if result.get("inShadowRoot") is None and preview_result.get("inShadowRoot") is not None:
+            result["inShadowRoot"] = preview_result["inShadowRoot"]
 
         if result.get("found") and result.get("clicked"):
             await asyncio.sleep(1.0)
@@ -734,15 +752,29 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
         auth_inputs = diagnostics.get("authInputs", {})
 
         unchecked_boxes = [cb for cb in checkboxes if not cb.get("checked")]
+        agreement_keywords = [
+            "agree",
+            "accept",
+            "consent",
+            "terms",
+            "privacy",
+            "acknowledge",
+            "i understand",
+            "certify",
+        ]
+        agreement_unchecked = [
+            cb
+            for cb in unchecked_boxes
+            if any(keyword in (cb.get("label", "") or "").lower() for keyword in agreement_keywords)
+        ]
 
-        # ── Auto-fix: if unchecked checkboxes are likely blocking submission,
-        #    check them automatically and retry the button click once.
-        if unchecked_boxes:
+        # ── Auto-fix: only agreement-style checkboxes should be auto-checked.
+        if agreement_unchecked:
             logger.info(
                 "domhand_click_button.auto_checking_boxes",
                 extra={
                     "label": label,
-                    "unchecked": [cb.get("label", "?")[:60] for cb in unchecked_boxes],
+                    "unchecked": [cb.get("label", "?")[:60] for cb in agreement_unchecked],
                 },
             )
             try:
@@ -795,13 +827,19 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
             error_texts = [e.get("text", "")[:80] for e in hidden_errors[:5]]
             detail_parts.append(f"Hidden errors found: {error_texts}")
 
-        if unchecked_boxes:
-            labels = [cb.get("label", "?")[:60] for cb in unchecked_boxes]
+        if agreement_unchecked:
+            labels = [cb.get("label", "?")[:60] for cb in agreement_unchecked]
             detail_parts.append(
-                f"UNCHECKED CHECKBOXES DETECTED: {labels}. "
+                f"UNCHECKED AGREEMENT CHECKBOXES DETECTED: {labels}. "
                 "An unchecked agreement checkbox is the most likely cause. "
                 "Use domhand_check_agreement or click the checkbox manually, "
                 "then try domhand_click_button again."
+            )
+        elif unchecked_boxes:
+            labels = [cb.get("label", "?")[:60] for cb in unchecked_boxes]
+            detail_parts.append(
+                f"Unchecked non-agreement checkboxes seen: {labels}. "
+                "They were not auto-checked."
             )
 
         invalid_forms = [f for f in forms if not f.get("valid")]

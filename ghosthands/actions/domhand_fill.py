@@ -756,14 +756,18 @@ _IS_SEARCHABLE_DROPDOWN_JS = r"""(ffId) => {
 
 _CLICK_DROPDOWN_OPTION_JS = r"""(text) => {
 	var lowerText = text.toLowerCase();
-	var roleEls = document.querySelectorAll('[role="option"], [role="menuitem"], [role="treeitem"], [data-automation-id*="promptOption"], [data-automation-id*="menuItem"]');
+	function qAll(sel) {
+		if (window.__ff && window.__ff.queryAll) return window.__ff.queryAll(sel);
+		return Array.from(document.querySelectorAll(sel));
+	}
+	var roleEls = qAll('[role="option"], [role="menuitem"], [role="treeitem"], [data-automation-id*="promptOption"], [data-automation-id*="menuItem"]');
 	for (var i = 0; i < roleEls.length; i++) {
 		var o = roleEls[i]; var rect = o.getBoundingClientRect();
 		if (rect.width === 0 || rect.height === 0) continue;
 		var t = (o.textContent || '').trim().toLowerCase();
 		if (t === lowerText || t.includes(lowerText)) { o.click(); return JSON.stringify({clicked: true, text: (o.textContent || '').trim()}); }
 	}
-	var allVisible = document.querySelectorAll('div[tabindex], div[data-automation-id], span[data-automation-id], li, a, button, [role="button"]');
+	var allVisible = qAll('div[tabindex], div[data-automation-id], span[data-automation-id], li, a, button, [role="button"]');
 	for (var j = 0; j < allVisible.length; j++) {
 		var el = allVisible[j]; var r = el.getBoundingClientRect();
 		if (r.width === 0 || r.height === 0) continue;
@@ -1685,6 +1689,8 @@ Rules:
 - For dropdowns/radio groups with listed options, pick the EXACT text of one of the available options.
 - For hierarchical dropdown options (format "Category > SubOption"), pick the EXACT full path including the " > " separator.
 - For dropdowns WITHOUT listed options, provide the value from the profile if available. If the field name closely matches a profile entry, use that value.
+- For "How did you hear about us?" or similar source/referral fields: select the option closest to the applicant's answer. Map common sources like LinkedIn or Indeed to the best available category if needed. If the profile has no source, choose the closest "Job Board" or "Website"-style option. NEVER return "" for this field.
+- For "Phone Device Type" or similar phone type fields: select "Mobile" from the available options. NEVER return "" for this field.
 - For skill typeahead fields, return an ARRAY of relevant skills from the applicant profile.
 - For multi-select fields, return a JSON array of ALL matching options (e.g., ["Python", "Java"]).
 - For checkboxes/toggles, respond with "checked" or "unchecked".

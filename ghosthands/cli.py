@@ -46,6 +46,7 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 os.environ["BROWSER_USE_SETUP_LOGGING"] = "false"
 
 from ghosthands.agent.hooks import install_same_tab_guard
+from ghosthands.config.settings import settings
 
 
 # ── Argument parsing ──────────────────────────────────────────────────
@@ -513,6 +514,10 @@ def _build_task_prompt(
         "Instead: (1) input credentials, (2) domhand_check_agreement to check\n"
         "the 'I agree' checkbox -- THIS IS REQUIRED or the button silently fails,\n"
         "(3) VERIFY the checkbox is checked, (4) domhand_click_button to submit.\n"
+        "\n"
+        "DROPDOWN RULE: After clicking a dropdown option, STOP and observe.\n"
+        "Do NOT batch a dropdown click with 'Save and Continue' or any other action.\n"
+        "Dropdowns may reveal sub-options that need a second selection.\n"
         "\n"
         "Other rules:\n"
     )

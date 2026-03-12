@@ -1,6 +1,14 @@
 """Regression tests for scoped repeater fills in DomHand."""
 
+import asyncio
+from contextlib import asynccontextmanager
+
+from pytest_httpserver import HTTPServer
+
+from browser_use.browser import BrowserProfile, BrowserSession
+from browser_use.tools.service import Tools
 from ghosthands.actions.domhand_fill import (
+	_click_dropdown_option,
 	_field_value_matches_expected,
 	_filter_fields_for_scope,
 	_find_best_profile_answer,
@@ -20,6 +28,46 @@ from ghosthands.actions.views import (
 	split_dropdown_value_hierarchy,
 )
 from ghosthands.agent.prompts import build_system_prompt
+from ghosthands.dom.shadow_helpers import ensure_helpers
+
+SHADOW_DROPDOWN_HTML = """
+<!DOCTYPE html>
+<html>
+<body>
+	<div id="dropdown-host"></div>
+	<script>
+		window.__selected = '';
+		const root = document.getElementById('dropdown-host').attachShadow({ mode: 'open' });
+		root.innerHTML = `
+			<div role="listbox" aria-label="Referral source">
+				<div role="option" id="job-board">Job Board</div>
+				<div role="option" id="linkedin">LinkedIn</div>
+			</div>
+		`;
+		root.getElementById('job-board').addEventListener('click', () => { window.__selected = 'Job Board'; });
+		root.getElementById('linkedin').addEventListener('click', () => { window.__selected = 'LinkedIn'; });
+	</script>
+</body>
+</html>
+"""
+
+
+@asynccontextmanager
+async def managed_browser_session():
+	session = BrowserSession(
+		browser_profile=BrowserProfile(
+			headless=True,
+			user_data_dir=None,
+			keep_alive=True,
+			enable_default_extensions=True,
+		)
+	)
+	await session.start()
+	try:
+		yield session
+	finally:
+		await session.kill()
+		await session.event_bus.stop(clear=True, timeout=5)
 
 
 def _field(field_id: str, name: str, section: str) -> FormField:
@@ -144,6 +192,31 @@ def test_dropdown_search_terms_cover_hierarchy_and_fallback_words():
 
 def test_dropdown_hierarchy_split_preserves_order():
 	assert split_dropdown_value_hierarchy('Website > workday.com') == ['Website', 'workday.com']
+
+
+async def test_click_dropdown_option_finds_open_shadow_root_options(
+	httpserver: HTTPServer,
+):
+	"""Dropdown option lookup should pierce open shadow roots via __ff.queryAll."""
+	async with managed_browser_session() as browser_session:
+		tools = Tools()
+		httpserver.expect_request('/shadow-dropdown').respond_with_data(SHADOW_DROPDOWN_HTML, content_type='text/html')
+
+		await tools.navigate(
+			url=httpserver.url_for('/shadow-dropdown'),
+			new_tab=False,
+			browser_session=browser_session,
+		)
+		await asyncio.sleep(0.3)
+
+		page = await browser_session.get_current_page()
+		assert page is not None
+		await ensure_helpers(page)
+
+		clicked = await _click_dropdown_option(page, 'LinkedIn')
+
+		assert clicked == {'clicked': True, 'text': 'LinkedIn'}
+		assert await page.evaluate("() => window.__selected") == 'LinkedIn'
 
 
 def test_parse_profile_evidence_includes_address_and_referral_fields():
