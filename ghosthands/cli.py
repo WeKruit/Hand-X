@@ -192,6 +192,71 @@ _DOMHAND_PROFILE_DEFAULTS: dict[str, Any] = {
 }
 
 
+_CAMEL_TO_SNAKE_SCALAR: dict[str, str] = {
+    "firstName": "first_name",
+    "lastName": "last_name",
+    "linkedIn": "linkedin",
+    "zipCode": "zip",
+    "workAuthorization": "work_authorization",
+    "visaSponsorship": "visa_sponsorship",
+    "raceEthnicity": "race_ethnicity",
+    "veteranStatus": "veteran_status",
+    "disabilityStatus": "disability_status",
+    "phoneDeviceType": "phone_device_type",
+    "phoneCountryCode": "phone_country_code",
+}
+
+_CAMEL_TO_SNAKE_NESTED: dict[str, str] = {
+    "fieldOfStudy": "field_of_study",
+    "startDate": "start_date",
+    "endDate": "end_date",
+    "graduationDate": "graduation_date",
+}
+
+
+def _camel_to_snake_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    """Convert known camelCase keys from the Desktop bridge to snake_case.
+
+    The Desktop app sends profile data with camelCase keys (matching the
+    VALET API's TypeScript conventions).  DomHand and the rest of the
+    Python codebase expect snake_case.
+
+    This function adds snake_case equivalents for known camelCase keys
+    without removing the originals, so both formats work downstream.
+
+    Also handles ``zipCode`` -> ``zip`` *and* ``postal_code`` (for prompts).
+    """
+    out = dict(profile)
+
+    # ── Scalar fields ────────────────────────────────────────────
+    for camel, snake in _CAMEL_TO_SNAKE_SCALAR.items():
+        if camel in out and snake not in out:
+            out[snake] = out[camel]
+
+    # zipCode also maps to postal_code for prompt templates
+    if "zipCode" in out and "postal_code" not in out:
+        out["postal_code"] = out["zipCode"]
+
+    # ── Nested arrays: education / experience ────────────────────
+    for array_key in ("education", "experience"):
+        items = out.get(array_key)
+        if not isinstance(items, list):
+            continue
+        converted = []
+        for item in items:
+            if not isinstance(item, dict):
+                converted.append(item)
+                continue
+            new_item = dict(item)
+            for camel, snake in _CAMEL_TO_SNAKE_NESTED.items():
+                if camel in new_item and snake not in new_item:
+                    new_item[snake] = new_item[camel]
+            converted.append(new_item)
+        out[array_key] = converted
+
+    return out
+
+
 def normalize_profile_defaults(profile: dict[str, Any]) -> dict[str, Any]:
     """Add DomHand-expected default fields that the Desktop bridge omits.
 
@@ -271,8 +336,27 @@ def _load_runtime_settings():
 def _resolve_sensitive_data(
     args: argparse.Namespace,
     app_settings,
+    embedded_credentials: dict[str, Any] | None = None,
+    platform: str = "generic",
 ) -> dict[str, str] | None:
-    """Resolve credentials from environment first, then deprecated CLI flags."""
+    """Resolve credentials with priority: profile creds > env vars > CLI flags.
+
+    When the Desktop app embeds a ``credentials`` key in the profile JSON,
+    we resolve platform-specific credentials first, then fall back to
+    ``generic``, then ``GH_EMAIL``/``GH_PASSWORD`` env vars, then the
+    deprecated ``--email``/``--password`` CLI flags.
+
+    Parameters
+    ----------
+    embedded_credentials:
+        The ``credentials`` dict popped from the profile JSON (if any).
+        Structure: ``{"generic": {"email": ..., "password": ...},
+        "workday": {...}, "application_password": "..."}``
+    platform:
+        The already-detected platform string (e.g. ``"workday"``,
+        ``"greenhouse"``).  Callers must detect this once via
+        ``detect_platform()`` and pass it in to avoid redundant calls.
+    """
     if args.email or args.password:
         logger.warning(
             "cli.credentials_flags_deprecated",
@@ -281,8 +365,31 @@ def _resolve_sensitive_data(
             has_password_flag=bool(args.password),
         )
 
-    email = app_settings.email or args.email or ""
-    password = app_settings.password or args.password or ""
+    # ── Extract embedded credentials from profile ────────────────
+    creds_email = ""
+    creds_password = ""
+
+    if embedded_credentials and isinstance(embedded_credentials, dict):
+        # Priority 1: platform-specific credentials
+        platform_creds = embedded_credentials.get(platform) or {}
+        if isinstance(platform_creds, dict) and platform_creds.get("email") and platform_creds.get("password"):
+            creds_email = platform_creds["email"]
+            creds_password = platform_creds["password"]
+        else:
+            # Priority 2: generic credentials
+            generic_creds = embedded_credentials.get("generic") or {}
+            if isinstance(generic_creds, dict) and generic_creds.get("email") and generic_creds.get("password"):
+                creds_email = generic_creds["email"]
+                creds_password = generic_creds["password"]
+
+        # Also check application_password as fallback for password only
+        if creds_email and not creds_password:
+            creds_password = embedded_credentials.get("application_password", "")
+
+    # Priority 3: env vars (GH_EMAIL / GH_PASSWORD via app_settings)
+    # Priority 4: deprecated CLI flags
+    email = creds_email or app_settings.email or args.email or ""
+    password = creds_password or app_settings.password or args.password or ""
 
     if email and password:
         return {"email": email, "password": password}
@@ -324,6 +431,13 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     except (json.JSONDecodeError, OSError, ValueError) as e:
         emit_error(f"Failed to load profile: {e}", fatal=True)
         sys.exit(1)
+
+    # -- Convert camelCase keys from Desktop bridge to snake_case ----------
+    profile = _camel_to_snake_profile(profile)
+
+    # -- Extract embedded credentials before they leak into env/profile ----
+    # We pop them so they don't end up in GH_USER_PROFILE_TEXT env var.
+    embedded_credentials = profile.pop("credentials", None)
 
     # -- Normalize profile defaults for DomHand ----------------------------
     profile = normalize_profile_defaults(profile)
@@ -383,7 +497,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         pass
 
     # -- Credentials --------------------------------------------------------
-    sensitive_data = _resolve_sensitive_data(args, app_settings)
+    sensitive_data = _resolve_sensitive_data(args, app_settings, embedded_credentials, platform=platform)
 
     # -- Browser ------------------------------------------------------------
     browser_profile = BrowserProfile(headless=args.headless, keep_alive=True)
@@ -476,10 +590,17 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 completion_tokens=history.usage.total_completion_tokens or 0,
             )
 
+        # Get real field counts from DomHand callback
+        from ghosthands.output.field_events import get_field_counts
+
+        filled_count, failed_count = get_field_counts()
+
         if cancel_requested.is_set():
             emit_done(
                 success=False,
                 message="Job cancelled by user",
+                fields_filled=filled_count,
+                fields_failed=failed_count,
                 job_id=job_id,
                 lease_id=lease_id,
                 result_data={
@@ -515,7 +636,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             emit_done(
                 success=True,
                 message="Application filled -- browser open for review",
-                fields_filled=total_steps,
+                fields_filled=filled_count,
+                fields_failed=failed_count,
                 job_id=job_id,
                 lease_id=lease_id,
                 result_data=result_data,
@@ -526,6 +648,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             emit_done(
                 success=False,
                 message=blocker or final_result or "Agent did not complete successfully",
+                fields_filled=filled_count,
+                fields_failed=failed_count,
                 job_id=job_id,
                 lease_id=lease_id,
                 result_data=result_data,
@@ -555,6 +679,12 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     except (json.JSONDecodeError, OSError, ValueError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
+
+    # -- Convert camelCase keys from Desktop bridge to snake_case ----------
+    profile = _camel_to_snake_profile(profile)
+
+    # -- Extract embedded credentials before they leak into env/profile ----
+    embedded_credentials = profile.pop("credentials", None)
 
     # -- Normalize profile defaults for DomHand ----------------------------
     profile = normalize_profile_defaults(profile)
@@ -601,7 +731,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         pass
 
     # -- Credentials --------------------------------------------------------
-    sensitive_data = _resolve_sensitive_data(args, app_settings)
+    sensitive_data = _resolve_sensitive_data(args, app_settings, embedded_credentials, platform=platform)
 
     # -- Browser ------------------------------------------------------------
     browser_profile = BrowserProfile(headless=args.headless, keep_alive=True)

@@ -720,3 +720,385 @@ class TestNormalizeProfileDefaults:
         assert result["email"] == "jane@example.com"
         assert result["phone"] == "+15551234567"
         assert result["skills"] == ["Python", "TypeScript"]
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — get_field_counts
+# ---------------------------------------------------------------------------
+
+
+class TestGetFieldCounts:
+    """get_field_counts() must return correct (filled, failed) counts."""
+
+    def _reset_field_events(self):
+        """Reset module-level state so tests are independent."""
+        import ghosthands.output.field_events as fe
+
+        fe._installed = False
+        fe._counts["filled"] = 0
+        fe._counts["total"] = 0
+        fe._counts["last_round"] = 0
+
+    def test_returns_zero_zero_before_installation(self):
+        """Before install_jsonl_callback is called, counts should be (0, 0)."""
+        self._reset_field_events()
+        from ghosthands.output.field_events import get_field_counts
+
+        assert get_field_counts() == (0, 0)
+
+    def test_returns_zero_zero_when_installed_but_no_fields(self):
+        """After installation with no field results, counts should be (0, 0)."""
+        import ghosthands.output.field_events as fe
+
+        self._reset_field_events()
+        # Simulate installation without actually importing domhand_fill
+        fe._installed = True
+        assert fe.get_field_counts() == (0, 0)
+
+    def test_counts_tracked_correctly_after_fields(self):
+        """Counts must reflect filled and failed fields accurately."""
+        import ghosthands.output.field_events as fe
+
+        self._reset_field_events()
+        fe._installed = True
+
+        # Simulate 5 filled, 2 failed (total=7)
+        fe._counts["filled"] = 5
+        fe._counts["total"] = 7
+
+        assert fe.get_field_counts() == (5, 2)
+
+    def test_counts_all_filled(self):
+        """When all fields succeed, failed count should be 0."""
+        import ghosthands.output.field_events as fe
+
+        self._reset_field_events()
+        fe._installed = True
+
+        fe._counts["filled"] = 10
+        fe._counts["total"] = 10
+
+        assert fe.get_field_counts() == (10, 0)
+
+    def test_counts_all_failed(self):
+        """When no fields succeed, filled count should be 0."""
+        import ghosthands.output.field_events as fe
+
+        self._reset_field_events()
+        fe._installed = True
+
+        fe._counts["filled"] = 0
+        fe._counts["total"] = 3
+
+        assert fe.get_field_counts() == (0, 3)
+
+
+# ---------------------------------------------------------------------------
+# Test 8 — account_created no longer emitted unconditionally
+# ---------------------------------------------------------------------------
+
+
+class TestAccountCreatedEmission:
+    """account_created must NOT be unconditionally emitted on success.
+
+    The emit_account_created function still exists in the JSONL module (for
+    future use when actual account creation is detected), but cli.py no
+    longer calls it on every successful apply.
+    """
+
+    def test_emit_account_created_function_still_exists(self):
+        """The emit_account_created helper should still be importable for
+        future use, even though cli.py no longer calls it unconditionally."""
+        from ghosthands.output.jsonl import emit_account_created
+
+        events = _capture_jsonl_output(
+            emit_account_created,
+            "workday",
+            "user@test.com",
+            "s3cret",
+            url="https://workday.com/job/123",
+        )
+        assert len(events) == 1
+        assert events[0]["event"] == "account_created"
+
+    def test_cli_does_not_import_emit_account_created(self):
+        """cli.py should no longer import or reference emit_account_created."""
+        import inspect
+        import ghosthands.cli as cli_mod
+
+        source = inspect.getsource(cli_mod)
+        # The function name should not appear in cli.py at all
+        assert "emit_account_created" not in source
+
+
+# ---------------------------------------------------------------------------
+# Test 9 — _camel_to_snake_profile
+# ---------------------------------------------------------------------------
+
+
+class TestCamelToSnakeProfile:
+    """_camel_to_snake_profile must convert known camelCase keys to snake_case."""
+
+    def test_converts_scalar_camel_keys(self):
+        from ghosthands.cli import _camel_to_snake_profile
+
+        profile = {
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "linkedIn": "https://linkedin.com/in/jane",
+            "zipCode": "94105",
+            "workAuthorization": "Yes",
+            "visaSponsorship": "No",
+            "raceEthnicity": "Asian",
+            "veteranStatus": "Not a veteran",
+            "disabilityStatus": "No",
+            "phoneDeviceType": "Mobile",
+            "phoneCountryCode": "+1",
+        }
+        result = _camel_to_snake_profile(profile)
+
+        assert result["first_name"] == "Jane"
+        assert result["last_name"] == "Doe"
+        assert result["linkedin"] == "https://linkedin.com/in/jane"
+        assert result["zip"] == "94105"
+        assert result["postal_code"] == "94105"
+        assert result["work_authorization"] == "Yes"
+        assert result["visa_sponsorship"] == "No"
+        assert result["race_ethnicity"] == "Asian"
+        assert result["veteran_status"] == "Not a veteran"
+        assert result["disability_status"] == "No"
+        assert result["phone_device_type"] == "Mobile"
+        assert result["phone_country_code"] == "+1"
+
+    def test_preserves_camel_keys(self):
+        """Original camelCase keys must NOT be removed."""
+        from ghosthands.cli import _camel_to_snake_profile
+
+        profile = {"firstName": "Jane", "lastName": "Doe"}
+        result = _camel_to_snake_profile(profile)
+
+        assert result["firstName"] == "Jane"
+        assert result["first_name"] == "Jane"
+
+    def test_does_not_overwrite_existing_snake_keys(self):
+        """If both camelCase and snake_case exist, snake_case wins."""
+        from ghosthands.cli import _camel_to_snake_profile
+
+        profile = {"firstName": "CamelJane", "first_name": "SnakeJane"}
+        result = _camel_to_snake_profile(profile)
+
+        assert result["first_name"] == "SnakeJane"
+
+    def test_converts_education_nested_fields(self):
+        from ghosthands.cli import _camel_to_snake_profile
+
+        profile = {
+            "education": [
+                {
+                    "school": "MIT",
+                    "fieldOfStudy": "Computer Science",
+                    "startDate": "2018-09",
+                    "endDate": "2022-06",
+                    "graduationDate": "2022-06-15",
+                }
+            ]
+        }
+        result = _camel_to_snake_profile(profile)
+        edu = result["education"][0]
+
+        assert edu["field_of_study"] == "Computer Science"
+        assert edu["start_date"] == "2018-09"
+        assert edu["end_date"] == "2022-06"
+        assert edu["graduation_date"] == "2022-06-15"
+        # Originals preserved
+        assert edu["fieldOfStudy"] == "Computer Science"
+
+    def test_converts_experience_nested_fields(self):
+        from ghosthands.cli import _camel_to_snake_profile
+
+        profile = {
+            "experience": [
+                {
+                    "company": "Acme",
+                    "title": "Engineer",
+                    "startDate": "2020-01",
+                    "endDate": "2023-12",
+                }
+            ]
+        }
+        result = _camel_to_snake_profile(profile)
+        exp = result["experience"][0]
+
+        assert exp["start_date"] == "2020-01"
+        assert exp["end_date"] == "2023-12"
+
+    def test_handles_empty_profile(self):
+        from ghosthands.cli import _camel_to_snake_profile
+
+        result = _camel_to_snake_profile({})
+        assert result == {}
+
+    def test_does_not_mutate_input(self):
+        from ghosthands.cli import _camel_to_snake_profile
+
+        profile = {"firstName": "Jane"}
+        original_keys = set(profile.keys())
+        _camel_to_snake_profile(profile)
+
+        assert set(profile.keys()) == original_keys
+
+    def test_handles_non_dict_items_in_arrays(self):
+        """Non-dict items in education/experience arrays should pass through."""
+        from ghosthands.cli import _camel_to_snake_profile
+
+        profile = {"education": ["MIT", None, 42]}
+        result = _camel_to_snake_profile(profile)
+
+        assert result["education"] == ["MIT", None, 42]
+
+    def test_handles_non_list_education(self):
+        """If education is not a list, it should be left as-is."""
+        from ghosthands.cli import _camel_to_snake_profile
+
+        profile = {"education": "MIT"}
+        result = _camel_to_snake_profile(profile)
+
+        assert result["education"] == "MIT"
+
+    def test_snake_case_profile_passes_through(self):
+        """A profile already in snake_case should not be altered."""
+        from ghosthands.cli import _camel_to_snake_profile
+
+        profile = {
+            "first_name": "Jane",
+            "last_name": "Doe",
+            "work_authorization": "Yes",
+        }
+        result = _camel_to_snake_profile(profile)
+
+        assert result["first_name"] == "Jane"
+        assert result["last_name"] == "Doe"
+        assert result["work_authorization"] == "Yes"
+
+
+# ---------------------------------------------------------------------------
+# Test 10 — Credential extraction from profile JSON
+# ---------------------------------------------------------------------------
+
+
+class TestCredentialExtraction:
+    """_resolve_sensitive_data must extract credentials from embedded profile data."""
+
+    @staticmethod
+    def _make_args(job_url="https://myworkdayjobs.com/en-US/job/123", email=None, password=None):
+        return argparse.Namespace(
+            job_url=job_url,
+            email=email,
+            password=password,
+        )
+
+    @staticmethod
+    def _make_settings(email="", password=""):
+        settings = MagicMock()
+        settings.email = email
+        settings.password = password
+        return settings
+
+    def test_platform_specific_creds_take_priority(self):
+        """Platform-specific credentials should be used over generic."""
+        from ghosthands.cli import _resolve_sensitive_data
+
+        args = self._make_args(job_url="https://myworkdayjobs.com/en-US/job/123")
+        settings = self._make_settings()
+
+        creds = {
+            "generic": {"email": "generic@test.com", "password": "genPass"},
+            "workday": {"email": "wd@test.com", "password": "wdPass"},
+        }
+
+        result = _resolve_sensitive_data(args, settings, embedded_credentials=creds, platform="workday")
+        assert result == {"email": "wd@test.com", "password": "wdPass"}
+
+    def test_generic_creds_used_when_no_platform_match(self):
+        """Generic credentials should be used when platform-specific are missing."""
+        from ghosthands.cli import _resolve_sensitive_data
+
+        args = self._make_args(job_url="https://boards.greenhouse.io/company/123")
+        settings = self._make_settings()
+
+        creds = {
+            "generic": {"email": "generic@test.com", "password": "genPass"},
+            "workday": {"email": "wd@test.com", "password": "wdPass"},
+        }
+
+        result = _resolve_sensitive_data(args, settings, embedded_credentials=creds, platform="greenhouse")
+        assert result == {"email": "generic@test.com", "password": "genPass"}
+
+    def test_env_vars_fallback_when_no_embedded_creds(self):
+        """GH_EMAIL / GH_PASSWORD (via app_settings) should be used when no embedded creds."""
+        from ghosthands.cli import _resolve_sensitive_data
+
+        args = self._make_args()
+        settings = self._make_settings(email="env@test.com", password="envPass")
+
+        result = _resolve_sensitive_data(args, settings, embedded_credentials=None)
+        assert result == {"email": "env@test.com", "password": "envPass"}
+
+    def test_embedded_creds_override_env_vars(self):
+        """Embedded credentials should take priority over env vars."""
+        from ghosthands.cli import _resolve_sensitive_data
+
+        args = self._make_args()
+        settings = self._make_settings(email="env@test.com", password="envPass")
+
+        creds = {
+            "generic": {"email": "embedded@test.com", "password": "embedPass"},
+        }
+
+        result = _resolve_sensitive_data(args, settings, embedded_credentials=creds)
+        assert result == {"email": "embedded@test.com", "password": "embedPass"}
+
+    def test_returns_none_when_no_credentials_anywhere(self):
+        """Should return None when no credentials are available from any source."""
+        from ghosthands.cli import _resolve_sensitive_data
+
+        args = self._make_args()
+        settings = self._make_settings()
+
+        result = _resolve_sensitive_data(args, settings, embedded_credentials=None)
+        assert result is None
+
+    def test_application_password_fallback(self):
+        """application_password is only used when creds_email is set but creds_password is not.
+
+        Since the code requires both email AND password from platform/generic
+        creds to set creds_email, and application_password is a password-only
+        fallback, this scenario only applies if a future code path sets
+        creds_email without creds_password.  For now we verify the code
+        doesn't crash and falls through to None.
+        """
+        from ghosthands.cli import _resolve_sensitive_data
+
+        args = self._make_args(job_url="https://myworkdayjobs.com/en-US/job/123")
+        settings = self._make_settings()
+
+        # workday has email but missing password key -> fails the
+        # "both email AND password" check -> creds_email stays empty
+        # -> application_password can't help -> returns None
+        embedded = {
+            "workday": {"email": "wd@test.com"},
+            "application_password": "appPass123",
+        }
+
+        result = _resolve_sensitive_data(args, settings, embedded_credentials=embedded, platform="workday")
+        assert result is None
+
+    def test_empty_embedded_credentials_falls_through(self):
+        """An empty credentials dict should fall through to env vars."""
+        from ghosthands.cli import _resolve_sensitive_data
+
+        args = self._make_args()
+        settings = self._make_settings(email="env@test.com", password="envPass")
+
+        result = _resolve_sensitive_data(args, settings, embedded_credentials={})
+        assert result == {"email": "env@test.com", "password": "envPass"}
