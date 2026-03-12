@@ -171,6 +171,75 @@ def _load_profile(args: argparse.Namespace) -> dict:
     raise ValueError("Either --profile, --test-data, or GH_USER_PROFILE_TEXT env var is required")
 
 
+# Defaults matching resume_loader.PROFILE_DEFAULTS — duplicated here to avoid
+# importing the integrations package (which pulls in asyncpg/database).
+_DOMHAND_PROFILE_DEFAULTS: dict[str, Any] = {
+    "phone_device_type": "Mobile",
+    "phone_country_code": "+1",
+    "address": {
+        "street": "",
+        "city": "",
+        "state": "",
+        "zip": "",
+        "country": "United States of America",
+    },
+    "work_authorization": "Yes",
+    "visa_sponsorship": "No",
+    "veteran_status": "I am not a protected veteran",
+    "disability_status": "No, I Don't Have A Disability",
+    "gender": "Male",
+    "race_ethnicity": "Asian (Not Hispanic or Latino)",
+}
+
+
+def normalize_profile_defaults(profile: dict[str, Any]) -> dict[str, Any]:
+    """Add DomHand-expected default fields that the Desktop bridge omits.
+
+    When the Desktop app passes a raw ``UserProfile`` via ``--profile`` or
+    ``GH_USER_PROFILE_TEXT``, it may be missing fields that the old
+    TypeScript ``toWorkdayProfile()`` transformation would have added.
+    DomHand's ``_parse_profile_evidence`` and ``_known_profile_value``
+    rely on these fields being present in the profile.
+
+    This function fills in missing keys with sensible defaults, matching
+    the ``PROFILE_DEFAULTS`` from ``resume_loader``.  Existing values in
+    the profile are never overwritten.
+    """
+    defaults = _DOMHAND_PROFILE_DEFAULTS
+    normalized = dict(profile)
+
+    # ── Scalar defaults ──────────────────────────────────────────
+    for key in (
+        "phone_device_type",
+        "phone_country_code",
+        "work_authorization",
+        "visa_sponsorship",
+        "veteran_status",
+        "disability_status",
+        "gender",
+        "race_ethnicity",
+    ):
+        if key not in normalized or normalized[key] is None or normalized[key] == "":
+            normalized[key] = defaults[key]
+
+    # ── Address defaults (merge, don't overwrite) ────────────────
+    default_address = defaults["address"]
+    existing_address = normalized.get("address")
+
+    if existing_address is None or existing_address == "":
+        normalized["address"] = dict(default_address)
+    elif isinstance(existing_address, dict):
+        merged = dict(default_address)
+        for k, v in existing_address.items():
+            if v is not None and v != "":
+                merged[k] = v
+        normalized["address"] = merged
+    # If address is a string (e.g. "San Francisco, CA"), leave it as-is —
+    # _format_profile_summary handles string addresses fine.
+
+    return normalized
+
+
 def _apply_runtime_env(
     args: argparse.Namespace,
     profile: dict[str, Any],
@@ -255,6 +324,9 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     except (json.JSONDecodeError, OSError, ValueError) as e:
         emit_error(f"Failed to load profile: {e}", fatal=True)
         sys.exit(1)
+
+    # -- Normalize profile defaults for DomHand ----------------------------
+    profile = normalize_profile_defaults(profile)
 
     # -- Set env vars -------------------------------------------------------
     resume_path = _apply_runtime_env(args, profile)
@@ -483,6 +555,9 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     except (json.JSONDecodeError, OSError, ValueError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
+
+    # -- Normalize profile defaults for DomHand ----------------------------
+    profile = normalize_profile_defaults(profile)
 
     # -- Set env vars -------------------------------------------------------
     resume_path = _apply_runtime_env(args, profile)

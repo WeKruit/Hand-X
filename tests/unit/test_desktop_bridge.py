@@ -578,3 +578,145 @@ class TestProfileLoadingEnvFallback:
             result = _load_profile(args)
 
         assert result == flag_data
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — normalize_profile_defaults
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeProfileDefaults:
+    """normalize_profile_defaults must add DomHand-expected fields with
+    sensible defaults when they are missing from a raw Desktop bridge profile."""
+
+    def test_adds_all_scalar_defaults_when_missing(self):
+        """A bare-minimum profile should gain all required scalar defaults."""
+        from ghosthands.cli import normalize_profile_defaults
+
+        raw = {"first_name": "Jane", "last_name": "Doe", "email": "jane@example.com"}
+        result = normalize_profile_defaults(raw)
+
+        assert result["phone_device_type"] == "Mobile"
+        assert result["phone_country_code"] == "+1"
+        assert result["work_authorization"] == "Yes"
+        assert result["visa_sponsorship"] == "No"
+        assert result["veteran_status"] == "I am not a protected veteran"
+        assert result["disability_status"] == "No, I Don't Have A Disability"
+        assert result["gender"] == "Male"
+        assert result["race_ethnicity"] == "Asian (Not Hispanic or Latino)"
+
+    def test_preserves_existing_values(self):
+        """Existing non-empty values must NOT be overwritten by defaults."""
+        from ghosthands.cli import normalize_profile_defaults
+
+        raw = {
+            "first_name": "Jane",
+            "work_authorization": "No",
+            "gender": "Female",
+            "veteran_status": "I am a protected veteran",
+        }
+        result = normalize_profile_defaults(raw)
+
+        assert result["work_authorization"] == "No"
+        assert result["gender"] == "Female"
+        assert result["veteran_status"] == "I am a protected veteran"
+        # Defaults still applied for missing fields
+        assert result["phone_device_type"] == "Mobile"
+        assert result["disability_status"] == "No, I Don't Have A Disability"
+
+    def test_adds_default_address_when_missing(self):
+        """When address is absent, a full default address dict should be added."""
+        from ghosthands.cli import normalize_profile_defaults
+
+        raw = {"first_name": "Jane"}
+        result = normalize_profile_defaults(raw)
+
+        assert isinstance(result["address"], dict)
+        assert result["address"]["country"] == "United States of America"
+        assert "street" in result["address"]
+        assert "city" in result["address"]
+        assert "state" in result["address"]
+        assert "zip" in result["address"]
+
+    def test_merges_partial_address(self):
+        """When address is a dict with some fields, missing fields get defaults."""
+        from ghosthands.cli import normalize_profile_defaults
+
+        raw = {
+            "first_name": "Jane",
+            "address": {"city": "San Francisco", "state": "CA"},
+        }
+        result = normalize_profile_defaults(raw)
+
+        assert result["address"]["city"] == "San Francisco"
+        assert result["address"]["state"] == "CA"
+        assert result["address"]["country"] == "United States of America"
+        assert result["address"]["street"] == ""
+
+    def test_leaves_string_address_as_is(self):
+        """A string address (e.g. 'San Francisco, CA') must not be replaced."""
+        from ghosthands.cli import normalize_profile_defaults
+
+        raw = {"first_name": "Jane", "address": "San Francisco, CA"}
+        result = normalize_profile_defaults(raw)
+
+        assert result["address"] == "San Francisco, CA"
+
+    def test_replaces_empty_string_values_with_defaults(self):
+        """Empty-string values should be treated as missing and get defaults."""
+        from ghosthands.cli import normalize_profile_defaults
+
+        raw = {"work_authorization": "", "gender": ""}
+        result = normalize_profile_defaults(raw)
+
+        assert result["work_authorization"] == "Yes"
+        assert result["gender"] == "Male"
+
+    def test_replaces_none_values_with_defaults(self):
+        """None values should be treated as missing and get defaults."""
+        from ghosthands.cli import normalize_profile_defaults
+
+        raw = {"work_authorization": None, "veteran_status": None}
+        result = normalize_profile_defaults(raw)
+
+        assert result["work_authorization"] == "Yes"
+        assert result["veteran_status"] == "I am not a protected veteran"
+
+    def test_does_not_mutate_input(self):
+        """The original profile dict must not be modified."""
+        from ghosthands.cli import normalize_profile_defaults
+
+        raw = {"first_name": "Jane"}
+        original_keys = set(raw.keys())
+        normalize_profile_defaults(raw)
+
+        assert set(raw.keys()) == original_keys
+
+    def test_replaces_empty_address_string_with_default(self):
+        """An empty string address should be replaced with the default dict."""
+        from ghosthands.cli import normalize_profile_defaults
+
+        raw = {"address": ""}
+        result = normalize_profile_defaults(raw)
+
+        assert isinstance(result["address"], dict)
+        assert result["address"]["country"] == "United States of America"
+
+    def test_original_profile_fields_pass_through(self):
+        """Non-default fields from the original profile must be preserved."""
+        from ghosthands.cli import normalize_profile_defaults
+
+        raw = {
+            "first_name": "Jane",
+            "last_name": "Doe",
+            "email": "jane@example.com",
+            "phone": "+15551234567",
+            "skills": ["Python", "TypeScript"],
+        }
+        result = normalize_profile_defaults(raw)
+
+        assert result["first_name"] == "Jane"
+        assert result["last_name"] == "Doe"
+        assert result["email"] == "jane@example.com"
+        assert result["phone"] == "+15551234567"
+        assert result["skills"] == ["Python", "TypeScript"]
