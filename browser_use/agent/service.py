@@ -3,6 +3,7 @@ import gc
 import inspect
 import json
 import logging
+import os
 import re
 import tempfile
 import time
@@ -84,6 +85,22 @@ from browser_use.utils import (
 logger = logging.getLogger(__name__)
 
 
+def _truncate_log_text(text: str | None, limit: int | None = None) -> str:
+	"""Keep verbose agent logs compact without changing model behavior."""
+	if not text:
+		return ''
+	if limit is None:
+		raw_limit = os.getenv('GH_AGENT_LOG_TEXT_LIMIT', '220').strip()
+		try:
+			limit = max(40, int(raw_limit))
+		except ValueError:
+			limit = 220
+	clean = ' '.join(str(text).split())
+	if len(clean) <= limit:
+		return clean
+	return clean[: limit - 1].rstrip() + '…'
+
+
 def log_response(response: AgentOutput, registry=None, logger=None) -> None:
 	"""Utility function to log the model's response."""
 
@@ -98,6 +115,7 @@ def log_response(response: AgentOutput, registry=None, logger=None) -> None:
 	# Only log evaluation if it's not empty
 	eval_goal = response.current_state.evaluation_previous_goal
 	if eval_goal:
+		eval_goal = _truncate_log_text(eval_goal, 180)
 		if 'success' in eval_goal.lower():
 			emoji = '👍'
 			# Green color for success
@@ -113,13 +131,13 @@ def log_response(response: AgentOutput, registry=None, logger=None) -> None:
 
 	# Always log memory if present
 	if response.current_state.memory:
-		logger.info(f'  🧠 Memory: {response.current_state.memory}')
+		logger.info(f'  🧠 Memory: {_truncate_log_text(response.current_state.memory)}')
 
 	# Only log next goal if it's not empty
 	next_goal = response.current_state.next_goal
 	if next_goal:
 		# Blue color for next goal
-		logger.info(f'  \033[34m🎯 Next goal: {next_goal}\033[0m')
+		logger.info(f'  \033[34m🎯 Next goal: {_truncate_log_text(next_goal)}\033[0m')
 
 
 Context = TypeVar('Context')
@@ -1633,11 +1651,12 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				verdict_text = '✅ PASS' if judgement.verdict else '❌ FAIL'
 				judge_log += f'⚖️  {verdict_color}Judge Verdict: {verdict_text}\033[0m\n'
 				if judgement.failure_reason:
-					judge_log += f'   Failure Reason: {judgement.failure_reason}\n'
+					judge_log += f'   Failure: {_truncate_log_text(judgement.failure_reason)}\n'
 				if judgement.reached_captcha:
 					judge_log += '   🤖 Captcha Detected: Agent encountered captcha challenges\n'
 					judge_log += '   👉 🥷 Use Browser Use Cloud for the most stealth browser infra: https://docs.browser-use.com/customize/browser/remote\n'
-				judge_log += f'   {judgement.reasoning}\n'
+				if judgement.reasoning:
+					judge_log += f'   Evidence: {_truncate_log_text(judgement.reasoning)}\n'
 				self.logger.info(judge_log)
 
 	async def _get_model_output_with_retry(self, input_messages: list[BaseMessage]) -> AgentOutput:
@@ -2691,14 +2710,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		try:
 			if (
 				self.browser_session._cached_browser_state_summary is not None
-				and self.browser_session._cached_browser_state_summary.dom_state is not None
+				and self.browser_session._cached_browser_state_summary.dom_state is None
 			):
-				cached_selector_map = dict(self.browser_session._cached_browser_state_summary.dom_state.selector_map)
-			else:
-				cached_selector_map = {}
+				self.logger.debug('Cached browser state summary had no DOM selector map')
 		except Exception as e:
 			self.logger.error(f'Error getting cached selector map: {e}')
-			cached_selector_map = {}
 
 		for i, action in enumerate(actions):
 			# Get action name from the action model BEFORE try block to ensure it's always available in except
