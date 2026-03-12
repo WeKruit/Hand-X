@@ -142,6 +142,10 @@ Instead: (1) input credentials, (2) domhand_check_agreement to check
 the 'I agree' checkbox — THIS IS REQUIRED or the button silently fails,
 (3) VERIFY the checkbox is checked, (4) domhand_click_button to submit.
 
+DROPDOWN RULE: After clicking a dropdown option, STOP and observe.
+Do NOT batch a dropdown click with 'Save and Continue' or any other action.
+Dropdowns may reveal sub-options that need a second selection.
+
 Other rules:
 - {'Use the provided credentials to log in or create an account if needed. For Workday, fill email + password + confirm password on the Create Account page.' if sensitive_data else 'If a login wall appears, report it as a blocker.'}
 - Do NOT click the final Submit button. Stop at the review page and use the done action.
@@ -158,7 +162,7 @@ Other rules:
 		sensitive_data=sensitive_data,
 		available_file_paths=[resume_path],
 		use_vision=True,
-		max_actions_per_step=5,
+		max_actions_per_step=2,
 	)
 
 	# ── Run ───────────────────────────────────────────────────────

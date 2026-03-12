@@ -41,6 +41,7 @@ from ghosthands.actions.views import (
 	is_placeholder_value,
 	normalize_name,
 )
+from ghosthands.dom.shadow_helpers import QALL_JS_SNIPPET
 
 logger = logging.getLogger(__name__)
 
@@ -714,16 +715,15 @@ _IS_SEARCHABLE_DROPDOWN_JS = r"""(ffId) => {
 	);
 }"""
 
-_CLICK_DROPDOWN_OPTION_JS = r"""(text) => {
-	var lowerText = text.toLowerCase();
-	var roleEls = document.querySelectorAll('[role="option"], [role="menuitem"], [role="treeitem"], [data-automation-id*="promptOption"], [data-automation-id*="menuItem"]');
+_CLICK_DROPDOWN_OPTION_JS = "(text) => {\n\tvar lowerText = text.toLowerCase();\n\t" + QALL_JS_SNIPPET + r"""
+	var roleEls = qAll('[role="option"], [role="menuitem"], [role="treeitem"], [data-automation-id*="promptOption"], [data-automation-id*="menuItem"]');
 	for (var i = 0; i < roleEls.length; i++) {
 		var o = roleEls[i]; var rect = o.getBoundingClientRect();
 		if (rect.width === 0 || rect.height === 0) continue;
 		var t = (o.textContent || '').trim().toLowerCase();
 		if (t === lowerText || t.includes(lowerText)) { o.click(); return JSON.stringify({clicked: true, text: (o.textContent || '').trim()}); }
 	}
-	var allVisible = document.querySelectorAll('div[tabindex], div[data-automation-id], span[data-automation-id], li, a, button, [role="button"]');
+	var allVisible = qAll('div[tabindex], div[data-automation-id], span[data-automation-id], li, a, button, [role="button"]');
 	for (var j = 0; j < allVisible.length; j++) {
 		var el = allVisible[j]; var r = el.getBoundingClientRect();
 		if (r.width === 0 || r.height === 0) continue;
@@ -1022,6 +1022,8 @@ Rules:
 - For dropdowns/radio groups with listed options, pick the EXACT text of one of the available options.
 - For hierarchical dropdown options (format "Category > SubOption"), pick the EXACT full path including the " > " separator.
 - For dropdowns WITHOUT listed options, provide your best guess for the value.
+- For "How did you hear about us?" or similar source/referral fields: select the option closest to the applicant's answer. Map common sources to categories (e.g., "LinkedIn" or "Indeed" → "Job Board" or "Job Board/Social Media Web Site"). If the profile has no data, default to "Job Board" or "Website". NEVER return "" for this field — always pick the best available option.
+- For "Phone Device Type" or similar phone type fields: select "Mobile" from the available options. NEVER return "" for this field.
 - For skill typeahead fields, return an ARRAY of relevant skills from the applicant profile.
 - For multi-select fields, return a JSON array of ALL matching options (e.g., ["Python", "Java"]).
 - For checkboxes/toggles, respond with "checked" or "unchecked".
@@ -1699,22 +1701,65 @@ async def _fill_custom_dropdown(page: Any, field: FormField, value: str, tag: st
 		}""", ff_id)
 		await asyncio.sleep(0.6)
 
-		clicked_json = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, value)
-		clicked = json.loads(clicked_json)
-		if clicked.get('clicked'):
-			logger.debug(f'select {tag} -> "{clicked.get("text", value)}"')
-			await asyncio.sleep(0.3)
-			return True
+		# Handle hierarchical dropdowns (e.g. "Category > SubOption")
+		# Split on " > " separator if present, otherwise treat as flat
+		parts = [p.strip() for p in value.split(' > ')] if ' > ' in value else [value]
 
-		words = value.split()
-		if len(words) > 1:
-			clicked_json = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, words[0])
+		any_intermediate_clicked = False
+		for depth, part in enumerate(parts):
+			clicked_json = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, part)
 			clicked = json.loads(clicked_json)
 			if clicked.get('clicked'):
-				logger.debug(f'select {tag} -> "{clicked.get("text", words[0])}" (fuzzy)')
+				if depth < len(parts) - 1:
+					# Intermediate level — wait for sub-options to appear
+					any_intermediate_clicked = True
+					await asyncio.sleep(0.8)
+					logger.debug(f'select {tag} -> "{clicked.get("text", part)}" (level {depth})')
+				else:
+					logger.debug(f'select {tag} -> "{clicked.get("text", part)}"')
+					await asyncio.sleep(0.3)
+					return True
+			else:
+				# Partial match by first word at this level
+				words = part.split()
+				if len(words) > 1:
+					clicked_json = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, words[0])
+					clicked = json.loads(clicked_json)
+					if clicked.get('clicked'):
+						if depth < len(parts) - 1:
+							any_intermediate_clicked = True
+							await asyncio.sleep(0.8)
+							logger.debug(f'select {tag} -> "{clicked.get("text", words[0])}" (fuzzy, level {depth})')
+						else:
+							logger.debug(f'select {tag} -> "{clicked.get("text", words[0])}" (fuzzy)')
+							await asyncio.sleep(0.3)
+							return True
+					else:
+						break  # Can't find this level, fall through
+				else:
+					break  # Can't find this level, fall through
+
+		# If a hierarchical path partially resolved (category opened but sub-option
+		# not found), dismiss the dropdown and return False so the agent can retry
+		# with domhand_select rather than picking a random option.
+		if any_intermediate_clicked:
+			logger.debug(f'skip {tag} (hierarchical dropdown partially resolved, dismissing)')
+			try:
+				await page.evaluate(_DISMISS_DROPDOWN_JS)
+			except Exception:
+				pass
+			return False
+
+		# If flat value, try the full value as-is before keyboard fallback
+		if len(parts) > 1:
+			clicked_json = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, value)
+			clicked = json.loads(clicked_json)
+			if clicked.get('clicked'):
+				logger.debug(f'select {tag} -> "{clicked.get("text", value)}" (flat fallback)')
 				await asyncio.sleep(0.3)
 				return True
 
+		# Keyboard fallback
 		await page.press('ArrowDown')
 		await asyncio.sleep(0.2)
 		await page.press('Enter')
