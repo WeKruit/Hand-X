@@ -111,6 +111,16 @@ def _setup_logging() -> None:
     root.setLevel(logging.INFO)
 
 
+def _truncate_text(text: str | None, limit: int = 180) -> str:
+    """Keep user-facing CLI output compact."""
+    if not text:
+        return ""
+    clean = " ".join(str(text).split())
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 1].rstrip() + "…"
+
+
 # ── Profile loading ───────────────────────────────────────────────────
 
 
@@ -267,7 +277,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         if ag.state.last_model_output:
             goal = ag.state.last_model_output.next_goal or ""
         emit_status(
-            goal or f"Step {step}...",
+            _truncate_text(goal or f"Step {step}..."),
             step=step,
             max_steps=args.max_steps,
             job_id=args.job_id,
@@ -467,14 +477,14 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     print("=" * 60)
     print("  RESULT")
     print("=" * 60)
-    print(f"  Done:    {history.is_done()}")
+    print(f"  Status:  {'done' if history.is_done() else 'stopped'}")
     print(f"  Steps:   {len(history.history) if history.history else 0}")
     if history.usage:
         print(f"  Cost:    ${history.usage.total_cost:.4f}")
         print(f"  Tokens:  {history.usage.total_prompt_tokens} in / {history.usage.total_completion_tokens} out")
     result = history.final_result()
     if result:
-        print(f"  Output:  {result[:500]}")
+        print(f"  Result:  {_truncate_text(result)}")
     print("=" * 60)
     print()
     print("  Browser is still open -- review the application before submitting.")
@@ -503,7 +513,8 @@ def _build_task_prompt(
         "\n"
         "ACTION ORDER FOR FORM PAGES:\n"
         "1. On each form page, your FIRST action MUST be domhand_fill.\n"
-        "2. Review domhand_fill output -- handle unresolved fields with domhand_select.\n"
+        "2. Review domhand_fill output -- handle unresolved required fields with domhand_select.\n"
+        "   Only retry optional fields when the applicant profile clearly provides the value.\n"
         f"3. For file uploads (resume), use domhand_upload or upload_file with path: {resume_path}\n"
         "4. Only use generic browser-use actions (click, input_text) as a LAST RESORT.\n"
         "5. After all fields are filled, click Next/Continue/Save to advance.\n"
@@ -518,6 +529,9 @@ def _build_task_prompt(
         "DROPDOWN RULE: After clicking a dropdown option, STOP and observe.\n"
         "Do NOT batch a dropdown click with 'Save and Continue' or any other action.\n"
         "Dropdowns may reveal sub-options that need a second selection.\n"
+        "If a control still shows validation after 2 attempts, stop writing bigger\n"
+        "evaluate()/JS hacks for it. Re-open the same visible control, use a real\n"
+        "click / coordinate click on the exact option, and verify the state changed.\n"
         "\n"
         "Other rules:\n"
     )

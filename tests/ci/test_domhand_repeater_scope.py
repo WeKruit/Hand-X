@@ -2,15 +2,22 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import date
 
 from pytest_httpserver import HTTPServer
 
 from browser_use.browser import BrowserProfile, BrowserSession
 from browser_use.tools.service import Tools
 from ghosthands.actions.domhand_fill import (
+	_build_inject_helpers_js,
 	_click_dropdown_option,
+	_default_value,
 	_field_value_matches_expected,
 	_filter_fields_for_scope,
+	_fill_button_group,
+	_fill_checkbox,
+	_fill_date_field,
+	_fill_text_field,
 	_find_best_profile_answer,
 	_format_entry_profile_text,
 	_infer_entry_data_from_scope,
@@ -20,6 +27,7 @@ from ghosthands.actions.domhand_fill import (
 	_known_profile_value_for_field,
 	_match_answer,
 	_parse_profile_evidence,
+	_replace_placeholder_answers,
 )
 from ghosthands.actions.domhand_select import _selection_matches_value
 from ghosthands.actions.views import (
@@ -46,6 +54,99 @@ SHADOW_DROPDOWN_HTML = """
 		`;
 		root.getElementById('job-board').addEventListener('click', () => { window.__selected = 'Job Board'; });
 		root.getElementById('linkedin').addEventListener('click', () => { window.__selected = 'LinkedIn'; });
+	</script>
+</body>
+</html>
+"""
+
+TRUSTED_BUTTON_GROUP_HTML = """
+<!DOCTYPE html>
+<html>
+<body>
+	<div id="disability-group" data-ff-id="disability-group" role="group" aria-label="Disability status">
+		<button type="button" id="btn-yes" aria-pressed="true">Yes</button>
+		<button type="button" id="btn-no" aria-pressed="false">No, I do not have a disability and have not had one in the past</button>
+	</div>
+	<script>
+		window.__selected = 'Yes';
+		const buttons = Array.from(document.querySelectorAll('#disability-group button'));
+		buttons.forEach((button) => {
+			button.addEventListener('click', (event) => {
+				if (!event.isTrusted) return;
+				buttons.forEach((candidate) => candidate.setAttribute('aria-pressed', 'false'));
+				button.setAttribute('aria-pressed', 'true');
+				window.__selected = button.textContent.trim();
+			});
+		});
+	</script>
+</body>
+</html>
+"""
+
+TRUSTED_CHECKBOX_HTML = """
+<!DOCTYPE html>
+<html>
+<body>
+	<div id="disability-row" role="row" style="display:flex;gap:12px;align-items:center;padding:16px;border:1px solid #ccc;width:640px;">
+		<div
+			id="disability-no"
+			data-ff-id="disability-no"
+			role="checkbox"
+			aria-checked="false"
+			aria-label="No, I do not have a disability and have not had one in the past"
+			style="width:28px;height:28px;border:1px solid #666;"
+		></div>
+		<div role="cell">No, I do not have a disability and have not had one in the past</div>
+	</div>
+	<script>
+		window.__selected = '';
+		const row = document.getElementById('disability-row');
+		const checkbox = document.getElementById('disability-no');
+		row.addEventListener('click', (event) => {
+			if (!event.isTrusted) return;
+			checkbox.setAttribute('aria-checked', 'true');
+			window.__selected = 'No, I do not have a disability and have not had one in the past';
+		});
+	</script>
+</body>
+</html>
+"""
+
+ENTER_COMMIT_NAME_HTML = """
+<!DOCTYPE html>
+<html>
+<body>
+	<label for="candidate-name">Name</label>
+	<input id="candidate-name" data-ff-id="candidate-name" type="text" aria-label="Name" />
+	<script>
+		window.__committedName = '';
+		const input = document.getElementById('candidate-name');
+		input.addEventListener('keydown', (event) => {
+			if (event.key === 'Enter' && event.isTrusted) {
+				window.__committedName = input.value;
+				input.setAttribute('data-committed', 'true');
+			}
+		});
+	</script>
+</body>
+</html>
+"""
+
+ENTER_COMMIT_DATE_HTML = """
+<!DOCTYPE html>
+<html>
+<body>
+	<label for="start-date">Date</label>
+	<input id="start-date" data-ff-id="start-date" type="text" aria-label="Date" />
+	<script>
+		window.__committedDate = '';
+		const input = document.getElementById('start-date');
+		input.addEventListener('keydown', (event) => {
+			if (event.key === 'Enter' && event.isTrusted) {
+				window.__committedDate = input.value;
+				input.setAttribute('data-committed', 'true');
+			}
+		});
 	</script>
 </body>
 </html>
@@ -136,6 +237,25 @@ def test_known_entry_value_supports_currently_working_and_graduation_date():
 	assert _known_entry_value_for_field(field, entry) == 'Bachelors'
 
 
+def test_known_entry_value_maps_start_and_end_years_to_correct_side():
+	entry = {
+		'start_date': '2024-09',
+		'graduation_date': '2027-05',
+	}
+	from_field = FormField(field_id='edu-from', name='From', field_type='text', section='Education 1')
+	to_field = FormField(field_id='edu-to', name='To (Actual or Expected)', field_type='text', section='Education 1')
+
+	assert _known_entry_value_for_field(from_field, entry) == '2024'
+	assert _known_entry_value_for_field(to_field, entry) == '2027'
+
+
+def test_known_entry_value_leaves_missing_end_side_blank():
+	entry = {'start_date': '2024-09'}
+	to_field = FormField(field_id='edu-to-missing', name='To (Actual or Expected)', field_type='text', section='Education 1')
+
+	assert _known_entry_value_for_field(to_field, entry) is None
+
+
 def test_format_entry_profile_text_includes_scoped_values():
 	entry = {
 		'title': 'Software Engineer',
@@ -219,17 +339,171 @@ async def test_click_dropdown_option_finds_open_shadow_root_options(
 		assert await page.evaluate("() => window.__selected") == 'LinkedIn'
 
 
+async def test_fill_button_group_uses_gui_fallback_for_untrusted_dom_clicks(
+	httpserver: HTTPServer,
+):
+	async with managed_browser_session() as browser_session:
+		tools = Tools()
+		httpserver.expect_request('/trusted-button-group').respond_with_data(
+			TRUSTED_BUTTON_GROUP_HTML,
+			content_type='text/html',
+		)
+
+		await tools.navigate(
+			url=httpserver.url_for('/trusted-button-group'),
+			new_tab=False,
+			browser_session=browser_session,
+		)
+		await asyncio.sleep(0.3)
+
+		page = await browser_session.get_current_page()
+		assert page is not None
+		await page.evaluate(_build_inject_helpers_js())
+
+		field = FormField(
+			field_id='disability-group',
+			name='Disability Status',
+			field_type='button-group',
+			section='Self Identify',
+			choices=[
+				'Yes',
+				'No, I do not have a disability and have not had one in the past',
+			],
+		)
+
+		success = await _fill_button_group(
+			page,
+			field,
+			'No, I do not have a disability and have not had one in the past',
+			'[Disability Status]',
+		)
+
+		assert success is True
+		assert await page.evaluate("() => window.__selected") == 'No, I do not have a disability and have not had one in the past'
+
+
+async def test_fill_checkbox_uses_gui_fallback_for_untrusted_dom_clicks(
+	httpserver: HTTPServer,
+):
+	async with managed_browser_session() as browser_session:
+		tools = Tools()
+		httpserver.expect_request('/trusted-checkbox').respond_with_data(
+			TRUSTED_CHECKBOX_HTML,
+			content_type='text/html',
+		)
+
+		await tools.navigate(
+			url=httpserver.url_for('/trusted-checkbox'),
+			new_tab=False,
+			browser_session=browser_session,
+		)
+		await asyncio.sleep(0.3)
+
+		page = await browser_session.get_current_page()
+		assert page is not None
+		await page.evaluate(_build_inject_helpers_js())
+
+		field = FormField(
+			field_id='disability-no',
+			name='No, I do not have a disability and have not had one in the past',
+			field_type='checkbox',
+			section='Self Identify',
+		)
+
+		success = await _fill_checkbox(
+			page,
+			field,
+			'checked',
+			'[Disability Status]',
+		)
+
+		assert success is True
+		assert await page.evaluate("() => window.__selected") == 'No, I do not have a disability and have not had one in the past'
+		assert await page.evaluate("() => document.getElementById('disability-no').getAttribute('aria-checked')") == 'true'
+
+
+async def test_fill_text_field_commits_exact_name_with_enter(
+	httpserver: HTTPServer,
+):
+	async with managed_browser_session() as browser_session:
+		tools = Tools()
+		httpserver.expect_request('/enter-commit-name').respond_with_data(
+			ENTER_COMMIT_NAME_HTML,
+			content_type='text/html',
+		)
+
+		await tools.navigate(
+			url=httpserver.url_for('/enter-commit-name'),
+			new_tab=False,
+			browser_session=browser_session,
+		)
+		await asyncio.sleep(0.3)
+
+		page = await browser_session.get_current_page()
+		assert page is not None
+		await page.evaluate(_build_inject_helpers_js())
+
+		field = FormField(
+			field_id='candidate-name',
+			name='Name',
+			field_type='text',
+			section='Self Identify',
+		)
+
+		success = await _fill_text_field(page, field, 'Rioyang Chen', '[Name]')
+
+		assert success is True
+		assert await page.evaluate("() => window.__committedName") == 'Rioyang Chen'
+		assert await page.evaluate("() => document.getElementById('candidate-name').getAttribute('data-committed')") == 'true'
+
+
+async def test_fill_date_field_commits_with_enter(
+	httpserver: HTTPServer,
+):
+	async with managed_browser_session() as browser_session:
+		tools = Tools()
+		httpserver.expect_request('/enter-commit-date').respond_with_data(
+			ENTER_COMMIT_DATE_HTML,
+			content_type='text/html',
+		)
+
+		await tools.navigate(
+			url=httpserver.url_for('/enter-commit-date'),
+			new_tab=False,
+			browser_session=browser_session,
+		)
+		await asyncio.sleep(0.3)
+
+		page = await browser_session.get_current_page()
+		assert page is not None
+		await page.evaluate(_build_inject_helpers_js())
+
+		field = FormField(
+			field_id='start-date',
+			name='Date',
+			field_type='date',
+			section='Self Identify',
+		)
+
+		success = await _fill_date_field(page, field, '03/12/2026', '[Date]')
+
+		assert success is True
+		assert await page.evaluate("() => window.__committedDate") == '03/12/2026'
+		assert await page.evaluate("() => document.getElementById('start-date').getAttribute('data-committed')") == 'true'
+
+
 def test_parse_profile_evidence_includes_address_and_referral_fields():
 	evidence = _parse_profile_evidence(
 		'{"address":"100 Main St","address_line_2":"Apt 4B","country":"United States",'
-		'"how_did_you_hear":"LinkedIn","phone_type":"Mobile"}'
+		'"how_did_you_hear":"LinkedIn"}'
 	)
 
 	assert evidence['address'] == '100 Main St'
 	assert evidence['address_line_2'] == 'Apt 4B'
 	assert evidence['country'] == 'United States'
 	assert evidence['how_did_you_hear'] == 'LinkedIn'
-	assert evidence['phone_device_type'] == 'Mobile'
+	assert evidence['phone_device_type'] is None
+	assert evidence['phone_country_code'] is None
 
 
 def test_infer_entry_data_from_scope_uses_profile_lists():
@@ -252,6 +526,15 @@ def test_known_profile_value_matches_optional_address_fields():
 	assert _known_profile_value('Address Line 1', evidence) == '100 Main St'
 	assert _known_profile_value('Apartment / Unit', evidence) == 'Apt 4B'
 	assert _known_profile_value('Country / Region', evidence) == 'United States'
+
+
+def test_known_profile_value_maps_exact_name_to_full_name():
+	evidence = {
+		'first_name': 'Rioyang',
+		'last_name': 'Chen',
+	}
+
+	assert _known_profile_value('Name*', evidence) == 'Rioyang Chen'
 
 
 def test_known_profile_value_matches_optional_address_and_link_variants():
@@ -336,6 +619,48 @@ def test_match_answer_skips_ambiguous_optional_field_matches():
 	answers = {'Source': 'LinkedIn'}
 
 	assert _match_answer(field, answers, {}, {}) is None
+
+
+def test_default_value_only_uses_narrow_policy_dates():
+	regular_date = FormField(field_id='start-date', name='Start Date', field_type='date', section='Education 1')
+	self_identify_date = FormField(field_id='self-date', name='Date', field_type='date', section='Self Identify')
+	source_field = FormField(field_id='source', name='How Did You Hear About Us?', field_type='select', section='My Information')
+
+	assert _default_value(regular_date) == ''
+	assert _default_value(source_field) == ''
+	assert _default_value(self_identify_date) == date.today().isoformat()
+
+
+def test_replace_placeholder_answers_does_not_invent_non_demographic_values():
+	field = FormField(
+		field_id='source-required',
+		name='How Did You Hear About Us?',
+		field_type='select',
+		section='My Information',
+		required=True,
+		options=['Select One', 'LinkedIn', 'Other'],
+	)
+	parsed = {'How Did You Hear About Us?': 'Select One'}
+
+	_replace_placeholder_answers(parsed, [field], ['How Did You Hear About Us?'])
+
+	assert parsed['How Did You Hear About Us?'] == ''
+
+
+def test_replace_placeholder_answers_allows_neutral_decline_for_self_identify():
+	field = FormField(
+		field_id='disability-disclosure',
+		name='Disability Status',
+		field_type='select',
+		section='Self Identify',
+		required=True,
+		options=['Select One', 'I do not wish to answer', 'No'],
+	)
+	parsed = {'Disability Status': 'Select One'}
+
+	_replace_placeholder_answers(parsed, [field], ['Disability Status'])
+
+	assert parsed['Disability Status'] == 'I do not wish to answer'
 
 
 def test_dropdown_selection_match_requires_final_visible_value():

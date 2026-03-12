@@ -10,8 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import traceback
-import uuid
-from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -20,7 +18,6 @@ import structlog
 from ghosthands.config.settings import settings
 from ghosthands.integrations.credentials import (
 	decrypt_credentials,
-	decrypt_valet_credentials,
 )
 from ghosthands.integrations.database import Database
 from ghosthands.integrations.resume_loader import load_resume
@@ -361,7 +358,6 @@ async def _run_agent(
 	os.environ["GH_USER_PROFILE_JSON"] = json.dumps(profile)
 
 	# ── Build task prompt ────────────────────────────────────────
-	profile_snippet = json.dumps(profile, indent=2) if profile else "{}"
 	resume_path = input_data.get("resume_path", "")
 	if resume_path:
 		os.environ["GH_RESUME_PATH"] = resume_path
@@ -394,6 +390,7 @@ Other rules:
 {workday_start_flow_rules.rstrip()}
 - For searchable or multi-layer dropdowns, type/search, WAIT 2-3 seconds for the list to update, and keep clicking until the final leaf option is selected and the field visibly changes.
 - Do NOT click a dropdown option and then Save/Continue in the same action batch. Wait briefly, verify the field settled, then continue.
+- If a control still shows validation after 2 attempts, STOP writing larger evaluate()/JS hacks for it. Re-open the same visible control, use a real click / coordinate click on the exact option, and verify the selected state changed before continuing.
 - If the page looks blank or partially loaded after clicking a start/continue button, WAIT 5-10 seconds before retrying, going back, or reopening the same dialog.
 - Never use navigate() to return to the original job URL after entering the application flow. Waiting is the default recovery.
 """
