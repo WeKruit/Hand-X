@@ -19,8 +19,29 @@ on:
 jobs:
   trigger_cloud_eval_image_build:
     runs-on: ubuntu-latest
+    env:
+      TRIGGER_CLOUD_BUILD_GH_KEY: ${{ secrets.TRIGGER_CLOUD_BUILD_GH_KEY }}
     steps:
+      - name: Check cloud eval dispatch configuration
+        id: preflight
+        shell: bash
+        run: |
+          if [ "$GITHUB_REPOSITORY_OWNER" != "browser-use" ]; then
+            echo "Skipping cloud eval dispatch outside the browser-use organization."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "$TRIGGER_CLOUD_BUILD_GH_KEY" ]; then
+            echo "Skipping cloud eval dispatch because TRIGGER_CLOUD_BUILD_GH_KEY is not configured."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
       - uses: actions/github-script@v7
+        if: steps.preflight.outputs.enabled == 'true'
         with:
           github-token: ${{ secrets.TRIGGER_CLOUD_BUILD_GH_KEY }}
           script: |

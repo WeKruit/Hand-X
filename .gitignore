@@ -62,7 +62,6 @@ Thumbs.db
 saved_trajectories/
 
 # Lock files (uv generates on install)
-uv.lock
 
 # Temp
 temp/
