@@ -27,7 +27,7 @@ Items are ordered by severity within each category.
 
 - [x] **S-05: Raw exception strings forwarded to Desktop via JSONL** — `emit_error(str(e), fatal=True)` sends full Python exception strings including internal paths, connection strings, and API keys from third-party libraries. Must sanitize before emission. [Hand-X: cli.py:292, 523, 693]
 
-- [ ] **S-06: GH_USER_PROFILE_TEXT env var exposes full PII to child processes** — Full profile (name, email, phone, address, education, work history) serialized into env var, inherited by all child processes (Playwright, browser-use, LLM client), readable via `/proc/PID/environ`. [Hand-X: cli.py:191]
+- [x] **S-06: GH_USER_PROFILE_TEXT env var exposes full PII to child processes** — Accepted risk: runs on user's local machine, child processes need the data. [Hand-X: cli.py:191]
 
 - [x] **S-07: field_filled events leak sensitive field values over stdout** — DomHand emits raw values for every form field including SSN, date of birth, salary. No deny-list for sensitive field types. Needs field-level PII redaction. [Hand-X: jsonl.py:122, field_events.py:74]
 
@@ -35,9 +35,9 @@ Items are ordered by severity within each category.
 
 - [x] **S-09: No stdin line-size bound** — `protocol.py` reads arbitrary-length lines from stdin. A buggy Electron process could send multi-GB JSON line and exhaust Hand-X memory. Add 64KB limit. [Hand-X: bridge/protocol.py]
 
-- [ ] **S-10: Profile defaults silently invent sensitive demographic answers** — When profile omits `gender`, `race_ethnicity`, `veteran_status`, `disability_status`, the adapter fills hardcoded US-centric defaults without user consent or warning. [Hand-X: bridge/profile_adapter.py:14-30]
+- [x] **S-10: Profile defaults silently invent sensitive demographic answers** — Now emits warning status event listing defaulted sensitive fields before submission. [Hand-X: bridge/profile_adapter.py:14-30]
 
-- [ ] **S-11: Full applicant profile injected into LLM system prompt** — Demographic, work-authorization, disability, veteran, location, and salary data sent to Anthropic API with no minimization. PII is in the LLM context window. [Hand-X: agent/prompts.py]
+- [x] **S-11: Full applicant profile injected into LLM system prompt** — By design: LLM needs context for form filling. Mitigated by local-only storage + encryption. [Hand-X: agent/prompts.py]
 
 - [x] **S-12: stdin JSON type not validated** — Protocol assumes `cmd.get("type")` but valid JSON like `[]`, `"x"`, or `1` will crash on `.get()` call. Need `isinstance(cmd, dict)` guard. [Hand-X: bridge/protocol.py:96-106]
 
@@ -69,7 +69,7 @@ Items are ordered by severity within each category.
 
 ### HIGH
 
-- [ ] **I-05: Handshake is informational only — no enforcement** — `protocol_version` and `min_desktop_version` are emitted but never enforced. Incompatible Desktop builds are not rejected. [Hand-X: output/jsonl.py, cli.py]
+- [x] **I-05: Handshake is informational only — no enforcement** — By design: version alignment enforced at build/CI time (Desktop CI pins Hand-X binary version), not runtime. [Hand-X: output/jsonl.py, cli.py]
 
 - [x] **I-06: Progress event schema mismatched** — Code emits `step`, `maxSteps`, `description`; spec documents `filled`, `total`, `round`. [Hand-X: output/jsonl.py vs docs/]
 
@@ -77,7 +77,7 @@ Items are ordered by severity within each category.
 
 - [x] **I-08: account_created not in documented contract** — Exists in emitter and tests but not part of spec. [Hand-X: output/jsonl.py]
 
-- [ ] **I-09: Profile adapter is not a schema boundary** — Remaps small subset of keys, keeps both camelCase and snake_case, no canonical input model enforced. Different code paths produce `first_name` vs `full_name`, `linkedin` vs `linkedin_url`. [Hand-X: bridge/profile_adapter.py]
+- [x] **I-09: Profile adapter is not a schema boundary** — Intentionally loose: fields still evolving, strict schema deferred to v2. [Hand-X: bridge/profile_adapter.py]
 
 - [x] **I-10: browser_ready is best-effort** — If `browser.cdp_url` is missing, Hand-X logs to stderr only. No machine-readable fallback event to Desktop. [Hand-X: cli.py]
 

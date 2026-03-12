@@ -7,7 +7,10 @@ codebase, and fills in default values that the Desktop bridge omits.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Defaults matching resume_loader.PROFILE_DEFAULTS — duplicated here to avoid
 # importing the integrations package (which pulls in asyncpg/database).
@@ -28,6 +31,18 @@ DOMHAND_PROFILE_DEFAULTS: dict[str, Any] = {
     "gender": "Male",
     "race_ethnicity": "Asian (Not Hispanic or Latino)",
 }
+
+# Demographic / sensitive fields that warrant a user-visible warning when
+# defaults are applied.  Non-sensitive fields like phone_device_type and
+# address are intentionally excluded.
+SENSITIVE_DEFAULT_FIELDS: frozenset[str] = frozenset({
+    "gender",
+    "race_ethnicity",
+    "veteran_status",
+    "disability_status",
+    "work_authorization",
+    "visa_sponsorship",
+})
 
 
 CAMEL_TO_SNAKE_SCALAR: dict[str, str] = {
@@ -107,9 +122,17 @@ def normalize_profile_defaults(profile: dict[str, Any]) -> dict[str, Any]:
     This function fills in missing keys with sensible defaults, matching
     the ``PROFILE_DEFAULTS`` from ``resume_loader``.  Existing values in
     the profile are never overwritten.
+
+    If any *sensitive* demographic fields (gender, race_ethnicity,
+    veteran_status, disability_status, work_authorization, visa_sponsorship)
+    receive defaults, a warning status event is emitted via the JSONL
+    protocol so the Desktop app can surface it to the user.
     """
     defaults = DOMHAND_PROFILE_DEFAULTS
     normalized = dict(profile)
+
+    # Track which sensitive fields had defaults applied
+    defaulted_sensitive: list[str] = []
 
     # ── Scalar defaults ──────────────────────────────────────────
     for key in (
@@ -124,6 +147,8 @@ def normalize_profile_defaults(profile: dict[str, Any]) -> dict[str, Any]:
     ):
         if key not in normalized or normalized[key] is None or normalized[key] == "":
             normalized[key] = defaults[key]
+            if key in SENSITIVE_DEFAULT_FIELDS:
+                defaulted_sensitive.append(key)
 
     # ── Address defaults (merge, don't overwrite) ────────────────
     default_address = defaults["address"]
@@ -139,5 +164,22 @@ def normalize_profile_defaults(profile: dict[str, Any]) -> dict[str, Any]:
         normalized["address"] = merged
     # If address is a string (e.g. "San Francisco, CA"), leave it as-is —
     # _format_profile_summary handles string addresses fine.
+
+    # ── Emit warning for defaulted sensitive fields ──────────────
+    if defaulted_sensitive:
+        field_list = ", ".join(defaulted_sensitive)
+        msg = (
+            f"Using default answers for: {field_list} "
+            f"— verify before submitting"
+        )
+        logger.warning("demographic_defaults_applied", extra={"fields": defaulted_sensitive})
+        try:
+            from ghosthands.output.jsonl import emit_status
+
+            emit_status(msg)
+        except Exception:
+            # If JSONL emitter is not available (e.g. running outside
+            # Desktop bridge context), the warning is still logged above.
+            pass
 
     return normalized
