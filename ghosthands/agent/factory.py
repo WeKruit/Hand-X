@@ -130,6 +130,7 @@ async def create_job_agent(
 		headless=headless,
 		allowed_domains=allowed_domains,
 		keep_alive=True,  # Keep browser open for user review / HITL
+		demo_mode=False,  # Suppress browser-use logo/panel overlay
 	)
 
 	# ── Sensitive data (credentials) ──────────────────────────────

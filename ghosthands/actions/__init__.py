@@ -126,6 +126,13 @@ def register_domhand_actions(tools: "Tools") -> None:
 		param_model=DomHandExpandParams,
 	)(domhand_expand)
 
+	# ── Enable global visual cursor (patches Mouse + Element) ───
+	try:
+		from ghosthands.visuals.patch import enable_visual_cursor
+		enable_visual_cursor()
+	except ImportError:
+		pass
+
 	# Log what was registered
 	registered = [
 		name for name in tools.registry.registry.actions
