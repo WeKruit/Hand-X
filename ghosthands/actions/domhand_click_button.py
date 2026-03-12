@@ -364,6 +364,47 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
 		checkboxes = diagnostics.get("checkboxes", [])
 		forms = diagnostics.get("forms", [])
 
+		unchecked_boxes = [cb for cb in checkboxes if not cb.get("checked")]
+
+		# ── Auto-fix: if unchecked checkboxes are likely blocking submission,
+		#    check them automatically and retry the button click once.
+		if unchecked_boxes:
+			logger.info("domhand_click_button.auto_checking_boxes", extra={
+				"label": label,
+				"unchecked": [cb.get("label", "?")[:60] for cb in unchecked_boxes],
+			})
+			try:
+				from ghosthands.actions.domhand_check_agreement import (
+					DomHandCheckAgreementParams,
+					domhand_check_agreement,
+				)
+				await domhand_check_agreement(DomHandCheckAgreementParams(), browser_session)
+				await asyncio.sleep(0.5)
+
+				# Retry the button click after checking boxes
+				retry_json = await page.evaluate(_FIND_AND_CLICK_JS, label, True)
+				retry_result = json.loads(retry_json)
+				if retry_result.get("found") and retry_result.get("clicked"):
+					await asyncio.sleep(1.5)
+					try:
+						url_after = await page.get_url()
+					except Exception:
+						url_after = url_before
+
+					if url_before != url_after:
+						logger.info("domhand_click_button.retry_after_checkbox_success", extra={
+							"label": label,
+						})
+						return ActionResult(
+							extracted_content=(
+								f"DomHand click: auto-checked agreement checkbox, then clicked "
+								f"'{label}'. Page navigated to {url_after}."
+							),
+							include_in_memory=True,
+						)
+			except Exception as e:
+				logger.debug(f"Auto-check-and-retry failed: {e}")
+
 		detail_parts = [
 			f"DomHand click: found and clicked '{label}' but page did not navigate.",
 		]
@@ -372,10 +413,14 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
 			error_texts = [e.get("text", "")[:80] for e in hidden_errors[:5]]
 			detail_parts.append(f"Hidden errors found: {error_texts}")
 
-		unchecked_boxes = [cb for cb in checkboxes if not cb.get("checked")]
 		if unchecked_boxes:
 			labels = [cb.get("label", "?")[:60] for cb in unchecked_boxes]
-			detail_parts.append(f"Unchecked checkboxes: {labels}")
+			detail_parts.append(
+				f"UNCHECKED CHECKBOXES DETECTED: {labels}. "
+				"An unchecked agreement checkbox is the most likely cause. "
+				"Use domhand_check_agreement or click the checkbox manually, "
+				"then try domhand_click_button again."
+			)
 
 		invalid_forms = [f for f in forms if not f.get("valid")]
 		if invalid_forms:
@@ -384,12 +429,12 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
 								for fld in f.get("fields", [])]
 				detail_parts.append(f"Form validation errors: {invalid_fields}")
 
-		detail_parts.append(
-			"The button was clicked via JS + CDP but the page did not transition. "
-			"Possible causes: form validation failure, unchecked required checkbox, "
-			"or the site blocks automated clicks. Try checking error messages or "
-			"required fields manually."
-		)
+		if not unchecked_boxes and not hidden_errors and not invalid_forms:
+			detail_parts.append(
+				"The button was clicked but the page did not transition. "
+				"Possible causes: the site blocks automated clicks, or a "
+				"required field is missing. Check for error messages."
+			)
 
 		logger.warning("domhand_click_button.no_transition", extra={
 			"label": label,

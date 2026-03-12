@@ -127,14 +127,19 @@ async def apply_to_job(
 	# ── Task prompt ───────────────────────────────────────────────
 	task = f"""Go to {job_url} and fill out the job application form completely.
 
-CRITICAL — Action Order:
-1. After navigating to the page, your FIRST action MUST be domhand_fill. It fills ALL visible form fields in one call via DOM manipulation. Do NOT use click or input actions before trying domhand_fill.
-2. After domhand_fill completes, review its output to see which fields were filled and which failed.
-3. For failed dropdowns/selects, use domhand_select.
-4. For file uploads (resume), use domhand_upload or upload_file action with path: {resume_path}
-5. Only use generic browser-use actions (click, input_text) as a LAST RESORT for fields DomHand could not handle.
-6. After all fields on the current page are filled, click Next/Continue/Save to advance.
-7. On each new page, call domhand_fill AGAIN as the first action.
+ACTION ORDER FOR FORM PAGES:
+1. On each form page, your FIRST action MUST be domhand_fill.
+2. Review domhand_fill output — handle unresolved fields with domhand_select.
+3. For file uploads (resume), use domhand_upload or upload_file with path: {resume_path}
+4. Only use generic browser-use actions (click, input_text) as a LAST RESORT.
+5. After all fields are filled, click Next/Continue/Save to advance.
+6. On each new form page, call domhand_fill AGAIN as the first action.
+
+ACTION ORDER FOR AUTH PAGES (Create Account / Sign In):
+Do NOT call domhand_fill on auth pages — it uses the wrong email.
+Instead: (1) input credentials, (2) domhand_check_agreement to check
+the 'I agree' checkbox — THIS IS REQUIRED or the button silently fails,
+(3) VERIFY the checkbox is checked, (4) domhand_click_button to submit.
 
 Other rules:
 - {'Use the provided credentials to log in or create an account if needed. For Workday, fill email + password + confirm password on the Create Account page.' if sensitive_data else 'If a login wall appears, report it as a blocker.'}
