@@ -358,6 +358,7 @@ async def _run_agent(
 	# domhand_fill reads GH_USER_PROFILE_TEXT to generate field answers.
 	profile = resume_profile or {}
 	os.environ["GH_USER_PROFILE_TEXT"] = json.dumps(profile, indent=2)
+	os.environ["GH_USER_PROFILE_JSON"] = json.dumps(profile)
 
 	# ── Build task prompt ────────────────────────────────────────
 	profile_snippet = json.dumps(profile, indent=2) if profile else "{}"
@@ -365,12 +366,22 @@ async def _run_agent(
 	if resume_path:
 		os.environ["GH_RESUME_PATH"] = resume_path
 
+	workday_start_flow_rules = ""
+	if platform == "workday":
+		workday_start_flow_rules = (
+			"- If a start dialog offers a SAME-SITE option such as 'Autofill with Resume' or 'Apply with Resume', prefer that path over manual entry.\n"
+			"- Do NOT choose external apply/import options such as LinkedIn, Indeed, Google, or other third-party account flows.\n"
+			"- After uploading a resume on Workday, WAIT for the filename or a success message to appear and for the Continue button to become enabled before clicking it.\n"
+			"- Do NOT upload a resume and click Continue in the same action batch.\n"
+		)
+
 	task = f"""Go to {target_url} and fill out the job application form completely.
 
 CRITICAL — Action Order:
 1. After navigating to the page, your FIRST action MUST be domhand_fill. It fills ALL visible form fields in one call via DOM manipulation. Do NOT use click or input actions before trying domhand_fill.
 2. After domhand_fill completes, review its output to see which fields were filled and which failed.
-3. For failed dropdowns/selects, use domhand_select.
+3. For failed dropdowns/selects, use domhand_select. Retry failed fields even if they are optional when the applicant profile provides a value (address, website, referral source, LinkedIn, etc.).
+   For optional fields, only retry when the applicant profile clearly maps to that field with high confidence. If the optional match is ambiguous, leave it blank.
 4. For file uploads (resume), use domhand_upload or upload_file action.
 5. Only use generic browser-use actions (click, input) as a LAST RESORT for fields DomHand could not handle.
 6. After all fields on the current page are filled, click Next/Continue/Save to advance.
@@ -380,6 +391,11 @@ Other rules:
 - {'Use the provided credentials to log in if needed.' if credentials else 'If a login wall appears, report it as a blocker.'}
 - Do NOT click the final Submit button. Stop at the review page and use the done action.
 - If anything pops up blocking the form, close it and continue.
+{workday_start_flow_rules.rstrip()}
+- For searchable or multi-layer dropdowns, type/search, WAIT 2-3 seconds for the list to update, and keep clicking until the final leaf option is selected and the field visibly changes.
+- Do NOT click a dropdown option and then Save/Continue in the same action batch. Wait briefly, verify the field settled, then continue.
+- If the page looks blank or partially loaded after clicking a start/continue button, WAIT 5-10 seconds before retrying, going back, or reopening the same dialog.
+- Never use navigate() to return to the original job URL after entering the application flow. Waiting is the default recovery.
 """
 
 	# ── Status callback for cost tracking + VALET progress ───────

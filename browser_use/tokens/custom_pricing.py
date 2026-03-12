@@ -39,4 +39,14 @@ CUSTOM_MODEL_PRICING: dict[str, dict[str, Any]] = {
 }
 CUSTOM_MODEL_PRICING['bu-latest'] = CUSTOM_MODEL_PRICING['bu-1-0']
 
+CUSTOM_MODEL_PRICING['gemini-3.1-flash-lite-preview'] = {
+	'input_cost_per_token': 0.075 / 1_000_000,  # Lite = ~half of Flash
+	'output_cost_per_token': 0.30 / 1_000_000,
+	'cache_read_input_token_cost': 0.01875 / 1_000_000,
+	'cache_creation_input_token_cost': None,
+	'max_tokens': None,
+	'max_input_tokens': 1_048_576,
+	'max_output_tokens': 65_536,
+}
+
 CUSTOM_MODEL_PRICING['smart'] = CUSTOM_MODEL_PRICING['bu-1-0']

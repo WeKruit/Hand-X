@@ -1,99 +1,103 @@
 {
-	"first_name": "Jane",
-	"last_name": "Smith",
-	"email": "jane.smith@example.com",
-	"phone": "555-123-4567",
+	"first_name": "Ruiyang",
+	"last_name": "Chen",
+	"full_name": "Ruiyang Chen",
+	"preferred_name": "Ringo",
+	"email": "rc5663@nyu.edu",
+	"phone": "646-678-9391",
 	"phone_type": "Mobile",
+	"phone_device_type": "Mobile",
 	"phone_country_code": "+1",
 
-	"address": "100 Main St",
-	"address_line_2": "Apt 4B",
-	"city": "Rochester",
+	"address": "",
+	"address_line_2": "",
+	"city": "New York",
 	"state": "NY",
-	"postal_code": "14621",
+	"postal_code": "10003",
 	"country": "United States",
 
-	"linkedin": "https://www.linkedin.com/in/janesmith",
-	"portfolio": "https://janesmith.dev",
-	"github": "https://github.com/janesmith",
+	"linkedin": "https://linkedin.com/in/ruiyang-chen-864842311",
+	"linkedin_url": "https://linkedin.com/in/ruiyang-chen-864842311",
+	"portfolio": "https://www.ringochenry.com",
+	"website_url": "https://www.ringochenry.com",
+	"github": "https://github.com/ringochen06",
 
-	"US_citizen": true,
-	"sponsorship_needed": false,
 	"authorized_to_work": true,
-	"work_authorization": "US Citizen",
-
-	"age": "28",
-	"gender": "Female",
-	"race": "White",
-	"hispanic_latino": "No",
-	"Veteran_status": "I am not a protected veteran",
+	"work_authorization": "Yes",
+	"sponsorship_needed": false,
+	"Veteran_status": "I do not wish to answer",
 	"disability_status": "I do not wish to answer",
 
 	"how_did_you_hear": "LinkedIn",
 	"referral_source": "LinkedIn",
 	"referred_by": "",
 
-	"available_start_date": "2026-04-15",
-	"salary_expectation": "80000",
-	"salary_currency": "USD",
-	"willing_to_relocate": true,
-	"preferred_shift": "Day",
-
-	"years_experience": "3",
+	"available_start_date": "2026-06-01",
+	"years_experience": "1",
 
 	"experience": [
 		{
-			"title": "Software Engineer",
-			"company": "Acme Corp",
-			"location": "Rochester, NY",
-			"start_date": "2024-06",
+			"title": "Software Engineering Intern",
+			"company": "Global Key Solutions",
+			"location": "New York, NY",
+			"start_date": "2025-09",
+			"end_date": "2025-12",
+			"currently_working": false,
+			"description": "Built a full-stack regulatory data pipeline for life science websites, designed a PostgreSQL processing architecture with schema validation and resilient ingestion, and improved structured extraction quality for downstream compliance workflows."
+		},
+		{
+			"title": "Undergraduate Research Assistant",
+			"company": "NYU AI Mechatronics Systems Lab",
+			"location": "New York, NY",
+			"start_date": "2025-03",
 			"end_date": "",
 			"currently_working": true,
-			"description": "Full-stack web development using React, Node.js, and PostgreSQL. Led migration of legacy monolith to microservices architecture. Implemented CI/CD pipeline reducing deployment time by 60%."
+			"description": "Developed real-time multimodal prototypes for soft robotic systems using OCR, YOLOv11, OpenCV, MediaPipe, and LLM-based reasoning, and optimized the vision-LLM pipeline for low-latency deployment on Jetson devices."
 		},
 		{
 			"title": "Software Engineering Intern",
-			"company": "TechStart Inc",
-			"location": "New York, NY",
-			"start_date": "2023-06",
-			"end_date": "2023-12",
+			"company": "Wekruit",
+			"location": "",
+			"start_date": "2025-07",
+			"end_date": "2025-08",
 			"currently_working": false,
-			"description": "Developed REST APIs in Python/Flask. Built automated testing suite covering 85% of codebase. Contributed to data pipeline processing 2M+ records daily."
+			"description": "Developed backend modules for an AI-powered mock interview platform, integrated LiveKit for real-time audio streaming, and helped deploy LLM-powered conversational interview agents."
 		}
 	],
 
 	"education": [
 		{
-			"school": "Rochester Institute of Technology",
+			"school": "New York University",
 			"degree": "Bachelor of Science",
-			"field_of_study": "Computer Science",
-			"gpa": "3.7",
-			"graduation_date": "2024-05",
-			"start_date": "2020-08"
+			"field_of_study": "Mathematics and Computer Science",
+			"gpa": "3.85",
+			"graduation_date": "2027-05",
+			"start_date": "2024-09"
 		}
 	],
 
 	"skills": [
-		"Python", "JavaScript", "TypeScript", "React", "Node.js",
-		"PostgreSQL", "AWS", "Docker", "Git", "REST APIs",
-		"Agile", "CI/CD"
+		"Python",
+		"Java",
+		"C/C++",
+		"TypeScript",
+		"SQL",
+		"Node.js",
+		"React",
+		"Express",
+		"PyTorch",
+		"FastAPI",
+		"PostgreSQL",
+		"MongoDB",
+		"GCP",
+		"Linux",
+		"Docker",
+		"MATLAB",
+		"SuperCollider"
 	],
 
-	"languages": [
-		{"language": "English", "proficiency": "Native"},
-		{"language": "Spanish", "proficiency": "Conversational"}
-	],
-
-	"certifications": [
-		{
-			"name": "AWS Certified Cloud Practitioner",
-			"issuer": "Amazon Web Services",
-			"date": "2025-03"
-		}
-	],
-
-	"what_drew_you_to_this_role": "I am passionate about building scalable software systems and this role aligns with my experience in full-stack development and cloud architecture.",
-	"why_this_company": "The company's commitment to innovation and engineering excellence resonates with my career goals.",
-	"what_are_your_strengths": "Strong problem-solving skills, experience with distributed systems, and a collaborative approach to engineering.",
-	"cover_letter_text": "Dear Hiring Manager,\n\nI am writing to express my interest in this position. With 3 years of experience in software engineering, including expertise in React, Node.js, and cloud technologies, I am confident I can contribute meaningfully to your team.\n\nAt Acme Corp, I led the migration of a legacy monolith to microservices, improving deployment velocity by 60%. I am eager to bring this same drive for engineering excellence to your organization.\n\nThank you for considering my application.\n\nBest regards,\nJane Smith"
+	"what_drew_you_to_this_role": "I like building production systems that combine solid backend engineering with practical AI workflows, and this role fits the work I have already done in data pipelines, real-time systems, and applied ML.",
+	"why_this_company": "I am looking for a team where I can keep improving as an engineer while shipping real products, and the company’s product and technical scope align with that goal.",
+	"what_are_your_strengths": "I am strong at turning ambiguous product ideas into working systems, moving across backend and applied AI work, and iterating quickly without losing rigor.",
+	"cover_letter_text": "Dear Hiring Manager,\n\nI am excited to apply for this role. I am a Mathematics and Computer Science student at New York University with hands-on experience across backend engineering, full-stack systems, and applied AI.\n\nMost recently, I built regulatory data pipelines at Global Key Solutions, developed multimodal robotics prototypes at NYU AI Mechatronics Systems Lab, and contributed backend and real-time audio features at Wekruit. Across these roles, I have worked with Python, TypeScript, FastAPI, React, PostgreSQL, Docker, and LLM-enabled workflows.\n\nI would be excited to bring that mix of product-minded engineering and practical execution to your team.\n\nBest regards,\nRuiyang Chen"
 }

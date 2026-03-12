@@ -20,7 +20,7 @@ Usage:
     python examples/apply_to_job.py --job-url "https://..." --model claude-sonnet-4-0
 
 Requires:
-    ANTHROPIC_API_KEY or OPENAI_API_KEY in environment or .env file.
+    GOOGLE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or GH_LLM_PROXY_URL.
 """
 
 import argparse
@@ -39,7 +39,9 @@ load_dotenv(ROOT / ".env")
 
 from browser_use import Agent, Browser, BrowserProfile, ChatGoogle, Tools
 from browser_use.tools.views import UploadFileAction
+from ghosthands.agent.hooks import install_same_tab_guard
 from ghosthands.agent.prompts import _format_profile_summary
+from ghosthands.config.settings import settings
 
 # ── Defaults ──────────────────────────────────────────────────────────
 EXAMPLES_DIR = Path(__file__).resolve().parent
@@ -47,7 +49,7 @@ DEFAULT_DATA = EXAMPLES_DIR / "apply_to_job_sample_data.json"
 DEFAULT_RESUME = EXAMPLES_DIR / "resume.pdf"
 DEFAULT_JOB_URL = "https://job-boards.greenhouse.io/starburst/jobs/5123053008"
 
-DEFAULT_MODEL = "gemini-3-flash-preview"
+DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
 
 
 def _get_llm(model: str | None = None):
@@ -83,6 +85,7 @@ async def apply_to_job(
 
 	# ── Set profile text for DomHand (domhand_fill reads from env) ─
 	os.environ["GH_USER_PROFILE_TEXT"] = _format_profile_summary(info)
+	os.environ["GH_USER_PROFILE_JSON"] = json.dumps(info)
 	if resume_path:
 		os.environ["GH_RESUME_PATH"] = str(resume_path)
 
@@ -122,35 +125,78 @@ async def apply_to_job(
 		browser_profile=BrowserProfile(
 			headless=headless,
 			keep_alive=True,  # Keep browser open for user review
+			wait_between_actions=settings.wait_between_actions,
 		),
 	)
 
 	# ── Task prompt ───────────────────────────────────────────────
+	workday_start_flow_rules = ""
+	if platform == "workday":
+		workday_start_flow_rules = (
+			"- If a start dialog offers a SAME-SITE option such as 'Autofill with Resume'\n"
+			"  or 'Apply with Resume', prefer that path over manual entry.\n"
+			"- Do NOT choose external apply/import options such as LinkedIn, Indeed,\n"
+			"  Google, or other third-party account flows.\n"
+			"- After uploading a resume on Workday, WAIT for the filename or a\n"
+			"  success message to appear and for the Continue button to become\n"
+			"  enabled before clicking it.\n"
+			"- Do NOT upload a resume and click Continue in the same action batch.\n"
+		)
+
 	task = f"""Go to {job_url} and fill out the job application form completely.
 
-ACTION ORDER FOR FORM PAGES:
-1. On each form page, your FIRST action MUST be domhand_fill.
-2. Review domhand_fill output — handle unresolved fields with domhand_select.
-3. For file uploads (resume), use domhand_upload or upload_file with path: {resume_path}
-4. Only use generic browser-use actions (click, input_text) as a LAST RESORT.
-5. After all fields are filled, click Next/Continue/Save to advance.
-6. On each new form page, call domhand_fill AGAIN as the first action.
+FORM PAGE SEQUENCE (repeat on EVERY form page):
+1. domhand_fill — fills all visible fields in one call. ALWAYS first.
+2. Handle domhand_fill's unresolved fields with domhand_select or click.
+   Do this for REQUIRED fields.
+   For OPTIONAL fields, only do it when the applicant profile clearly maps
+   to that field with high confidence (address, LinkedIn, website,
+   referral source, etc.). If the optional match is ambiguous, leave it blank.
+3. Upload resume: domhand_upload or upload_file with path: {resume_path}
+4. For repeater sections (Work Experience, Education):
+   a. Call domhand_expand(section="Work Experience") to click Add
+   b. Call domhand_fill with heading_boundary matching the new entry heading
+      and entry_data containing ONLY that one profile entry
+   c. Repeat for each entry in the applicant profile
+5. AFTER all fields are filled: click Next / Continue / Save & Continue.
+   *** YOU MUST CLICK NEXT. Do NOT call done() until you reach a
+   read-only review/confirmation page with no editable fields. ***
+6. On the new page, start over from step 1.
 
-ACTION ORDER FOR AUTH PAGES (Create Account / Sign In):
+AUTH PAGE SEQUENCE (Create Account / Sign In):
 Do NOT call domhand_fill on auth pages — it uses the wrong email.
-Instead: (1) input credentials, (2) domhand_check_agreement to check
-the 'I agree' checkbox — THIS IS REQUIRED or the button silently fails,
-(3) VERIFY the checkbox is checked, (4) domhand_click_button to submit.
+(1) input credentials, (2) domhand_check_agreement for 'I agree' checkbox,
+(3) VERIFY checkbox is checked, (4) domhand_click_button to submit.
 
-DROPDOWN RULE: After clicking a dropdown option, STOP and observe.
-Do NOT batch a dropdown click with 'Save and Continue' or any other action.
-Dropdowns may reveal sub-options that need a second selection.
+TRANSITION RULE:
+If the page looks blank or half-loaded after clicking a start/continue button,
+WAIT 5-10 seconds before going back, reopening the dialog, or retrying the click.
+Never use navigate() to go back to the original job URL after entering the
+application flow. Waiting is the default recovery, not restarting.
+
+DROPDOWN RULE: If domhand_select returns [FAIL-OVER], STOP retrying it.
+Click the dropdown open yourself, find the option visually, click it.
+If a dropdown is searchable or multi-layer, type/search, WAIT 2-3 seconds,
+and keep clicking until the FINAL leaf option is selected and the field text
+changes. Do NOT move on after the first click if a submenu appears or the
+field still looks empty/invalid. Do NOT click a dropdown option and then
+Save/Continue in the same action batch; wait briefly and re-evaluate first.
 
 Other rules:
 - {'Use the provided credentials to log in or create an account if needed. For Workday, fill email + password + confirm password on the Create Account page.' if sensitive_data else 'If a login wall appears, report it as a blocker.'}
 - Do NOT click the final Submit button. Stop at the review page and use the done action.
 - If anything pops up blocking the form, close it and continue.
+{workday_start_flow_rules.rstrip()}
+- Stay on this site — do NOT open new tabs or navigate away.
+- After auth, continue from wherever the redirect lands — do NOT go back to the job URL.
 """
+
+	async def _on_step_start(agent_instance):
+		await install_same_tab_guard(agent_instance)
+		try:
+			pass
+		except Exception:
+			pass  # Non-fatal — best effort
 
 	# ── Create agent ──────────────────────────────────────────────
 	agent = Agent(
@@ -162,7 +208,8 @@ Other rules:
 		sensitive_data=sensitive_data,
 		available_file_paths=[resume_path],
 		use_vision=True,
-		max_actions_per_step=2,
+		max_actions_per_step=settings.agent_max_actions_per_step,
+		calculate_cost=True,
 	)
 
 	# ── Run ───────────────────────────────────────────────────────
@@ -182,7 +229,7 @@ Other rules:
 	print("=" * 60)
 	print()
 
-	history = await agent.run(max_steps=max_steps)
+	history = await agent.run(max_steps=max_steps, on_step_start=_on_step_start)
 
 	# ── Results ───────────────────────────────────────────────────
 	print()
@@ -192,8 +239,13 @@ Other rules:
 	print(f"  Done:    {history.is_done()}")
 	print(f"  Steps:   {len(history.history)}")
 	if history.usage:
-		print(f"  Cost:    ${history.usage.total_cost:.4f}")
-		print(f"  Tokens:  {history.usage.total_prompt_tokens} in / {history.usage.total_completion_tokens} out")
+		try:
+			print(f"  Cost:    ${history.usage.total_cost:.4f}")
+			in_tok = getattr(history.usage, 'total_prompt_tokens', None) or getattr(history.usage, 'total_input_tokens', 0)
+			out_tok = getattr(history.usage, 'total_completion_tokens', None) or getattr(history.usage, 'total_output_tokens', 0)
+			print(f"  Tokens:  {in_tok} in / {out_tok} out")
+		except Exception:
+			print("  (token stats unavailable)")
 	result = history.final_result()
 	if result:
 		print(f"  Output:  {result[:500]}")

@@ -18,6 +18,10 @@
 #   export WORKDAY_TEST_EMAIL="your-test@email.com"
 #   export WORKDAY_TEST_PASSWORD="YourTestPassword123!"
 #
+# By default, this script auto-generates a simple +lastname alias:
+#   happy@ucla.edu -> happy+smith@ucla.edu
+# Pass --reuse-email if you want to reuse the exact email instead.
+#
 # Or pass inline:
 #   ./examples/workday_test.sh "https://..." --email test@email.com --password Pass123!
 # ─────────────────────────────────────────────────────────────
@@ -40,12 +44,12 @@ source "$DIR/.venv/bin/activate"
 [ -f "$DIR/.env" ] && set -a && source "$DIR/.env" && set +a
 
 # ── Check API keys ────────────────────────────────────────────
-if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${GH_ANTHROPIC_API_KEY:-}" ]; then
-  echo "ERROR: Set ANTHROPIC_API_KEY in .env or environment (needed for DomHand)"
+if [ -z "${GH_LLM_PROXY_URL:-}" ] && [ -z "${GOOGLE_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${GH_ANTHROPIC_API_KEY:-}" ]; then
+  echo "ERROR: Set one of GH_LLM_PROXY_URL, GOOGLE_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY"
   exit 1
 fi
-if [ -z "${GOOGLE_API_KEY:-}" ]; then
-  echo "WARNING: GOOGLE_API_KEY not set — agent model (Gemini) won't work without it"
+if [ -z "${GOOGLE_API_KEY:-}" ] && [ -z "${GH_LLM_PROXY_URL:-}" ]; then
+  echo "WARNING: GOOGLE_API_KEY not set — default Gemini Flash Lite model will need a different provider override"
 fi
 
 # ── Parse args ────────────────────────────────────────────────
@@ -72,15 +76,111 @@ if [ -z "$JOB_URL" ]; then
 fi
 
 # ── Credentials ───────────────────────────────────────────────
-EMAIL_ARG=""
-PASS_ARG=""
+INLINE_EMAIL=""
+INLINE_PASSWORD=""
+REUSE_EMAIL=0
+PASSTHROUGH_ARGS=()
+MODEL_SPECIFIED=0
 
-# Check environment variables first
-if [ -n "${WORKDAY_TEST_EMAIL:-}" ]; then
-  EMAIL_ARG="--email $WORKDAY_TEST_EMAIL"
+make_fresh_workday_email() {
+  local base_email="$1"
+  local applicant_last_name="$2"
+  if [[ "$base_email" != *"@"* ]]; then
+    echo "$base_email"
+    return
+  fi
+
+  local local_part="${base_email%@*}"
+  local domain_part="${base_email#*@}"
+  local clean_local="${local_part%%+*}"
+  local clean_last_name
+
+  clean_last_name="$(printf '%s' "$applicant_last_name" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
+  if [ -z "$clean_last_name" ]; then
+    echo "$base_email"
+    return
+  fi
+
+  echo "${clean_local}+${clean_last_name}@${domain_part}"
+}
+
+get_applicant_last_name() {
+  python - "$DATA" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    print("")
+    raise SystemExit(0)
+
+last_name = str(data.get("last_name") or "").strip()
+print(last_name)
+PY
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --email)
+      if [ "$#" -lt 2 ]; then
+        echo "ERROR: --email requires a value"
+        exit 1
+      fi
+      INLINE_EMAIL="$2"
+      shift 2
+      ;;
+    --password)
+      if [ "$#" -lt 2 ]; then
+        echo "ERROR: --password requires a value"
+        exit 1
+      fi
+      INLINE_PASSWORD="$2"
+      shift 2
+      ;;
+    --reuse-email)
+      REUSE_EMAIL=1
+      shift
+      ;;
+    *)
+      if [ "$1" = "--model" ]; then
+        MODEL_SPECIFIED=1
+      fi
+      PASSTHROUGH_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+BASE_EMAIL="${INLINE_EMAIL:-${WORKDAY_TEST_EMAIL:-}}"
+EFFECTIVE_PASSWORD="${INLINE_PASSWORD:-${WORKDAY_TEST_PASSWORD:-}}"
+EFFECTIVE_EMAIL="$BASE_EMAIL"
+APPLICANT_LAST_NAME="$(get_applicant_last_name)"
+
+if [ -n "$BASE_EMAIL" ] && [ "$REUSE_EMAIL" -ne 1 ]; then
+  EFFECTIVE_EMAIL="$(make_fresh_workday_email "$BASE_EMAIL" "$APPLICANT_LAST_NAME")"
 fi
-if [ -n "${WORKDAY_TEST_PASSWORD:-}" ]; then
-  PASS_ARG="--password $WORKDAY_TEST_PASSWORD"
+
+AUTH_ARGS=()
+
+if [ -n "$EFFECTIVE_EMAIL" ]; then
+  AUTH_ARGS+=(--email "$EFFECTIVE_EMAIL")
+fi
+if [ -n "$EFFECTIVE_PASSWORD" ]; then
+  AUTH_ARGS+=(--password "$EFFECTIVE_PASSWORD")
+fi
+
+if [ -n "$EFFECTIVE_EMAIL" ]; then
+  CREDENTIAL_STATUS="$EFFECTIVE_EMAIL"
+  if [ -n "$EFFECTIVE_PASSWORD" ]; then
+    CREDENTIAL_STATUS="$CREDENTIAL_STATUS (password set)"
+  else
+    CREDENTIAL_STATUS="$CREDENTIAL_STATUS (password missing)"
+  fi
+else
+  CREDENTIAL_STATUS="not set (sign-in will be skipped)"
 fi
 
 echo "══════════════════════════════════════════════════════════"
@@ -89,10 +189,18 @@ echo "════════════════════════�
 echo "  URL:         $JOB_URL"
 echo "  Resume:      $RESUME"
 echo "  Test Data:   $DATA"
-echo "  Credentials: ${WORKDAY_TEST_EMAIL:+$WORKDAY_TEST_EMAIL}${WORKDAY_TEST_EMAIL:-not set (sign-in will be skipped)}"
+if [ -n "$BASE_EMAIL" ] && [ "$BASE_EMAIL" != "$EFFECTIVE_EMAIL" ]; then
+  echo "  Base Email:  $BASE_EMAIL"
+fi
+echo "  Credentials: $CREDENTIAL_STATUS"
 echo "══════════════════════════════════════════════════════════"
 echo
 echo "  NOTE: Workday requires per-tenant account creation."
+echo "  This runner uses a simple +lastname alias by default so the"
+echo "  Workday account email still looks normal during testing."
+echo "  Pass --reuse-email if you intentionally want to sign in with the exact"
+echo "  email you supplied."
+echo
 echo "  If the agent encounters a login wall without credentials,"
 echo "  it will report 'blocker: login required'."
 echo
@@ -103,11 +211,24 @@ echo
 echo "══════════════════════════════════════════════════════════"
 echo
 
-exec python examples/apply_to_job.py \
-  --job-url "$JOB_URL" \
-  --resume "$RESUME" \
-  --test-data "$DATA" \
-  --max-steps 80 \
-  $EMAIL_ARG \
-  $PASS_ARG \
-  "$@"
+CMD=(
+  python examples/apply_to_job.py
+  --job-url "$JOB_URL"
+  --resume "$RESUME"
+  --test-data "$DATA"
+  --max-steps 80
+)
+
+if [ "$MODEL_SPECIFIED" -ne 1 ]; then
+  CMD+=(--model "gemini-3-flash-preview")
+fi
+
+if [ "${#AUTH_ARGS[@]}" -gt 0 ]; then
+  CMD+=("${AUTH_ARGS[@]}")
+fi
+
+if [ "${#PASSTHROUGH_ARGS[@]}" -gt 0 ]; then
+  CMD+=("${PASSTHROUGH_ARGS[@]}")
+fi
+
+exec "${CMD[@]}"
