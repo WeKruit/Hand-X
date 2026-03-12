@@ -42,7 +42,6 @@ from typing import Any
 
 import structlog
 
-from ghosthands.agent.prompts import build_task_prompt
 from ghosthands.bridge.profile_adapter import (
     camel_to_snake_profile,
     normalize_profile_defaults,
@@ -91,8 +90,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=50, help="Max agent steps (default: 50)")
     parser.add_argument("--max-budget", type=float, default=0.50, help="Max LLM budget USD")
     parser.add_argument("--headless", action="store_true", help="Run browser headless")
-    parser.add_argument("--email", default=None, help="Login email (deprecated; prefer GH_EMAIL)")
-    parser.add_argument("--password", default=None, help="Login password (deprecated; prefer GH_PASSWORD)")
     parser.add_argument(
         "--output-format",
         choices=["jsonl", "human"],
@@ -208,17 +205,15 @@ def _load_runtime_settings():
 
 
 def _resolve_sensitive_data(
-    args: argparse.Namespace,
     app_settings,
     embedded_credentials: dict[str, Any] | None = None,
     platform: str = "generic",
 ) -> dict[str, str] | None:
-    """Resolve credentials with priority: profile creds > env vars > CLI flags.
+    """Resolve credentials with priority: profile creds > env vars.
 
     When the Desktop app embeds a ``credentials`` key in the profile JSON,
     we resolve platform-specific credentials first, then fall back to
-    ``generic``, then ``GH_EMAIL``/``GH_PASSWORD`` env vars, then the
-    deprecated ``--email``/``--password`` CLI flags.
+    ``generic``, then ``GH_EMAIL``/``GH_PASSWORD`` env vars.
 
     Parameters
     ----------
@@ -231,14 +226,6 @@ def _resolve_sensitive_data(
         ``"greenhouse"``).  Callers must detect this once via
         ``detect_platform()`` and pass it in to avoid redundant calls.
     """
-    if args.email or args.password:
-        logger.warning(
-            "cli.credentials_flags_deprecated",
-            detail="Use GH_EMAIL and GH_PASSWORD environment variables instead of --email/--password",
-            has_email_flag=bool(args.email),
-            has_password_flag=bool(args.password),
-        )
-
     # ── Extract embedded credentials from profile ────────────────
     creds_email = ""
     creds_password = ""
@@ -261,9 +248,8 @@ def _resolve_sensitive_data(
             creds_password = embedded_credentials.get("application_password", "")
 
     # Priority 3: env vars (GH_EMAIL / GH_PASSWORD via app_settings)
-    # Priority 4: deprecated CLI flags
-    email = creds_email or app_settings.email or args.email or ""
-    password = creds_password or app_settings.password or args.password or ""
+    email = creds_email or app_settings.email or ""
+    password = creds_password or app_settings.password or ""
 
     if email and password:
         return {"email": email, "password": password}
@@ -371,13 +357,15 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         pass
 
     # -- Credentials --------------------------------------------------------
-    sensitive_data = _resolve_sensitive_data(args, app_settings, embedded_credentials, platform=platform)
+    sensitive_data = _resolve_sensitive_data(app_settings, embedded_credentials, platform=platform)
 
     # -- Browser ------------------------------------------------------------
     browser_profile = BrowserProfile(headless=args.headless, keep_alive=True)
     browser = BrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
+    from ghosthands.agent.prompts import build_task_prompt
+
     task = build_task_prompt(args.job_url, resume_path, sensitive_data)
 
     emit_status(
@@ -517,7 +505,9 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 result_data=result_data,
             )
             emit_awaiting_review()
-            await wait_for_review_command(browser, job_id, lease_id)
+            review_result = await wait_for_review_command(browser, job_id, lease_id)
+            if review_result in ("cancel", "eof"):
+                sys.exit(1)
         else:
             emit_done(
                 success=False,
@@ -605,13 +595,15 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         pass
 
     # -- Credentials --------------------------------------------------------
-    sensitive_data = _resolve_sensitive_data(args, app_settings, embedded_credentials, platform=platform)
+    sensitive_data = _resolve_sensitive_data(app_settings, embedded_credentials, platform=platform)
 
     # -- Browser ------------------------------------------------------------
     browser_profile = BrowserProfile(headless=args.headless, keep_alive=True)
     browser = BrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
+    from ghosthands.agent.prompts import build_task_prompt
+
     task = build_task_prompt(args.job_url, resume_path, sensitive_data)
 
     # -- Agent --------------------------------------------------------------

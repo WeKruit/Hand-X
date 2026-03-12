@@ -990,14 +990,6 @@ class TestCredentialExtraction:
     """_resolve_sensitive_data must extract credentials from embedded profile data."""
 
     @staticmethod
-    def _make_args(job_url="https://myworkdayjobs.com/en-US/job/123", email=None, password=None):
-        return argparse.Namespace(
-            job_url=job_url,
-            email=email,
-            password=password,
-        )
-
-    @staticmethod
     def _make_settings(email="", password=""):
         settings = MagicMock()
         settings.email = email
@@ -1008,7 +1000,6 @@ class TestCredentialExtraction:
         """Platform-specific credentials should be used over generic."""
         from ghosthands.cli import _resolve_sensitive_data
 
-        args = self._make_args(job_url="https://myworkdayjobs.com/en-US/job/123")
         settings = self._make_settings()
 
         creds = {
@@ -1016,14 +1007,13 @@ class TestCredentialExtraction:
             "workday": {"email": "wd@test.com", "password": "wdPass"},
         }
 
-        result = _resolve_sensitive_data(args, settings, embedded_credentials=creds, platform="workday")
+        result = _resolve_sensitive_data(settings, embedded_credentials=creds, platform="workday")
         assert result == {"email": "wd@test.com", "password": "wdPass"}
 
     def test_generic_creds_used_when_no_platform_match(self):
         """Generic credentials should be used when platform-specific are missing."""
         from ghosthands.cli import _resolve_sensitive_data
 
-        args = self._make_args(job_url="https://boards.greenhouse.io/company/123")
         settings = self._make_settings()
 
         creds = {
@@ -1031,41 +1021,38 @@ class TestCredentialExtraction:
             "workday": {"email": "wd@test.com", "password": "wdPass"},
         }
 
-        result = _resolve_sensitive_data(args, settings, embedded_credentials=creds, platform="greenhouse")
+        result = _resolve_sensitive_data(settings, embedded_credentials=creds, platform="greenhouse")
         assert result == {"email": "generic@test.com", "password": "genPass"}
 
     def test_env_vars_fallback_when_no_embedded_creds(self):
         """GH_EMAIL / GH_PASSWORD (via app_settings) should be used when no embedded creds."""
         from ghosthands.cli import _resolve_sensitive_data
 
-        args = self._make_args()
         settings = self._make_settings(email="env@test.com", password="envPass")
 
-        result = _resolve_sensitive_data(args, settings, embedded_credentials=None)
+        result = _resolve_sensitive_data(settings, embedded_credentials=None)
         assert result == {"email": "env@test.com", "password": "envPass"}
 
     def test_embedded_creds_override_env_vars(self):
         """Embedded credentials should take priority over env vars."""
         from ghosthands.cli import _resolve_sensitive_data
 
-        args = self._make_args()
         settings = self._make_settings(email="env@test.com", password="envPass")
 
         creds = {
             "generic": {"email": "embedded@test.com", "password": "embedPass"},
         }
 
-        result = _resolve_sensitive_data(args, settings, embedded_credentials=creds)
+        result = _resolve_sensitive_data(settings, embedded_credentials=creds)
         assert result == {"email": "embedded@test.com", "password": "embedPass"}
 
     def test_returns_none_when_no_credentials_anywhere(self):
         """Should return None when no credentials are available from any source."""
         from ghosthands.cli import _resolve_sensitive_data
 
-        args = self._make_args()
         settings = self._make_settings()
 
-        result = _resolve_sensitive_data(args, settings, embedded_credentials=None)
+        result = _resolve_sensitive_data(settings, embedded_credentials=None)
         assert result is None
 
     def test_application_password_fallback(self):
@@ -1079,7 +1066,6 @@ class TestCredentialExtraction:
         """
         from ghosthands.cli import _resolve_sensitive_data
 
-        args = self._make_args(job_url="https://myworkdayjobs.com/en-US/job/123")
         settings = self._make_settings()
 
         # workday has email but missing password key -> fails the
@@ -1090,17 +1076,16 @@ class TestCredentialExtraction:
             "application_password": "appPass123",
         }
 
-        result = _resolve_sensitive_data(args, settings, embedded_credentials=embedded, platform="workday")
+        result = _resolve_sensitive_data(settings, embedded_credentials=embedded, platform="workday")
         assert result is None
 
     def test_empty_embedded_credentials_falls_through(self):
         """An empty credentials dict should fall through to env vars."""
         from ghosthands.cli import _resolve_sensitive_data
 
-        args = self._make_args()
         settings = self._make_settings(email="env@test.com", password="envPass")
 
-        result = _resolve_sensitive_data(args, settings, embedded_credentials={})
+        result = _resolve_sensitive_data(settings, embedded_credentials={})
         assert result == {"email": "env@test.com", "password": "envPass"}
 
 

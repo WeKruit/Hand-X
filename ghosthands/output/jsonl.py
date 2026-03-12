@@ -59,6 +59,7 @@ def _get_output() -> IO[str]:
 # ── Core emitter ──────────────────────────────────────────────────────
 
 _emit_lock = threading.Lock()
+_pipe_broken = False
 
 
 def emit_event(event_type: str, **kwargs: Any) -> None:
@@ -68,6 +69,15 @@ def emit_event(event_type: str, **kwargs: Any) -> None:
     passed through as keyword arguments -- ``None`` values are omitted
     to keep the wire format compact.
     """
+    global _pipe_broken
+    if _pipe_broken:
+        if event_type in ("done", "error"):
+            print(
+                f"WARNING: JSONL pipe broken — suppressed critical event '{event_type}'",
+                file=sys.stderr,
+            )
+        return
+
     event: dict[str, Any] = {
         "event": event_type,
         "timestamp": int(time.time() * 1000),
@@ -78,9 +88,13 @@ def emit_event(event_type: str, **kwargs: Any) -> None:
 
     line = json.dumps(event, separators=(",", ":")) + "\n"
     with _emit_lock:
-        out = _get_output()
-        out.write(line)
-        out.flush()
+        try:
+            out = _get_output()
+            out.write(line)
+            out.flush()
+        except (BrokenPipeError, OSError):
+            _pipe_broken = True
+            print("JSONL pipe broken — further events will be suppressed", file=sys.stderr)
 
 
 # ── Typed convenience emitters ────────────────────────────────────────
