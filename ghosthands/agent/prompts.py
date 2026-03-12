@@ -415,3 +415,37 @@ def build_system_prompt(
 	]
 
 	return "\n".join(prompt_parts)
+
+
+def build_task_prompt(
+	job_url: str,
+	resume_path: str,
+	sensitive_data: dict | None,
+) -> str:
+	"""Build the task prompt for the agent."""
+	task = (
+		f"Go to {job_url} and fill out the job application form completely.\n"
+		"\n"
+		"CRITICAL -- Action Order:\n"
+		"1. After navigating to the page, your FIRST action MUST be domhand_fill.\n"
+		"2. After domhand_fill completes, review its output to see which fields were filled and which failed.\n"
+		"3. For failed dropdowns/selects, use domhand_select.\n"
+		f"4. For file uploads (resume), use domhand_upload or upload_file action with path: {resume_path}\n"
+		"5. Only use generic browser-use actions (click, input_text) as a LAST RESORT.\n"
+		"6. After all fields on the current page are filled, click Next/Continue/Save to advance.\n"
+		"7. On each new page, call domhand_fill AGAIN as the first action.\n"
+		"\n"
+		"Other rules:\n"
+	)
+	if sensitive_data:
+		task += (
+			"- Use the provided credentials to log in or create an account if needed. "
+			"For Workday, fill email + password + confirm password on the Create Account page.\n"
+		)
+	else:
+		task += "- If a login wall appears, report it as a blocker.\n"
+	task += (
+		"- Do NOT click the final Submit button. Stop at the review page and use the done action.\n"
+		"- If anything pops up blocking the form, close it and continue.\n"
+	)
+	return task
