@@ -18,14 +18,57 @@ PLATFORM_GUARDRAILS: dict[str, str] = {
 		"Workday often uses multi-step sections with repeated 'Next' buttons.\n"
 		"Treat any visible 'Submit', 'Submit Application', or final review CTA "
 		"as a stop condition — do NOT click it.\n"
-		"If password fields are visible, prefer login or create_account over "
-		"generic form filling.\n"
-		"Never use Google SSO or any other SSO provider on Workday-host pages. "
-		"Stay on the native email/password path only.\n"
-		"If 'Apply Manually' is visible after clicking Apply, choose that first "
+		"\n"
+		"ACCOUNT CREATION / SIGN-IN:\n"
+		"CRITICAL: Do NOT use domhand_fill on account creation or sign-in pages.\n"
+		"The email/password must come from your credentials (sensitive_data),\n"
+		"NOT from the applicant profile.  domhand_fill would use the wrong email.\n"
+		"\n"
+		"On the Create Account page, follow this EXACT sequence:\n"
+		"  1. Type the credential email into the Email Address field using input_text\n"
+		"  2. Type the credential password into the Password field using input_text\n"
+		"  3. Type the credential password into the Verify/Confirm Password field\n"
+		"  4. Call domhand_check_agreement to check the 'I agree' checkbox — "
+		"this is REQUIRED, the Create Account button will NOT work without it.\n"
+		"     Do NOT try to click the checkbox manually — Workday uses custom "
+		"widgets that need JavaScript-based checking.  domhand_check_agreement "
+		"handles this reliably.\n"
+		"  5. Use domhand_click_button with button_label='Create Account' to click the button.\n"
+		"     CRITICAL: Do NOT use the regular click action for Create Account or Sign In.\n"
+		"     Workday buttons require trusted events — regular click uses CDP mouse events\n"
+		"     which Workday silently ignores. domhand_click_button uses Playwright native\n"
+		"     click which produces trusted events.\n"
+		"\n"
+		"If domhand_check_agreement reports 'no agreement checkboxes found' or "
+		"the checkbox still appears unchecked, use the evaluate action with:\n"
+		"  evaluate(\"document.querySelectorAll('input[type=checkbox]').forEach(c => {c.checked=true; c.dispatchEvent(new Event('change',{bubbles:true}))})\")\n"
+		"\n"
+		"IMPORTANT: For ALL Workday auth buttons (Create Account, Sign In), use\n"
+		"domhand_click_button instead of the regular click action.\n"
+		"\n"
+		"NEVER click the 'Sign In' button when you are on the Create Account page.\n"
+		"NEVER toggle between Create Account and Sign In.  Pick ONE path and stick to it.\n"
+		"If the first page shown is Create Account, stay on Create Account.\n"
+		"If Create Account fails with 'Invalid Username/Password' or similar error,\n"
+		"report it as: done(success=False, text='blocker: account creation failed — "
+		"invalid credentials or account already exists').\n"
+		"Do NOT switch to Sign In after a Create Account failure.\n"
+		"\n"
+		"NEVER click any SSO/social login icons (Google, LinkedIn, Facebook, Apple,\n"
+		"or any icon-based login buttons).  Stay on the native email/password path ONLY.\n"
+		"\n"
+		"After sign-in or account creation, you may see a verification code "
+		"page. Report it as: done(success=False, text='blocker: verification code required').\n"
+		"\n"
+		"FORM FILLING:\n"
+		"- If 'Apply Manually' is visible after clicking Apply, choose that first "
 		"before any field-filling.\n"
-		"Use expand_repeaters when work history or education sections expose "
-		"visible 'Add' controls."
+		"- Use expand_repeaters or click 'Add' buttons when work history or "
+		"education sections expose visible 'Add' controls.\n"
+		"- Workday uses shadow DOM with data-automation-id selectors. DomHand "
+		"handles these, but if it fails, use generic input/click.\n"
+		"- Date fields use MM/DD/YYYY format. For segmented date inputs, type "
+		"continuous digits (e.g. '06152024') — Workday auto-advances segments."
 	),
 	"greenhouse": (
 		"Greenhouse usually has a single-page application flow with resume "
@@ -72,48 +115,162 @@ def _format_profile_summary(resume_profile: dict) -> str:
 
 	The summary is included in the system prompt so the agent knows what
 	data is available for form filling without needing an extra LLM call.
+
+	Handles both structured resume format (name, experience, education)
+	and flat JSON format (first_name, last_name, email, etc.).
 	"""
 	lines: list[str] = []
 
-	if name := resume_profile.get("name"):
+	# ── Name (handle both formats) ───────────────────────────────
+	name = resume_profile.get("name")
+	if not name:
+		first = resume_profile.get("first_name", "")
+		last = resume_profile.get("last_name", "")
+		if first or last:
+			name = f"{first} {last}".strip()
+	if name:
 		lines.append(f"Name: {name}")
+
 	if email := resume_profile.get("email"):
 		lines.append(f"Email: {email}")
 	if phone := resume_profile.get("phone"):
 		lines.append(f"Phone: {phone}")
-	if location := resume_profile.get("location"):
+
+	# ── Location (handle both formats) ───────────────────────────
+	location = resume_profile.get("location")
+	if not location:
+		city = resume_profile.get("city", "")
+		state = resume_profile.get("state", "")
+		country = resume_profile.get("country", "")
+		postal = resume_profile.get("postal_code", "")
+		address = resume_profile.get("address", "")
+		loc_parts = []
+		for p in [address, city, state, postal, country]:
+			if p is None or p == "":
+				continue
+			if isinstance(p, str):
+				loc_parts.append(p.strip())
+			elif isinstance(p, dict):
+				loc_parts.append(", ".join(str(v).strip() for v in p.values() if v))
+			elif isinstance(p, (list, tuple)):
+				loc_parts.append(", ".join(str(x).strip() for x in p if x))
+			else:
+				loc_parts.append(str(p).strip())
+		if loc_parts:
+			location = ", ".join(loc_parts)
+	if location:
+		if isinstance(location, dict):
+			location = ", ".join(str(v).strip() for v in location.values() if v)
+		elif not isinstance(location, str):
+			location = str(location)
 		lines.append(f"Location: {location}")
 
-	# Work experience — just titles + companies for the summary
+	# ── Flat fields common in sample data ────────────────────────
+	flat_fields = {
+		"age": "Age",
+		"gender": "Gender",
+		"race": "Race",
+		"years_experience": "Years of experience",
+		"Veteran_status": "Veteran status",
+		"disability_status": "Disability status",
+		"hispanic_latino": "Hispanic/Latino",
+	}
+	for key, label in flat_fields.items():
+		val = resume_profile.get(key)
+		if val is not None and val != "":
+			lines.append(f"{label}: {val}")
+
+	# ── Boolean fields ───────────────────────────────────────────
+	if resume_profile.get("US_citizen") is not None:
+		lines.append(f"US Citizen: {'Yes' if resume_profile['US_citizen'] else 'No'}")
+	if resume_profile.get("sponsorship_needed") is not None:
+		lines.append(f"Sponsorship needed: {'Yes' if resume_profile['sponsorship_needed'] else 'No'}")
+
+	# ── Work experience (structured format) ──────────────────────
 	experiences = resume_profile.get("experience", [])
 	if experiences:
 		exp_lines: list[str] = []
 		for exp in experiences[:5]:
 			title = exp.get("title", "")
 			company = exp.get("company", "")
+			location = exp.get("location", "")
+			start = exp.get("start_date", "")
+			end = exp.get("end_date", "")
+			current = exp.get("currently_working", False)
+			desc = exp.get("description", "")
 			if title or company:
-				exp_lines.append(f"  - {title} at {company}".strip())
+				date_range = f"{start} — {'Present' if current else end}" if start else ""
+				loc_str = f" ({location})" if location else ""
+				line = f"  - {title} at {company}{loc_str}"
+				if date_range:
+					line += f" [{date_range}]"
+				exp_lines.append(line.strip())
+				if desc:
+					exp_lines.append(f"    {desc[:200]}")
 		if exp_lines:
 			lines.append("Work experience:")
 			lines.extend(exp_lines)
 
-	# Education
+	# ── Education (structured format) ────────────────────────────
 	education = resume_profile.get("education", [])
 	if education:
 		edu_lines: list[str] = []
 		for edu in education[:3]:
 			degree = edu.get("degree", "")
 			school = edu.get("school", "")
+			field = edu.get("field_of_study", "")
+			grad_date = edu.get("graduation_date", "")
+			gpa = edu.get("gpa", "")
 			if degree or school:
-				edu_lines.append(f"  - {degree} — {school}".strip())
+				degree_str = f"{degree} in {field}" if field else degree
+				line = f"  - {degree_str} — {school}"
+				if grad_date:
+					line += f" (Graduated {grad_date})"
+				if gpa:
+					line += f" GPA: {gpa}"
+				edu_lines.append(line.strip())
 		if edu_lines:
 			lines.append("Education:")
 			lines.extend(edu_lines)
 
-	# Skills — compact list
+	# ── Skills ───────────────────────────────────────────────────
 	skills = resume_profile.get("skills", [])
 	if skills:
 		lines.append(f"Skills: {', '.join(skills[:20])}")
+
+	# ── Languages ────────────────────────────────────────────────
+	languages = resume_profile.get("languages", [])
+	if languages:
+		lang_strs = [f"{l.get('language', '')} ({l.get('proficiency', '')})" for l in languages if l.get("language")]
+		if lang_strs:
+			lines.append(f"Languages: {', '.join(lang_strs)}")
+
+	# ── Certifications ───────────────────────────────────────────
+	certs = resume_profile.get("certifications", [])
+	if certs:
+		cert_strs = [f"{c.get('name', '')} ({c.get('issuer', '')})" for c in certs if c.get("name")]
+		if cert_strs:
+			lines.append(f"Certifications: {', '.join(cert_strs)}")
+
+	# ── Work authorization / availability ────────────────────────
+	if wa := resume_profile.get("work_authorization"):
+		lines.append(f"Work authorization: {wa}")
+	if start := resume_profile.get("available_start_date"):
+		lines.append(f"Available start date: {start}")
+	if salary := resume_profile.get("salary_expectation"):
+		currency = resume_profile.get("salary_currency", "USD")
+		lines.append(f"Salary expectation: {salary} {currency}")
+	if resume_profile.get("willing_to_relocate") is not None:
+		lines.append(f"Willing to relocate: {'Yes' if resume_profile['willing_to_relocate'] else 'No'}")
+	if source := resume_profile.get("how_did_you_hear"):
+		lines.append(f"How did you hear about us: {source}")
+
+	# ── Open-ended answers ───────────────────────────────────────
+	for key, val in resume_profile.items():
+		if key.startswith("what_") or key.startswith("why_") or key.startswith("how_"):
+			if isinstance(val, str) and val.strip():
+				label = key.replace("_", " ").capitalize()
+				lines.append(f"{label}: {val}")
 
 	if not lines:
 		return "No applicant profile provided."
@@ -216,11 +373,22 @@ def build_system_prompt(
 		# ── Multi-page flow guidance ──────────────────────────────
 		"<multi_page_flow>",
 		"Many ATS platforms split applications across multiple pages or",
-		"sections.  After domhand_fill completes on the current step:",
-		"1. Check for unresolved fields and handle them.",
-		"2. Look for a 'Next' / 'Continue' / 'Save & Continue' button.",
-		"3. Click it to advance to the next section.",
-		"4. On the new page, call domhand_fill again.",
+		"sections.  Follow this EXACT sequence on EVERY page transition:",
+		"",
+		"MANDATORY PAGE ENTRY SEQUENCE:",
+		"1. When you land on ANY new page or section, your VERY FIRST",
+		"   action MUST be domhand_fill.  No exceptions.  Do NOT use",
+		"   click or input_text before trying domhand_fill.",
+		"2. After domhand_fill completes, review its output for unresolved",
+		"   fields.  Handle them with domhand_select or generic actions.",
+		"3. Check for agreement checkboxes ('I agree', 'I accept', 'I",
+		"   understand', privacy policy consent, terms of service).  These",
+		"   are often missed by domhand_fill.  Click any unchecked agreement",
+		"   checkbox before proceeding.",
+		"4. Look for a 'Next' / 'Continue' / 'Save & Continue' button.",
+		"5. Click it to advance to the next section.",
+		"6. On the new page, go back to step 1 — domhand_fill FIRST.",
+		"",
 		"Repeat until you reach a review/confirmation page, then call",
 		"done(success=True).",
 		"</multi_page_flow>",

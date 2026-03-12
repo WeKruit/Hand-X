@@ -24,10 +24,26 @@ class Settings(BaseSettings):
 		description="Anthropic API key for agent + Haiku answer gen",
 	)
 	openai_api_key: str = Field("", description="OpenAI API key (for browser-use if using GPT)")
-	agent_model: str = Field("claude-sonnet-4-20250514", description="Model for agent decisions")
+	google_api_key: str = Field(
+		"",
+		alias="GOOGLE_API_KEY",
+		description="Google API key for Gemini models (agent model)",
+	)
+	agent_model: str = Field("gemini-3-flash-preview", description="Model for agent decisions")
 	domhand_model: str = Field(
 		"claude-haiku-4-5-20251001",
 		description="Cheap model for DomHand answer generation",
+	)
+
+	# --- LLM Proxy (VALET) ---
+	llm_proxy_url: str = Field(
+		"",
+		description="VALET LLM proxy base URL. When set, all LLM calls route through VALET. "
+		"Example: https://api.valet.wekruit.com/api/v1/local-workers/anthropic",
+	)
+	llm_runtime_grant: str = Field(
+		"",
+		description="Runtime grant token for VALET managed inference auth",
 	)
 
 	# --- Worker ---

@@ -3,24 +3,56 @@
 	"last_name": "Smith",
 	"email": "jane.smith@example.com",
 	"phone": "555-123-4567",
+	"phone_type": "Mobile",
+
+	"address": "100 Main St",
+	"city": "Rochester",
+	"state": "NY",
+	"postal_code": "14621",
+	"country": "United States",
+
+	"linkedin": "https://www.linkedin.com/in/janesmith",
+
 	"age": "28",
 	"US_citizen": true,
 	"sponsorship_needed": false,
-	"resume": "",
-	"postal_code": "14621",
-	"country": "USA",
-	"state": "NY",
-	"city": "Rochester",
-	"address": "100 Main St",
+	"authorized_to_work": true,
+	"work_authorization": "US Citizen",
+
 	"gender": "Female",
 	"race": "White",
-	"Veteran_status": "Not a veteran",
-	"disability_status": "No disability",
+	"Veteran_status": "I am not a protected veteran",
+	"disability_status": "I do not wish to answer",
 	"hispanic_latino": "No",
+
+	"how_did_you_hear": "LinkedIn",
 	"years_experience": "1-3 years",
+	"available_start_date": "2026-04-15",
+
+	"experience": [
+		{
+			"title": "Software Engineer",
+			"company": "Acme Corp",
+			"location": "Rochester, NY",
+			"start_date": "2024-06",
+			"end_date": "",
+			"currently_working": true,
+			"description": "Full-stack web development using React, Node.js, and PostgreSQL."
+		}
+	],
+
+	"education": [
+		{
+			"school": "Rochester Institute of Technology",
+			"degree": "Bachelor of Science",
+			"field_of_study": "Computer Science",
+			"gpa": "3.7",
+			"graduation_date": "2024-05"
+		}
+	],
+
+	"skills": ["Python", "JavaScript", "React", "Node.js", "PostgreSQL", "AWS", "Docker"],
+
 	"what_drew_you_to_healthcare": "I want to help people and make a difference in patient care.",
-	"linkedin_url": "https://linkedin.com/in/janesmith",
-	"current_company": "Rochester General Hospital",
-	"current_title": "Registered Nurse",
-	"skills": ["Patient Care", "IV Therapy", "Electronic Health Records", "Team Collaboration"]
+	"why_this_company": "The company's commitment to innovation aligns with my career goals."
 }
