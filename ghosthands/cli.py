@@ -45,6 +45,8 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 # Suppress browser-use's own logging setup so we control stderr exclusively
 os.environ["BROWSER_USE_SETUP_LOGGING"] = "false"
 
+from ghosthands.agent.hooks import install_same_tab_guard
+
 
 # ── Argument parsing ──────────────────────────────────────────────────
 
@@ -171,6 +173,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = args.browsers_path
 
     os.environ["GH_USER_PROFILE_TEXT"] = json.dumps(profile, indent=2)
+    os.environ["GH_USER_PROFILE_JSON"] = json.dumps(profile)
     if args.resume:
         os.environ["GH_RESUME_PATH"] = str(Path(args.resume).resolve())
 
@@ -221,7 +224,11 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         sensitive_data = {"email": args.email, "password": args.password}
 
     # -- Browser ------------------------------------------------------------
-    browser_profile = BrowserProfile(headless=args.headless, keep_alive=True)
+    browser_profile = BrowserProfile(
+        headless=args.headless,
+        keep_alive=True,
+        wait_between_actions=settings.wait_between_actions,
+    )
     browser = BrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
@@ -239,7 +246,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         sensitive_data=sensitive_data,
         available_file_paths=available_files or None,
         use_vision=True,
-        max_actions_per_step=5,
+        max_actions_per_step=settings.agent_max_actions_per_step,
         calculate_cost=True,
         use_judge=False,
     )
@@ -253,6 +260,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     # -- Step hooks for live JSONL events -----------------------------------
     async def _on_step_start(ag: Agent) -> None:
+        await install_same_tab_guard(ag)
         step = ag.state.n_steps
         goal = ""
         if ag.state.last_model_output:
@@ -368,6 +376,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = args.browsers_path
 
     os.environ["GH_USER_PROFILE_TEXT"] = json.dumps(profile, indent=2)
+    os.environ["GH_USER_PROFILE_JSON"] = json.dumps(profile)
     if args.resume:
         os.environ["GH_RESUME_PATH"] = str(Path(args.resume).resolve())
 
@@ -411,7 +420,11 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         sensitive_data = {"email": args.email, "password": args.password}
 
     # -- Browser ------------------------------------------------------------
-    browser_profile = BrowserProfile(headless=args.headless, keep_alive=True)
+    browser_profile = BrowserProfile(
+        headless=args.headless,
+        keep_alive=True,
+        wait_between_actions=settings.wait_between_actions,
+    )
     browser = BrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
@@ -429,7 +442,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         sensitive_data=sensitive_data,
         available_file_paths=available_files or None,
         use_vision=True,
-        max_actions_per_step=5,
+        max_actions_per_step=settings.agent_max_actions_per_step,
         calculate_cost=True,
         use_judge=False,
     )

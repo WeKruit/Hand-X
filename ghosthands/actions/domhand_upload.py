@@ -30,6 +30,30 @@ _RESUME_KEYWORDS = ('resume', 'cv', 'curriculum vitae')
 _COVER_LETTER_KEYWORDS = ('cover letter', 'cover_letter', 'coverletter', 'motivation letter')
 
 
+def _body_text_indicates_upload_confirmation(body_text: str, file_name: str) -> bool:
+	"""Best-effort check for upload success indicators rendered outside the raw file input."""
+	text = (body_text or '').lower()
+	name = (file_name or '').lower().strip()
+
+	if name and name in text:
+		return True
+
+	return any(
+		signal in text
+		for signal in (
+			'successfully uploaded',
+			'uploaded successfully',
+			'upload complete',
+			'successfully attached',
+			'attached successfully',
+			'remove file',
+			'delete file',
+			'replace file',
+			'replace resume',
+		)
+	)
+
+
 # ── File input search (mirrors browser_use/tools/service.py pattern) ──
 
 def _find_file_input_near_element(
@@ -259,7 +283,7 @@ async def domhand_upload(params: DomHandUploadParams, browser_session: BrowserSe
 		)
 		await event
 		await event.event_result(raise_if_any=True, raise_if_none=False)
-		await asyncio.sleep(0.5)  # Brief wait for UI to update
+		await asyncio.sleep(0.75)  # Brief wait for UI to update
 	except Exception as e:
 		return ActionResult(error=f'Failed to upload file "{file_name}": {e}')
 
@@ -267,52 +291,66 @@ async def domhand_upload(params: DomHandUploadParams, browser_session: BrowserSe
 	uploaded = False
 	uploaded_name = file_name
 
-	try:
-		# Resolve the file input node via CDP and check its files property
-		session_id = file_input_node.session_id
-		if not session_id:
-			cdp_session = await browser_session.get_or_create_cdp_session()
-			session_id = cdp_session.session_id
+	for _ in range(8):
+		try:
+			# Resolve the file input node via CDP and check its files property
+			session_id = file_input_node.session_id
+			if not session_id:
+				cdp_session = await browser_session.get_or_create_cdp_session()
+				session_id = cdp_session.session_id
 
-		backend_node_id = file_input_node.backend_node_id
+			backend_node_id = file_input_node.backend_node_id
 
-		# Resolve the backend node to a JS object
-		resolve_result = await browser_session.cdp_client.send.DOM.resolveNode(
-			params={'backendNodeId': backend_node_id},
-			session_id=session_id,
-		)
-		object_id = resolve_result.get('object', {}).get('objectId')
-
-		if object_id:
-			# Call a function on the resolved node to check file status
-			call_result = await browser_session.cdp_client.send.Runtime.callFunctionOn(
-				params={
-					'objectId': object_id,
-					'functionDeclaration': """function() {
-						if (this.files && this.files.length > 0) {
-							return JSON.stringify({uploaded: true, fileName: this.files[0].name});
-						}
-						if (this.value && this.value.trim().length > 0) {
-							return JSON.stringify({uploaded: true, fileName: this.value.split('\\\\').pop()});
-						}
-						return JSON.stringify({uploaded: false});
-					}""",
-					'returnByValue': True,
-				},
+			resolve_result = await browser_session.cdp_client.send.DOM.resolveNode(
+				params={'backendNodeId': backend_node_id},
 				session_id=session_id,
 			)
-			raw_value = call_result.get('result', {}).get('value', '{}')
-			import json
-			verify = json.loads(raw_value) if isinstance(raw_value, str) else raw_value
-			uploaded = verify.get('uploaded', False)
-			if uploaded and verify.get('fileName'):
-				uploaded_name = verify['fileName']
-	except Exception as verify_err:
-		logger.debug(f'Upload verification via CDP failed (non-critical): {verify_err}')
-		# Non-critical — the upload likely still worked
+			object_id = resolve_result.get('object', {}).get('objectId')
+
+			if object_id:
+				call_result = await browser_session.cdp_client.send.Runtime.callFunctionOn(
+					params={
+						'objectId': object_id,
+						'functionDeclaration': """function() {
+							if (this.files && this.files.length > 0) {
+								return JSON.stringify({uploaded: true, fileName: this.files[0].name});
+							}
+							if (this.value && this.value.trim().length > 0) {
+								return JSON.stringify({uploaded: true, fileName: this.value.split('\\\\').pop()});
+							}
+							return JSON.stringify({uploaded: false});
+						}""",
+						'returnByValue': True,
+					},
+					session_id=session_id,
+				)
+				raw_value = call_result.get('result', {}).get('value', '{}')
+				import json
+				verify = json.loads(raw_value) if isinstance(raw_value, str) else raw_value
+				uploaded = verify.get('uploaded', False)
+				if uploaded and verify.get('fileName'):
+					uploaded_name = verify['fileName']
+		except Exception as verify_err:
+			logger.debug(f'Upload verification via CDP failed (non-critical): {verify_err}')
+
+		if not uploaded:
+			try:
+				body_text = await page.evaluate("() => (document.body && document.body.innerText) || ''")
+				if _body_text_indicates_upload_confirmation(body_text, file_name):
+					uploaded = True
+			except Exception as verify_err:
+				logger.debug(f'Upload verification via page text failed (non-critical): {verify_err}')
+
+		if uploaded:
+			break
+		await asyncio.sleep(0.75)
 
 	if uploaded:
-		memory = f'Uploaded {effective_type} "{uploaded_name}" to file input at index {params.index}'
+		await asyncio.sleep(1.25)  # Allow Workday/other ATS UIs to enable the next button
+		memory = (
+			f'Uploaded {effective_type} "{uploaded_name}" to file input at index {params.index}. '
+			'Wait briefly for the page to finish processing before clicking Continue.'
+		)
 		logger.info(f'DomHand upload: {memory}')
 		return ActionResult(
 			extracted_content=memory,
@@ -320,7 +358,10 @@ async def domhand_upload(params: DomHandUploadParams, browser_session: BrowserSe
 		)
 	else:
 		# Upload may have succeeded but verification couldn't confirm
-		memory = f'Set file "{file_name}" on input at index {params.index}, but could not confirm upload. Check visually.'
+		memory = (
+			f'Set file "{file_name}" on input at index {params.index}, but could not confirm upload yet. '
+			'Wait and verify the filename or upload success message before clicking Continue.'
+		)
 		logger.warning(f'DomHand upload: {memory}')
 		return ActionResult(
 			extracted_content=memory,

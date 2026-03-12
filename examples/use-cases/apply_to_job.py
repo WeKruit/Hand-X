@@ -18,7 +18,7 @@ async def apply_to_rochester_regional_health(info: dict, resume_path: str):
 	    "first_name": "John",
 	    "last_name": "Doe",
 	    "email": "john.doe@example.com",
-	    "phone": "555-555-5555",
+	    "phone": "424-320-1345",
 	    "age": "21",
 	    "US_citizen": boolean,
 	    "sponsorship_needed": boolean,

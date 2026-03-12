@@ -66,7 +66,7 @@ BROWSER_USE_API_KEY=your-key
 **3. Run your first agent:**
 ```python
 from browser_use import Agent, Browser, ChatBrowserUse
-# from browser_use import ChatGoogle  # ChatGoogle(model='gemini-3-flash-preview')
+# from browser_use import ChatGoogle  # ChatGoogle(model='gemini-3.1-flash-lite-preview')
 # from browser_use import ChatAnthropic  # ChatAnthropic(model='claude-sonnet-4-6')
 import asyncio
 
@@ -78,7 +78,7 @@ async def main():
     agent = Agent(
         task="Find the number of stars of the browser-use repo",
         llm=ChatBrowserUse(),
-        # llm=ChatGoogle(model='gemini-3-flash-preview'),
+        # llm=ChatGoogle(model='gemini-3.1-flash-lite-preview'),
         # llm=ChatAnthropic(model='claude-sonnet-4-6'),
         browser=browser,
     )

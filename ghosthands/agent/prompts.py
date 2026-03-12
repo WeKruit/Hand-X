@@ -43,7 +43,13 @@ PLATFORM_GUARDRAILS: dict[str, str] = {
 		"- If a verification code is required, report as blocker.\n"
 		"\n"
 		"FORM FILLING:\n"
-		"- Click the main 'Apply' button (not 'Apply Manually').\n"
+		"- Click the main 'Apply' button first.\n"
+		"- If a Workday start dialog offers a SAME-SITE option such as "
+		"  'Autofill with Resume' or 'Apply with Resume', prefer that path.\n"
+		"- Use 'Apply Manually' only when no same-site resume-autofill option "
+		"  exists.\n"
+		"- NEVER choose external apply paths such as LinkedIn, Indeed, Google, "
+		"  or other third-party apply/import options.\n"
 		"- Use domhand_expand or click 'Add' buttons to expand work history\n"
 		"  and education sections before filling.\n"
 		"- Workday uses shadow DOM with data-automation-id selectors.\n"
@@ -145,6 +151,20 @@ def _format_profile_summary(resume_profile: dict) -> str:
 		elif not isinstance(location, str):
 			location = str(location)
 		lines.append(f"Location: {location}")
+	if address := resume_profile.get("address"):
+		lines.append(f"Address: {address}")
+	if address2 := resume_profile.get("address_line_2"):
+		lines.append(f"Address line 2: {address2}")
+	if city := resume_profile.get("city"):
+		lines.append(f"City: {city}")
+	if state := resume_profile.get("state"):
+		lines.append(f"State: {state}")
+	if postal := resume_profile.get("postal_code"):
+		lines.append(f"Postal code: {postal}")
+	if country := resume_profile.get("country"):
+		lines.append(f"Country: {country}")
+	if phone_type := resume_profile.get("phone_type") or resume_profile.get("phone_device_type"):
+		lines.append(f"Phone type: {phone_type}")
 
 	# ── Flat fields common in sample data ────────────────────────
 	flat_fields = {
@@ -318,7 +338,11 @@ def build_system_prompt(
 		"After calling domhand_fill, inspect its result to see which fields",
 		"were filled and which remain unresolved.  Handle unresolved fields",
 		"individually with domhand_select, generic input, or by skipping",
-		"optional fields the applicant profile does not cover.",
+		"ONLY optional fields the applicant profile does not cover.",
+		"If an optional field is visible AND the applicant profile provides",
+		"a value (address, website, referral source, LinkedIn, etc.), you",
+		"SHOULD make a best-effort attempt to fill it only when the",
+		"field-to-profile mapping is high confidence.",
 		"</domhand_actions>",
 		"",
 		# ── Hard rules ─────────────────────────────────────────────
@@ -328,7 +352,11 @@ def build_system_prompt(
 		"  action would be final submission, call done(success=True) and",
 		"  include any extracted confirmation data in the text.",
 		"- Leave optional fields empty when the applicant profile does not",
-		"  provide an explicit value.  Do NOT invent information.",
+		"  provide a value OR when the field-to-profile mapping is low",
+		"  confidence. Do NOT guess on optional fields.",
+		"- If the applicant profile clearly provides the value and the match",
+		"  is high confidence, make a best-effort fill attempt for that",
+		"  optional field before advancing.",
 		"- After filling a step, look for 'Next', 'Continue', or",
 		"  'Save & Continue' buttons and click them to advance.",
 		"- Prefer the smallest reversible action that advances the flow.",
@@ -360,6 +388,10 @@ def build_system_prompt(
 		"These pages have email, password, and optionally confirm-password",
 		"fields.  Do NOT call domhand_fill on auth pages — it would use the",
 		"applicant profile email instead of the login credentials.",
+		"If credentials were provided for this run, they are available and",
+		"you MUST use them here. Do NOT claim 'blocker: login required' on",
+		"any page that visibly shows email/password fields when credentials",
+		"were provided.",
 		"Follow this sequence instead:",
 		"  1. Type the credential email into the Email field (input_text).",
 		"  2. Type the credential password into the Password field.",
@@ -372,20 +404,103 @@ def build_system_prompt(
 		"     a checkbox visually and click it manually.",
 		"  6. Only AFTER the checkbox is confirmed checked, use",
 		"     domhand_click_button to click 'Create Account' or 'Sign In'.",
+		"  7. Only report 'blocker: login required' if NO credentials were",
+		"     provided and you are stuck on an auth page.",
 		"",
 		"FORM PAGES (everything else):",
 		"  1. Your FIRST action MUST be domhand_fill.  Do NOT use click or",
 		"     input_text before trying domhand_fill.",
 		"  2. Review domhand_fill output for unresolved fields.  Handle them",
-		"     with domhand_select or generic actions.",
+		"     with domhand_select or generic actions. Do this for required",
+		"     fields, and for optional fields only when the applicant",
+		"     profile maps to that field with high confidence.",
 		"  3. Check for agreement checkboxes and click any that are unchecked.",
 		"  4. Click 'Next' / 'Continue' / 'Save & Continue' to advance.",
 		"  5. On the new page, determine if it's an auth page or form page",
 		"     and follow the appropriate sequence above.",
 		"",
+		"CRITICAL: After filling all fields on a page, you MUST click",
+		"Next / Continue / Save & Continue to advance.  Do NOT call done()",
+		"until you reach a read-only review or confirmation page.",
+		"If a page has editable fields, you are NOT on the review page.",
+		"",
 		"Repeat until you reach a review/confirmation page, then call",
 		"done(success=True).",
 		"</multi_page_flow>",
+		"",
+		"<transition_waiting>",
+		"If the page looks blank, partially rendered, or still loading after",
+		"you click a start/continue button, WAIT 5-10 seconds before doing",
+		"anything else.",
+		"Never use navigate() to return to the original job URL as recovery",
+		"after you have already clicked into the application flow. Waiting",
+		"is the default recovery, not restarting.",
+		"</transition_waiting>",
+		"",
+		# ── Repeater sections (Work Experience, Education, etc.) ──
+		"<repeater_sections>",
+		"Work Experience, Education, and similar sections have 'Add' buttons",
+		"to create new entries.  Fill entries ONE AT A TIME with scoped data:",
+		"",
+		"  1. If the first empty entry is already visible, call domhand_fill",
+		"     with heading_boundary set to that entry heading and entry_data set",
+		"     to ONLY that single profile entry.",
+		"  2. For additional entries, call domhand_expand(section='Work Experience')",
+		"     or domhand_expand(section='Education') to reveal the next blank block.",
+		"  3. Immediately call domhand_fill with heading_boundary matching the",
+		"     new entry heading (for example 'Work Experience 2') and entry_data",
+		"     containing ONLY that one experience or education record.",
+		"  4. If domhand_expand fails, click the visible 'Add' or '+' button",
+		"     yourself, then call scoped domhand_fill for the new heading.",
+		"  5. Repeat steps 1-4 for each additional entry in the profile.",
+		"",
+		"Rules:",
+		"- The applicant profile lists how many entries to create.",
+		"  If it has 2 work experiences, expand and fill 2 entries.",
+		"- Fill each entry BEFORE expanding the next one.",
+		"- NEVER call bare domhand_fill for a repeater entry when there are",
+		"  already filled entries above it — always scope it with",
+		"  heading_boundary and entry_data.",
+		"- Example: domhand_fill(heading_boundary='Work Experience 2',",
+		"  entry_data={'title': '...', 'company': '...', 'start_date': '...'})",
+		"  fills only that second entry instead of the entire page.",
+		"- NEVER delete a filled entry.",
+		"</repeater_sections>",
+		"",
+		# ── Dropdown fallback guidance ────────────────────────────
+		"<dropdown_fallback>",
+		"For searchable or multi-layer dropdowns, selection may take",
+		"multiple actions.  Do NOT assume one click is enough.",
+		"- After opening the dropdown, type the target value or a shorter",
+		"  search term, then WAIT 2-3 seconds for the list to update.",
+		"- If a category is selected and a second list appears, keep going",
+		"  until you click the final leaf option.  Do NOT navigate away",
+		"  after the first click in a multi-layer dropdown.",
+		"- Source/referral fields such as 'How Did You Hear About Us?' are",
+		"  dropdowns even when they look like text inputs. Typing a value or",
+		"  clicking a parent category is NOT enough; you must click the final",
+		"  leaf option that matches the applicant profile value.",
+		"- Example: if the applicant profile says LinkedIn and the first menu",
+		"  shows a parent option like 'Job Board/Social Media Web Site', click",
+		"  that parent, WAIT for the next menu, then click the final leaf such",
+		"  as 'LinkedIn'. Only the final leaf clears the validation error.",
+		"- After clicking an option, verify the field text changed or the",
+		"  validation error cleared before clicking Save/Continue.",
+		"- Do NOT click a dropdown option and then Save/Continue in the same",
+		"  action batch. After any option click, WAIT briefly and re-evaluate",
+		"  before the next click.",
+		"- NEVER click Save/Continue immediately after the first dropdown",
+		"  click when the widget still looks open or the field still looks",
+		"  empty.",
+		"If domhand_select returns [FAIL-OVER]:",
+		"- STOP.  Do NOT call domhand_select again for that field.",
+		"- Instead: (1) click the element to open it, (2) type/search if the",
+		"  widget supports it, (3) click the option directly, (4) if a new",
+		"  submenu appears, click the final option there too, (5) verify the",
+		"  field visibly changed before moving on.",
+		"- This is expected for complex custom widgets (Workday portals,",
+		"  multi-layer dropdowns).  DomHand cannot handle every widget.",
+		"</dropdown_fallback>",
 		"",
 		# ── Review / completion detection ─────────────────────────
 		"<completion_detection>",
