@@ -161,24 +161,20 @@ WORKDAY_GUARDRAILS: list[str] = [
 	# Auth rules
 	(
 		"NEVER use 'Sign In with Google' or any SSO option. Always use native "
-		"Workday email/password authentication. If the page shows both 'Sign In' "
-		"and 'Create Account', check if a Workday account already exists first."
+		"Workday email/password authentication."
 	),
 	(
-		"If the page says 'Create Account' with a confirm-password field, "
-		"fill in email, password, and confirm password to register a new account. "
-		"Do NOT click 'Sign In' — that navigates away."
+		"If the page shows BOTH 'Create Account' and 'Sign In' options, "
+		"pick ONE path and commit to it.  If a confirm-password field is "
+		"visible, you are on Create Account — stay on it.  Do NOT toggle "
+		"between the two.  Do NOT click 'Sign In' when on the Create Account "
+		"page."
 	),
 	(
 		"Avoid the 'Apply Manually' link on job listing pages — it leads to a "
 		"different, often broken flow. Click the main 'Apply' button instead."
 	),
 	# Form filling rules
-	(
-		"ZERO SCROLLING: Never scroll the page. Only interact with fields that "
-		"are 100% fully visible on screen (all four edges visible). When you run "
-		"out of visible fields, stop and report done."
-	),
 	(
 		"ONE ATTEMPT PER TEXT FIELD: Type into a text field at most once. "
 		"After typing and clicking away, the field is done — even if it appears "
@@ -193,10 +189,6 @@ WORKDAY_GUARDRAILS: list[str] = [
 	(
 		"NO TAB KEY: Never use Tab to move between fields. Click on whitespace "
 		"to deselect, then click directly on the next field."
-	),
-	(
-		"NEVER NAVIGATE: Do not click 'Save and Continue', 'Next', 'Submit', "
-		"'Back', or any navigation button. The orchestrator handles navigation."
 	),
 	# Dropdown rules
 	(
@@ -217,10 +209,11 @@ WORKDAY_GUARDRAILS: list[str] = [
 		"the full date as continuous digits with NO slashes (e.g. '01152026'). "
 		"Workday auto-advances through the segments."
 	),
-	# Review/submit
+	# Navigation — agent handles it directly
 	(
-		"On the REVIEW page: verify all sections are filled correctly. "
-		"Do NOT click Submit — the orchestrator handles final submission."
+		"After filling all fields on a page, click 'Save and Continue' or "
+		"'Next' to advance.  NEVER click 'Submit' or 'Submit Application' — "
+		"that is the final submission button."
 	),
 ]
 

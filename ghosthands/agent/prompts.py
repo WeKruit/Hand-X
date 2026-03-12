@@ -15,60 +15,41 @@ from __future__ import annotations
 
 PLATFORM_GUARDRAILS: dict[str, str] = {
 	"workday": (
-		"Workday often uses multi-step sections with repeated 'Next' buttons.\n"
-		"Treat any visible 'Submit', 'Submit Application', or final review CTA "
-		"as a stop condition — do NOT click it.\n"
+		"Workday uses multi-step sections.  Treat any visible 'Submit' or "
+		"'Submit Application' button as the FINAL submission — do NOT click it.\n"
 		"\n"
 		"ACCOUNT CREATION / SIGN-IN:\n"
-		"CRITICAL: Do NOT use domhand_fill on account creation or sign-in pages.\n"
-		"The email/password must come from your credentials (sensitive_data),\n"
-		"NOT from the applicant profile.  domhand_fill would use the wrong email.\n"
+		"Do NOT use domhand_fill on auth pages — it uses the applicant email\n"
+		"instead of login credentials.\n"
 		"\n"
-		"On the Create Account page, follow this EXACT sequence:\n"
-		"  1. Type the credential email into the Email Address field using input_text\n"
-		"  2. Type the credential password into the Password field using input_text\n"
-		"  3. Type the credential password into the Verify/Confirm Password field\n"
-		"  4. Call domhand_check_agreement to check the 'I agree' checkbox — "
-		"this is REQUIRED, the Create Account button will NOT work without it.\n"
-		"     Do NOT try to click the checkbox manually — Workday uses custom "
-		"widgets that need JavaScript-based checking.  domhand_check_agreement "
-		"handles this reliably.\n"
-		"  5. Use domhand_click_button with button_label='Create Account' to click the button.\n"
-		"     CRITICAL: Do NOT use the regular click action for Create Account or Sign In.\n"
-		"     Workday buttons require trusted events — regular click uses CDP mouse events\n"
-		"     which Workday silently ignores. domhand_click_button uses Playwright native\n"
-		"     click which produces trusted events.\n"
+		"EXACT sequence for the Create Account page:\n"
+		"  1. input_text: credential email → Email Address field\n"
+		"  2. input_text: credential password → Password field\n"
+		"  3. input_text: credential password → Verify/Confirm Password field\n"
+		"  4. domhand_check_agreement → checks the 'I agree' checkbox.\n"
+		"     *** THIS IS REQUIRED.  The Create Account button SILENTLY FAILS\n"
+		"     if the checkbox is unchecked.  Do NOT skip this step. ***\n"
+		"  5. VERIFY: Look at the checkbox.  If it still appears unchecked,\n"
+		"     click it manually before proceeding.\n"
+		"  6. domhand_click_button(button_label='Create Account').\n"
+		"     Use domhand_click_button, NOT the regular click action.\n"
 		"\n"
-		"If domhand_check_agreement reports 'no agreement checkboxes found' or "
-		"the checkbox still appears unchecked, use the evaluate action with:\n"
-		"  evaluate(\"document.querySelectorAll('input[type=checkbox]').forEach(c => {c.checked=true; c.dispatchEvent(new Event('change',{bubbles:true}))})\")\n"
-		"\n"
-		"IMPORTANT: For ALL Workday auth buttons (Create Account, Sign In), use\n"
-		"domhand_click_button instead of the regular click action.\n"
-		"\n"
-		"NEVER click the 'Sign In' button when you are on the Create Account page.\n"
-		"NEVER toggle between Create Account and Sign In.  Pick ONE path and stick to it.\n"
-		"If the first page shown is Create Account, stay on Create Account.\n"
-		"If Create Account fails with 'Invalid Username/Password' or similar error,\n"
-		"report it as: done(success=False, text='blocker: account creation failed — "
-		"invalid credentials or account already exists').\n"
-		"Do NOT switch to Sign In after a Create Account failure.\n"
-		"\n"
-		"NEVER click any SSO/social login icons (Google, LinkedIn, Facebook, Apple,\n"
-		"or any icon-based login buttons).  Stay on the native email/password path ONLY.\n"
-		"\n"
-		"After sign-in or account creation, you may see a verification code "
-		"page. Report it as: done(success=False, text='blocker: verification code required').\n"
+		"Auth page rules:\n"
+		"- Pick ONE path (Create Account OR Sign In) and commit.  Do NOT\n"
+		"  toggle between them.\n"
+		"- If a confirm-password field is visible, you are on Create Account.\n"
+		"- NEVER use SSO/social login (Google, LinkedIn, Facebook, Apple).\n"
+		"- If account creation fails, report as blocker — do NOT switch to Sign In.\n"
+		"- If a verification code is required, report as blocker.\n"
 		"\n"
 		"FORM FILLING:\n"
-		"- If 'Apply Manually' is visible after clicking Apply, choose that first "
-		"before any field-filling.\n"
-		"- Use expand_repeaters or click 'Add' buttons when work history or "
-		"education sections expose visible 'Add' controls.\n"
-		"- Workday uses shadow DOM with data-automation-id selectors. DomHand "
-		"handles these, but if it fails, use generic input/click.\n"
-		"- Date fields use MM/DD/YYYY format. For segmented date inputs, type "
-		"continuous digits (e.g. '06152024') — Workday auto-advances segments."
+		"- Click the main 'Apply' button (not 'Apply Manually').\n"
+		"- Use domhand_expand or click 'Add' buttons to expand work history\n"
+		"  and education sections before filling.\n"
+		"- Workday uses shadow DOM with data-automation-id selectors.\n"
+		"- Date fields: click MM segment, type continuous digits (e.g. '06152024').\n"
+		"- After filling all fields, click 'Save and Continue' / 'Next' to advance.\n"
+		"  NEVER click the final 'Submit' button."
 	),
 	"greenhouse": (
 		"Greenhouse usually has a single-page application flow with resume "
@@ -373,21 +354,34 @@ def build_system_prompt(
 		# ── Multi-page flow guidance ──────────────────────────────
 		"<multi_page_flow>",
 		"Many ATS platforms split applications across multiple pages or",
-		"sections.  Follow this EXACT sequence on EVERY page transition:",
+		"sections.  There are TWO page types with different sequences:",
 		"",
-		"MANDATORY PAGE ENTRY SEQUENCE:",
-		"1. When you land on ANY new page or section, your VERY FIRST",
-		"   action MUST be domhand_fill.  No exceptions.  Do NOT use",
-		"   click or input_text before trying domhand_fill.",
-		"2. After domhand_fill completes, review its output for unresolved",
-		"   fields.  Handle them with domhand_select or generic actions.",
-		"3. Check for agreement checkboxes ('I agree', 'I accept', 'I",
-		"   understand', privacy policy consent, terms of service).  These",
-		"   are often missed by domhand_fill.  Click any unchecked agreement",
-		"   checkbox before proceeding.",
-		"4. Look for a 'Next' / 'Continue' / 'Save & Continue' button.",
-		"5. Click it to advance to the next section.",
-		"6. On the new page, go back to step 1 — domhand_fill FIRST.",
+		"AUTH PAGES (Create Account / Sign In):",
+		"These pages have email, password, and optionally confirm-password",
+		"fields.  Do NOT call domhand_fill on auth pages — it would use the",
+		"applicant profile email instead of the login credentials.",
+		"Follow this sequence instead:",
+		"  1. Type the credential email into the Email field (input_text).",
+		"  2. Type the credential password into the Password field.",
+		"  3. If a Confirm Password field is visible, type password again.",
+		"  4. Call domhand_check_agreement to check any 'I agree' checkbox.",
+		"     This step is REQUIRED — the submit button will silently fail",
+		"     if the agreement checkbox is unchecked.",
+		"  5. VERIFY the checkbox is checked before proceeding.  If",
+		"     domhand_check_agreement reports no checkboxes found, look for",
+		"     a checkbox visually and click it manually.",
+		"  6. Only AFTER the checkbox is confirmed checked, use",
+		"     domhand_click_button to click 'Create Account' or 'Sign In'.",
+		"",
+		"FORM PAGES (everything else):",
+		"  1. Your FIRST action MUST be domhand_fill.  Do NOT use click or",
+		"     input_text before trying domhand_fill.",
+		"  2. Review domhand_fill output for unresolved fields.  Handle them",
+		"     with domhand_select or generic actions.",
+		"  3. Check for agreement checkboxes and click any that are unchecked.",
+		"  4. Click 'Next' / 'Continue' / 'Save & Continue' to advance.",
+		"  5. On the new page, determine if it's an auth page or form page",
+		"     and follow the appropriate sequence above.",
 		"",
 		"Repeat until you reach a review/confirmation page, then call",
 		"done(success=True).",
