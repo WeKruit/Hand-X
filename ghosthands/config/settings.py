@@ -29,9 +29,9 @@ class Settings(BaseSettings):
 		alias="GOOGLE_API_KEY",
 		description="Google API key for Gemini models (agent model)",
 	)
-	agent_model: str = Field("gemini-3-flash-preview", description="Model for agent decisions")
+	agent_model: str = Field("gemini-3.1-flash-lite-preview", description="Model for agent decisions")
 	domhand_model: str = Field(
-		"claude-haiku-4-5-20251001",
+		"gemini-3.1-flash-lite-preview",
 		description="Cheap model for DomHand answer generation",
 	)
 
@@ -78,6 +78,14 @@ class Settings(BaseSettings):
 	# --- Browser ---
 	headless: bool = Field(True, description="Run browser headless")
 	browser_timeout: int = Field(30_000, description="Browser operation timeout in ms")
+	wait_between_actions: float = Field(
+		1.8,
+		description="Seconds to wait between actions within the same agent step",
+	)
+	agent_max_actions_per_step: int = Field(
+		1,
+		description="Maximum browser-use actions to execute in a single agent step",
+	)
 
 	# --- Testing ---
 	resume_json_path: str = Field(

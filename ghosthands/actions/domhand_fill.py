@@ -37,9 +37,11 @@ from ghosthands.actions.views import (
 	DomHandFillParams,
 	FillFieldResult,
 	FormField,
+	generate_dropdown_search_terms,
 	get_stable_field_key,
 	is_placeholder_value,
 	normalize_name,
+	split_dropdown_value_hierarchy,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,6 +81,17 @@ _NAV_BUTTON_LABELS = frozenset([
 	'delete', 'cancel', 'back', 'previous', 'close', 'save', 'select one',
 	'choose file',
 ])
+
+_MATCH_CONFIDENCE_RANKS = {
+	'exact': 4,
+	'strong': 3,
+	'medium': 2,
+	'weak': 1,
+}
+
+_GENERIC_SINGLE_WORD_LABELS = frozenset({
+	'source', 'type', 'status', 'name', 'date', 'number', 'code', 'title',
+})
 
 
 # ── Browser-side helper injection ────────────────────────────────────
@@ -691,6 +704,33 @@ _READ_BINARY_STATE_JS = r"""(ffId) => {
 	return JSON.stringify(null);
 }"""
 
+_READ_FIELD_VALUE_JS = r"""(ffId) => {
+	var ff = window.__ff;
+	var el = ff ? ff.byId(ffId) : null;
+	if (!el) return JSON.stringify('');
+	if (el.tagName === 'SELECT') {
+		var selOpt = el.options[el.selectedIndex];
+		return JSON.stringify(selOpt ? (selOpt.textContent || '').trim() : '');
+	}
+	if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+		return JSON.stringify((el.value || '').trim());
+	}
+	var value = '';
+	if (typeof el.value === 'string' && el.value.trim()) {
+		value = el.value.trim();
+	}
+	if (!value) {
+		var ariaLabel = el.getAttribute('aria-label');
+		if (ariaLabel && ariaLabel.trim() && ariaLabel.trim().toLowerCase() !== 'select one') {
+			value = ariaLabel.trim();
+		}
+	}
+	if (!value && el.textContent) {
+		value = el.textContent.trim();
+	}
+	return JSON.stringify(value || '');
+}"""
+
 _CLICK_BUTTON_GROUP_JS = r"""(ffId, text) => {
 	var ff = window.__ff;
 	var container = ff ? ff.byId(ffId) : null;
@@ -818,8 +858,11 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
 				'first_name': first_name, 'last_name': last_name,
 				'email': str(data.get('email') or '').strip() or None,
 				'phone': str(data.get('phone') or '').strip() or None,
+				'address': str(data.get('address') or '').strip() or None,
+				'address_line_2': str(data.get('address_line_2') or '').strip() or None,
 				'city': city, 'state': state, 'zip': zip_code,
-				'phone_device_type': str(data.get('phone_device_type') or 'Mobile').strip() or None,
+				'country': str(data.get('country') or '').strip() or None,
+				'phone_device_type': str(data.get('phone_device_type') or data.get('phone_type') or 'Mobile').strip() or None,
 				'phone_country_code': str(data.get('phone_country_code') or '+1').strip() or None,
 				'linkedin': str(data.get('linkedin') or data.get('linkedin_url') or '').strip() or None,
 				'portfolio': str(data.get('portfolio') or data.get('website') or data.get('personal_website') or '').strip() or None,
@@ -829,7 +872,7 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
 				'work_authorization': str(data.get('work_authorization') or '').strip() or None,
 				'available_start_date': str(data.get('available_start_date') or '').strip() or None,
 				'salary_expectation': str(data.get('salary_expectation') or '').strip() or None,
-				'how_did_you_hear': str(data.get('how_did_you_hear') or '').strip() or None,
+				'how_did_you_hear': str(data.get('how_did_you_hear') or data.get('referral_source') or '').strip() or None,
 				'willing_to_relocate': str(data.get('willing_to_relocate') or '').strip() or None,
 			}
 
@@ -862,7 +905,10 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
 	return {
 		'first_name': first_name, 'last_name': last_name,
 		'email': read_line('Email'), 'phone': read_line('Phone'),
+		'address': read_line('Address'),
+		'address_line_2': read_line('Address line 2') or read_line('Address Line 2'),
 		'city': city, 'state': state, 'zip': zip_code,
+		'country': read_line('Country'),
 		'phone_device_type': 'Mobile', 'phone_country_code': '+1',
 		'linkedin': linkedin, 'portfolio': portfolio,
 		'github': github_match.group(0) if github_match else None,
@@ -874,6 +920,586 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
 		'how_did_you_hear': read_line('How did you hear about us'),
 		'willing_to_relocate': read_line('Willing to relocate'),
 	}
+
+
+def _normalize_bool_text(value: Any) -> str | None:
+	"""Convert bool-like values to a stable Yes/No string when possible."""
+	if isinstance(value, bool):
+		return 'Yes' if value else 'No'
+	if value in (None, ''):
+		return None
+	text = str(value).strip()
+	if not text:
+		return None
+	norm = normalize_name(text)
+	if norm in {'yes', 'y', 'true', 'checked', '1'}:
+		return 'Yes'
+	if norm in {'no', 'n', 'false', 'unchecked', '0'}:
+		return 'No'
+	return text
+
+
+def _normalize_yes_no_answer(answer: str | None) -> str | None:
+	"""Collapse affirmative/negative answer variants to Yes/No when possible."""
+	if not answer:
+		return None
+	norm = normalize_name(answer)
+	if not norm:
+		return None
+	if re.search(r'\b(no|not|false|unchecked|decline|never|none)\b', norm):
+		return 'No'
+	if re.search(r'\b(yes|true|checked|citizen|authorized|eligible|available)\b', norm):
+		return 'Yes'
+	return None
+
+
+def _choice_words(text: str) -> set[str]:
+	"""Return a normalized word set for fuzzy option matching."""
+	stop_words = {'the', 'a', 'an', 'of', 'for', 'in', 'to', 'and', 'or', 'your', 'my'}
+	return {word for word in normalize_name(text).split() if len(word) > 2 and word not in stop_words}
+
+
+def _stem_word(word: str) -> str:
+	"""Apply a lightweight stemmer for fuzzy question/choice matching."""
+	return re.sub(r'(ating|ting|ing|tion|sion|ment|ness|able|ible|ed|ly|er|est|ies|es|s)$', '', word, flags=re.IGNORECASE)
+
+
+def _normalize_match_label(text: str) -> str:
+	"""Normalize a field label for confidence scoring and answer lookup."""
+	raw = normalize_name(text or '')
+	raw = re.sub(r'\s+#\d+\s*$', '', raw)
+	raw = re.sub(r'[^a-z0-9]+', ' ', raw)
+	return re.sub(r'\s+', ' ', raw).strip()
+
+
+def _label_match_words(text: str) -> set[str]:
+	"""Return normalized label words including short domain words like ZIP."""
+	return {
+		word
+		for word in _normalize_match_label(text).split()
+		if word and word not in {'the', 'a', 'an', 'of', 'for', 'in', 'to', 'and', 'or', 'your', 'my'}
+	}
+
+
+def _label_match_confidence(label: str, candidate: str) -> str | None:
+	"""Classify how confidently two field labels refer to the same concept."""
+	label_norm = _normalize_match_label(label)
+	candidate_norm = _normalize_match_label(candidate)
+	if not label_norm or not candidate_norm:
+		return None
+	if label_norm == candidate_norm:
+		return 'exact'
+
+	label_words = _label_match_words(label)
+	candidate_words = _label_match_words(candidate)
+	if not label_words or not candidate_words:
+		return None
+
+	overlap_words = label_words & candidate_words
+	smaller_size = min(len(label_words), len(candidate_words))
+	overlap_ratio = len(overlap_words) / smaller_size if smaller_size else 0.0
+	if smaller_size >= 2 and overlap_ratio >= 1.0:
+		return 'strong'
+	if smaller_size >= 3 and overlap_ratio >= 0.75:
+		return 'strong'
+
+	if smaller_size == 1 and overlap_ratio >= 1.0:
+		single_word = next(iter(overlap_words))
+		if len(single_word) >= 4 and single_word not in _GENERIC_SINGLE_WORD_LABELS:
+			if max(len(label_words), len(candidate_words)) <= 2:
+				return 'strong'
+			return 'medium'
+
+	if smaller_size >= 2 and overlap_ratio >= 0.6:
+		return 'medium'
+
+	label_stems = {_stem_word(word) for word in label_words}
+	candidate_stems = {_stem_word(word) for word in candidate_words}
+	stem_overlap = label_stems & candidate_stems
+	stem_ratio = len(stem_overlap) / min(len(label_stems), len(candidate_stems)) if label_stems and candidate_stems else 0.0
+	if len(stem_overlap) >= 2 and stem_ratio >= 0.75:
+		return 'medium'
+	if len(stem_overlap) >= 2:
+		return 'weak'
+
+	if label_norm in candidate_norm or candidate_norm in label_norm:
+		shorter = min(label_norm, candidate_norm, key=len)
+		if len(shorter) >= 8:
+			return 'medium'
+		return 'weak'
+
+	return None
+
+
+def _meets_match_confidence(confidence: str | None, minimum_confidence: str) -> bool:
+	"""Return True when the detected match confidence clears the required bar."""
+	if not confidence:
+		return False
+	return _MATCH_CONFIDENCE_RANKS.get(confidence, 0) >= _MATCH_CONFIDENCE_RANKS.get(minimum_confidence, 0)
+
+
+def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
+	"""Map a profile answer onto the closest available field option when present."""
+	if answer in (None, ''):
+		return None
+	text = str(answer).strip()
+	if not text:
+		return None
+
+	choices = [str(choice).strip() for choice in (field.options or field.choices or []) if str(choice).strip()]
+	if not choices:
+		return text
+
+	text_norm = normalize_name(text)
+	for choice in choices:
+		if normalize_name(choice) == text_norm:
+			return choice
+
+	boolish = _normalize_yes_no_answer(text)
+	if boolish:
+		for choice in choices:
+			if normalize_name(choice) == normalize_name(boolish):
+				return choice
+
+	for choice in choices:
+		choice_norm = normalize_name(choice)
+		if choice_norm and (choice_norm in text_norm or text_norm in choice_norm):
+			return choice
+
+	text_words = _choice_words(text)
+	text_stems = {_stem_word(word) for word in text_words}
+	best_choice: str | None = None
+	best_score = 0
+	for choice in choices:
+		choice_words = _choice_words(choice)
+		score = len(text_words & choice_words) * 2
+		score += len(text_stems & {_stem_word(word) for word in choice_words})
+		if score > best_score:
+			best_score = score
+			best_choice = choice
+
+	if best_choice and best_score > 0:
+		return best_choice
+	return text
+
+
+def _field_label_candidates(field: FormField) -> list[str]:
+	"""Return deduplicated field labels ordered from most to least descriptive."""
+	seen: set[str] = set()
+	candidates: list[str] = []
+	for label in (field.raw_label, field.name):
+		cleaned = str(label or '').strip()
+		key = normalize_name(cleaned)
+		if not cleaned or not key or key in seen:
+			continue
+		seen.add(key)
+		candidates.append(cleaned)
+	return candidates
+
+
+def _preferred_field_label(field: FormField) -> str:
+	"""Choose the best human-readable label for prompts and matching."""
+	candidates = _field_label_candidates(field)
+	if candidates:
+		return candidates[0]
+	return (field.name or field.raw_label or '').strip()
+
+
+def _section_matches_scope(section: str | None, scope: str | None) -> bool:
+	"""Return True when a field section matches a requested scope/boundary."""
+	section_norm = normalize_name(section or '')
+	scope_norm = normalize_name(scope or '')
+	if not scope_norm:
+		return True
+	if not section_norm:
+		return False
+	return (
+		section_norm == scope_norm
+		or scope_norm in section_norm
+		or section_norm in scope_norm
+	)
+
+
+def _filter_fields_for_scope(
+	fields: list[FormField],
+	target_section: str | None = None,
+	heading_boundary: str | None = None,
+) -> list[FormField]:
+	"""Restrict fields to a section and/or repeater entry boundary."""
+	filtered = fields
+	if target_section:
+		section_filtered = [f for f in filtered if _section_matches_scope(f.section, target_section)]
+		if section_filtered:
+			filtered = section_filtered
+		elif not heading_boundary:
+			logger.info(
+				'DomHand scope fallback: no fields matched target section, using all visible fields',
+				extra={'target_section': target_section, 'field_count': len(fields)},
+			)
+	if heading_boundary:
+		filtered = [f for f in filtered if _section_matches_scope(f.section, heading_boundary)]
+	return filtered
+
+
+def _format_entry_profile_text(entry_data: dict[str, Any]) -> str:
+	"""Format a repeater entry into profile text for scoped LLM answer generation."""
+	if not entry_data:
+		return ''
+
+	lines: list[str] = []
+	used_keys: set[str] = set()
+	label_map = [
+		('title', 'Job Title'),
+		('company', 'Company'),
+		('location', 'Location'),
+		('school', 'School'),
+		('degree', 'Degree'),
+		('field_of_study', 'Field of Study'),
+		('gpa', 'GPA'),
+		('start_date', 'Start Date'),
+		('end_date', 'End Date'),
+		('description', 'Description'),
+	]
+
+	for key, label in label_map:
+		value = entry_data.get(key)
+		if key == 'end_date' and value in (None, '', []):
+			value = entry_data.get('graduation_date')
+		if value in (None, '', []):
+			continue
+		used_keys.add(key)
+		lines.append(f'{label}: {value}')
+
+	currently_work_here = entry_data.get('currently_work_here')
+	if currently_work_here is None:
+		currently_work_here = entry_data.get('currently_working')
+	if currently_work_here is not None:
+		used_keys.add('currently_work_here')
+		lines.append(
+			'I currently work here: '
+			+ ('Yes' if bool(currently_work_here) else 'No')
+		)
+
+	for key, value in entry_data.items():
+		if key in used_keys or value in (None, '', []):
+			continue
+		lines.append(f'{key.replace("_", " ").title()}: {value}')
+
+	return '\n'.join(lines) if lines else json.dumps(entry_data, indent=2, sort_keys=True)
+
+
+def _known_entry_value(field_name: str, entry_data: dict[str, Any] | None) -> str | None:
+	"""Return a scoped repeater-entry value when filling a single experience/education block."""
+	if not entry_data:
+		return None
+
+	name = normalize_name(field_name)
+	if not name:
+		return None
+
+	def _entry_string(key: str) -> str | None:
+		value = entry_data.get(key)
+		if value in (None, '', []):
+			return None
+		return str(value).strip() or None
+
+	if any(kw in name for kw in ('job title', 'title', 'position', 'role title')):
+		return _entry_string('title')
+	if any(kw in name for kw in ('company', 'employer', 'organization')):
+		return _entry_string('company')
+	if any(kw in name for kw in ('school', 'university', 'college', 'institution')):
+		return _entry_string('school')
+	if 'degree' in name:
+		return _entry_string('degree')
+	if any(kw in name for kw in ('field of study', 'major', 'discipline')):
+		return _entry_string('field_of_study')
+	if 'gpa' in name:
+		return _entry_string('gpa')
+	if any(kw in name for kw in ('location', 'city')):
+		return _entry_string('location')
+	if any(kw in name for kw in ('currently work here', 'currently employed', 'currently working', 'still employed')):
+		current = entry_data.get('currently_work_here')
+		if current is None:
+			current = entry_data.get('currently_working')
+		if current is None:
+			return None
+		return 'checked' if bool(current) else 'unchecked'
+	if any(kw in name for kw in ('start date', 'from date', 'date from', 'begin date', 'employment start')):
+		return _entry_string('start_date')
+	if any(kw in name for kw in ('end date', 'to date', 'date to', 'graduation date', 'completion date')):
+		return _entry_string('end_date') or _entry_string('graduation_date')
+	if any(kw in name for kw in ('description', 'summary', 'responsibilities', 'responsibility', 'duties', 'details', 'accomplishments', 'achievements')):
+		return _entry_string('description')
+	return None
+
+
+def _known_entry_value_for_field(field: FormField, entry_data: dict[str, Any] | None) -> str | None:
+	"""Try scoped repeater entry matching against all known labels for a field."""
+	for label in _field_label_candidates(field):
+		value = _known_entry_value(label, entry_data)
+		if value:
+			return _coerce_answer_to_field(field, value)
+	return _coerce_answer_to_field(field, _known_entry_value(field.name, entry_data))
+
+
+def _parse_heading_index(scope: str | None) -> int | None:
+	"""Extract a 1-based repeater index from headings like 'Education 1'."""
+	if not scope:
+		return None
+	match = re.search(r'(\d+)(?!.*\d)', scope)
+	if not match:
+		return None
+	try:
+		return max(1, int(match.group(1)))
+	except ValueError:
+		return None
+
+
+def _infer_entry_data_from_scope(
+	profile_data: dict[str, Any],
+	heading_boundary: str | None,
+	target_section: str | None,
+) -> dict[str, Any] | None:
+	"""Infer repeater entry data from the full profile when entry_data is omitted."""
+	if not profile_data:
+		return None
+
+	scope_norm = normalize_name(heading_boundary or target_section or '')
+	if not scope_norm:
+		return None
+
+	entry_index = (_parse_heading_index(heading_boundary or target_section) or 1) - 1
+	if 'education' in scope_norm:
+		entries = profile_data.get('education')
+	elif any(token in scope_norm for token in ('work experience', 'experience', 'employment')):
+		entries = profile_data.get('experience')
+	else:
+		return None
+
+	if not isinstance(entries, list) or not (0 <= entry_index < len(entries)):
+		return None
+	entry = entries[entry_index]
+	return entry if isinstance(entry, dict) and entry else None
+
+
+def _get_nested_profile_value(profile_data: dict[str, Any], *paths: tuple[str, ...]) -> Any:
+	"""Return the first nested profile value found across the candidate paths."""
+	for path in paths:
+		current: Any = profile_data
+		found = True
+		for key in path:
+			if not isinstance(current, dict) or key not in current:
+				found = False
+				break
+			current = current[key]
+		if found:
+			return current
+	return None
+
+
+def _build_profile_answer_map(
+	profile_data: dict[str, Any],
+	evidence: dict[str, str | None],
+) -> dict[str, str]:
+	"""Build a generic question/answer map from structured profile data."""
+	if not profile_data:
+		return {}
+
+	first_name = str(profile_data.get('first_name') or evidence.get('first_name') or '').strip()
+	last_name = str(profile_data.get('last_name') or evidence.get('last_name') or '').strip()
+	full_name = (
+		str(profile_data.get('full_name') or profile_data.get('name') or '').strip()
+		or f'{first_name} {last_name}'.strip()
+	)
+	address = _get_nested_profile_value(profile_data, ('address',))
+	address_street = address if isinstance(address, str) else _get_nested_profile_value(profile_data, ('address', 'street'))
+	address_line_2 = profile_data.get('address_line_2')
+	if not address_line_2 and isinstance(address, dict):
+		address_line_2 = address.get('line2') or address.get('street2')
+	country = (
+		profile_data.get('country')
+		or _get_nested_profile_value(profile_data, ('address', 'country'))
+		or evidence.get('country')
+	)
+	phone_type = profile_data.get('phone_device_type') or profile_data.get('phone_type') or evidence.get('phone_device_type')
+	phone_country_code = profile_data.get('phone_country_code') or evidence.get('phone_country_code')
+	referral_source = profile_data.get('how_did_you_hear') or profile_data.get('referral_source') or evidence.get('how_did_you_hear')
+	work_auth = profile_data.get('work_authorization') or evidence.get('work_authorization')
+	authorized_value = profile_data.get('authorized_to_work')
+	if authorized_value is None:
+		authorized_value = profile_data.get('US_citizen')
+	sponsorship_value = profile_data.get('sponsorship_needed')
+	if sponsorship_value is None:
+		sponsorship_value = profile_data.get('visa_sponsorship')
+
+	answer_map: dict[str, str] = {}
+
+	def add(value: Any, *labels: str) -> None:
+		text = _normalize_bool_text(value)
+		if text is None:
+			return
+		for label in labels:
+			answer_map[label] = text
+
+	add(profile_data.get('gender'), 'Gender')
+	add(profile_data.get('race_ethnicity') or profile_data.get('race'), 'Race/Ethnicity', 'Race', 'Ethnicity')
+	add(profile_data.get('Veteran_status') or profile_data.get('veteran_status'), 'Veteran Status', 'Are you a protected veteran')
+	add(profile_data.get('disability_status'), 'Disability', 'Disability Status', 'Please indicate if you have a disability')
+	add(country, 'Country', 'Country/Territory', 'Country/Region')
+	add(phone_type, 'Phone Device Type', 'Phone Type')
+	add(phone_country_code, 'Country Phone Code', 'Phone Country Code')
+	add(full_name, 'Please enter your name', 'Enter your name', 'Your name', 'Full name', 'Signature', 'Name')
+	add(address_street, 'Address', 'Address Line 1', 'Address 1', 'Street', 'Street Address', 'Street Line 1', 'Mailing Address')
+	add(address_line_2, 'Address Line 2', 'Address 2', 'Apartment / Unit', 'Apartment', 'Suite / Apartment', 'Suite', 'Unit', 'Street Line 2', 'Mailing Address Line 2')
+	add(profile_data.get('city') or _get_nested_profile_value(profile_data, ('address', 'city')), 'City', 'Town')
+	add(profile_data.get('state') or _get_nested_profile_value(profile_data, ('address', 'state')), 'State', 'State/Province', 'State / Province', 'Province', 'Region')
+	add(profile_data.get('postal_code') or _get_nested_profile_value(profile_data, ('address', 'zip')), 'Postal Code', 'Postal/Zip Code', 'ZIP', 'ZIP Code', 'Zip/Postal Code')
+	add(referral_source, 'How Did You Hear About Us?', 'How did you hear about this position?', 'How did you learn about us?', 'Referral Source', 'Source', 'Source of Referral')
+	add(profile_data.get('linkedin') or profile_data.get('linkedin_url') or evidence.get('linkedin'), 'LinkedIn', 'LinkedIn URL', 'LinkedIn Profile')
+	add(profile_data.get('portfolio') or profile_data.get('website') or profile_data.get('website_url') or profile_data.get('personal_website') or evidence.get('portfolio'), 'Website', 'Website URL', 'Portfolio', 'Portfolio URL', 'Personal Website', 'Personal Site', 'Blog')
+	add(profile_data.get('github') or profile_data.get('github_url') or evidence.get('github'), 'GitHub', 'GitHub URL', 'GitHub Profile')
+	add(work_auth, 'Work Authorization')
+	add(profile_data.get('willing_to_relocate'), 'Willing to relocate', 'Relocation')
+	add(sponsorship_value, 'Visa Sponsorship', 'Sponsorship needed', 'Require sponsorship', 'Need sponsorship')
+	add(authorized_value, 'Authorized to work', 'Legally authorized to work', 'Are you legally authorized to work in the country in which this job is located?')
+
+	age_value = profile_data.get('age')
+	if age_value not in (None, ''):
+		try:
+			if int(str(age_value).strip()) >= 18:
+				add('Yes', 'Are you at least 18 years old?', 'Are you 18 years of age or older?')
+		except ValueError:
+			pass
+
+	return answer_map
+
+
+def _find_best_profile_answer(
+	label: str,
+	answer_map: dict[str, str],
+	minimum_confidence: str = 'medium',
+) -> str | None:
+	"""Find the closest structured-profile answer for a field label."""
+	if not label or not answer_map:
+		return None
+
+	best_answer: str | None = None
+	best_rank = 0
+	for question, answer in answer_map.items():
+		confidence = _label_match_confidence(label, question)
+		if not _meets_match_confidence(confidence, minimum_confidence):
+			continue
+		rank = _MATCH_CONFIDENCE_RANKS.get(confidence or '', 0)
+		if rank > best_rank:
+			best_rank = rank
+			best_answer = answer
+
+	if best_answer is None:
+		return None
+	return best_answer
+
+
+def _default_screening_answer(field: FormField, profile_data: dict[str, Any]) -> str | None:
+	"""Return a conservative default for standard yes/no screening questions."""
+	label = _preferred_field_label(field)
+	norm = normalize_name(label)
+	options = [normalize_name(choice) for choice in (field.options or field.choices or [])]
+	if options and not ({'yes', 'no'} & set(options)):
+		return None
+
+	if any(phrase in norm for phrase in ('ever applied', 'previously applied', 'have you applied')):
+		return _coerce_answer_to_field(field, 'No')
+	if any(phrase in norm for phrase in ('ever worked', 'previously worked', 'worked at', 'worked for', 'been employed')):
+		return _coerce_answer_to_field(field, 'No')
+	if any(phrase in norm for phrase in ('relatives employed', 'relative employed', 'related to any employee', 'family employed')):
+		return _coerce_answer_to_field(field, 'No')
+	if any(phrase in norm for phrase in ('commitments to another employer', 'interfere with your employment', 'affect your employment', 'conflict of interest', 'obligation to another employer')):
+		return _coerce_answer_to_field(field, 'No')
+
+	sponsorship_value = profile_data.get('sponsorship_needed')
+	if sponsorship_value is None:
+		sponsorship_value = profile_data.get('visa_sponsorship')
+	if any(phrase in norm for phrase in ('sponsorship', 'visa sponsorship', 'require sponsorship', 'need sponsorship')):
+		return _coerce_answer_to_field(field, _normalize_bool_text(sponsorship_value) or 'No')
+
+	authorized_value = profile_data.get('authorized_to_work')
+	if authorized_value is None:
+		authorized_value = profile_data.get('US_citizen')
+	if any(phrase in norm for phrase in ('authorized to work', 'legally authorized', 'eligible to work')):
+		return _coerce_answer_to_field(field, _normalize_bool_text(authorized_value) or 'Yes')
+
+	return None
+
+
+def _parse_dropdown_click_result(raw_result: Any) -> dict[str, Any]:
+	"""Normalize dropdown click helper results into a dict."""
+	if isinstance(raw_result, str):
+		try:
+			parsed = json.loads(raw_result)
+		except json.JSONDecodeError:
+			return {'clicked': False}
+		return parsed if isinstance(parsed, dict) else {'clicked': False}
+	return raw_result if isinstance(raw_result, dict) else {'clicked': False}
+
+
+def _field_value_matches_expected(current: str, expected: str) -> bool:
+	"""Return True when the visible field value reflects the intended selection."""
+	current_text = (current or '').strip()
+	expected_text = (expected or '').strip()
+	if not current_text or not expected_text:
+		return False
+	if is_placeholder_value(current_text):
+		return False
+
+	current_norm = normalize_name(current_text)
+	expected_norm = normalize_name(expected_text)
+	if not current_norm or not expected_norm:
+		return False
+	if expected_norm in current_norm or current_norm in expected_norm:
+		return True
+
+	segments = split_dropdown_value_hierarchy(expected_text)
+	if not segments:
+		return False
+	final_segment = normalize_name(segments[-1])
+	return bool(final_segment and final_segment in current_norm)
+
+
+async def _read_field_value(page: Any, field_id: str) -> str:
+	"""Read the current visible value for a field."""
+	try:
+		raw_value = await page.evaluate(_READ_FIELD_VALUE_JS, field_id)
+	except Exception:
+		return ''
+	if isinstance(raw_value, str):
+		try:
+			parsed = json.loads(raw_value)
+		except json.JSONDecodeError:
+			return raw_value.strip()
+		return str(parsed or '').strip()
+	return str(raw_value or '').strip()
+
+
+async def _wait_for_field_value(
+	page: Any,
+	field: FormField,
+	expected: str,
+	timeout: float = 2.4,
+	poll_interval: float = 0.25,
+) -> str:
+	"""Wait briefly for a field's visible value to reflect the intended selection."""
+	loop = asyncio.get_running_loop()
+	deadline = loop.time() + timeout
+	last_value = ''
+	while True:
+		current = await _read_field_value(page, field.field_id)
+		if current:
+			last_value = current
+		if _field_value_matches_expected(current, expected):
+			return current
+		if loop.time() >= deadline:
+			return last_value
+		await asyncio.sleep(poll_interval)
 
 
 def _known_profile_value(field_name: str, evidence: dict[str, str | None]) -> str | None:
@@ -900,22 +1526,28 @@ def _known_profile_value(field_name: str, evidence: dict[str, str | None]) -> st
 		return evidence.get('phone_country_code')
 	if any(kw in name for kw in ('phone', 'mobile', 'telephone')) and evidence.get('phone'):
 		return evidence['phone']
+	if any(kw in name for kw in ('address line 2', 'address 2', 'street line 2', 'apartment', 'apt', 'suite', 'unit', 'mailing address line 2')):
+		return evidence.get('address_line_2')
+	if any(kw in name for kw in ('address', 'street address', 'address line 1', 'address 1', 'street line 1', 'mailing address')):
+		return evidence.get('address')
 	if name == 'city' or ' city' in name:
 		return evidence.get('city')
-	if name == 'state' or 'state/province' in name or 'province' in name:
+	if name == 'state' or 'state/province' in name or 'state / province' in name or 'province' in name or name == 'region':
 		return evidence.get('state')
 	if 'postal' in name or 'zip' in name:
 		return evidence.get('zip')
+	if any(kw in name for kw in ('country/region', 'country region', 'country')):
+		return evidence.get('country')
 	if 'linkedin' in name:
 		return evidence.get('linkedin')
 	if 'github' in name:
 		return evidence.get('github')
-	if any(kw in name for kw in ('portfolio', 'website', 'personal site', 'blog')):
+	if any(kw in name for kw in ('portfolio', 'website', 'website url', 'personal site', 'personal website', 'blog', 'homepage')):
 		return evidence.get('portfolio')
 	if 'twitter' in name or 'x handle' in name:
 		return evidence.get('twitter')
 	# Workday-specific field matching
-	if any(kw in name for kw in ('how did you hear', 'referral source', 'source')):
+	if any(kw in name for kw in ('how did you hear', 'learn about us', 'referral source', 'source of referral', 'source')):
 		return evidence.get('how_did_you_hear')
 	if any(kw in name for kw in ('work authorization', 'authorized to work', 'legally authorized')):
 		return evidence.get('work_authorization')
@@ -933,8 +1565,38 @@ def _known_profile_value(field_name: str, evidence: dict[str, str | None]) -> st
 	return None
 
 
+def _known_profile_value_for_field(
+	field: FormField,
+	evidence: dict[str, str | None],
+	profile_data: dict[str, Any] | None = None,
+	minimum_confidence: str = 'medium',
+) -> str | None:
+	"""Try direct profile matching against all known labels for a field."""
+	profile_answer_map = _build_profile_answer_map(profile_data or {}, evidence)
+	for label in _field_label_candidates(field):
+		value = _find_best_profile_answer(label, profile_answer_map, minimum_confidence=minimum_confidence)
+		if value:
+			return _coerce_answer_to_field(field, value)
+	if _MATCH_CONFIDENCE_RANKS.get(minimum_confidence, 0) >= _MATCH_CONFIDENCE_RANKS['strong']:
+		return None
+	for label in _field_label_candidates(field):
+		value = _known_profile_value(label, evidence)
+		if value:
+			return _coerce_answer_to_field(field, value)
+	default_answer = _default_screening_answer(field, profile_data or {})
+	if default_answer:
+		return default_answer
+	return _coerce_answer_to_field(field, _known_profile_value(field.name, evidence))
+
+
 def _default_value(field: FormField) -> str:
 	"""Fallback default values for fields that the LLM didn't answer."""
+	name_lower = (field.name or '').lower()
+
+	# Referral source — always "Other" (every ATS has this option)
+	if ('hear' in name_lower and 'about' in name_lower) or 'referral' in name_lower:
+		return 'Other'
+
 	match field.field_type:
 		case 'number':
 			return '1'
@@ -973,18 +1635,19 @@ def _sanitize_no_guess_answer(
 async def _generate_answers(
 	fields: list[FormField], profile_text: str,
 ) -> tuple[dict[str, str], int, int, float, str | None]:
-	"""Call Haiku to generate answers for all fields in a single batch."""
+	"""Call the configured DomHand model to generate answers for all fields in a single batch."""
 	try:
-		from ghosthands.llm.client import get_anthropic_client
+		from browser_use.llm.messages import UserMessage
 		from ghosthands.config.models import estimate_cost
 		from ghosthands.config.settings import settings as _settings
+		from ghosthands.llm.client import get_chat_model
 	except ImportError:
 		logger.error('ghosthands.llm.client not available — cannot generate answers')
 		return {}, 0, 0, 0.0, None
 
-	client = get_anthropic_client()
 	evidence = _parse_profile_evidence(profile_text)
 	model_id = _settings.domhand_model
+	llm = get_chat_model(model=model_id)
 	input_tokens = 0
 	output_tokens = 0
 	step_cost = 0.0
@@ -992,7 +1655,7 @@ async def _generate_answers(
 	name_counts: dict[str, int] = {}
 	disambiguated_names: list[str] = []
 	for i, field in enumerate(fields):
-		base_name = (field.name or '').strip() or f'Field {i + 1}'
+		base_name = _preferred_field_label(field) or f'Field {i + 1}'
 		norm = normalize_name(base_name) or f'field-{i + 1}'
 		count = name_counts.get(norm, 0) + 1
 		name_counts[norm] = count
@@ -1021,7 +1684,7 @@ Rules:
 - NEVER fabricate personal identifiers or social handles/URLs not explicitly in the profile. If missing: return "" (empty string) regardless of whether the field is required or optional.
 - For dropdowns/radio groups with listed options, pick the EXACT text of one of the available options.
 - For hierarchical dropdown options (format "Category > SubOption"), pick the EXACT full path including the " > " separator.
-- For dropdowns WITHOUT listed options, provide your best guess for the value.
+- For dropdowns WITHOUT listed options, provide the value from the profile if available. If the field name closely matches a profile entry, use that value.
 - For skill typeahead fields, return an ARRAY of relevant skills from the applicant profile.
 - For multi-select fields, return a JSON array of ALL matching options (e.g., ["Python", "Java"]).
 - For checkboxes/toggles, respond with "checked" or "unchecked".
@@ -1039,14 +1702,13 @@ Rules:
 Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because..."}}"""
 
 	try:
-		response = await client.messages.create(
-			model=model_id,
+		response = await llm.ainvoke(
+			[UserMessage(content=prompt)],
 			max_tokens=4096,
-			messages=[{'role': 'user', 'content': prompt}],
 		)
-		text = response.content[0].text if response.content and response.content[0].type == 'text' else ''
-		input_tokens = response.usage.input_tokens if response.usage else 0
-		output_tokens = response.usage.output_tokens if response.usage else 0
+		text = response.completion if isinstance(response.completion, str) else ''
+		input_tokens = response.usage.prompt_tokens if response.usage else 0
+		output_tokens = response.usage.completion_tokens if response.usage else 0
 		try:
 			step_cost = estimate_cost(model_id, input_tokens, output_tokens)
 		except Exception as e:
@@ -1139,64 +1801,50 @@ _AUTHORITATIVE_SELECT_DEFAULTS: dict[str, str] = {
 
 
 def _match_answer(
-	field: FormField, answers: dict[str, str], evidence: dict[str, str | None],
+	field: FormField,
+	answers: dict[str, str],
+	evidence: dict[str, str | None],
+	profile_data: dict[str, Any] | None = None,
 ) -> str | None:
-	norm_name = normalize_name(field.name)
-	if field.field_type == 'select' and norm_name in _AUTHORITATIVE_SELECT_KEYS:
-		for ck in _AUTHORITATIVE_SELECT_KEYS[norm_name]:
-			if ck in answers:
-				return answers[ck]
-			for key, val in answers.items():
-				if normalize_name(key) == normalize_name(ck):
-					return val
-		if norm_name in _AUTHORITATIVE_SELECT_DEFAULTS:
-			return _AUTHORITATIVE_SELECT_DEFAULTS[norm_name]
+	label_candidates = _field_label_candidates(field) or [field.name]
+	candidate_norms = [_normalize_match_label(label) for label in label_candidates if _normalize_match_label(label)]
+	minimum_confidence = 'medium' if field.required else 'strong'
 
-	profile_val = _known_profile_value(field.name, evidence)
+	if field.field_type == 'select':
+		for norm_name in candidate_norms:
+			if norm_name in _AUTHORITATIVE_SELECT_KEYS:
+				for ck in _AUTHORITATIVE_SELECT_KEYS[norm_name]:
+					if ck in answers:
+						return answers[ck]
+					for key, val in answers.items():
+						if normalize_name(key) == normalize_name(ck):
+							return val
+				if norm_name in _AUTHORITATIVE_SELECT_DEFAULTS:
+					return _AUTHORITATIVE_SELECT_DEFAULTS[norm_name]
+
+	profile_val = _known_profile_value_for_field(field, evidence, profile_data, minimum_confidence=minimum_confidence)
 	if profile_val:
 		return profile_val
 
-	field_norm = normalize_name(field.name)
-	if not field_norm:
+	if not candidate_norms:
 		return None
 
+	best_val: str | None = None
+	best_rank = 0
 	for key, val in answers.items():
-		if normalize_name(key) == field_norm:
-			return val
-	for key, val in answers.items():
-		if field_norm in normalize_name(key):
-			return val
-	for key, val in answers.items():
-		key_norm = normalize_name(key)
-		if key_norm and key_norm in field_norm:
-			return val
+		for candidate in label_candidates:
+			confidence = _label_match_confidence(candidate, key)
+			if not _meets_match_confidence(confidence, minimum_confidence):
+				continue
+			rank = _MATCH_CONFIDENCE_RANKS.get(confidence or '', 0)
+			if rank > best_rank:
+				best_rank = rank
+				best_val = _coerce_answer_to_field(field, val)
+				if rank == _MATCH_CONFIDENCE_RANKS['exact']:
+					return best_val
 
-	stop_words = {'the', 'a', 'an', 'of', 'for', 'in', 'to', 'and', 'or', 'your', 'my'}
-	field_words = set(field_norm.split()) - stop_words
-	if len(field_words) >= 2:
-		best_overlap = 0
-		best_val: str | None = None
-		for key, val in answers.items():
-			key_words = set(normalize_name(key).split()) - stop_words
-			overlap = len(field_words & key_words)
-			if overlap >= 2 and overlap > best_overlap:
-				best_overlap = overlap
-				best_val = val
-		if best_val is not None:
-			return best_val
-
-	def stem(word: str) -> str:
-		for suffix in ('tion', 'sion', 'ment', 'ness', 'ing', 'ity', 'ous', 'ive', 'ful', 'ly', 'ed', 'er', 'es', 's'):
-			if word.endswith(suffix) and len(word) > len(suffix) + 2:
-				return word[:-len(suffix)]
-		return word
-
-	field_stems = {stem(w) for w in field_words}
-	for key, val in answers.items():
-		key_words = set(normalize_name(key).split()) - stop_words
-		key_stems = {stem(w) for w in key_words}
-		if len(field_stems & key_stems) >= 2:
-			return val
+	if best_val is not None:
+		return best_val
 
 	return None
 
@@ -1222,10 +1870,15 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 	if not page:
 		return ActionResult(error='No active page found in browser session')
 
-	profile_text = _get_profile_text()
-	if not profile_text:
+	base_profile_text = _get_profile_text()
+	if not base_profile_text:
 		return ActionResult(error='No user profile text found. Set GH_USER_PROFILE_TEXT or GH_USER_PROFILE_PATH env var.')
 
+	profile_data = _get_profile_data()
+	entry_data = params.entry_data if isinstance(params.entry_data, dict) and params.entry_data else None
+	if not entry_data:
+		entry_data = _infer_entry_data_from_scope(profile_data, params.heading_boundary, params.target_section)
+	profile_text = _format_entry_profile_text(entry_data) if entry_data else base_profile_text
 	evidence = _parse_profile_evidence(profile_text)
 	all_results: list[FillFieldResult] = []
 	total_step_cost = 0.0
@@ -1311,14 +1964,19 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 		except Exception as e:
 			logger.debug(f'Button group extraction failed: {e}')
 
-		if params.target_section:
-			section_norm = normalize_name(params.target_section)
-			fields = [
-				f for f in fields
-				if normalize_name(f.section) == section_norm
-				or section_norm in normalize_name(f.section)
-				or normalize_name(f.section) in section_norm
-			]
+		fields = _filter_fields_for_scope(
+			fields,
+			target_section=params.target_section,
+			heading_boundary=params.heading_boundary,
+		)
+
+		if params.heading_boundary and not fields:
+			return ActionResult(
+				error=(
+					f'No visible fields matched heading boundary "{params.heading_boundary}". '
+					'Verify the entry heading is visible before calling domhand_fill.'
+				),
+			)
 
 		fillable_fields: list[FormField] = []
 		for f in fields:
@@ -1356,7 +2014,12 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 			if f.current_value and not is_placeholder_value(f.current_value):
 				fields_seen.add(get_stable_field_key(f))
 				continue
-			profile_val = _known_profile_value(f.name, evidence)
+			profile_val = _known_entry_value_for_field(f, entry_data) or _known_profile_value_for_field(
+				f,
+				evidence,
+				profile_data,
+				minimum_confidence='medium' if f.required else 'strong',
+			)
 			if profile_val:
 				direct_fills[f.field_id] = profile_val
 			else:
@@ -1381,7 +2044,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 				value = direct_fills[f.field_id]
 				success = await _fill_single_field(page, f, value)
 				fr = FillFieldResult(
-					field_id=f.field_id, name=f.name, success=success, actor='dom',
+					field_id=f.field_id, name=_preferred_field_label(f), success=success, actor='dom',
 					value_set=value if success else None, error=None if success else 'DOM fill failed',
 				)
 				all_results.append(fr)
@@ -1392,7 +2055,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 				round_failed += 0 if success else 1
 
 		for f in needs_llm:
-			matched_answer = _match_answer(f, answers, evidence)
+			matched_answer = _match_answer(f, answers, evidence, profile_data)
 			if not matched_answer:
 				matched_answer = _default_value(f)
 			# Strip out any N/A-like placeholders the LLM generated
@@ -1400,9 +2063,12 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 				matched_answer = ''
 			if not matched_answer:
 				key = get_stable_field_key(f)
+				error_msg = 'No confident profile match for this field'
+				if f.required:
+					error_msg = 'REQUIRED — could not fill automatically'
 				fr = FillFieldResult(
-					field_id=f.field_id, name=f.name, success=False,
-					actor='skipped', error='No profile data for this field',
+					field_id=f.field_id, name=_preferred_field_label(f), success=False,
+					actor='skipped', error=error_msg,
 				)
 				all_results.append(fr)
 				if _on_field_result:
@@ -1412,7 +2078,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 				continue
 			success = await _fill_single_field(page, f, matched_answer)
 			fr = FillFieldResult(
-				field_id=f.field_id, name=f.name, success=success, actor='dom',
+				field_id=f.field_id, name=_preferred_field_label(f), success=success, actor='dom',
 				value_set=matched_answer if success else None, error=None if success else 'DOM fill failed',
 			)
 			all_results.append(fr)
@@ -1431,8 +2097,13 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 	failed_count = sum(1 for r in all_results if not r.success and r.actor == 'dom')
 	skipped_count = sum(1 for r in all_results if r.actor == 'skipped')
 	unfilled_count = sum(1 for r in all_results if r.actor == 'unfilled')
-	skipped_descriptions = [
-		f'  - "{r.name}" (no profile data)' for r in all_results if r.actor == 'skipped'
+	required_skipped = [
+		f'  - "{r.name}" (REQUIRED — needs attention)' for r in all_results if r.actor == 'skipped' and r.error and 'REQUIRED' in r.error
+	]
+	optional_skipped = [
+		f'  - "{r.name}" ({r.error or "no confident profile match"})'
+		for r in all_results
+		if r.actor == 'skipped' and (not r.error or 'REQUIRED' not in r.error)
 	]
 	failed_descriptions = [
 		f'  - "{r.name}" ({r.error or "DOM fill failed"})' for r in all_results if not r.success and r.actor == 'dom'
@@ -1441,13 +2112,16 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 		f'DomHand fill complete: {filled_count} filled, {failed_count} DOM failures, {skipped_count} skipped (no data), {unfilled_count} unfilled.',
 		f'LLM calls: {llm_calls} (input: {total_input_tokens} tokens, output: {total_output_tokens} tokens)',
 	]
-	if skipped_descriptions:
-		summary_lines.append('Skipped fields (no profile data — use domhand_select or manual input if needed):')
-		summary_lines.extend(skipped_descriptions[:20])
-		if len(skipped_descriptions) > 20:
-			summary_lines.append(f'  ... and {len(skipped_descriptions) - 20} more')
+	if required_skipped:
+		summary_lines.append('REQUIRED fields that need attention (fill these using click/select):')
+		summary_lines.extend(required_skipped[:20])
+	if optional_skipped:
+		summary_lines.append('Skipped optional fields (no confident profile match):')
+		summary_lines.extend(optional_skipped[:20])
+		if len(optional_skipped) > 20:
+			summary_lines.append(f'  ... and {len(optional_skipped) - 20} more')
 	if failed_descriptions:
-		summary_lines.append('Failed fields:')
+		summary_lines.append('Failed fields (retry even if optional when profile data exists):')
 		summary_lines.extend(failed_descriptions[:20])
 
 	summary = '\n'.join(summary_lines)
@@ -1568,14 +2242,14 @@ async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag
 		clicked = json.loads(clicked_json)
 		if clicked.get('clicked'):
 			logger.debug(f'search-select {tag} -> "{clicked.get("text", value)}"')
-			await asyncio.sleep(0.3)
+			await _settle_dropdown_selection(page)
 			return True
 
 		await page.press('ArrowDown')
 		await asyncio.sleep(0.2)
 		await page.press('Enter')
 		logger.debug(f'search-select {tag} -> first result (keyboard)')
-		await asyncio.sleep(0.3)
+		await _settle_dropdown_selection(page)
 		return True
 	except Exception as e:
 		logger.debug(f'skip {tag} (searchable dropdown failed: {str(e)[:60]})')
@@ -1690,6 +2364,65 @@ async def _fill_multi_select(page: Any, field: FormField, values: list[str], tag
 	return False
 
 
+async def _click_dropdown_option(page: Any, text: str) -> dict[str, Any]:
+	"""Click a visible dropdown option by text."""
+	try:
+		raw_result = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, text)
+	except Exception:
+		return {'clicked': False}
+	return _parse_dropdown_click_result(raw_result)
+
+
+async def _clear_dropdown_search(page: Any) -> None:
+	"""Clear the current searchable dropdown query if one is focused."""
+	for shortcut in ('Meta+A', 'Control+A'):
+		try:
+			await page.keyboard.press(shortcut)
+		except Exception:
+			pass
+	try:
+		await page.keyboard.press('Backspace')
+	except Exception:
+		pass
+	await asyncio.sleep(0.15)
+
+
+async def _settle_dropdown_selection(page: Any, delay: float = 0.45) -> None:
+	"""Dismiss an open dropdown and give the UI time to commit the selection."""
+	try:
+		await page.evaluate(_DISMISS_DROPDOWN_JS)
+	except Exception:
+		pass
+	await asyncio.sleep(delay)
+
+
+async def _type_and_click_dropdown_option(page: Any, value: str, tag: str) -> dict[str, Any]:
+	"""Type search terms into an open dropdown and click the best visible match."""
+	for idx, term in enumerate(generate_dropdown_search_terms(value)):
+		try:
+			if idx > 0:
+				await _clear_dropdown_search(page)
+			await page.keyboard.type(term, delay=45)
+			await asyncio.sleep(0.3)
+			clicked = await _click_dropdown_option(page, value)
+			if clicked.get('clicked'):
+				logger.debug(f'select {tag} -> "{clicked.get("text", value)}" (typed search)')
+				return clicked
+			await page.keyboard.press('Enter')
+			await asyncio.sleep(1.1)
+			clicked = await _click_dropdown_option(page, value)
+			if clicked.get('clicked'):
+				logger.debug(f'select {tag} -> "{clicked.get("text", value)}" (typed search)')
+				return clicked
+			clicked = await _click_dropdown_option(page, term)
+			if clicked.get('clicked'):
+				logger.debug(f'select {tag} -> "{clicked.get("text", term)}" (typed search)')
+				return clicked
+		except Exception as e:
+			logger.debug(f'dropdown search {tag} term "{term}" failed: {str(e)[:60]}')
+	return {'clicked': False}
+
+
 async def _fill_custom_dropdown(page: Any, field: FormField, value: str, tag: str) -> bool:
 	ff_id = field.field_id
 	try:
@@ -1699,32 +2432,45 @@ async def _fill_custom_dropdown(page: Any, field: FormField, value: str, tag: st
 		}""", ff_id)
 		await asyncio.sleep(0.6)
 
-		clicked_json = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, value)
-		clicked = json.loads(clicked_json)
+		clicked = await _click_dropdown_option(page, value)
 		if clicked.get('clicked'):
-			logger.debug(f'select {tag} -> "{clicked.get("text", value)}"')
-			await asyncio.sleep(0.3)
-			return True
+			current = await _wait_for_field_value(page, field, value)
+			if _field_value_matches_expected(current, value):
+				logger.debug(f'select {tag} -> "{clicked.get("text", value)}"')
+				await _settle_dropdown_selection(page)
+				return True
 
-		words = value.split()
-		if len(words) > 1:
-			clicked_json = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, words[0])
-			clicked = json.loads(clicked_json)
-			if clicked.get('clicked'):
-				logger.debug(f'select {tag} -> "{clicked.get("text", words[0])}" (fuzzy)')
-				await asyncio.sleep(0.3)
+		segments = split_dropdown_value_hierarchy(value)
+		if len(segments) > 1:
+			for idx, segment in enumerate(segments):
+				clicked = await _click_dropdown_option(page, segment)
+				if not clicked.get('clicked'):
+					clicked = await _type_and_click_dropdown_option(page, segment, tag)
+				if not clicked.get('clicked'):
+					raise RuntimeError(f'No hierarchical dropdown match for "{segment}"')
+				await asyncio.sleep(0.8 if idx < len(segments) - 1 else 0.45)
+			current = await _wait_for_field_value(page, field, value, timeout=2.8)
+			if _field_value_matches_expected(current, value):
+				logger.debug(f'select {tag} -> "{value}" (hierarchy)')
+				await _settle_dropdown_selection(page, delay=0.6)
+				return True
+
+		clicked = await _type_and_click_dropdown_option(page, value, tag)
+		if clicked.get('clicked'):
+			current = await _wait_for_field_value(page, field, value)
+			if _field_value_matches_expected(current, value):
+				await _settle_dropdown_selection(page)
 				return True
 
 		await page.press('ArrowDown')
-		await asyncio.sleep(0.2)
+		await asyncio.sleep(0.25)
 		await page.press('Enter')
-		logger.debug(f'select {tag} -> first option (keyboard)')
-		await asyncio.sleep(0.3)
-		try:
-			await page.evaluate(_DISMISS_DROPDOWN_JS)
-		except Exception:
-			pass
-		return True
+		current = await _wait_for_field_value(page, field, value, timeout=1.4)
+		if _field_value_matches_expected(current, value):
+			logger.debug(f'select {tag} -> first option (keyboard)')
+			await _settle_dropdown_selection(page)
+			return True
+		raise RuntimeError(f'Dropdown value did not settle to "{value}"')
 	except Exception as e:
 		try:
 			await page.evaluate(_DISMISS_DROPDOWN_JS)
@@ -1882,3 +2628,38 @@ def _get_profile_text() -> str | None:
 		except Exception as e:
 			logger.warning(f'Failed to read profile from {path}: {e}')
 	return None
+
+
+def _get_profile_data() -> dict[str, Any]:
+	"""Return structured applicant profile data when available."""
+	raw_json = os.environ.get('GH_USER_PROFILE_JSON', '')
+	if raw_json.strip():
+		try:
+			parsed = json.loads(raw_json)
+			if isinstance(parsed, dict):
+				return parsed
+		except Exception as e:
+			logger.warning(f'Failed to parse GH_USER_PROFILE_JSON: {e}')
+
+	text = os.environ.get('GH_USER_PROFILE_TEXT', '')
+	if text.strip():
+		try:
+			parsed = json.loads(text)
+			if isinstance(parsed, dict):
+				return parsed
+		except Exception:
+			pass
+
+	path = os.environ.get('GH_USER_PROFILE_PATH', '')
+	if path:
+		try:
+			import pathlib
+			p = pathlib.Path(path)
+			if p.is_file():
+				parsed = json.loads(p.read_text(encoding='utf-8'))
+				if isinstance(parsed, dict):
+					return parsed
+		except Exception as e:
+			logger.warning(f'Failed to parse profile JSON from {path}: {e}')
+
+	return {}

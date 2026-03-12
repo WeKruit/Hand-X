@@ -8,7 +8,7 @@ class ModelConfig:
     """Configuration for a single LLM model."""
 
     model_id: str
-    provider: str  # "anthropic" | "openai"
+    provider: str  # "anthropic" | "openai" | "google"
     input_cost_per_1k: float  # $ per 1K input tokens
     output_cost_per_1k: float  # $ per 1K output tokens
     max_context: int  # max context window in tokens
@@ -44,6 +44,14 @@ MODEL_CATALOG: dict[str, ModelConfig] = {
         input_cost_per_1k=0.00015,
         output_cost_per_1k=0.0006,
         max_context=128_000,
+    ),
+    # Google
+    "gemini-3.1-flash-lite-preview": ModelConfig(
+        model_id="gemini-3.1-flash-lite-preview",
+        provider="google",
+        input_cost_per_1k=0.000075,
+        output_cost_per_1k=0.0003,
+        max_context=1_048_576,
     ),
 }
 
