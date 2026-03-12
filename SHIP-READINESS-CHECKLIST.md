@@ -15,31 +15,31 @@ Items are ordered by severity within each category.
 
 ### CRITICAL
 
-- [ ] **S-01: Domain lockdown not wired into Desktop CLI path** — `DomainLockdown` exists in `ghosthands/security/` but `cli.py` creates `BrowserProfile(headless=..., keep_alive=True)` with NO `allowed_domains`. The worker path (`agent/factory.py`) applies it, Desktop path does not. LLM agent can navigate anywhere. [Hand-X: cli.py, security/domain_lockdown.py]
+- [x] **S-01: Domain lockdown not wired into Desktop CLI path** — `DomainLockdown` exists in `ghosthands/security/` but `cli.py` creates `BrowserProfile(headless=..., keep_alive=True)` with NO `allowed_domains`. The worker path (`agent/factory.py`) applies it, Desktop path does not. LLM agent can navigate anywhere. [Hand-X: cli.py, security/domain_lockdown.py]
 
-- [ ] **S-02: --profile CLI arg exposes full PII via ps aux** — When Desktop spawns `hand-x --profile '{"email":"...", "credentials":{...}}'`, the entire JSON including credentials is visible to any user on the system via `ps aux`, `/proc/PID/cmdline`, or Activity Monitor. Must use stdin or env vars exclusively. [Hand-X: cli.py:82]
+- [x] **S-02: --profile CLI arg exposes full PII via ps aux** — When Desktop spawns `hand-x --profile '{"email":"...", "credentials":{...}}'`, the entire JSON including credentials is visible to any user on the system via `ps aux`, `/proc/PID/cmdline`, or Activity Monitor. Must use stdin or env vars exclusively. [Hand-X: cli.py:82]
 
-- [ ] **S-03: emit_account_created sends plaintext password over stdout** — Dead code but publicly exported. If wired up, sends cleartext credentials over IPC pipe, capturable in DevTools/crash reports. Remove password param or encrypt. [Hand-X: jsonl.py:201-215]
+- [x] **S-03: emit_account_created sends plaintext password over stdout** — Dead code but publicly exported. If wired up, sends cleartext credentials over IPC pipe, capturable in DevTools/crash reports. Remove password param or encrypt. [Hand-X: jsonl.py:201-215]
 
-- [ ] **S-04: No profile JSON schema validation** — `_load_profile()` trusts arbitrary JSON from `--profile`, `@file`, `--test-data`, or `GH_USER_PROFILE_TEXT` with no schema validation. Non-dict values (`[]`, `"string"`, `null`) can crash downstream. [Hand-X: cli.py]
+- [x] **S-04: No profile JSON schema validation** — `_load_profile()` trusts arbitrary JSON from `--profile`, `@file`, `--test-data`, or `GH_USER_PROFILE_TEXT` with no schema validation. Non-dict values (`[]`, `"string"`, `null`) can crash downstream. [Hand-X: cli.py]
 
 ### HIGH
 
-- [ ] **S-05: Raw exception strings forwarded to Desktop via JSONL** — `emit_error(str(e), fatal=True)` sends full Python exception strings including internal paths, connection strings, and API keys from third-party libraries. Must sanitize before emission. [Hand-X: cli.py:292, 523, 693]
+- [x] **S-05: Raw exception strings forwarded to Desktop via JSONL** — `emit_error(str(e), fatal=True)` sends full Python exception strings including internal paths, connection strings, and API keys from third-party libraries. Must sanitize before emission. [Hand-X: cli.py:292, 523, 693]
 
 - [ ] **S-06: GH_USER_PROFILE_TEXT env var exposes full PII to child processes** — Full profile (name, email, phone, address, education, work history) serialized into env var, inherited by all child processes (Playwright, browser-use, LLM client), readable via `/proc/PID/environ`. [Hand-X: cli.py:191]
 
 - [ ] **S-07: field_filled events leak sensitive field values over stdout** — DomHand emits raw values for every form field including SSN, date of birth, salary. No deny-list for sensitive field types. Needs field-level PII redaction. [Hand-X: jsonl.py:122, field_events.py:74]
 
-- [ ] **S-08: No SIGTERM handler in CLI mode** — Worker mode has signal handling, but CLI entry point only catches KeyboardInterrupt. SIGTERM from Electron force-quit leaves browser open, CDP port exposed, env vars unreleased. [Hand-X: cli.py]
+- [x] **S-08: No SIGTERM handler in CLI mode** — Worker mode has signal handling, but CLI entry point only catches KeyboardInterrupt. SIGTERM from Electron force-quit leaves browser open, CDP port exposed, env vars unreleased. [Hand-X: cli.py]
 
-- [ ] **S-09: No stdin line-size bound** — `protocol.py` reads arbitrary-length lines from stdin. A buggy Electron process could send multi-GB JSON line and exhaust Hand-X memory. Add 64KB limit. [Hand-X: bridge/protocol.py]
+- [x] **S-09: No stdin line-size bound** — `protocol.py` reads arbitrary-length lines from stdin. A buggy Electron process could send multi-GB JSON line and exhaust Hand-X memory. Add 64KB limit. [Hand-X: bridge/protocol.py]
 
 - [ ] **S-10: Profile defaults silently invent sensitive demographic answers** — When profile omits `gender`, `race_ethnicity`, `veteran_status`, `disability_status`, the adapter fills hardcoded US-centric defaults without user consent or warning. [Hand-X: bridge/profile_adapter.py:14-30]
 
 - [ ] **S-11: Full applicant profile injected into LLM system prompt** — Demographic, work-authorization, disability, veteran, location, and salary data sent to Anthropic API with no minimization. PII is in the LLM context window. [Hand-X: agent/prompts.py]
 
-- [ ] **S-12: stdin JSON type not validated** — Protocol assumes `cmd.get("type")` but valid JSON like `[]`, `"x"`, or `1` will crash on `.get()` call. Need `isinstance(cmd, dict)` guard. [Hand-X: bridge/protocol.py:96-106]
+- [x] **S-12: stdin JSON type not validated** — Protocol assumes `cmd.get("type")` but valid JSON like `[]`, `"x"`, or `1` will crash on `.get()` call. Need `isinstance(cmd, dict)` guard. [Hand-X: bridge/protocol.py:96-106]
 
 ### MEDIUM
 
@@ -59,13 +59,13 @@ Items are ordered by severity within each category.
 
 ### CRITICAL
 
-- [ ] **I-01: Spec/code mismatch — `event` vs `type` discriminator** — Shipped JSONL uses `event` as top-level key, `docs/DESKTOP_BRIDGE_SPEC.md` defines `type`. Contract divergence. [Hand-X: output/jsonl.py vs docs/DESKTOP_BRIDGE_SPEC.md]
+- [x] **I-01: Spec/code mismatch — `event` vs `type` discriminator** — Shipped JSONL uses `event` as top-level key, `docs/DESKTOP_BRIDGE_SPEC.md` defines `type`. Contract divergence. [Hand-X: output/jsonl.py vs docs/DESKTOP_BRIDGE_SPEC.md]
 
-- [ ] **I-02: `done` is not terminal — emitted before review** — `done(success=true)` emitted before review starts, then process continues waiting for stdin commands. One run can produce `done(success=true)` followed by `error(fatal=true)`. [Hand-X: cli.py:500-510]
+- [x] **I-02: `done` is not terminal — emitted before review** — `done(success=true)` emitted before review starts, then process continues waiting for stdin commands. One run can produce `done(success=true)` followed by `error(fatal=true)`. [Hand-X: cli.py:500-510]
 
-- [ ] **I-03: No terminal event for review outcomes** — Review complete = `status("Review complete")`, review cancel = `status("Review cancelled")` + exit 1, review timeout = `error(fatal)` after `done(success)`. Desktop must infer outcomes from text matching. [Hand-X: bridge/protocol.py:168-177]
+- [x] **I-03: No terminal event for review outcomes** — Review complete = `status("Review complete")`, review cancel = `status("Review cancelled")` + exit 1, review timeout = `error(fatal)` after `done(success)`. Desktop must infer outcomes from text matching. [Hand-X: bridge/protocol.py:168-177]
 
-- [ ] **I-04: Spec documents removed --email/--password args** — `DESKTOP_BRIDGE_SPEC.md` still shows `--email` and `--password` as CLI args but they were removed for security. [Hand-X: docs/DESKTOP_BRIDGE_SPEC.md]
+- [x] **I-04: Spec documents removed --email/--password args** — `DESKTOP_BRIDGE_SPEC.md` still shows `--email` and `--password` as CLI args but they were removed for security. [Hand-X: docs/DESKTOP_BRIDGE_SPEC.md]
 
 ### HIGH
 
@@ -81,7 +81,7 @@ Items are ordered by severity within each category.
 
 - [ ] **I-10: browser_ready is best-effort** — If `browser.cdp_url` is missing, Hand-X logs to stderr only. No machine-readable fallback event to Desktop. [Hand-X: cli.py]
 
-- [ ] **I-11: Review timeout exits 0 after fatal error** — `run_agent_jsonl()` only exits 1 on `cancel`/`eof`, so timeout returns exit code 0 after emitting `error(fatal=true)`. [Hand-X: cli.py, bridge/protocol.py]
+- [x] **I-11: Review timeout exits 0 after fatal error** — `run_agent_jsonl()` only exits 1 on `cancel`/`eof`, so timeout returns exit code 0 after emitting `error(fatal=true)`. [Hand-X: cli.py, bridge/protocol.py]
 
 - [ ] **I-12: Spec env precedence is inaccurate** — `GH_HEADLESS`, `GH_MAX_STEPS_PER_JOB`, `GH_MAX_BUDGET_PER_JOB` are documented as configurable but argparse defaults override them. [Hand-X: cli.py vs docs/]
 
@@ -105,17 +105,17 @@ Items are ordered by severity within each category.
 
 ### CRITICAL
 
-- [ ] **C-01: CI never runs unit or integration tests** — `test.yaml` only discovers `tests/ci/test_*.py`. The 67 bridge integration tests and unit tests are never executed in CI. [Hand-X: .github/workflows/test.yaml]
+- [x] **C-01: CI never runs unit or integration tests** — `test.yaml` only discovers `tests/ci/test_*.py`. The 67 bridge integration tests and unit tests are never executed in CI. [Hand-X: .github/workflows/test.yaml]
 
-- [ ] **C-02: Binary builds not gated on tests** — `build-binary.yml` triggers on `v*` tags and `main` push with no dependency on test workflow. Broken code can ship as release binaries. [Hand-X: .github/workflows/build-binary.yml]
+- [x] **C-02: Binary builds not gated on tests** — `build-binary.yml` triggers on `v*` tags and `main` push with no dependency on test workflow. Broken code can ship as release binaries. [Hand-X: .github/workflows/build-binary.yml]
 
-- [ ] **C-03: publish.yml has pytest sanity check commented out** — Release publishing happens without any test execution. [Hand-X: .github/workflows/publish.yml]
+- [x] **C-03: publish.yml has pytest sanity check commented out** — Release publishing happens without any test execution. [Hand-X: .github/workflows/publish.yml]
 
 ### HIGH
 
-- [ ] **C-04: Binary smoke test always passes** — Uses `--help || true`, so even a completely broken binary passes. [Hand-X: .github/workflows/build-binary.yml]
+- [x] **C-04: Binary smoke test always passes** — Uses `--help || true`, so even a completely broken binary passes. [Hand-X: .github/workflows/build-binary.yml]
 
-- [ ] **C-05: Unit tests are stale** — `tests/unit/test_desktop_bridge.py` imports removed symbols (`_listen_for_cancel`, `_read_stdin_line`). Hidden because CI never runs it. [Hand-X: tests/unit/test_desktop_bridge.py]
+- [x] **C-05: Unit tests are stale** — `tests/unit/test_desktop_bridge.py` imports removed symbols (`_listen_for_cancel`, `_read_stdin_line`). Hidden because CI never runs it. [Hand-X: tests/unit/test_desktop_bridge.py]
 
 - [ ] **C-06: No code signing or notarization** — macOS and Windows binaries are unsigned. Users must bypass OS security warnings (Gatekeeper/SmartScreen). [Hand-X: .github/workflows/build-binary.yml]
 
@@ -123,7 +123,7 @@ Items are ordered by severity within each category.
 
 - [ ] **C-08: No dependency audit in Desktop CI** — Missing `npm audit` and static analysis (CodeQL) in Desktop App CI pipeline. [Desktop: .github/workflows/]
 
-- [ ] **C-09: PyInstaller unpinned in build** — Build uses `pip install pyinstaller` without version pin. Binary contents can drift across builds. [Hand-X: .github/workflows/build-binary.yml]
+- [x] **C-09: PyInstaller unpinned in build** — Build uses `pip install pyinstaller` without version pin. Binary contents can drift across builds. [Hand-X: .github/workflows/build-binary.yml]
 
 ### MEDIUM
 
@@ -161,9 +161,9 @@ Items are ordered by severity within each category.
 
 ### CRITICAL
 
-- [ ] **U-01: done(success=true) emitted before user approves** — Desktop shows "completed" before human review. User hasn't actually approved the application. Contradictory UI state. [Hand-X: cli.py:500]
+- [x] **U-01: done(success=true) emitted before user approves** — Desktop shows "completed" before human review. User hasn't actually approved the application. Contradictory UI state. [Hand-X: cli.py:500]
 
-- [ ] **U-02: No terminal event for review outcomes** — Desktop must infer review complete/cancel/timeout from status text + exit code. No machine-readable review result event. [Hand-X: bridge/protocol.py]
+- [x] **U-02: No terminal event for review outcomes** — Desktop must infer review complete/cancel/timeout from status text + exit code. No machine-readable review result event. [Hand-X: bridge/protocol.py]
 
 ### HIGH
 
