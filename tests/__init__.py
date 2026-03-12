@@ -1,0 +1,1 @@
+"""GhostHands test suite."""
