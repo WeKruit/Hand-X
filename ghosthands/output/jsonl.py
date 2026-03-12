@@ -175,3 +175,13 @@ def emit_cost(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
     )
+
+
+def emit_browser_ready(cdp_url: str) -> None:
+    """Emit browser_ready event with CDP WebSocket URL."""
+    emit_event("browser_ready", cdpUrl=cdp_url)
+
+
+def emit_awaiting_review(message: str = "Application filled — waiting for review") -> None:
+    """Emit awaiting_review event when browser is open for user review."""
+    emit_event("awaiting_review", message=message)
