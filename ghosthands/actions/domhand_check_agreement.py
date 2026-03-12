@@ -284,6 +284,7 @@ async def domhand_check_agreement(params: DomHandCheckAgreementParams, browser_s
 		label = cb.get("label", "?")[:80]
 		selector = cb.get("selector")
 		wrapper_selector = cb.get("wrapperSelector")
+		automation_id = cb.get("automationId", "")
 		was_checked = cb.get("checked")
 
 		if was_checked is True:
@@ -292,25 +293,45 @@ async def domhand_check_agreement(params: DomHandCheckAgreementParams, browser_s
 
 		confirmed = False
 
-		# Helper: re-check whether the checkbox is now checked
+		# Helper: re-check whether the checkbox is now checked.
+		# Uses automationId (most unique) then selector+label to disambiguate
+		# when selectors are generic (e.g. 'input[type="checkbox"]').
 		async def _is_now_checked() -> bool:
 			try:
 				v = await page.evaluate(_DISCOVER_CHECKBOXES_JS)
 				for c in json.loads(v):
-					if c.get("isAgreement") and c.get("selector") == selector:
+					if not c.get("isAgreement"):
+						continue
+					# Match by automationId (most specific)
+					if automation_id and c.get("automationId") == automation_id:
+						return c.get("checked") is True
+					# Match by selector + label prefix (disambiguate generic selectors)
+					if c.get("selector") == selector and c.get("label", "")[:40] == label[:40]:
 						return c.get("checked") is True
 			except Exception:
 				pass
 			return False
 
-		# Strategy 1: CDP click on the WRAPPER element (label/parent div).
-		# This is what actually works on Workday — the visual click target
-		# is the wrapper, not the hidden input.
+		# Strategy 1: JS click on the WRAPPER element (label/parent div)
+		# via __ff.queryAll() — pierces shadow DOM where CDP cannot.
+		# The visual wrapper is the real click target on Workday (hidden input).
 		if wrapper_selector and not confirmed:
 			try:
-				elements = await page.get_elements_by_css_selector(wrapper_selector)
-				if elements:
-					await elements[0].click()
+				from ghosthands.actions._highlight import highlight_element
+				await highlight_element(page, wrapper_selector)
+				clicked = await page.evaluate(r"""(sel) => {
+					var q = (window.__ff && window.__ff.queryAll)
+						? function(s) { return window.__ff.queryAll(s); }
+						: function(s) { return Array.from(document.querySelectorAll(s)); };
+					var els = q(sel);
+					if (els.length > 0) {
+						els[0].scrollIntoView({block: 'center', behavior: 'instant'});
+						els[0].click();
+						return true;
+					}
+					return false;
+				}""", wrapper_selector)
+				if clicked:
 					await asyncio.sleep(0.5)
 					if await _is_now_checked():
 						confirmed = True
@@ -321,21 +342,35 @@ async def domhand_check_agreement(params: DomHandCheckAgreementParams, browser_s
 			except Exception as e:
 				logger.debug(f"Wrapper click failed for '{label}': {e}")
 
-		# Strategy 2: CDP click on the checkbox element itself
+		# Strategy 2: JS click on the checkbox element itself via __ff.queryAll()
+		# Pierces shadow DOM unlike CDP get_elements_by_css_selector.
 		if selector and not confirmed:
 			try:
-				elements = await page.get_elements_by_css_selector(selector)
-				if elements:
-					await elements[0].click()
+				from ghosthands.actions._highlight import highlight_element
+				await highlight_element(page, selector)
+				clicked = await page.evaluate(r"""(sel) => {
+					var q = (window.__ff && window.__ff.queryAll)
+						? function(s) { return window.__ff.queryAll(s); }
+						: function(s) { return Array.from(document.querySelectorAll(s)); };
+					var els = q(sel);
+					if (els.length > 0) {
+						els[0].scrollIntoView({block: 'center', behavior: 'instant'});
+						els[0].focus();
+						els[0].click();
+						return true;
+					}
+					return false;
+				}""", selector)
+				if clicked:
 					await asyncio.sleep(0.5)
 					if await _is_now_checked():
 						confirmed = True
-						results.append({"label": label, "action": "cdp_click", "selector": selector})
-						logger.info("domhand_check_agreement.cdp_click", extra={"label": label, "selector": selector})
+						results.append({"label": label, "action": "js_element_click", "selector": selector})
+						logger.info("domhand_check_agreement.js_element_click", extra={"label": label, "selector": selector})
 					else:
-						logger.debug(f"CDP click didn't toggle state for '{label}'")
+						logger.debug(f"JS element click didn't toggle state for '{label}'")
 			except Exception as e:
-				logger.debug(f"CDP click failed for '{label}': {e}")
+				logger.debug(f"JS element click failed for '{label}': {e}")
 
 		# Strategy 3: JS click with React-compatible event sequence
 		if not confirmed:
@@ -394,10 +429,34 @@ async def domhand_check_agreement(params: DomHandCheckAgreementParams, browser_s
 			except Exception as e:
 				logger.debug(f"JS click failed for '{label}': {e}")
 
-		# Strategy 4: Broad JS click on ALL unchecked checkboxes + their wrappers
+		# Strategy 4: Broad JS click on unchecked AGREEMENT checkboxes only.
+		# Filters by label text to avoid checking unrelated boxes (e.g. "Remember me").
 		if not confirmed:
 			try:
 				broad_js = r"""() => {
+					var agreeKeywords = [
+						'agree', 'accept', 'understand', 'acknowledge', 'consent',
+						'privacy', 'terms', 'certify', 'create account'
+					];
+					function isAgreementEl(el) {
+						var text = '';
+						var label = el.closest('label');
+						if (label) text = (label.textContent || '').toLowerCase();
+						else {
+							var p = el.parentElement;
+							for (var d = 0; p && d < 5; d++) {
+								text = (p.textContent || '').toLowerCase();
+								if (text.length > 5 && text.length < 500) break;
+								p = p.parentElement;
+							}
+						}
+						var aid = (el.getAttribute('data-automation-id') || '').toLowerCase();
+						for (var i = 0; i < agreeKeywords.length; i++) {
+							if (text.indexOf(agreeKeywords[i]) !== -1) return true;
+							if (aid.indexOf(agreeKeywords[i]) !== -1) return true;
+						}
+						return false;
+					}
 					function qAll(sel) {
 						if (window.__ff && window.__ff.queryAll) return window.__ff.queryAll(sel);
 						return Array.from(document.querySelectorAll(sel));
@@ -407,7 +466,7 @@ async def domhand_check_agreement(params: DomHandCheckAgreementParams, browser_s
 					cbs.forEach(function(el) {
 						var isUnchecked = (el.tagName === 'INPUT' && !el.checked) ||
 							(el.getAttribute('aria-checked') === 'false');
-						if (isUnchecked) {
+						if (isUnchecked && isAgreementEl(el)) {
 							// Click wrapper first (label or parent), then element
 							var wrapper = el.closest('label') || el.parentElement;
 							if (wrapper && wrapper !== el) {
@@ -441,14 +500,12 @@ async def domhand_check_agreement(params: DomHandCheckAgreementParams, browser_s
 		final_state = {}
 
 	# Build summary
-	confirmed_count = sum(1 for r in results if r.get("action") == "wrapper_click"
-						  or r.get("action") == "cdp_click"
+	confirmed_count = sum(1 for r in results if r.get("action") in ("wrapper_click", "js_element_click")
 						  or r.get("confirmed") is True)
 	already_count = sum(1 for r in results if r.get("action") == "already_checked")
 	unconfirmed_count = sum(1 for r in results
-							if r.get("action") not in ("already_checked", "failed", "wrapper_click", "cdp_click")
-							and r.get("confirmed") is not True
-							and r.get("action") != "failed")
+							if r.get("action") not in ("already_checked", "failed", "wrapper_click", "js_element_click")
+							and r.get("confirmed") is not True)
 	failed_count = sum(1 for r in results if r.get("action") == "failed")
 
 	# Check if any agreement checkbox ended up still unchecked
