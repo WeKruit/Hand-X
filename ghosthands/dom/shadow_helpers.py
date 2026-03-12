@@ -246,6 +246,17 @@ def _build_inject_helpers_js() -> str:
 """
 
 
+# ── Reusable JS snippet for shadow-DOM-safe querySelectorAll ────────────
+# Embed this at the top of any page.evaluate() JS that needs to find
+# elements across shadow roots.  Falls back to document.querySelectorAll
+# when __ff is not yet injected.
+QALL_JS_SNIPPET = (
+	"function qAll(sel){"
+	"if(window.__ff&&window.__ff.queryAll)return window.__ff.queryAll(sel);"
+	"return Array.from(document.querySelectorAll(sel));}"
+)
+
+
 async def inject_helpers(page: Page) -> None:
     """Inject the ``window.__ff`` helper object into the page.
 

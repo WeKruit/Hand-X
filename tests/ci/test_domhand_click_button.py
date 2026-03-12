@@ -1,11 +1,12 @@
 """Regression tests for shadow-DOM-aware auth button selection."""
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 
 from pytest_httpserver import HTTPServer
 
-from browser_use.browser import BrowserSession
+from browser_use.browser import BrowserProfile, BrowserSession
 from browser_use.tools.service import Tools
 from ghosthands.actions.domhand_click_button import (
     DomHandClickButtonParams,
@@ -133,47 +134,151 @@ AUTH_MODAL_HTML = """
 </html>
 """
 
+AGREEMENT_RETRY_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Agreement Retry</title>
+</head>
+<body>
+	<form id="signup-form">
+		<label for="email">Email</label>
+		<input id="email" type="email" value="happy@ucla.edu" />
+		<label for="password">Password</label>
+		<input id="password" type="password" value="YourTestPass123!" />
+		<label>
+			<input id="agree" type="checkbox" />
+			I agree to the Terms of Service
+		</label>
+		<label>
+			<input id="marketing" type="checkbox" />
+			Send me product updates
+		</label>
+		<div id="error"></div>
+		<div id="status"></div>
+		<button id="create-account" type="submit">Create Account</button>
+	</form>
+	<script>
+		window.__submitCount = 0;
+
+		document.getElementById('signup-form').addEventListener('submit', function(event) {
+			event.preventDefault();
+			window.__submitCount += 1;
+
+			const agree = document.getElementById('agree').checked;
+			const marketing = document.getElementById('marketing').checked;
+			window.__checkboxState = { agree, marketing };
+
+			if (!agree) {
+				document.getElementById('error').textContent = 'terms required';
+				return;
+			}
+
+			document.getElementById('error').textContent = '';
+			document.getElementById('status').textContent = 'submitted';
+			history.pushState({}, '', '/agreements/success');
+		});
+	</script>
+</body>
+</html>
+"""
+
+
+@asynccontextmanager
+async def managed_browser_session():
+    session = BrowserSession(
+        browser_profile=BrowserProfile(
+            headless=True,
+            user_data_dir=None,
+            keep_alive=True,
+            enable_default_extensions=True,
+        )
+    )
+    await session.start()
+    try:
+        yield session
+    finally:
+        await session.kill()
+        await session.event_bus.stop(clear=True, timeout=5)
+
 
 async def test_domhand_click_button_prefers_shadow_dialog_submit(
     httpserver: HTTPServer,
-    browser_session: BrowserSession,
 ):
     """Select the real submit button when duplicate auth buttons are present."""
-    tools = Tools()
-    httpserver.expect_request("/shadow-auth").respond_with_data(AUTH_MODAL_HTML, content_type="text/html")
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/shadow-auth").respond_with_data(AUTH_MODAL_HTML, content_type="text/html")
 
-    await tools.navigate(
-        url=httpserver.url_for("/shadow-auth"),
-        new_tab=False,
-        browser_session=browser_session,
-    )
-    await asyncio.sleep(0.5)
+        await tools.navigate(
+            url=httpserver.url_for("/shadow-auth"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.5)
 
-    page = await browser_session.get_current_page()
-    assert page is not None
+        page = await browser_session.get_current_page()
+        assert page is not None
 
-    await page.evaluate(
-        """() => {
+        await page.evaluate(
+            """() => {
 			const root = document.getElementById('auth-host').shadowRoot;
 			root.getElementById('email').value = 'happy@ucla.edu';
 			root.getElementById('password').value = 'YourTestPass123!';
 		}"""
-    )
+        )
 
-    result = await domhand_click_button(
-        DomHandClickButtonParams(button_label="Sign In"),
-        browser_session,
-    )
+        result = await domhand_click_button(
+            DomHandClickButtonParams(button_label="Sign In"),
+            browser_session,
+        )
 
-    assert result.error is None
-    assert result.extracted_content is not None
-    assert "Page navigated" in result.extracted_content
+        assert result.error is None
+        assert result.extracted_content is not None
+        assert "Page navigated" in result.extracted_content
 
-    clicks = json.loads(await page.evaluate("() => JSON.stringify(window.__clicks)"))
-    assert clicks == {"nav": 0, "tab": 0, "submit": 1}
+        clicks = json.loads(await page.evaluate("() => JSON.stringify(window.__clicks)"))
+        assert clicks == {"nav": 0, "tab": 0, "submit": 1}
 
-    current_url = await page.get_url()
-    assert current_url.endswith("/shadow-auth/signed-in")
+        current_url = await page.get_url()
+        assert current_url.endswith("/shadow-auth/signed-in")
 
-    result_text = await page.evaluate("() => document.getElementById('result').textContent")
-    assert result_text == "submitted"
+        result_text = await page.evaluate("() => document.getElementById('result').textContent")
+        assert result_text == "submitted"
+
+
+async def test_domhand_click_button_only_auto_checks_agreement_boxes(
+    httpserver: HTTPServer,
+):
+    """Retry should only toggle agreement checkboxes, not unrelated preferences."""
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/agreements").respond_with_data(AGREEMENT_RETRY_HTML, content_type="text/html")
+
+        await tools.navigate(
+            url=httpserver.url_for("/agreements"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.5)
+
+        result = await domhand_click_button(
+            DomHandClickButtonParams(button_label="Create Account"),
+            browser_session,
+        )
+
+        assert result.error is None
+        assert result.extracted_content is not None
+        assert "auto-checked agreement checkbox" in result.extracted_content
+
+        page = await browser_session.get_current_page()
+        assert page is not None
+
+        state = json.loads(await page.evaluate("() => JSON.stringify(window.__checkboxState || {})"))
+        assert state == {"agree": True, "marketing": False}
+
+        submit_count = await page.evaluate("() => window.__submitCount")
+        assert int(submit_count) >= 2
+
+        current_url = await page.get_url()
+        assert current_url.endswith("/agreements/success")
