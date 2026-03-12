@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from typing import IO, Any
 
@@ -57,25 +58,29 @@ def _get_output() -> IO[str]:
 
 # ── Core emitter ──────────────────────────────────────────────────────
 
+_emit_lock = threading.Lock()
+
 
 def emit_event(event_type: str, **kwargs: Any) -> None:
     """Emit a single JSONL event.
 
-    Every event gets ``type`` and ``timestamp``.  All other fields are
+    Every event gets ``event`` and ``timestamp``.  All other fields are
     passed through as keyword arguments -- ``None`` values are omitted
     to keep the wire format compact.
     """
     event: dict[str, Any] = {
-        "type": event_type,
+        "event": event_type,
         "timestamp": int(time.time() * 1000),
     }
     for key, value in kwargs.items():
         if value is not None:
             event[key] = value
 
-    out = _get_output()
-    out.write(json.dumps(event, separators=(",", ":")) + "\n")
-    out.flush()
+    line = json.dumps(event, separators=(",", ":")) + "\n"
+    with _emit_lock:
+        out = _get_output()
+        out.write(line)
+        out.flush()
 
 
 # ── Typed convenience emitters ────────────────────────────────────────
@@ -110,20 +115,20 @@ def emit_field_filled(
 
 def emit_field_failed(
     field: str,
-    error: str,
+    reason: str,
 ) -> None:
     """Emit when a field fill attempt fails."""
-    emit_event("field_failed", field=field, error=error)
+    emit_event("field_failed", field=field, reason=reason)
 
 
 def emit_progress(
-    filled: int,
-    total: int,
+    step: int,
+    max_steps: int,
     *,
-    round: int = 1,
+    description: str = "",
 ) -> None:
-    """Emit a progress snapshot (fields filled so far)."""
-    emit_event("progress", filled=filled, total=total, round=round)
+    """Emit a progress snapshot."""
+    emit_event("progress", step=step, maxSteps=max_steps, description=description)
 
 
 def emit_done(
@@ -131,6 +136,7 @@ def emit_done(
     message: str,
     *,
     fields_filled: int = 0,
+    fields_failed: int = 0,
     job_id: str = "",
     lease_id: str = "",
     result_data: dict[str, Any] | None = None,
@@ -141,6 +147,7 @@ def emit_done(
         success=success,
         message=message,
         fields_filled=fields_filled,
+        fields_failed=fields_failed,
         jobId=job_id or None,
         leaseId=lease_id or None,
         resultData=result_data,

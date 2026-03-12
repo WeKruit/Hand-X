@@ -10,9 +10,11 @@ All tests are offline (no browser, no database, no API calls).
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import io
 import json
+import os
 import sys
 import types
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -57,7 +59,7 @@ class TestEmitBrowserReady:
 
         events = _capture_jsonl_output(emit_browser_ready, "http://localhost:9222")
         assert len(events) == 1
-        assert events[0]["type"] == "browser_ready"
+        assert events[0]["event"] == "browser_ready"
 
     def test_emits_cdp_url_field(self):
         from ghosthands.output.jsonl import emit_browser_ready
@@ -97,7 +99,7 @@ class TestEmitBrowserReady:
         assert len(lines) == 1
         # Must parse as JSON
         parsed = json.loads(lines[0])
-        assert parsed["type"] == "browser_ready"
+        assert parsed["event"] == "browser_ready"
 
     def test_uses_real_stdout_when_guard_is_active(self):
         """When the stdout guard is installed, output goes to the saved fd, not sys.stdout."""
@@ -118,7 +120,7 @@ class TestEmitBrowserReady:
             # Event should go to the saved fd
             assert fake_fd.getvalue().strip() != ""
             event = json.loads(fake_fd.getvalue().strip())
-            assert event["type"] == "browser_ready"
+            assert event["event"] == "browser_ready"
         finally:
             jsonl_mod._jsonl_out = original_guard
 
@@ -136,7 +138,7 @@ class TestEmitAwaitingReview:
 
         events = _capture_jsonl_output(emit_awaiting_review)
         assert len(events) == 1
-        assert events[0]["type"] == "awaiting_review"
+        assert events[0]["event"] == "awaiting_review"
 
     def test_default_message_is_present(self):
         """Calling with no arguments should still include a non-empty message."""
@@ -170,7 +172,7 @@ class TestEmitAwaitingReview:
         events = _capture_jsonl_output(emit_awaiting_review, "")
         # The field must be present; whether it's "" or a default is implementation-
         # defined, but it should not raise and should produce a valid event.
-        assert events[0]["type"] == "awaiting_review"
+        assert events[0]["event"] == "awaiting_review"
 
 
 # ---------------------------------------------------------------------------
@@ -200,12 +202,10 @@ class TestListenForCancel:
 
         cancel_line = json.dumps({"type": "cancel"}) + "\n"
 
-        async def fake_readline():
-            return cancel_line
-
-        loop = asyncio.get_event_loop()
-
-        with patch.object(loop, "run_in_executor", new=AsyncMock(side_effect=[cancel_line, ""])):
+        with patch(
+            "ghosthands.cli._read_stdin_line",
+            new=AsyncMock(side_effect=[cancel_line, ""]),
+        ):
             await _listen_for_cancel(agent)
 
         assert agent.state.stopped is True
@@ -217,10 +217,11 @@ class TestListenForCancel:
 
         agent = _make_mock_agent()
 
-        loop = asyncio.get_event_loop()
-
         # First call returns "" (EOF)
-        with patch.object(loop, "run_in_executor", new=AsyncMock(return_value="")):
+        with patch(
+            "ghosthands.cli._read_stdin_line",
+            new=AsyncMock(return_value=""),
+        ):
             await _listen_for_cancel(agent)
 
         # Agent should NOT be stopped — it was a clean EOF, not a cancel
@@ -233,12 +234,9 @@ class TestListenForCancel:
 
         agent = _make_mock_agent()
 
-        loop = asyncio.get_event_loop()
-
         # Sequence: bad JSON → EOF
-        with patch.object(
-            loop,
-            "run_in_executor",
+        with patch(
+            "ghosthands.cli._read_stdin_line",
             new=AsyncMock(side_effect=["not valid json\n", ""]),
         ):
             # Should not raise
@@ -253,13 +251,10 @@ class TestListenForCancel:
 
         agent = _make_mock_agent()
 
-        loop = asyncio.get_event_loop()
-
         unknown_cmd = json.dumps({"type": "ping"}) + "\n"
 
-        with patch.object(
-            loop,
-            "run_in_executor",
+        with patch(
+            "ghosthands.cli._read_stdin_line",
             new=AsyncMock(side_effect=[unknown_cmd, ""]),
         ):
             await _listen_for_cancel(agent)
@@ -273,11 +268,8 @@ class TestListenForCancel:
 
         agent = _make_mock_agent()
 
-        loop = asyncio.get_event_loop()
-
-        with patch.object(
-            loop,
-            "run_in_executor",
+        with patch(
+            "ghosthands.cli._read_stdin_line",
             new=AsyncMock(side_effect=["\n", "   \n", ""]),
         ):
             await _listen_for_cancel(agent)
@@ -291,15 +283,16 @@ class TestListenForCancel:
 
         agent = _make_mock_agent()
 
-        loop = asyncio.get_event_loop()
-
         seq = [
             json.dumps({"type": "ping"}) + "\n",
             "bad json\n",
             json.dumps({"type": "cancel"}) + "\n",
         ]
 
-        with patch.object(loop, "run_in_executor", new=AsyncMock(side_effect=seq)):
+        with patch(
+            "ghosthands.cli._read_stdin_line",
+            new=AsyncMock(side_effect=seq),
+        ):
             await _listen_for_cancel(agent)
 
         assert agent.state.stopped is True
@@ -340,7 +333,7 @@ class TestEventContract:
             lambda: emit_status("Starting", step=1, max_steps=10, job_id="j1"),
             lambda: emit_field_filled("first_name", "Jane"),
             lambda: emit_field_failed("phone", "not found"),
-            lambda: emit_progress(3, 10, round=1),
+            lambda: emit_progress(3, 10, description="Filling fields"),
             lambda: emit_done(True, "Done", fields_filled=5, job_id="j1", lease_id="l1"),
             lambda: emit_error("Something went wrong", fatal=False, job_id="j1"),
             lambda: emit_cost(0.0012, prompt_tokens=500, completion_tokens=200),
@@ -353,11 +346,11 @@ class TestEventContract:
             results.append(events[0])
         return results
 
-    def test_all_events_have_type_field(self):
+    def test_all_events_have_event_field(self):
         for event in self._emit_all_events():
-            assert "type" in event, f"Missing 'type' in {event}"
-            assert isinstance(event["type"], str)
-            assert len(event["type"]) > 0
+            assert "event" in event, f"Missing 'event' in {event}"
+            assert isinstance(event["event"], str)
+            assert len(event["event"]) > 0
 
     def test_all_events_have_timestamp_field(self):
         for event in self._emit_all_events():
@@ -369,7 +362,7 @@ class TestEventContract:
 
         events = _capture_jsonl_output(emit_browser_ready, "http://localhost:9222")
         e = events[0]
-        assert e["type"] == "browser_ready"
+        assert e["event"] == "browser_ready"
         assert "cdpUrl" in e
         assert "timestamp" in e
 
@@ -378,7 +371,7 @@ class TestEventContract:
 
         events = _capture_jsonl_output(emit_awaiting_review, "Check the form")
         e = events[0]
-        assert e["type"] == "awaiting_review"
+        assert e["event"] == "awaiting_review"
         assert "message" in e
         assert "timestamp" in e
 
@@ -387,7 +380,7 @@ class TestEventContract:
 
         events = _capture_jsonl_output(emit_status, "Loading", step=2, max_steps=20)
         e = events[0]
-        assert e["type"] == "status"
+        assert e["event"] == "status"
         assert "message" in e
         assert "timestamp" in e
 
@@ -396,7 +389,7 @@ class TestEventContract:
 
         events = _capture_jsonl_output(emit_field_filled, "email", "jane@example.com")
         e = events[0]
-        assert e["type"] == "field_filled"
+        assert e["event"] == "field_filled"
         assert "field" in e
         assert "value" in e
         assert "method" in e
@@ -406,26 +399,25 @@ class TestEventContract:
 
         events = _capture_jsonl_output(emit_field_failed, "phone", "selector not found")
         e = events[0]
-        assert e["type"] == "field_failed"
+        assert e["event"] == "field_failed"
         assert "field" in e
-        assert "error" in e
+        assert "reason" in e
 
     def test_progress_contract(self):
         from ghosthands.output.jsonl import emit_progress
 
         events = _capture_jsonl_output(emit_progress, 4, 10)
         e = events[0]
-        assert e["type"] == "progress"
-        assert "filled" in e
-        assert "total" in e
-        assert "round" in e
+        assert e["event"] == "progress"
+        assert "step" in e
+        assert "maxSteps" in e
 
     def test_done_contract(self):
         from ghosthands.output.jsonl import emit_done
 
         events = _capture_jsonl_output(emit_done, True, "Application submitted")
         e = events[0]
-        assert e["type"] == "done"
+        assert e["event"] == "done"
         assert "success" in e
         assert "message" in e
         assert isinstance(e["success"], bool)
@@ -435,7 +427,7 @@ class TestEventContract:
 
         events = _capture_jsonl_output(emit_error, "Timeout", fatal=True)
         e = events[0]
-        assert e["type"] == "error"
+        assert e["event"] == "error"
         assert "message" in e
         assert "fatal" in e
 
@@ -444,7 +436,7 @@ class TestEventContract:
 
         events = _capture_jsonl_output(emit_cost, 0.0025)
         e = events[0]
-        assert e["type"] == "cost"
+        assert e["event"] == "cost"
         assert "total_usd" in e
         assert isinstance(e["total_usd"], float)
 
@@ -456,6 +448,27 @@ class TestEventContract:
         e = events[0]
         assert "present" in e
         assert "absent" not in e
+
+    def test_done_includes_fields_failed(self):
+        """emit_done must include fields_failed when provided."""
+        from ghosthands.output.jsonl import emit_done
+
+        events = _capture_jsonl_output(
+            emit_done, True, "Done", fields_filled=8, fields_failed=2
+        )
+        e = events[0]
+        assert e["event"] == "done"
+        assert e["fields_filled"] == 8
+        assert e["fields_failed"] == 2
+
+    def test_done_fields_failed_defaults_to_zero(self):
+        """emit_done must emit fields_failed=0 when not explicitly provided."""
+        from ghosthands.output.jsonl import emit_done
+
+        events = _capture_jsonl_output(emit_done, True, "Done")
+        e = events[0]
+        assert e["event"] == "done"
+        assert e["fields_failed"] == 0
 
     def test_all_known_event_types(self):
         """Smoke-test: all events produced by _emit_all_events have recognised types."""
@@ -471,4 +484,62 @@ class TestEventContract:
             "cost",
         }
         for event in self._emit_all_events():
-            assert event["type"] in known_types, f"Unexpected event type: {event['type']}"
+            assert event["event"] in known_types, f"Unexpected event type: {event['event']}"
+
+
+# ---------------------------------------------------------------------------
+# Test 5 — Profile loading: GH_USER_PROFILE_TEXT env var fallback
+# ---------------------------------------------------------------------------
+
+
+class TestProfileLoadingEnvFallback:
+    """_load_profile must fall back to GH_USER_PROFILE_TEXT env var when
+    neither --profile nor --test-data is provided."""
+
+    def test_loads_profile_from_env_var(self):
+        from ghosthands.cli import _load_profile
+
+        profile_data = {"name": "Jane Doe", "email": "jane@example.com"}
+        args = argparse.Namespace(profile=None, test_data=None)
+
+        with patch.dict(os.environ, {"GH_USER_PROFILE_TEXT": json.dumps(profile_data)}):
+            result = _load_profile(args)
+
+        assert result == profile_data
+
+    def test_raises_when_no_profile_source(self):
+        """Must raise ValueError when --profile, --test-data, and env var are all absent."""
+        from ghosthands.cli import _load_profile
+
+        args = argparse.Namespace(profile=None, test_data=None)
+
+        with patch.dict(os.environ, {}, clear=False):
+            # Ensure env var is not set
+            os.environ.pop("GH_USER_PROFILE_TEXT", None)
+            with pytest.raises(ValueError, match="Either --profile"):
+                _load_profile(args)
+
+    def test_env_var_invalid_json_raises(self):
+        """Invalid JSON in GH_USER_PROFILE_TEXT must raise json.JSONDecodeError."""
+        from ghosthands.cli import _load_profile
+
+        args = argparse.Namespace(profile=None, test_data=None)
+
+        with patch.dict(os.environ, {"GH_USER_PROFILE_TEXT": "not valid json"}):
+            with pytest.raises(json.JSONDecodeError):
+                _load_profile(args)
+
+    def test_profile_flag_takes_precedence_over_env(self):
+        """--profile must take precedence over GH_USER_PROFILE_TEXT."""
+        from ghosthands.cli import _load_profile
+
+        flag_data = {"source": "flag"}
+        env_data = {"source": "env"}
+        args = argparse.Namespace(
+            profile=json.dumps(flag_data), test_data=None
+        )
+
+        with patch.dict(os.environ, {"GH_USER_PROFILE_TEXT": json.dumps(env_data)}):
+            result = _load_profile(args)
+
+        assert result == flag_data
