@@ -41,11 +41,37 @@ fi
 source "$DIR/.venv/bin/activate"
 
 # ── Load .env ─────────────────────────────────────────────────
-[ -f "$DIR/.env" ] && set -a && source "$DIR/.env" && set +a
+load_env_file() {
+  local env_path="$1"
+  if [ -f "$env_path" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$env_path"
+    set +a
+    return 0
+  fi
+  return 1
+}
+
+ENV_PATH="$DIR/.env"
+if ! load_env_file "$ENV_PATH"; then
+  COMMON_GIT_DIR="$(git -C "$DIR" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [ -n "$COMMON_GIT_DIR" ]; then
+    COMMON_ROOT="$(cd "$COMMON_GIT_DIR/.." && pwd)"
+    SHARED_ENV_PATH="$COMMON_ROOT/.env"
+    if [ "$COMMON_ROOT" != "$DIR" ] && load_env_file "$SHARED_ENV_PATH"; then
+      echo "INFO: Loaded shared .env from $SHARED_ENV_PATH"
+    fi
+  fi
+fi
 
 # ── Check API keys ────────────────────────────────────────────
 if [ -z "${GH_LLM_PROXY_URL:-}" ] && [ -z "${GOOGLE_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${GH_ANTHROPIC_API_KEY:-}" ]; then
   echo "ERROR: Set one of GH_LLM_PROXY_URL, GOOGLE_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY"
+  echo "  Checked: $DIR/.env"
+  if [ -n "${SHARED_ENV_PATH:-}" ]; then
+    echo "  Checked: $SHARED_ENV_PATH"
+  fi
   exit 1
 fi
 if [ -z "${GOOGLE_API_KEY:-}" ] && [ -z "${GH_LLM_PROXY_URL:-}" ]; then

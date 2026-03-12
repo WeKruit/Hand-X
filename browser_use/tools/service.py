@@ -577,7 +577,7 @@ class Tools(Generic[Context]):
 				)
 			except BrowserError as e:
 				return handle_browser_error(e)
-			except Exception as e:
+			except Exception:
 				error_msg = f'Failed to click at coordinates ({params.coordinate_x}, {params.coordinate_y}).'
 				return ActionResult(error=error_msg)
 
@@ -713,6 +713,10 @@ class Tools(Generic[Context]):
 
 				if not has_sensitive_data and actual_value is not None and actual_value != params.text:
 					msg += f"\n⚠️ Note: the field's actual value '{actual_value}' differs from typed text '{params.text}'. The page may have reformatted or autocompleted your input."
+
+				# Give typed fields a brief settle window before the next action.
+				# Some ATS widgets clear or reject just-typed values if the next click happens immediately.
+				await asyncio.sleep(0.3)
 
 				# Check for autocomplete/combobox field — add mechanical delay for dropdown
 				if _is_autocomplete_field(node):
@@ -1405,7 +1409,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				msg = f'🔍  {memory}'
 				logger.info(msg)
 				return ActionResult(extracted_content=memory, long_term_memory=memory)
-			except Exception as e:
+			except Exception:
 				# Text not found
 				msg = f"Text '{text}' not found or not visible on page"
 				logger.info(msg)
