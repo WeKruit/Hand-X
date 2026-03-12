@@ -1,55 +1,68 @@
-"""Main form field extraction — runs Playwright page.evaluate() scripts to
-extract all interactive form fields from the current page.
+"""DOM field extraction — the heart of DomHand.
 
-Ports ``extractFields()`` and the button-group detection from GHOST-HANDS
-formFiller.ts.  The flow is:
+Runs a large ``page.evaluate()`` JavaScript function that traverses
+the full document (including shadow DOMs) to discover every interactive
+form field.  The JS is a faithful port of ``extractFields()`` from
+GHOST-HANDS ``formFiller.ts``.
 
-1. Ensure ``window.__ff`` helpers are injected (shadow_helpers)
-2. Run the main extraction JS to find all input/select/textarea/role elements
-3. Run the button-group detection JS for Yes/No and multi-choice button questions
-4. Group radio/checkbox siblings into ``-group`` pseudo-fields
-5. Enrich with label metadata, fingerprints, and current values
-6. Optionally read validation errors
-7. Return an ``ExtractionResult`` with Pydantic models
+The Python layer:
+1. Injects ``window.__ff`` helpers (from shadow_helpers).
+2. Runs JS extraction to collect raw field descriptors.
+3. Runs a second JS pass to detect button-groups (Yes/No choices).
+4. Groups radio/checkbox siblings into ``radio-group``/``checkbox-group``.
+5. Parses every result into :class:`FormField` via Pydantic.
+6. Wraps everything in :class:`ExtractionResult`.
 """
 
-import logging
+from __future__ import annotations
 
+import hashlib
+import re
+from typing import Any
+
+import structlog
 from playwright.async_api import Page
 
-from ghosthands.dom.label_resolver import (
-	generate_field_fingerprint,
-	normalize_name,
-	sanitize_label,
+from ghosthands.dom.shadow_helpers import (
+	PLACEHOLDER_RE_SOURCE,
+	ensure_helpers,
+	inject_helpers,
 )
-from ghosthands.dom.shadow_helpers import ensure_helpers
-from ghosthands.dom.validation_reader import capture_validation_errors
 from ghosthands.dom.views import (
 	ExtractionResult,
 	FieldOption,
 	FormField,
+	ValidationSnapshot,
 )
 
-logger = logging.getLogger("ghosthands.dom.field_extractor")
+log = structlog.get_logger(__name__)
 
 
-# ── Main extraction JS ───────────────────────────────────────────────────
-# This runs inside the browser and returns raw dicts for each interactive
-# element it finds.
+# ── Constants ────────────────────────────────────────────────────────────
 
-_EXTRACT_FIELDS_JS = """
+# Labels that indicate a Workday internal widget, not a real field.
+_WORKDAY_NOISE_LABELS = frozenset({"items selected"})
+
+
+# ── JavaScript: raw field extraction ─────────────────────────────────────
+# Uses ES5-compatible syntax (var, function(){}) for maximum compatibility
+# across WebView / browser runtimes.
+
+_JS_EXTRACT_RAW_FIELDS = """
 () => {
-	const ff = window.__ff;
-	const seen = new Set();
-	const out = [];
+	var ff = window.__ff;
+	if (!ff) return [];
 
-	const shouldSkip = (el) => {
+	var seen = new Set();
+	var out = [];
+
+	var shouldSkip = function(el) {
 		if (ff.closestCrossRoot(el, '[class*="select-dropdown"], [class*="select-option"]')) return true;
 		if (ff.closestCrossRoot(el, '.iti__dropdown-content')) return true;
 		if (ff.closestCrossRoot(el, '[data-automation-id="activeListContainer"]')) return true;
 		if (el.getAttribute('role') === 'listbox' && el.closest('[role="combobox"]')) return true;
 		if (el.getAttribute('role') === 'listbox' && el.id) {
-			const controller = ff.queryOne('[role="combobox"][aria-controls="' + el.id + '"]');
+			var controller = ff.queryOne('[role="combobox"][aria-controls="' + el.id + '"]');
 			if (controller) return true;
 		}
 		if (el.tagName === 'INPUT' && el.type === 'search' && ff.closestCrossRoot(el, '[class*="dropdown"], [role="dialog"]')) return true;
@@ -57,164 +70,228 @@ _EXTRACT_FIELDS_JS = """
 		return false;
 	};
 
-	const getOptionMainText = (opt) => {
-		const clone = opt.cloneNode(true);
-		clone.querySelectorAll('[class*="desc"], [class*="sub"], [class*="hint"], .option-desc, small').forEach(x => x.remove());
-		return clone.textContent?.trim() || '';
+	var getOptionMainText = function(opt) {
+		var clone = opt.cloneNode(true);
+		clone.querySelectorAll('[class*="desc"], [class*="sub"], [class*="hint"], .option-desc, small').forEach(function(x) { x.remove(); });
+		return (clone.textContent || '').trim();
 	};
 
-	ff.queryAll(ff.SELECTOR).forEach((el) => {
+	var placeholderRe = new RegExp(""" + repr(PLACEHOLDER_RE_SOURCE) + """, 'i');
+
+	ff.queryAll(ff.SELECTOR).forEach(function(el) {
 		if (seen.has(el)) return;
 		seen.add(el);
 		if (shouldSkip(el)) return;
 
-		const id = ff.tag(el);
+		var id = ff.tag(el);
 
-		/* Resolve field type */
-		const type = (() => {
-			const role = el.getAttribute('role');
-			if (role === 'textbox' && el.getAttribute('aria-multiline') === 'true') return 'textarea';
-			if (role === 'textbox') return 'text';
-			if (role === 'combobox') return 'select';
-			if (role === 'listbox') return 'select';
-			if (el.getAttribute('data-uxi-widget-type') === 'selectinput') return 'select';
-			if (el.getAttribute('aria-haspopup') === 'listbox') return 'select';
-			if (role === 'radio') return 'radio';
-			if (role === 'checkbox') return 'checkbox';
-			if (role === 'spinbutton') return 'number';
-			if (role === 'slider') return 'range';
-			if (role === 'searchbox') return 'search';
-			if (role === 'switch') return 'toggle';
-			if (el.tagName === 'SELECT') return 'select';
-			if (el.tagName === 'TEXTAREA') return 'textarea';
-			const t = el.type || '';
-			return ({
-				text:'text', email:'email', tel:'tel', url:'url', number:'number',
-				date:'date', file:'file', checkbox:'checkbox', radio:'radio',
-				search:'search', password:'password'
-			})[t] || t || 'text';
-		})();
+		/* ── resolve type ── */
+		var role = el.getAttribute('role');
+		var type;
+		if (role === 'textbox' && el.getAttribute('aria-multiline') === 'true') type = 'textarea';
+		else if (role === 'textbox') type = 'text';
+		else if (role === 'combobox') type = 'select';
+		else if (role === 'listbox') type = 'select';
+		else if (el.getAttribute('data-uxi-widget-type') === 'selectinput') type = 'select';
+		else if (el.getAttribute('aria-haspopup') === 'listbox') type = 'select';
+		else if (role === 'radio') type = 'radio';
+		else if (role === 'checkbox') type = 'checkbox';
+		else if (role === 'spinbutton') type = 'number';
+		else if (role === 'slider') type = 'range';
+		else if (role === 'searchbox') type = 'search';
+		else if (role === 'switch') type = 'toggle';
+		else if (el.tagName === 'SELECT') type = 'select';
+		else if (el.tagName === 'TEXTAREA') type = 'textarea';
+		else {
+			var t = el.type || '';
+			var typeMap = {
+				text:'text', email:'email', tel:'tel', url:'url',
+				number:'number', date:'date', file:'file',
+				checkbox:'checkbox', radio:'radio', search:'search',
+				password:'password', hidden:'hidden'
+			};
+			type = typeMap[t] || t || 'text';
+		}
 
-		/* Visibility — file inputs get special container-level check */
-		const visible = (() => {
-			if (type === 'file' && !ff.isVisible(el)) {
-				const container = el.closest('[class*=upload], [class*=drop], .form-group, .field');
-				return container ? ff.isVisible(container) : false;
-			}
-			return ff.isVisible(el);
-		})();
+		/* ── visibility (file inputs get container check) ── */
+		var visible;
+		if (type === 'file' && !ff.isVisible(el)) {
+			var fileContainer = el.closest('[class*=upload], [class*=drop], .form-group, .field');
+			visible = fileContainer ? ff.isVisible(fileContainer) : false;
+		} else {
+			visible = ff.isVisible(el);
+		}
 
-		const isNative = el.tagName === 'SELECT';
-		const isMultiSelect = type === 'select' && !isNative && !!(
+		/* ── native select detection ── */
+		var isNative = el.tagName === 'SELECT';
+		var isMultiSelect = type === 'select' && !isNative && !!(
 			el.querySelector('[class*="multi"]') ||
-			el.classList.toString().includes('multi') ||
+			(el.classList && el.classList.toString().indexOf('multi') !== -1) ||
 			el.getAttribute('aria-multiselectable') === 'true' ||
-			el.querySelector('[aria-selected]')?.closest('[class*="multi"]')
+			(el.querySelector('[aria-selected]') && el.querySelector('[aria-selected]').closest('[class*="multi"]'))
 		);
 
-		/* Required detection */
-		const required = el.required ||
-			el.getAttribute('aria-required') === 'true' ||
-			el.dataset.required === 'true' ||
-			el.dataset.ffRequired === 'true';
+		/* ── label ── */
+		var rawLabel = ff.getAccessibleName(el);
 
-		const entry = {
+		/* ── required signals ── */
+		var requiredSignals = [];
+		if (el.required) requiredSignals.push('html_required');
+		if (el.getAttribute('aria-required') === 'true') requiredSignals.push('aria_required');
+		if (el.dataset && el.dataset.required === 'true') requiredSignals.push('data_required');
+		if (el.dataset && el.dataset.ffRequired === 'true') requiredSignals.push('ff_required');
+		if (rawLabel && /\\*/.test(rawLabel)) requiredSignals.push('label_asterisk');
+		if (rawLabel && /required/i.test(rawLabel)) requiredSignals.push('label_required_text');
+		var isRequired = requiredSignals.length > 0;
+
+		/* ── label source tracking ── */
+		var labelSources = [];
+		if (el.getAttribute('aria-labelledby')) labelSources.push('aria-labelledby');
+		else if (el.getAttribute('aria-label')) labelSources.push('aria-label');
+		else if (el.id && ff.queryOne('label[for="' + el.id + '"]')) labelSources.push('label[for]');
+		else if (el.closest && el.closest('label')) labelSources.push('ancestor-label');
+		else if (el.closest && el.closest('fieldset') && el.closest('fieldset').querySelector('legend')) labelSources.push('legend');
+		else if (el.placeholder) labelSources.push('placeholder');
+		else if (el.getAttribute('title')) labelSources.push('title');
+
+		/* ── sanitize label ── */
+		var syntheticLabel = false;
+		var label = rawLabel;
+		if (!label) {
+			label = el.getAttribute('name') || el.getAttribute('data-automation-id') || '';
+			if (label) {
+				labelSources.push('name');
+				syntheticLabel = true;
+			}
+		}
+		label = label.replace(/\\s*\\*\\s*/g, ' ').replace(/\\s*Required\\s*/gi, '').replace(/\\s+/g, ' ').trim();
+
+		/* ── value ── */
+		var value = '';
+		if (type === 'checkbox' || type === 'toggle') {
+			value = el.checked ? 'true' : 'false';
+		} else if (type === 'radio') {
+			value = el.checked ? 'true' : 'false';
+		} else if (isNative) {
+			value = el.options && el.selectedIndex >= 0 ? (el.options[el.selectedIndex].text || '').trim() : '';
+		} else if (type === 'select') {
+			value = (el.textContent || '').trim();
+			if (placeholderRe.test(value)) value = '';
+		} else {
+			value = el.value || '';
+		}
+
+		/* ── section ── */
+		var section = ff.getSection(el);
+
+		/* ── placeholder ── */
+		var placeholder = el.placeholder || el.getAttribute('placeholder') || '';
+
+		/* ── disabled ── */
+		var disabled = !!(el.disabled || el.getAttribute('aria-disabled') === 'true');
+
+		/* ── build entry ── */
+		var entry = {
 			id: id,
-			name: ff.getAccessibleName(el),
+			label: label,
+			rawLabel: rawLabel,
 			type: type,
-			section: ff.getSection(el),
-			required: required,
+			section: section,
+			required: isRequired,
+			requiredSignals: requiredSignals,
 			visible: visible,
 			isNative: isNative,
 			isMultiSelect: isMultiSelect,
-			placeholder: el.placeholder || '',
-			disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
+			value: value,
+			placeholder: placeholder,
+			labelSources: labelSources,
+			syntheticLabel: syntheticLabel,
+			disabled: disabled,
+			name: el.getAttribute('name') || ''
 		};
 
+		/* ── file accept ── */
 		if (el.accept) entry.accept = el.accept;
 
-		/* Read options for select fields */
+		/* ── options for selects ── */
 		if (type === 'select') {
-			let opts = [];
+			var opts = [];
 			if (el.tagName === 'SELECT') {
-				opts = Array.from(el.options)
-					.filter(o => o.value !== '')
-					.map(o => ({
-						value: o.value,
-						text: o.textContent?.trim() || '',
-						selected: o.selected,
-					}));
+				var nativeOpts = el.options || [];
+				for (var oi = 0; oi < nativeOpts.length; oi++) {
+					var o = nativeOpts[oi];
+					if (o.value === '') continue;
+					var optText = (o.textContent || '').trim();
+					if (optText) opts.push({ value: o.value, text: optText, selected: o.selected });
+				}
 			} else {
-				const ctrlId = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
-				let src = ctrlId ? ff.getByDomId(ctrlId) : null;
+				var ctrlId = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
+				var src = ctrlId ? ff.getByDomId(ctrlId) : null;
 				if (!src && el.tagName === 'INPUT') {
 					src = ff.closestCrossRoot(el, '[class*="select"], [class*="combobox"], .form-group, .field');
 				}
 				if (!src) src = el;
 				if (src) {
-					opts = Array.from(src.querySelectorAll('[role="option"], [role="menuitem"]'))
-						.map(o => ({
-							value: o.getAttribute('data-value') || o.textContent?.trim() || '',
-							text: getOptionMainText(o),
-							selected: o.getAttribute('aria-selected') === 'true',
-						}))
-						.filter(o => o.text);
+					var roleOpts = src.querySelectorAll('[role="option"], [role="menuitem"]');
+					for (var ri = 0; ri < roleOpts.length; ri++) {
+						var optT = getOptionMainText(roleOpts[ri]);
+						if (optT) {
+							var isSel = roleOpts[ri].getAttribute('aria-selected') === 'true';
+							opts.push({ value: optT, text: optT, selected: isSel });
+						}
+					}
 				}
 			}
 			if (opts.length) entry.options = opts;
 		}
 
-		/* Checkbox/radio item label */
+		/* ── checkbox/radio item label ── */
 		if (type === 'checkbox' || type === 'radio') {
-			const labelEl = el.querySelector('[class*="label"], .rc-label');
+			var labelEl = el.querySelector('[class*="label"], .rc-label');
 			if (labelEl) {
-				entry.itemLabel = labelEl.textContent?.trim() || '';
+				entry.itemLabel = (labelEl.textContent || '').trim();
 			} else {
-				const wrap = el.closest('label');
+				var wrap = el.closest('label');
 				if (wrap) {
-					const c = wrap.cloneNode(true);
-					c.querySelectorAll('input, [class*=desc], small').forEach(x => x.remove());
-					entry.itemLabel = c.textContent?.trim() || '';
+					var wc = wrap.cloneNode(true);
+					wc.querySelectorAll('input, [class*=desc], small').forEach(function(x) { x.remove(); });
+					entry.itemLabel = (wc.textContent || '').trim();
 				} else {
 					entry.itemLabel = el.getAttribute('aria-label') || ff.getAccessibleName(el);
 				}
 			}
-			entry.itemValue = el.value || el.querySelector('input')?.value || '';
-		}
-
-		/* Current value */
-		if (type === 'checkbox' || type === 'radio') {
-			entry.currentValue = el.checked ? 'checked' : '';
-		} else if (el.tagName === 'SELECT') {
-			const selected = el.options[el.selectedIndex];
-			entry.currentValue = selected ? selected.textContent?.trim() || '' : '';
-		} else if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-			entry.currentValue = el.value || '';
-		} else if (el.getAttribute('contenteditable') === 'true') {
-			entry.currentValue = el.textContent?.trim() || '';
-		} else {
-			entry.currentValue = '';
+			entry.itemValue = el.value || (el.querySelector('input') ? el.querySelector('input').value : '') || '';
 		}
 
 		out.push(entry);
 	});
+
 	return out;
 }
 """
 
 
-# ── Button group detection JS ────────────────────────────────────────────
+# ── JavaScript: button-group detection ───────────────────────────────────
 
-_EXTRACT_BUTTON_GROUPS_JS = """
+_NAV_BUTTON_TEXTS_JS = repr([
+	"save and continue", "next", "continue", "submit", "submit application",
+	"apply", "add", "add another", "replace", "upload", "browse", "remove",
+	"delete", "cancel", "back", "previous", "close", "save", "select one",
+	"choose file",
+])
+
+_JS_DETECT_BUTTON_GROUPS = """
 () => {
-	const ff = window.__ff;
-	const results = [];
+	var ff = window.__ff;
+	if (!ff) return [];
 
-	const allBtnEls = document.querySelectorAll('button, [role="button"]');
-	const parentMap = {};
+	var results = [];
+	var allBtnEls = document.querySelectorAll('button, [role="button"]');
+	var parentMap = {};
+	var NAV_TEXTS = """ + _NAV_BUTTON_TEXTS_JS + """;
 
-	for (let i = 0; i < allBtnEls.length; i++) {
-		const btn = allBtnEls[i];
+	for (var i = 0; i < allBtnEls.length; i++) {
+		var btn = allBtnEls[i];
 		if (!ff.isVisible(btn)) continue;
 		if (btn.disabled) continue;
 		if (btn.closest('nav, header, [role="navigation"], [role="menubar"], [role="menu"], [role="toolbar"], [data-automation-id*="header"], [data-automation-id*="navigation"]')) continue;
@@ -223,24 +300,20 @@ _EXTRACT_BUTTON_GROUPS_JS = """
 		if (btn.getAttribute('aria-haspopup') === 'listbox') continue;
 		if (btn.tagName.toLowerCase() === 'input') continue;
 
-		const btnText = (btn.textContent || '').trim();
+		var btnText = (btn.textContent || '').trim();
 		if (!btnText || btnText.length > 30) continue;
 
-		const btnLower = btnText.toLowerCase();
-		if ([
-			'save and continue', 'next', 'continue', 'submit', 'submit application',
-			'apply', 'add', 'add another', 'replace', 'upload', 'browse', 'remove',
-			'delete', 'cancel', 'back', 'previous', 'close', 'save', 'select one',
-			'choose file',
-		].includes(btnLower) || btnLower.startsWith('add ') || btnLower.includes('save & continue')) {
-			continue;
-		}
+		var btnLower = btnText.toLowerCase();
+		if (NAV_TEXTS.indexOf(btnLower) !== -1) continue;
+		if (btnLower.indexOf('add ') === 0) continue;
+		if (btnLower.indexOf('save & continue') !== -1) continue;
 
-		let parent = btn.parentElement;
-		for (let pu = 0; pu < 3 && parent; pu++) {
-			const childBtns = parent.querySelectorAll('button, [role="button"]');
-			let visibleCount = 0;
-			for (let vc = 0; vc < childBtns.length; vc++) {
+		/* walk up to 3 ancestors to find parent with 2-4 visible buttons */
+		var parent = btn.parentElement;
+		for (var pu = 0; pu < 3 && parent; pu++) {
+			var childBtns = parent.querySelectorAll('button, [role="button"]');
+			var visibleCount = 0;
+			for (var vc = 0; vc < childBtns.length; vc++) {
 				if (ff.isVisible(childBtns[vc])) visibleCount++;
 			}
 			if (visibleCount >= 2 && visibleCount <= 4) break;
@@ -248,43 +321,52 @@ _EXTRACT_BUTTON_GROUPS_JS = """
 		}
 		if (!parent) continue;
 
-		const parentKey = parent.getAttribute('data-ff-btn-group') || ('btngrp-' + i);
+		var parentKey = parent.getAttribute('data-ff-btn-group') || ('btngrp-' + i);
 		parent.setAttribute('data-ff-btn-group', parentKey);
 
 		if (!parentMap[parentKey]) {
 			parentMap[parentKey] = { parent: parent, buttons: [] };
 		}
-		if (!parentMap[parentKey].buttons.some(entry => entry.el === btn)) {
+		var alreadyAdded = false;
+		for (var ai = 0; ai < parentMap[parentKey].buttons.length; ai++) {
+			if (parentMap[parentKey].buttons[ai].el === btn) { alreadyAdded = true; break; }
+		}
+		if (!alreadyAdded) {
 			parentMap[parentKey].buttons.push({ el: btn, text: btnText });
 		}
 	}
 
-	for (const groupKey in parentMap) {
-		const group = parentMap[groupKey];
+	for (var groupKey in parentMap) {
+		var group = parentMap[groupKey];
 		if (group.buttons.length < 2 || group.buttons.length > 4) continue;
-		if (group.buttons.some(entry => entry.text.length > 30)) continue;
 
-		const container = group.parent;
-		let questionLabel = '';
+		var tooLong = false;
+		for (var tl = 0; tl < group.buttons.length; tl++) {
+			if (group.buttons[tl].text.length > 30) { tooLong = true; break; }
+		}
+		if (tooLong) continue;
 
-		/* Resolve label from preceding sibling */
-		const prevSib = container.previousElementSibling;
+		var container = group.parent;
+		var questionLabel = '';
+
+		/* try previous sibling */
+		var prevSib = container.previousElementSibling;
 		if (prevSib) {
-			const prevText = (prevSib.textContent || '').trim();
+			var prevText = (prevSib.textContent || '').trim();
 			if (prevText && prevText.length > 5 && prevText.length < 300) {
 				questionLabel = prevText;
 			}
 		}
 
-		/* Walk up ancestors looking for preceding text */
+		/* walk up ancestors looking for preceding text */
 		if (!questionLabel) {
-			let labelContainer = container.parentElement;
-			for (let lc = 0; lc < 5 && labelContainer && !questionLabel; lc++) {
-				const children = labelContainer.children;
-				for (let ch = 0; ch < children.length; ch++) {
-					const child = children[ch];
+			var labelContainer = container.parentElement;
+			for (var lc = 0; lc < 5 && labelContainer && !questionLabel; lc++) {
+				var children = labelContainer.children;
+				for (var ch = 0; ch < children.length; ch++) {
+					var child = children[ch];
 					if (child === container || child.contains(container)) break;
-					const childText = (child.textContent || '').trim();
+					var childText = (child.textContent || '').trim();
 					if (childText && childText.length > 5 && childText.length < 300) {
 						questionLabel = childText;
 					}
@@ -294,65 +376,78 @@ _EXTRACT_BUTTON_GROUPS_JS = """
 			}
 		}
 
-		/* aria-label on container */
+		/* aria-label on ancestor */
 		if (!questionLabel) {
-			const ariaContainer = container.closest('[aria-label]');
+			var ariaContainer = container.closest('[aria-label]');
 			if (ariaContainer) {
-				const ariaText = ariaContainer.getAttribute('aria-label');
+				var ariaText = ariaContainer.getAttribute('aria-label');
 				if (ariaText && ariaText.length > 5) questionLabel = ariaText;
 			}
 		}
 
 		if (!questionLabel) continue;
 
-		const rawQuestionLabel = questionLabel;
+		var rawQuestionLabel = questionLabel;
 
+		/* sanitize label */
 		questionLabel = questionLabel
 			.replace(/\\s*\\*\\s*/g, ' ')
 			.replace(/\\s*Required\\s*/gi, '')
 			.replace(/\\s+/g, ' ')
 			.trim();
+
+		/* skip noise labels */
 		if (/\\b(follow us|privacy policy|job alerts)\\b/i.test(questionLabel)) continue;
 		if (questionLabel.length > 200) {
 			questionLabel = questionLabel.substring(0, 200).trim();
 		}
 
-		const choices = [];
-		const btnIds = [];
-		for (const entry of group.buttons) {
-			const id = ff.tag(entry.el);
-			choices.push(entry.text);
-			btnIds.push(id);
+		/* collect choices and tag buttons */
+		var choices = [];
+		var btnIds = [];
+		for (var ci = 0; ci < group.buttons.length; ci++) {
+			var bid = ff.tag(group.buttons[ci].el);
+			choices.push(group.buttons[ci].text);
+			btnIds.push(bid);
 		}
 
-		const navChoiceHits = choices.filter(c =>
-			/\\b(careers|search for jobs|candidate home|job alerts|privacy policy|follow us|about us)\\b/i.test(c)
-		).length;
-		if (navChoiceHits >= 2) continue;
+		/* filter nav-like choice sets */
+		var navHits = 0;
+		var navRe = /\\b(careers|search for jobs|candidate home|job alerts|privacy policy|follow us|about us)\\b/i;
+		for (var ni = 0; ni < choices.length; ni++) {
+			if (navRe.test(choices[ni])) navHits++;
+		}
+		if (navHits >= 2) continue;
 
-		const containerId = ff.tag(container);
+		var containerId = ff.tag(container);
 
-		/* Multi-signal required detection */
-		const requiredSignals = [];
-		if (rawQuestionLabel.includes('*')) requiredSignals.push('label_asterisk');
-		if (prevSib && (prevSib.textContent || '').includes('*')) requiredSignals.push('sibling_asterisk');
+		/* required signals */
+		var requiredSignals = [];
+		if (rawQuestionLabel.indexOf('*') !== -1) requiredSignals.push('label_asterisk');
+		if (prevSib && (prevSib.textContent || '').indexOf('*') !== -1) requiredSignals.push('sibling_asterisk');
 		if (container.getAttribute('aria-required') === 'true') requiredSignals.push('aria_required');
 		if (container.closest('[aria-required="true"]')) requiredSignals.push('ancestor_aria_required');
 		if (/required/i.test(rawQuestionLabel)) requiredSignals.push('label_required_text');
-		const isRequired = requiredSignals.length > 0;
 
 		results.push({
 			id: containerId,
-			name: questionLabel,
+			label: questionLabel,
 			rawLabel: rawQuestionLabel,
 			type: 'button-group',
 			section: ff.getSection(container),
-			required: isRequired,
+			required: requiredSignals.length > 0,
 			requiredSignals: requiredSignals,
 			visible: true,
 			isNative: false,
 			choices: choices,
 			btnIds: btnIds,
+			disabled: false,
+			labelSources: ['button-group-heuristic'],
+			syntheticLabel: false,
+			name: '',
+			value: '',
+			placeholder: '',
+			isMultiSelect: false
 		});
 	}
 
@@ -361,281 +456,317 @@ _EXTRACT_BUTTON_GROUPS_JS = """
 """
 
 
-# ── Page metadata JS ─────────────────────────────────────────────────────
+# ── JavaScript: page metadata ────────────────────────────────────────────
 
-_PAGE_METADATA_JS = """
+_JS_PAGE_METADATA = """
 () => {
-	const ff = window.__ff;
-	const forms = document.querySelectorAll('form');
-	const submitButtons = ff?.queryAll(
+	var formEls = document.querySelectorAll('form');
+	var submitBtn = document.querySelector(
 		'button[type="submit"], input[type="submit"], ' +
 		'[data-automation-id="bottom-navigation-next-button"], ' +
 		'[data-automation-id="submit-button"]'
-	) ?? [];
-	const hasSubmit = submitButtons.length > 0 || Array.from(
-		ff?.queryAll('button') ?? []
-	).some(btn => {
-		const t = (btn.textContent || '').trim().toLowerCase();
-		return ['submit', 'submit application', 'save and continue', 'next'].includes(t);
-	});
+	);
+	/* Heuristic: check if any visible button says submit/apply */
+	if (!submitBtn) {
+		var allBtns = document.querySelectorAll('button');
+		for (var i = 0; i < allBtns.length; i++) {
+			var txt = (allBtns[i].textContent || '').trim().toLowerCase();
+			if (txt === 'submit' || txt === 'submit application' || txt === 'apply' || txt === 'save and continue' || txt === 'next') {
+				submitBtn = allBtns[i];
+				break;
+			}
+		}
+	}
 	return {
 		title: document.title || '',
 		url: window.location.href,
-		formCount: forms.length,
-		hasSubmitButton: hasSubmit,
+		formCount: formEls.length,
+		hasSubmitButton: !!submitBtn
 	};
 }
 """
 
 
-# ── Python extraction API ────────────────────────────────────────────────
+# ── Fingerprint generation ───────────────────────────────────────────────
 
-def _raw_to_form_field(raw: dict) -> FormField:
-	"""Convert a raw dict from the browser JS into a FormField model."""
-	raw_label = raw.get("name", "")
-	label = sanitize_label(raw_label)
-	field_type = raw.get("type", "text")
-	section = raw.get("section", "")
-	name_attr = raw.get("name", "")
+def _field_fingerprint(
+	field_type: str,
+	label: str,
+	name: str,
+	section: str,
+) -> str:
+	"""Create a stable identity fingerprint for a field.
+
+	Helps track fields across re-extractions even if ``ff_id`` changes
+	(e.g. after SPA navigation resets the counter).
+	"""
+	raw = f"{field_type}|{label.lower().strip()}|{name.lower().strip()}|{section.lower().strip()}"
+	return hashlib.md5(raw.encode(), usedforsecurity=False).hexdigest()[:12]
+
+
+# ── Sanitize label ───────────────────────────────────────────────────────
+
+_ASTERISK_RE = re.compile(r"\s*\*\s*")
+_REQUIRED_RE = re.compile(r"\s*Required\s*", re.IGNORECASE)
+_MULTI_SPACE_RE = re.compile(r"\s+")
+
+
+def _sanitize_label(raw: str) -> str:
+	"""Strip asterisks and 'Required' from a label string."""
+	s = _ASTERISK_RE.sub(" ", raw)
+	s = _REQUIRED_RE.sub("", s)
+	s = _MULTI_SPACE_RE.sub(" ", s).strip()
+	return s
+
+
+# ── Raw JS result -> FormField conversion ────────────────────────────────
+
+def _parse_raw_field(raw: dict[str, Any]) -> FormField:
+	"""Convert a single raw JS field descriptor into a :class:`FormField`."""
+	ff_id: str = raw.get("id", "")
+	field_type: str = raw.get("type", "unknown")
+	label: str = raw.get("label", "")
+	raw_label: str = raw.get("rawLabel", "")
+	name: str = raw.get("name", "")
+	section: str = raw.get("section", "")
+	value: str = raw.get("value", "")
+	placeholder: str = raw.get("placeholder", "")
 
 	options: list[FieldOption] = []
-	if raw.get("options"):
-		for opt in raw["options"]:
-			if isinstance(opt, dict):
-				options.append(FieldOption(
-					value=opt.get("value", ""),
-					text=opt.get("text", ""),
-					selected=opt.get("selected", False),
-				))
-			elif isinstance(opt, str):
-				options.append(FieldOption(value=opt, text=opt, selected=False))
+	for opt in raw.get("options", []):
+		if isinstance(opt, dict):
+			options.append(FieldOption(
+				value=opt.get("value", ""),
+				text=opt.get("text", ""),
+				selected=opt.get("selected", False),
+			))
+		elif isinstance(opt, str):
+			options.append(FieldOption(value=opt, text=opt, selected=False))
+
+	choices: list[str] = raw.get("choices", [])
+	btn_ids: list[str] = raw.get("btnIds", [])
 
 	return FormField(
-		ff_id=raw.get("id", ""),
-		selector=f'[data-ff-id="{raw.get("id", "")}"]',
+		ff_id=ff_id,
+		selector=f'[data-ff-id="{ff_id}"]',
 		field_type=field_type,
 		label=label,
 		raw_label=raw_label,
-		name=name_attr,
-		value=raw.get("currentValue", ""),
-		placeholder=raw.get("placeholder", ""),
+		name=name,
+		value=value,
+		placeholder=placeholder,
 		required=raw.get("required", False),
+		required_signals=raw.get("requiredSignals", []),
 		options=options,
+		choices=choices,
 		section=section,
 		visible=raw.get("visible", True),
 		is_native=raw.get("isNative", False),
 		is_multi_select=raw.get("isMultiSelect", False),
 		accept=raw.get("accept", ""),
+		label_sources=raw.get("labelSources", []),
+		synthetic_label=raw.get("syntheticLabel", False),
 		item_label=raw.get("itemLabel", ""),
 		item_value=raw.get("itemValue", ""),
+		btn_ids=btn_ids,
 		disabled=raw.get("disabled", False),
-		field_fingerprint=generate_field_fingerprint(field_type, label, section, name_attr),
+		field_fingerprint=_field_fingerprint(field_type, label, name, section),
 	)
 
 
-def _group_radio_checkbox_fields(raw_fields: list[dict]) -> list[FormField]:
-	"""Group radio/checkbox siblings into -group pseudo-fields.
+# ── Grouping logic ──────────────────────────────────────────────────────
+
+def _group_fields(raw_fields: list[dict[str, Any]]) -> list[FormField]:
+	"""Group radio/checkbox siblings into ``radio-group`` / ``checkbox-group``.
 
 	Mirrors the post-processing in ``extractFields()`` from formFiller.ts.
-	Radio/checkbox elements sharing the same ``name`` and ``section`` are
-	collapsed into a single ``radio-group`` or ``checkbox-group`` field
-	with ``choices`` populated from individual item labels.
+	All other field types pass through as-is.
 	"""
 	fields: list[FormField] = []
 	seen_ids: set[str] = set()
-	seen_groups: set[str] = set()
+	seen_group_keys: set[str] = set()
 
 	for raw in raw_fields:
-		fid = raw.get("id", "")
+		fid: str = raw.get("id", "")
 		if not fid or fid in seen_ids:
 			continue
 
-		ftype = raw.get("type", "")
+		ftype: str = raw.get("type", "")
+		fname: str = raw.get("label", "")
+		fsection: str = raw.get("section", "")
+
 		if ftype in ("checkbox", "radio"):
-			group_key = f"group:{raw.get('name', '')}:{raw.get('section', '')}"
-			if group_key in seen_groups:
+			group_key = f"group:{fname}:{fsection}"
+			if group_key in seen_group_keys:
 				continue
 			seen_ids.add(fid)
 
+			# Find siblings — same type, same label (question text), same section
 			siblings = [
 				r for r in raw_fields
 				if r.get("type") in ("checkbox", "radio")
-				and r.get("name") == raw.get("name")
-				and r.get("section") == raw.get("section")
+				and r.get("label") == fname
+				and r.get("section") == fsection
 			]
 
 			if len(siblings) > 1:
-				seen_groups.add(group_key)
-				for s in siblings:
-					seen_ids.add(s.get("id", ""))
+				# Merge into a group
+				seen_group_keys.add(group_key)
+				for sib in siblings:
+					seen_ids.add(sib.get("id", ""))
 
-				raw_label = raw.get("name", "")
-				label = sanitize_label(raw_label)
-				section = raw.get("section", "")
 				group_type = f"{ftype}-group"
-				choices = [s.get("itemLabel") or s.get("name", "") for s in siblings]
+				choices = [
+					s.get("itemLabel") or s.get("label", "")
+					for s in siblings
+				]
 
 				fields.append(FormField(
 					ff_id=fid,
 					selector=f'[data-ff-id="{fid}"]',
 					field_type=group_type,
-					label=label,
-					raw_label=raw_label,
+					label=fname,
+					raw_label=raw.get("rawLabel", ""),
 					name=raw.get("name", ""),
+					section=fsection,
 					required=raw.get("required", False),
+					required_signals=raw.get("requiredSignals", []),
 					choices=choices,
-					section=section,
 					visible=raw.get("visible", True),
-					is_native=False,
-					field_fingerprint=generate_field_fingerprint(group_type, label, section, raw.get("name", "")),
+					label_sources=raw.get("labelSources", []),
+					field_fingerprint=_field_fingerprint(group_type, fname, raw.get("name", ""), fsection),
 				))
 			else:
-				item_label = raw.get("itemLabel") or raw.get("name", "")
-				fields.append(FormField(
-					ff_id=fid,
-					selector=f'[data-ff-id="{fid}"]',
-					field_type=ftype,
-					label=sanitize_label(item_label),
-					raw_label=item_label,
-					name=raw.get("name", ""),
-					required=raw.get("required", False),
-					section=raw.get("section", ""),
-					visible=raw.get("visible", True),
-					is_native=False,
-					value="checked" if raw.get("currentValue") == "checked" else "",
-					field_fingerprint=generate_field_fingerprint(
-						ftype,
-						sanitize_label(item_label),
-						raw.get("section", ""),
-						raw.get("name", ""),
-					),
-				))
+				# Standalone checkbox/radio — use itemLabel as the display label
+				item_label = raw.get("itemLabel") or fname
+				fields.append(_parse_raw_field({
+					**raw,
+					"label": item_label,
+				}))
 		else:
 			seen_ids.add(fid)
-			fields.append(_raw_to_form_field(raw))
+			fields.append(_parse_raw_field(raw))
 
 	return fields
 
 
-def _raw_button_group_to_form_field(raw: dict) -> FormField:
-	"""Convert a raw button-group dict from JS into a FormField."""
-	raw_label = raw.get("rawLabel", raw.get("name", ""))
-	label = sanitize_label(raw.get("name", ""))
-	section = raw.get("section", "")
-	choices = raw.get("choices", [])
-	btn_ids = raw.get("btnIds", [])
-	required_signals = raw.get("requiredSignals", [])
-
-	return FormField(
-		ff_id=raw.get("id", ""),
-		selector=f'[data-ff-id="{raw.get("id", "")}"]',
-		field_type="button-group",
-		label=label,
-		raw_label=raw_label,
-		name=label,
-		required=raw.get("required", False),
-		required_signals=required_signals,
-		choices=choices,
-		btn_ids=btn_ids,
-		section=section,
-		visible=True,
-		is_native=False,
-		field_fingerprint=generate_field_fingerprint("button-group", label, section, label),
-	)
-
+# ── Public API ───────────────────────────────────────────────────────────
 
 async def extract_form_fields(
 	page: Page,
-	*,
-	include_validation: bool = False,
+	target_section: str | None = None,
 ) -> ExtractionResult:
-	"""Extract all form fields from the current page via Playwright evaluate.
+	"""Extract all interactive form fields from the current page.
 
-	This is the main entry point for DOM extraction.  It:
+	Injects shadow DOM helpers, then runs a JavaScript extraction script that:
 
-	1. Ensures ``window.__ff`` helpers are injected
-	2. Runs the field extraction JS (inputs, selects, textareas, ARIA roles)
-	3. Runs button-group detection (Yes/No, multi-choice button questions)
-	4. Groups radio/checkbox siblings into ``-group`` pseudo-fields
-	5. Enriches fields with label metadata and fingerprints
-	6. Optionally captures validation errors
-	7. Filters out Workday internal elements (``items selected``)
+	1. Traverses all document roots (including shadow DOMs)
+	2. Finds all interactive elements (inputs, selects, textareas, ARIA roles)
+	3. Resolves accessible names via the label resolution chain
+	4. Reads current values, options, checked states
+	5. Detects required fields via multi-signal analysis
+	6. Groups radio buttons and button groups
+	7. Filters by visibility and optional section
+	8. Tags each element with ``data-ff-id`` for later targeting
 
-	Args:
-		page: Playwright Page instance.
-		include_validation: If True, also capture validation errors.
+	Parameters
+	----------
+	page:
+		Playwright page instance (must already be navigated).
+	target_section:
+		If provided, only return fields whose ``section`` matches
+		(case-insensitive substring).
 
-	Returns:
-		ExtractionResult with all extracted fields and page metadata.
+	Returns
+	-------
+	ExtractionResult
+		Pydantic model containing the field list and page metadata.
 	"""
-	assert page is not None, "page must not be None"
-
-	# Step 1: Ensure helpers are injected
+	# 1. Ensure __ff helpers are present
 	await ensure_helpers(page)
 
-	# Step 2: Extract raw field data
-	raw_fields: list[dict] = await page.evaluate(_EXTRACT_FIELDS_JS)
+	# 2. Extract raw field descriptors from the DOM
+	try:
+		raw_fields: list[dict[str, Any]] = await page.evaluate(_JS_EXTRACT_RAW_FIELDS)
+	except Exception:
+		log.warning("field_extraction.raw_fields_failed", exc_info=True)
+		raw_fields = []
+		# Re-inject and retry once — SPA navigation may have wiped the context
+		try:
+			await inject_helpers(page)
+			raw_fields = await page.evaluate(_JS_EXTRACT_RAW_FIELDS)
+		except Exception:
+			log.error("field_extraction.raw_fields_retry_failed", exc_info=True)
 
-	# Step 3: Extract button groups
-	raw_button_groups: list[dict] = await page.evaluate(_EXTRACT_BUTTON_GROUPS_JS)
+	# 3. Detect button groups (second JS pass)
+	try:
+		button_groups: list[dict[str, Any]] = await page.evaluate(_JS_DETECT_BUTTON_GROUPS)
+	except Exception:
+		log.warning("field_extraction.button_groups_failed", exc_info=True)
+		button_groups = []
 
-	# Step 4: Group radio/checkbox and convert to models
-	fields = _group_radio_checkbox_fields(raw_fields)
+	# 4. Group radio/checkbox siblings into -group pseudo-fields
+	fields = _group_fields(raw_fields)
 
-	# Step 5: Add button groups (dedup by ff_id)
+	# 5. Append button groups (avoid duplicates by ff_id)
 	seen_ids = {f.ff_id for f in fields}
-	for bg in raw_button_groups:
+	for bg in button_groups:
 		bg_id = bg.get("id", "")
 		if bg_id and bg_id not in seen_ids:
 			seen_ids.add(bg_id)
-			fields.append(_raw_button_group_to_form_field(bg))
+			fields.append(_parse_raw_field(bg))
 
-	# Step 6: Filter out Workday internal artifacts
-	fields = [f for f in fields if normalize_name(f.label) != "items selected"]
+	# 6. Filter out Workday noise fields
+	fields = [
+		f for f in fields
+		if f.label.lower().strip() not in _WORKDAY_NOISE_LABELS
+	]
 
-	# Step 7: Mark synthetic labels and observation warnings
-	for field in fields:
-		if not field.label.strip():
-			field.synthetic_label = True
-			field.observation_warnings = [*field.observation_warnings, "missing_label"]
+	# 7. Apply optional section filter
+	if target_section:
+		target_lower = target_section.lower()
+		fields = [
+			f for f in fields
+			if target_lower in f.section.lower()
+		]
 
-	# Step 8: Read page metadata
-	meta: dict = await page.evaluate(_PAGE_METADATA_JS)
+	# 8. Add observation warnings
+	for f in fields:
+		warnings: list[str] = []
+		if not f.label:
+			warnings.append("no_label_resolved")
+		if f.synthetic_label:
+			warnings.append("synthetic_label")
+		if f.field_type == "select" and not f.options and f.is_native:
+			warnings.append("native_select_no_options")
+		if f.field_type in ("radio-group", "checkbox-group") and not f.choices:
+			warnings.append("group_no_choices")
+		if f.disabled:
+			warnings.append("disabled")
+		f.observation_warnings = warnings
 
-	# Step 9: Optionally capture validation errors
-	validation = None
-	if include_validation:
-		validation = await capture_validation_errors(page, fields)
+	# 9. Collect page metadata
+	try:
+		meta: dict[str, Any] = await page.evaluate(_JS_PAGE_METADATA)
+	except Exception:
+		log.warning("field_extraction.metadata_failed", exc_info=True)
+		meta = {}
 
-	result = ExtractionResult(
+	log.info(
+		"field_extraction.complete",
+		total_raw=len(raw_fields),
+		total_button_groups=len(button_groups),
+		total_fields=len(fields),
+		visible_fields=sum(1 for f in fields if f.visible),
+		required_fields=sum(1 for f in fields if f.required),
+		section_filter=target_section,
+	)
+
+	return ExtractionResult(
 		fields=fields,
 		page_title=meta.get("title", ""),
 		page_url=meta.get("url", ""),
 		form_count=meta.get("formCount", 0),
 		has_submit_button=meta.get("hasSubmitButton", False),
-	)
-	if validation is not None:
-		result.validation = validation
-
-	_log_extraction_summary(result)
-	return result
-
-
-def _log_extraction_summary(result: ExtractionResult) -> None:
-	"""Log a summary of what was extracted."""
-	visible_count = sum(1 for f in result.fields if f.visible)
-	required_count = sum(1 for f in result.fields if f.required)
-	select_count = sum(1 for f in result.fields if f.field_type == "select")
-	btn_group_count = sum(1 for f in result.fields if f.field_type == "button-group")
-	logger.debug(
-		"Extracted %d fields (%d visible, %d required, %d selects, %d button groups) "
-		"from %s [%d forms, submit=%s]",
-		len(result.fields),
-		visible_count,
-		required_count,
-		select_count,
-		btn_group_count,
-		result.page_url,
-		result.form_count,
-		result.has_submit_button,
+		validation=ValidationSnapshot(),
 	)
