@@ -37,8 +37,7 @@ sys.path.insert(0, str(ROOT))
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
-from browser_use import Agent, Browser, BrowserProfile, ChatGoogle, Tools
-from browser_use.tools.views import UploadFileAction
+from browser_use import Agent, Browser, BrowserProfile, Tools
 from ghosthands.agent.hooks import install_same_tab_guard
 from ghosthands.agent.prompts import _format_profile_summary
 from ghosthands.config.settings import settings
@@ -50,6 +49,40 @@ DEFAULT_RESUME = EXAMPLES_DIR / "resume.pdf"
 DEFAULT_JOB_URL = "https://job-boards.greenhouse.io/starburst/jobs/5123053008"
 
 DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
+
+
+def _truncate_text(text: str | None, limit: int = 220) -> str:
+	"""Keep terminal summaries compact without changing agent behavior."""
+	if not text:
+		return ""
+	clean = " ".join(str(text).split())
+	if len(clean) <= limit:
+		return clean
+	return clean[: limit - 1].rstrip() + "…"
+
+
+def _print_history_summary(history) -> None:
+	"""Print a short end-of-run summary for human debugging."""
+	print()
+	print("=" * 60)
+	print("  RESULT")
+	print("=" * 60)
+	final_result = history.final_result() or ""
+	status = "done" if history.is_done() else "stopped"
+	print(f"  Status:  {status}")
+	print(f"  Steps:   {len(history.history)}")
+	if history.usage:
+		try:
+			print(f"  Cost:    ${history.usage.total_cost:.4f}")
+			in_tok = getattr(history.usage, 'total_prompt_tokens', None) or getattr(history.usage, 'total_input_tokens', 0)
+			out_tok = getattr(history.usage, 'total_completion_tokens', None) or getattr(history.usage, 'total_output_tokens', 0)
+			print(f"  Tokens:  {in_tok} in / {out_tok} out")
+		except Exception:
+			print("  Tokens:  unavailable")
+	if final_result:
+		print(f"  Result:  {_truncate_text(final_result)}")
+	print("=" * 60)
+	print()
 
 
 def _get_llm(model: str | None = None):
@@ -181,6 +214,10 @@ and keep clicking until the FINAL leaf option is selected and the field text
 changes. Do NOT move on after the first click if a submenu appears or the
 field still looks empty/invalid. Do NOT click a dropdown option and then
 Save/Continue in the same action batch; wait briefly and re-evaluate first.
+If a control still shows validation after 2 attempts, STOP writing larger
+evaluate()/JS hacks for it. Re-open the same visible control, use a real
+click / coordinate click on the exact option, and verify the state changed
+before continuing.
 
 Other rules:
 - {'Use the provided credentials to log in or create an account if needed. For Workday, fill email + password + confirm password on the Create Account page.' if sensitive_data else 'If a login wall appears, report it as a blocker.'}
@@ -210,6 +247,7 @@ Other rules:
 		use_vision=True,
 		max_actions_per_step=settings.agent_max_actions_per_step,
 		calculate_cost=True,
+		use_judge=False,
 	)
 
 	# ── Run ───────────────────────────────────────────────────────
@@ -225,32 +263,15 @@ Other rules:
 	if proxy_url:
 		print(f"  LLM Proxy: {proxy_url}")
 	else:
-		print(f"  LLM:       Direct API")
+		print("  LLM:       Direct API")
 	print("=" * 60)
 	print()
 
 	history = await agent.run(max_steps=max_steps, on_step_start=_on_step_start)
+	result = history.final_result()
 
 	# ── Results ───────────────────────────────────────────────────
-	print()
-	print("=" * 60)
-	print("  RESULT")
-	print("=" * 60)
-	print(f"  Done:    {history.is_done()}")
-	print(f"  Steps:   {len(history.history)}")
-	if history.usage:
-		try:
-			print(f"  Cost:    ${history.usage.total_cost:.4f}")
-			in_tok = getattr(history.usage, 'total_prompt_tokens', None) or getattr(history.usage, 'total_input_tokens', 0)
-			out_tok = getattr(history.usage, 'total_completion_tokens', None) or getattr(history.usage, 'total_output_tokens', 0)
-			print(f"  Tokens:  {in_tok} in / {out_tok} out")
-		except Exception:
-			print("  (token stats unavailable)")
-	result = history.final_result()
-	if result:
-		print(f"  Output:  {result[:500]}")
-	print("=" * 60)
-	print()
+	_print_history_summary(history)
 	print("  Browser is still open — review the application before submitting.")
 	print("  Press Ctrl+C to close when done.")
 	print()
@@ -290,11 +311,11 @@ async def main():
 	# Validate files
 	if not Path(args.test_data).exists():
 		print(f"ERROR: Test data not found: {args.test_data}")
-		print(f"  Create one or use: --test-data path/to/data.json")
+		print("  Create one or use: --test-data path/to/data.json")
 		sys.exit(1)
 	if not Path(args.resume).exists():
 		print(f"ERROR: Resume not found: {args.resume}")
-		print(f"  Add a resume PDF or use: --resume path/to/resume.pdf")
+		print("  Add a resume PDF or use: --resume path/to/resume.pdf")
 		sys.exit(1)
 
 	with open(args.test_data) as f:
@@ -318,7 +339,7 @@ async def main():
 		max_steps=args.max_steps,
 		max_budget=args.max_budget,
 	)
-	print("\nResult:", result)
+	print("\nResult:", _truncate_text(result))
 
 
 if __name__ == "__main__":
