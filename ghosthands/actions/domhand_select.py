@@ -29,8 +29,12 @@ from browser_use.browser.events import (
 )
 from browser_use.dom.views import EnhancedDOMTreeNode
 
-from ghosthands.actions.views import DomHandSelectParams, normalize_name
-from ghosthands.dom.shadow_helpers import QALL_JS_SNIPPET
+from ghosthands.actions.views import (
+	DomHandSelectParams,
+	generate_dropdown_search_terms,
+	normalize_name,
+	split_dropdown_value_hierarchy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +43,18 @@ logger = logging.getLogger(__name__)
 # These JS functions operate on a node passed directly via Runtime.callFunctionOn
 # (i.e., `this` is the DOM element). They never use data-highlight-index.
 
-_DISCOVER_OPTIONS_ON_NODE_JS = "function(){const el=this;const tag=el.tagName.toLowerCase();" + QALL_JS_SNIPPET + r"""
+_DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
+	const el = this;
+	const tag = el.tagName.toLowerCase();
+
+	// Helper: use __ff.queryAll for cross-shadow-root traversal, fallback to document
+	const qAll = (sel) => (window.__ff && window.__ff.queryAll)
+		? window.__ff.queryAll(sel)
+		: Array.from(document.querySelectorAll(sel));
+	const qById = (id) => (window.__ff && window.__ff.getByDomId)
+		? window.__ff.getByDomId(id)
+		: document.getElementById(id);
+
 	// Case 1: Native <select>
 	if (tag === 'select') {
 		const options = Array.from(el.options).map((o, i) => ({
@@ -58,7 +73,7 @@ _DISCOVER_OPTIONS_ON_NODE_JS = "function(){const el=this;const tag=el.tagName.to
 	// Case 2: ARIA combobox/listbox
 	const listboxId = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
 	if (listboxId) {
-		const listbox = document.getElementById(listboxId);
+		const listbox = qById(listboxId);
 		if (listbox) {
 			const options = Array.from(
 				listbox.querySelectorAll('[role="option"], li, [class*="option"], [data-value]')
@@ -105,7 +120,7 @@ _DISCOVER_OPTIONS_ON_NODE_JS = "function(){const el=this;const tag=el.tagName.to
 		}
 	}
 
-	// Case 4: Generic — look for any visible listbox/menu on the page
+	// Case 4: Generic — look for any visible listbox/menu across all roots
 	const allListboxes = qAll(
 		'[role="listbox"], [role="menu"], ul[class*="dropdown"], ul[class*="options"], div[class*="dropdown-menu"]'
 	);
@@ -142,7 +157,14 @@ _DISCOVER_OPTIONS_ON_NODE_JS = "function(){const el=this;const tag=el.tagName.to
 }"""
 
 # Click an option by its text content within any visible listbox/popup on the page
-_CLICK_OPTION_JS = "function(targetText){const lowerTarget=targetText.toLowerCase().trim();" + QALL_JS_SNIPPET + r"""
+_CLICK_OPTION_JS = r"""function(targetText) {
+	const lowerTarget = targetText.toLowerCase().trim();
+
+	// Helper: use __ff.queryAll for cross-shadow-root traversal, fallback to document
+	const qAll = (sel) => (window.__ff && window.__ff.queryAll)
+		? window.__ff.queryAll(sel)
+		: Array.from(document.querySelectorAll(sel));
+
 	// Collect all visible option-like elements (across shadow roots)
 	const selectors = [
 		'[role="option"]', '[role="menuitem"]',
@@ -339,6 +361,123 @@ def _fuzzy_match_option(
 	return None
 
 
+async def _clear_dropdown_search(page: Any) -> None:
+	"""Clear the current typed query for an open searchable dropdown."""
+	for shortcut in ('Meta+A', 'Control+A'):
+		try:
+			await page.keyboard.press(shortcut)
+		except Exception:
+			pass
+	try:
+		await page.keyboard.press('Backspace')
+	except Exception:
+		pass
+	await asyncio.sleep(0.15)
+
+
+async def _search_and_click_dropdown_option(page: Any, value: str) -> dict[str, Any]:
+	"""Type generic fallback search terms into an open dropdown and click a match."""
+	for idx, term in enumerate(generate_dropdown_search_terms(value)):
+		try:
+			if idx > 0:
+				await _clear_dropdown_search(page)
+			await page.keyboard.type(term, delay=45)
+			await asyncio.sleep(0.3)
+			result = await _click_option_via_page_js(page, value, 'typed_search')
+			if result.get('success'):
+				return result
+			await page.keyboard.press('Enter')
+			await asyncio.sleep(1.1)
+			result = await _click_option_via_page_js(page, value, 'typed_search')
+			if result.get('success'):
+				return result
+			result = await _click_option_via_page_js(page, term, 'typed_search')
+			if result.get('success'):
+				return result
+		except Exception as e:
+			logger.debug(f'Typed dropdown search failed for "{term}": {e}')
+	return {'success': False, 'error': f'No matching option found for: {value}'}
+
+
+async def _search_and_click_dropdown_path(page: Any, value: str) -> dict[str, Any]:
+	"""Handle hierarchical dropdown labels such as "Website > workday.com"."""
+	segments = split_dropdown_value_hierarchy(value)
+	if len(segments) <= 1:
+		return await _search_and_click_dropdown_option(page, value)
+
+	last_result: dict[str, Any] = {'success': False, 'error': f'No matching option found for: {value}'}
+	for segment in segments:
+		result = await _click_option_via_page_js(page, segment, 'hierarchy')
+		if not result.get('success'):
+			result = await _search_and_click_dropdown_option(page, segment)
+		if not result.get('success'):
+			return result
+		last_result = result
+		await asyncio.sleep(0.8)
+	return last_result
+
+
+def _selection_matches_value(current: str, expected: str) -> bool:
+	"""Return True when the widget visibly reflects the intended selection."""
+	current_norm = normalize_name(current or '')
+	expected_norm = normalize_name(expected or '')
+	if not current_norm or 'select one' in current_norm or 'choose one' in current_norm:
+		return False
+	if expected_norm and (expected_norm in current_norm or current_norm in expected_norm):
+		return True
+	segments = split_dropdown_value_hierarchy(expected)
+	if not segments:
+		return False
+	final_segment = normalize_name(segments[-1])
+	return bool(final_segment and final_segment in current_norm)
+
+
+async def _read_current_selection(
+	browser_session: BrowserSession,
+	node: EnhancedDOMTreeNode,
+) -> str:
+	"""Read the widget's currently visible value."""
+	try:
+		verify = await _call_function_on_node(
+			browser_session, node, _VERIFY_SELECTION_ON_NODE_JS
+		)
+	except Exception:
+		return ''
+	return verify.get('value', '') if isinstance(verify, dict) else ''
+
+
+async def _confirm_selection(
+	page: Any,
+	browser_session: BrowserSession,
+	node: EnhancedDOMTreeNode,
+	dropdown_type: str,
+	expected: str,
+	clicked_text: str,
+) -> tuple[str, str]:
+	"""Retry searchable/multi-layer dropdowns until the final visible value is confirmed."""
+	current = ''
+	last_clicked = clicked_text
+	for attempt in range(3):
+		await asyncio.sleep(0.7 if attempt == 0 else 0.9)
+		current = await _read_current_selection(browser_session, node)
+		if _selection_matches_value(current, expected):
+			return current, last_clicked
+		if dropdown_type == 'native_select' or attempt == 2:
+			break
+		try:
+			event = browser_session.event_bus.dispatch(ClickElementEvent(node=node))
+			await event
+			await event.event_result(raise_if_any=True, raise_if_none=False)
+			await asyncio.sleep(0.45)
+		except Exception:
+			pass
+		retry = await _search_and_click_dropdown_path(page, expected)
+		if retry.get('success'):
+			last_clicked = retry.get('clicked', last_clicked)
+	current = await _read_current_selection(browser_session, node)
+	return current, last_clicked
+
+
 # ── Core action function ─────────────────────────────────────────────
 
 async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSession) -> ActionResult:
@@ -353,6 +492,13 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
 	page = await browser_session.get_current_page()
 	if not page:
 		return ActionResult(error='No active page found in browser session')
+
+	# ── Step 0: Inject __ff shadow-DOM helpers if not present ─
+	try:
+		from ghosthands.dom.shadow_helpers import ensure_helpers
+		await ensure_helpers(page)
+	except Exception as e:
+		logger.debug(f'Could not inject __ff helpers: {e}')
 
 	# ── Step 1: Get the trigger element ───────────────────────
 	try:
@@ -384,21 +530,26 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
 	options = discovery.get('options', []) if isinstance(discovery, dict) else []
 
 	# ── Step 3b: If no options found, click to open and re-discover ──
+	# React-select dropdowns often need TWO clicks: first to focus, second to open.
 	if not options or dropdown_type == 'unknown':
-		try:
-			event = browser_session.event_bus.dispatch(ClickElementEvent(node=node))
-			await event
-			await event.event_result(raise_if_any=True, raise_if_none=False)
-			await asyncio.sleep(0.5)  # Wait for dropdown animation
+		for click_attempt in range(4):
+			try:
+				event = browser_session.event_bus.dispatch(ClickElementEvent(node=node))
+				await event
+				await event.event_result(raise_if_any=True, raise_if_none=False)
+				await asyncio.sleep(0.5)  # Wait for dropdown animation
 
-			# Re-discover after clicking
-			discovery = await _call_function_on_node(
-				browser_session, node, _DISCOVER_OPTIONS_ON_NODE_JS
-			)
-			dropdown_type = discovery.get('type', 'unknown') if isinstance(discovery, dict) else 'unknown'
-			options = discovery.get('options', []) if isinstance(discovery, dict) else []
-		except Exception as e:
-			logger.warning(f'Failed to click dropdown trigger: {e}')
+				# Re-discover after clicking
+				discovery = await _call_function_on_node(
+					browser_session, node, _DISCOVER_OPTIONS_ON_NODE_JS
+				)
+				dropdown_type = discovery.get('type', 'unknown') if isinstance(discovery, dict) else 'unknown'
+				options = discovery.get('options', []) if isinstance(discovery, dict) else []
+				if options:
+					break  # Got options, no need for second click
+			except Exception as e:
+				logger.warning(f'Failed to click dropdown trigger (attempt {click_attempt + 1}): {e}')
+				break
 
 	# ── Step 3c: If still no options, try GetDropdownOptionsEvent ──
 	if not options:
@@ -415,46 +566,55 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
 
 	if not options:
 		return ActionResult(
-			error=f'No dropdown options found for element {params.index}. '
-			f'The element may not be a dropdown, or it may use a custom implementation '
-			f'that requires typing to search. Try using the input action instead.',
+			error=f'[FAIL-OVER] domhand_select cannot handle element {params.index}. '
+			f'STOP — do NOT call domhand_select for this element again. '
+			f'Use click action: (1) click element to open dropdown, (2) click the option directly.',
 		)
 
 	# ── Step 4: Match the target value ────────────────────────
 	matched = _fuzzy_match_option(params.value, options)
+	result: dict[str, Any] | None = None
+	matched_text = params.value
 
 	if not matched:
-		available_texts = [opt.get('text', '') for opt in options[:20]]
-		return ActionResult(
-			error=f'No matching option found for "{params.value}". '
-			f'Available options: {available_texts}',
-		)
+		if dropdown_type != 'native_select':
+			result = await _search_and_click_dropdown_path(page, params.value)
+			if result.get('success'):
+				matched_text = result.get('clicked', params.value)
+		if result is None or not result.get('success'):
+			available_texts = [opt.get('text', '') for opt in options[:20]]
+			return ActionResult(
+				error=f'[FAIL-OVER] No match for "{params.value}" in element {params.index}. '
+				f'Options: {available_texts}. '
+				f'STOP — do NOT retry domhand_select. Use click action to select visually.',
+			)
 
 	# ── Step 5: Click the matched option ──────────────────────
-	matched_text = matched.get('text', params.value)
-	try:
-		if dropdown_type == 'native_select':
-			# For native selects, use JS to set value directly on the resolved node
-			result = await _call_function_on_node(
-				browser_session, node, _SELECT_NATIVE_ON_NODE_JS,
-				arguments=[{'value': matched_text}],
-			)
-		else:
-			# For custom dropdowns, try SelectDropdownOptionEvent first
-			try:
-				event = browser_session.event_bus.dispatch(
-					SelectDropdownOptionEvent(node=node, text=matched_text)
+	if result is None:
+		matched_text = matched.get('text', params.value)
+		try:
+			if dropdown_type == 'native_select':
+				# For native selects, use JS to set value directly on the resolved node
+				result = await _call_function_on_node(
+					browser_session, node, _SELECT_NATIVE_ON_NODE_JS,
+					arguments=[{'value': matched_text}],
 				)
-				selection_data = await event.event_result(timeout=3.0, raise_if_none=False, raise_if_any=False)
-				if selection_data and isinstance(selection_data, dict) and selection_data.get('success'):
-					result = {'success': True, 'clicked': selection_data.get('selected_text', matched_text)}
-				else:
-					# Fallback: click the option via page-level JS
+			else:
+				# For custom dropdowns, try SelectDropdownOptionEvent first
+				try:
+					event = browser_session.event_bus.dispatch(
+						SelectDropdownOptionEvent(node=node, text=matched_text)
+					)
+					selection_data = await event.event_result(timeout=3.0, raise_if_none=False, raise_if_any=False)
+					if selection_data and isinstance(selection_data, dict) and selection_data.get('success'):
+						result = {'success': True, 'clicked': selection_data.get('selected_text', matched_text)}
+					else:
+						# Fallback: click the option via page-level JS
+						result = await _click_option_via_page_js(page, matched_text, dropdown_type)
+				except Exception:
 					result = await _click_option_via_page_js(page, matched_text, dropdown_type)
-			except Exception:
-				result = await _click_option_via_page_js(page, matched_text, dropdown_type)
-	except Exception as e:
-		return ActionResult(error=f'Failed to select option "{matched_text}": {e}')
+		except Exception as e:
+			return ActionResult(error=f'Failed to select option "{matched_text}": {e}')
 
 	if isinstance(result, dict) and not result.get('success'):
 		available = result.get('available', [])
@@ -466,14 +626,23 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
 	clicked_text = result.get('clicked', matched_text) if isinstance(result, dict) else matched_text
 
 	# ── Step 6: Verify the selection ──────────────────────────
-	await asyncio.sleep(0.3)  # Brief wait for UI update
-	try:
-		verify = await _call_function_on_node(
-			browser_session, node, _VERIFY_SELECTION_ON_NODE_JS
+	current, clicked_text = await _confirm_selection(
+		page,
+		browser_session,
+		node,
+		dropdown_type,
+		params.value,
+		clicked_text,
+	)
+
+	if not _selection_matches_value(current, params.value):
+		return ActionResult(
+			error=(
+				f'[FAIL-OVER] Selection for "{params.value}" was not confirmed on element {params.index}. '
+				f'Current value: "{current}". Keep the dropdown open, continue clicking/searching if a '
+				'secondary menu appears, WAIT for the next list to load, and only proceed once the field visibly changes.'
+			),
 		)
-		current = verify.get('value', '') if isinstance(verify, dict) else ''
-	except Exception:
-		current = ''
 
 	memory = f'Selected "{clicked_text}" for dropdown at index {params.index}'
 	if current and normalize_name(current) != normalize_name(clicked_text):
@@ -517,8 +686,9 @@ async def _select_via_event_bus(
 	if not matched:
 		available_texts = [opt.get('text', '') for opt in options[:20]]
 		return ActionResult(
-			error=f'No matching option found for "{params.value}". '
-			f'Available options: {available_texts}',
+			error=f'[FAIL-OVER] No match for "{params.value}" in element {params.index}. '
+			f'Options: {available_texts}. '
+			f'STOP — do NOT retry domhand_select. Use click action to select visually.',
 		)
 
 	matched_text = matched.get('text', params.value)

@@ -55,8 +55,10 @@ def register_domhand_actions(tools: "Tools") -> None:
 			'Fill all visible form fields at once using fast DOM manipulation. '
 			'Extracts fields, generates answers from user profile via a single LLM call, '
 			'and fills each field via DOM. Handles text inputs, selects, checkboxes, '
-			'textareas, and radio buttons. Use this as the FIRST approach for any form page. '
-			'Only fall back to individual input/click actions for fields this cannot handle.'
+			'textareas, and radio buttons. Supports scoped repeater fills via '
+			'target_section, heading_boundary, and entry_data. Use this as the FIRST '
+			'approach for any form page. Only fall back to individual input/click actions '
+			'for fields this cannot handle.'
 		),
 		param_model=DomHandFillParams,
 	)(domhand_fill)
@@ -125,6 +127,13 @@ def register_domhand_actions(tools: "Tools") -> None:
 		),
 		param_model=DomHandExpandParams,
 	)(domhand_expand)
+
+	# ── Enable global visual cursor (patches Mouse + Element) ───
+	try:
+		from ghosthands.visuals.patch import enable_visual_cursor
+		enable_visual_cursor()
+	except ImportError:
+		pass
 
 	# Log what was registered
 	registered = [

@@ -27,6 +27,103 @@ if TYPE_CHECKING:
 	from browser_use.agent.service import Agent
 
 logger = logging.getLogger(__name__)
+_SAME_TAB_GUARD_INSTALLED: set[int] = set()
+
+_SAME_TAB_GUARD_JS = r"""(() => {
+	if (window.__ghSameTabGuardInstalled) {
+		try {
+			document.querySelectorAll('a[target], area[target], form[target]').forEach((el) => el.removeAttribute('target'));
+		} catch (e) {}
+		return;
+	}
+	window.__ghSameTabGuardInstalled = true;
+
+	function stripTargets(root) {
+		var scope = root && root.querySelectorAll ? root : document;
+		try {
+			scope.querySelectorAll('a[target], area[target], form[target]').forEach(function(el) {
+				el.removeAttribute('target');
+			});
+		} catch (e) {}
+	}
+
+	var originalOpen = typeof window.open === 'function' ? window.open.bind(window) : null;
+	window.open = function(url) {
+		try {
+			if (typeof url === 'string' && url && url !== 'about:blank') {
+				window.location.assign(url);
+			}
+		} catch (e) {}
+		return window;
+	};
+	window.__ghOriginalWindowOpen = originalOpen;
+
+	document.addEventListener('click', function(event) {
+		var el = event.target && event.target.closest ? event.target.closest('a[target], area[target]') : null;
+		if (el) {
+			try { el.removeAttribute('target'); } catch (e) {}
+		}
+	}, true);
+
+	document.addEventListener('submit', function(event) {
+		var form = event.target;
+		if (form && form.removeAttribute) {
+			try { form.removeAttribute('target'); } catch (e) {}
+		}
+	}, true);
+
+	var observer = new MutationObserver(function(records) {
+		for (var i = 0; i < records.length; i++) {
+			var record = records[i];
+			if (record.type === 'attributes' && record.attributeName === 'target' && record.target && record.target.removeAttribute) {
+				try { record.target.removeAttribute('target'); } catch (e) {}
+			}
+			if (!record.addedNodes) continue;
+			for (var j = 0; j < record.addedNodes.length; j++) {
+				var node = record.addedNodes[j];
+				if (node && node.querySelectorAll) stripTargets(node);
+			}
+		}
+	});
+
+	if (document.documentElement) {
+		observer.observe(document.documentElement, {
+			subtree: true,
+			childList: true,
+			attributes: true,
+			attributeFilter: ['target'],
+		});
+	}
+
+	stripTargets(document);
+})();"""
+
+
+async def install_same_tab_guard(agent: "Agent") -> None:
+	"""Prevent sites from opening new tabs during job-application flows.
+
+	This is best-effort:
+	- installs a CDP init script once per browser session so future documents inherit it
+	- reapplies the script on the current page every step to catch already-loaded DOM
+	"""
+	try:
+		browser_session = getattr(agent, "browser_session", None)
+		if browser_session is None:
+			return
+
+		session_key = id(browser_session)
+		if session_key not in _SAME_TAB_GUARD_INSTALLED:
+			try:
+				await browser_session._cdp_add_init_script(_SAME_TAB_GUARD_JS)
+				_SAME_TAB_GUARD_INSTALLED.add(session_key)
+			except Exception as exc:
+				logger.debug("step.same_tab_guard_init_failed", extra={"error": str(exc)})
+
+		page = await browser_session.get_current_page()
+		if page:
+			await page.evaluate(_SAME_TAB_GUARD_JS)
+	except Exception as exc:
+		logger.debug("step.same_tab_guard_apply_failed", extra={"error": str(exc)})
 
 
 class StepHooks:
@@ -74,6 +171,8 @@ class StepHooks:
 			"step.start",
 			extra={"job_id": self.job_id, "step": step},
 		)
+
+		await install_same_tab_guard(agent)
 
 		# If an external signal set the stopped flag, the agent loop will
 		# honour it on the next iteration.  We don't need to do anything

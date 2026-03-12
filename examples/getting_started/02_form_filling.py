@@ -36,7 +36,7 @@ async def main():
 	task = """
     Go to https://httpbin.org/forms/post and fill out the contact form with:
     - Customer name: John Doe
-    - Telephone: 555-123-4567
+    - Telephone: 424-320-1345
     - Email: john.doe@example.com
     - Size: Medium
     - Topping: cheese

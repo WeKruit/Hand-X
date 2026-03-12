@@ -130,6 +130,8 @@ async def create_job_agent(
 		headless=headless,
 		allowed_domains=allowed_domains,
 		keep_alive=True,  # Keep browser open for user review / HITL
+		demo_mode=False,  # Suppress browser-use logo/panel overlay
+		wait_between_actions=settings.wait_between_actions,
 	)
 
 	# ── Sensitive data (credentials) ──────────────────────────────
@@ -161,7 +163,7 @@ async def create_job_agent(
 		# No judge needed — we detect completion ourselves
 		use_judge=False,
 		# Reasonable defaults for job-application flows
-		max_actions_per_step=5,
+		max_actions_per_step=settings.agent_max_actions_per_step,
 		max_failures=5,
 		use_thinking=True,
 	)

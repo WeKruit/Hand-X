@@ -8,48 +8,49 @@ present in the browser context.
 
 from playwright.async_api import Page
 
-
 # ── Interactive element selector ─────────────────────────────────────────
 
-INTERACTIVE_SELECTOR = ", ".join([
-	"input",
-	"select",
-	"textarea",
-	'[role="textbox"]',
-	'[role="combobox"]',
-	'[role="listbox"]',
-	'[role="checkbox"]',
-	'[role="radio"]',
-	'[role="switch"]',
-	'[role="spinbutton"]',
-	'[role="slider"]',
-	'[role="searchbox"]',
-	'[data-uxi-widget-type="selectinput"]',
-	'[aria-haspopup="listbox"]',
-])
+INTERACTIVE_SELECTOR = ", ".join(
+    [
+        "input",
+        "select",
+        "textarea",
+        '[role="textbox"]',
+        '[role="combobox"]',
+        '[role="listbox"]',
+        '[role="checkbox"]',
+        '[role="radio"]',
+        '[role="switch"]',
+        '[role="spinbutton"]',
+        '[role="slider"]',
+        '[role="searchbox"]',
+        '[data-uxi-widget-type="selectinput"]',
+        '[aria-haspopup="listbox"]',
+    ]
+)
 
 
 # ── Placeholder value pattern ────────────────────────────────────────────
 
 PLACEHOLDER_RE_SOURCE = (
-	r"^(select\.{0,3}|select…|please\s+select(\s+one)?|select\s+(one|an?\s+option)"
-	r"|choose\.{0,3}|choose…|please\s+choose(\s+one)?|choose\s+one|pick"
-	r"|start\s+typing|enter\s+(your|an?)\s+(name|email|phone|address|city|state|zip|value|number|answer|response|text|url|company|title)"
-	r"|type\s+here|--+\s*(select|choose)?\s*--*|—)$"
+    r"^(select\.{0,3}|select…|please\s+select(\s+one)?|select\s+(one|an?\s+option)"
+    r"|choose\.{0,3}|choose…|please\s+choose(\s+one)?|choose\s+one|pick"
+    r"|start\s+typing|enter\s+(your|an?)\s+(name|email|phone|address|city|state|zip|value|number|answer|response|text|url|company|title)"
+    r"|type\s+here|--+\s*(select|choose)?\s*--*|—)$"
 )
 
 
 def _build_inject_helpers_js() -> str:
-	"""Return the JavaScript source that installs ``window.__ff`` helpers.
+    """Return the JavaScript source that installs ``window.__ff`` helpers.
 
-	The helpers provide cross-shadow-root traversal, accessible name
-	resolution, visibility checking, section detection, and element tagging.
-	"""
-	import json
-	selector_str = json.dumps(INTERACTIVE_SELECTOR)
+    The helpers provide cross-shadow-root traversal, accessible name
+    resolution, visibility checking, section detection, and element tagging.
+    """
+    import json
 
-	return f"""
-(function() {{
+    selector_str = json.dumps(INTERACTIVE_SELECTOR)
+
+    return f"""() => {{
 	if (typeof globalThis.__name === 'undefined') {{
 		globalThis.__name = function(fn) {{ return fn; }};
 	}}
@@ -241,7 +242,7 @@ def _build_inject_helpers_js() -> str:
 			return el.getAttribute('data-ff-id');
 		}}
 	}};
-}})();
+}}
 """
 
 
@@ -257,17 +258,17 @@ QALL_JS_SNIPPET = (
 
 
 async def inject_helpers(page: Page) -> None:
-	"""Inject the ``window.__ff`` helper object into the page.
+    """Inject the ``window.__ff`` helper object into the page.
 
-	Safe to call multiple times — preserves the nextId counter across
-	re-injections so existing ``data-ff-id`` tags remain valid.
-	"""
-	js = _build_inject_helpers_js()
-	await page.evaluate(js)
+    Safe to call multiple times — preserves the nextId counter across
+    re-injections so existing ``data-ff-id`` tags remain valid.
+    """
+    js = _build_inject_helpers_js()
+    await page.evaluate(js)
 
 
 async def ensure_helpers(page: Page) -> None:
-	"""Re-inject helpers if they were wiped (e.g. by SPA navigation)."""
-	has_helpers: bool = await page.evaluate("!!(window.__ff)")
-	if not has_helpers:
-		await inject_helpers(page)
+    """Re-inject helpers if they were wiped (e.g. by SPA navigation)."""
+    has_helpers = await page.evaluate("() => !!(window.__ff)")
+    if has_helpers != "true" and has_helpers is not True:
+        await inject_helpers(page)
