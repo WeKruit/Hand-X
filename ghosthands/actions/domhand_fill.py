@@ -776,6 +776,63 @@ _FOCUS_AND_CLEAR_JS = r"""(ffId) => {
 
 def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
 	"""Extract structured fields from profile text for direct field matching."""
+	stripped = profile_text.strip()
+
+	if stripped.startswith('{'):
+		try:
+			data = json.loads(stripped)
+		except json.JSONDecodeError:
+			data = None
+		if isinstance(data, dict):
+			name = str(data.get('name') or '').strip() or None
+			first_name = str(data.get('first_name') or '').strip() or None
+			last_name = str(data.get('last_name') or '').strip() or None
+			if name and not first_name:
+				first_name = name.split()[0] if name.split() else None
+			if name and not last_name and len(name.split()) > 1:
+				last_name = ' '.join(name.split()[1:])
+
+			location = data.get('location')
+			city = str(data.get('city') or '').strip() or None
+			state = str(data.get('state') or data.get('province') or '').strip() or None
+			zip_code = str(data.get('zip') or data.get('zip_code') or data.get('postal_code') or '').strip() or None
+			if isinstance(location, str) and location.strip() and (not city or not state or not zip_code):
+				parts = [p.strip() for p in location.split(',') if p.strip()]
+				if len(parts) >= 2:
+					city = city or parts[0]
+					state_zip = parts[1].split()
+					state = state or (state_zip[0] if state_zip else None)
+					zip_code = zip_code or (state_zip[1] if len(state_zip) > 1 else None)
+
+			github = str(data.get('github') or data.get('github_url') or '').strip() or None
+			if not github:
+				github_match = re.search(r'https?://(?:www\.)?github\.com/[^\s)]+', profile_text, re.IGNORECASE)
+				github = github_match.group(0) if github_match else None
+
+			twitter = str(data.get('twitter') or data.get('twitter_url') or data.get('x') or data.get('x_url') or '').strip() or None
+			if not twitter:
+				twitter_match = re.search(r'https?://(?:www\.)?(?:twitter\.com|x\.com)/[^\s)]+', profile_text, re.IGNORECASE)
+				twitter = twitter_match.group(0) if twitter_match else None
+
+			return {
+				'first_name': first_name, 'last_name': last_name,
+				'email': str(data.get('email') or '').strip() or None,
+				'phone': str(data.get('phone') or '').strip() or None,
+				'city': city, 'state': state, 'zip': zip_code,
+				'phone_device_type': str(data.get('phone_device_type') or 'Mobile').strip() or None,
+				'phone_country_code': str(data.get('phone_country_code') or '+1').strip() or None,
+				'linkedin': str(data.get('linkedin') or data.get('linkedin_url') or '').strip() or None,
+				'portfolio': str(data.get('portfolio') or data.get('website') or data.get('personal_website') or '').strip() or None,
+				'github': github,
+				'twitter': twitter,
+				# Workday-relevant fields
+				'work_authorization': str(data.get('work_authorization') or '').strip() or None,
+				'available_start_date': str(data.get('available_start_date') or '').strip() or None,
+				'salary_expectation': str(data.get('salary_expectation') or '').strip() or None,
+				'how_did_you_hear': str(data.get('how_did_you_hear') or '').strip() or None,
+				'willing_to_relocate': str(data.get('willing_to_relocate') or '').strip() or None,
+			}
+
 	def read_line(label: str) -> str | None:
 		m = re.search(rf'^\s*{re.escape(label)}:\s*(.+)$', profile_text, re.MULTILINE | re.IGNORECASE)
 		val = m.group(1).strip() if m else None
@@ -915,17 +972,22 @@ def _sanitize_no_guess_answer(
 
 async def _generate_answers(
 	fields: list[FormField], profile_text: str,
-) -> tuple[dict[str, str], int, int]:
+) -> tuple[dict[str, str], int, int, float, str | None]:
 	"""Call Haiku to generate answers for all fields in a single batch."""
 	try:
 		from ghosthands.llm.client import get_anthropic_client
+		from ghosthands.config.models import estimate_cost
 		from ghosthands.config.settings import settings as _settings
 	except ImportError:
 		logger.error('ghosthands.llm.client not available — cannot generate answers')
-		return {}, 0, 0
+		return {}, 0, 0, 0.0, None
 
 	client = get_anthropic_client()
 	evidence = _parse_profile_evidence(profile_text)
+	model_id = _settings.domhand_model
+	input_tokens = 0
+	output_tokens = 0
+	step_cost = 0.0
 
 	name_counts: dict[str, int] = {}
 	disambiguated_names: list[str] = []
@@ -978,13 +1040,18 @@ Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because.
 
 	try:
 		response = await client.messages.create(
-			model=_settings.domhand_model,
+			model=model_id,
 			max_tokens=4096,
 			messages=[{'role': 'user', 'content': prompt}],
 		)
 		text = response.content[0].text if response.content and response.content[0].type == 'text' else ''
 		input_tokens = response.usage.input_tokens if response.usage else 0
 		output_tokens = response.usage.output_tokens if response.usage else 0
+		try:
+			step_cost = estimate_cost(model_id, input_tokens, output_tokens)
+		except Exception as e:
+			logger.warning(f'Failed to estimate LLM cost for model "{model_id}": {e}')
+			step_cost = 0.0
 		if response.stop_reason == 'max_tokens':
 			logger.warning('LLM response was truncated (hit max_tokens).')
 		logger.info(f'LLM answer response: {text[:200]}{"..." if len(text) > 200 else ""}')
@@ -1006,13 +1073,13 @@ Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because.
 			if key in parsed and isinstance(parsed[key], str):
 				parsed[key] = _sanitize_no_guess_answer(field.name, field.required, parsed[key], evidence)
 
-		return parsed, input_tokens, output_tokens
+		return parsed, input_tokens, output_tokens, step_cost, model_id
 	except json.JSONDecodeError:
 		logger.warning('Failed to parse LLM response as JSON, using empty answers')
-		return {}, 0, 0
+		return {}, input_tokens, output_tokens, step_cost, model_id
 	except Exception as e:
 		logger.error(f'LLM answer generation failed: {e}')
-		return {}, 0, 0
+		return {}, input_tokens, output_tokens, step_cost, model_id
 
 
 def _build_field_description(field: FormField, display_name: str) -> str:
@@ -1161,9 +1228,11 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 
 	evidence = _parse_profile_evidence(profile_text)
 	all_results: list[FillFieldResult] = []
+	total_step_cost = 0.0
 	total_input_tokens = 0
 	total_output_tokens = 0
 	llm_calls = 0
+	model_name: str | None = None
 	fields_seen: set[str] = set()
 	fields_skipped: set[str] = set()  # Fields with no profile data — don't retry
 
@@ -1269,6 +1338,13 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 				return ActionResult(
 					extracted_content='No fillable form fields found on the page.',
 					include_extracted_content_only_once=True,
+					metadata={
+						'step_cost': total_step_cost,
+						'input_tokens': total_input_tokens,
+						'output_tokens': total_output_tokens,
+						'model': model_name,
+						'domhand_llm_calls': llm_calls,
+					},
 				)
 			break
 
@@ -1288,11 +1364,14 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 
 		answers: dict[str, str] = {}
 		if needs_llm:
-			llm_answers, in_tok, out_tok = await _generate_answers(needs_llm, profile_text)
+			llm_answers, in_tok, out_tok, step_cost, llm_model_name = await _generate_answers(needs_llm, profile_text)
 			answers = llm_answers
+			total_step_cost += step_cost
 			total_input_tokens += in_tok
 			total_output_tokens += out_tok
 			llm_calls += 1
+			if llm_model_name:
+				model_name = llm_model_name
 
 		round_filled = 0
 		round_failed = 0
@@ -1373,7 +1452,17 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 
 	summary = '\n'.join(summary_lines)
 	logger.info(summary)
-	return ActionResult(extracted_content=summary, include_extracted_content_only_once=False)
+	return ActionResult(
+		extracted_content=summary,
+		include_extracted_content_only_once=False,
+		metadata={
+			'step_cost': total_step_cost,
+			'input_tokens': total_input_tokens,
+			'output_tokens': total_output_tokens,
+			'model': model_name,
+			'domhand_llm_calls': llm_calls,
+		},
+	)
 
 
 # ── Per-field fill dispatch ──────────────────────────────────────────

@@ -39,6 +39,7 @@ load_dotenv(ROOT / ".env")
 
 from browser_use import Agent, Browser, BrowserProfile, ChatGoogle, Tools
 from browser_use.tools.views import UploadFileAction
+from ghosthands.agent.prompts import _format_profile_summary
 
 # ── Defaults ──────────────────────────────────────────────────────────
 EXAMPLES_DIR = Path(__file__).resolve().parent
@@ -81,7 +82,7 @@ async def apply_to_job(
 	llm = _get_llm(model=model)
 
 	# ── Set profile text for DomHand (domhand_fill reads from env) ─
-	os.environ["GH_USER_PROFILE_TEXT"] = json.dumps(info, indent=2)
+	os.environ["GH_USER_PROFILE_TEXT"] = _format_profile_summary(info)
 	if resume_path:
 		os.environ["GH_RESUME_PATH"] = str(resume_path)
 
