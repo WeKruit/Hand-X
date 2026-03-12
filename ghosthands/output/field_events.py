@@ -64,14 +64,14 @@ def install_jsonl_callback() -> None:
             else:
                 emit_field_failed(
                     field=result.name,
-                    error=result.error or "unknown error",
+                    reason=result.error or "unknown error",
                 )
 
             # Emit cumulative progress after each field
             emit_progress(
-                filled=_counts["filled"],
-                total=_counts["total"],
-                round=round_num,
+                step=_counts["filled"],
+                max_steps=_counts["total"],
+                description=f"Round {round_num}",
             )
 
         fill_module._on_field_result = _on_field_result

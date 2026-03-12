@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import sys
+import time as _time
 from pathlib import Path
 from typing import Any
 
@@ -161,7 +162,12 @@ def _load_profile(args: argparse.Namespace) -> dict:
         except Exception:
             return data
 
-    raise ValueError("Either --profile or --test-data is required")
+    # Environment variable fallback (for desktop bridge)
+    profile_text = os.environ.get("GH_USER_PROFILE_TEXT", "")
+    if profile_text:
+        return json.loads(profile_text)
+
+    raise ValueError("Either --profile, --test-data, or GH_USER_PROFILE_TEXT env var is required")
 
 
 def _apply_runtime_env(
@@ -691,12 +697,33 @@ async def _wait_for_review_command(browser, job_id: str, lease_id: str) -> None:
     - {"type": "complete_review"} -- user approved, close browser
     - {"type": "cancel_job"}     -- user cancelled, close browser
     - {"type": "cancel"}         -- user cancelled, close browser
+
+    Times out after 30 minutes if no command is received.
     """
     from ghosthands.output.jsonl import emit_done
 
+    review_timeout_seconds = 30 * 60  # 30 minutes
+    start_time = _time.monotonic()
+
     try:
         while True:
-            line = await _read_stdin_line()
+            elapsed = _time.monotonic() - start_time
+            remaining = review_timeout_seconds - elapsed
+            if remaining <= 0:
+                logger.warning("review_timeout_exceeded", timeout_seconds=review_timeout_seconds)
+                emit_done(
+                    success=False,
+                    message="Review timed out after 30 minutes",
+                    job_id=job_id,
+                    lease_id=lease_id,
+                )
+                break
+
+            try:
+                line = await _read_stdin_line(timeout=min(remaining, 5.0))
+            except TimeoutError:
+                continue
+
             if not line:
                 break  # stdin closed -- Electron died
 
