@@ -117,12 +117,11 @@ class StepHooks:
 
 		# ── Blocker detection from done text ───────────────────────
 		blocker_detected: str | None = None
-		if agent.history.is_done():
-			last_history = agent.history.last_action()
-			if last_history and last_history.result:
-				for result in last_history.result:
-					if result.extracted_content and "blocker:" in result.extracted_content.lower():
-						blocker_detected = result.extracted_content
+		if agent.history.is_done() and agent.history.history:
+			last_entry = agent.history.history[-1]
+			for result in last_entry.result:
+				if result.extracted_content and "blocker:" in result.extracted_content.lower():
+					blocker_detected = result.extracted_content
 
 		# ── Status update callback ─────────────────────────────────
 		if self.on_status_update is not None:

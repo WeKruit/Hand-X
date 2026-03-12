@@ -29,7 +29,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from browser_use import Agent, BrowserProfile, BrowserSession
+from browser_use import Agent, BrowserProfile
 from browser_use.llm.anthropic.chat import ChatAnthropic
 from browser_use.tools.service import Tools
 
@@ -244,16 +244,15 @@ async def run_job_agent(
 		extracted_text: str | None = None
 		blocker: str | None = None
 
-		if is_done:
-			last = history.last_action()
-			if last and last.result:
-				for result in last.result:
-					if result.is_done:
-						success = result.success or False
-					if result.extracted_content:
-						extracted_text = result.extracted_content
-						if "blocker:" in extracted_text.lower():
-							blocker = extracted_text
+		if is_done and history.history:
+			last_entry = history.history[-1]
+			for result in last_entry.result:
+				if result.is_done:
+					success = result.success or False
+				if result.extracted_content:
+					extracted_text = result.extracted_content
+					if "blocker:" in extracted_text.lower():
+						blocker = extracted_text
 
 		return {
 			"success": success,

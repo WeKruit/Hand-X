@@ -11,8 +11,6 @@ Flow:
 5. Return count of newly added fields
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
 import logging
