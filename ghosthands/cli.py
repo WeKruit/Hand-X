@@ -424,6 +424,10 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             emit_browser_ready(browser.cdp_url)
         else:
             logger.warning("cli.browser_ready_missing_cdp_url")
+            emit_status(
+                "Browser CDP URL unavailable — live review attachment disabled",
+                job_id=job_id,
+            )
 
         # -- Create agent ---------------------------------------------------
         available_files = [resume_path] if resume_path else []

@@ -71,11 +71,11 @@ Items are ordered by severity within each category.
 
 - [ ] **I-05: Handshake is informational only — no enforcement** — `protocol_version` and `min_desktop_version` are emitted but never enforced. Incompatible Desktop builds are not rejected. [Hand-X: output/jsonl.py, cli.py]
 
-- [ ] **I-06: Progress event schema mismatched** — Code emits `step`, `maxSteps`, `description`; spec documents `filled`, `total`, `round`. [Hand-X: output/jsonl.py vs docs/]
+- [x] **I-06: Progress event schema mismatched** — Code emits `step`, `maxSteps`, `description`; spec documents `filled`, `total`, `round`. [Hand-X: output/jsonl.py vs docs/]
 
-- [ ] **I-07: field_failed schema mismatched** — Code uses `reason`, spec uses `error`. [Hand-X: output/jsonl.py vs docs/]
+- [x] **I-07: field_failed schema mismatched** — Code uses `reason`, spec uses `error`. [Hand-X: output/jsonl.py vs docs/]
 
-- [ ] **I-08: account_created not in documented contract** — Exists in emitter and tests but not part of spec. [Hand-X: output/jsonl.py]
+- [x] **I-08: account_created not in documented contract** — Exists in emitter and tests but not part of spec. [Hand-X: output/jsonl.py]
 
 - [ ] **I-09: Profile adapter is not a schema boundary** — Remaps small subset of keys, keeps both camelCase and snake_case, no canonical input model enforced. Different code paths produce `first_name` vs `full_name`, `linkedin` vs `linkedin_url`. [Hand-X: bridge/profile_adapter.py]
 
@@ -167,13 +167,13 @@ Items are ordered by severity within each category.
 
 ### HIGH
 
-- [ ] **U-03: Review timeout produces contradictory events** — `done(success=true)` then `error(fatal=true, "Review timed out")` — Desktop sees both success and fatal error from same run. [Hand-X: cli.py, bridge/protocol.py]
+- [x] **U-03: Review timeout produces contradictory events** — `done(success=true)` then `error(fatal=true, "Review timed out")` — Desktop sees both success and fatal error from same run. [Hand-X: cli.py, bridge/protocol.py]
 
 - [ ] **U-04: No progress during agent run gaps** — Progress only emits during DomHand field fills. If agent is navigating, loading pages, or running generic browser actions, Desktop shows silence. No heartbeat/idle signal. [Hand-X: cli.py]
 
 - [ ] **U-05: No retry/resume after failure** — Profile-load failure, browser crash, review timeout, review cancel all exit the process. No retry or resume workflow. User must restart manually. [Hand-X: cli.py]
 
-- [ ] **U-06: Error messages are raw exception strings** — Desktop users see `"Failed to load profile: JSONDecodeError('Expecting value: line 1 column 1 (char 0)')"` instead of actionable guidance. [Hand-X: cli.py]
+- [x] **U-06: Error messages are raw exception strings** — Desktop users see `"Failed to load profile: JSONDecodeError('Expecting value: line 1 column 1 (char 0)')"` instead of actionable guidance. [Hand-X: cli.py]
 
 - [ ] **U-07: Grant budget exhaustion gives no reason** — 429 "Runtime grant budget exhausted" doesn't indicate whether it's request count or cost. Desktop can't explain to user. [VALET: local-worker.routes.ts:263]
 

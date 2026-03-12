@@ -18,6 +18,34 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Field labels containing any of these substrings (case-insensitive) will have
+# their values replaced with "[REDACTED]" before being emitted over JSONL.
+_SENSITIVE_FIELD_PATTERNS: frozenset[str] = frozenset(
+    {
+        "password",
+        "ssn",
+        "social_security",
+        "social security",
+        "date_of_birth",
+        "date of birth",
+        "salary",
+        "compensation",
+        "bank",
+        "routing",
+        "account_number",
+    }
+)
+
+
+def _redact_if_sensitive(label: str, value: str) -> str:
+    """Return ``value`` unchanged, or ``"[REDACTED]"`` when *label* matches a sensitive pattern."""
+    label_lower = label.lower()
+    for pattern in _SENSITIVE_FIELD_PATTERNS:
+        if pattern in label_lower:
+            return "[REDACTED]"
+    return value
+
+
 _installed = False
 
 # Track cumulative fill counts across rounds (module-level for external access)
@@ -71,7 +99,7 @@ def install_jsonl_callback() -> None:
                 _counts["filled"] += 1
                 emit_field_filled(
                     field=result.name,
-                    value=result.value_set or "",
+                    value=_redact_if_sensitive(result.name, result.value_set or ""),
                     method="domhand",
                 )
             else:

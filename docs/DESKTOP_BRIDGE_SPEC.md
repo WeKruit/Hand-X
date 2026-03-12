@@ -341,21 +341,23 @@ The desktop app sets these environment variables when spawning the Hand-X proces
 
 | Variable                  | Default          | Description                                              |
 |---------------------------|------------------|----------------------------------------------------------|
-| `GH_HEADLESS`             | `true`           | `true` or `false`. Whether to run the browser headless.  |
+| `GH_HEADLESS`             | `true`           | `true` or `false`. Whether to run the browser headless. Used only when `--headless` flag is **not** supplied on the CLI. |
 | `PLAYWRIGHT_BROWSERS_PATH`| (system default)  | Absolute path to Playwright browser binaries. Set when browsers are bundled with the app. |
 | `GH_USER_PROFILE_TEXT`    | (none)           | Full applicant profile as JSON string. Passed via env to avoid shell escaping issues with `--profile`. |
 | `GH_RESUME_PATH`          | (none)           | Absolute path to the resume PDF file.                    |
-| `GH_MAX_BUDGET_PER_JOB`   | `0.50`           | Maximum LLM spend in USD. Overridden by `--max-budget` CLI arg. |
-| `GH_AGENT_MODEL`          | `gemini-3-flash-preview` | Agent model name. Overridden by `--model` CLI arg. When proxy is active, non-Anthropic models are automatically mapped to `claude-sonnet-4-20250514`. |
+| `GH_MAX_BUDGET_PER_JOB`   | `0.50`           | Maximum LLM spend in USD. Only consulted when `--max-budget` is not explicitly passed on the CLI (CLI arg takes priority). |
+| `GH_AGENT_MODEL`          | `gemini-3-flash-preview` | Agent model name. Only consulted when `--model` is not explicitly passed on the CLI (CLI arg takes priority). When proxy is active, non-Anthropic models are automatically mapped to `claude-sonnet-4-20250514`. |
 | `BROWSER_USE_SETUP_LOGGING`| `false`         | Set to `false` to suppress browser-use's own logging setup. Hand-X sets this automatically. |
 
 ### 4.4 Environment Variable Precedence
 
-When both an env var and a CLI arg provide the same value, the CLI arg wins (it is set into `os.environ` after parsing). The full precedence chain:
+CLI arguments always take priority. Env vars are only read when the corresponding CLI argument is **not explicitly provided**. The full precedence chain:
 
 ```
 CLI arg > Environment variable > .env file > Pydantic default
 ```
+
+**Important:** argparse defaults (e.g. `--max-steps 50`, `--max-budget 0.50`) are applied when the CLI arg is absent. This means `GH_MAX_BUDGET_PER_JOB` and `GH_MAX_STEPS_PER_JOB` env vars are only effective when the caller omits the corresponding `--max-budget` / `--max-steps` CLI flags entirely. If the desktop app always passes those flags explicitly, the env vars have no effect.
 
 ---
 
