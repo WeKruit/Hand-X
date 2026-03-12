@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import contextlib
 import json
 import logging
@@ -624,34 +625,49 @@ def _build_task_prompt(
     return task
 
 
+_stdin_lock = asyncio.Lock()
+_stdin_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="hand-x-stdin",
+)
+# Mark the worker thread as daemon so it dies with the process (R-4 fix)
+_stdin_executor._thread_name_prefix = "hand-x-stdin"
+
+
 async def _read_stdin_line(timeout: float | None = None) -> str:
-    """Read a single line from stdin with optional timeout."""
-    loop = asyncio.get_running_loop()
+    """Read a single line from stdin with optional timeout.
 
-    try:
-        fileno = sys.stdin.fileno()
-        future: asyncio.Future[str] = loop.create_future()
+    Uses a module-level lock to ensure only one reader at a time (R-2 fix),
+    and a dedicated daemon ThreadPoolExecutor so cancelled reads don't leak
+    threads from the default pool (R-4 fix).
+    """
+    async with _stdin_lock:
+        loop = asyncio.get_running_loop()
 
-        def _on_stdin_ready() -> None:
-            if future.done():
-                return
-            try:
-                future.set_result(sys.stdin.readline())
-            except Exception as exc:
-                future.set_exception(exc)
-
-        loop.add_reader(fileno, _on_stdin_ready)
         try:
+            fileno = sys.stdin.fileno()
+            future: asyncio.Future[str] = loop.create_future()
+
+            def _on_stdin_ready() -> None:
+                if future.done():
+                    return
+                try:
+                    future.set_result(sys.stdin.readline())
+                except Exception as exc:
+                    future.set_exception(exc)
+
+            loop.add_reader(fileno, _on_stdin_ready)
+            try:
+                if timeout is None:
+                    return await future
+                return await asyncio.wait_for(future, timeout=timeout)
+            finally:
+                loop.remove_reader(fileno)
+        except (AttributeError, NotImplementedError, OSError, ValueError):
+            line_future = loop.run_in_executor(_stdin_executor, sys.stdin.readline)
             if timeout is None:
-                return await future
-            return await asyncio.wait_for(future, timeout=timeout)
-        finally:
-            loop.remove_reader(fileno)
-    except (AttributeError, NotImplementedError, OSError, ValueError):
-        line_future = loop.run_in_executor(None, sys.stdin.readline)
-        if timeout is None:
-            return await line_future
-        return await asyncio.wait_for(line_future, timeout=timeout)
+                return await line_future
+            return await asyncio.wait_for(line_future, timeout=timeout)
 
 
 async def _listen_for_cancel(
@@ -699,8 +715,12 @@ async def _wait_for_review_command(browser, job_id: str, lease_id: str) -> None:
     - {"type": "cancel"}         -- user cancelled, close browser
 
     Times out after 30 minutes if no command is received.
+
+    NOTE: Does NOT emit a second ``done`` event.  The main flow already
+    emitted ``done`` before entering review.  Emitting another would
+    confuse the Desktop App event handler (R-1 fix).
     """
-    from ghosthands.output.jsonl import emit_done
+    from ghosthands.output.jsonl import emit_error, emit_status
 
     review_timeout_seconds = 30 * 60  # 30 minutes
     start_time = _time.monotonic()
@@ -711,11 +731,10 @@ async def _wait_for_review_command(browser, job_id: str, lease_id: str) -> None:
             remaining = review_timeout_seconds - elapsed
             if remaining <= 0:
                 logger.warning("review_timeout_exceeded", timeout_seconds=review_timeout_seconds)
-                emit_done(
-                    success=False,
-                    message="Review timed out after 30 minutes",
+                emit_error(
+                    "Review timed out after 30 minutes",
+                    fatal=True,
                     job_id=job_id,
-                    lease_id=lease_id,
                 )
                 break
 
@@ -739,20 +758,12 @@ async def _wait_for_review_command(browser, job_id: str, lease_id: str) -> None:
             cmd_type = cmd.get("type", "")
 
             if cmd_type == "complete_review":
-                emit_done(
-                    success=True,
-                    message="Review complete -- closing browser",
-                    job_id=job_id,
-                    lease_id=lease_id,
-                )
+                logger.info("review_completed", job_id=job_id, lease_id=lease_id)
+                emit_status("Review complete -- closing browser", job_id=job_id)
                 break
             elif cmd_type in {"cancel", "cancel_job"}:
-                emit_done(
-                    success=False,
-                    message="Job cancelled by user",
-                    job_id=job_id,
-                    lease_id=lease_id,
-                )
+                logger.info("review_cancelled", job_id=job_id, lease_id=lease_id)
+                emit_status("Review cancelled by user", job_id=job_id)
                 break
     except (EOFError, KeyboardInterrupt):
         pass
