@@ -6,8 +6,12 @@ __pycache__/
 *.egg-info/
 *.egg
 dist/
-build/
 *.whl
+
+# PyInstaller build artifacts (but keep build/*.spec and build/*.sh)
+build/dist/
+build/work/
+*.spec.bak
 
 # Virtual environments
 .venv/

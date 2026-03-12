@@ -1,0 +1,99 @@
+{
+	"first_name": "Jane",
+	"last_name": "Smith",
+	"email": "jane.smith@example.com",
+	"phone": "555-123-4567",
+	"phone_type": "Mobile",
+	"phone_country_code": "+1",
+
+	"address": "100 Main St",
+	"address_line_2": "Apt 4B",
+	"city": "Rochester",
+	"state": "NY",
+	"postal_code": "14621",
+	"country": "United States",
+
+	"linkedin": "https://www.linkedin.com/in/janesmith",
+	"portfolio": "https://janesmith.dev",
+	"github": "https://github.com/janesmith",
+
+	"US_citizen": true,
+	"sponsorship_needed": false,
+	"authorized_to_work": true,
+	"work_authorization": "US Citizen",
+
+	"age": "28",
+	"gender": "Female",
+	"race": "White",
+	"hispanic_latino": "No",
+	"Veteran_status": "I am not a protected veteran",
+	"disability_status": "I do not wish to answer",
+
+	"how_did_you_hear": "LinkedIn",
+	"referral_source": "LinkedIn",
+	"referred_by": "",
+
+	"available_start_date": "2026-04-15",
+	"salary_expectation": "80000",
+	"salary_currency": "USD",
+	"willing_to_relocate": true,
+	"preferred_shift": "Day",
+
+	"years_experience": "3",
+
+	"experience": [
+		{
+			"title": "Software Engineer",
+			"company": "Acme Corp",
+			"location": "Rochester, NY",
+			"start_date": "2024-06",
+			"end_date": "",
+			"currently_working": true,
+			"description": "Full-stack web development using React, Node.js, and PostgreSQL. Led migration of legacy monolith to microservices architecture. Implemented CI/CD pipeline reducing deployment time by 60%."
+		},
+		{
+			"title": "Software Engineering Intern",
+			"company": "TechStart Inc",
+			"location": "New York, NY",
+			"start_date": "2023-06",
+			"end_date": "2023-12",
+			"currently_working": false,
+			"description": "Developed REST APIs in Python/Flask. Built automated testing suite covering 85% of codebase. Contributed to data pipeline processing 2M+ records daily."
+		}
+	],
+
+	"education": [
+		{
+			"school": "Rochester Institute of Technology",
+			"degree": "Bachelor of Science",
+			"field_of_study": "Computer Science",
+			"gpa": "3.7",
+			"graduation_date": "2024-05",
+			"start_date": "2020-08"
+		}
+	],
+
+	"skills": [
+		"Python", "JavaScript", "TypeScript", "React", "Node.js",
+		"PostgreSQL", "AWS", "Docker", "Git", "REST APIs",
+		"Agile", "CI/CD"
+	],
+
+	"languages": [
+		{"language": "English", "proficiency": "Native"},
+		{"language": "Spanish", "proficiency": "Conversational"}
+	],
+
+	"certifications": [
+		{
+			"name": "AWS Certified Cloud Practitioner",
+			"issuer": "Amazon Web Services",
+			"date": "2025-03"
+		}
+	],
+
+	"what_drew_you_to_this_role": "I am passionate about building scalable software systems and this role aligns with my experience in full-stack development and cloud architecture.",
+	"why_this_company": "The company's commitment to innovation and engineering excellence resonates with my career goals.",
+	"what_are_your_strengths": "Strong problem-solving skills, experience with distributed systems, and a collaborative approach to engineering.",
+	"cover_letter_text": "Dear Hiring Manager,\n\nI am writing to express my interest in this position. With 3 years of experience in software engineering, including expertise in React, Node.js, and cloud technologies, I am confident I can contribute meaningfully to your team.\n\nAt Acme Corp, I led the migration of a legacy monolith to microservices, improving deployment velocity by 60%. I am eager to bring this same drive for engineering excellence to your organization.\n\nThank you for considering my application.\n\nBest regards,\nJane Smith"
+}

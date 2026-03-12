@@ -3,7 +3,7 @@
 This is the main entry point for spawning an agent.  The factory wires
 together:
 
-- An Anthropic LLM (``ChatAnthropic``) using the model from settings
+- An LLM via ``get_chat_model()`` (routes through VALET proxy if configured)
 - A ``BrowserProfile`` with headless mode and domain lockdown
 - The GhostHands system-prompt extension (platform guardrails + profile)
 - DomHand custom actions registered on the ``Tools`` controller
@@ -30,7 +30,6 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from browser_use import Agent, BrowserProfile
-from browser_use.llm.anthropic.chat import ChatAnthropic
 from browser_use.tools.service import Tools
 
 from ghosthands.agent.hooks import StepHooks
@@ -102,10 +101,9 @@ async def create_job_agent(
 		allowed_domains = settings.allowed_domains
 
 	# ── LLM ───────────────────────────────────────────────────────
-	llm = ChatAnthropic(
-		model=settings.agent_model,
-		api_key=settings.anthropic_api_key or None,
-	)
+	from ghosthands.llm.client import get_chat_model
+
+	llm = get_chat_model()
 
 	# ── Tools with DomHand actions ────────────────────────────────
 	tools: Tools = Tools()
@@ -131,6 +129,7 @@ async def create_job_agent(
 	browser_profile = BrowserProfile(
 		headless=headless,
 		allowed_domains=allowed_domains,
+		keep_alive=True,  # Keep browser open for user review / HITL
 	)
 
 	# ── Sensitive data (credentials) ──────────────────────────────
@@ -262,9 +261,12 @@ async def run_job_agent(
 			"blocker": blocker,
 		}
 	finally:
-		# Ensure the browser session is closed even on errors
-		if agent.browser_session:
+		# run_job_agent is the worker convenience wrapper — the worker has no human
+		# reviewer, so always kill the browser when the job finishes.  Callers that
+		# want the browser to stay open (e.g. for HITL or manual review) should use
+		# create_job_agent() directly and manage the lifecycle themselves.
+		if agent.browser_session is not None:
 			try:
-				await agent.browser_session.close()
+				await agent.browser_session.kill()
 			except Exception:
-				logger.exception("agent.browser_close_failed", extra={"job_id": job_id})
+				pass
