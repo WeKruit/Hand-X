@@ -148,12 +148,26 @@ async def domhand_check_agreement(params: DomHandCheckAgreementParams, browser_s
 		return ActionResult(error="No active page found")
 
 	# Step 1: Discover all checkboxes and identify agreement ones
-	try:
-		result_json = await page.evaluate(_DISCOVER_CHECKBOXES_JS)
-		checkboxes = json.loads(result_json)
-	except Exception as e:
-		logger.warning("domhand_check_agreement.discover_error", extra={"error": str(e)})
-		return ActionResult(error=f"Failed to discover checkboxes: {e}")
+	# Retry once after a short delay if nothing found — the DOM may still
+	# be settling after a modal close or page transition.
+	checkboxes = []
+	for attempt in range(2):
+		try:
+			result_json = await page.evaluate(_DISCOVER_CHECKBOXES_JS)
+			checkboxes = json.loads(result_json)
+		except Exception as e:
+			logger.warning("domhand_check_agreement.discover_error", extra={"error": str(e), "attempt": attempt})
+			if attempt == 0:
+				await asyncio.sleep(0.8)
+				continue
+			return ActionResult(error=f"Failed to discover checkboxes: {e}")
+
+		agreements = [c for c in checkboxes if c.get("isAgreement")]
+		if agreements or attempt > 0:
+			break
+		# No agreement checkboxes found on first try — wait for DOM to settle
+		logger.info("domhand_check_agreement.retry_after_delay", extra={"total_found": len(checkboxes)})
+		await asyncio.sleep(0.8)
 
 	logger.info("domhand_check_agreement.discovered", extra={
 		"total": len(checkboxes),
