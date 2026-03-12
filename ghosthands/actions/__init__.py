@@ -1,14 +1,12 @@
 """Actions module — browser-use @tools.action() definitions for DomHand form filling.
 
 Usage:
-    from browser_use.tools.service import Tools
-    from ghosthands.actions import register_domhand_actions
+	from browser_use.tools.service import Tools
+	from ghosthands.actions import register_domhand_actions
 
-    tools = Tools()
-    register_domhand_actions(tools)
+	tools = Tools()
+	register_domhand_actions(tools)
 """
-
-from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
@@ -39,6 +37,7 @@ def register_domhand_actions(tools: "Tools") -> None:
 		via ``tools.action(description, param_model=...)(func)`` which
 		delegates to the underlying ``Registry``.
 	"""
+	from ghosthands.actions.domhand_expand import domhand_expand
 	from ghosthands.actions.domhand_fill import domhand_fill
 	from ghosthands.actions.domhand_select import domhand_select
 	from ghosthands.actions.domhand_upload import domhand_upload
@@ -85,22 +84,14 @@ def register_domhand_actions(tools: "Tools") -> None:
 	# ── domhand_expand: Repeater expansion ────────────────────
 	# Clicks "Add More" buttons to expand repeater sections like
 	# Work Experience, Education, References.
-	try:
-		from ghosthands.actions.domhand_expand import domhand_expand
-
-		tools.action(
-			description=(
-				'Click "Add More" / "Add Another" buttons to expand repeater sections '
-				'(e.g., Work Experience, Education). Finds the section, clicks the add '
-				'button, waits for new fields, and reports how many appeared.'
-			),
-			param_model=DomHandExpandParams,
-		)(domhand_expand)
-	except ImportError:
-		logger.debug(
-			"ghosthands.actions.domhand_expand not yet implemented; "
-			"expand_repeaters action will not be available"
-		)
+	tools.action(
+		description=(
+			'Click "Add More" / "Add Another" buttons to expand repeater sections '
+			'(e.g., Work Experience, Education). Finds the section, clicks the add '
+			'button, waits for new fields, and reports how many appeared.'
+		),
+		param_model=DomHandExpandParams,
+	)(domhand_expand)
 
 	# Log what was registered
 	registered = [
