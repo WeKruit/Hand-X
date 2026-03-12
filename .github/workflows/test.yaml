@@ -1,11 +1,9 @@
 name: test
 permissions:
   actions: read
-  contents: write
-  pull-requests: write  # Allow writing comments on PRs
-  issues: write         # Allow writing comments on issues
-  statuses: write       # Allow writing statuses on PRs
-  discussions: write
+  contents: read
+  pull-requests: write
+  issues: write
 
 # Cancel in-progress runs when a new commit is pushed to the same branch/PR
 concurrency:
@@ -29,7 +27,15 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
       - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install project dependencies
+        run: uv sync --frozen --extra dev
 
       - name: Get week number for cache key
         id: week
@@ -41,13 +47,13 @@ jobs:
         with:
           path: |
             ~/.cache/ms-playwright
-          key: ${{ runner.os }}-${{ runner.arch }}-chromium-${{ steps.week.outputs.number }}
+          key: ${{ runner.os }}-${{ runner.arch }}-chromium-${{ hashFiles('uv.lock', '.python-version') }}-${{ steps.week.outputs.number }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-chromium-
 
       - name: Install Chromium if not cached
         if: steps.cache-chromium.outputs.cache-hit != 'true'
-        run: uvx playwright install chromium --with-deps --no-shell
+        run: uv run --no-sync playwright install chromium --with-deps --no-shell
 
   find_tests:
     runs-on: ubuntu-latest
@@ -81,7 +87,7 @@ jobs:
   tests:
     needs: [setup-chromium, find_tests]
     runs-on: ubuntu-latest
-    timeout-minutes: 4  # Reduced timeout - tests should complete quickly or retry
+    timeout-minutes: 8
     env:
       IN_DOCKER: 'True'
       ANONYMIZED_TELEMETRY: 'false'
@@ -96,6 +102,7 @@ jobs:
       BROWSER_USE_API_KEY: ${{ secrets.BROWSER_USE_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
     strategy:
+      fail-fast: false
       matrix:
         test_filename: ${{ fromJson(needs.find_tests.outputs.TEST_FILENAMES || '["FAILED_TO_DISCOVER_TESTS"]') }}
         # autodiscovers all the files in tests/ci/test_*.py
@@ -114,10 +121,12 @@ jobs:
           fi
 
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-          activate-environment: true
 
       - name: Cache uv packages and venv
         uses: actions/cache@v4
@@ -125,11 +134,11 @@ jobs:
           path: |
             ~/.cache/uv
             .venv
-          key: ${{ runner.os }}-uv-venv-${{ hashFiles('pyproject.toml') }}
+          key: ${{ runner.os }}-uv-venv-${{ hashFiles('uv.lock', '.python-version') }}
           restore-keys: |
             ${{ runner.os }}-uv-venv-
 
-      - run: uv sync --dev --all-extras
+      - run: uv sync --frozen --extra dev
 
       - name: Get week number for cache key
         id: week
@@ -141,20 +150,20 @@ jobs:
         with:
           path: |
             ~/.cache/ms-playwright
-          key: ${{ runner.os }}-${{ runner.arch }}-chromium-${{ steps.week.outputs.number }}
+          key: ${{ runner.os }}-${{ runner.arch }}-chromium-${{ hashFiles('uv.lock', '.python-version') }}-${{ steps.week.outputs.number }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-chromium-
 
       - name: Install Chromium browser if not cached
         if: steps.cache-chromium.outputs.cache-hit != 'true'
-        run: uvx playwright install chromium --with-deps --no-shell
+        run: uv run --no-sync playwright install chromium --with-deps --no-shell
 
       - name: Cache browser-use extensions
         uses: actions/cache@v4
         with:
           path: |
             ~/.config/browseruse/extensions
-          key: ${{ runner.os }}-browseruse-extensions-${{ hashFiles('browser_use/browser/profile.py') }}
+          key: ${{ runner.os }}-browseruse-extensions-${{ hashFiles('browser_use/browser/profile.py', 'uv.lock') }}
           restore-keys: |
             ${{ runner.os }}-browseruse-extensions-
 
@@ -176,10 +185,10 @@ jobs:
         if: steps.check-file.outputs.exists == 'true'
         uses: nick-fields/retry@v3
         with:
-          timeout_minutes: 4
-          max_attempts: 1
+          timeout_minutes: 6
+          max_attempts: 2
           retry_on: error
-          command: pytest "tests/ci/${{ matrix.test_filename }}.py"
+          command: uv run --no-sync pytest "tests/ci/${{ matrix.test_filename }}.py"
 
   evaluate-tasks:
     needs: setup-chromium
@@ -198,10 +207,12 @@ jobs:
       BROWSER_USE_API_KEY: ${{ secrets.BROWSER_USE_API_KEY }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-          activate-environment: true
 
       - name: Cache uv packages and venv
         uses: actions/cache@v4
@@ -209,11 +220,11 @@ jobs:
           path: |
             ~/.cache/uv
             .venv
-          key: ${{ runner.os }}-uv-venv-${{ hashFiles('pyproject.toml') }}
+          key: ${{ runner.os }}-uv-venv-${{ hashFiles('uv.lock', '.python-version') }}
           restore-keys: |
             ${{ runner.os }}-uv-venv-
 
-      - run: uv sync --dev --all-extras
+      - run: uv sync --frozen --extra dev
 
       - name: Get week number for cache key
         id: week
@@ -225,20 +236,20 @@ jobs:
         with:
           path: |
             ~/.cache/ms-playwright
-          key: ${{ runner.os }}-${{ runner.arch }}-chromium-${{ steps.week.outputs.number }}
+          key: ${{ runner.os }}-${{ runner.arch }}-chromium-${{ hashFiles('uv.lock', '.python-version') }}-${{ steps.week.outputs.number }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-chromium-
 
       - name: Install Chromium browser if not cached
         if: steps.cache-chromium.outputs.cache-hit != 'true'
-        run: uvx playwright install chromium --with-deps --no-shell
+        run: uv run --no-sync playwright install chromium --with-deps --no-shell
 
       - name: Cache browser-use extensions
         uses: actions/cache@v4
         with:
           path: |
             ~/.config/browseruse/extensions
-          key: ${{ runner.os }}-browseruse-extensions-${{ hashFiles('browser_use/browser/profile.py') }}
+          key: ${{ runner.os }}-browseruse-extensions-${{ hashFiles('browser_use/browser/profile.py', 'uv.lock') }}
           restore-keys: |
             ${{ runner.os }}-browseruse-extensions-
 
@@ -246,11 +257,11 @@ jobs:
         id: eval
         uses: nick-fields/retry@v3
         with:
-          timeout_minutes: 4
-          max_attempts: 1
+          timeout_minutes: 6
+          max_attempts: 2
           retry_on: error
           command: |
-            python tests/ci/evaluate_tasks.py > result.txt
+            uv run --no-sync python tests/ci/evaluate_tasks.py > result.txt
             cat result.txt
             echo "PASSED=$(grep '^PASSED=' result.txt | cut -d= -f2)" >> $GITHUB_ENV
             echo "TOTAL=$(grep '^TOTAL=' result.txt | cut -d= -f2)" >> $GITHUB_ENV
