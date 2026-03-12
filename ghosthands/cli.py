@@ -5,7 +5,7 @@ browser-use agent.  Communication happens via stdio:
 
 - stdout -> JSONL events (ProgressEvent-compatible)
 - stderr -> structured logging
-- stdin  -> commands from Electron (complete_review, cancel_job)
+- stdin  -> commands from Electron (cancel, complete_review, cancel_job)
 
 Usage (from Electron -- JSONL mode):
     python -m ghosthands \\
@@ -38,12 +38,17 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
+
+import structlog
 
 # Force unbuffered I/O for reliable JSONL streaming
 os.environ["PYTHONUNBUFFERED"] = "1"
 
 # Suppress browser-use's own logging setup so we control stderr exclusively
 os.environ["BROWSER_USE_SETUP_LOGGING"] = "false"
+
+logger = structlog.get_logger()
 
 
 # ── Argument parsing ──────────────────────────────────────────────────
@@ -76,8 +81,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=50, help="Max agent steps (default: 50)")
     parser.add_argument("--max-budget", type=float, default=0.50, help="Max LLM budget USD")
     parser.add_argument("--headless", action="store_true", help="Run browser headless")
-    parser.add_argument("--email", default=None, help="Login email")
-    parser.add_argument("--password", default=None, help="Login password")
+    parser.add_argument("--email", default=None, help="Login email (deprecated; prefer GH_EMAIL)")
+    parser.add_argument("--password", default=None, help="Login password (deprecated; prefer GH_PASSWORD)")
     parser.add_argument(
         "--output-format",
         choices=["jsonl", "human"],
@@ -106,6 +111,24 @@ def _setup_logging() -> None:
     handler.setFormatter(logging.Formatter("%(levelname)s [%(name)s] %(message)s"))
     root.addHandler(handler)
     root.setLevel(logging.INFO)
+    structlog.configure(
+        cache_logger_on_first_use=True,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        processors=[
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.UnicodeDecoder(),
+            structlog.processors.KeyValueRenderer(
+                key_order=["event", "level", "logger", "timestamp"],
+            ),
+        ],
+    )
 
 
 # ── Profile loading ───────────────────────────────────────────────────
@@ -141,12 +164,78 @@ def _load_profile(args: argparse.Namespace) -> dict:
     raise ValueError("Either --profile or --test-data is required")
 
 
+def _apply_runtime_env(
+    args: argparse.Namespace,
+    profile: dict[str, Any],
+) -> str:
+    """Set runtime environment variables expected by downstream modules."""
+    if args.proxy_url:
+        os.environ["GH_LLM_PROXY_URL"] = args.proxy_url
+    if args.runtime_grant:
+        os.environ["GH_LLM_RUNTIME_GRANT"] = args.runtime_grant
+    if args.browsers_path:
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = args.browsers_path
+
+    os.environ["GH_USER_PROFILE_TEXT"] = json.dumps(profile, indent=2)
+
+    resume_path = str(Path(args.resume).resolve()) if args.resume else ""
+    if resume_path:
+        os.environ["GH_RESUME_PATH"] = resume_path
+
+    return resume_path
+
+
+def _load_runtime_settings():
+    """Load settings after CLI-provided environment overrides are applied."""
+    from ghosthands.config.settings import Settings
+
+    return Settings()
+
+
+def _resolve_sensitive_data(
+    args: argparse.Namespace,
+    app_settings,
+) -> dict[str, str] | None:
+    """Resolve credentials from environment first, then deprecated CLI flags."""
+    if args.email or args.password:
+        logger.warning(
+            "cli.credentials_flags_deprecated",
+            detail="Use GH_EMAIL and GH_PASSWORD environment variables instead of --email/--password",
+            has_email_flag=bool(args.email),
+            has_password_flag=bool(args.password),
+        )
+
+    email = app_settings.email or args.email or ""
+    password = app_settings.password or args.password or ""
+
+    if email and password:
+        return {"email": email, "password": password}
+    return None
+
+
+def _warn_if_proxy_overrides_direct_keys(
+    args: argparse.Namespace,
+    app_settings,
+) -> None:
+    """Warn when VALET proxy mode is active alongside direct Anthropic keys."""
+    if (args.proxy_url or app_settings.llm_proxy_url) and (
+        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("GH_ANTHROPIC_API_KEY")
+    ):
+        logger.warning(
+            "llm.proxy_mode_active",
+            detail="Direct API keys ignored when --proxy-url is set",
+            proxy_url=app_settings.llm_proxy_url,
+        )
+
+
 # ── JSONL agent run ───────────────────────────────────────────────────
 
 
 async def run_agent_jsonl(args: argparse.Namespace) -> None:
     """Run the agent with JSONL event output on stdout."""
     from ghosthands.output.jsonl import (
+        emit_awaiting_review,
+        emit_browser_ready,
         emit_cost,
         emit_done,
         emit_error,
@@ -163,16 +252,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # -- Set env vars -------------------------------------------------------
-    if args.proxy_url:
-        os.environ["GH_LLM_PROXY_URL"] = args.proxy_url
-    if args.runtime_grant:
-        os.environ["GH_LLM_RUNTIME_GRANT"] = args.runtime_grant
-    if args.browsers_path:
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = args.browsers_path
-
-    os.environ["GH_USER_PROFILE_TEXT"] = json.dumps(profile, indent=2)
-    if args.resume:
-        os.environ["GH_RESUME_PATH"] = str(Path(args.resume).resolve())
+    resume_path = _apply_runtime_env(args, profile)
 
     # -- Install DomHand field event callback --------------------------------
     from ghosthands.output import field_events
@@ -181,9 +261,13 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     # -- Import heavy deps after env setup ----------------------------------
     from browser_use import Agent, BrowserProfile, BrowserSession, Tools
-    from ghosthands.llm.client import get_chat_model
 
     emit_status("Setting up agent...", job_id=args.job_id)
+
+    app_settings = _load_runtime_settings()
+    _warn_if_proxy_overrides_direct_keys(args, app_settings)
+
+    from ghosthands.llm.client import get_chat_model
 
     llm = get_chat_model(model=args.model)
 
@@ -216,33 +300,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         pass
 
     # -- Credentials --------------------------------------------------------
-    sensitive_data: dict[str, str | dict[str, str]] | None = None
-    if args.email and args.password:
-        sensitive_data = {"email": args.email, "password": args.password}
+    sensitive_data = _resolve_sensitive_data(args, app_settings)
 
     # -- Browser ------------------------------------------------------------
     browser_profile = BrowserProfile(headless=args.headless, keep_alive=True)
     browser = BrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
-    resume_path = str(Path(args.resume).resolve()) if args.resume else ""
     task = _build_task_prompt(args.job_url, resume_path, sensitive_data)
-
-    # -- Create agent -------------------------------------------------------
-    available_files = [resume_path] if resume_path else []
-    agent = Agent(
-        task=task,
-        llm=llm,
-        browser_session=browser,
-        tools=tools,
-        extend_system_message=system_ext or None,
-        sensitive_data=sensitive_data,
-        available_file_paths=available_files or None,
-        use_vision=True,
-        max_actions_per_step=5,
-        calculate_cost=True,
-        use_judge=False,
-    )
 
     emit_status(
         f"Starting application: {args.job_url}",
@@ -280,11 +345,40 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     # -- Run ----------------------------------------------------------------
     try:
-        history = await agent.run(
-            max_steps=args.max_steps,
-            on_step_start=_on_step_start,
-            on_step_end=_on_step_end,
+        await browser.start()
+        if browser.cdp_url:
+            emit_browser_ready(browser.cdp_url)
+        else:
+            logger.warning("cli.browser_ready_missing_cdp_url")
+
+        # -- Create agent ---------------------------------------------------
+        available_files = [resume_path] if resume_path else []
+        agent = Agent(
+            task=task,
+            llm=llm,
+            browser_session=browser,
+            tools=tools,
+            extend_system_message=system_ext or None,
+            sensitive_data=sensitive_data,
+            available_file_paths=available_files or None,
+            use_vision=True,
+            max_actions_per_step=5,
+            calculate_cost=True,
+            use_judge=False,
         )
+
+        cancel_requested = asyncio.Event()
+        cancel_task = asyncio.create_task(_listen_for_cancel(agent, cancel_requested))
+        try:
+            history = await agent.run(
+                max_steps=args.max_steps,
+                on_step_start=_on_step_start,
+                on_step_end=_on_step_end,
+            )
+        finally:
+            cancel_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cancel_task
 
         is_done = history.is_done()
         final_result = history.final_result()
@@ -298,6 +392,25 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 prompt_tokens=history.usage.total_prompt_tokens or 0,
                 completion_tokens=history.usage.total_completion_tokens or 0,
             )
+
+        if cancel_requested.is_set():
+            emit_done(
+                success=False,
+                message="Job cancelled by user",
+                job_id=args.job_id,
+                lease_id=args.lease_id,
+                result_data={
+                    "success": False,
+                    "steps": total_steps,
+                    "costUsd": round(total_cost, 6),
+                    "finalResult": final_result,
+                    "blocker": None,
+                    "platform": platform,
+                    "cancelled": True,
+                },
+            )
+            await browser.close()
+            sys.exit(1)
 
         # Determine outcome
         success = is_done and bool(final_result)
@@ -324,6 +437,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 lease_id=args.lease_id,
                 result_data=result_data,
             )
+            emit_awaiting_review()
             await _wait_for_review_command(browser, args.job_id, args.lease_id)
         else:
             emit_done(
@@ -360,19 +474,14 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # -- Set env vars -------------------------------------------------------
-    if args.proxy_url:
-        os.environ["GH_LLM_PROXY_URL"] = args.proxy_url
-    if args.runtime_grant:
-        os.environ["GH_LLM_RUNTIME_GRANT"] = args.runtime_grant
-    if args.browsers_path:
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = args.browsers_path
-
-    os.environ["GH_USER_PROFILE_TEXT"] = json.dumps(profile, indent=2)
-    if args.resume:
-        os.environ["GH_RESUME_PATH"] = str(Path(args.resume).resolve())
+    resume_path = _apply_runtime_env(args, profile)
 
     # -- Import after env setup ---------------------------------------------
     from browser_use import Agent, BrowserProfile, BrowserSession, Tools
+
+    app_settings = _load_runtime_settings()
+    _warn_if_proxy_overrides_direct_keys(args, app_settings)
+
     from ghosthands.llm.client import get_chat_model
 
     llm = get_chat_model(model=args.model)
@@ -406,16 +515,13 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         pass
 
     # -- Credentials --------------------------------------------------------
-    sensitive_data: dict[str, str | dict[str, str]] | None = None
-    if args.email and args.password:
-        sensitive_data = {"email": args.email, "password": args.password}
+    sensitive_data = _resolve_sensitive_data(args, app_settings)
 
     # -- Browser ------------------------------------------------------------
     browser_profile = BrowserProfile(headless=args.headless, keep_alive=True)
     browser = BrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
-    resume_path = str(Path(args.resume).resolve()) if args.resume else ""
     task = _build_task_prompt(args.job_url, resume_path, sensitive_data)
 
     # -- Agent --------------------------------------------------------------
@@ -512,20 +618,85 @@ def _build_task_prompt(
     return task
 
 
+async def _read_stdin_line(timeout: float | None = None) -> str:
+    """Read a single line from stdin with optional timeout."""
+    loop = asyncio.get_running_loop()
+
+    try:
+        fileno = sys.stdin.fileno()
+        future: asyncio.Future[str] = loop.create_future()
+
+        def _on_stdin_ready() -> None:
+            if future.done():
+                return
+            try:
+                future.set_result(sys.stdin.readline())
+            except Exception as exc:
+                future.set_exception(exc)
+
+        loop.add_reader(fileno, _on_stdin_ready)
+        try:
+            if timeout is None:
+                return await future
+            return await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            loop.remove_reader(fileno)
+    except (AttributeError, NotImplementedError, OSError, ValueError):
+        line_future = loop.run_in_executor(None, sys.stdin.readline)
+        if timeout is None:
+            return await line_future
+        return await asyncio.wait_for(line_future, timeout=timeout)
+
+
+async def _listen_for_cancel(
+    agent: Any,
+    cancel_requested: asyncio.Event | None = None,
+) -> None:
+    """Read stdin concurrently during agent run for cancel commands."""
+    while not agent.state.stopped:
+        try:
+            line = await _read_stdin_line(timeout=1.0)
+        except TimeoutError:
+            continue
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            continue
+
+        if not line:
+            break
+
+        line = line.strip()
+        if not line:
+            continue
+
+        try:
+            cmd = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        cmd_type = cmd.get("type")
+        if cmd_type in {"cancel", "cancel_job"}:
+            logger.info("cancel_command_received_from_stdin", command_type=cmd_type)
+            if cancel_requested is not None:
+                cancel_requested.set()
+            agent.state.stopped = True
+            break
+
+
 async def _wait_for_review_command(browser, job_id: str, lease_id: str) -> None:
     """Wait for a command from Electron on stdin.
 
     Expected commands:
     - {"type": "complete_review"} -- user approved, close browser
     - {"type": "cancel_job"}     -- user cancelled, close browser
+    - {"type": "cancel"}         -- user cancelled, close browser
     """
     from ghosthands.output.jsonl import emit_done
 
-    loop = asyncio.get_event_loop()
-
     try:
         while True:
-            line = await loop.run_in_executor(None, sys.stdin.readline)
+            line = await _read_stdin_line()
             if not line:
                 break  # stdin closed -- Electron died
 
@@ -548,7 +719,7 @@ async def _wait_for_review_command(browser, job_id: str, lease_id: str) -> None:
                     lease_id=lease_id,
                 )
                 break
-            elif cmd_type == "cancel_job":
+            elif cmd_type in {"cancel", "cancel_job"}:
                 emit_done(
                     success=False,
                     message="Job cancelled by user",
