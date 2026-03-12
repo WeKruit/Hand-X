@@ -10,6 +10,9 @@ Flow:
 4. Fuzzy-match the target value against available options
 5. Click the matching option
 6. Verify the selection stuck
+
+All DOM element lookups use browser-use's selector map (get_element_by_index)
+and CDP backend_node_id resolution — never data-highlight-index attributes.
 """
 
 import asyncio
@@ -19,19 +22,24 @@ from typing import Any
 
 from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
+from browser_use.browser.events import (
+	ClickElementEvent,
+	GetDropdownOptionsEvent,
+	SelectDropdownOptionEvent,
+)
+from browser_use.dom.views import EnhancedDOMTreeNode
 
 from ghosthands.actions.views import DomHandSelectParams, normalize_name
 
 logger = logging.getLogger(__name__)
 
-# ── JavaScript: discover dropdown options ────────────────────────────
 
-_DISCOVER_OPTIONS_JS = r"""
-(triggerIndex) => {
-	// Find the element by browser-use index (data-highlight-index attribute)
-	const el = document.querySelector('[data-highlight-index="' + triggerIndex + '"]');
-	if (!el) return JSON.stringify({error: 'Trigger element not found at index ' + triggerIndex});
+# ── CDP-based JavaScript helpers ─────────────────────────────────────
+# These JS functions operate on a node passed directly via Runtime.callFunctionOn
+# (i.e., `this` is the DOM element). They never use data-highlight-index.
 
+_DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
+	const el = this;
 	const tag = el.tagName.toLowerCase();
 
 	// Case 1: Native <select>
@@ -45,7 +53,7 @@ _DISCOVER_OPTIONS_JS = r"""
 		return JSON.stringify({
 			type: 'native_select',
 			options: options,
-			currentValue: el.options[el.selectedIndex]?.text?.trim() || '',
+			currentValue: el.options[el.selectedIndex] ? el.options[el.selectedIndex].text.trim() : '',
 		});
 	}
 
@@ -66,7 +74,7 @@ _DISCOVER_OPTIONS_JS = r"""
 				type: 'aria_listbox',
 				listboxId: listboxId,
 				options: options,
-				currentValue: el.value || el.textContent?.trim() || '',
+				currentValue: el.value || (el.textContent ? el.textContent.trim() : ''),
 			});
 		}
 	}
@@ -74,7 +82,6 @@ _DISCOVER_OPTIONS_JS = r"""
 	// Case 3: Workday-style custom dropdowns (data-uxi-widget-type)
 	const widgetType = el.getAttribute('data-uxi-widget-type');
 	if (widgetType === 'selectinput' || el.getAttribute('role') === 'combobox') {
-		// Options may be in a popup/portal element
 		const popups = document.querySelectorAll(
 			'[role="listbox"], [role="menu"], [class*="popup"], [class*="dropdown-menu"], [class*="options-list"]'
 		);
@@ -93,7 +100,7 @@ _DISCOVER_OPTIONS_JS = r"""
 					return JSON.stringify({
 						type: 'custom_popup',
 						options: options,
-						currentValue: el.value || el.textContent?.trim() || '',
+						currentValue: el.value || (el.textContent ? el.textContent.trim() : ''),
 					});
 				}
 			}
@@ -131,15 +138,13 @@ _DISCOVER_OPTIONS_JS = r"""
 	return JSON.stringify({
 		type: 'unknown',
 		options: [],
-		currentValue: el.value || el.textContent?.trim() || '',
+		currentValue: el.value || (el.textContent ? el.textContent.trim() : ''),
 		error: 'Could not discover dropdown options. The dropdown may need to be clicked first.',
 	});
-}
-"""
+}"""
 
-# JavaScript: click an option by its text content within a visible listbox/popup
-_CLICK_OPTION_JS = r"""
-(targetText, listboxType) => {
+# Click an option by its text content within any visible listbox/popup on the page
+_CLICK_OPTION_JS = r"""function(targetText) {
 	const lowerTarget = targetText.toLowerCase().trim();
 
 	// Collect all visible option-like elements
@@ -190,14 +195,12 @@ _CLICK_OPTION_JS = r"""
 		error: 'No matching option found for: ' + targetText,
 		available: availableTexts,
 	});
-}
-"""
+}"""
 
-# JavaScript: select a native <select> option by value or text
-_SELECT_NATIVE_JS = r"""
-(triggerIndex, targetValue) => {
-	const el = document.querySelector('[data-highlight-index="' + triggerIndex + '"]');
-	if (!el || el.tagName.toLowerCase() !== 'select') {
+# Select a native <select> option by value or text — operates on `this` = the <select> element
+_SELECT_NATIVE_ON_NODE_JS = r"""function(targetValue) {
+	const el = this;
+	if (el.tagName.toLowerCase() !== 'select') {
 		return JSON.stringify({success: false, error: 'Not a native select element'});
 	}
 
@@ -235,25 +238,68 @@ _SELECT_NATIVE_JS = r"""
 	el.dispatchEvent(new Event('input', {bubbles: true}));
 	const selected = el.options[el.selectedIndex];
 	return JSON.stringify({success: true, clicked: selected ? selected.text.trim() : targetValue});
-}
-"""
+}"""
 
-# JavaScript: verify current selection
-_VERIFY_SELECTION_JS = r"""
-(triggerIndex) => {
-	const el = document.querySelector('[data-highlight-index="' + triggerIndex + '"]');
-	if (!el) return JSON.stringify({value: '', error: 'Element not found'});
-
+# Verify current selection — operates on `this` = the trigger element
+_VERIFY_SELECTION_ON_NODE_JS = r"""function() {
+	const el = this;
 	if (el.tagName.toLowerCase() === 'select') {
 		const sel = el.options[el.selectedIndex];
 		return JSON.stringify({value: sel ? sel.text.trim() : ''});
 	}
 
 	// For ARIA/custom: check aria-label, value, or text content
-	const value = el.value || el.getAttribute('aria-label') || el.textContent?.trim() || '';
+	const value = el.value || el.getAttribute('aria-label') || (el.textContent ? el.textContent.trim() : '');
 	return JSON.stringify({value: value});
-}
-"""
+}"""
+
+
+# ── CDP helper to call JS on a resolved node ────────────────────────
+
+async def _call_function_on_node(
+	browser_session: BrowserSession,
+	node: EnhancedDOMTreeNode,
+	function_declaration: str,
+	arguments: list[dict[str, Any]] | None = None,
+) -> Any:
+	"""Resolve a node via CDP and call a JS function on it.
+
+	Uses DOM.resolveNode with backend_node_id, then Runtime.callFunctionOn.
+	Returns the parsed JSON result or raw value.
+	"""
+	session_id = node.session_id
+	if not session_id:
+		cdp_session = await browser_session.get_or_create_cdp_session()
+		session_id = cdp_session.session_id
+
+	# Resolve the backend node to a JS remote object
+	resolve_result = await browser_session.cdp_client.send.DOM.resolveNode(
+		params={'backendNodeId': node.backend_node_id},
+		session_id=session_id,
+	)
+	object_id = resolve_result.get('object', {}).get('objectId')
+	if not object_id:
+		raise RuntimeError(f'Could not resolve node (backend_node_id={node.backend_node_id}) to JS object')
+
+	call_params: dict[str, Any] = {
+		'objectId': object_id,
+		'functionDeclaration': function_declaration,
+		'returnByValue': True,
+	}
+	if arguments:
+		call_params['arguments'] = arguments
+
+	call_result = await browser_session.cdp_client.send.Runtime.callFunctionOn(
+		params=call_params,
+		session_id=session_id,
+	)
+	raw_value = call_result.get('result', {}).get('value')
+	if isinstance(raw_value, str):
+		try:
+			return json.loads(raw_value)
+		except (json.JSONDecodeError, ValueError):
+			return raw_value
+	return raw_value
 
 
 # ── Fuzzy matching helper ────────────────────────────────────────────
@@ -280,7 +326,7 @@ def _fuzzy_match_option(
 		if opt_norm and (target_norm in opt_norm or opt_norm in target_norm):
 			return opt
 
-	# Pass 3: Word overlap (at least 2 shared words)
+	# Pass 3: Word overlap (at least 1 shared meaningful word)
 	target_words = set(target_norm.split()) - {'the', 'a', 'an', 'of', 'for', 'in', 'to'}
 	if len(target_words) >= 1:
 		best_overlap = 0
@@ -312,7 +358,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
 	if not page:
 		return ActionResult(error='No active page found in browser session')
 
-	# ── Step 1: Click the trigger to open dropdown ────────────
+	# ── Step 1: Get the trigger element ───────────────────────
 	try:
 		node = await browser_session.get_element_by_index(params.index)
 		if node is None:
@@ -320,33 +366,56 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
 	except Exception as e:
 		return ActionResult(error=f'Failed to find element at index {params.index}: {e}')
 
-	# ── Step 2: Discover options (try before clicking — some are pre-rendered) ──
+	# ── Step 2: Try browser-use event bus first (handles native + ARIA) ──
+	# For native <select> elements, try the built-in SelectDropdownOptionEvent
+	is_native_select = node.tag_name == 'select'
+
+	if is_native_select:
+		try:
+			return await _select_via_event_bus(browser_session, node, params)
+		except Exception as e:
+			logger.debug(f'Event bus select failed for native <select>, falling back to CDP: {e}')
+
+	# ── Step 3: Discover options via CDP (resolve node, run JS on it) ──
 	try:
-		raw_discovery = await page.evaluate(_DISCOVER_OPTIONS_JS, params.index)
-		discovery: dict[str, Any] = json.loads(raw_discovery) if isinstance(raw_discovery, str) else raw_discovery
+		discovery = await _call_function_on_node(
+			browser_session, node, _DISCOVER_OPTIONS_ON_NODE_JS
+		)
 	except Exception as e:
 		discovery = {'type': 'unknown', 'options': [], 'error': str(e)}
 
-	dropdown_type = discovery.get('type', 'unknown')
-	options = discovery.get('options', [])
+	dropdown_type = discovery.get('type', 'unknown') if isinstance(discovery, dict) else 'unknown'
+	options = discovery.get('options', []) if isinstance(discovery, dict) else []
 
-	# ── Step 2b: If no options found, click to open and re-discover ──
+	# ── Step 3b: If no options found, click to open and re-discover ──
 	if not options or dropdown_type == 'unknown':
 		try:
-			# Use the browser_session event bus to click the element
-			from browser_use.browser.events import ClickElementEvent
 			event = browser_session.event_bus.dispatch(ClickElementEvent(node=node))
 			await event
 			await event.event_result(raise_if_any=True, raise_if_none=False)
 			await asyncio.sleep(0.5)  # Wait for dropdown animation
 
 			# Re-discover after clicking
-			raw_discovery = await page.evaluate(_DISCOVER_OPTIONS_JS, params.index)
-			discovery = json.loads(raw_discovery) if isinstance(raw_discovery, str) else raw_discovery
-			dropdown_type = discovery.get('type', 'unknown')
-			options = discovery.get('options', [])
+			discovery = await _call_function_on_node(
+				browser_session, node, _DISCOVER_OPTIONS_ON_NODE_JS
+			)
+			dropdown_type = discovery.get('type', 'unknown') if isinstance(discovery, dict) else 'unknown'
+			options = discovery.get('options', []) if isinstance(discovery, dict) else []
 		except Exception as e:
 			logger.warning(f'Failed to click dropdown trigger: {e}')
+
+	# ── Step 3c: If still no options, try GetDropdownOptionsEvent ──
+	if not options:
+		try:
+			event = browser_session.event_bus.dispatch(GetDropdownOptionsEvent(node=node))
+			dropdown_data = await event.event_result(timeout=3.0, raise_if_none=False, raise_if_any=False)
+			if dropdown_data and isinstance(dropdown_data, dict):
+				raw_options = dropdown_data.get('options', [])
+				if raw_options:
+					options = raw_options
+					dropdown_type = dropdown_data.get('type', 'event_bus')
+		except Exception as e:
+			logger.debug(f'GetDropdownOptionsEvent failed: {e}')
 
 	if not options:
 		return ActionResult(
@@ -355,7 +424,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
 			f'that requires typing to search. Try using the input action instead.',
 		)
 
-	# ── Step 3: Match the target value ────────────────────────
+	# ── Step 4: Match the target value ────────────────────────
 	matched = _fuzzy_match_option(params.value, options)
 
 	if not matched:
@@ -365,17 +434,29 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
 			f'Available options: {available_texts}',
 		)
 
-	# ── Step 4: Click the matched option ──────────────────────
+	# ── Step 5: Click the matched option ──────────────────────
 	matched_text = matched.get('text', params.value)
 	try:
 		if dropdown_type == 'native_select':
-			# For native selects, use JavaScript to set value directly
-			result_json = await page.evaluate(_SELECT_NATIVE_JS, params.index, matched_text)
-			result = json.loads(result_json) if isinstance(result_json, str) else result_json
+			# For native selects, use JS to set value directly on the resolved node
+			result = await _call_function_on_node(
+				browser_session, node, _SELECT_NATIVE_ON_NODE_JS,
+				arguments=[{'value': matched_text}],
+			)
 		else:
-			# For custom dropdowns, click the option element
-			result_json = await page.evaluate(_CLICK_OPTION_JS, matched_text, dropdown_type)
-			result = json.loads(result_json) if isinstance(result_json, str) else result_json
+			# For custom dropdowns, try SelectDropdownOptionEvent first
+			try:
+				event = browser_session.event_bus.dispatch(
+					SelectDropdownOptionEvent(node=node, text=matched_text)
+				)
+				selection_data = await event.event_result(timeout=3.0, raise_if_none=False, raise_if_any=False)
+				if selection_data and isinstance(selection_data, dict) and selection_data.get('success'):
+					result = {'success': True, 'clicked': selection_data.get('selected_text', matched_text)}
+				else:
+					# Fallback: click the option via page-level JS
+					result = await _click_option_via_page_js(page, matched_text, dropdown_type)
+			except Exception:
+				result = await _click_option_via_page_js(page, matched_text, dropdown_type)
 	except Exception as e:
 		return ActionResult(error=f'Failed to select option "{matched_text}": {e}')
 
@@ -388,11 +469,12 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
 
 	clicked_text = result.get('clicked', matched_text) if isinstance(result, dict) else matched_text
 
-	# ── Step 5: Verify the selection ──────────────────────────
+	# ── Step 6: Verify the selection ──────────────────────────
 	await asyncio.sleep(0.3)  # Brief wait for UI update
 	try:
-		verify_json = await page.evaluate(_VERIFY_SELECTION_JS, params.index)
-		verify = json.loads(verify_json) if isinstance(verify_json, str) else verify_json
+		verify = await _call_function_on_node(
+			browser_session, node, _VERIFY_SELECTION_ON_NODE_JS
+		)
 		current = verify.get('value', '') if isinstance(verify, dict) else ''
 	except Exception:
 		current = ''
@@ -407,3 +489,73 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
 		extracted_content=memory,
 		include_extracted_content_only_once=False,
 	)
+
+
+# ── Helper: select via event bus for native selects ──────────────────
+
+async def _select_via_event_bus(
+	browser_session: BrowserSession,
+	node: EnhancedDOMTreeNode,
+	params: DomHandSelectParams,
+) -> ActionResult:
+	"""Use browser-use's GetDropdownOptionsEvent + SelectDropdownOptionEvent.
+
+	This path is preferred for native <select> elements since browser-use
+	handles all the change/input event dispatching correctly.
+	"""
+	# Get options
+	event = browser_session.event_bus.dispatch(GetDropdownOptionsEvent(node=node))
+	dropdown_data = await event.event_result(timeout=3.0, raise_if_none=True, raise_if_any=True)
+
+	if not dropdown_data or not isinstance(dropdown_data, dict):
+		raise ValueError('Failed to get dropdown options from event bus')
+
+	raw_options = dropdown_data.get('options', [])
+	if not raw_options:
+		raise ValueError('No options returned from event bus')
+
+	# Convert to our option format if needed
+	options = raw_options if isinstance(raw_options, list) else []
+	matched = _fuzzy_match_option(params.value, options)
+
+	if not matched:
+		available_texts = [opt.get('text', '') for opt in options[:20]]
+		return ActionResult(
+			error=f'No matching option found for "{params.value}". '
+			f'Available options: {available_texts}',
+		)
+
+	matched_text = matched.get('text', params.value)
+
+	# Select via event bus
+	event = browser_session.event_bus.dispatch(
+		SelectDropdownOptionEvent(node=node, text=matched_text)
+	)
+	selection_data = await event.event_result(timeout=3.0, raise_if_none=False, raise_if_any=True)
+
+	clicked_text = matched_text
+	if selection_data and isinstance(selection_data, dict):
+		clicked_text = selection_data.get('selected_text', matched_text)
+
+	memory = f'Selected "{clicked_text}" for dropdown at index {params.index}'
+	logger.info(f'DomHand select: {memory}')
+
+	return ActionResult(
+		extracted_content=memory,
+		include_extracted_content_only_once=False,
+	)
+
+
+# ── Helper: click option via page-level JS ───────────────────────────
+
+async def _click_option_via_page_js(page: Any, matched_text: str, dropdown_type: str) -> dict[str, Any]:
+	"""Click a dropdown option using page.evaluate with a global JS search.
+
+	This is the fallback when the event bus approach doesn't work. It searches
+	all visible option-like elements on the page (not tied to any specific
+	element index).
+	"""
+	raw_result = await page.evaluate(_CLICK_OPTION_JS, matched_text)
+	if isinstance(raw_result, str):
+		return json.loads(raw_result)
+	return raw_result if isinstance(raw_result, dict) else {'success': False, 'error': 'Unexpected result type'}

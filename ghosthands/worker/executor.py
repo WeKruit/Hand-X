@@ -384,17 +384,50 @@ Other rules:
 
 	# ── Status callback for cost tracking + VALET progress ───────
 	step_count = 0
+	last_cost_usd = 0.0
+	last_usage_input_tokens = 0
+	last_usage_output_tokens = 0
 
 	async def _on_status(status: dict) -> None:
-		nonlocal step_count
+		nonlocal step_count, last_cost_usd, last_usage_input_tokens, last_usage_output_tokens
 		step_count += 1
-		step_cost = status.get("step_cost", 0.0)
-		if step_cost > 0:
-			cost_tracker.record_step(
-				input_tokens=status.get("input_tokens", 0),
-				output_tokens=status.get("output_tokens", 0),
-				model=status.get("model", settings.agent_model),
-			)
+		current_cost_usd = float(status.get("cost_usd") or 0.0)
+		raw_step_cost = status.get("step_cost")
+		step_cost = float(raw_step_cost) if raw_step_cost is not None else max(current_cost_usd - last_cost_usd, 0.0)
+
+		input_tokens: int | None = None
+		output_tokens: int | None = None
+		if raw_step_cost is not None:
+			if status.get("input_tokens") is not None and status.get("output_tokens") is not None:
+				input_tokens = int(status["input_tokens"])
+				output_tokens = int(status["output_tokens"])
+		else:
+			usage_input_tokens = status.get("usage_input_tokens")
+			usage_output_tokens = status.get("usage_output_tokens")
+			if usage_input_tokens is not None and usage_output_tokens is not None:
+				input_tokens = max(int(usage_input_tokens) - last_usage_input_tokens, 0)
+				output_tokens = max(int(usage_output_tokens) - last_usage_output_tokens, 0)
+
+		if input_tokens is not None and output_tokens is not None and (step_cost > 0 or input_tokens > 0 or output_tokens > 0):
+			try:
+				cost_tracker.track_step(
+					step=step_count,
+					tokens_in=input_tokens,
+					tokens_out=output_tokens,
+					model=status.get("model", settings.agent_model),
+				)
+			except KeyError:
+				log.warning(
+					"executor.cost_tracking_model_unknown",
+					model=status.get("model", settings.agent_model),
+					step=step_count,
+				)
+
+		last_cost_usd = current_cost_usd
+		if status.get("usage_input_tokens") is not None:
+			last_usage_input_tokens = int(status["usage_input_tokens"])
+		if status.get("usage_output_tokens") is not None:
+			last_usage_output_tokens = int(status["usage_output_tokens"])
 
 	log.info("executor.launching_agent", platform=platform, headless=settings.headless)
 
