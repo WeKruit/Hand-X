@@ -723,6 +723,127 @@ class TestNormalizeProfileDefaults:
 
 
 # ---------------------------------------------------------------------------
+# Test 6b — normalize_profile_defaults: demographic defaults warning (S-10)
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeProfileDefaultsWarning:
+    """When sensitive demographic fields receive defaults, a warning status
+    event must be emitted via the JSONL protocol."""
+
+    def test_emits_warning_when_sensitive_fields_defaulted(self):
+        """Minimal profile missing all sensitive fields -> emit_status called."""
+        from unittest.mock import patch
+
+        from ghosthands.cli import normalize_profile_defaults
+
+        raw = {"first_name": "Jane", "last_name": "Doe", "email": "jane@example.com"}
+        with patch("ghosthands.output.jsonl.emit_status") as mock_emit:
+            normalize_profile_defaults(raw)
+
+        mock_emit.assert_called_once()
+        msg = mock_emit.call_args[0][0]
+        assert "gender" in msg
+        assert "race_ethnicity" in msg
+        assert "veteran_status" in msg
+        assert "disability_status" in msg
+        assert "work_authorization" in msg
+        assert "visa_sponsorship" in msg
+        assert "verify before submitting" in msg
+
+    def test_no_warning_when_all_sensitive_fields_provided(self):
+        """Profile with all sensitive fields filled -> no emit_status call."""
+        from unittest.mock import patch
+
+        from ghosthands.cli import normalize_profile_defaults
+
+        raw = {
+            "first_name": "Jane",
+            "gender": "Female",
+            "race_ethnicity": "White",
+            "veteran_status": "I am a protected veteran",
+            "disability_status": "Yes, I Have A Disability",
+            "work_authorization": "No",
+            "visa_sponsorship": "Yes",
+        }
+        with patch("ghosthands.output.jsonl.emit_status") as mock_emit:
+            normalize_profile_defaults(raw)
+
+        mock_emit.assert_not_called()
+
+    def test_warning_only_lists_missing_sensitive_fields(self):
+        """Profile with some sensitive fields -> warning only lists the missing ones."""
+        from unittest.mock import patch
+
+        from ghosthands.cli import normalize_profile_defaults
+
+        raw = {
+            "first_name": "Jane",
+            "gender": "Female",
+            "work_authorization": "Yes",
+            # Missing: race_ethnicity, veteran_status, disability_status, visa_sponsorship
+        }
+        with patch("ghosthands.output.jsonl.emit_status") as mock_emit:
+            normalize_profile_defaults(raw)
+
+        mock_emit.assert_called_once()
+        msg = mock_emit.call_args[0][0]
+        # Should NOT list provided fields
+        assert "gender" not in msg
+        assert "work_authorization" not in msg
+        # Should list missing sensitive fields
+        assert "race_ethnicity" in msg
+        assert "veteran_status" in msg
+        assert "disability_status" in msg
+        assert "visa_sponsorship" in msg
+
+    def test_warning_excludes_non_sensitive_defaults(self):
+        """Non-sensitive defaults (phone_device_type, phone_country_code)
+        must not appear in the warning message."""
+        from unittest.mock import patch
+
+        from ghosthands.cli import normalize_profile_defaults
+
+        raw = {
+            "first_name": "Jane",
+            # All sensitive fields provided
+            "gender": "Female",
+            "race_ethnicity": "White",
+            "veteran_status": "I am a protected veteran",
+            "disability_status": "Yes, I Have A Disability",
+            "work_authorization": "No",
+            "visa_sponsorship": "Yes",
+            # Non-sensitive fields missing — should NOT trigger warning
+        }
+        with patch("ghosthands.output.jsonl.emit_status") as mock_emit:
+            result = normalize_profile_defaults(raw)
+
+        # Defaults were applied for non-sensitive fields
+        assert result["phone_device_type"] == "Mobile"
+        assert result["phone_country_code"] == "+1"
+        # But no warning emitted
+        mock_emit.assert_not_called()
+
+    def test_emit_failure_does_not_raise(self):
+        """If emit_status raises, the function must still return normally."""
+        from unittest.mock import patch
+
+        from ghosthands.cli import normalize_profile_defaults
+
+        raw = {"first_name": "Jane"}
+        with patch(
+            "ghosthands.output.jsonl.emit_status",
+            side_effect=RuntimeError("pipe broken"),
+        ):
+            # Should not raise
+            result = normalize_profile_defaults(raw)
+
+        # Defaults still applied
+        assert result["gender"] == "Male"
+        assert result["race_ethnicity"] == "Asian (Not Hispanic or Latino)"
+
+
+# ---------------------------------------------------------------------------
 # Test 7 — get_field_counts
 # ---------------------------------------------------------------------------
 
