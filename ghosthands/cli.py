@@ -993,9 +993,10 @@ def main() -> None:
     # This saves the real stdout fd for JSONL and redirects sys.stdout
     # to stderr so stray print() calls from any library are safe.
     if is_jsonl:
-        from ghosthands.output.jsonl import install_stdout_guard
+        from ghosthands.output.jsonl import emit_handshake, install_stdout_guard
 
         install_stdout_guard()
+        emit_handshake()
 
     _setup_logging()
 
