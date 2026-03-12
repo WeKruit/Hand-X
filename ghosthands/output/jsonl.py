@@ -189,6 +189,23 @@ def emit_browser_ready(cdp_url: str) -> None:
     emit_event("browser_ready", cdpUrl=cdp_url)
 
 
+def emit_account_created(
+    platform: str,
+    email: str,
+    password: str,
+    *,
+    url: str = "",
+) -> None:
+    """Emit when a new ATS platform account is created during automation."""
+    emit_event(
+        "account_created",
+        platform=platform,
+        email=email,
+        password=password,
+        url=url or None,
+    )
+
+
 def emit_awaiting_review(message: str = "Application filled — waiting for review") -> None:
     """Emit awaiting_review event when browser is open for user review."""
     emit_event("awaiting_review", message=message)

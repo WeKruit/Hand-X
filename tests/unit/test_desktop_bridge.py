@@ -176,6 +176,38 @@ class TestEmitAwaitingReview:
 
 
 # ---------------------------------------------------------------------------
+# Test 2b — emit_account_created
+# ---------------------------------------------------------------------------
+
+
+class TestEmitAccountCreated:
+    def test_emits_correct_event_type(self):
+        from ghosthands.output.jsonl import emit_account_created
+
+        events = _capture_jsonl_output(emit_account_created, "workday", "user@test.com", "pass123")
+        assert len(events) == 1
+        assert events[0]["event"] == "account_created"
+
+    def test_includes_all_fields(self):
+        from ghosthands.output.jsonl import emit_account_created
+
+        events = _capture_jsonl_output(
+            emit_account_created, "workday", "user@test.com", "pass123", url="https://workday.com"
+        )
+        e = events[0]
+        assert e["platform"] == "workday"
+        assert e["email"] == "user@test.com"
+        assert e["password"] == "pass123"
+        assert e["url"] == "https://workday.com"
+
+    def test_url_omitted_when_empty(self):
+        from ghosthands.output.jsonl import emit_account_created
+
+        events = _capture_jsonl_output(emit_account_created, "greenhouse", "user@test.com", "pass")
+        assert "url" not in events[0]
+
+
+# ---------------------------------------------------------------------------
 # Test 3 — _listen_for_cancel
 # ---------------------------------------------------------------------------
 
@@ -316,6 +348,7 @@ class TestEventContract:
     def _emit_all_events() -> list[dict]:
         """Emit one of every event type and return the parsed JSON objects."""
         from ghosthands.output.jsonl import (
+            emit_account_created,
             emit_browser_ready,
             emit_awaiting_review,
             emit_cost,
@@ -328,6 +361,7 @@ class TestEventContract:
         )
 
         emitters = [
+            lambda: emit_account_created("workday", "user@test.com", "pass123"),
             lambda: emit_browser_ready("http://localhost:9222"),
             lambda: emit_awaiting_review("Please review"),
             lambda: emit_status("Starting", step=1, max_steps=10, job_id="j1"),
@@ -473,6 +507,7 @@ class TestEventContract:
     def test_all_known_event_types(self):
         """Smoke-test: all events produced by _emit_all_events have recognised types."""
         known_types = {
+            "account_created",
             "browser_ready",
             "awaiting_review",
             "status",

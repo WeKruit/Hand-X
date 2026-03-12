@@ -77,6 +77,11 @@ class Settings(BaseSettings):
         description="Allowed ATS domains for navigation",
     )
 
+    # --- Desktop bridge identifiers ---
+    user_id: str = Field("", description="User ID for desktop bridge tracking")
+    job_id: str = Field("", description="Job ID for desktop bridge tracking")
+    lease_id: str = Field("", description="Lease ID for desktop bridge tracking")
+
     # --- Browser ---
     headless: bool = Field(True, description="Run browser headless")
     browser_timeout: int = Field(30_000, description="Browser operation timeout in ms")
