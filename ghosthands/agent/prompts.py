@@ -169,11 +169,12 @@ def _format_profile_summary(resume_profile: dict) -> str:
 	flat_fields = {
 		"age": "Age",
 		"gender": "Gender",
-		"race": "Race",
+		"race_ethnicity": "Race/Ethnicity",
 		"years_experience": "Years of experience",
-		"Veteran_status": "Veteran status",
+		"veteran_status": "Veteran status",
 		"disability_status": "Disability status",
 		"hispanic_latino": "Hispanic/Latino",
+		"visa_sponsorship": "Visa sponsorship",
 	}
 	for key, label in flat_fields.items():
 		val = resume_profile.get(key)

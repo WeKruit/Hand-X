@@ -8,6 +8,7 @@ listeners for cancel and review workflows.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import concurrent.futures
 import contextlib
 import json
@@ -24,8 +25,7 @@ stdin_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="hand-x-stdin",
 )
-# Mark the worker thread as daemon so it dies with the process (R-4 fix)
-stdin_executor._thread_name_prefix = "hand-x-stdin"
+atexit.register(stdin_executor.shutdown, wait=False, cancel_futures=True)
 
 
 async def read_stdin_line(timeout: float | None = None) -> str:
@@ -77,9 +77,15 @@ async def listen_for_cancel(
         except asyncio.CancelledError:
             raise
         except Exception:
+            await asyncio.sleep(0.1)
             continue
 
         if not line:
+            # EOF — stdin closed (Electron died); treat as cancellation
+            logger.warning("stdin_eof_treating_as_cancel")
+            if cancel_requested is not None:
+                cancel_requested.set()
+            agent.state.stopped = True
             break
 
         line = line.strip()
@@ -100,7 +106,7 @@ async def listen_for_cancel(
             break
 
 
-async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> None:
+async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> str:
     """Wait for a command from Electron on stdin.
 
     Expected commands:
@@ -110,6 +116,11 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> N
 
     Times out after 30 minutes if no command is received.
 
+    Returns
+    -------
+    str
+        One of ``"complete"``, ``"cancel"``, ``"timeout"``, or ``"eof"``.
+
     NOTE: Does NOT emit a second ``done`` event.  The main flow already
     emitted ``done`` before entering review.  Emitting another would
     confuse the Desktop App event handler (R-1 fix).
@@ -118,6 +129,7 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> N
 
     review_timeout_seconds = 30 * 60  # 30 minutes
     start_time = _time.monotonic()
+    result = "eof"
 
     try:
         while True:
@@ -130,6 +142,7 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> N
                     fatal=True,
                     job_id=job_id,
                 )
+                result = "timeout"
                 break
 
             try:
@@ -138,6 +151,7 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> N
                 continue
 
             if not line:
+                result = "eof"
                 break  # stdin closed -- Electron died
 
             line = line.strip()
@@ -154,13 +168,17 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> N
             if cmd_type == "complete_review":
                 logger.info("review_completed", job_id=job_id, lease_id=lease_id)
                 emit_status("Review complete -- closing browser", job_id=job_id)
+                result = "complete"
                 break
             elif cmd_type in {"cancel", "cancel_job"}:
                 logger.info("review_cancelled", job_id=job_id, lease_id=lease_id)
                 emit_status("Review cancelled by user", job_id=job_id)
+                result = "cancel"
                 break
     except (EOFError, KeyboardInterrupt):
         pass
     finally:
         with contextlib.suppress(Exception):
             await browser.close()
+
+    return result
