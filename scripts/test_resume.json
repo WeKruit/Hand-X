@@ -1,0 +1,64 @@
+{
+	"first_name": "Test",
+	"last_name": "Applicant",
+	"full_name": "Test Applicant",
+	"email": "test.applicant@example.com",
+	"phone": "5551234567",
+	"phone_device_type": "Mobile",
+	"phone_country_code": "+1",
+	"address": {
+		"street": "123 Main St",
+		"city": "San Francisco",
+		"state": "CA",
+		"zip": "94105",
+		"country": "United States of America"
+	},
+	"linkedin_url": "https://linkedin.com/in/testapplicant",
+	"website_url": "https://testapplicant.dev",
+	"current_company": "Acme Corp",
+	"current_title": "Senior Software Engineer",
+	"summary": "Senior software engineer with 5+ years of experience building scalable web applications. Proficient in Python, TypeScript, React, and cloud infrastructure. Passionate about developer tools and automation.",
+	"education": [
+		{
+			"school": "University of California, Berkeley",
+			"degree": "Bachelor of Science",
+			"field_of_study": "Computer Science",
+			"gpa": "3.7",
+			"start_date": "2015-08",
+			"end_date": "2019-05"
+		}
+	],
+	"experience": [
+		{
+			"company": "Acme Corp",
+			"title": "Senior Software Engineer",
+			"location": "San Francisco, CA",
+			"currently_work_here": true,
+			"start_date": "2022-01",
+			"end_date": "",
+			"description": "Led development of microservices architecture serving 10M+ requests/day. Built CI/CD pipelines with GitHub Actions. Mentored 3 junior engineers."
+		},
+		{
+			"company": "StartupXYZ",
+			"title": "Software Engineer",
+			"location": "San Francisco, CA",
+			"currently_work_here": false,
+			"start_date": "2019-06",
+			"end_date": "2021-12",
+			"description": "Full-stack development with React and Node.js. Implemented real-time collaboration features. Reduced API latency by 40%."
+		}
+	],
+	"skills": ["Python", "TypeScript", "React", "Node.js", "PostgreSQL", "AWS", "Docker", "Kubernetes", "GraphQL", "CI/CD"],
+	"certifications": ["AWS Solutions Architect Associate"],
+	"languages": ["English", "Mandarin"],
+	"projects": [],
+	"awards": [],
+	"volunteer_work": [],
+	"total_years_experience": 5,
+	"work_authorization": "Yes",
+	"visa_sponsorship": "No",
+	"veteran_status": "I am not a protected veteran",
+	"disability_status": "No, I Don't Have A Disability",
+	"gender": "Male",
+	"race_ethnicity": "Asian (Not Hispanic or Latino)"
+}
