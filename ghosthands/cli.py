@@ -249,8 +249,6 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         emit_status,
     )
 
-    emit_status("Hand-X engine initialized", job_id=args.job_id)
-
     # -- Load profile -------------------------------------------------------
     try:
         profile = _load_profile(args)
@@ -269,9 +267,15 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     # -- Import heavy deps after env setup ----------------------------------
     from browser_use import Agent, BrowserProfile, BrowserSession, Tools
 
-    emit_status("Setting up agent...", job_id=args.job_id)
-
     app_settings = _load_runtime_settings()
+
+    # -- Resolve job_id / lease_id: CLI args take precedence, env fallback ---
+    job_id = args.job_id or app_settings.job_id
+    lease_id = args.lease_id or app_settings.lease_id
+
+    emit_status("Hand-X engine initialized", job_id=job_id)
+    emit_status("Setting up agent...", job_id=job_id)
+
     _warn_if_proxy_overrides_direct_keys(args, app_settings)
 
     from ghosthands.llm.client import get_chat_model
@@ -284,9 +288,9 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         from ghosthands.actions import register_domhand_actions
 
         register_domhand_actions(tools)
-        emit_status("DomHand actions registered", job_id=args.job_id)
+        emit_status("DomHand actions registered", job_id=job_id)
     except Exception as e:
-        emit_status(f"DomHand unavailable: {e}, using generic actions", job_id=args.job_id)
+        emit_status(f"DomHand unavailable: {e}, using generic actions", job_id=job_id)
 
     # -- Platform detection -------------------------------------------------
     platform = "generic"
@@ -320,7 +324,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         f"Starting application: {args.job_url}",
         step=1,
         max_steps=args.max_steps,
-        job_id=args.job_id,
+        job_id=job_id,
     )
 
     # -- Step hooks for live JSONL events -----------------------------------
@@ -333,7 +337,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             goal or f"Step {step}...",
             step=step,
             max_steps=args.max_steps,
-            job_id=args.job_id,
+            job_id=job_id,
         )
 
     async def _on_step_end(ag: Agent) -> None:
@@ -348,7 +352,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         # Budget check
         if usage and usage.total_cost and usage.total_cost >= args.max_budget:
             ag.state.stopped = True
-            emit_error("Budget exceeded", fatal=False, job_id=args.job_id)
+            emit_error("Budget exceeded", fatal=False, job_id=job_id)
 
     # -- Run ----------------------------------------------------------------
     try:
@@ -404,8 +408,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             emit_done(
                 success=False,
                 message="Job cancelled by user",
-                job_id=args.job_id,
-                lease_id=args.lease_id,
+                job_id=job_id,
+                lease_id=lease_id,
                 result_data={
                     "success": False,
                     "steps": total_steps,
@@ -440,25 +444,25 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 success=True,
                 message="Application filled -- browser open for review",
                 fields_filled=total_steps,
-                job_id=args.job_id,
-                lease_id=args.lease_id,
+                job_id=job_id,
+                lease_id=lease_id,
                 result_data=result_data,
             )
             emit_awaiting_review()
-            await _wait_for_review_command(browser, args.job_id, args.lease_id)
+            await _wait_for_review_command(browser, job_id, lease_id)
         else:
             emit_done(
                 success=False,
                 message=blocker or final_result or "Agent did not complete successfully",
-                job_id=args.job_id,
-                lease_id=args.lease_id,
+                job_id=job_id,
+                lease_id=lease_id,
                 result_data=result_data,
             )
             await browser.close()
             sys.exit(1)
 
     except Exception as e:
-        emit_error(str(e), fatal=True, job_id=args.job_id)
+        emit_error(str(e), fatal=True, job_id=job_id)
         with contextlib.suppress(Exception):
             await browser.close()
         sys.exit(1)
