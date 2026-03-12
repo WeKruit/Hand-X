@@ -36,7 +36,8 @@ if [ -z "${GOOGLE_API_KEY:-}" ]; then
 fi
 
 # ── Parse args ────────────────────────────────────────────────
-JOB_URL="${1:-https://job-boards.greenhouse.io/starburst/jobs/5123053008}"
+# JOB_URL="${1:-https://job-boards.greenhouse.io/starburst/jobs/5123053008}"
+JOB_URL="${1:-https://jobs.smartrecruiters.com/oneclick-ui/company/Laxir1/publication/79d18a58-32ce-485c-80b4-f04058efa20b?dcr_ci=Laxir1}"
 shift 2>/dev/null || true
 
 echo "══════════════════════════════════════════════════════════"

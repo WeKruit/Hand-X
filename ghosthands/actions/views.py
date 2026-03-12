@@ -47,6 +47,23 @@ class DomHandFillParams(BaseModel):
 		None,
 		description='Optional section name to fill. If null, fills all visible sections.',
 	)
+	heading_boundary: str | None = Field(
+		None,
+		description=(
+			'Restrict filling to fields BELOW this heading and ABOVE the next sibling heading. '
+			'Use for repeater entries, e.g. heading_boundary="Work Experience 2" to fill only '
+			'the second work experience entry without touching others.'
+		),
+	)
+	entry_data: dict | None = Field(
+		None,
+		description=(
+			'Structured data for a single repeater entry. When provided, this overrides the '
+			'full profile for LLM answer generation. Example: '
+			'{"title": "Software Engineer", "company": "Google", "start_date": "06/2022", '
+			'"end_date": "Present", "description": "Built distributed systems..."}'
+		),
+	)
 
 
 class DomHandSelectParams(BaseModel):
@@ -88,6 +105,47 @@ def is_placeholder_value(value: str) -> bool:
 def normalize_name(s: str) -> str:
 	"""Normalize a field name for comparison: strip asterisks/underscores, collapse whitespace, lowercase."""
 	return re.sub(r'\s+', ' ', s.replace('*', '').replace('_', ' ')).strip().lower()
+
+
+def split_dropdown_value_hierarchy(value: str) -> list[str]:
+	"""Split hierarchical dropdown labels such as "Category > Option" into ordered segments."""
+	raw = re.sub(r'\s+', ' ', (value or '').strip())
+	if not raw:
+		return []
+	parts = [part.strip() for part in re.split(r'\s*(?:>|→)\s*', raw) if part.strip()]
+	return parts or [raw]
+
+
+def generate_dropdown_search_terms(value: str) -> list[str]:
+	"""Build generic fallback search terms for searchable dropdowns and typeaheads."""
+	raw = re.sub(r'\s+', ' ', (value or '').strip())
+	if not raw:
+		return []
+
+	seen: set[str] = set()
+	terms: list[str] = []
+	stop_words = {'of', 'and', 'in', 'the', 'a', 'an', 'for', 'to', 'with', 'or', 'at', 'by'}
+
+	def add(term: str) -> None:
+		cleaned = re.sub(r'\s+', ' ', term.strip())
+		if not cleaned:
+			return
+		key = normalize_name(cleaned)
+		if not key or key in seen:
+			return
+		seen.add(key)
+		terms.append(cleaned)
+
+	add(raw)
+	for part in split_dropdown_value_hierarchy(raw):
+		add(part)
+		words = [word for word in re.split(r'\s+', part) if len(word) > 1]
+		meaningful_words = [word for word in words if word.lower() not in stop_words]
+		if len(meaningful_words) > 1:
+			for word in meaningful_words:
+				add(word)
+
+	return terms
 
 
 def get_stable_field_key(field: FormField) -> str:

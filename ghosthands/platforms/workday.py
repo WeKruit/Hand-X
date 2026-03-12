@@ -174,6 +174,12 @@ WORKDAY_GUARDRAILS: list[str] = [
 		"Avoid the 'Apply Manually' link on job listing pages — it leads to a "
 		"different, often broken flow. Click the main 'Apply' button instead."
 	),
+	(
+		"If the Workday start dialog offers a same-site option like "
+		"'Autofill with Resume' or 'Apply with Resume', prefer that over "
+		"'Apply Manually'. Never choose external apply/import paths such as "
+		"LinkedIn, Indeed, Google, or other third-party account flows."
+	),
 	# Form filling rules
 	(
 		"ONE ATTEMPT PER TEXT FIELD: Type into a text field at most once. "
