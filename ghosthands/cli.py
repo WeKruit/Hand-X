@@ -143,6 +143,13 @@ def _setup_logging() -> None:
 
 def _load_profile(args: argparse.Namespace) -> dict:
     """Load applicant profile from --profile or --test-data."""
+
+    def _validate_profile(profile: Any) -> dict:
+        """Assert the parsed value is a JSON object (dict), not a list or scalar."""
+        if not isinstance(profile, dict):
+            raise ValueError("Profile must be a JSON object")
+        return profile
+
     # --profile takes precedence (inline JSON or @filepath)
     if args.profile:
         raw = args.profile
@@ -150,8 +157,8 @@ def _load_profile(args: argparse.Namespace) -> dict:
             path = Path(raw[1:])
             if not path.exists():
                 raise FileNotFoundError(f"Profile file not found: {path}")
-            return json.loads(path.read_text())
-        return json.loads(raw)
+            return _validate_profile(json.loads(path.read_text()))
+        return _validate_profile(json.loads(raw))
 
     # --test-data: load from JSON file
     if args.test_data:
@@ -164,14 +171,14 @@ def _load_profile(args: argparse.Namespace) -> dict:
         try:
             from ghosthands.integrations.resume_loader import load_resume_from_file
 
-            return load_resume_from_file(str(path))
+            return _validate_profile(load_resume_from_file(str(path)))
         except Exception:
-            return data
+            return _validate_profile(data)
 
     # Environment variable fallback (for desktop bridge)
     profile_text = os.environ.get("GH_USER_PROFILE_TEXT", "")
     if profile_text:
-        return json.loads(profile_text)
+        return _validate_profile(json.loads(profile_text))
 
     raise ValueError("Either --profile, --test-data, or GH_USER_PROFILE_TEXT env var is required")
 
@@ -359,8 +366,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     # -- Credentials --------------------------------------------------------
     sensitive_data = _resolve_sensitive_data(app_settings, embedded_credentials, platform=platform)
 
+    # -- Domain lockdown ----------------------------------------------------
+    from ghosthands.security.domain_lockdown import DomainLockdown
+
+    lockdown = DomainLockdown(job_url=args.job_url, platform=platform)
+    allowed_domains = lockdown.get_allowed_domains()
+
     # -- Browser ------------------------------------------------------------
-    browser_profile = BrowserProfile(headless=args.headless, keep_alive=True)
+    browser_profile = BrowserProfile(headless=args.headless, keep_alive=True, allowed_domains=allowed_domains)
     browser = BrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
@@ -495,18 +508,47 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         }
 
         if success:
-            emit_done(
-                success=True,
-                message="Application filled -- browser open for review",
-                fields_filled=filled_count,
-                fields_failed=failed_count,
-                job_id=job_id,
-                lease_id=lease_id,
-                result_data=result_data,
-            )
+            # I-02/U-01: emit status (not done) before review so the terminal
+            # event is only sent once, after the user has actually reviewed.
+            emit_status("Application filled — awaiting review", job_id=job_id)
             emit_awaiting_review()
             review_result = await wait_for_review_command(browser, job_id, lease_id)
-            if review_result in ("cancel", "eof"):
+
+            # I-03/U-02: emit terminal done event based on review outcome.
+            if review_result == "complete":
+                emit_done(
+                    success=True,
+                    message="Application submitted — review completed",
+                    fields_filled=filled_count,
+                    fields_failed=failed_count,
+                    job_id=job_id,
+                    lease_id=lease_id,
+                    result_data=result_data,
+                )
+            elif review_result == "cancel":
+                emit_done(
+                    success=False,
+                    message="Review cancelled by user",
+                    fields_filled=filled_count,
+                    fields_failed=failed_count,
+                    job_id=job_id,
+                    lease_id=lease_id,
+                    result_data={**result_data, "success": False, "cancelled": True},
+                )
+                sys.exit(1)
+            elif review_result == "timeout":
+                # wait_for_review_command already emitted error(fatal); just exit.
+                sys.exit(1)
+            else:  # "eof"
+                emit_done(
+                    success=False,
+                    message="Desktop disconnected",
+                    fields_filled=filled_count,
+                    fields_failed=failed_count,
+                    job_id=job_id,
+                    lease_id=lease_id,
+                    result_data={**result_data, "success": False},
+                )
                 sys.exit(1)
         else:
             emit_done(

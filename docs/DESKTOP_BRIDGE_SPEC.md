@@ -23,24 +23,33 @@ All stdout output is machine-readable JSONL. Hand-X installs a stdout guard (`in
 
 ## 2. JSONL Event Contract (stdout)
 
-Every event is a single JSON object on one line. Every event contains at minimum `type` (string) and `timestamp` (integer, Unix epoch milliseconds). Fields with `null` or empty-string values are omitted from the wire format to reduce payload size.
+Every event is a single JSON object on one line. Every event contains at minimum `event` (string discriminator) and `timestamp` (integer, Unix epoch milliseconds). Fields with `null` or empty-string values are omitted from the wire format to reduce payload size.
 
 ### 2.1 TypeScript Type Definition
 
 ```typescript
 type HandXEvent =
+  | HandshakeEvent
   | StatusEvent
   | FieldFilledEvent
   | FieldFailedEvent
   | ProgressEvent
   | BrowserReadyEvent
   | AwaitingReviewEvent
+  | AccountCreatedEvent
   | DoneEvent
   | ErrorEvent
   | CostEvent;
 
+interface HandshakeEvent {
+  event: 'handshake';
+  protocol_version: number;  // Current value: 1
+  min_desktop_version: string; // Minimum compatible desktop app version, e.g. "0.1.0"
+  timestamp: number;
+}
+
 interface StatusEvent {
-  type: 'status';
+  event: 'status';
   message: string;
   step?: number;        // Current agent step (1-indexed)
   maxSteps?: number;    // Configured step limit
@@ -49,7 +58,7 @@ interface StatusEvent {
 }
 
 interface FieldFilledEvent {
-  type: 'field_filled';
+  event: 'field_filled';
   field: string;        // Label/name of the form field
   value: string;        // Value that was set (may be truncated for display)
   method: string;       // "domhand" | "browser-use" | "manual"
@@ -57,37 +66,47 @@ interface FieldFilledEvent {
 }
 
 interface FieldFailedEvent {
-  type: 'field_failed';
+  event: 'field_failed';
   field: string;        // Label/name of the form field
-  error: string;        // Human-readable failure reason
+  reason: string;       // Human-readable failure reason
   timestamp: number;
 }
 
 interface ProgressEvent {
-  type: 'progress';
-  filled: number;       // Cumulative fields successfully filled
-  total: number;        // Cumulative fields attempted
-  round: number;        // DomHand fill round (resets on page navigation)
+  event: 'progress';
+  step: number;         // Current agent step number
+  maxSteps: number;     // Configured step limit
+  description?: string; // Human-readable description of current progress
   timestamp: number;
 }
 
 interface BrowserReadyEvent {
-  type: 'browser_ready';
+  event: 'browser_ready';
   cdpUrl: string;       // CDP WebSocket URL, e.g. "ws://127.0.0.1:9222/devtools/browser/..."
   timestamp: number;
 }
 
 interface AwaitingReviewEvent {
-  type: 'awaiting_review';
+  event: 'awaiting_review';
   message: string;      // Human-readable description, e.g. "Application filled -- browser open for review"
   timestamp: number;
 }
 
+interface AccountCreatedEvent {
+  event: 'account_created';
+  platform: string;     // ATS platform name, e.g. "workday", "greenhouse"
+  email: string;        // Email address used to create the account
+  password: string;     // Password used to create the account
+  url?: string;         // URL of the account creation page (if available)
+  timestamp: number;
+}
+
 interface DoneEvent {
-  type: 'done';
+  event: 'done';
   success: boolean;
   message: string;
   fields_filled?: number;
+  fields_failed?: number;
   jobId?: string;
   leaseId?: string;
   resultData?: {
@@ -103,7 +122,7 @@ interface DoneEvent {
 }
 
 interface ErrorEvent {
-  type: 'error';
+  event: 'error';
   message: string;
   fatal: boolean;       // true = process will exit; false = recoverable
   jobId?: string;
@@ -111,7 +130,7 @@ interface ErrorEvent {
 }
 
 interface CostEvent {
-  type: 'cost';
+  event: 'cost';
   total_usd: number;       // Cumulative LLM spend (USD), 6 decimal places
   prompt_tokens: number;   // Cumulative input tokens
   completion_tokens: number; // Cumulative output tokens
@@ -129,8 +148,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 @dataclass(frozen=True)
+class HandshakeEvent:
+    event: str = "handshake"      # literal "handshake"
+    protocol_version: int = 1
+    min_desktop_version: str = "0.1.0"
+    timestamp: int = 0            # set by emit_event()
+
+@dataclass(frozen=True)
 class StatusEvent:
-    type: str = "status"          # literal "status"
+    event: str = "status"         # literal "status"
     message: str = ""
     step: int | None = None
     maxSteps: int | None = None   # camelCase to match wire format
@@ -139,7 +165,7 @@ class StatusEvent:
 
 @dataclass(frozen=True)
 class FieldFilledEvent:
-    type: str = "field_filled"
+    event: str = "field_filled"
     field: str = ""
     value: str = ""
     method: str = "domhand"
@@ -147,37 +173,47 @@ class FieldFilledEvent:
 
 @dataclass(frozen=True)
 class FieldFailedEvent:
-    type: str = "field_failed"
+    event: str = "field_failed"
     field: str = ""
-    error: str = ""
+    reason: str = ""              # wire key is "reason", not "error"
     timestamp: int = 0
 
 @dataclass(frozen=True)
 class ProgressEvent:
-    type: str = "progress"
-    filled: int = 0
-    total: int = 0
-    round: int = 1
+    event: str = "progress"
+    step: int = 0                 # current agent step number
+    maxSteps: int = 0             # camelCase to match wire format
+    description: str = ""        # omitted from wire if empty
     timestamp: int = 0
 
 @dataclass(frozen=True)
 class BrowserReadyEvent:
-    type: str = "browser_ready"
+    event: str = "browser_ready"
     cdpUrl: str = ""
     timestamp: int = 0
 
 @dataclass(frozen=True)
 class AwaitingReviewEvent:
-    type: str = "awaiting_review"
+    event: str = "awaiting_review"
     message: str = ""
     timestamp: int = 0
 
 @dataclass(frozen=True)
+class AccountCreatedEvent:
+    event: str = "account_created"
+    platform: str = ""
+    email: str = ""
+    password: str = ""
+    url: str | None = None
+    timestamp: int = 0
+
+@dataclass(frozen=True)
 class DoneEvent:
-    type: str = "done"
+    event: str = "done"
     success: bool = False
     message: str = ""
     fields_filled: int = 0
+    fields_failed: int = 0
     jobId: str | None = None
     leaseId: str | None = None
     resultData: dict[str, Any] | None = None
@@ -185,7 +221,7 @@ class DoneEvent:
 
 @dataclass(frozen=True)
 class ErrorEvent:
-    type: str = "error"
+    event: str = "error"
     message: str = ""
     fatal: bool = False
     jobId: str | None = None
@@ -193,7 +229,7 @@ class ErrorEvent:
 
 @dataclass(frozen=True)
 class CostEvent:
-    type: str = "cost"
+    event: str = "cost"
     total_usd: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -205,32 +241,35 @@ class CostEvent:
 Each line is compact JSON with no whitespace padding (uses `separators=(",",":")`) followed by a newline character (`\n`).
 
 ```jsonl
-{"type":"status","message":"Hand-X engine initialized","jobId":"abc-123","timestamp":1710288000000}
-{"type":"status","message":"Setting up agent...","jobId":"abc-123","timestamp":1710288001200}
-{"type":"status","message":"DomHand actions registered","jobId":"abc-123","timestamp":1710288001500}
-{"type":"browser_ready","cdpUrl":"ws://127.0.0.1:9222/devtools/browser/a1b2c3d4","timestamp":1710288003000}
-{"type":"status","message":"Starting application: https://boards.greenhouse.io/example/jobs/123","step":1,"maxSteps":50,"jobId":"abc-123","timestamp":1710288004000}
-{"type":"field_filled","field":"First Name","value":"Jane","method":"domhand","timestamp":1710288010000}
-{"type":"field_filled","field":"Last Name","value":"Doe","method":"domhand","timestamp":1710288010050}
-{"type":"field_failed","field":"Phone Type","error":"No matching option found","timestamp":1710288010100}
-{"type":"progress","filled":2,"total":3,"round":1,"timestamp":1710288010150}
-{"type":"cost","total_usd":0.003421,"prompt_tokens":1200,"completion_tokens":350,"timestamp":1710288015000}
-{"type":"status","message":"Reviewing filled fields and fixing failures","step":2,"maxSteps":50,"jobId":"abc-123","timestamp":1710288016000}
-{"type":"cost","total_usd":0.007890,"prompt_tokens":2800,"completion_tokens":720,"timestamp":1710288025000}
-{"type":"done","success":true,"message":"Application filled -- browser open for review","fields_filled":15,"jobId":"abc-123","leaseId":"lease-456","resultData":{"success":true,"steps":8,"costUsd":0.00789,"finalResult":"All fields filled","blocker":null,"platform":"greenhouse"},"timestamp":1710288030000}
-{"type":"awaiting_review","message":"Browser open for review. Send complete_review or cancel.","timestamp":1710288030100}
+{"event":"handshake","protocol_version":1,"min_desktop_version":"0.1.0","timestamp":1710287999000}
+{"event":"status","message":"Hand-X engine initialized","jobId":"abc-123","timestamp":1710288000000}
+{"event":"status","message":"Setting up agent...","jobId":"abc-123","timestamp":1710288001200}
+{"event":"status","message":"DomHand actions registered","jobId":"abc-123","timestamp":1710288001500}
+{"event":"browser_ready","cdpUrl":"ws://127.0.0.1:9222/devtools/browser/a1b2c3d4","timestamp":1710288003000}
+{"event":"status","message":"Starting application: https://boards.greenhouse.io/example/jobs/123","step":1,"maxSteps":50,"jobId":"abc-123","timestamp":1710288004000}
+{"event":"field_filled","field":"First Name","value":"Jane","method":"domhand","timestamp":1710288010000}
+{"event":"field_filled","field":"Last Name","value":"Doe","method":"domhand","timestamp":1710288010050}
+{"event":"field_failed","field":"Phone Type","reason":"No matching option found","timestamp":1710288010100}
+{"event":"progress","step":1,"maxSteps":50,"description":"Filled 2 of 3 fields","timestamp":1710288010150}
+{"event":"cost","total_usd":0.003421,"prompt_tokens":1200,"completion_tokens":350,"timestamp":1710288015000}
+{"event":"status","message":"Reviewing filled fields and fixing failures","step":2,"maxSteps":50,"jobId":"abc-123","timestamp":1710288016000}
+{"event":"cost","total_usd":0.007890,"prompt_tokens":2800,"completion_tokens":720,"timestamp":1710288025000}
+{"event":"done","success":true,"message":"Application filled -- browser open for review","fields_filled":15,"fields_failed":1,"jobId":"abc-123","leaseId":"lease-456","resultData":{"success":true,"steps":8,"costUsd":0.00789,"finalResult":"All fields filled","blocker":null,"platform":"greenhouse"},"timestamp":1710288030000}
+{"event":"awaiting_review","message":"Browser open for review. Send complete_review or cancel.","timestamp":1710288030100}
 ```
 
 ### 2.4 Event Ordering Guarantees
 
 The following ordering is guaranteed:
 
-1. One or more `status` events (engine initialization)
-2. `browser_ready` (exactly once, after Playwright browser launches)
-3. Interleaved `status`, `field_filled`, `field_failed`, `progress`, `cost` events during the agent loop
-4. Exactly one terminal event: either `done` or `error` with `fatal: true`
-5. If `done.success === true`: one `awaiting_review` event follows, then Hand-X blocks on stdin
-6. If `done.success === false` or fatal error: process exits (no `awaiting_review`)
+1. Exactly one `handshake` event (the very first event emitted, before any status)
+2. One or more `status` events (engine initialization)
+3. `browser_ready` (exactly once, after Playwright browser launches)
+4. Interleaved `status`, `field_filled`, `field_failed`, `progress`, `cost` events during the agent loop
+5. `account_created` events may appear during the agent loop when the agent creates a new ATS account
+6. Exactly one terminal event: either `done` or `error` with `fatal: true`
+7. If `done.success === true`: one `awaiting_review` event follows, then Hand-X blocks on stdin
+8. If `done.success === false` or fatal error: process exits (no `awaiting_review`)
 
 Non-fatal `error` events can appear at any point without terminating the process.
 
@@ -296,7 +335,7 @@ The desktop app sets these environment variables when spawning the Hand-X proces
 | `GH_EMAIL`                | `user@example.com`                  | ATS login email. Readable from env only.           |
 | `GH_PASSWORD`             | `s3cret`                            | ATS login password. Readable from env only.        |
 
-**Note:** The CLI also accepts `--email` and `--password` flags for development convenience, but the desktop app MUST use environment variables for credentials to avoid them appearing in the process argument list.
+**Note:** Credentials MUST be passed via environment variables or embedded in the profile JSON's `credentials` key. The `--email` and `--password` CLI flags were removed from Hand-X for security — they would expose credentials in the process argument list visible via `ps aux`.
 
 ### 4.3 Optional Variables
 
@@ -338,8 +377,6 @@ hand-x \
   --lease-id <STRING> \
   --model <MODEL_NAME> \
   [--headless] \
-  [--email <EMAIL>] \
-  [--password <PASSWORD>] \
   [--browsers-path <PATH>]
 ```
 
@@ -374,11 +411,11 @@ hand-x apply --job-url <URL> ...
 | `--lease-id`       | No       | String  | Lease ID for event correlation                      |
 | `--model`          | No       | String  | LLM model override                                 |
 | `--headless`       | No       | Flag    | Run browser headless (flag, no value)               |
-| `--email`          | No       | String  | ATS login email                                     |
-| `--password`       | No       | String  | ATS login password                                  |
 | `--browsers-path`  | No       | Path    | Path to Playwright browser binaries                 |
 
 *One of `--profile` or `--test-data` is required.
+
+> **Credentials:** Pass ATS login credentials via the `credentials` key in the profile JSON or via `GH_EMAIL`/`GH_PASSWORD` environment variables. The `--email` and `--password` CLI flags were removed — they exposed credentials in the process argument list.
 
 ---
 
@@ -390,39 +427,40 @@ hand-x apply --job-url <URL> ...
 Desktop (Electron)                        Hand-X (Python)
       |                                        |
       |-- spawn(hand-x, args, env) ----------->|
+      |                                        |-- Install stdout guard
+      |<--- {"event":"handshake","protocol_version":1,...} ---------|
       |                                        |-- Initialize engine
       |                                        |-- Setup logging (stderr)
-      |                                        |-- Install stdout guard
       |                                        |-- Load profile
       |                                        |-- Configure LLM proxy
       |                                        |
-      |<--- {"type":"status","message":"Hand-X engine initialized"} ---|
-      |<--- {"type":"status","message":"Setting up agent..."} --------|
-      |<--- {"type":"status","message":"DomHand actions registered"} --|
+      |<--- {"event":"status","message":"Hand-X engine initialized"} ---|
+      |<--- {"event":"status","message":"Setting up agent..."} --------|
+      |<--- {"event":"status","message":"DomHand actions registered"} --|
       |                                        |-- Launch Playwright browser
-      |<--- {"type":"browser_ready","cdpUrl":"ws://..."} -------------|
+      |<--- {"event":"browser_ready","cdpUrl":"ws://..."} -------------|
       |                                        |
       |    [Store cdpUrl for review session]    |
       |                                        |
-      |<--- {"type":"status","step":1,...} ----|
+      |<--- {"event":"status","step":1,...} ----|
       |                                        |-- Agent loop begins
-      |<--- {"type":"field_filled",...} -------|  (repeated per field)
-      |<--- {"type":"field_failed",...} -------|
-      |<--- {"type":"progress",...} -----------|
-      |<--- {"type":"cost",...} ---------------|
-      |<--- {"type":"status","step":2,...} ----|
+      |<--- {"event":"field_filled",...} -------|  (repeated per field)
+      |<--- {"event":"field_failed",...} -------|
+      |<--- {"event":"progress",...} -----------|
+      |<--- {"event":"cost",...} ---------------|
+      |<--- {"event":"status","step":2,...} ----|
       |        ...                             |-- (steps repeat)
-      |<--- {"type":"cost",...} ---------------|
+      |<--- {"event":"cost",...} ---------------|
       |                                        |
       |                                        |-- Agent loop ends
-      |<--- {"type":"done","success":true,...} |
-      |<--- {"type":"awaiting_review",...} ----|
+      |<--- {"event":"done","success":true,...} |
+      |<--- {"event":"awaiting_review",...} ----|
       |                                        |
       |    [Show review UI to user]            |-- Blocking on stdin
       |                                        |
       |--- {"type":"complete_review"}\n ------>|
       |                                        |-- Close browser
-      |<--- {"type":"done","message":"Review complete",...} ---|
+      |<--- {"event":"done","message":"Review complete",...} ---|
       |                                        |
       |    [Process exits with code 0]         |
 ```
@@ -482,7 +520,7 @@ If the Hand-X process exits with a non-zero exit code and no `done` or fatal `er
 handXProcess.on('exit', (code, signal) => {
   if (!receivedDoneEvent) {
     const synthetic: ErrorEvent = {
-      type: 'error',
+      event: 'error',
       message: signal
         ? `Hand-X killed by signal ${signal}`
         : `Hand-X exited with code ${code}`,
@@ -704,7 +742,7 @@ import { createInterface } from 'node:readline';
 
 function spawnHandX(params: {
   jobUrl: string;
-  profile: Record<string, unknown>;
+  profile: Record<string, unknown>;  // must include credentials key if needed
   resumePath: string;
   proxyUrl: string;
   runtimeGrant: string;
@@ -713,8 +751,6 @@ function spawnHandX(params: {
   maxSteps?: number;
   maxBudget?: number;
   headless?: boolean;
-  email?: string;
-  password?: string;
   browsersPath?: string;
 }): ChildProcess {
   const { binary, prependArgs } = resolveHandXBinary();
@@ -732,11 +768,12 @@ function spawnHandX(params: {
     '--max-steps', String(params.maxSteps ?? 50),
     '--max-budget', String(params.maxBudget ?? 0.50),
     ...(params.headless ? ['--headless'] : []),
-    ...(params.email ? ['--email', params.email] : []),
-    ...(params.password ? ['--password', params.password] : []),
     ...(params.browsersPath ? ['--browsers-path', params.browsersPath] : []),
   ];
 
+  // NOTE: Credentials must be embedded in params.profile under the
+  // "credentials" key, or passed via GH_EMAIL/GH_PASSWORD env vars.
+  // Do NOT pass credentials as CLI args -- they are visible via ps aux.
   return spawn(binary, cliArgs, {
     env: {
       ...process.env,
@@ -763,7 +800,7 @@ function attachEventParser(
     if (!line.trim()) return;
     try {
       const event = JSON.parse(line) as HandXEvent;
-      if (event.type && event.timestamp) {
+      if (event.event && event.timestamp) {
         onEvent(event);
       }
     } catch {
@@ -809,8 +846,9 @@ function cancelHandX(proc: ChildProcess): void {
 
 ### 11.1 Credential Handling
 
-- ATS credentials (email, password) MUST be passed via environment variables, not CLI arguments. CLI arguments are visible in process listings (`ps aux`).
-- The desktop app uses env vars `GH_EMAIL` and `GH_PASSWORD`. The CLI flags `--email` and `--password` exist only for developer convenience.
+- ATS credentials (email, password) MUST be passed via environment variables or embedded in the profile JSON's `credentials` key. CLI arguments are not accepted for credentials — they would be visible in process listings (`ps aux`).
+- The desktop app embeds credentials in the profile JSON under `profile.credentials.generic` (or a platform-specific key such as `profile.credentials.workday`). As a fallback, `GH_EMAIL` and `GH_PASSWORD` env vars are also read.
+- Hand-X pops the `credentials` key from the profile before storing it in `GH_USER_PROFILE_TEXT`, so credentials are never persisted to the environment.
 - Hand-X never logs credential values. They are passed through browser-use's `sensitive_data` mechanism which redacts them from prompt logs.
 
 ### 11.2 No API Keys on Client
@@ -836,17 +874,19 @@ function cancelHandX(proc: ChildProcess): void {
 
 The desktop app's existing renderer consumes `ProgressEvent` objects. The bridge layer maps Hand-X events to these:
 
-| Hand-X Event    | Desktop ProgressEvent Type | Mapping Logic                                                  |
-|-----------------|----------------------------|----------------------------------------------------------------|
-| `status`        | `status`                   | Pass `message` through directly. Include step info if present. |
-| `field_filled`  | `action`                   | `message: "Filled: ${field} = ${value}"`                       |
-| `field_failed`  | `action`                   | `message: "Failed: ${field} -- ${error}"`                      |
-| `progress`      | `status`                   | `message: "Filled ${filled}/${total} fields (round ${round})"` |
-| `browser_ready` | (internal)                 | Store `cdpUrl` for review session. Do not emit to renderer.    |
-| `awaiting_review`| `status`                  | `message: "Ready for review"`. Trigger review UI.              |
-| `done`          | `complete`                 | Include `success`, `message`, and `resultData` in completion.  |
-| `error`         | `error`                    | Pass `message` through. If `fatal`, stop processing.           |
-| `cost`          | (internal)                 | Update `RunningCostState`. Optionally emit as status: `"Cost: $0.0034"` |
+| Hand-X Event      | Desktop ProgressEvent Type | Mapping Logic                                                         |
+|-------------------|----------------------------|-----------------------------------------------------------------------|
+| `handshake`       | (internal)                 | Validate `protocol_version`. Reject incompatible versions.            |
+| `status`          | `status`                   | Pass `message` through directly. Include step info if present.        |
+| `field_filled`    | `action`                   | `message: "Filled: ${field} = ${value}"`                              |
+| `field_failed`    | `action`                   | `message: "Failed: ${field} -- ${reason}"`                            |
+| `progress`        | `status`                   | `message: "Step ${step}/${maxSteps}: ${description}"`                 |
+| `browser_ready`   | (internal)                 | Store `cdpUrl` for review session. Do not emit to renderer.           |
+| `awaiting_review` | `status`                   | `message: "Ready for review"`. Trigger review UI.                     |
+| `account_created` | `action`                   | `message: "Created ${platform} account: ${email}"`. Store credentials securely. |
+| `done`            | `complete`                 | Include `success`, `message`, and `resultData` in completion.         |
+| `error`           | `error`                    | Pass `message` through. If `fatal`, stop processing.                  |
+| `cost`            | (internal)                 | Update `RunningCostState`. Optionally emit as status: `"Cost: $0.0034"` |
 
 ---
 
@@ -900,13 +940,13 @@ Both sides should validate against the shared event types. A TypeScript consumer
 function isValidHandXEvent(obj: unknown): obj is HandXEvent {
   if (typeof obj !== 'object' || obj === null) return false;
   const e = obj as Record<string, unknown>;
-  if (typeof e.type !== 'string') return false;
+  if (typeof e.event !== 'string') return false;
   if (typeof e.timestamp !== 'number') return false;
-  const validTypes = [
-    'status', 'field_filled', 'field_failed', 'progress',
-    'browser_ready', 'awaiting_review', 'done', 'error', 'cost',
+  const validEvents = [
+    'handshake', 'status', 'field_filled', 'field_failed', 'progress',
+    'browser_ready', 'awaiting_review', 'account_created', 'done', 'error', 'cost',
   ];
-  return validTypes.includes(e.type);
+  return validEvents.includes(e.event);
 }
 ```
 
@@ -933,4 +973,5 @@ Before spawning Hand-X, the desktop app must ensure:
 
 | Version | Date       | Changes                           |
 |---------|------------|-----------------------------------|
+| 1.0.1   | 2026-03-12 | I-01: Align discriminator key from `type` to `event` (matches code). Fix `field_failed.reason` (was `error`). Fix `progress` fields (`step`/`maxSteps`/`description`, was `filled`/`total`/`round`). Add `handshake` and `account_created` events. Add `fields_failed` to `DoneEvent`. I-04: Remove `--email`/`--password` CLI flags (security: use profile `credentials` key or env vars). |
 | 1.0.0   | 2026-03-12 | Initial specification             |

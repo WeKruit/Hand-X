@@ -206,16 +206,20 @@ def emit_browser_ready(cdp_url: str) -> None:
 def emit_account_created(
     platform: str,
     email: str,
-    password: str,
     *,
     url: str = "",
 ) -> None:
-    """Emit when a new ATS platform account is created during automation."""
+    """Emit when a new ATS platform account is created during automation.
+
+    NOTE: The plaintext password is intentionally NOT emitted over the JSONL
+    stream.  A boolean flag ``password_provided`` is used instead so the
+    Desktop App knows credentials exist without receiving the secret value.
+    """
     emit_event(
         "account_created",
         platform=platform,
         email=email,
-        password=password,
+        password_provided=True,
         url=url or None,
     )
 
