@@ -30,6 +30,7 @@ from browser_use.browser.events import (
 from browser_use.dom.views import EnhancedDOMTreeNode
 
 from ghosthands.actions.views import DomHandSelectParams, normalize_name
+from ghosthands.dom.shadow_helpers import QALL_JS_SNIPPET
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +39,7 @@ logger = logging.getLogger(__name__)
 # These JS functions operate on a node passed directly via Runtime.callFunctionOn
 # (i.e., `this` is the DOM element). They never use data-highlight-index.
 
-_DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
-	const el = this;
-	const tag = el.tagName.toLowerCase();
-
+_DISCOVER_OPTIONS_ON_NODE_JS = "function(){const el=this;const tag=el.tagName.toLowerCase();" + QALL_JS_SNIPPET + r"""
 	// Case 1: Native <select>
 	if (tag === 'select') {
 		const options = Array.from(el.options).map((o, i) => ({
@@ -82,7 +80,7 @@ _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 	// Case 3: Workday-style custom dropdowns (data-uxi-widget-type)
 	const widgetType = el.getAttribute('data-uxi-widget-type');
 	if (widgetType === 'selectinput' || el.getAttribute('role') === 'combobox') {
-		const popups = document.querySelectorAll(
+		const popups = qAll(
 			'[role="listbox"], [role="menu"], [class*="popup"], [class*="dropdown-menu"], [class*="options-list"]'
 		);
 		for (const popup of popups) {
@@ -108,7 +106,7 @@ _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 	}
 
 	// Case 4: Generic — look for any visible listbox/menu on the page
-	const allListboxes = document.querySelectorAll(
+	const allListboxes = qAll(
 		'[role="listbox"], [role="menu"], ul[class*="dropdown"], ul[class*="options"], div[class*="dropdown-menu"]'
 	);
 	for (const lb of allListboxes) {
@@ -144,17 +142,15 @@ _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 }"""
 
 # Click an option by its text content within any visible listbox/popup on the page
-_CLICK_OPTION_JS = r"""function(targetText) {
-	const lowerTarget = targetText.toLowerCase().trim();
-
-	// Collect all visible option-like elements
+_CLICK_OPTION_JS = "function(targetText){const lowerTarget=targetText.toLowerCase().trim();" + QALL_JS_SNIPPET + r"""
+	// Collect all visible option-like elements (across shadow roots)
 	const selectors = [
 		'[role="option"]', '[role="menuitem"]',
 		'li', '[class*="option"]', '[data-value]',
 	];
 	const candidates = [];
 	for (const selector of selectors) {
-		for (const el of document.querySelectorAll(selector)) {
+		for (const el of qAll(selector)) {
 			const rect = el.getBoundingClientRect();
 			if (rect.width > 0 && rect.height > 0) {
 				candidates.push(el);

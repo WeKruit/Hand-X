@@ -239,7 +239,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         sensitive_data=sensitive_data,
         available_file_paths=available_files or None,
         use_vision=True,
-        max_actions_per_step=5,
+        max_actions_per_step=2,
         calculate_cost=True,
         use_judge=False,
     )
@@ -429,7 +429,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         sensitive_data=sensitive_data,
         available_file_paths=available_files or None,
         use_vision=True,
-        max_actions_per_step=5,
+        max_actions_per_step=2,
         calculate_cost=True,
         use_judge=False,
     )
@@ -500,6 +500,10 @@ def _build_task_prompt(
         "Instead: (1) input credentials, (2) domhand_check_agreement to check\n"
         "the 'I agree' checkbox -- THIS IS REQUIRED or the button silently fails,\n"
         "(3) VERIFY the checkbox is checked, (4) domhand_click_button to submit.\n"
+        "\n"
+        "DROPDOWN RULE: After clicking a dropdown option, STOP and observe.\n"
+        "Do NOT batch a dropdown click with 'Save and Continue' or any other action.\n"
+        "Dropdowns may reveal sub-options that need a second selection.\n"
         "\n"
         "Other rules:\n"
     )
