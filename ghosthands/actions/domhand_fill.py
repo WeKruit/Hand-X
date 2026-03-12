@@ -44,6 +44,11 @@ from ghosthands.actions.views import (
 
 logger = logging.getLogger(__name__)
 
+# ── Field event callback (set by CLI for JSONL emission) ─────────────
+# When set, called with each FillFieldResult as it is created.
+# Signature: (result: FillFieldResult, round_num: int) -> None
+_on_field_result: Any = None  # Callable[[FillFieldResult, int], None] | None
+
 # ── Constants ────────────────────────────────────────────────────────
 
 MAX_FILL_ROUNDS = 3
@@ -805,6 +810,12 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
 		'linkedin': linkedin, 'portfolio': portfolio,
 		'github': github_match.group(0) if github_match else None,
 		'twitter': twitter_match.group(0) if twitter_match else None,
+		# Workday-relevant fields
+		'work_authorization': read_line('Work authorization'),
+		'available_start_date': read_line('Available start date'),
+		'salary_expectation': read_line('Salary expectation'),
+		'how_did_you_hear': read_line('How did you hear about us'),
+		'willing_to_relocate': read_line('Willing to relocate'),
 	}
 
 
@@ -846,6 +857,22 @@ def _known_profile_value(field_name: str, evidence: dict[str, str | None]) -> st
 		return evidence.get('portfolio')
 	if 'twitter' in name or 'x handle' in name:
 		return evidence.get('twitter')
+	# Workday-specific field matching
+	if any(kw in name for kw in ('how did you hear', 'referral source', 'source')):
+		return evidence.get('how_did_you_hear')
+	if any(kw in name for kw in ('work authorization', 'authorized to work', 'legally authorized')):
+		return evidence.get('work_authorization')
+	if any(kw in name for kw in ('start date', 'earliest start', 'available date', 'availability')):
+		return evidence.get('available_start_date')
+	if any(kw in name for kw in ('salary', 'compensation', 'pay expectation')):
+		return evidence.get('salary_expectation')
+	if any(kw in name for kw in ('willing to relocate', 'relocation')):
+		return evidence.get('willing_to_relocate')
+	# Auto-check agreement/consent checkboxes — always agree on behalf of applicant
+	if any(kw in name for kw in ('i agree', 'i accept', 'i understand', 'i acknowledge',
+		'i consent', 'i certify', 'privacy policy', 'terms of service',
+		'terms and conditions', 'candidate consent', 'agree to')):
+		return 'checked'
 	return None
 
 
@@ -880,10 +907,10 @@ def _sanitize_no_guess_answer(
 	if not _SOCIAL_OR_ID_NO_GUESS_RE.search(field_name or ''):
 		return proposed
 	if not proposed:
-		return 'N/A' if required else ''
+		return ''
 	if is_placeholder_value(proposed) or re.match(r'^(n/a|na|none|unknown|not applicable|prefer not|decline)', proposed, re.IGNORECASE):
-		return proposed if required else ''
-	return 'N/A' if required else ''
+		return ''
+	return ''
 
 
 async def _generate_answers(
@@ -891,17 +918,13 @@ async def _generate_answers(
 ) -> tuple[dict[str, str], int, int]:
 	"""Call Haiku to generate answers for all fields in a single batch."""
 	try:
-		import anthropic
+		from ghosthands.llm.client import get_anthropic_client
+		from ghosthands.config.settings import settings as _settings
 	except ImportError:
-		logger.error('anthropic package not installed — cannot generate answers')
+		logger.error('ghosthands.llm.client not available — cannot generate answers')
 		return {}, 0, 0
 
-	api_key = os.environ.get('GH_ANTHROPIC_API_KEY') or os.environ.get('ANTHROPIC_API_KEY', '')
-	if not api_key:
-		logger.error('No Anthropic API key found (GH_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY)')
-		return {}, 0, 0
-
-	client = anthropic.AsyncAnthropic(api_key=api_key)
+	client = get_anthropic_client()
 	evidence = _parse_profile_evidence(profile_text)
 
 	name_counts: dict[str, int] = {}
@@ -931,28 +954,31 @@ Here are the form fields to fill:
 
 Rules:
 - For each field, decide what value to put based on the profile.
-- Fields marked with * are REQUIRED. NEVER return "" for required fields. Use profile-backed values first; for non-identity fields you may use careful contextual inference.
-- For optional fields, still fill them in if the profile has any relevant info. Only return "" for optional fields where there is truly nothing relevant to put.
-- NEVER fabricate personal identifiers or social handles/URLs not explicitly in the profile. If missing: return "" for optional, "N/A" for required.
+- For each field, use the applicant's actual profile data. If the profile has relevant info, use it.
+- If the profile has NO relevant data for a field, return "" (empty string) — even for required fields. NEVER make up data or use placeholder values like "N/A", "None", "Not applicable", etc.
+- NEVER fabricate personal identifiers or social handles/URLs not explicitly in the profile. If missing: return "" (empty string) regardless of whether the field is required or optional.
 - For dropdowns/radio groups with listed options, pick the EXACT text of one of the available options.
 - For hierarchical dropdown options (format "Category > SubOption"), pick the EXACT full path including the " > " separator.
 - For dropdowns WITHOUT listed options, provide your best guess for the value.
 - For skill typeahead fields, return an ARRAY of relevant skills from the applicant profile.
 - For multi-select fields, return a JSON array of ALL matching options (e.g., ["Python", "Java"]).
 - For checkboxes/toggles, respond with "checked" or "unchecked".
+- IMPORTANT: For agreement/consent checkboxes (e.g., "I agree", "I accept", "I understand", privacy policy, terms of service, candidate consent), ALWAYS respond with "checked". The applicant consents to standard application agreements.
 - For file upload fields, skip them (don't include in output).
 - For textarea fields, write 2-4 thoughtful sentences using the applicant's real background. NEVER return a single letter or placeholder.
-- For demographic/EEO fields, use the applicant's actual info. If no info, choose the most neutral "decline" option.
+- For demographic/EEO fields, use the applicant's actual info. If no info, choose the most neutral "decline" option from the available options.
 - NEVER select a default placeholder value like "Select One", "Please select", etc.
+- NEVER use placeholder strings like "N/A", "NA", "None", "Not applicable", "Unknown". If you don't have data, return "" (empty string).
 - For salary fields, provide a realistic number based on role and experience level.
 - Use the EXACT field names shown above (including any "#N" suffix) as JSON keys.
+- Only include fields you have a real answer for. Omit fields you cannot answer from the JSON output.
 - Respond with ONLY a valid JSON object. No explanation, no markdown fences.
 
 Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because..."}}"""
 
 	try:
 		response = await client.messages.create(
-			model='claude-haiku-4-5-20251001',
+			model=_settings.domhand_model,
 			max_tokens=4096,
 			messages=[{'role': 'user', 'content': prompt}],
 		)
@@ -1139,6 +1165,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 	total_output_tokens = 0
 	llm_calls = 0
 	fields_seen: set[str] = set()
+	fields_skipped: set[str] = set()  # Fields with no profile data — don't retry
 
 	for round_num in range(1, MAX_FILL_ROUNDS + 1):
 		logger.info(f'DomHand fill round {round_num}/{MAX_FILL_ROUNDS}')
@@ -1229,6 +1256,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 			if f.field_type == 'file':
 				continue
 			key = get_stable_field_key(f)
+			if key in fields_skipped:
+				continue  # Already determined no profile data — don't retry
 			if key in fields_seen and f.current_value and not is_placeholder_value(f.current_value):
 				continue
 			if _is_navigation_field(f):
@@ -1272,10 +1301,13 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 			if f.field_id in direct_fills:
 				value = direct_fills[f.field_id]
 				success = await _fill_single_field(page, f, value)
-				all_results.append(FillFieldResult(
+				fr = FillFieldResult(
 					field_id=f.field_id, name=f.name, success=success, actor='dom',
 					value_set=value if success else None, error=None if success else 'DOM fill failed',
-				))
+				)
+				all_results.append(fr)
+				if _on_field_result:
+					_on_field_result(fr, round_num)
 				fields_seen.add(get_stable_field_key(f))
 				round_filled += 1 if success else 0
 				round_failed += 0 if success else 1
@@ -1284,20 +1316,29 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 			matched_answer = _match_answer(f, answers, evidence)
 			if not matched_answer:
 				matched_answer = _default_value(f)
+			# Strip out any N/A-like placeholders the LLM generated
+			if matched_answer and re.match(r'^(n/?a|na|none|not applicable|unknown|placeholder)$', matched_answer.strip(), re.IGNORECASE):
+				matched_answer = ''
 			if not matched_answer:
-				if f.required:
-					all_results.append(FillFieldResult(
-						field_id=f.field_id, name=f.name, success=False,
-						actor='unfilled', error='No answer generated for required field',
-					))
-					round_failed += 1
-				fields_seen.add(get_stable_field_key(f))
+				key = get_stable_field_key(f)
+				fr = FillFieldResult(
+					field_id=f.field_id, name=f.name, success=False,
+					actor='skipped', error='No profile data for this field',
+				)
+				all_results.append(fr)
+				if _on_field_result:
+					_on_field_result(fr, round_num)
+				fields_seen.add(key)
+				fields_skipped.add(key)  # Never retry — no data exists
 				continue
 			success = await _fill_single_field(page, f, matched_answer)
-			all_results.append(FillFieldResult(
+			fr = FillFieldResult(
 				field_id=f.field_id, name=f.name, success=success, actor='dom',
 				value_set=matched_answer if success else None, error=None if success else 'DOM fill failed',
-			))
+			)
+			all_results.append(fr)
+			if _on_field_result:
+				_on_field_result(fr, round_num)
 			fields_seen.add(get_stable_field_key(f))
 			round_filled += 1 if success else 0
 			round_failed += 0 if success else 1
@@ -1309,19 +1350,26 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 
 	filled_count = sum(1 for r in all_results if r.success)
 	failed_count = sum(1 for r in all_results if not r.success and r.actor == 'dom')
+	skipped_count = sum(1 for r in all_results if r.actor == 'skipped')
 	unfilled_count = sum(1 for r in all_results if r.actor == 'unfilled')
-	unfilled_descriptions = [
-		f'  - "{r.name}" ({r.error or "no answer"})' for r in all_results if not r.success
+	skipped_descriptions = [
+		f'  - "{r.name}" (no profile data)' for r in all_results if r.actor == 'skipped'
+	]
+	failed_descriptions = [
+		f'  - "{r.name}" ({r.error or "DOM fill failed"})' for r in all_results if not r.success and r.actor == 'dom'
 	]
 	summary_lines = [
-		f'DomHand fill complete: {filled_count} filled, {failed_count} DOM failures, {unfilled_count} unfilled.',
+		f'DomHand fill complete: {filled_count} filled, {failed_count} DOM failures, {skipped_count} skipped (no data), {unfilled_count} unfilled.',
 		f'LLM calls: {llm_calls} (input: {total_input_tokens} tokens, output: {total_output_tokens} tokens)',
 	]
-	if unfilled_descriptions:
-		summary_lines.append('Unfilled/failed fields:')
-		summary_lines.extend(unfilled_descriptions[:20])
-		if len(unfilled_descriptions) > 20:
-			summary_lines.append(f'  ... and {len(unfilled_descriptions) - 20} more')
+	if skipped_descriptions:
+		summary_lines.append('Skipped fields (no profile data — use domhand_select or manual input if needed):')
+		summary_lines.extend(skipped_descriptions[:20])
+		if len(skipped_descriptions) > 20:
+			summary_lines.append(f'  ... and {len(skipped_descriptions) - 20} more')
+	if failed_descriptions:
+		summary_lines.append('Failed fields:')
+		summary_lines.extend(failed_descriptions[:20])
 
 	summary = '\n'.join(summary_lines)
 	logger.info(summary)

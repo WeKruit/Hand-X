@@ -347,51 +347,86 @@ async def _run_agent(
 ) -> dict[str, Any]:
 	"""Run the browser-use agent for the job.
 
-	This is the integration point with browser-use. When the agent module
-	is fully implemented, this function will:
-
-	1. Launch a Playwright browser (headless or headed)
-	2. Create a browser-use Agent with DomHand custom actions registered
-	3. Navigate to the target URL
-	4. Fill the application form using DomHand (DOM-first) + LLM fallback
-	5. Handle blockers (CAPTCHA, login) via HITL
-	6. Submit the application
-	7. Return structured result
-
-	For now, this raises NotImplementedError to make it clear that the
-	agent module needs to be wired in.
+	Creates a fully-configured agent via the factory, runs it against the
+	target URL, and returns structured results.
 	"""
-	# TODO: Replace with actual browser-use agent execution.
-	#
-	# Example integration (when agent module is ready):
-	#
-	#   from ghosthands.agent import create_agent
-	#
-	#   agent = await create_agent(
-	#       platform=platform,
-	#       target_url=target_url,
-	#       resume_profile=resume_profile,
-	#       credentials=credentials,
-	#       input_data=input_data,
-	#       cost_tracker=cost_tracker,
-	#       hitl=hitl,
-	#       headless=settings.headless,
-	#   )
-	#
-	#   result = await agent.run(max_steps=settings.max_steps_per_job)
-	#   return {
-	#       "success": result.success,
-	#       "summary": result.summary,
-	#       "pages_visited": result.pages_visited,
-	#       "fields_filled": result.fields_filled,
-	#       "screenshots": result.screenshots,
-	#   }
+	import os
 
-	raise NotImplementedError(
-		"Agent execution not yet wired. "
-		"Implement ghosthands.agent.create_agent() and connect it here. "
-		f"Job {job_id} targeting {target_url} on {platform}."
+	from ghosthands.agent.factory import run_job_agent
+
+	# ── Set profile env var for domhand_fill ──────────────────────
+	# domhand_fill reads GH_USER_PROFILE_TEXT to generate field answers.
+	profile = resume_profile or {}
+	os.environ["GH_USER_PROFILE_TEXT"] = json.dumps(profile, indent=2)
+
+	# ── Build task prompt ────────────────────────────────────────
+	profile_snippet = json.dumps(profile, indent=2) if profile else "{}"
+	resume_path = input_data.get("resume_path", "")
+	if resume_path:
+		os.environ["GH_RESUME_PATH"] = resume_path
+
+	task = f"""Go to {target_url} and fill out the job application form completely.
+
+CRITICAL — Action Order:
+1. After navigating to the page, your FIRST action MUST be domhand_fill. It fills ALL visible form fields in one call via DOM manipulation. Do NOT use click or input actions before trying domhand_fill.
+2. After domhand_fill completes, review its output to see which fields were filled and which failed.
+3. For failed dropdowns/selects, use domhand_select.
+4. For file uploads (resume), use domhand_upload or upload_file action.
+5. Only use generic browser-use actions (click, input) as a LAST RESORT for fields DomHand could not handle.
+6. After all fields on the current page are filled, click Next/Continue/Save to advance.
+7. On each new page, call domhand_fill AGAIN as the first action.
+
+Other rules:
+- {'Use the provided credentials to log in if needed.' if credentials else 'If a login wall appears, report it as a blocker.'}
+- Do NOT click the final Submit button. Stop at the review page and use the done action.
+- If anything pops up blocking the form, close it and continue.
+"""
+
+	# ── Status callback for cost tracking + VALET progress ───────
+	step_count = 0
+
+	async def _on_status(status: dict) -> None:
+		nonlocal step_count
+		step_count += 1
+		step_cost = status.get("step_cost", 0.0)
+		if step_cost > 0:
+			cost_tracker.record_step(
+				input_tokens=status.get("input_tokens", 0),
+				output_tokens=status.get("output_tokens", 0),
+				model=status.get("model", settings.agent_model),
+			)
+
+	log.info("executor.launching_agent", platform=platform, headless=settings.headless)
+
+	# ── Run the agent ────────────────────────────────────────────
+	result = await run_job_agent(
+		task=task,
+		resume_profile=profile,
+		credentials=credentials,
+		platform=platform,
+		headless=settings.headless,
+		max_steps=settings.max_steps_per_job,
+		job_id=job_id,
+		max_budget=settings.max_budget_per_job,
+		on_status_update=_on_status,
 	)
+
+	log.info(
+		"executor.agent_finished",
+		success=result.get("success"),
+		steps=result.get("steps"),
+		cost=result.get("cost_usd"),
+		blocker=result.get("blocker"),
+	)
+
+	# ── Map to executor result format ────────────────────────────
+	return {
+		"success": result.get("success", False),
+		"summary": result.get("extracted_text") or "Agent completed",
+		"steps_taken": result.get("steps", 0),
+		"cost_usd": result.get("cost_usd", 0.0),
+		"blocker": result.get("blocker"),
+	}
 
 
 async def _fail_job(
