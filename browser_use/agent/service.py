@@ -3909,14 +3909,20 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 	async def close(self):
 		"""Close all resources"""
 		try:
-			# Only close browser if keep_alive is False (or not set)
+			# Only kill the browser when keep_alive is explicitly False.
+			# keep_alive=None (the default) means "no preference" — do not kill, because
+			# the caller may be holding a reference to the browser session and expects
+			# the window to survive agent.run() returning.  Only keep_alive=False
+			# (an explicit opt-out) triggers a hard kill.
 			if self.browser_session is not None:
-				if not self.browser_session.browser_profile.keep_alive:
+				if self.browser_session.browser_profile.keep_alive is False:
 					# Kill the browser session - this dispatches BrowserStopEvent,
 					# stops the EventBus with clear=True, and recreates a fresh EventBus
 					await self.browser_session.kill()
 				else:
-					# keep_alive=True sessions shouldn't keep the event loop alive after agent.run()
+					# keep_alive=True or keep_alive=None: browser window stays open.
+					# Stop the event bus so it doesn't keep the asyncio loop alive,
+					# but do NOT dispatch BrowserStopEvent / kill the process.
 					await self.browser_session.event_bus.stop(
 						clear=False,
 						timeout=_get_timeout('TIMEOUT_BrowserSessionEventBusStopOnAgentClose', 1.0),

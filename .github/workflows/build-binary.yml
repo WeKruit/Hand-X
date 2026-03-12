@@ -1,0 +1,154 @@
+name: Build Hand-X Binary
+
+# Produces standalone binaries for macOS ARM, macOS Intel, Linux x64, Windows x64.
+# The Electron desktop app downloads the appropriate binary for the user's platform.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed for creating releases
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14        # Apple Silicon (M1+)
+            name: darwin-arm64
+            runner_arch: arm64
+          - os: macos-13        # Intel Mac
+            name: darwin-x64
+            runner_arch: x64
+          - os: ubuntu-22.04    # Linux x64
+            name: linux-x64
+            runner_arch: x64
+          - os: windows-latest  # Windows x64
+            name: win-x64
+            runner_arch: x64
+
+    runs-on: ${{ matrix.os }}
+    name: Build (${{ matrix.name }})
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        shell: bash
+        env:
+          # Skip downloading browsers -- the binary ships without them.
+          # The Electron app manages browser installation separately.
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install pyinstaller
+
+      - name: Build binary
+        shell: bash
+        run: |
+          pyinstaller build/hand-x.spec \
+            --distpath build/dist \
+            --workpath build/work \
+            --noconfirm \
+            --log-level WARN
+
+      - name: Rename binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mv build/dist/hand-x build/dist/hand-x-${{ matrix.name }}
+
+      - name: Rename binary (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mv build/dist/hand-x.exe build/dist/hand-x-${{ matrix.name }}.exe
+
+      - name: Compress with UPX (Windows only)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # UPX is pre-installed on windows-latest runners
+          if command -v upx &>/dev/null; then
+            upx --best --lzma build/dist/hand-x-${{ matrix.name }}.exe || true
+          fi
+
+      - name: Report binary size
+        shell: bash
+        run: |
+          echo "=== Binary size ==="
+          ls -lh build/dist/hand-x-${{ matrix.name }}* || true
+
+      - name: Smoke test (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x build/dist/hand-x-${{ matrix.name }}
+          build/dist/hand-x-${{ matrix.name }} --help || true
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          build/dist/hand-x-${{ matrix.name }}.exe --help || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hand-x-${{ matrix.name }}
+          path: build/dist/hand-x-${{ matrix.name }}*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Release -- runs only on version tags (e.g., v0.1.0)
+  # ---------------------------------------------------------------------------
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    name: Create Release
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: false
+
+      - name: List artifacts
+        run: |
+          echo "=== Release artifacts ==="
+          find artifacts -type f | sort
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd artifacts
+          find . -type f -name 'hand-x-*' -exec sha256sum {} \; | sort > checksums-sha256.txt
+          echo "=== SHA-256 checksums ==="
+          cat checksums-sha256.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/hand-x-*
+            artifacts/checksums-sha256.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

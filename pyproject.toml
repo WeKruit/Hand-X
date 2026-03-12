@@ -55,6 +55,7 @@ dev = [
 
 [project.scripts]
 ghosthands = "ghosthands.main:main"
+hand-x = "ghosthands.cli:main"
 
 [tool.ruff]
 line-length = 120
