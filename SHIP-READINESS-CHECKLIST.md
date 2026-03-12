@@ -29,7 +29,7 @@ Items are ordered by severity within each category.
 
 - [ ] **S-06: GH_USER_PROFILE_TEXT env var exposes full PII to child processes** — Full profile (name, email, phone, address, education, work history) serialized into env var, inherited by all child processes (Playwright, browser-use, LLM client), readable via `/proc/PID/environ`. [Hand-X: cli.py:191]
 
-- [ ] **S-07: field_filled events leak sensitive field values over stdout** — DomHand emits raw values for every form field including SSN, date of birth, salary. No deny-list for sensitive field types. Needs field-level PII redaction. [Hand-X: jsonl.py:122, field_events.py:74]
+- [x] **S-07: field_filled events leak sensitive field values over stdout** — DomHand emits raw values for every form field including SSN, date of birth, salary. No deny-list for sensitive field types. Needs field-level PII redaction. [Hand-X: jsonl.py:122, field_events.py:74]
 
 - [x] **S-08: No SIGTERM handler in CLI mode** — Worker mode has signal handling, but CLI entry point only catches KeyboardInterrupt. SIGTERM from Electron force-quit leaves browser open, CDP port exposed, env vars unreleased. [Hand-X: cli.py]
 
@@ -79,11 +79,11 @@ Items are ordered by severity within each category.
 
 - [ ] **I-09: Profile adapter is not a schema boundary** — Remaps small subset of keys, keeps both camelCase and snake_case, no canonical input model enforced. Different code paths produce `first_name` vs `full_name`, `linkedin` vs `linkedin_url`. [Hand-X: bridge/profile_adapter.py]
 
-- [ ] **I-10: browser_ready is best-effort** — If `browser.cdp_url` is missing, Hand-X logs to stderr only. No machine-readable fallback event to Desktop. [Hand-X: cli.py]
+- [x] **I-10: browser_ready is best-effort** — If `browser.cdp_url` is missing, Hand-X logs to stderr only. No machine-readable fallback event to Desktop. [Hand-X: cli.py]
 
 - [x] **I-11: Review timeout exits 0 after fatal error** — `run_agent_jsonl()` only exits 1 on `cancel`/`eof`, so timeout returns exit code 0 after emitting `error(fatal=true)`. [Hand-X: cli.py, bridge/protocol.py]
 
-- [ ] **I-12: Spec env precedence is inaccurate** — `GH_HEADLESS`, `GH_MAX_STEPS_PER_JOB`, `GH_MAX_BUDGET_PER_JOB` are documented as configurable but argparse defaults override them. [Hand-X: cli.py vs docs/]
+- [x] **I-12: Spec env precedence is inaccurate** — `GH_HEADLESS`, `GH_MAX_STEPS_PER_JOB`, `GH_MAX_BUDGET_PER_JOB` are documented as configurable but argparse defaults override them. [Hand-X: cli.py vs docs/]
 
 ### MEDIUM
 
@@ -119,7 +119,7 @@ Items are ordered by severity within each category.
 
 - [ ] **C-06: No code signing or notarization** — macOS and Windows binaries are unsigned. Users must bypass OS security warnings (Gatekeeper/SmartScreen). [Hand-X: .github/workflows/build-binary.yml]
 
-- [ ] **C-07: No security scanning in any workflow** — No CodeQL, `pip-audit`, `bandit`, `safety`, secret scanning, or SBOM generation. [Hand-X: .github/workflows/]
+- [x] **C-07: No security scanning in any workflow** — No CodeQL, `pip-audit`, `bandit`, `safety`, secret scanning, or SBOM generation. [Hand-X: .github/workflows/]
 
 - [ ] **C-08: No dependency audit in Desktop CI** — Missing `npm audit` and static analysis (CodeQL) in Desktop App CI pipeline. [Desktop: .github/workflows/]
 
