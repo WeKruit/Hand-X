@@ -2,11 +2,9 @@
 
 Tests cover:
 - create_job_agent() — verifies Agent is created with correct parameters
-- run_job_agent() — verifies the finally-block always kills the browser
-  CRITICAL: Documents that run_job_agent UNCONDITIONALLY calls browser_session.kill(),
-  ignoring keep_alive=True set during creation. This is intentional for the worker
-  path (no human reviewer), but callers wanting HITL/review must use
-  create_job_agent() directly.
+- run_job_agent() — verifies keep_alive controls browser cleanup:
+  * keep_alive=False → browser_session.kill()  (EC2 worker path)
+  * keep_alive=True/None → event_bus.stop()     (Desktop/HITL path)
 """
 
 from __future__ import annotations
@@ -103,6 +101,41 @@ def sample_profile():
         "education": [],
         "skills": [],
     }
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_agent(*, run_side_effect=None, is_done=True, n_steps=3):
+    """Create a mock Agent with explicit event_bus mock for keep_alive tests."""
+    mock_agent = AsyncMock()
+
+    # Browser session with both kill() and event_bus.stop()
+    mock_event_bus = AsyncMock()
+    mock_event_bus.stop = AsyncMock()
+
+    mock_browser_session = AsyncMock()
+    mock_browser_session.kill = AsyncMock()
+    mock_browser_session.event_bus = mock_event_bus
+
+    mock_agent.browser_session = mock_browser_session
+
+    # Agent run result
+    mock_history = MagicMock()
+    mock_history.is_done.return_value = is_done
+    mock_history.history = []
+
+    if run_side_effect:
+        mock_agent.run = AsyncMock(side_effect=run_side_effect)
+    else:
+        mock_agent.run = AsyncMock(return_value=mock_history)
+
+    mock_agent.state = MagicMock()
+    mock_agent.state.n_steps = n_steps
+
+    return mock_agent
 
 
 # ---------------------------------------------------------------------------
@@ -317,103 +350,114 @@ async def test_create_job_agent_extends_system_message(mock_prompt, mock_get_mod
 
 
 # ---------------------------------------------------------------------------
-# run_job_agent tests
+# run_job_agent tests — S3: keep_alive controls browser cleanup
 # ---------------------------------------------------------------------------
 
 
 @patch("ghosthands.agent.factory.create_job_agent")
-async def test_run_job_agent_always_kills_browser(mock_create, sample_profile):
-    """BASELINE: run_job_agent UNCONDITIONALLY kills browser in finally block.
-    This is the documented behavior: the worker convenience wrapper always
-    kills the browser because there is no human reviewer in the worker path.
-    Callers wanting keep_alive behavior should use create_job_agent() directly.
-    NOTE: The browser profile has keep_alive=True but run_job_agent ignores it."""
-    # Set up mock agent
-    mock_agent = AsyncMock()
-    mock_browser_session = AsyncMock()
-    mock_browser_session.kill = AsyncMock()
-
-    # Mock browser_profile with keep_alive=True (as factory sets it)
-    mock_browser_profile = MagicMock()
-    mock_browser_profile.keep_alive = True
-    mock_browser_session.browser_profile = mock_browser_profile
-
-    mock_agent.browser_session = mock_browser_session
-
-    # Mock agent.run() to return a history with is_done()=True
-    mock_history = MagicMock()
-    mock_history.is_done.return_value = True
-    mock_history.history = []
-    mock_agent.run = AsyncMock(return_value=mock_history)
-    mock_agent.state = MagicMock()
-    mock_agent.state.n_steps = 3
-
+async def test_run_job_agent_keep_alive_false_kills_browser(mock_create, sample_profile):
+    """S3: keep_alive=False calls browser_session.kill(), NOT event_bus.stop()."""
+    mock_agent = _make_mock_agent()
     mock_create.return_value = mock_agent
 
     await run_job_agent(
         task="Apply to https://example.com",
         resume_profile=sample_profile,
+        keep_alive=False,
     )
 
-    # BASELINE: kill() is ALWAYS called, even though keep_alive=True
-    mock_browser_session.kill.assert_called_once()
+    mock_agent.browser_session.kill.assert_called_once()
+    mock_agent.browser_session.event_bus.stop.assert_not_called()
 
 
 @patch("ghosthands.agent.factory.create_job_agent")
-async def test_run_job_agent_kills_browser_on_exception(mock_create, sample_profile):
-    """BASELINE: Browser is killed even when agent.run() raises an exception."""
-    mock_agent = AsyncMock()
-    mock_browser_session = AsyncMock()
-    mock_browser_session.kill = AsyncMock()
-    mock_agent.browser_session = mock_browser_session
+async def test_run_job_agent_keep_alive_true_preserves_browser(mock_create, sample_profile):
+    """S3: keep_alive=True calls event_bus.stop(clear=False, timeout=1.0), NOT kill()."""
+    mock_agent = _make_mock_agent()
+    mock_create.return_value = mock_agent
 
-    # Make agent.run() raise an error
-    mock_agent.run = AsyncMock(side_effect=RuntimeError("LLM failed"))
+    await run_job_agent(
+        task="Apply to https://example.com",
+        resume_profile=sample_profile,
+        keep_alive=True,
+    )
 
+    mock_agent.browser_session.kill.assert_not_called()
+    mock_agent.browser_session.event_bus.stop.assert_called_once_with(clear=False, timeout=1.0)
+
+
+@patch("ghosthands.agent.factory.create_job_agent")
+async def test_run_job_agent_keep_alive_none_preserves_browser(mock_create, sample_profile):
+    """S3: keep_alive=None (default) treats as True — event_bus.stop(), NOT kill()."""
+    mock_agent = _make_mock_agent()
+    mock_create.return_value = mock_agent
+
+    await run_job_agent(
+        task="Apply to https://example.com",
+        resume_profile=sample_profile,
+        # keep_alive defaults to None
+    )
+
+    mock_agent.browser_session.kill.assert_not_called()
+    mock_agent.browser_session.event_bus.stop.assert_called_once_with(clear=False, timeout=1.0)
+
+
+@patch("ghosthands.agent.factory.create_job_agent")
+async def test_run_job_agent_keep_alive_false_kills_on_exception(mock_create, sample_profile):
+    """S3: keep_alive=False still calls kill() when agent.run() raises."""
+    mock_agent = _make_mock_agent(run_side_effect=RuntimeError("LLM failed"))
     mock_create.return_value = mock_agent
 
     with pytest.raises(RuntimeError, match="LLM failed"):
         await run_job_agent(
             task="Apply to https://example.com",
             resume_profile=sample_profile,
+            keep_alive=False,
         )
 
-    # BASELINE: kill() called in finally even on exception
-    mock_browser_session.kill.assert_called_once()
+    mock_agent.browser_session.kill.assert_called_once()
+    mock_agent.browser_session.event_bus.stop.assert_not_called()
 
 
 @patch("ghosthands.agent.factory.create_job_agent")
-async def test_run_job_agent_handles_kill_exception_gracefully(mock_create, sample_profile):
-    """BASELINE: If browser_session.kill() itself raises, the exception is swallowed."""
-    mock_agent = AsyncMock()
-    mock_browser_session = AsyncMock()
-    mock_browser_session.kill = AsyncMock(side_effect=Exception("Browser already closed"))
-    mock_agent.browser_session = mock_browser_session
-
-    # Normal run
-    mock_history = MagicMock()
-    mock_history.is_done.return_value = True
-    mock_history.history = []
-    mock_agent.run = AsyncMock(return_value=mock_history)
-    mock_agent.state = MagicMock()
-    mock_agent.state.n_steps = 1
-
+async def test_run_job_agent_keep_alive_true_preserves_on_exception(mock_create, sample_profile):
+    """S3: keep_alive=True calls event_bus.stop() even when agent.run() raises."""
+    mock_agent = _make_mock_agent(run_side_effect=RuntimeError("LLM failed"))
     mock_create.return_value = mock_agent
 
-    # Should NOT raise even though kill() failed
+    with pytest.raises(RuntimeError, match="LLM failed"):
+        await run_job_agent(
+            task="Apply to https://example.com",
+            resume_profile=sample_profile,
+            keep_alive=True,
+        )
+
+    mock_agent.browser_session.kill.assert_not_called()
+    mock_agent.browser_session.event_bus.stop.assert_called_once_with(clear=False, timeout=1.0)
+
+
+@patch("ghosthands.agent.factory.create_job_agent")
+async def test_run_job_agent_handles_event_bus_stop_exception_gracefully(mock_create, sample_profile):
+    """S3: If event_bus.stop() raises, the exception is swallowed."""
+    mock_agent = _make_mock_agent()
+    mock_agent.browser_session.event_bus.stop = AsyncMock(side_effect=Exception("Bus error"))
+    mock_create.return_value = mock_agent
+
+    # Should NOT raise even though event_bus.stop() failed
     result = await run_job_agent(
         task="Apply to https://example.com",
         resume_profile=sample_profile,
+        keep_alive=True,
     )
 
     assert isinstance(result, dict)
 
 
 @patch("ghosthands.agent.factory.create_job_agent")
-async def test_run_job_agent_skips_kill_when_browser_session_is_none(mock_create, sample_profile):
-    """BASELINE: If browser_session is None, kill() is not called (no crash)."""
+async def test_run_job_agent_skips_cleanup_when_browser_session_is_none(mock_create, sample_profile):
+    """S3: If browser_session is None, no cleanup is attempted (no crash)."""
     mock_agent = AsyncMock()
-    mock_agent.browser_session = None  # No browser session
+    mock_agent.browser_session = None
 
     mock_history = MagicMock()
     mock_history.is_done.return_value = False
@@ -424,7 +468,6 @@ async def test_run_job_agent_skips_kill_when_browser_session_is_none(mock_create
 
     mock_create.return_value = mock_agent
 
-    # Should not crash
     result = await run_job_agent(
         task="Apply to https://example.com",
         resume_profile=sample_profile,
@@ -438,9 +481,8 @@ async def test_run_job_agent_skips_kill_when_browser_session_is_none(mock_create
 async def test_run_job_agent_returns_success_result(mock_create, sample_profile):
     """BASELINE: run_job_agent returns a result dict with expected keys on success."""
     mock_agent = AsyncMock()
-    mock_agent.browser_session = None  # skip kill for simplicity
+    mock_agent.browser_session = None  # skip cleanup for simplicity
 
-    # Build a mock history entry with is_done=True and success result
     mock_result = MagicMock()
     mock_result.is_done = True
     mock_result.success = True
@@ -452,8 +494,6 @@ async def test_run_job_agent_returns_success_result(mock_create, sample_profile)
     mock_history = MagicMock()
     mock_history.is_done.return_value = True
     mock_history.history = [mock_last_entry]
-    mock_history.usage = MagicMock()
-    mock_history.usage.total_cost = 0.05
 
     mock_agent.run = AsyncMock(return_value=mock_history)
     mock_agent.state = MagicMock()
@@ -466,7 +506,6 @@ async def test_run_job_agent_returns_success_result(mock_create, sample_profile)
         resume_profile=sample_profile,
     )
 
-    # BASELINE: result dict shape
     assert result["success"] is True
     assert result["steps"] == 10
     assert "cost_usd" in result
@@ -503,7 +542,6 @@ async def test_run_job_agent_detects_blocker_in_result(mock_create, sample_profi
         resume_profile=sample_profile,
     )
 
-    # BASELINE: blocker detection uses case-insensitive 'blocker:' check
     assert result["blocker"] is not None
     assert "CAPTCHA" in result["blocker"]
 
@@ -515,7 +553,7 @@ async def test_run_job_agent_not_done_returns_failure(mock_create, sample_profil
     mock_agent.browser_session = None
 
     mock_history = MagicMock()
-    mock_history.is_done.return_value = False  # Not done
+    mock_history.is_done.return_value = False
     mock_history.history = []
 
     mock_agent.run = AsyncMock(return_value=mock_history)
@@ -555,10 +593,26 @@ async def test_run_job_agent_passes_hooks_to_agent_run(mock_create, sample_profi
         job_id="test-job-123",
     )
 
-    # BASELINE: agent.run() is called with on_step_start and on_step_end kwargs
     mock_agent.run.assert_called_once()
     call_kwargs = mock_agent.run.call_args.kwargs
     assert "on_step_start" in call_kwargs
     assert "on_step_end" in call_kwargs
     assert callable(call_kwargs["on_step_start"])
     assert callable(call_kwargs["on_step_end"])
+
+
+@patch("ghosthands.agent.factory.create_job_agent")
+async def test_run_job_agent_handles_kill_exception_gracefully(mock_create, sample_profile):
+    """BASELINE: If browser_session.kill() itself raises, the exception is swallowed."""
+    mock_agent = _make_mock_agent()
+    mock_agent.browser_session.kill = AsyncMock(side_effect=Exception("Browser already closed"))
+    mock_create.return_value = mock_agent
+
+    # Should NOT raise even though kill() failed
+    result = await run_job_agent(
+        task="Apply to https://example.com",
+        resume_profile=sample_profile,
+        keep_alive=False,
+    )
+
+    assert isinstance(result, dict)

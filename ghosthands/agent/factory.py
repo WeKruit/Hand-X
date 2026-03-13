@@ -190,11 +190,20 @@ async def run_job_agent(
     max_budget: float | None = None,
     on_status_update: Callable[..., Awaitable[None]] | None = None,
     allowed_domains: list[str] | None = None,
+    keep_alive: bool | None = None,
 ) -> dict[str, Any]:
     """Convenience wrapper: create an agent, run it, and return a result dict.
 
     This is the function the worker calls for each job.  It handles the
     full lifecycle: create agent -> run -> extract result -> close browser.
+
+    Parameters
+    ----------
+    keep_alive:
+            Controls browser cleanup after the agent finishes.
+            ``False`` — kill the browser process (EC2 worker path).
+            ``True`` or ``None`` — stop the event bus but leave the
+            browser open for human review / HITL.
 
     Returns
     -------
@@ -257,12 +266,16 @@ async def run_job_agent(
             "blocker": blocker,
         }
     finally:
-        # run_job_agent is the worker convenience wrapper — the worker has no human
-        # reviewer, so always kill the browser when the job finishes.  Callers that
-        # want the browser to stay open (e.g. for HITL or manual review) should use
-        # create_job_agent() directly and manage the lifecycle themselves.
+        # Respect the keep_alive parameter for browser cleanup.
+        # keep_alive=False (EC2 worker): kill the browser process.
+        # keep_alive=True or None (Desktop/HITL): stop event bus but
+        # leave the browser open for human review.
         if agent.browser_session is not None:
             try:
-                await agent.browser_session.kill()
+                if keep_alive is False:
+                    await agent.browser_session.kill()
+                else:
+                    # keep_alive=True or None: stop event bus but leave browser open
+                    await agent.browser_session.event_bus.stop(clear=False, timeout=1.0)
             except Exception:
                 pass

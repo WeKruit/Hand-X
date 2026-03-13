@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from pathlib import Path
 
 # Force unbuffered I/O for reliable JSONL streaming
@@ -149,11 +150,24 @@ def _load_profile(args: argparse.Namespace) -> dict:
 async def run_agent_jsonl(args: argparse.Namespace) -> None:
     """Run the agent with JSONL event output on stdout."""
     from ghosthands.output.jsonl import (
+        emit_browser_ready,
         emit_cost,
         emit_done,
         emit_error,
+        emit_handshake,
+        emit_lease_acquired,
+        emit_lease_released,
         emit_status,
     )
+
+    # -- Lease ID resolution ---------------------------------------------------
+    lease_id = args.lease_id or str(uuid.uuid4())
+
+    # -- Protocol handshake (must be the very first event) ----------------------
+    emit_handshake()
+
+    # -- Lease acquired --------------------------------------------------------
+    emit_lease_acquired(lease_id, job_id=args.job_id)
 
     emit_status("Hand-X engine initialized", job_id=args.job_id)
 
@@ -262,8 +276,18 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     )
 
     # -- Step hooks for live JSONL events -----------------------------------
+    _browser_ready_emitted = False
+
     async def _on_step_start(ag: Agent) -> None:
+        nonlocal _browser_ready_emitted
         await install_same_tab_guard(ag)
+
+        # Emit browser_ready once, on the first step (browser is now live)
+        if not _browser_ready_emitted:
+            _browser_ready_emitted = True
+            cdp_url = getattr(ag.browser_session, "cdp_url", "") or ""
+            emit_browser_ready(cdp_url)
+
         step = ag.state.n_steps
         goal = ""
         if ag.state.last_model_output:
@@ -332,23 +356,26 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 message="Application filled -- browser open for review",
                 fields_filled=total_steps,
                 job_id=args.job_id,
-                lease_id=args.lease_id,
+                lease_id=lease_id,
                 result_data=result_data,
             )
-            await _wait_for_review_command(browser, args.job_id, args.lease_id)
+            await _wait_for_review_command(browser, args.job_id, lease_id)
+            emit_lease_released(lease_id, reason="completed")
         else:
             emit_done(
                 success=False,
                 message=blocker or final_result or "Agent did not complete successfully",
                 job_id=args.job_id,
-                lease_id=args.lease_id,
+                lease_id=lease_id,
                 result_data=result_data,
             )
+            emit_lease_released(lease_id, reason="failed")
             await browser.close()
             sys.exit(1)
 
     except Exception as e:
         emit_error(str(e), fatal=True, job_id=args.job_id)
+        emit_lease_released(lease_id, reason="error")
         with contextlib.suppress(Exception):
             await browser.close()
         sys.exit(1)

@@ -66,7 +66,7 @@ def emit_event(event_type: str, **kwargs: Any) -> None:
     to keep the wire format compact.
     """
     event: dict[str, Any] = {
-        "type": event_type,
+        "event": event_type,
         "timestamp": int(time.time() * 1000),
     }
     for key, value in kwargs.items():
@@ -110,10 +110,10 @@ def emit_field_filled(
 
 def emit_field_failed(
     field: str,
-    error: str,
+    reason: str,
 ) -> None:
     """Emit when a field fill attempt fails."""
-    emit_event("field_failed", field=field, error=error)
+    emit_event("field_failed", field=field, reason=reason)
 
 
 def emit_progress(
@@ -121,9 +121,18 @@ def emit_progress(
     total: int,
     *,
     round: int = 1,
+    description: str = "",
 ) -> None:
     """Emit a progress snapshot (fields filled so far)."""
-    emit_event("progress", filled=filled, total=total, round=round)
+    emit_event(
+        "progress",
+        filled=filled,
+        total=total,
+        step=filled,
+        maxSteps=total,
+        description=description or None,
+        round=round,
+    )
 
 
 def emit_done(
@@ -175,3 +184,32 @@ def emit_cost(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
     )
+
+
+# -- Lease protocol events (S2) -----------------------------------------------
+
+
+def emit_handshake(protocol_version: int = 2) -> None:
+    """Emit protocol handshake as the very first event."""
+    emit_event("handshake", protocol_version=protocol_version)
+
+
+def emit_browser_ready(cdp_url: str) -> None:
+    """Emit when the browser is connected and CDP is available."""
+    emit_event("browser_ready", cdpUrl=cdp_url)
+
+
+def emit_lease_acquired(lease_id: str, job_id: str = "") -> None:
+    """Emit when a lease is acquired from the Desktop app."""
+    emit_event("lease_acquired", leaseId=lease_id, jobId=job_id or None)
+
+
+def emit_lease_released(lease_id: str, reason: str = "completed") -> None:
+    """Emit when a lease is released (agent done or cancelled)."""
+    emit_event("lease_released", leaseId=lease_id, reason=reason)
+
+
+def emit_lease_heartbeat(lease_id: str) -> None:
+    """Emit periodic lease heartbeat to indicate the process is alive."""
+    emit_event("lease_heartbeat", leaseId=lease_id)
+
