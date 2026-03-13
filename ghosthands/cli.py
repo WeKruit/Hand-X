@@ -410,14 +410,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 result_data=result_data,
             )
             emit_lease_released(lease_id, reason="failed")
-            await browser.close()
+            await browser.kill()
             sys.exit(1)
 
     except Exception as e:
         emit_error(str(e), fatal=True, job_id=args.job_id)
         emit_lease_released(lease_id, reason="error")
         with contextlib.suppress(Exception):
-            await browser.close()
+            await browser.kill()
         sys.exit(1)
 
 
@@ -582,7 +582,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
             await asyncio.sleep(1)
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\nClosing browser...")
-        await browser.close()
+        await browser.kill()
 
 
 # ── Shared helpers ────────────────────────────────────────────────────
@@ -712,7 +712,7 @@ async def _wait_for_review_command(browser, job_id: str, lease_id: str) -> None:
         pass
     finally:
         with contextlib.suppress(Exception):
-            await browser.close()
+            await browser.kill()
 
 
 # ── Entry point ───────────────────────────────────────────────────────
