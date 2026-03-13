@@ -175,7 +175,7 @@ jobs:
       - name: Dispatch to GH-Desktop-App
         uses: peter-evans/repository-dispatch@v3
         with:
-          token: ${{ secrets.GH_PACKAGES_TOKEN }}
+          token: ${{ secrets.DESKTOP_REPO_PAT }}
           repository: WeKruit/GH-Desktop-App
           event-type: hand-x-updated
           client-payload: '{"version": "${{ steps.version.outputs.version }}"}'
