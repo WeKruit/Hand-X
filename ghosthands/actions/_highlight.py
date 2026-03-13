@@ -1,8 +1,7 @@
 """Shared visual highlight for DomHand actions.
 
-Injects the same animated corner-bracket effect that browser-use uses
-(`highlight_interaction_element`) so users can see exactly which element
-a DomHand action is interacting with.
+Injects a Hand-X styled frame highlight so users can see exactly which
+element a DomHand action is interacting with.
 """
 
 # JS function that draws animated corner brackets around an element found
@@ -19,61 +18,38 @@ HIGHLIGHT_JS = r"""(selector, color, durationMs) => {
 	var rect = el.getBoundingClientRect();
 	if (rect.width === 0 && rect.height === 0) return false;
 
-	var maxCornerSize = 20;
-	var minCornerSize = 8;
-	var cornerSize = Math.max(
-		minCornerSize,
-		Math.min(maxCornerSize, Math.min(rect.width, rect.height) * 0.35)
-	);
-	var borderWidth = 3;
-	var startOffset = 10;
-	var finalOffset = -3;
-
 	var scrollX = window.pageXOffset || document.documentElement.scrollLeft || 0;
 	var scrollY = window.pageYOffset || document.documentElement.scrollTop || 0;
 
 	var container = document.createElement('div');
 	container.setAttribute('data-domhand-highlight', 'true');
 	container.style.cssText =
-		'position:absolute;pointer-events:none;z-index:2147483647;' +
+		'position:absolute;pointer-events:none;z-index:2147483647;opacity:0;' +
+		'transform:scale(0.985);transition:opacity 0.18s ease-out,transform 0.18s ease-out;' +
 		'left:' + (rect.x + scrollX) + 'px;' +
 		'top:' + (rect.y + scrollY) + 'px;' +
 		'width:' + rect.width + 'px;' +
 		'height:' + rect.height + 'px;';
 
-	var corners = [
-		{ top: '0', left: '0', right: '', bottom: '', bT: true, bL: true,
-		  sx: -startOffset, sy: -startOffset, fx: finalOffset, fy: finalOffset },
-		{ top: '0', left: '', right: '0', bottom: '', bT: true, bR: true,
-		  sx: startOffset, sy: -startOffset, fx: -finalOffset, fy: finalOffset },
-		{ top: '', left: '0', right: '', bottom: '0', bB: true, bL: true,
-		  sx: -startOffset, sy: startOffset, fx: finalOffset, fy: -finalOffset },
-		{ top: '', left: '', right: '0', bottom: '0', bB: true, bR: true,
-		  sx: startOffset, sy: startOffset, fx: -finalOffset, fy: -finalOffset }
-	];
+	var frame = document.createElement('div');
+	frame.style.cssText =
+		'position:absolute;inset:-4px;border-radius:12px;' +
+		'border:2px solid ' + color + ';' +
+		'background:linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0));' +
+		'box-shadow:0 0 0 4px rgba(96,165,250,0.16), 0 10px 24px rgba(2,6,23,0.22);';
+	container.appendChild(frame);
 
-	corners.forEach(function(c) {
-		var b = document.createElement('div');
-		b.style.cssText =
-			'position:absolute;pointer-events:none;' +
-			'width:' + cornerSize + 'px;height:' + cornerSize + 'px;' +
-			'transition:all 0.15s ease-out;' +
-			'transform:translate(' + c.sx + 'px,' + c.sy + 'px);';
-		if (c.top !== '')   b.style.top = c.top;
-		if (c.left !== '')  b.style.left = c.left;
-		if (c.right !== '') b.style.right = c.right;
-		if (c.bottom !== '') b.style.bottom = c.bottom;
-		if (c.bT) b.style.borderTop    = borderWidth + 'px solid ' + color;
-		if (c.bR) b.style.borderRight  = borderWidth + 'px solid ' + color;
-		if (c.bB) b.style.borderBottom = borderWidth + 'px solid ' + color;
-		if (c.bL) b.style.borderLeft   = borderWidth + 'px solid ' + color;
-		container.appendChild(b);
-		setTimeout(function() {
-			b.style.transform = 'translate(' + c.fx + 'px,' + c.fy + 'px)';
-		}, 10);
-	});
+	var accent = document.createElement('div');
+	accent.style.cssText =
+		'position:absolute;top:-7px;right:10px;width:10px;height:10px;border-radius:999px;' +
+		'background:' + color + ';box-shadow:0 0 0 4px rgba(96,165,250,0.22);';
+	container.appendChild(accent);
 
 	document.body.appendChild(container);
+	requestAnimationFrame(function() {
+		container.style.opacity = '1';
+		container.style.transform = 'scale(1)';
+	});
 	setTimeout(function() {
 		container.style.opacity = '0';
 		container.style.transition = 'opacity 0.3s ease-out';
@@ -82,16 +58,18 @@ HIGHLIGHT_JS = r"""(selector, color, durationMs) => {
 	return true;
 }"""
 
-DEFAULT_COLOR = "rgb(255, 127, 39)"
+DEFAULT_COLOR = "rgb(37, 99, 235)"
 DEFAULT_DURATION_MS = 1000
 
 
-async def highlight_element(page, selector: str, color: str = DEFAULT_COLOR, duration_ms: int = DEFAULT_DURATION_MS) -> None:
-	"""Show animated corner brackets around an element, matching browser-use's style.
+async def highlight_element(
+    page, selector: str, color: str = DEFAULT_COLOR, duration_ms: int = DEFAULT_DURATION_MS
+) -> None:
+    """Show animated corner brackets around an element, matching browser-use's style.
 
-	Safe to call fire-and-forget — failures are silently ignored.
-	"""
-	try:
-		await page.evaluate(HIGHLIGHT_JS, selector, color, duration_ms)
-	except Exception:
-		pass  # Never fail the action because of a visual effect
+    Safe to call fire-and-forget — failures are silently ignored.
+    """
+    try:
+        await page.evaluate(HIGHLIGHT_JS, selector, color, duration_ms)
+    except Exception:
+        pass  # Never fail the action because of a visual effect

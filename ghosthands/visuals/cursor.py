@@ -48,8 +48,9 @@ _INJECT_CURSOR_JS = r"""() => {
             width: 0;
             height: 0;
             border-radius: 50%;
-            background: rgba(59, 130, 246, 0.3);
-            border: 2px solid rgba(59, 130, 246, 0.6);
+            background: rgba(96, 165, 250, 0.18);
+            border: 2px solid rgba(96, 165, 250, 0.72);
+            box-shadow: 0 0 0 8px rgba(96, 165, 250, 0.14);
             pointer-events: none;
             z-index: 2147483645;
             transform: translate(-50%, -50%);
@@ -77,12 +78,14 @@ _INJECT_CURSOR_JS = r"""() => {
             transform: translateX(-50%);
             z-index: 2147483646;
             pointer-events: none;
-            background: rgba(0, 0, 0, 0.75);
-            color: #fff;
+            background: rgba(2, 6, 23, 0.84);
+            border: 1px solid rgba(96, 165, 250, 0.24);
+            box-shadow: 0 12px 30px rgba(2, 6, 23, 0.28);
+            color: #eff6ff;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             font-size: 13px;
             padding: 6px 14px;
-            border-radius: 6px;
+            border-radius: 999px;
             opacity: 0;
             transition: opacity 0.2s ease;
             white-space: nowrap;
@@ -99,8 +102,9 @@ _INJECT_CURSOR_JS = r"""() => {
     // ── Cursor pointer (SVG arrow) ──────────────────────
     var cursor = document.createElement('div');
     cursor.id = 'gh-cursor-visual';
-    cursor.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M5 3L19 12L12 13L9 20L5 3Z" fill="#3b82f6" stroke="#1e40af" stroke-width="1.5" stroke-linejoin="round"/>
+    cursor.innerHTML = `<svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M6 4L21 12.5L13.6 14.4L10.9 23L6 4Z" fill="#2563eb" stroke="#dbeafe" stroke-width="1.6" stroke-linejoin="round"/>
+        <circle cx="20.2" cy="20.4" r="3.1" fill="#93c5fd" opacity="0.98"/>
     </svg>`;
     document.body.appendChild(cursor);
 
@@ -172,7 +176,7 @@ _REMOVE_CURSOR_JS = r"""() => {
 class CursorVisual:
     """Manages a visual cursor overlay in the browser page."""
 
-    def __init__(self, page: "Page"):
+    def __init__(self, page: Page):
         self._page = page
         self._injected = False
 
