@@ -115,11 +115,25 @@ class CamoufoxProvider(BrowserProvider):
 	async def _launch_via_subprocess(self, profile: BrowserProfile) -> tuple[str, int | None]:
 		"""Launch Camoufox as a subprocess with remote debugging port.
 
+		.. warning::
+
+			This path uses ``--remote-debugging-port`` and ``/json/version``
+			which are Chrome DevTools Protocol (CDP) semantics.  Camoufox is
+			Firefox-based and speaks the Juggler protocol, so these CDP
+			endpoints will not behave correctly.  Use library mode
+			(``pip install camoufox``) instead.
+
 		Falls back to binary execution if the Python library is unavailable.
 
 		Raises:
+			NotImplementedError: Always — subprocess launch is not production-ready.
 			FileNotFoundError: If the camoufox binary cannot be found.
 		"""
+		raise NotImplementedError(
+			"Subprocess launch for Camoufox is not yet production-ready. "
+			"Use library mode via 'pip install camoufox'."
+		)
+
 		binary = self._find_camoufox_binary()
 		if binary is None:
 			raise FileNotFoundError(
