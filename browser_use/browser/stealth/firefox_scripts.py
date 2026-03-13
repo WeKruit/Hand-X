@@ -59,7 +59,7 @@ MEDIA_CODECS_PATCH = """
                 'audio/webm; codecs="opus"',
             ];
             MediaSource.isTypeSupported = function(type) {
-                if (commonCodecs.some(c => type.includes(c.split(';')[0]))) {
+                if (commonCodecs.some(c => { const mime = c.split(';')[0]; return type === mime || type.startsWith(mime + ';'); })) {
                     return true;
                 }
                 return originalIsTypeSupported.call(this, type);
