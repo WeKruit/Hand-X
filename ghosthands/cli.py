@@ -281,6 +281,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         engine = RouteSelector.select_engine(args.job_url, platform)
         emit_status(f"Auto-selected browser engine: {engine}", job_id=args.job_id)
 
+    # TODO: wire CamoufoxProvider when ready
+    if engine == "firefox":
+        emit_status(
+            "Firefox/Camoufox engine is not yet wired — falling back to chromium",
+            job_id=args.job_id,
+        )
+        engine = "chromium"
+
     # -- Browser ------------------------------------------------------------
     browser_profile = BrowserProfile(
         headless=args.headless,
@@ -520,6 +528,11 @@ async def run_agent_human(args: argparse.Namespace) -> None:
 
         engine = RouteSelector.select_engine(args.job_url, platform)
         print(f"Auto-selected browser engine: {engine}")
+
+    # TODO: wire CamoufoxProvider when ready
+    if engine == "firefox":
+        print("WARNING: Firefox/Camoufox engine is not yet wired — falling back to chromium")
+        engine = "chromium"
 
     # -- Browser ------------------------------------------------------------
     browser_profile = BrowserProfile(
