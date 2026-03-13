@@ -190,7 +190,7 @@ async def run_job_agent(
     max_budget: float | None = None,
     on_status_update: Callable[..., Awaitable[None]] | None = None,
     allowed_domains: list[str] | None = None,
-    keep_alive: bool | None = None,
+    keep_alive: bool = False,
 ) -> dict[str, Any]:
     """Convenience wrapper: create an agent, run it, and return a result dict.
 
@@ -201,9 +201,11 @@ async def run_job_agent(
     ----------
     keep_alive:
             Controls browser cleanup after the agent finishes.
-            ``False`` — kill the browser process (EC2 worker path).
-            ``True`` or ``None`` — stop the event bus but leave the
-            browser open for human review / HITL.
+            ``False`` (default) — kill the browser process.  This is the
+            safe default for the EC2 worker path which does not pass
+            keep_alive explicitly.
+            ``True`` — stop the event bus but leave the browser open for
+            human review / HITL (desktop app path).
 
     Returns
     -------
@@ -267,15 +269,14 @@ async def run_job_agent(
         }
     finally:
         # Respect the keep_alive parameter for browser cleanup.
-        # keep_alive=False (EC2 worker): kill the browser process.
-        # keep_alive=True or None (Desktop/HITL): stop event bus but
-        # leave the browser open for human review.
+        # keep_alive=False (default, EC2 worker): kill the browser process.
+        # keep_alive=True (Desktop/HITL): stop event bus but leave browser open.
         if agent.browser_session is not None:
             try:
-                if keep_alive is False:
+                if not keep_alive:
                     await agent.browser_session.kill()
                 else:
-                    # keep_alive=True or None: stop event bus but leave browser open
+                    # keep_alive=True: stop event bus but leave browser open
                     await agent.browser_session.event_bus.stop(clear=False, timeout=1.0)
             except Exception:
                 pass
