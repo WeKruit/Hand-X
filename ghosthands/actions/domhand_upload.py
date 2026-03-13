@@ -1,23 +1,24 @@
 """DomHand Upload — file upload action for resume and cover letter inputs.
 
 Handles file uploads by:
-1. Detecting the file input element at the given index
-2. Classifying what type of file is expected from the label context
-3. Resolving the file path from environment config
-4. Using CDP to set the file on the input element
-5. Verifying the upload succeeded
+1. Detecting the file input element at the given index (via browser-use selector map)
+2. Searching self, descendants, ancestors, and siblings for an actual <input type="file">
+3. Classifying what type of file is expected from the label context
+4. Resolving the file path from environment config
+5. Dispatching an UploadFileEvent through the browser-use event bus
+6. Verifying the upload succeeded via CDP
 """
 
 import asyncio
-import json
 import logging
 import os
 import re
 from pathlib import Path
-from typing import Any
 
 from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
+from browser_use.browser.events import UploadFileEvent
+from browser_use.dom.views import EnhancedDOMTreeNode
 
 from ghosthands.actions.views import DomHandUploadParams
 
@@ -28,104 +29,108 @@ logger = logging.getLogger(__name__)
 _RESUME_KEYWORDS = ('resume', 'cv', 'curriculum vitae')
 _COVER_LETTER_KEYWORDS = ('cover letter', 'cover_letter', 'coverletter', 'motivation letter')
 
-# JavaScript: get file input info at an index
-_GET_FILE_INPUT_INFO_JS = r"""
-(triggerIndex) => {
-	const el = document.querySelector('[data-highlight-index="' + triggerIndex + '"]');
-	if (!el) return JSON.stringify({error: 'Element not found at index ' + triggerIndex});
 
-	const tag = el.tagName.toLowerCase();
-	const isFileInput = tag === 'input' && el.type === 'file';
+def _body_text_indicates_upload_confirmation(body_text: str, file_name: str) -> bool:
+	"""Best-effort check for upload success indicators rendered outside the raw file input."""
+	text = (body_text or '').lower()
+	name = (file_name or '').lower().strip()
 
-	// Also check for file input within the element (e.g., a wrapper div)
-	let fileInput = isFileInput ? el : el.querySelector('input[type="file"]');
+	if name and name in text:
+		return True
 
-	if (!fileInput) {
-		// Look in parent context for hidden file inputs
-		const parent = el.closest('.form-group, .form-field, .field, [class*="upload"], [class*="file"], [class*="drop"]');
-		if (parent) {
-			fileInput = parent.querySelector('input[type="file"]');
-		}
-	}
+	return any(
+		signal in text
+		for signal in (
+			'successfully uploaded',
+			'uploaded successfully',
+			'upload complete',
+			'successfully attached',
+			'attached successfully',
+			'remove file',
+			'delete file',
+			'replace file',
+			'replace resume',
+		)
+	)
 
-	if (!fileInput) {
-		return JSON.stringify({
-			error: 'No file input found at or near element ' + triggerIndex,
-			elementTag: tag,
-			elementType: el.type || '',
-			elementRole: el.getAttribute('role') || '',
-		});
-	}
 
-	// Gather label context
-	let label = fileInput.getAttribute('aria-label') || '';
-	if (!label && fileInput.id) {
-		const labelEl = document.querySelector('label[for="' + CSS.escape(fileInput.id) + '"]');
-		if (labelEl) label = labelEl.textContent.trim();
-	}
-	if (!label) {
-		const parent = fileInput.closest('.form-group, .form-field, .field, [class*="upload"]');
-		if (parent) {
-			const clone = parent.cloneNode(true);
-			clone.querySelectorAll('input, button').forEach(c => c.remove());
-			label = clone.textContent.trim();
-		}
-	}
+# ── File input search (mirrors browser_use/tools/service.py pattern) ──
 
-	const hasFile = (fileInput.files && fileInput.files.length > 0) || (fileInput.value || '').trim().length > 0;
-	const accept = fileInput.getAttribute('accept') || '';
+def _find_file_input_near_element(
+	node: EnhancedDOMTreeNode,
+	browser_session: BrowserSession,
+	max_height: int = 3,
+	max_descendant_depth: int = 3,
+) -> EnhancedDOMTreeNode | None:
+	"""Find the closest <input type="file"> to the given element.
 
-	return JSON.stringify({
-		found: true,
-		label: label,
-		hasFile: hasFile,
-		accept: accept,
-		fileInputId: fileInput.id || null,
-		multiple: fileInput.multiple || false,
-	});
-}
-"""
+	Walks descendants, then ancestors (up to max_height), checking siblings
+	at each level. This mirrors the pattern in browser_use/tools/service.py.
+	"""
 
-# JavaScript: check if upload succeeded
-_VERIFY_UPLOAD_JS = r"""
-(triggerIndex) => {
-	const el = document.querySelector('[data-highlight-index="' + triggerIndex + '"]');
-	if (!el) return JSON.stringify({uploaded: false, error: 'Element not found'});
+	def _search_descendants(n: EnhancedDOMTreeNode, depth: int) -> EnhancedDOMTreeNode | None:
+		if depth < 0:
+			return None
+		if browser_session.is_file_input(n):
+			return n
+		for child in n.children_nodes or []:
+			result = _search_descendants(child, depth - 1)
+			if result:
+				return result
+		return None
 
-	let fileInput = (el.tagName.toLowerCase() === 'input' && el.type === 'file')
-		? el
-		: el.querySelector('input[type="file"]');
+	current = node
+	for _ in range(max_height + 1):
+		# Check the current node itself
+		if browser_session.is_file_input(current):
+			return current
+		# Check all descendants of the current node
+		result = _search_descendants(current, max_descendant_depth)
+		if result:
+			return result
+		# Check siblings and their descendants
+		if current.parent_node:
+			for sibling in current.parent_node.children_nodes or []:
+				if sibling is current:
+					continue
+				if browser_session.is_file_input(sibling):
+					return sibling
+				result = _search_descendants(sibling, max_descendant_depth)
+				if result:
+					return result
+		current = current.parent_node
+		if not current:
+			break
+	return None
 
-	if (!fileInput) {
-		const parent = el.closest('.form-group, .form-field, .field, [class*="upload"], [class*="file"]');
-		if (parent) fileInput = parent.querySelector('input[type="file"]');
-	}
 
-	if (!fileInput) return JSON.stringify({uploaded: false, error: 'File input not found'});
+def _get_label_from_node(node: EnhancedDOMTreeNode) -> str:
+	"""Extract a human-readable label from the node and its context.
 
-	const hasFile = (fileInput.files && fileInput.files.length > 0) || (fileInput.value || '').trim().length > 0;
-	let fileName = '';
-	if (fileInput.files && fileInput.files.length > 0) {
-		fileName = fileInput.files[0].name;
-	} else if (fileInput.value) {
-		fileName = fileInput.value.split('\\').pop() || fileInput.value;
-	}
+	Checks aria-label, ax_node name, placeholder, and parent text.
+	"""
+	# Direct attributes
+	label = node.attributes.get('aria-label', '')
+	if label:
+		return label
 
-	// Also check for success indicators in the parent container
-	const parent = fileInput.closest('.form-group, .form-field, .field, [class*="upload"], [class*="file"]');
-	let successIndicator = false;
-	if (parent) {
-		const text = parent.textContent.toLowerCase();
-		successIndicator = text.includes('uploaded') || text.includes('attached') || text.includes('complete');
-	}
+	# Accessibility tree name
+	if node.ax_node and node.ax_node.name:
+		return node.ax_node.name
 
-	return JSON.stringify({
-		uploaded: hasFile || successIndicator,
-		fileName: fileName,
-		successIndicator: successIndicator,
-	});
-}
-"""
+	# Placeholder / title
+	label = node.attributes.get('placeholder', '') or node.attributes.get('title', '')
+	if label:
+		return label
+
+	# Walk up to parent and grab surrounding text
+	parent = node.parent_node
+	if parent:
+		text = parent.get_all_children_text(max_depth=2)
+		if text:
+			return text[:200]
+
+	return ''
 
 
 # ── File classification ──────────────────────────────────────────────
@@ -187,14 +192,6 @@ def _resolve_file_path(file_type: str) -> str | None:
 		if p.is_file():
 			return str(p.resolve())
 
-	# If file_type is resume or generic, also try GH_RESUME_PATH
-	if file_type in ('resume', 'generic'):
-		path_str = os.environ.get('GH_RESUME_PATH', '')
-		if path_str:
-			p = Path(path_str)
-			if p.is_file():
-				return str(p.resolve())
-
 	return None
 
 
@@ -203,51 +200,65 @@ def _resolve_file_path(file_type: str) -> str | None:
 async def domhand_upload(params: DomHandUploadParams, browser_session: BrowserSession) -> ActionResult:
 	"""Upload a file (resume, cover letter) to a file input element.
 
-	1. Detect the file input at the given element index
-	2. Classify what type of file is expected
-	3. Resolve the file path from environment config
-	4. Set the file via CDP
-	5. Verify the upload succeeded
+	1. Get the element node from browser-use selector map
+	2. Search nearby DOM for an actual <input type="file">
+	3. Classify what type of file is expected
+	4. Resolve the file path from environment config
+	5. Dispatch UploadFileEvent through the event bus
+	6. Verify the upload succeeded via CDP
 	"""
 	page = await browser_session.get_current_page()
 	if not page:
 		return ActionResult(error='No active page found in browser session')
 
-	# ── Step 1: Detect the file input ─────────────────────────
+	# ── Step 1: Get the element node ──────────────────────────
 	try:
-		raw_info = await page.evaluate(_GET_FILE_INPUT_INFO_JS, params.index)
-		info: dict[str, Any] = json.loads(raw_info) if isinstance(raw_info, str) else raw_info
+		node = await browser_session.get_element_by_index(params.index)
+		if node is None:
+			return ActionResult(error=f'Element at index {params.index} not available. Page may have changed.')
 	except Exception as e:
-		return ActionResult(error=f'Failed to inspect file input at index {params.index}: {e}')
+		return ActionResult(error=f'Failed to find element at index {params.index}: {e}')
 
-	if info.get('error'):
-		return ActionResult(error=info['error'])
+	# ── Step 2: Find the actual file input ────────────────────
+	file_input_node = _find_file_input_near_element(node, browser_session)
 
-	if not info.get('found'):
-		return ActionResult(error=f'No file input found at index {params.index}')
+	if file_input_node is None:
+		# Fallback: search the entire selector map for the closest file input
+		selector_map = await browser_session.get_selector_map()
+		closest_file_input = None
+		min_distance = float('inf')
 
-	# Already has a file?
-	if info.get('hasFile'):
-		return ActionResult(
-			extracted_content=f'File input at index {params.index} already has a file uploaded.',
-			include_extracted_content_only_once=True,
-		)
+		node_y = node.absolute_position.y if node.absolute_position else 0
+		for _idx, element in selector_map.items():
+			if browser_session.is_file_input(element):
+				if element.absolute_position:
+					distance = abs(element.absolute_position.y - node_y)
+					if distance < min_distance:
+						min_distance = distance
+						closest_file_input = element
 
-	# ── Step 2: Classify the file type ────────────────────────
-	label = info.get('label', '')
+		if closest_file_input:
+			file_input_node = closest_file_input
+			logger.info(f'Found file input closest to element {params.index} (distance: {min_distance}px)')
+		else:
+			return ActionResult(
+				error=f'No <input type="file"> found at or near element index {params.index}. '
+				f'The element (tag={node.tag_name}) may not be a file upload trigger.',
+			)
+
+	# ── Step 3: Classify the file type ────────────────────────
+	label = _get_label_from_node(file_input_node)
 	detected_type = _classify_file_input(label)
 
-	# Use the param file_type hint if it overrides detection
+	# Use the param file_type hint if detection is ambiguous
 	effective_type = params.file_type
 	if detected_type == 'cover_letter':
 		effective_type = 'cover_letter'
-	elif detected_type == 'other':
-		# Label describes something specific that isn't resume/cover letter
-		effective_type = params.file_type  # Trust the caller's hint
-	elif detected_type == 'generic':
-		effective_type = params.file_type  # Trust the caller's hint
+	elif detected_type == 'resume':
+		effective_type = 'resume'
+	# For 'generic' or 'other', trust the caller's hint
 
-	# ── Step 3: Resolve the file path ─────────────────────────
+	# ── Step 4: Resolve the file path ─────────────────────────
 	file_path = _resolve_file_path(effective_type)
 	if not file_path:
 		return ActionResult(
@@ -257,83 +268,89 @@ async def domhand_upload(params: DomHandUploadParams, browser_session: BrowserSe
 
 	file_name = Path(file_path).name
 
-	# ── Step 4: Upload the file via CDP ───────────────────────
-	try:
-		# We need to use CDP to set the file on the input element.
-		# Get the node from the browser session for CDP interaction.
-		node = await browser_session.get_element_by_index(params.index)
-		if node is None:
-			return ActionResult(error=f'Element at index {params.index} not available. Page may have changed.')
+	# Check if the file input already has a file (via attributes or ax_node)
+	if file_input_node.ax_node and file_input_node.ax_node.name:
+		ax_name = file_input_node.ax_node.name.lower()
+		# Many browsers show "No file chosen" or the filename in the ax_name
+		if ax_name and ax_name not in ('', 'no file chosen', 'no file selected', 'choose file', 'browse'):
+			# Might already have a file — but proceed anyway since user explicitly asked
+			pass
 
-		# Use the browser-use event bus to dispatch the upload
-		from browser_use.browser.events import UploadFileEvent
+	# ── Step 5: Upload via event bus ──────────────────────────
+	try:
 		event = browser_session.event_bus.dispatch(
-			UploadFileEvent(node=node, file_path=file_path)
+			UploadFileEvent(node=file_input_node, file_path=file_path)
 		)
 		await event
 		await event.event_result(raise_if_any=True, raise_if_none=False)
-
-		# Brief wait for UI to update
-		await asyncio.sleep(0.5)
+		await asyncio.sleep(0.75)  # Brief wait for UI to update
 	except Exception as e:
-		# Fallback: try using CDP DOM.setFileInputFiles directly
+		return ActionResult(error=f'Failed to upload file "{file_name}": {e}')
+
+	# ── Step 6: Verify the upload ─────────────────────────────
+	uploaded = False
+	uploaded_name = file_name
+
+	for _ in range(8):
 		try:
-			cdp_page = await browser_session.get_current_page()
-			if cdp_page:
-				session_id = await cdp_page.session_id
-				# We need the backend node ID for the file input
-				# Use JavaScript to find and tag the actual file input
-				tag_result = await page.evaluate(f"""
-					(triggerIndex) => {{
-						const el = document.querySelector('[data-highlight-index="' + triggerIndex + '"]');
-						if (!el) return null;
-						let fi = (el.tagName === 'INPUT' && el.type === 'file') ? el : el.querySelector('input[type="file"]');
-						if (!fi) {{
-							const parent = el.closest('.form-group, .form-field, [class*="upload"]');
-							if (parent) fi = parent.querySelector('input[type="file"]');
-						}}
-						if (!fi) return null;
-						fi.setAttribute('data-dh-upload-target', 'true');
-						return true;
-					}}
-				""", params.index)
+			# Resolve the file input node via CDP and check its files property
+			session_id = file_input_node.session_id
+			if not session_id:
+				cdp_session = await browser_session.get_or_create_cdp_session()
+				session_id = cdp_session.session_id
 
-				if not tag_result:
-					return ActionResult(error=f'Could not locate file input for upload: {e}')
+			backend_node_id = file_input_node.backend_node_id
 
-				# Resolve the node via CDP
-				cdp_client = browser_session.cdp_client
-				if cdp_client:
-					doc_result = await cdp_client.send.DOM.getDocument(session_id=session_id)
-					root_id = doc_result.get('root', {}).get('nodeId', 0)
-					search_result = await cdp_client.send.DOM.querySelector(
-						params={'nodeId': root_id, 'selector': '[data-dh-upload-target="true"]'},
-						session_id=session_id,
-					)
-					target_node_id = search_result.get('nodeId', 0)
-					if target_node_id:
-						await cdp_client.send.DOM.setFileInputFiles(
-							params={'files': [file_path], 'nodeId': target_node_id},
-							session_id=session_id,
-						)
-						await asyncio.sleep(0.5)
-					else:
-						return ActionResult(error=f'Failed to upload file: {e}')
-				else:
-					return ActionResult(error=f'Failed to upload file (no CDP client): {e}')
-		except Exception as fallback_e:
-			return ActionResult(error=f'Failed to upload file via both event bus and CDP: {e} / {fallback_e}')
+			resolve_result = await browser_session.cdp_client.send.DOM.resolveNode(
+				params={'backendNodeId': backend_node_id},
+				session_id=session_id,
+			)
+			object_id = resolve_result.get('object', {}).get('objectId')
 
-	# ── Step 5: Verify the upload ─────────────────────────────
-	try:
-		verify_json = await page.evaluate(_VERIFY_UPLOAD_JS, params.index)
-		verify: dict[str, Any] = json.loads(verify_json) if isinstance(verify_json, str) else verify_json
-	except Exception:
-		verify = {'uploaded': False}
+			if object_id:
+				call_result = await browser_session.cdp_client.send.Runtime.callFunctionOn(
+					params={
+						'objectId': object_id,
+						'functionDeclaration': """function() {
+							if (this.files && this.files.length > 0) {
+								return JSON.stringify({uploaded: true, fileName: this.files[0].name});
+							}
+							if (this.value && this.value.trim().length > 0) {
+								return JSON.stringify({uploaded: true, fileName: this.value.split('\\\\').pop()});
+							}
+							return JSON.stringify({uploaded: false});
+						}""",
+						'returnByValue': True,
+					},
+					session_id=session_id,
+				)
+				raw_value = call_result.get('result', {}).get('value', '{}')
+				import json
+				verify = json.loads(raw_value) if isinstance(raw_value, str) else raw_value
+				uploaded = verify.get('uploaded', False)
+				if uploaded and verify.get('fileName'):
+					uploaded_name = verify['fileName']
+		except Exception as verify_err:
+			logger.debug(f'Upload verification via CDP failed (non-critical): {verify_err}')
 
-	if verify.get('uploaded'):
-		uploaded_name = verify.get('fileName', file_name)
-		memory = f'Uploaded {effective_type} "{uploaded_name}" to file input at index {params.index}'
+		if not uploaded:
+			try:
+				body_text = await page.evaluate("() => (document.body && document.body.innerText) || ''")
+				if _body_text_indicates_upload_confirmation(body_text, file_name):
+					uploaded = True
+			except Exception as verify_err:
+				logger.debug(f'Upload verification via page text failed (non-critical): {verify_err}')
+
+		if uploaded:
+			break
+		await asyncio.sleep(0.75)
+
+	if uploaded:
+		await asyncio.sleep(1.25)  # Allow Workday/other ATS UIs to enable the next button
+		memory = (
+			f'Uploaded {effective_type} "{uploaded_name}" to file input at index {params.index}. '
+			'Wait briefly for the page to finish processing before clicking Continue.'
+		)
 		logger.info(f'DomHand upload: {memory}')
 		return ActionResult(
 			extracted_content=memory,
@@ -341,7 +358,10 @@ async def domhand_upload(params: DomHandUploadParams, browser_session: BrowserSe
 		)
 	else:
 		# Upload may have succeeded but verification couldn't confirm
-		memory = f'Set file "{file_name}" on input at index {params.index}, but could not confirm upload. Check visually.'
+		memory = (
+			f'Set file "{file_name}" on input at index {params.index}, but could not confirm upload yet. '
+			'Wait and verify the filename or upload success message before clicking Continue.'
+		)
 		logger.warning(f'DomHand upload: {memory}')
 		return ActionResult(
 			extracted_content=memory,

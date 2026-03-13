@@ -1,0 +1,208 @@
+name: Sync upstream browser-use
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "Upstream ref to sync from"
+        required: true
+        default: stable
+        type: choice
+        options:
+          - stable
+          - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream-browser-use
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      BASE_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install "$(cat .python-version)"
+
+      - name: Install project dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Fetch upstream refs
+        run: |
+          git remote add upstream https://github.com/browser-use/browser-use.git 2>/dev/null || true
+          git fetch upstream main stable --tags --prune
+
+      - name: Compute upstream status
+        id: status
+        run: uv run --no-sync python scripts/browser_use_upstream_status.py --github-output "$GITHUB_OUTPUT"
+
+      - name: Select sync target
+        id: target
+        env:
+          INPUT_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.target_ref || '' }}
+          BEHIND_STABLE: ${{ steps.status.outputs.behind_upstream_stable }}
+          BEHIND_MAIN: ${{ steps.status.outputs.behind_upstream_main }}
+          LATEST_RELEASE_TAG: ${{ steps.status.outputs.latest_release_tag }}
+          UPSTREAM_STABLE_SHA: ${{ steps.status.outputs.upstream_stable_sha }}
+          UPSTREAM_MAIN_SHA: ${{ steps.status.outputs.upstream_main_sha }}
+        run: |
+          if [ -n "$INPUT_TARGET" ]; then
+            TARGET_NAME="$INPUT_TARGET"
+          else
+            TARGET_NAME="stable"
+          fi
+
+          case "$TARGET_NAME" in
+            stable)
+              TARGET_REF="upstream/stable"
+              TARGET_SHA="$UPSTREAM_STABLE_SHA"
+              TARGET_VERSION="$LATEST_RELEASE_TAG"
+              BEHIND_COUNT="$BEHIND_STABLE"
+              SYNC_BRANCH="sync/browser-use-stable"
+              ;;
+            main)
+              TARGET_REF="upstream/main"
+              TARGET_SHA="$UPSTREAM_MAIN_SHA"
+              TARGET_VERSION="$(git rev-parse --short "$UPSTREAM_MAIN_SHA")"
+              BEHIND_COUNT="$BEHIND_MAIN"
+              SYNC_BRANCH="sync/browser-use-main"
+              ;;
+            *)
+              echo "Unsupported target: $TARGET_NAME" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "target_name=$TARGET_NAME"
+            echo "target_ref=$TARGET_REF"
+            echo "target_sha=$TARGET_SHA"
+            echo "target_version=$TARGET_VERSION"
+            echo "behind_count=$BEHIND_COUNT"
+            echo "sync_branch=$SYNC_BRANCH"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$BEHIND_COUNT" = "0" ]; then
+            echo "needs_sync=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Browser Use sync"
+              echo ""
+              echo "No sync needed for \`$TARGET_REF\`."
+              echo ""
+              echo "- Current release tag: \`${{ steps.status.outputs.current_tag }}\`"
+              echo "- Latest upstream release tag: \`${{ steps.status.outputs.latest_release_tag }}\`"
+              echo "- Behind upstream/stable: \`${BEHIND_STABLE}\`"
+              echo "- Behind upstream/main: \`${BEHIND_MAIN}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "needs_sync=true" >> "$GITHUB_OUTPUT"
+
+      - name: Configure git author
+        if: steps.target.outputs.needs_sync == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge upstream into sync branch
+        if: steps.target.outputs.needs_sync == 'true'
+        id: merge
+        env:
+          SYNC_BRANCH: ${{ steps.target.outputs.sync_branch }}
+          TARGET_REF: ${{ steps.target.outputs.target_ref }}
+          TARGET_VERSION: ${{ steps.target.outputs.target_version }}
+          TARGET_NAME: ${{ steps.target.outputs.target_name }}
+        run: |
+          git fetch origin "$BASE_BRANCH"
+          git checkout -B "$SYNC_BRANCH" "origin/$BASE_BRANCH"
+
+          set +e
+          git merge "$TARGET_REF" --no-ff -m "sync(browser-use): merge upstream/$TARGET_NAME $TARGET_VERSION"
+          MERGE_EXIT=$?
+          set -e
+
+          if [ "$MERGE_EXIT" -eq 0 ]; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            git add -A
+            git commit -m "sync(browser-use): merge upstream/$TARGET_NAME $TARGET_VERSION with conflicts"
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          git push origin "$SYNC_BRANCH" --force-with-lease
+
+      - name: Create or update pull request
+        if: steps.target.outputs.needs_sync == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_BRANCH: ${{ env.BASE_BRANCH }}
+          SYNC_BRANCH: ${{ steps.target.outputs.sync_branch }}
+          TARGET_NAME: ${{ steps.target.outputs.target_name }}
+          TARGET_REF: ${{ steps.target.outputs.target_ref }}
+          TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+          TARGET_VERSION: ${{ steps.target.outputs.target_version }}
+          BEHIND_COUNT: ${{ steps.target.outputs.behind_count }}
+          CONFLICT: ${{ steps.merge.outputs.conflict }}
+          CURRENT_TAG: ${{ steps.status.outputs.current_tag }}
+          LATEST_RELEASE_TAG: ${{ steps.status.outputs.latest_release_tag }}
+          BEHIND_STABLE: ${{ steps.status.outputs.behind_upstream_stable }}
+          BEHIND_MAIN: ${{ steps.status.outputs.behind_upstream_main }}
+        run: |
+          if [ "$TARGET_NAME" = "stable" ]; then
+            TITLE="sync(browser-use): update to $TARGET_VERSION"
+          else
+            TITLE="sync(browser-use): merge upstream main ($BEHIND_COUNT commits)"
+          fi
+
+          BODY=$(cat <<EOF
+          ## Upstream Browser Use sync
+
+          - Target ref: \`$TARGET_REF\`
+          - Target SHA: \`$TARGET_SHA\`
+          - Current release tag in this fork: \`${CURRENT_TAG:-unknown}\`
+          - Latest upstream release tag: \`${LATEST_RELEASE_TAG:-unknown}\`
+          - Behind upstream/stable before sync: \`$BEHIND_STABLE\`
+          - Behind upstream/main before sync: \`$BEHIND_MAIN\`
+
+          This repository vendors \`browser_use/\` in-tree, so upstream updates are merged into a dedicated sync branch instead of bumping a package version.
+
+          $(if [ "$CONFLICT" = "true" ]; then
+            echo "> Merge conflicts were committed to this branch for manual resolution."
+          fi)
+          EOF
+          )
+
+          PR_NUMBER=$(gh pr list --head "$SYNC_BRANCH" --base "$BASE_BRANCH" --state open --json number --jq '.[0].number')
+          if [ -n "$PR_NUMBER" ]; then
+            gh pr edit "$PR_NUMBER" --title "$TITLE" --body "$BODY"
+          else
+            gh pr create --title "$TITLE" --body "$BODY" --base "$BASE_BRANCH" --head "$SYNC_BRANCH"
+          fi
+
+          {
+            echo "## Browser Use sync"
+            echo ""
+            echo "- Target ref: \`$TARGET_REF\`"
+            echo "- Target SHA: \`$TARGET_SHA\`"
+            echo "- Sync branch: \`$SYNC_BRANCH\`"
+            echo "- Conflicts committed: \`$CONFLICT\`"
+          } >> "$GITHUB_STEP_SUMMARY"

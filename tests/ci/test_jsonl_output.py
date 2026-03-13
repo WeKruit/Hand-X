@@ -1,0 +1,444 @@
+"""Baseline regression tests for ghosthands.output.jsonl.
+
+These tests capture the CURRENT behavior of the JSONL event emitter so that
+future changes (especially Stream S2 renaming "type" -> "event") can be
+validated against a known-good baseline.
+
+Every emit_*() function writes a single JSON line to the JSONL output stream.
+When the stdout guard is NOT installed (_jsonl_out is None), the fallback
+target is sys.stdout.  These tests patch sys.stdout to capture output.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import time
+from unittest.mock import patch
+
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _capture_emit(fn, *args, **kwargs) -> dict:
+    """Call an emit function, capture its JSONL line, return parsed dict.
+
+    Because _get_output() falls back to sys.stdout when the stdout guard
+    is not installed, patching sys.stdout with an io.StringIO buffer is
+    sufficient for test isolation.
+    """
+    buf = io.StringIO()
+    with patch("sys.stdout", buf):
+        fn(*args, **kwargs)
+    line = buf.getvalue().strip()
+    assert line, "emit function produced no output"
+    return json.loads(line)
+
+
+# ---------------------------------------------------------------------------
+# emit_event — core emitter
+# ---------------------------------------------------------------------------
+
+
+class TestEmitEvent:
+    """Tests for the core emit_event() function."""
+
+    def test_output_uses_type_key(self):
+        """emit_event uses 'type' key for the event type.
+
+        # BASELINE: Current code uses "type" as the key name.
+        # NOTE: Stream S2 will intentionally rename this to "event".
+        """
+        from ghosthands.output.jsonl import emit_event
+
+        obj = _capture_emit(emit_event, "status", message="hello")
+        # BASELINE: "type" key — will change to "event" in S2
+        assert "type" in obj
+        assert obj["type"] == "status"
+
+    def test_includes_timestamp(self):
+        """Every event includes an integer millisecond timestamp."""
+        from ghosthands.output.jsonl import emit_event
+
+        before_ms = int(time.time() * 1000)
+        obj = _capture_emit(emit_event, "test_event")
+        after_ms = int(time.time() * 1000)
+
+        assert "timestamp" in obj
+        assert isinstance(obj["timestamp"], int)
+        # Timestamp should be within a reasonable window
+        assert before_ms <= obj["timestamp"] <= after_ms + 1
+
+    def test_kwargs_passed_through(self):
+        """Extra keyword arguments appear as top-level keys in the event."""
+        from ghosthands.output.jsonl import emit_event
+
+        obj = _capture_emit(emit_event, "custom", foo="bar", count=42)
+        assert obj["foo"] == "bar"
+        assert obj["count"] == 42
+
+    def test_none_values_omitted(self):
+        """Keyword arguments with None values are omitted from the output."""
+        from ghosthands.output.jsonl import emit_event
+
+        obj = _capture_emit(emit_event, "sparse", present="yes", absent=None)
+        assert "present" in obj
+        assert "absent" not in obj
+
+    def test_compact_json_separators(self):
+        """Output uses compact JSON separators (no spaces after : and ,)."""
+        from ghosthands.output.jsonl import emit_event
+
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            emit_event("compact_test", key="value")
+        line = buf.getvalue().strip()
+        # Compact separators: no space after colon or comma
+        assert ": " not in line
+        assert ", " not in line
+
+    def test_output_ends_with_newline(self):
+        """Each emitted event is terminated by a newline character."""
+        from ghosthands.output.jsonl import emit_event
+
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            emit_event("newline_test")
+        raw = buf.getvalue()
+        assert raw.endswith("\n")
+
+    def test_output_is_single_line(self):
+        """Each event is exactly one line of JSON (JSONL format)."""
+        from ghosthands.output.jsonl import emit_event
+
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            emit_event("single_line", data="test")
+        lines = buf.getvalue().strip().split("\n")
+        assert len(lines) == 1
+
+    def test_output_goes_to_stdout_not_stderr(self):
+        """When the stdout guard is NOT installed, output goes to sys.stdout."""
+        from ghosthands.output.jsonl import emit_event
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        with patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+            emit_event("target_test")
+
+        assert stdout_buf.getvalue().strip() != ""
+        assert stderr_buf.getvalue() == ""
+
+
+# ---------------------------------------------------------------------------
+# emit_status
+# ---------------------------------------------------------------------------
+
+
+class TestEmitStatus:
+    """Tests for the emit_status() convenience emitter."""
+
+    def test_basic_status(self):
+        """emit_status produces a status event with a message."""
+        from ghosthands.output.jsonl import emit_status
+
+        obj = _capture_emit(emit_status, "Processing step 1")
+        # BASELINE: uses "type" key
+        assert obj["type"] == "status"
+        assert obj["message"] == "Processing step 1"
+        assert "timestamp" in obj
+
+    def test_status_with_step_info(self):
+        """emit_status passes step and maxSteps through."""
+        from ghosthands.output.jsonl import emit_status
+
+        obj = _capture_emit(emit_status, "Working", step=3, max_steps=10)
+        assert obj["step"] == 3
+        assert obj["maxSteps"] == 10
+
+    def test_status_omits_none_optional_fields(self):
+        """Optional fields that are None are omitted (compact wire format)."""
+        from ghosthands.output.jsonl import emit_status
+
+        obj = _capture_emit(emit_status, "Minimal")
+        assert "step" not in obj
+        assert "maxSteps" not in obj
+        # job_id defaults to "" which becomes None via `or None`, so omitted
+        assert "jobId" not in obj
+
+    def test_status_with_job_id(self):
+        """emit_status includes jobId when provided."""
+        from ghosthands.output.jsonl import emit_status
+
+        obj = _capture_emit(emit_status, "Active", job_id="job-123")
+        assert obj["jobId"] == "job-123"
+
+    def test_status_empty_job_id_omitted(self):
+        """Empty string job_id is converted to None and omitted."""
+        from ghosthands.output.jsonl import emit_status
+
+        obj = _capture_emit(emit_status, "Active", job_id="")
+        assert "jobId" not in obj
+
+
+# ---------------------------------------------------------------------------
+# emit_done
+# ---------------------------------------------------------------------------
+
+
+class TestEmitDone:
+    """Tests for the emit_done() convenience emitter."""
+
+    def test_done_success(self):
+        """emit_done with success=True includes expected fields."""
+        from ghosthands.output.jsonl import emit_done
+
+        obj = _capture_emit(
+            emit_done,
+            success=True,
+            message="Completed",
+            fields_filled=5,
+            job_id="job-1",
+            lease_id="lease-1",
+        )
+        assert obj["type"] == "done"
+        assert obj["success"] is True
+        assert obj["message"] == "Completed"
+        assert obj["fields_filled"] == 5
+        assert obj["jobId"] == "job-1"
+        assert obj["leaseId"] == "lease-1"
+        assert "timestamp" in obj
+
+    def test_done_failure(self):
+        """emit_done with success=False."""
+        from ghosthands.output.jsonl import emit_done
+
+        obj = _capture_emit(emit_done, success=False, message="Failed to fill")
+        assert obj["type"] == "done"
+        assert obj["success"] is False
+        assert obj["message"] == "Failed to fill"
+
+    def test_done_with_result_data(self):
+        """emit_done passes result_data dict through."""
+        from ghosthands.output.jsonl import emit_done
+
+        result = {"steps": 10, "costUsd": 0.05}
+        obj = _capture_emit(
+            emit_done, success=True, message="OK", result_data=result
+        )
+        assert obj["resultData"] == result
+
+    def test_done_omits_empty_optional_strings(self):
+        """Empty string job_id and lease_id are omitted (converted to None)."""
+        from ghosthands.output.jsonl import emit_done
+
+        obj = _capture_emit(
+            emit_done, success=True, message="OK", job_id="", lease_id=""
+        )
+        assert "jobId" not in obj
+        assert "leaseId" not in obj
+
+    def test_done_fields_filled_default_zero(self):
+        """fields_filled defaults to 0 and is included (not omitted — 0 is not None)."""
+        from ghosthands.output.jsonl import emit_done
+
+        obj = _capture_emit(emit_done, success=True, message="OK")
+        assert obj["fields_filled"] == 0
+
+
+# ---------------------------------------------------------------------------
+# emit_field_filled
+# ---------------------------------------------------------------------------
+
+
+class TestEmitFieldFilled:
+    """Tests for the emit_field_filled() convenience emitter."""
+
+    def test_basic_field_filled(self):
+        """emit_field_filled produces a field_filled event."""
+        from ghosthands.output.jsonl import emit_field_filled
+
+        obj = _capture_emit(emit_field_filled, "first_name", "Jane")
+        assert obj["type"] == "field_filled"
+        assert obj["field"] == "first_name"
+        assert obj["value"] == "Jane"
+        assert "timestamp" in obj
+
+    def test_default_method_is_domhand(self):
+        """The default method is 'domhand'."""
+        from ghosthands.output.jsonl import emit_field_filled
+
+        obj = _capture_emit(emit_field_filled, "email", "a@b.com")
+        assert obj["method"] == "domhand"
+
+    def test_custom_method(self):
+        """A custom method can be specified."""
+        from ghosthands.output.jsonl import emit_field_filled
+
+        obj = _capture_emit(
+            emit_field_filled, "email", "a@b.com", method="browser-use"
+        )
+        assert obj["method"] == "browser-use"
+
+
+# ---------------------------------------------------------------------------
+# emit_field_failed
+# ---------------------------------------------------------------------------
+
+
+class TestEmitFieldFailed:
+    """Tests for the emit_field_failed() convenience emitter."""
+
+    def test_basic_field_failed(self):
+        """emit_field_failed produces a field_failed event."""
+        from ghosthands.output.jsonl import emit_field_failed
+
+        obj = _capture_emit(emit_field_failed, "phone", "Element not found")
+        assert obj["type"] == "field_failed"
+        assert obj["field"] == "phone"
+        assert obj["error"] == "Element not found"
+        assert "timestamp" in obj
+
+
+# ---------------------------------------------------------------------------
+# emit_progress
+# ---------------------------------------------------------------------------
+
+
+class TestEmitProgress:
+    """Tests for the emit_progress() convenience emitter."""
+
+    def test_basic_progress(self):
+        """emit_progress produces a progress event with filled/total."""
+        from ghosthands.output.jsonl import emit_progress
+
+        obj = _capture_emit(emit_progress, 5, 10)
+        assert obj["type"] == "progress"
+        assert obj["filled"] == 5
+        assert obj["total"] == 10
+        assert "timestamp" in obj
+
+    def test_progress_default_round(self):
+        """The default round is 1."""
+        from ghosthands.output.jsonl import emit_progress
+
+        obj = _capture_emit(emit_progress, 0, 8)
+        assert obj["round"] == 1
+
+    def test_progress_custom_round(self):
+        """A custom round number can be specified."""
+        from ghosthands.output.jsonl import emit_progress
+
+        obj = _capture_emit(emit_progress, 3, 8, round=2)
+        assert obj["round"] == 2
+
+
+# ---------------------------------------------------------------------------
+# emit_error
+# ---------------------------------------------------------------------------
+
+
+class TestEmitError:
+    """Tests for the emit_error() convenience emitter."""
+
+    def test_basic_error(self):
+        """emit_error produces an error event with a message."""
+        from ghosthands.output.jsonl import emit_error
+
+        obj = _capture_emit(emit_error, "Something went wrong")
+        assert obj["type"] == "error"
+        assert obj["message"] == "Something went wrong"
+        assert "timestamp" in obj
+
+    def test_error_fatal_default_false(self):
+        """Fatal defaults to False and is included (not None)."""
+        from ghosthands.output.jsonl import emit_error
+
+        obj = _capture_emit(emit_error, "Oops")
+        assert obj["fatal"] is False
+
+    def test_error_fatal_true(self):
+        """Fatal can be set to True."""
+        from ghosthands.output.jsonl import emit_error
+
+        obj = _capture_emit(emit_error, "Crash", fatal=True)
+        assert obj["fatal"] is True
+
+    def test_error_with_job_id(self):
+        """emit_error includes jobId when provided."""
+        from ghosthands.output.jsonl import emit_error
+
+        obj = _capture_emit(emit_error, "Fail", job_id="job-99")
+        assert obj["jobId"] == "job-99"
+
+    def test_error_empty_job_id_omitted(self):
+        """Empty string job_id is converted to None and omitted."""
+        from ghosthands.output.jsonl import emit_error
+
+        obj = _capture_emit(emit_error, "Fail", job_id="")
+        assert "jobId" not in obj
+
+
+# ---------------------------------------------------------------------------
+# emit_cost
+# ---------------------------------------------------------------------------
+
+
+class TestEmitCost:
+    """Tests for the emit_cost() convenience emitter."""
+
+    def test_basic_cost(self):
+        """emit_cost produces a cost event with total_usd."""
+        from ghosthands.output.jsonl import emit_cost
+
+        obj = _capture_emit(emit_cost, 0.123456)
+        assert obj["type"] == "cost"
+        assert obj["total_usd"] == 0.123456
+        assert "timestamp" in obj
+
+    def test_cost_rounds_to_six_decimals(self):
+        """total_usd is rounded to 6 decimal places."""
+        from ghosthands.output.jsonl import emit_cost
+
+        obj = _capture_emit(emit_cost, 0.12345678901)
+        assert obj["total_usd"] == round(0.12345678901, 6)
+
+    def test_cost_token_defaults(self):
+        """Token counts default to 0."""
+        from ghosthands.output.jsonl import emit_cost
+
+        obj = _capture_emit(emit_cost, 0.01)
+        assert obj["prompt_tokens"] == 0
+        assert obj["completion_tokens"] == 0
+
+    def test_cost_with_tokens(self):
+        """Token counts are passed through when provided."""
+        from ghosthands.output.jsonl import emit_cost
+
+        obj = _capture_emit(
+            emit_cost, 0.05, prompt_tokens=1000, completion_tokens=500
+        )
+        assert obj["prompt_tokens"] == 1000
+        assert obj["completion_tokens"] == 500
+
+
+# ---------------------------------------------------------------------------
+# _get_output fallback behavior
+# ---------------------------------------------------------------------------
+
+
+class TestGetOutput:
+    """Tests for the _get_output() fallback logic."""
+
+    def test_fallback_is_stdout_when_guard_not_installed(self):
+        """Without install_stdout_guard(), _get_output() returns sys.stdout."""
+        from ghosthands.output.jsonl import _get_output, _jsonl_out
+
+        # In test context, the guard should not be installed
+        assert _jsonl_out is None
+        out = _get_output()
+        import sys
+        assert out is sys.stdout

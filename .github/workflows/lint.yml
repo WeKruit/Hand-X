@@ -1,6 +1,8 @@
 name: lint
 
-# Cancel in-progress runs when a new commit is pushed to the same branch/PR
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -10,9 +12,9 @@ on:
     branches:
       - main
       - stable
-      - 'releases/**'
+      - "releases/**"
     tags:
-      - '*'
+      - "*"
   pull_request:
   workflow_dispatch:
 
@@ -22,21 +24,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv run ruff check --no-fix --select PLE
+      - run: uv sync --frozen --extra dev
+      - run: uv run --no-sync ruff check --no-fix --select PLE
 
   lint-style:
     name: code-style
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv python install 3.11
-      - run: uv sync --dev --all-extras --python 3.11
+      - run: uv sync --frozen --extra dev
       - run: uv run --no-sync pre-commit run --all-files --show-diff-on-failure
 
   lint-typecheck:
@@ -44,8 +52,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --dev --all-extras  # install extras for examples to avoid pyright missing imports errors-
+      - run: uv sync --frozen --extra dev
       - run: uv run --no-sync pyright

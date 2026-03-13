@@ -1,5 +1,5 @@
 default_language_version:
-  python: python3.11
+  python: python3.12
 
 repos:
   - repo: https://github.com/asottile/yesqa
@@ -18,7 +18,7 @@ repos:
     rev: v3.20.0
     hooks:
       - id: pyupgrade
-        args: [--py311-plus]
+        args: [--py312-plus]
 
   # - repo: https://github.com/asottile/add-trailing-comma
   #   rev: v3.1.0
@@ -33,10 +33,13 @@ repos:
       - id: ruff-format
       # see pyproject.toml for more details on ruff config
 
-  - repo: https://github.com/RobertCraigie/pyright-python
-    rev: v1.1.404
+  - repo: local
     hooks:
-    - id: pyright
+      - id: pyright
+        name: pyright
+        entry: uv run --no-sync pyright
+        language: system
+        types_or: [python]
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

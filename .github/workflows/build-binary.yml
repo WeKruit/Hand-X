@@ -29,7 +29,7 @@ jobs:
           - os: macos-14        # Apple Silicon (M1+)
             name: darwin-arm64
             runner_arch: arm64
-          - os: macos-13        # Intel Mac
+          - os: macos-15        # x64 Python via Rosetta on Apple Silicon
             name: darwin-x64
             runner_arch: x64
           - os: ubuntu-22.04    # Linux x64
@@ -50,6 +50,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          architecture: ${{ matrix.runner_arch }}
 
       - name: Install dependencies
         shell: bash
@@ -122,7 +123,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: always() && !cancelled() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     name: Create Release
 
@@ -157,3 +158,24 @@ jobs:
           prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Notify Desktop App — trigger binary sync after release is created
+  # ---------------------------------------------------------------------------
+  notify-desktop:
+    needs: release
+    if: always() && !cancelled() && needs.release.result == 'success'
+    runs-on: ubuntu-latest
+    name: Notify Desktop App
+    steps:
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch to GH-Desktop-App
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GH_PACKAGES_TOKEN }}
+          repository: WeKruit/GH-Desktop-App
+          event-type: hand-x-updated
+          client-payload: '{"version": "${{ steps.version.outputs.version }}"}'
