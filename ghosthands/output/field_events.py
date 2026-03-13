@@ -84,6 +84,7 @@ def install_jsonl_callback() -> None:
         from ghosthands.output.jsonl import (
             emit_field_failed,
             emit_field_filled,
+            emit_phase,
             emit_progress,
         )
 
@@ -102,6 +103,8 @@ def install_jsonl_callback() -> None:
                     value=_redact_if_sensitive(result.name, result.value_set or ""),
                     method="domhand",
                 )
+                if _counts["filled"] > 0 and _counts["filled"] % 5 == 0:
+                    emit_phase(f"Filling form fields ({_counts['filled']} completed)")
             else:
                 emit_field_failed(
                     field=result.name,

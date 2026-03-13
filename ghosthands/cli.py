@@ -468,6 +468,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         emit_cost,
         emit_done,
         emit_error,
+        emit_phase,
         emit_status,
     )
 
@@ -476,6 +477,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     job_id = ""
     lease_id = ""
     desktop_owns_browser = False
+    last_phase: str | None = None
+
+    def _emit_phase_if_changed(phase: str, detail: str | None = None) -> None:
+        nonlocal last_phase
+        if phase == last_phase:
+            return
+        emit_phase(phase, detail=detail)
+        last_phase = phase
 
     # -- Load profile -------------------------------------------------------
     try:
@@ -494,6 +503,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     # -- Normalize profile defaults for DomHand ----------------------------
     profile = normalize_profile_defaults(profile)
+    _emit_phase_if_changed("Starting application")
 
     # -- Set env vars -------------------------------------------------------
     resume_path = _apply_runtime_env(args, profile)
@@ -586,12 +596,17 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     # -- Step hooks for live JSONL events -----------------------------------
     async def _on_step_start(ag: Agent) -> None:
+        from ghosthands.agent.hooks import infer_phase_from_goal
+
         step = ag.state.n_steps
         goal = ""
         if ag.state.last_model_output:
             goal = ag.state.last_model_output.next_goal or ""
+        phase = infer_phase_from_goal(goal)
+        if phase:
+            _emit_phase_if_changed(phase, detail=goal or None)
         emit_status(
-            goal or f"Step {step}...",
+            phase or goal or f"Step {step}...",
             step=step,
             max_steps=args.max_steps,
             job_id=job_id,
@@ -642,6 +657,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         cancel_requested = asyncio.Event()
         cancel_task = asyncio.create_task(listen_for_cancel(agent, cancel_requested))
         try:
+            _emit_phase_if_changed("Navigating to application")
             history = await agent.run(
                 max_steps=args.max_steps,
                 on_step_start=_on_step_start,
@@ -710,6 +726,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         if success:
             # I-02/U-01: emit status (not done) before review so the terminal
             # event is only sent once, after the user has actually reviewed.
+            _emit_phase_if_changed("Reviewing filled fields")
             emit_status("Application filled — awaiting review", job_id=job_id)
 
             # Resolve CDP URL and current page URL for Desktop review attachment
