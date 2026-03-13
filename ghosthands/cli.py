@@ -391,16 +391,20 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         }
 
         if success:
+            emit_status(
+                "Application filled -- browser open for review",
+                job_id=args.job_id,
+            )
+            review_outcome = await _wait_for_review_command(browser, args.job_id, lease_id)
             emit_done(
-                success=True,
-                message="Application filled -- browser open for review",
+                success=(review_outcome == "completed"),
+                message="Review complete" if review_outcome == "completed" else "Job cancelled by user",
                 fields_filled=total_steps,
                 job_id=args.job_id,
                 lease_id=lease_id,
                 result_data=result_data,
             )
-            await _wait_for_review_command(browser, args.job_id, lease_id)
-            emit_lease_released(lease_id, reason="completed")
+            emit_lease_released(lease_id, reason=review_outcome)
         else:
             emit_done(
                 success=False,
