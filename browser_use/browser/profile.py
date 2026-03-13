@@ -577,6 +577,10 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 
 	# custom options we provide that aren't native playwright kwargs
 	disable_security: bool = Field(default=False, description='Disable browser security features.')
+	engine: Literal['chromium', 'firefox', 'auto'] = Field(
+		default='chromium',
+		description="Browser engine to use. 'chromium' (default), 'firefox' for Camoufox, 'auto' for route-based selection.",
+	)
 	deterministic_rendering: bool = Field(default=False, description='Enable deterministic rendering flags.')
 	allowed_domains: list[str] | set[str] | None = Field(
 		default=None,
