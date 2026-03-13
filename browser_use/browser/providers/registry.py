@@ -17,9 +17,16 @@ class ProviderRegistry:
 
 	New engines are registered via:
 		ProviderRegistry.register('firefox', CamoufoxProvider)
+
+	Tests should call ``ProviderRegistry.reset()`` in teardown to restore
+	the built-in providers and prevent test pollution.
 	"""
 
-	_providers: dict[str, type[BrowserProvider]] = {}
+	_default_providers: dict[str, type[BrowserProvider]] = {
+		'chromium': ChromiumProvider,
+		'firefox': CamoufoxProvider,
+	}
+	_providers: dict[str, type[BrowserProvider]] = dict(_default_providers)
 
 	@classmethod
 	def register(cls, name: str, provider_class: type[BrowserProvider]) -> None:
@@ -53,7 +60,11 @@ class ProviderRegistry:
 		"""Return list of registered engine names."""
 		return list(cls._providers.keys())
 
+	@classmethod
+	def reset(cls) -> None:
+		"""Reset the registry to built-in providers only.
 
-# Auto-register built-in providers
-ProviderRegistry.register('chromium', ChromiumProvider)
-ProviderRegistry.register('firefox', CamoufoxProvider)
+		Call this in test teardown to prevent test pollution from
+		custom provider registrations leaking across test cases.
+		"""
+		cls._providers = dict(cls._default_providers)

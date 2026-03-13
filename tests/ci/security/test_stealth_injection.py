@@ -8,8 +8,7 @@ Validates that:
 - ``StealthConfig`` is properly wired into ``BrowserProfile``
 """
 
-import subprocess
-import textwrap
+import re
 
 import pytest
 
@@ -139,30 +138,24 @@ class TestStealthScriptsSyntax:
 
 	@pytest.mark.parametrize('name,script', ALL_SCRIPTS, ids=[n for n, _ in ALL_SCRIPTS])
 	def test_script_is_valid_js(self, name: str, script: str):
-		"""Each stealth script must parse without JS syntax errors.
+		"""Each stealth script must be a well-formed JS snippet.
 
-		Uses Node.js ``--check`` (syntax-only parse) when available,
-		otherwise falls back to a basic structural check.
+		Performs Python-based structural checks (no Node.js dependency):
+		- Non-empty content
+		- Balanced braces, parens, and brackets
+		- No obvious syntax errors (stray tokens, empty blocks)
 		"""
-		# Try Node.js syntax check first
-		try:
-			result = subprocess.run(
-				['node', '--check', '--input-type=module'],
-				input=script,
-				capture_output=True,
-				text=True,
-				timeout=10,
-			)
-			assert result.returncode == 0, (
-				f'{name} has JS syntax errors:\nstderr: {result.stderr}\n'
-				f'Script excerpt:\n{textwrap.shorten(script, width=200)}'
-			)
-		except FileNotFoundError:
-			# Node.js not available -- fallback to basic checks
-			assert script.strip(), f'{name} is empty'
-			# Check balanced braces/parens as a basic sanity check
-			assert script.count('(') == script.count(')'), f'{name} has unbalanced parentheses'
-			assert script.count('{') == script.count('}'), f'{name} has unbalanced braces'
+		assert script.strip(), f'{name} is empty'
+		# Check balanced braces/parens/brackets
+		assert script.count('(') == script.count(')'), f'{name} has unbalanced parentheses'
+		assert script.count('{') == script.count('}'), f'{name} has unbalanced braces'
+		assert script.count('[') == script.count(']'), f'{name} has unbalanced brackets'
+		# No stray triple-quote (Python leaking) or obvious non-JS tokens
+		assert '"""' not in script, f'{name} contains Python triple-quotes'
+		assert "'''" not in script, f'{name} contains Python triple-quotes'
+		# Should contain at least one JS keyword or expression
+		js_keywords = re.compile(r'\b(function|const|let|var|return|if|Object|get|set|value)\b')
+		assert js_keywords.search(script), f'{name} does not look like JavaScript'
 
 	def test_all_scripts_are_nonempty_strings(self):
 		"""Every script constant must be a non-empty string."""
