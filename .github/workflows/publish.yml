@@ -97,9 +97,9 @@ jobs:
       - run: uvx playwright install chrome
       - run: uvx playwright install chromium
 
-      # TODO: just depend on the other test.yml action for this instead of re-running the tests here
-      # - run: uv run pytest tests/ci/test_tools.py   # final sanity check: run a few of the tests before release
-      
+      - name: Run sanity check tests
+        run: uv run pytest tests/ci/ tests/unit/ -v --tb=short  # final sanity check: run tests before release
+
       # publish to PyPI
       - run: uv publish --trusted-publishing always
       - name: Push to stable branch (if stable release)
