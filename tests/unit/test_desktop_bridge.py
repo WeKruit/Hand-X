@@ -202,6 +202,25 @@ class TestEmitPhase:
         events = _capture_jsonl_output(emit_phase, "Uploading resume", detail="Upload the PDF resume")
         assert events[0]["detail"] == "Upload the PDF resume"
 
+    def test_emit_phase_after_guard_teardown_does_not_crash(self):
+        """emit_phase must safely fall back to sys.stdout when no guard is installed."""
+        import ghosthands.output.jsonl as jsonl_mod
+        from ghosthands.output.jsonl import emit_phase
+
+        original_guard = jsonl_mod._jsonl_out
+        original_pipe_broken = jsonl_mod._pipe_broken
+        jsonl_mod._jsonl_out = None
+        jsonl_mod._pipe_broken = False
+
+        try:
+            with patch("sys.stdout", io.StringIO()):
+                emit_phase("test phase")
+        except Exception:
+            pytest.fail("emit_phase raised after guard teardown")
+        finally:
+            jsonl_mod._jsonl_out = original_guard
+            jsonl_mod._pipe_broken = original_pipe_broken
+
 
 # ---------------------------------------------------------------------------
 # Test 2b — emit_account_created
@@ -1684,6 +1703,33 @@ class TestWaitForReviewCommand:
         )
         browser.stop.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_no_warning_if_submitted_before_timeout(self):
+        from ghosthands.bridge.protocol import wait_for_review_command
+
+        browser = AsyncMock()
+        cmd = json.dumps({"type": "complete_review"}) + "\n"
+
+        with (
+            patch(
+                "ghosthands.bridge.protocol.read_stdin_line",
+                new=AsyncMock(side_effect=[cmd]),
+            ),
+            patch(
+                "ghosthands.bridge.protocol._time.monotonic",
+                side_effect=[0.0, 600.0],
+            ),
+            patch("ghosthands.output.jsonl.emit_status") as emit_status,
+        ):
+            result = await wait_for_review_command(browser, "j1", "l1")
+
+        assert result == "complete"
+        emit_status.assert_any_call("Review complete -- closing browser", job_id="j1")
+        assert ("Your review session will expire in 5 minutes. Please submit or cancel soon.",) not in [
+            call.args for call in emit_status.call_args_list
+        ]
+        browser.stop.assert_called_once()
+
 
 class TestReviewOutcomeHandling:
     def test_timeout_emits_done_failure_message(self):
@@ -1753,6 +1799,33 @@ class TestRuntimeErrorClassification:
         assert result.code == "BUDGET_EXHAUSTED"
         assert "partially completed form is still open in the browser" in result.message
         assert result.keep_browser_open is True
+
+    def test_returns_none_when_not_proxy_mode(self):
+        from ghosthands.cli import _classify_runtime_error
+
+        error = self._make_error(401, "Runtime grant expired")
+
+        result = _classify_runtime_error(error, proxy_mode=False)
+
+        assert result is None
+
+    def test_plain_429_is_not_budget_exhausted(self):
+        from ghosthands.cli import _classify_runtime_error
+
+        error = self._make_error(429, "Too many requests")
+
+        result = _classify_runtime_error(error, proxy_mode=True)
+
+        assert result is None or result.code != "BUDGET_EXHAUSTED"
+
+    def test_plain_401_is_not_grant_expired(self):
+        from ghosthands.cli import _classify_runtime_error
+
+        error = self._make_error(401, "Invalid API key")
+
+        result = _classify_runtime_error(error, proxy_mode=True)
+
+        assert result is None or result.code != "GRANT_EXPIRED"
 
 
 # ---------------------------------------------------------------------------
