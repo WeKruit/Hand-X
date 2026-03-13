@@ -1,0 +1,192 @@
+name: Notify Desktop App of Hand-X Release
+
+# Dispatches a repository_dispatch event to the GH-Desktop-App repo after the
+# publish workflow completes successfully. This ensures all release binaries
+# are uploaded before Desktop attempts to download them.
+
+on:
+  workflow_run:
+    workflows: ["publish"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to dispatch (e.g., 0.1.0 or v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  notify-desktop:
+    # Only notify Desktop when the publish workflow succeeded (all binaries uploaded)
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    name: Dispatch to GH-Desktop-App
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Extract version from the release that triggered the publish workflow
+      - name: Extract version from release
+        if: github.event_name == 'workflow_run'
+        id: version-release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # The publish workflow was triggered by a release event.
+          # Fetch the latest release to get the tag name.
+          TAG=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name')
+
+          if [ -z "$TAG" ]; then
+            echo "::error::Could not determine release tag from latest release"
+            exit 1
+          fi
+
+          # Strip leading 'v' from tag (e.g., v0.1.0 -> 0.1.0)
+          VERSION="${TAG#v}"
+
+          # Validate semver format: X.Y.Z or X.Y.Z-prerelease
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*)?$ ]]; then
+            echo "::error::Invalid version format: $VERSION (from tag $TAG)"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # Use manual input version for workflow_dispatch
+      - name: Extract version from manual input
+        if: github.event_name == 'workflow_dispatch'
+        id: version-manual
+        shell: bash
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          VERSION="${VERSION#v}"
+
+          # Validate semver format
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*)?$ ]]; then
+            echo "::error::Invalid version format: $VERSION"
+            exit 1
+          fi
+
+          TAG="v${VERSION}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # Choose outputs based on trigger
+      - name: Set version outputs
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "version=${{ steps.version-release.outputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "tag=${{ steps.version-release.outputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ steps.version-manual.outputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "tag=${{ steps.version-manual.outputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Download release assets and compute checksums
+      - name: Download release assets
+        if: github.event_name == 'workflow_run'
+        id: checksums
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ASSETS_DIR="release-assets"
+          mkdir -p "$ASSETS_DIR"
+
+          # Use GitHub API to fetch release assets
+          gh release download "${{ steps.version.outputs.tag }}" \
+            --dir "$ASSETS_DIR" \
+            --pattern "hand-x-*" \
+            --repo "${{ github.repository }}"
+
+          echo "=== Downloaded assets ==="
+          ls -lh "$ASSETS_DIR"
+
+          # Generate SHA-256 checksums as JSON object
+          echo "=== Computing SHA-256 checksums ==="
+          CHECKSUMS_JSON="{}"
+          while IFS= read -r file; do
+            filename=$(basename "$file")
+            sha=$(sha256sum "$file" | awk '{print $1}')
+            echo "  $filename: $sha"
+            CHECKSUMS_JSON=$(echo "$CHECKSUMS_JSON" | jq --arg k "$filename" --arg v "$sha" '. + {($k): $v}')
+          done < <(find "$ASSETS_DIR" -type f -name 'hand-x-*' | sort)
+
+          # Save to output (escaped for JSON)
+          echo "checksums=$CHECKSUMS_JSON" >> "$GITHUB_OUTPUT"
+
+      # For manual dispatch, generate empty checksums (optional)
+      - name: Set empty checksums for manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        id: checksums-manual
+        shell: bash
+        run: |
+          echo "checksums={}" >> "$GITHUB_OUTPUT"
+
+      # Choose checksums based on trigger
+      - name: Resolve checksums
+        id: resolved-checksums
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            CHECKSUMS='${{ steps.checksums.outputs.checksums }}'
+          else
+            CHECKSUMS='${{ steps.checksums-manual.outputs.checksums }}'
+          fi
+
+          echo "checksums=$CHECKSUMS" >> "$GITHUB_OUTPUT"
+
+      # Dispatch repository_dispatch event to Desktop App
+      - name: Dispatch to GH-Desktop-App
+        uses: actions/github-script@v7
+        env:
+          DESKTOP_REPO_PAT: ${{ secrets.DESKTOP_REPO_PAT }}
+        with:
+          github-token: ${{ env.DESKTOP_REPO_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const payload = {
+              version: '${{ steps.version.outputs.version }}',
+              tag: '${{ steps.version.outputs.tag }}',
+              sha: '${{ github.sha }}',
+              run_id: '${{ github.run_id }}',
+              checksums: ${{ steps.resolved-checksums.outputs.checksums }}
+            };
+
+            console.log('Dispatching hand-x-updated event to GH-Desktop-App');
+            console.log('Payload:', JSON.stringify(payload, null, 2));
+
+            try {
+              const response = await github.rest.repos.createDispatchEvent({
+                owner: 'WeKruit',
+                repo: 'GH-Desktop-App',
+                event_type: 'hand-x-updated',
+                client_payload: payload
+              });
+
+              console.log('✓ Dispatch succeeded');
+              core.info(`Dispatched hand-x-updated event to GH-Desktop-App with version ${payload.version}`);
+            } catch (error) {
+              console.error('✗ Dispatch failed:', error.message);
+              throw error;
+            }
+
+      - name: Log dispatch details
+        if: success()
+        shell: bash
+        run: |
+          echo "=== Hand-X Release Notification ==="
+          echo "Event: hand-x-updated"
+          echo "Version: ${{ steps.version.outputs.version }}"
+          echo "Tag: ${{ steps.version.outputs.tag }}"
+          echo "Commit SHA: ${{ github.sha }}"
+          echo "Run ID: ${{ github.run_id }}"
+          echo "Target: WeKruit/GH-Desktop-App"
+          echo "Status: ✓ Dispatched successfully"

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from PyInstaller.building.api import EXE, PYZ
 from PyInstaller.building.build_main import Analysis
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -53,6 +53,11 @@ mcp_datas = [
 playwright_datas = collect_data_files("playwright")
 
 all_datas = system_prompt_datas + code_use_datas + mcp_datas + playwright_datas
+
+# ---------------------------------------------------------------------------
+# CDP protocol library (329 submodules — used by browser_use.browser.session)
+# ---------------------------------------------------------------------------
+cdp_use_imports = collect_submodules("cdp_use")
 
 # ---------------------------------------------------------------------------
 # Hidden imports -- packages that PyInstaller can't detect statically
@@ -94,6 +99,7 @@ hidden_imports = [
     "browser_use.llm.openai",
     "browser_use.llm.google",
     "browser_use.config",
+    "browser_use.browser.session",
     "browser_use.controller",
     "browser_use.sync",
     "browser_use.tokens",
@@ -176,7 +182,7 @@ excluded_modules = [
     "tkinter",
     "unittest",
     "test",
-    "email",
+    # NOTE: "email" was previously excluded here but pydantic → importlib.metadata needs it
     "xmlrpc",
     "pydoc",
     "doctest",
@@ -227,7 +233,7 @@ a = Analysis(
     pathex=[str(ROOT)],
     binaries=[],
     datas=all_datas,
-    hiddenimports=hidden_imports,
+    hiddenimports=hidden_imports + cdp_use_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
