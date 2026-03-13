@@ -176,6 +176,34 @@ class TestEmitAwaitingReview:
 
 
 # ---------------------------------------------------------------------------
+# Test 2a — emit_phase
+# ---------------------------------------------------------------------------
+
+
+class TestEmitPhase:
+    """emit_phase() must emit a valid phase JSONL event."""
+
+    def test_emits_correct_type(self):
+        from ghosthands.output.jsonl import emit_phase
+
+        events = _capture_jsonl_output(emit_phase, "Uploading resume")
+        assert len(events) == 1
+        assert events[0]["event"] == "phase"
+
+    def test_phase_field_is_present(self):
+        from ghosthands.output.jsonl import emit_phase
+
+        events = _capture_jsonl_output(emit_phase, "Filling personal information")
+        assert events[0]["phase"] == "Filling personal information"
+
+    def test_detail_is_optional(self):
+        from ghosthands.output.jsonl import emit_phase
+
+        events = _capture_jsonl_output(emit_phase, "Uploading resume", detail="Upload the PDF resume")
+        assert events[0]["detail"] == "Upload the PDF resume"
+
+
+# ---------------------------------------------------------------------------
 # Test 2b — emit_account_created
 # ---------------------------------------------------------------------------
 
@@ -356,6 +384,7 @@ class TestEventContract:
             emit_error,
             emit_field_failed,
             emit_field_filled,
+            emit_phase,
             emit_progress,
             emit_status,
         )
@@ -364,6 +393,7 @@ class TestEventContract:
             lambda: emit_account_created("workday", "user@test.com", "pass123"),
             lambda: emit_browser_ready("http://localhost:9222"),
             lambda: emit_awaiting_review("Please review"),
+            lambda: emit_phase("Starting application"),
             lambda: emit_status("Starting", step=1, max_steps=10, job_id="j1"),
             lambda: emit_field_filled("first_name", "Jane"),
             lambda: emit_field_failed("phone", "not found"),
@@ -416,6 +446,15 @@ class TestEventContract:
         e = events[0]
         assert e["event"] == "status"
         assert "message" in e
+        assert "timestamp" in e
+
+    def test_phase_contract(self):
+        from ghosthands.output.jsonl import emit_phase
+
+        events = _capture_jsonl_output(emit_phase, "Answering additional questions")
+        e = events[0]
+        assert e["event"] == "phase"
+        assert e["phase"] == "Answering additional questions"
         assert "timestamp" in e
 
     def test_field_filled_contract(self):
@@ -509,6 +548,7 @@ class TestEventContract:
             "account_created",
             "browser_ready",
             "awaiting_review",
+            "phase",
             "status",
             "field_filled",
             "field_failed",
@@ -1402,6 +1442,37 @@ class TestFieldEventsCallback:
         assert events[0]["field"] == "phone"
         assert events[0]["reason"] == "selector not found"
 
+    def test_every_fifth_success_emits_phase(self):
+        """Each fifth successful fill should emit a high-level phase update."""
+        self._reset_field_events()
+
+        import ghosthands.output.field_events as fe
+
+        mock_fill, modules = self._setup_mock_fill()
+
+        with patch.dict("sys.modules", modules):
+            fe._installed = False
+            fe.install_jsonl_callback()
+
+            callback = mock_fill._on_field_result
+            assert callback is not None
+
+            result = MagicMock()
+            result.success = True
+            result.name = "email"
+            result.value_set = "jane@test.com"
+
+            for _ in range(4):
+                _capture_jsonl_output(callback, result, 1)
+
+            events = _capture_jsonl_output(callback, result, 1)
+
+        assert len(events) == 3
+        assert events[0]["event"] == "field_filled"
+        assert events[1]["event"] == "phase"
+        assert events[1]["phase"] == "Filling form fields (5 completed)"
+        assert events[2]["event"] == "progress"
+
     def test_multi_round_counting(self):
         """Counts must accumulate across multiple rounds."""
         self._reset_field_events()
@@ -1685,7 +1756,31 @@ class TestRuntimeErrorClassification:
 
 
 # ---------------------------------------------------------------------------
-# Test 16 — JSONL line buffering / output format
+# Test 16 — step goal phase mapping
+# ---------------------------------------------------------------------------
+
+
+class TestGoalPhaseMapping:
+    @pytest.mark.parametrize(
+        ("goal", "expected"),
+        [
+            ("Upload the resume PDF to continue", "Uploading resume"),
+            ("Fill work experience history section", "Filling work experience"),
+            ("Complete personal information and contact info", "Filling personal information"),
+            ("Answer additional questions about authorization", "Answering additional questions"),
+            ("Review the form and prepare to submit", "Preparing to submit"),
+            ("Navigate to the application form", "Navigating to application"),
+            ("Click the next button", None),
+        ],
+    )
+    def test_infers_user_friendly_phase(self, goal, expected):
+        from ghosthands.agent.hooks import infer_phase_from_goal
+
+        assert infer_phase_from_goal(goal) == expected
+
+
+# ---------------------------------------------------------------------------
+# Test 17 — JSONL line buffering / output format
 # ---------------------------------------------------------------------------
 
 

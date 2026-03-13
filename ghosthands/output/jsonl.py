@@ -117,6 +117,11 @@ def emit_status(
     )
 
 
+def emit_phase(phase: str, detail: str | None = None) -> None:
+    """Emit a high-level progress phase for user display."""
+    emit_event("phase", phase=phase, detail=detail)
+
+
 def emit_field_filled(
     field: str,
     value: str,

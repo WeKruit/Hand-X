@@ -66,13 +66,9 @@ def _parse_jsonl_strict(text: str) -> list[dict]:
         try:
             parsed = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"stdout line {lineno} is not valid JSON: {line!r}"
-            ) from exc
+            raise ValueError(f"stdout line {lineno} is not valid JSON: {line!r}") from exc
         if not isinstance(parsed, dict):
-            raise ValueError(
-                f"stdout line {lineno} parsed as {type(parsed).__name__}, expected dict: {line!r}"
-            )
+            raise ValueError(f"stdout line {lineno} parsed as {type(parsed).__name__}, expected dict: {line!r}")
         events.append(parsed)
     return events
 
@@ -141,8 +137,10 @@ class TestCLISubprocess:
         """
         proc = subprocess.run(
             _cli_args(
-                "--job-url", "https://example.com/job/12345",
-                "--output-format", "jsonl",
+                "--job-url",
+                "https://example.com/job/12345",
+                "--output-format",
+                "jsonl",
                 "--headless",
             ),
             capture_output=True,
@@ -161,8 +159,10 @@ class TestCLISubprocess:
         """Handshake event must include min_desktop_version field."""
         proc = subprocess.run(
             _cli_args(
-                "--job-url", "https://example.com/job/12345",
-                "--output-format", "jsonl",
+                "--job-url",
+                "https://example.com/job/12345",
+                "--output-format",
+                "jsonl",
                 "--headless",
             ),
             capture_output=True,
@@ -180,8 +180,10 @@ class TestCLISubprocess:
         """Without --profile or --test-data, the CLI should emit an error event after handshake."""
         proc = subprocess.run(
             _cli_args(
-                "--job-url", "https://example.com/job/12345",
-                "--output-format", "jsonl",
+                "--job-url",
+                "https://example.com/job/12345",
+                "--output-format",
+                "jsonl",
                 "--headless",
             ),
             capture_output=True,
@@ -200,8 +202,10 @@ class TestCLISubprocess:
         """Every JSONL event must have a numeric timestamp field."""
         proc = subprocess.run(
             _cli_args(
-                "--job-url", "https://example.com/job/12345",
-                "--output-format", "jsonl",
+                "--job-url",
+                "https://example.com/job/12345",
+                "--output-format",
+                "jsonl",
                 "--headless",
             ),
             capture_output=True,
@@ -223,8 +227,10 @@ class TestCLISubprocess:
         """
         proc = subprocess.run(
             _cli_args(
-                "--job-url", "https://example.com/job/12345",
-                "--output-format", "jsonl",
+                "--job-url",
+                "https://example.com/job/12345",
+                "--output-format",
+                "jsonl",
                 "--headless",
             ),
             capture_output=True,
@@ -239,7 +245,8 @@ class TestCLISubprocess:
         """Verify GH_EMAIL and GH_PASSWORD env vars are forwarded to subprocess."""
         proc = subprocess.run(
             [
-                sys.executable, "-c",
+                sys.executable,
+                "-c",
                 "import os; print(os.environ.get('GH_EMAIL', 'MISSING')); "
                 "print(os.environ.get('GH_PASSWORD', 'MISSING'))",
             ],
@@ -275,8 +282,10 @@ class TestCLISubprocess:
         """
         proc = subprocess.Popen(
             _cli_args(
-                "--job-url", "https://example.com/job/12345",
-                "--output-format", "jsonl",
+                "--job-url",
+                "https://example.com/job/12345",
+                "--output-format",
+                "jsonl",
                 "--headless",
             ),
             stdout=subprocess.PIPE,
@@ -307,8 +316,10 @@ class TestCLISubprocess:
         """Send garbage to stdin; the process should not crash due to bad input."""
         proc = subprocess.Popen(
             _cli_args(
-                "--job-url", "https://example.com/job/12345",
-                "--output-format", "jsonl",
+                "--job-url",
+                "https://example.com/job/12345",
+                "--output-format",
+                "jsonl",
                 "--headless",
             ),
             stdout=subprocess.PIPE,
@@ -343,7 +354,8 @@ class TestCLISubprocess:
         """When --output-format is not specified, jsonl is the default."""
         proc = subprocess.run(
             _cli_args(
-                "--job-url", "https://example.com/job/12345",
+                "--job-url",
+                "https://example.com/job/12345",
                 "--headless",
             ),
             capture_output=True,
@@ -360,8 +372,10 @@ class TestCLISubprocess:
         """With --output-format=human, stdout should NOT contain JSONL handshake."""
         proc = subprocess.run(
             _cli_args(
-                "--job-url", "https://example.com/job/12345",
-                "--output-format", "human",
+                "--job-url",
+                "https://example.com/job/12345",
+                "--output-format",
+                "human",
                 "--headless",
             ),
             capture_output=True,
@@ -378,8 +392,10 @@ class TestCLISubprocess:
         """In JSONL mode, stderr should NOT contain JSONL events (only logging)."""
         proc = subprocess.run(
             _cli_args(
-                "--job-url", "https://example.com/job/12345",
-                "--output-format", "jsonl",
+                "--job-url",
+                "https://example.com/job/12345",
+                "--output-format",
+                "jsonl",
                 "--headless",
             ),
             capture_output=True,
@@ -396,9 +412,18 @@ class TestCLISubprocess:
                 parsed = json.loads(line)
                 # If it parsed as JSON, it should NOT be a JSONL protocol event
                 assert "event" not in parsed or parsed.get("event") not in {
-                    "handshake", "status", "error", "done", "progress",
-                    "field_filled", "field_failed", "cost", "browser_ready",
-                    "awaiting_review", "account_created",
+                    "handshake",
+                    "status",
+                    "error",
+                    "done",
+                    "progress",
+                    "field_filled",
+                    "field_failed",
+                    "cost",
+                    "browser_ready",
+                    "phase",
+                    "awaiting_review",
+                    "account_created",
                 }, f"JSONL event leaked to stderr: {parsed}"
             except json.JSONDecodeError:
                 pass  # Expected -- stderr is logging text, not JSON
