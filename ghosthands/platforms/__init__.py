@@ -66,6 +66,47 @@ _URL_PATTERNS: list[tuple[list[str], str]] = [
     ),
 ]
 
+_HOSTED_GREENHOUSE_QUERY_KEYS = frozenset({"gh_jid", "gh_src"})
+_HOSTED_GREENHOUSE_PATH_HINTS = (
+    "/jobs/",
+    "/job/",
+    "/apply",
+    "/openings/",
+)
+_HOSTED_GREENHOUSE_HOST_HINTS = (
+    "careers",
+    "jobs",
+)
+
+
+def _match_marker_hits(normalized_text: str, markers: list[str]) -> set[str]:
+    """Return the subset of markers found in the provided page text."""
+    return {marker for marker in markers if marker and marker.lower() in normalized_text}
+
+
+def _looks_like_hosted_greenhouse(url: str) -> bool:
+    """Detect high-confidence hosted Greenhouse URLs on custom domains."""
+    try:
+        parsed = urlparse(url.lower())
+        hostname = parsed.hostname or ""
+        path = parsed.path or ""
+        query_keys = set(parse_qs(parsed.query))
+    except Exception:
+        return False
+
+    if not (_HOSTED_GREENHOUSE_QUERY_KEYS & query_keys):
+        return False
+
+    if any(pattern in hostname for patterns, _ in _URL_PATTERNS for pattern in patterns):
+        return False
+
+    has_host_hint = any(
+        hostname.startswith(f"{label}.") or f".{label}." in hostname
+        for label in _HOSTED_GREENHOUSE_HOST_HINTS
+    )
+    has_path_hint = any(hint in path for hint in _HOSTED_GREENHOUSE_PATH_HINTS)
+    return has_host_hint or has_path_hint
+
 
 def detect_platform_from_signals(
     url: str,
@@ -95,7 +136,11 @@ def detect_platform_from_signals(
             continue
         if not config.content_markers:
             continue
-        if any(marker.lower() in normalized_text for marker in config.content_markers):
+        strong_hits = _match_marker_hits(normalized_text, config.strong_content_markers)
+        if strong_hits:
+            return platform_name
+        marker_hits = _match_marker_hits(normalized_text, config.content_markers)
+        if len(marker_hits) >= max(1, config.content_marker_min_hits):
             return platform_name
 
     return url_guess
@@ -107,17 +152,12 @@ def detect_platform(url: str) -> str:
     Returns: 'workday' | 'greenhouse' | 'lever' | 'smartrecruiters' | 'generic'
     """
     normalized = url.lower()
-    try:
-        parsed = urlparse(normalized)
-        query = parse_qs(parsed.query)
-        if "gh_jid" in query or "gh_src" in query:
-            return "greenhouse"
-    except Exception:
-        pass
     for patterns, platform_name in _URL_PATTERNS:
         for pattern in patterns:
             if pattern in normalized:
                 return platform_name
+    if _looks_like_hosted_greenhouse(normalized):
+        return "greenhouse"
     return "generic"
 
 
