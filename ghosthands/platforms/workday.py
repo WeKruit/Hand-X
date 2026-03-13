@@ -313,6 +313,10 @@ WORKDAY_CONFIG = PlatformConfig(
         "save and continue",
         "create account",
     ],
+    strong_content_markers=[
+        "myworkdayjobs",
+    ],
+    content_marker_min_hits=2,
     navigation_hints=WORKDAY_NAVIGATION,
     form_strategy="dom_first",
 )

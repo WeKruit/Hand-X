@@ -110,6 +110,8 @@ LEVER_CONFIG = PlatformConfig(
         "resume/cv",
         "additional information",
     ],
+    strong_content_markers=[],
+    content_marker_min_hits=2,
     navigation_hints=[
         "Single-page form — no 'Next' or 'Continue' buttons.",
         "Apply link on job listing page navigates to /apply URL.",

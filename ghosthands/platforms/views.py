@@ -44,6 +44,20 @@ class PlatformConfig(BaseModel):
             "of this platform when the URL alone is ambiguous."
         ),
     )
+    strong_content_markers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Higher-confidence markers that can identify a hosted or white-label "
+            "platform on their own when the URL is ambiguous."
+        ),
+    )
+    content_marker_min_hits: int = Field(
+        default=2,
+        description=(
+            "Minimum number of non-strong content markers that must match before "
+            "inferring a hosted platform from generic page text."
+        ),
+    )
     navigation_hints: list[str] = Field(
         default_factory=list,
         description="Hints about how multi-page forms work on this platform.",
