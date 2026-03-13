@@ -105,6 +105,14 @@ def parse_args() -> argparse.Namespace:
     # Playwright
     parser.add_argument("--browsers-path", default=None, help="Path to Playwright browser binaries")
 
+    # Desktop-owned browser (CDP)
+    parser.add_argument(
+        "--cdp-url",
+        type=str,
+        default=None,
+        help="Connect to an existing browser via CDP URL instead of launching a new one (Desktop-owned browser mode)",
+    )
+
     return parser.parse_args(argv)
 
 
@@ -279,6 +287,20 @@ def _warn_if_proxy_overrides_direct_keys(
         )
 
 
+async def _cleanup_browser(browser, desktop_owns_browser: bool) -> None:
+    """Shut down the browser session with ownership-aware cleanup.
+
+    When the Desktop app owns the browser (CDP mode), we only disconnect
+    from the session via ``stop()`` — the browser process stays alive.
+    When Hand-X launched the browser itself, we tear it down fully via
+    ``close()`` (the pre-existing behavior).
+    """
+    if desktop_owns_browser:
+        await browser.stop()
+    else:
+        await browser.close()
+
+
 # ── JSONL agent run ───────────────────────────────────────────────────
 
 
@@ -375,8 +397,18 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     allowed_domains = lockdown.get_allowed_domains()
 
     # -- Browser ------------------------------------------------------------
-    browser_profile = BrowserProfile(headless=args.headless, keep_alive=True, allowed_domains=allowed_domains)
-    browser = BrowserSession(browser_profile=browser_profile)
+    cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
+    desktop_owns_browser = cdp_url is not None
+
+    if cdp_url:
+        # Desktop-owned browser: connect to existing browser via CDP URL.
+        # Do not launch a new browser; headless flag is irrelevant here.
+        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains)
+        browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
+        emit_status("Connecting to Desktop-owned browser via CDP", job_id=job_id)
+    else:
+        browser_profile = BrowserProfile(headless=args.headless, keep_alive=True, allowed_domains=allowed_domains)
+        browser = BrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
     from ghosthands.agent.prompts import build_task_prompt
@@ -494,7 +526,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                     "cancelled": True,
                 },
             )
-            await browser.close()
+            await _cleanup_browser(browser, desktop_owns_browser)
             sys.exit(1)
 
         # Determine outcome
@@ -517,7 +549,17 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             # I-02/U-01: emit status (not done) before review so the terminal
             # event is only sent once, after the user has actually reviewed.
             emit_status("Application filled — awaiting review", job_id=job_id)
-            emit_awaiting_review()
+
+            # Resolve CDP URL and current page URL for Desktop review attachment
+            review_cdp_url = browser.cdp_url
+            review_page_url: str | None = None
+            with contextlib.suppress(Exception):
+                review_page_url = await browser.get_current_page_url()
+
+            emit_awaiting_review(
+                cdp_url=review_cdp_url,
+                page_url=review_page_url,
+            )
             review_result = await wait_for_review_command(browser, job_id, lease_id)
 
             # I-03/U-02: emit terminal done event based on review outcome.
@@ -566,14 +608,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 lease_id=lease_id,
                 result_data=result_data,
             )
-            await browser.close()
+            await _cleanup_browser(browser, desktop_owns_browser)
             sys.exit(1)
 
     except Exception as e:
         logger.error("agent_run_failed", error=str(e))
         emit_error("Agent encountered an unexpected error", fatal=True, job_id=job_id)
         with contextlib.suppress(Exception):
-            await browser.close()
+            await _cleanup_browser(browser, desktop_owns_browser)
         sys.exit(1)
 
 
@@ -647,8 +689,16 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     sensitive_data = _resolve_sensitive_data(app_settings, embedded_credentials, platform=platform)
 
     # -- Browser ------------------------------------------------------------
-    browser_profile = BrowserProfile(headless=args.headless, keep_alive=True)
-    browser = BrowserSession(browser_profile=browser_profile)
+    cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
+    desktop_owns_browser = cdp_url is not None
+
+    if cdp_url:
+        browser_profile = BrowserProfile(keep_alive=True)
+        browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
+        print(f"Connecting to Desktop-owned browser via CDP: {cdp_url}")
+    else:
+        browser_profile = BrowserProfile(headless=args.headless, keep_alive=True)
+        browser = BrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
     from ghosthands.agent.prompts import build_task_prompt
@@ -678,6 +728,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     print(f"  Model:     {getattr(llm, 'model', '?')}")
     print(f"  Resume:    {resume_path or '(none)'}")
     print(f"  Headless:  {args.headless}")
+    print(f"  CDP URL:   {cdp_url or '(launching own browser)'}")
     print(f"  Max steps: {args.max_steps}")
     proxy_url = os.environ.get("GH_LLM_PROXY_URL", "")
     print(f"  LLM:       {'Proxy: ' + proxy_url if proxy_url else 'Direct API'}")
@@ -709,7 +760,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
             await asyncio.sleep(1)
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\nClosing browser...")
-        await browser.close()
+        await _cleanup_browser(browser, desktop_owns_browser)
 
 
 # ── Entry point ───────────────────────────────────────────────────────

@@ -224,9 +224,13 @@ def emit_account_created(
     )
 
 
-def emit_awaiting_review(message: str = "Application filled — waiting for review") -> None:
+def emit_awaiting_review(
+    message: str = "Application filled — waiting for review",
+    cdp_url: str | None = None,
+    page_url: str | None = None,
+) -> None:
     """Emit awaiting_review event when browser is open for user review."""
-    emit_event("awaiting_review", message=message)
+    emit_event("awaiting_review", message=message, cdpUrl=cdp_url, pageUrl=page_url)
 
 
 # ── Protocol handshake ───────────────────────────────────────────────
