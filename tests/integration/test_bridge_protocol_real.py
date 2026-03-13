@@ -46,13 +46,16 @@ class _FakeAgent:
 class _FakeBrowser:
     """Minimal browser object compatible with ``wait_for_review_command``.
 
-    Tracks whether ``.close()`` was called.
+    Tracks whether ``.stop()`` / ``.close()`` was called.
     """
 
     def __init__(self) -> None:
         self.closed = False
 
     async def close(self) -> None:
+        self.closed = True
+
+    async def stop(self) -> None:
         self.closed = True
 
 
