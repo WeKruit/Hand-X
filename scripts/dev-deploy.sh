@@ -110,12 +110,13 @@ if [ "$SKIP_BUILD" = false ]; then
     --noconfirm \
     --log-level WARN
 
-  # Rename to platform-specific name
+  # Copy to platform-specific name (use cat to avoid inheriting macOS provenance xattrs)
   if [ "$PLATFORM" = "win" ]; then
-    mv "build/dist/hand-x.exe" "build/dist/$BINARY_NAME" 2>/dev/null || true
+    cat "build/dist/hand-x.exe" > "build/dist/$BINARY_NAME"
   else
-    mv "build/dist/hand-x" "build/dist/$BINARY_NAME" 2>/dev/null || true
+    cat "build/dist/hand-x" > "build/dist/$BINARY_NAME"
   fi
+  chmod +x "build/dist/$BINARY_NAME"
 
   echo ""
   echo "Build complete: build/dist/$BINARY_NAME"
@@ -134,6 +135,10 @@ fi
 echo ""
 echo "Smoke testing binary..."
 chmod +x "$BUILD_BINARY"
+# Remove macOS quarantine from build output (Gatekeeper kills unsigned binaries)
+if [ "$PLATFORM" = "darwin" ]; then
+  xattr -d com.apple.quarantine "$BUILD_BINARY" 2>/dev/null || true
+fi
 if "$BUILD_BINARY" --help >/dev/null 2>&1; then
   echo "  --help: OK"
 else
@@ -171,13 +176,13 @@ else
   SHA256="0000000000000000000000000000000000000000000000000000000000000000"
 fi
 
-# Copy binary
-cp "$BUILD_BINARY" "$BINARY_DEST"
+# Copy binary (use cat to avoid inheriting macOS provenance/quarantine xattrs)
+cat "$BUILD_BINARY" > "$BINARY_DEST"
 chmod 755 "$BINARY_DEST"
 
-# Remove macOS quarantine
+# Remove macOS quarantine + provenance if they snuck in
 if [ "$PLATFORM" = "darwin" ]; then
-  xattr -d com.apple.quarantine "$BINARY_DEST" 2>/dev/null || true
+  xattr -cr "$BINARY_DEST" 2>/dev/null || true
 fi
 
 # Write version state (Desktop checks this)

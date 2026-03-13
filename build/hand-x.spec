@@ -94,11 +94,15 @@ hidden_imports = [
     "browser_use.llm.openai",
     "browser_use.llm.google",
     "browser_use.config",
+    "browser_use.browser.session",
     "browser_use.controller",
     "browser_use.sync",
     "browser_use.tokens",
     "browser_use.tools",
     "browser_use.actor",
+    # CDP protocol library (used by browser_use.browser.session)
+    "cdp_use",
+    "cdp_use.cdp",
     # Third-party runtime deps that use lazy/conditional imports
     "anthropic",
     "openai",
