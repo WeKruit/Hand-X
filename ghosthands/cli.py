@@ -91,6 +91,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--proxy-url", default=None, help="VALET LLM proxy URL")
     parser.add_argument("--runtime-grant", default=None, help="VALET runtime grant token")
 
+    # Security
+    parser.add_argument(
+        "--allowed-domains",
+        type=str,
+        default=None,
+        help="Comma-separated list of additional allowed domains",
+    )
+
     # Playwright
     parser.add_argument("--browsers-path", default=None, help="Path to Playwright browser binaries")
 
@@ -209,6 +217,20 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     except ImportError:
         pass
 
+    # -- Domain lockdown ----------------------------------------------------
+    from ghosthands.security.domain_lockdown import create_lockdown_for_platform
+
+    additional_domains: list[str] | None = None
+    if args.allowed_domains:
+        additional_domains = [d.strip() for d in args.allowed_domains.split(",") if d.strip()]
+
+    lockdown = create_lockdown_for_platform(
+        job_url=args.job_url,
+        platform=platform,
+        additional_domains=additional_domains,
+    )
+    allowed_domains = lockdown.get_allowed_domains()
+
     # -- System prompt ------------------------------------------------------
     system_ext = ""
     try:
@@ -231,6 +253,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         demo_mode=False,
         interaction_highlight_color="rgb(37, 99, 235)",
         wait_between_actions=settings.wait_between_actions,
+        allowed_domains=allowed_domains,
     )
     browser = BrowserSession(browser_profile=browser_profile)
 
@@ -408,6 +431,20 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     except ImportError:
         pass
 
+    # -- Domain lockdown ----------------------------------------------------
+    from ghosthands.security.domain_lockdown import create_lockdown_for_platform
+
+    additional_domains: list[str] | None = None
+    if args.allowed_domains:
+        additional_domains = [d.strip() for d in args.allowed_domains.split(",") if d.strip()]
+
+    lockdown = create_lockdown_for_platform(
+        job_url=args.job_url,
+        platform=platform,
+        additional_domains=additional_domains,
+    )
+    allowed_domains = lockdown.get_allowed_domains()
+
     # -- System prompt ------------------------------------------------------
     system_ext = ""
     try:
@@ -430,6 +467,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         demo_mode=False,
         interaction_highlight_color="rgb(37, 99, 235)",
         wait_between_actions=settings.wait_between_actions,
+        allowed_domains=allowed_domains,
     )
     browser = BrowserSession(browser_profile=browser_profile)
 
