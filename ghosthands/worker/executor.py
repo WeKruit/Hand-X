@@ -483,6 +483,9 @@ Other rules:
     log.info("executor.launching_agent", platform=platform, headless=settings.headless)
 
     # ── Run the agent ────────────────────────────────────────────
+    # keep_alive=True so the browser survives for HITL inspection when
+    # the agent reports a blocker.  If there is no blocker we close the
+    # browser ourselves below.
     result = await run_job_agent(
         task=task,
         resume_profile=profile,
@@ -493,7 +496,7 @@ Other rules:
         job_id=job_id,
         max_budget=settings.max_budget_per_job,
         on_status_update=_on_status,
-        keep_alive=False,  # EC2 worker path — no human reviewer
+        keep_alive=True,
     )
 
     log.info(
