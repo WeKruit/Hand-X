@@ -297,12 +297,18 @@ async def _cleanup_browser(browser, desktop_owns_browser: bool) -> None:
     """Shut down the browser session with ownership-aware cleanup.
 
     When the Desktop app owns the browser (CDP mode), we only disconnect
-    from the session via ``stop()`` — the browser process stays alive.
-    When Hand-X launched the browser itself, we also call ``stop()`` as
-    the upstream BrowserSession API no longer exposes ``close()``.
-    The Desktop app's process-group kill handles actual browser termination.
+    from the session via ``stop()`` — the browser process stays alive for
+    the Desktop app to manage.
+
+    When Hand-X launched the browser itself (standalone mode), we call
+    ``kill()`` which dispatches a force-stop event that actually terminates
+    the Chromium process.  Using ``stop()`` here would only disconnect
+    without killing the process, leaking Chromium instances.
     """
-    await browser.stop()
+    if desktop_owns_browser:
+        await browser.stop()
+    else:
+        await browser.kill()
 
 
 @dataclass(frozen=True)
@@ -387,10 +393,12 @@ def _classify_runtime_error(exc: BaseException, *, proxy_mode: bool) -> _Runtime
             keep_browser_open=True,
         )
 
-    if 401 in status_codes and "expired" in combined_text:
+    if 401 in status_codes and any(
+        keyword in combined_text for keyword in ("expired", "invalid", "revoked", "unauthorized", "grant")
+    ):
         return _RuntimeErrorSignal(
-            code="GRANT_EXPIRED",
-            message="Your automation session expired. Please try again.",
+            code="GRANT_ERROR",
+            message="Your automation session is no longer valid. Please try again.",
             keep_browser_open=True,
         )
 
