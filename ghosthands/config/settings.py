@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     # --- Browser ---
     headless: bool = Field(True, description="Run browser headless")
     browser_timeout: int = Field(30_000, description="Browser operation timeout in ms")
+    cdp_url: str | None = Field(
+        None, description="CDP URL of an existing browser to connect to (Desktop-owned browser mode)"
+    )
 
     # --- Testing ---
     resume_json_path: str = Field(

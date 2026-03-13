@@ -205,6 +205,6 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> s
         pass
     finally:
         with contextlib.suppress(Exception):
-            await browser.close()
+            await browser.stop()
 
     return result
