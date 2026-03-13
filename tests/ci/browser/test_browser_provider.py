@@ -23,10 +23,12 @@ class TestProviderRegistry:
 		provider_cls = ProviderRegistry.get('chromium')
 		assert provider_cls is ChromiumProvider
 
-	def test_get_firefox_raises_not_implemented(self):
-		"""ProviderRegistry.get('firefox') must raise NotImplementedError (not yet registered)."""
-		with pytest.raises(NotImplementedError, match="Browser provider 'firefox' not registered"):
-			ProviderRegistry.get('firefox')
+	def test_get_firefox_returns_camoufox_provider(self):
+		"""ProviderRegistry.get('firefox') must return CamoufoxProvider (registered in S6)."""
+		from browser_use.browser.providers.camoufox import CamoufoxProvider
+
+		provider_cls = ProviderRegistry.get('firefox')
+		assert provider_cls is CamoufoxProvider
 
 	def test_get_unknown_raises_not_implemented(self):
 		"""ProviderRegistry.get with an unknown name raises NotImplementedError."""

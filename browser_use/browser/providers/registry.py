@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from browser_use.browser.providers.base import BrowserProvider
+from browser_use.browser.providers.camoufox import CamoufoxProvider
 from browser_use.browser.providers.chromium import ChromiumProvider
 
 
@@ -53,5 +54,6 @@ class ProviderRegistry:
 		return list(cls._providers.keys())
 
 
-# Auto-register the built-in chromium provider
+# Auto-register built-in providers
 ProviderRegistry.register('chromium', ChromiumProvider)
+ProviderRegistry.register('firefox', CamoufoxProvider)
