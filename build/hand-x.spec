@@ -176,7 +176,6 @@ excluded_modules = [
     "tkinter",
     "unittest",
     "test",
-    "email",
     "xmlrpc",
     "pydoc",
     "doctest",
