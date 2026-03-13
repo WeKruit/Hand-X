@@ -1,0 +1,185 @@
+"""Profile adaptation layer for the Desktop bridge.
+
+Converts camelCase profile keys from the Desktop app (TypeScript conventions)
+to the snake_case format expected by DomHand and the rest of the Python
+codebase, and fills in default values that the Desktop bridge omits.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# Defaults matching resume_loader.PROFILE_DEFAULTS — duplicated here to avoid
+# importing the integrations package (which pulls in asyncpg/database).
+DOMHAND_PROFILE_DEFAULTS: dict[str, Any] = {
+    "phone_device_type": "Mobile",
+    "phone_country_code": "+1",
+    "address": {
+        "street": "",
+        "city": "",
+        "state": "",
+        "zip": "",
+        "country": "United States of America",
+    },
+    "work_authorization": "Yes",
+    "visa_sponsorship": "No",
+    "veteran_status": "I am not a protected veteran",
+    "disability_status": "No, I Don't Have A Disability",
+    "gender": "Male",
+    "race_ethnicity": "Asian (Not Hispanic or Latino)",
+}
+
+# Demographic / sensitive fields that warrant a user-visible warning when
+# defaults are applied.  Non-sensitive fields like phone_device_type and
+# address are intentionally excluded.
+SENSITIVE_DEFAULT_FIELDS: frozenset[str] = frozenset({
+    "gender",
+    "race_ethnicity",
+    "veteran_status",
+    "disability_status",
+    "work_authorization",
+    "visa_sponsorship",
+})
+
+
+CAMEL_TO_SNAKE_SCALAR: dict[str, str] = {
+    "firstName": "first_name",
+    "lastName": "last_name",
+    "linkedIn": "linkedin",
+    "zipCode": "zip",
+    "workAuthorization": "work_authorization",
+    "visaSponsorship": "visa_sponsorship",
+    "raceEthnicity": "race_ethnicity",
+    "veteranStatus": "veteran_status",
+    "disabilityStatus": "disability_status",
+    "phoneDeviceType": "phone_device_type",
+    "phoneCountryCode": "phone_country_code",
+}
+
+CAMEL_TO_SNAKE_NESTED: dict[str, str] = {
+    "fieldOfStudy": "field_of_study",
+    "startDate": "start_date",
+    "endDate": "end_date",
+    "graduationDate": "graduation_date",
+}
+
+
+def camel_to_snake_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    """Convert known camelCase keys from the Desktop bridge to snake_case.
+
+    The Desktop app sends profile data with camelCase keys (matching the
+    VALET API's TypeScript conventions).  DomHand and the rest of the
+    Python codebase expect snake_case.
+
+    This function adds snake_case equivalents for known camelCase keys
+    without removing the originals, so both formats work downstream.
+
+    Also handles ``zipCode`` -> ``zip`` *and* ``postal_code`` (for prompts).
+    """
+    out = dict(profile)
+
+    # ── Scalar fields ────────────────────────────────────────────
+    for camel, snake in CAMEL_TO_SNAKE_SCALAR.items():
+        if camel in out and snake not in out:
+            out[snake] = out[camel]
+
+    # zipCode also maps to postal_code for prompt templates
+    if "zipCode" in out and "postal_code" not in out:
+        out["postal_code"] = out["zipCode"]
+
+    # ── Nested arrays: education / experience ────────────────────
+    for array_key in ("education", "experience"):
+        items = out.get(array_key)
+        if not isinstance(items, list):
+            continue
+        converted = []
+        for item in items:
+            if not isinstance(item, dict):
+                converted.append(item)
+                continue
+            new_item = dict(item)
+            for camel, snake in CAMEL_TO_SNAKE_NESTED.items():
+                if camel in new_item and snake not in new_item:
+                    new_item[snake] = new_item[camel]
+            converted.append(new_item)
+        out[array_key] = converted
+
+    return out
+
+
+def normalize_profile_defaults(profile: dict[str, Any]) -> dict[str, Any]:
+    """Add DomHand-expected default fields that the Desktop bridge omits.
+
+    When the Desktop app passes a raw ``UserProfile`` via ``--profile`` or
+    ``GH_USER_PROFILE_TEXT``, it may be missing fields that the old
+    TypeScript ``toWorkdayProfile()`` transformation would have added.
+    DomHand's ``_parse_profile_evidence`` and ``_known_profile_value``
+    rely on these fields being present in the profile.
+
+    This function fills in missing keys with sensible defaults, matching
+    the ``PROFILE_DEFAULTS`` from ``resume_loader``.  Existing values in
+    the profile are never overwritten.
+
+    If any *sensitive* demographic fields (gender, race_ethnicity,
+    veteran_status, disability_status, work_authorization, visa_sponsorship)
+    receive defaults, a warning status event is emitted via the JSONL
+    protocol so the Desktop app can surface it to the user.
+    """
+    defaults = DOMHAND_PROFILE_DEFAULTS
+    normalized = dict(profile)
+
+    # Track which sensitive fields had defaults applied
+    defaulted_sensitive: list[str] = []
+
+    # ── Scalar defaults ──────────────────────────────────────────
+    for key in (
+        "phone_device_type",
+        "phone_country_code",
+        "work_authorization",
+        "visa_sponsorship",
+        "veteran_status",
+        "disability_status",
+        "gender",
+        "race_ethnicity",
+    ):
+        if key not in normalized or normalized[key] is None or normalized[key] == "":
+            normalized[key] = defaults[key]
+            if key in SENSITIVE_DEFAULT_FIELDS:
+                defaulted_sensitive.append(key)
+
+    # ── Address defaults (merge, don't overwrite) ────────────────
+    default_address = defaults["address"]
+    existing_address = normalized.get("address")
+
+    if existing_address is None or existing_address == "":
+        normalized["address"] = dict(default_address)
+    elif isinstance(existing_address, dict):
+        merged = dict(default_address)
+        for k, v in existing_address.items():
+            if v is not None and v != "":
+                merged[k] = v
+        normalized["address"] = merged
+    # If address is a string (e.g. "San Francisco, CA"), leave it as-is —
+    # _format_profile_summary handles string addresses fine.
+
+    # ── Emit warning for defaulted sensitive fields ──────────────
+    if defaulted_sensitive:
+        field_list = ", ".join(defaulted_sensitive)
+        msg = (
+            f"Using default answers for: {field_list} "
+            f"— verify before submitting"
+        )
+        logger.warning("demographic_defaults_applied", extra={"fields": defaulted_sensitive})
+        try:
+            from ghosthands.output.jsonl import emit_status
+
+            emit_status(msg)
+        except Exception:
+            # If JSONL emitter is not available (e.g. running outside
+            # Desktop bridge context), the warning is still logged above.
+            pass
+
+    return normalized

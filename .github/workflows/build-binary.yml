@@ -8,6 +8,10 @@ on:
     branches: [main]
     tags: ['v*']
   workflow_dispatch:
+  workflow_run:
+    workflows: ['test']
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: write  # needed for creating releases
@@ -17,6 +21,7 @@ env:
 
 jobs:
   build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -56,7 +61,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-          pip install pyinstaller
+          pip install pyinstaller==6.13.0
 
       - name: Build binary
         shell: bash
@@ -97,13 +102,13 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           chmod +x build/dist/hand-x-${{ matrix.name }}
-          build/dist/hand-x-${{ matrix.name }} --help || true
+          build/dist/hand-x-${{ matrix.name }} --help
 
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          build/dist/hand-x-${{ matrix.name }}.exe --help || true
+          build/dist/hand-x-${{ matrix.name }}.exe --help
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
