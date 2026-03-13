@@ -94,6 +94,14 @@ def parse_args() -> argparse.Namespace:
     # Playwright
     parser.add_argument("--browsers-path", default=None, help="Path to Playwright browser binaries")
 
+    # Browser engine
+    parser.add_argument(
+        "--engine",
+        choices=["chromium", "firefox", "auto"],
+        default="auto",
+        help="Browser engine to use: chromium, firefox (Camoufox), or auto (route-based selection, default)",
+    )
+
     return parser.parse_args(argv)
 
 
@@ -223,6 +231,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     if args.email and args.password:
         sensitive_data = {"email": args.email, "password": args.password}
 
+    # -- Engine selection ---------------------------------------------------
+    engine = args.engine
+    if engine == "auto":
+        from browser_use.browser.providers.route_selector import RouteSelector
+
+        engine = RouteSelector.select_engine(args.job_url, platform)
+        emit_status(f"Auto-selected browser engine: {engine}", job_id=args.job_id)
+
     # -- Browser ------------------------------------------------------------
     browser_profile = BrowserProfile(
         headless=args.headless,
@@ -231,6 +247,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         demo_mode=False,
         interaction_highlight_color="rgb(37, 99, 235)",
         wait_between_actions=settings.wait_between_actions,
+        engine=engine,
     )
     browser = BrowserSession(browser_profile=browser_profile)
 
@@ -422,6 +439,14 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     if args.email and args.password:
         sensitive_data = {"email": args.email, "password": args.password}
 
+    # -- Engine selection ---------------------------------------------------
+    engine = args.engine
+    if engine == "auto":
+        from browser_use.browser.providers.route_selector import RouteSelector
+
+        engine = RouteSelector.select_engine(args.job_url, platform)
+        print(f"Auto-selected browser engine: {engine}")
+
     # -- Browser ------------------------------------------------------------
     browser_profile = BrowserProfile(
         headless=args.headless,
@@ -430,6 +455,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         demo_mode=False,
         interaction_highlight_color="rgb(37, 99, 235)",
         wait_between_actions=settings.wait_between_actions,
+        engine=engine,
     )
     browser = BrowserSession(browser_profile=browser_profile)
 
