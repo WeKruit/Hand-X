@@ -24,7 +24,7 @@ jobs:
           - os: macos-14        # Apple Silicon (M1+)
             name: darwin-arm64
             runner_arch: arm64
-          - os: macos-13        # Intel Mac
+          - os: macos-15        # x64 Python via Rosetta on Apple Silicon
             name: darwin-x64
             runner_arch: x64
           - os: ubuntu-22.04    # Linux x64
@@ -45,6 +45,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          architecture: ${{ matrix.runner_arch }}
 
       - name: Install dependencies
         shell: bash
