@@ -1,8 +1,7 @@
-"""Baseline regression tests for ghosthands.cli argument parsing.
+"""Regression tests for ghosthands.cli argument parsing.
 
-These tests capture the CURRENT behavior of the CLI argument parser so that
-future changes (e.g., S4 adding --allowed-domains) are validated against a
-known-good baseline.
+These tests capture the behavior of the CLI argument parser. S4 added
+--allowed-domains for domain lockdown wiring.
 
 Because ghosthands.cli imports heavy dependencies at module level
 (ghosthands.agent.hooks -> browser-use -> cdp_use), we mock those modules
@@ -430,32 +429,57 @@ class TestApplySubcommand:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# --allowed-domains (S4: domain lockdown wiring)
+# ---------------------------------------------------------------------------
+
+
+class TestAllowedDomains:
+    """Tests for --allowed-domains argument (added in S4)."""
+
+    def test_allowed_domains_default_none(self):
+        """--allowed-domains defaults to None when not provided."""
+        args = _parse(["--job-url", "https://example.com"])
+        assert args.allowed_domains is None
+
+    def test_allowed_domains_single(self):
+        """--allowed-domains accepts a single domain."""
+        args = _parse([
+            "--job-url", "https://example.com",
+            "--allowed-domains", "greenhouse.io",
+        ])
+        assert args.allowed_domains == "greenhouse.io"
+
+    def test_allowed_domains_comma_separated(self):
+        """--allowed-domains accepts a comma-separated list."""
+        args = _parse([
+            "--job-url", "https://example.com",
+            "--allowed-domains", "greenhouse.io,lever.co,sso.company.com",
+        ])
+        assert args.allowed_domains == "greenhouse.io,lever.co,sso.company.com"
+
+    def test_allowed_domains_is_string(self):
+        """--allowed-domains is stored as a raw string (parsed later in CLI flow)."""
+        args = _parse([
+            "--job-url", "https://example.com",
+            "--allowed-domains", "example.com",
+        ])
+        assert isinstance(args.allowed_domains, str)
+
+
+# ---------------------------------------------------------------------------
+# Remaining gaps for future streams
+# ---------------------------------------------------------------------------
+
+
 class TestFutureGaps:
-    """Document arguments that do NOT currently exist.
-
-    These tests serve as a contract: if a future stream adds these args,
-    the corresponding test should be updated to assert the new behavior.
-    """
-
-    def test_allowed_domains_does_not_exist(self):
-        """--allowed-domains is NOT a current CLI argument.
-
-        # BASELINE: S4 will add --allowed-domains for domain allowlisting.
-        # When S4 lands, this test should be replaced with positive tests.
-        """
-        with pytest.raises(SystemExit):
-            _parse([
-                "--job-url", "https://example.com",
-                "--allowed-domains", "greenhouse.io,lever.co",
-            ])
+    """Document arguments that do NOT currently exist."""
 
     def test_keep_alive_does_not_exist_as_cli_flag(self):
         """--keep-alive is NOT a current CLI argument.
 
         Note: keep_alive is hardcoded to True in the BrowserProfile construction
         inside run_agent_jsonl/run_agent_human, but is not exposed as a CLI flag.
-
-        # BASELINE: keep_alive is always True, not configurable via CLI.
         """
         with pytest.raises(SystemExit):
             _parse([
