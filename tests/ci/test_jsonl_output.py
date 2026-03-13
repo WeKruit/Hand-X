@@ -55,8 +55,8 @@ class TestEmitEvent:
         from ghosthands.output.jsonl import emit_event
 
         obj = _capture_emit(emit_event, "status", message="hello")
-        # BASELINE: "type" key — will change to "event" in S2
-        assert "type" in obj
+        # CHANGED in S2: "event" key (was "type")
+        assert "event" in obj
         assert obj["event"] == "status"
 
     def test_includes_timestamp(self):
