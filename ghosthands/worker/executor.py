@@ -11,7 +11,7 @@ import asyncio
 import json
 import traceback
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import structlog
 
@@ -22,6 +22,7 @@ from ghosthands.integrations.credentials import (
 from ghosthands.integrations.database import Database
 from ghosthands.integrations.resume_loader import load_resume
 from ghosthands.integrations.valet_callback import ValetClient
+from ghosthands.platforms import detect_platform as detect_platform_config
 from ghosthands.worker.cost_tracker import (
     BudgetExceededError,
     CostTracker,
@@ -34,11 +35,7 @@ logger = structlog.get_logger()
 
 # ── Platform detection ────────────────────────────────────────────────────
 
-PLATFORM_PATTERNS: dict[str, list[str]] = {
-    "workday": ["myworkdayjobs.com", "myworkday.com", "wd5.myworkday.com"],
-    "greenhouse": ["greenhouse.io", "boards.greenhouse.io"],
-    "lever": ["lever.co", "jobs.lever.co"],
-    "smartrecruiters": ["smartrecruiters.com"],
+EXECUTOR_ONLY_PLATFORM_PATTERNS: dict[str, list[str]] = {
     "ashby": ["ashbyhq.com"],
     "icims": ["icims.com"],
 }
@@ -46,15 +43,12 @@ PLATFORM_PATTERNS: dict[str, list[str]] = {
 
 def detect_platform(url: str) -> str:
     """Detect ATS platform from a job URL. Returns platform name or 'generic'."""
+    shared_platform = detect_platform_config(url)
+    if shared_platform != "generic":
+        return shared_platform
+
     normalized = url.lower()
-    try:
-        parsed = urlparse(normalized)
-        query = parse_qs(parsed.query)
-        if "gh_jid" in query or "gh_src" in query:
-            return "greenhouse"
-    except Exception:
-        pass
-    for platform, patterns in PLATFORM_PATTERNS.items():
+    for platform, patterns in EXECUTOR_ONLY_PLATFORM_PATTERNS.items():
         if any(pattern in normalized for pattern in patterns):
             return platform
     return "generic"

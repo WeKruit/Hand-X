@@ -55,6 +55,7 @@ from ghosthands.dom.shadow_helpers import ensure_helpers
 from ghosthands.integrations.resume_loader import _map_to_profile
 from ghosthands.platforms import detect_platform, detect_platform_from_signals, get_config_by_name
 from ghosthands.profile.canonical import build_canonical_profile
+from ghosthands.worker.executor import detect_platform as detect_executor_platform
 
 SHADOW_DROPDOWN_HTML = """
 <!DOCTYPE html>
@@ -482,6 +483,17 @@ def test_smartrecruiters_platform_allows_single_page_presubmit():
 def test_detect_platform_recognizes_greenhouse_hosted_pages_with_gh_jid():
     url = "https://careers.withwaymo.com/jobs/example-role?gh_jid=7393132"
     assert detect_platform(url) == "greenhouse"
+
+
+def test_detect_platform_does_not_promote_generic_query_key_without_hosted_greenhouse_shape():
+    url = "https://example.com/about-us?gh_jid=7393132"
+    assert detect_platform(url) == "generic"
+
+
+def test_executor_detect_platform_matches_shared_detector_for_hosted_greenhouse():
+    url = "https://careers.withwaymo.com/jobs/example-role?gh_jid=7393132"
+    assert detect_executor_platform(url) == "greenhouse"
+    assert detect_executor_platform(url) == detect_platform(url)
 
 
 def test_smartrecruiters_prompt_includes_presubmit_single_page_state():
@@ -1036,6 +1048,28 @@ def test_detect_platform_from_signals_recognizes_greenhouse_markers():
             markers=["application_form", "submit application"],
         )
         == "greenhouse"
+    )
+
+
+def test_detect_platform_from_signals_does_not_promote_on_single_weak_marker():
+    assert (
+        detect_platform_from_signals(
+            "https://careers.example.com/role",
+            page_text="Submit Application",
+            markers=[],
+        )
+        == "generic"
+    )
+
+
+def test_detect_platform_from_signals_allows_strong_structural_marker():
+    assert (
+        detect_platform_from_signals(
+            "https://jobs.example.com/apply",
+            page_text="",
+            markers=["c-spl-select-field"],
+        )
+        == "smartrecruiters"
     )
 
 

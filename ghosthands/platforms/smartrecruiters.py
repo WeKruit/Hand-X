@@ -141,6 +141,10 @@ SMARTRECRUITERS_CONFIG = PlatformConfig(
         "ready to apply",
         "review your application",
     ],
+    strong_content_markers=[
+        "c-spl-select-field",
+    ],
+    content_marker_min_hits=2,
     navigation_hints=[
         ("May be multi-step or single-page depending on company config. Detect step indicators / progress bar."),
         (

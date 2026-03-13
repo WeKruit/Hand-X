@@ -116,6 +116,10 @@ GREENHOUSE_CONFIG = PlatformConfig(
         "submit application",
         "greenhouse",
     ],
+    strong_content_markers=[
+        "eeoc_fields",
+    ],
+    content_marker_min_hits=2,
     navigation_hints=[
         "Single-page form — scroll down to reveal all sections.",
         "Submit button is at the very bottom of the page.",
