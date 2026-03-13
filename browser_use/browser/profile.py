@@ -606,6 +606,14 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 		default=True,
 		description='Enable the captcha solver watchdog that listens for captcha events from the browser proxy. Automatically pauses agent steps while a CAPTCHA is being solved. Only active when the browser emits BrowserUse CDP events (e.g. Browser Use cloud browsers). Harmless when disabled or when events are not emitted.',
 	)
+	aboutblank_loading_logo_enabled: bool = Field(
+		default=True,
+		description='Show the Hand-X logo in the about:blank loading overlay.',
+	)
+	aboutblank_loading_min_display_seconds: float = Field(
+		default=2.0,
+		description='Minimum time to keep the Hand-X about:blank loading overlay visible before navigating away.',
+	)
 	demo_mode: bool = Field(
 		default=False,
 		description='Enable demo mode side panel that streams agent logs directly inside the browser window (requires headless=False).',
@@ -656,7 +664,7 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 	)
 	paint_order_filtering: bool = Field(default=True, description='Enable paint order filtering. Slightly experimental.')
 	interaction_highlight_color: str = Field(
-		default='rgb(255, 127, 39)',
+		default='rgb(37, 99, 235)',
 		description='Color to use for highlighting elements during interactions (CSS color string).',
 	)
 	interaction_highlight_duration: float = Field(default=1.0, description='Duration in seconds to show interaction highlights.')
