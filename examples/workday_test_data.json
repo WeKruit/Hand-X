@@ -42,6 +42,7 @@
 			"location": "New York, NY",
 			"start_date": "2025-09",
 			"end_date": "2025-12",
+			"end_date_type": "Actual",
 			"currently_working": false,
 			"description": "Built a full-stack regulatory data pipeline for life science websites, designed a PostgreSQL processing architecture with schema validation and resilient ingestion, and improved structured extraction quality for downstream compliance workflows."
 		},
@@ -51,6 +52,7 @@
 			"location": "New York, NY",
 			"start_date": "2025-03",
 			"end_date": "",
+			"end_date_type": "Current",
 			"currently_working": true,
 			"description": "Developed real-time multimodal prototypes for soft robotic systems using OCR, YOLOv11, OpenCV, MediaPipe, and LLM-based reasoning, and optimized the vision-LLM pipeline for low-latency deployment on Jetson devices."
 		},
@@ -60,6 +62,7 @@
 			"location": "",
 			"start_date": "2025-07",
 			"end_date": "2025-08",
+			"end_date_type": "Actual",
 			"currently_working": false,
 			"description": "Developed backend modules for an AI-powered mock interview platform, integrated LiveKit for real-time audio streaming, and helped deploy LLM-powered conversational interview agents."
 		}
@@ -71,8 +74,11 @@
 			"degree": "Bachelor of Science",
 			"field_of_study": "Mathematics and Computer Science",
 			"gpa": "3.85",
+			"end_date": "2027-05",
+			"end_date_type": "Expected",
 			"graduation_date": "2027-05",
-			"start_date": "2024-09"
+			"start_date": "2024-09",
+			"currently_enrolled": true
 		}
 	],
 

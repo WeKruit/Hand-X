@@ -33,6 +33,7 @@
 			"location": "New York, NY",
 			"start_date": "2025-09",
 			"end_date": "2025-12",
+			"end_date_type": "Actual",
 			"currently_working": false,
 			"description": "Built a full-stack regulatory data pipeline for life science websites and improved structured extraction workflows for compliance teams."
 		},
@@ -42,6 +43,7 @@
 			"location": "New York, NY",
 			"start_date": "2025-03",
 			"end_date": "",
+			"end_date_type": "Current",
 			"currently_working": true,
 			"description": "Built real-time multimodal robotics prototypes using OCR, YOLOv11, OpenCV, MediaPipe, and LLM-based reasoning."
 		}
@@ -53,7 +55,11 @@
 			"degree": "Bachelor of Science",
 			"field_of_study": "Mathematics and Computer Science",
 			"gpa": "3.85",
-			"graduation_date": "2027-05"
+			"start_date": "2024-09",
+			"end_date": "2027-05",
+			"end_date_type": "Expected",
+			"graduation_date": "2027-05",
+			"currently_enrolled": true
 		}
 	],
 
