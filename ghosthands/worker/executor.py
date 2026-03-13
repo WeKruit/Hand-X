@@ -493,6 +493,7 @@ Other rules:
         job_id=job_id,
         max_budget=settings.max_budget_per_job,
         on_status_update=_on_status,
+        keep_alive=False,  # EC2 worker path — no human reviewer
     )
 
     log.info(
@@ -502,6 +503,27 @@ Other rules:
         cost=result.get("cost_usd"),
         blocker=result.get("blocker"),
     )
+
+    # ── HITL: pause on blocker ───────────────────────────────────
+    if result.get("blocker"):
+        log.info("executor.hitl_pause", blocker=result["blocker"])
+        await hitl.pause_job(
+            job_id=job_id,
+            reason=result["blocker"],
+            interaction_type="blocker",
+            valet_task_id=valet_task_id,
+        )
+        signal = await hitl.wait_for_resume(job_id)
+        if signal and signal.get("action") == "cancel":
+            return {
+                "success": False,
+                "summary": "Cancelled by user",
+                "steps_taken": result.get("steps", 0),
+                "cost_usd": result.get("cost_usd", 0.0),
+                "blocker": result.get("blocker"),
+                "error_code": "user_cancelled",
+            }
+        # On resume, result is already captured -- continue to completion
 
     # ── Map to executor result format ────────────────────────────
     return {
