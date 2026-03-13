@@ -73,14 +73,14 @@ jobs:
           echo "Git branch: $(git branch --show-current)"
           echo ""
 
-          TEST_FILENAMES="$(find tests/ci -name 'test_*.py' -type f | sed 's|^tests/ci/||' | sed 's|\.py$||' | jq -R -s -c 'split("\n")[:-1]')"
+          TEST_FILENAMES="$(find tests/ci tests/unit tests/integration -name 'test_*.py' -type f | sed 's|^tests/[^/]*/||' | sed 's|\.py$||' | sort | jq -R -s -c 'split("\n")[:-1]')"
           echo "TEST_FILENAMES=${TEST_FILENAMES}" >> "$GITHUB_OUTPUT"
           echo "📋 Test matrix: $TEST_FILENAMES"
         # https://code.dblock.org/2021/09/03/generating-task-matrix-by-looping-over-repo-files-with-github-actions.html
       - name: Check that at least one test file is found
         run: |
           if [ -z "${{ steps.lsgrep.outputs.TEST_FILENAMES }}" ]; then
-            echo "Failed to find any test_*.py files in tests/ci/ folder!" > /dev/stderr
+            echo "Failed to find any test_*.py files in tests/ci/, tests/unit/, or tests/integration/ folders!" > /dev/stderr
             exit 1
           fi
 
@@ -170,15 +170,24 @@ jobs:
       - name: Check if test file exists
         id: check-file
         run: |
-          TEST_FILE="tests/ci/${{ matrix.test_filename }}.py"
-          if [ -f "$TEST_FILE" ]; then
+          # Check across all test directories
+          TEST_FILE=""
+          for dir in tests/ci tests/unit tests/integration; do
+            if [ -f "$dir/${{ matrix.test_filename }}.py" ]; then
+              TEST_FILE="$dir/${{ matrix.test_filename }}.py"
+              break
+            fi
+          done
+
+          if [ -n "$TEST_FILE" ]; then
             echo "exists=true" >> $GITHUB_OUTPUT
+            echo "test_path=$TEST_FILE" >> $GITHUB_OUTPUT
             echo "✅ Test file found: $TEST_FILE"
           else
             echo "exists=false" >> $GITHUB_OUTPUT
-            echo "❌ Test file not found: $TEST_FILE"
-            echo "This file may have been renamed or removed. Current test files:"
-            find tests/ci -name 'test_*.py' -type f | sed 's|tests/ci/||' | sed 's|\.py$||' | sort
+            echo "❌ Test file not found for: ${{ matrix.test_filename }}.py"
+            echo "Current test files:"
+            find tests/ci tests/unit tests/integration -name 'test_*.py' -type f | sed 's|\.py$||' | sort
           fi
 
       - name: Run test with retry
@@ -188,7 +197,7 @@ jobs:
           timeout_minutes: 6
           max_attempts: 2
           retry_on: error
-          command: uv run --no-sync pytest "tests/ci/${{ matrix.test_filename }}.py"
+          command: uv run --no-sync pytest "${{ steps.check-file.outputs.test_path }}"
 
   evaluate-tasks:
     needs: setup-chromium
