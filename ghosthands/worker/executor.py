@@ -527,6 +527,10 @@ Other rules:
                 "error_code": "user_cancelled",
             }
         # On resume, result is already captured -- continue to completion
+        log.warning(
+            "hitl.resume_not_implemented",
+            msg="Resume after pause is not yet implemented — returning original result",
+        )
 
     # ── Map to executor result format ────────────────────────────
     return {
