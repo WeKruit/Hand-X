@@ -69,10 +69,17 @@ _SCAN_PAGE_STATE_JS = r"""() => {
 		.filter((item) => item.text);
 	for (const item of buttons) buttonTexts.push(item.text);
 
+	const isAdvanceControl = (lower) => {
+		if (!lower) return false;
+		if (/\bcontinue with\b/.test(lower)) return false;
+		if (/\b(save and continue later|save & continue later|continue later)\b/.test(lower)) return false;
+		if (/^(next|next step|continue|continue application|continue to review)$/.test(lower)) return true;
+		if (/\b(save and continue|save & continue)\b/.test(lower)) return true;
+		return false;
+	};
+
 	const submitButtons = buttons.filter((item) => /\b(submit|finish application|send application)\b/.test(item.lower));
-	const advanceButtons = buttons.filter(
-		(item) => /\b(next|continue|save and continue|save & continue)\b/.test(item.lower)
-	);
+	const advanceButtons = buttons.filter((item) => isAdvanceControl(item.lower));
 
 	const markerNodes = Array.from(document.querySelectorAll('[id], [class], script[src]')).slice(0, 300);
 	const markers = [];
