@@ -61,7 +61,7 @@ class TestProviderRegistry:
 			assert ProviderRegistry.get('fake') is FakeProvider
 		finally:
 			# Clean up to avoid polluting other tests
-			ProviderRegistry._providers.pop('fake', None)
+			ProviderRegistry.reset()
 
 	def test_available_includes_chromium(self):
 		"""ProviderRegistry.available() includes 'chromium'."""
