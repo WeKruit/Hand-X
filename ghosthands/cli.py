@@ -604,8 +604,8 @@ async def _wait_for_review_command(browser, job_id: str, lease_id: str) -> None:
     """Wait for a command from Electron on stdin.
 
     Expected commands:
-    - {"type": "complete_review"} -- user approved, close browser
-    - {"type": "cancel_job"}     -- user cancelled, close browser
+    - {"event": "complete_review"} -- user approved, close browser
+    - {"event": "cancel_job"}     -- user cancelled, close browser
     """
     from ghosthands.output.jsonl import emit_done
 
@@ -626,7 +626,7 @@ async def _wait_for_review_command(browser, job_id: str, lease_id: str) -> None:
             except json.JSONDecodeError:
                 continue
 
-            cmd_type = cmd.get("type", "")
+            cmd_type = cmd.get("event", "")
 
             if cmd_type == "complete_review":
                 emit_done(
