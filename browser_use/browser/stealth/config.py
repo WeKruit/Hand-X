@@ -21,5 +21,5 @@ class StealthConfig(BaseModel):
 	languages_patch: bool = True
 	permissions_patch: bool = True
 	webgl_patch: bool = True
-	iframe_contentwindow_patch: bool = True
+	iframe_contentwindow_patch: bool = False  # No-op currently — needs meaningful implementation
 	media_codecs_patch: bool = True

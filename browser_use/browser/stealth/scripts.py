@@ -7,10 +7,7 @@ returns only the scripts enabled by the provided ``StealthConfig``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-	from browser_use.browser.stealth.config import StealthConfig
+from browser_use.browser.stealth.config import StealthConfig
 
 # ---------------------------------------------------------------------------
 # 1. navigator.webdriver
@@ -287,6 +284,12 @@ _PATCHES: list[tuple[str, str]] = [
 	('iframe_contentwindow_patch', IFRAME_CONTENTWINDOW_PATCH),
 	('media_codecs_patch', MEDIA_CODECS_PATCH),
 ]
+
+
+# Validate at import time that every flag in _PATCHES exists on StealthConfig
+for _flag_name, _ in _PATCHES:
+	assert _flag_name in StealthConfig.model_fields, f'Unknown stealth patch flag: {_flag_name!r}'
+del _flag_name  # clean up module namespace
 
 
 def get_stealth_scripts(config: 'StealthConfig') -> list[str]:
