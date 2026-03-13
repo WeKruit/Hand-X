@@ -48,7 +48,6 @@ os.environ["BROWSER_USE_SETUP_LOGGING"] = "false"
 from ghosthands.agent.hooks import install_same_tab_guard
 from ghosthands.config.settings import settings
 
-
 # ── Argument parsing ──────────────────────────────────────────────────
 
 
@@ -228,13 +227,16 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     browser_profile = BrowserProfile(
         headless=args.headless,
         keep_alive=True,
+        aboutblank_loading_logo_enabled=True,
+        demo_mode=False,
+        interaction_highlight_color="rgb(37, 99, 235)",
         wait_between_actions=settings.wait_between_actions,
     )
     browser = BrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
     resume_path = str(Path(args.resume).resolve()) if args.resume else ""
-    task = _build_task_prompt(args.job_url, resume_path, sensitive_data)
+    task = _build_task_prompt(args.job_url, resume_path, sensitive_data, platform)
 
     # -- Create agent -------------------------------------------------------
     available_files = [resume_path] if resume_path else []
@@ -424,13 +426,16 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     browser_profile = BrowserProfile(
         headless=args.headless,
         keep_alive=True,
+        aboutblank_loading_logo_enabled=True,
+        demo_mode=False,
+        interaction_highlight_color="rgb(37, 99, 235)",
         wait_between_actions=settings.wait_between_actions,
     )
     browser = BrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
     resume_path = str(Path(args.resume).resolve()) if args.resume else ""
-    task = _build_task_prompt(args.job_url, resume_path, sensitive_data)
+    task = _build_task_prompt(args.job_url, resume_path, sensitive_data, platform)
 
     # -- Agent --------------------------------------------------------------
     available_files = [resume_path] if resume_path else []
@@ -496,8 +501,15 @@ def _build_task_prompt(
     job_url: str,
     resume_path: str,
     sensitive_data: dict | None,
+    platform: str,
 ) -> str:
     """Build the task prompt for the agent."""
+    from ghosthands.agent.prompts import (
+        FAIL_OVER_CUSTOM_WIDGET,
+        FAIL_OVER_NATIVE_SELECT,
+        build_completion_detection_text,
+    )
+
     task = (
         f"Go to {job_url} and fill out the job application form completely.\n"
         "\n"
@@ -518,6 +530,29 @@ def _build_task_prompt(
         "DROPDOWN RULE: After clicking a dropdown option, STOP and observe.\n"
         "Do NOT batch a dropdown click with 'Save and Continue' or any other action.\n"
         "Dropdowns may reveal sub-options that need a second selection.\n"
+        f"If domhand_select returns {FAIL_OVER_NATIVE_SELECT}, do NOT click the native <select>.\n"
+        "Use dropdown_options(index=...) to inspect the exact option text/value,\n"
+        "then use select_dropdown(index=..., text=...) with the exact text/value.\n"
+        f"If domhand_select returns {FAIL_OVER_CUSTOM_WIDGET}, stop retrying domhand_select,\n"
+        "open the widget manually, search if supported, and click the final leaf option.\n"
+        "For phone country code or phone type dropdowns, if the first term fails,\n"
+        "try close variants like 'United States +1', 'United States', '+1',\n"
+        "'USA', 'US', 'Mobile', and 'Cell' before giving up.\n"
+        "For stubborn checkbox/radio/button controls, if the intended option still\n"
+        "does not stick after 2 tries, click the currently selected option once to\n"
+        "clear/reset stale state, then click the intended option again and verify\n"
+        "the visible state changed.\n"
+        "For text/date/search inputs that visibly contain the value but still show\n"
+        "validation errors, focus the field and press Enter or Tab to commit it.\n"
+        "Use domhand_assess_state before any large scroll, before clicking\n"
+        "Next/Continue/Save, and before calling done(). Follow its unresolved\n"
+        "field list and scroll_bias instead of doing a full-page reverification loop.\n"
+        "\n"
+        "COMPLETION STATES:\n"
+        f"{build_completion_detection_text(platform)}\n"
+        "\n"
+        "When close to completion, keep memory and next_goal short.\n"
+        "Do NOT re-verify the entire form once a terminal completion state is reached.\n"
         "\n"
         "Other rules:\n"
     )
@@ -529,8 +564,11 @@ def _build_task_prompt(
     else:
         task += "- If a login wall appears, report it as a blocker.\n"
     task += (
-        "- Do NOT click the final Submit button. Stop at the review page and use the done action.\n"
-        "- If anything pops up blocking the form, close it and continue.\n"
+        "- Do NOT click the final Submit button. Use the completion-state rules above and stop with the done action when the page is review, confirmation, or an allowed presubmit_single_page state.\n"
+        "- If anything pops up blocking the form, call domhand_close_popup first. Only fall back to Escape or coordinate clicks if that DOM-first popup close action fails.\n"
+        "- Every non-consent applicant value must come from the provided user profile. If the profile does not provide it, leave it empty or unresolved.\n"
+        "- Never invent placeholder personal info like John, Doe, or John Doe. Use the exact applicant identity from the provided profile only.\n"
+        "- Keep working near the current unresolved section and continue downward. Do NOT scroll back to the top just to re-check earlier fields unless a specific earlier required field is visibly empty or invalid.\n"
     )
     return task
 
