@@ -27,7 +27,9 @@
 			"field_of_study": "Mathematics and Computer Science",
 			"gpa": "3.85",
 			"start_date": "2024-09",
-			"end_date": "2027-05"
+			"end_date": "2027-05",
+			"end_date_type": "Expected",
+			"currently_enrolled": true
 		}
 	],
 	"experience": [
@@ -38,6 +40,7 @@
 			"currently_work_here": false,
 			"start_date": "2025-09",
 			"end_date": "2025-12",
+			"end_date_type": "Actual",
 			"description": "Built a full-stack regulatory data pipeline for life science websites, designed resilient PostgreSQL processing, and improved structured extraction quality."
 		},
 		{
@@ -47,6 +50,7 @@
 			"currently_work_here": true,
 			"start_date": "2025-03",
 			"end_date": "",
+			"end_date_type": "Current",
 			"description": "Developed real-time multimodal robotics prototypes using OCR, YOLOv11, OpenCV, MediaPipe, and LLM-based reasoning."
 		},
 		{
@@ -56,6 +60,7 @@
 			"currently_work_here": false,
 			"start_date": "2025-07",
 			"end_date": "2025-08",
+			"end_date_type": "Actual",
 			"description": "Built backend modules for an AI-powered mock interview platform and integrated LiveKit for real-time audio streaming."
 		}
 	],

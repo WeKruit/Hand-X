@@ -6,7 +6,11 @@ from browser_use.agent.views import AgentHistoryList, DetectedVariable
 from browser_use.dom.views import DOMInteractedElement
 
 
-def detect_variables_in_history(history: AgentHistoryList) -> dict[str, DetectedVariable]:
+def detect_variables_in_history(
+	history: AgentHistoryList,
+	*,
+	allow_value_pattern_fallback: bool = True,
+) -> dict[str, DetectedVariable]:
 	"""
 	Analyze agent history and detect reusable variables.
 
@@ -41,7 +45,13 @@ def detect_variables_in_history(history: AgentHistoryList) -> dict[str, Detected
 					element = history_item.state.interacted_element[action_idx]
 
 			# Detect variables in this action
-			_detect_in_action(action_dict, element, detected, detected_values)
+			_detect_in_action(
+				action_dict,
+				element,
+				detected,
+				detected_values,
+				allow_value_pattern_fallback,
+			)
 
 	return detected
 
@@ -51,6 +61,7 @@ def _detect_in_action(
 	element: DOMInteractedElement | None,
 	detected: dict[str, DetectedVariable],
 	detected_values: set[str],
+	allow_value_pattern_fallback: bool,
 ) -> None:
 	"""Detect variables in a single action using element context"""
 
@@ -75,7 +86,11 @@ def _detect_in_action(
 				continue
 
 			# Try to detect variable type (with element context)
-			var_info = _detect_variable_type(value, element)
+			var_info = _detect_variable_type(
+				value,
+				element,
+				allow_value_pattern_fallback=allow_value_pattern_fallback,
+			)
 			if not var_info:
 				continue
 
@@ -98,6 +113,8 @@ def _detect_in_action(
 def _detect_variable_type(
 	value: str,
 	element: DOMInteractedElement | None = None,
+	*,
+	allow_value_pattern_fallback: bool = True,
 ) -> tuple[str, str | None] | None:
 	"""
 	Detect if a value looks like a variable, using element context when available.
@@ -117,6 +134,8 @@ def _detect_variable_type(
 			return attr_detection
 
 	# STRATEGY 2: Pattern matching on value (fallback)
+	if not allow_value_pattern_fallback:
+		return None
 	return _detect_from_value_pattern(value)
 
 
