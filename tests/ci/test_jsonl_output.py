@@ -46,18 +46,18 @@ def _capture_emit(fn, *args, **kwargs) -> dict:
 class TestEmitEvent:
     """Tests for the core emit_event() function."""
 
-    def test_output_uses_type_key(self):
-        """emit_event uses 'type' key for the event type.
+    def test_output_uses_event_key(self):
+        """emit_event uses 'event' key for the event type.
 
-        # BASELINE: Current code uses "type" as the key name.
-        # NOTE: Stream S2 will intentionally rename this to "event".
+        # CHANGED in S2: Key renamed from "type" to "event" to match
+        # the Desktop app's HandXEvent interface.
         """
         from ghosthands.output.jsonl import emit_event
 
         obj = _capture_emit(emit_event, "status", message="hello")
-        # BASELINE: "type" key — will change to "event" in S2
-        assert "type" in obj
-        assert obj["type"] == "status"
+        # CHANGED in S2: "event" key (was "type")
+        assert "event" in obj
+        assert obj["event"] == "status"
 
     def test_includes_timestamp(self):
         """Every event includes an integer millisecond timestamp."""
@@ -146,8 +146,8 @@ class TestEmitStatus:
         from ghosthands.output.jsonl import emit_status
 
         obj = _capture_emit(emit_status, "Processing step 1")
-        # BASELINE: uses "type" key
-        assert obj["type"] == "status"
+        # CHANGED in S2: uses "event" key (was "type")
+        assert obj["event"] == "status"
         assert obj["message"] == "Processing step 1"
         assert "timestamp" in obj
 
@@ -204,7 +204,7 @@ class TestEmitDone:
             job_id="job-1",
             lease_id="lease-1",
         )
-        assert obj["type"] == "done"
+        assert obj["event"] == "done"
         assert obj["success"] is True
         assert obj["message"] == "Completed"
         assert obj["fields_filled"] == 5
@@ -217,7 +217,7 @@ class TestEmitDone:
         from ghosthands.output.jsonl import emit_done
 
         obj = _capture_emit(emit_done, success=False, message="Failed to fill")
-        assert obj["type"] == "done"
+        assert obj["event"] == "done"
         assert obj["success"] is False
         assert obj["message"] == "Failed to fill"
 
@@ -262,7 +262,7 @@ class TestEmitFieldFilled:
         from ghosthands.output.jsonl import emit_field_filled
 
         obj = _capture_emit(emit_field_filled, "first_name", "Jane")
-        assert obj["type"] == "field_filled"
+        assert obj["event"] == "field_filled"
         assert obj["field"] == "first_name"
         assert obj["value"] == "Jane"
         assert "timestamp" in obj
@@ -297,9 +297,10 @@ class TestEmitFieldFailed:
         from ghosthands.output.jsonl import emit_field_failed
 
         obj = _capture_emit(emit_field_failed, "phone", "Element not found")
-        assert obj["type"] == "field_failed"
+        assert obj["event"] == "field_failed"
         assert obj["field"] == "phone"
-        assert obj["error"] == "Element not found"
+        assert obj["reason"] == "Element not found"
+        assert "error" not in obj
         assert "timestamp" in obj
 
 
@@ -316,7 +317,7 @@ class TestEmitProgress:
         from ghosthands.output.jsonl import emit_progress
 
         obj = _capture_emit(emit_progress, 5, 10)
-        assert obj["type"] == "progress"
+        assert obj["event"] == "progress"
         assert obj["filled"] == 5
         assert obj["total"] == 10
         assert "timestamp" in obj
@@ -349,7 +350,7 @@ class TestEmitError:
         from ghosthands.output.jsonl import emit_error
 
         obj = _capture_emit(emit_error, "Something went wrong")
-        assert obj["type"] == "error"
+        assert obj["event"] == "error"
         assert obj["message"] == "Something went wrong"
         assert "timestamp" in obj
 
@@ -395,7 +396,7 @@ class TestEmitCost:
         from ghosthands.output.jsonl import emit_cost
 
         obj = _capture_emit(emit_cost, 0.123456)
-        assert obj["type"] == "cost"
+        assert obj["event"] == "cost"
         assert obj["total_usd"] == 0.123456
         assert "timestamp" in obj
 
@@ -442,3 +443,157 @@ class TestGetOutput:
         out = _get_output()
         import sys
         assert out is sys.stdout
+
+
+# ---------------------------------------------------------------------------
+# Progress field additions (ADDED in S2)
+# ---------------------------------------------------------------------------
+
+
+class TestEmitProgressS2:
+    """Tests for the S2 additions to emit_progress()."""
+
+    def test_progress_includes_step_and_maxsteps(self):
+        """emit_progress also emits step (= filled) and maxSteps (= total)."""
+        from ghosthands.output.jsonl import emit_progress
+
+        obj = _capture_emit(emit_progress, 5, 10)
+        assert obj["step"] == 5
+        assert obj["maxSteps"] == 10
+
+    def test_progress_description_omitted_when_empty(self):
+        """description is omitted when not provided (empty string -> None)."""
+        from ghosthands.output.jsonl import emit_progress
+
+        obj = _capture_emit(emit_progress, 3, 8)
+        assert "description" not in obj
+
+    def test_progress_description_included_when_provided(self):
+        """description is included when a non-empty string is provided."""
+        from ghosthands.output.jsonl import emit_progress
+
+        obj = _capture_emit(emit_progress, 3, 8, description="Filling page 2")
+        assert obj["description"] == "Filling page 2"
+
+
+# ---------------------------------------------------------------------------
+# Lease protocol events (ADDED in S2)
+# ---------------------------------------------------------------------------
+
+
+class TestEmitHandshake:
+    """Tests for the emit_handshake() lease protocol event."""
+
+    def test_handshake_default_version(self):
+        """emit_handshake emits a handshake event with protocol_version=2."""
+        from ghosthands.output.jsonl import emit_handshake
+
+        obj = _capture_emit(emit_handshake)
+        assert obj["event"] == "handshake"
+        assert obj["protocol_version"] == 2
+        assert "timestamp" in obj
+
+    def test_handshake_custom_version(self):
+        """emit_handshake accepts a custom protocol version."""
+        from ghosthands.output.jsonl import emit_handshake
+
+        obj = _capture_emit(emit_handshake, protocol_version=3)
+        assert obj["protocol_version"] == 3
+
+
+class TestEmitBrowserReady:
+    """Tests for the emit_browser_ready() lease protocol event."""
+
+    def test_browser_ready(self):
+        """emit_browser_ready emits a browser_ready event with cdpUrl."""
+        from ghosthands.output.jsonl import emit_browser_ready
+
+        obj = _capture_emit(emit_browser_ready, "ws://127.0.0.1:9222/devtools/browser/abc")
+        assert obj["event"] == "browser_ready"
+        assert obj["cdpUrl"] == "ws://127.0.0.1:9222/devtools/browser/abc"
+        assert "timestamp" in obj
+
+    def test_browser_ready_empty_url(self):
+        """emit_browser_ready with empty CDP URL still emits the event."""
+        from ghosthands.output.jsonl import emit_browser_ready
+
+        obj = _capture_emit(emit_browser_ready, "")
+        assert obj["event"] == "browser_ready"
+        assert obj["cdpUrl"] == ""
+
+
+class TestEmitLeaseAcquired:
+    """Tests for the emit_lease_acquired() lease protocol event."""
+
+    def test_lease_acquired_basic(self):
+        """emit_lease_acquired emits a lease_acquired event with leaseId."""
+        from ghosthands.output.jsonl import emit_lease_acquired
+
+        obj = _capture_emit(emit_lease_acquired, "lease-abc-123")
+        assert obj["event"] == "lease_acquired"
+        assert obj["leaseId"] == "lease-abc-123"
+        assert "timestamp" in obj
+
+    def test_lease_acquired_with_job_id(self):
+        """emit_lease_acquired includes jobId when provided."""
+        from ghosthands.output.jsonl import emit_lease_acquired
+
+        obj = _capture_emit(emit_lease_acquired, "lease-1", job_id="job-42")
+        assert obj["leaseId"] == "lease-1"
+        assert obj["jobId"] == "job-42"
+
+    def test_lease_acquired_empty_job_id_omitted(self):
+        """Empty string job_id is converted to None and omitted."""
+        from ghosthands.output.jsonl import emit_lease_acquired
+
+        obj = _capture_emit(emit_lease_acquired, "lease-1", job_id="")
+        assert "jobId" not in obj
+
+    def test_lease_acquired_default_job_id_omitted(self):
+        """Default job_id (empty string) is omitted."""
+        from ghosthands.output.jsonl import emit_lease_acquired
+
+        obj = _capture_emit(emit_lease_acquired, "lease-1")
+        assert "jobId" not in obj
+
+
+class TestEmitLeaseReleased:
+    """Tests for the emit_lease_released() lease protocol event."""
+
+    def test_lease_released_default_reason(self):
+        """emit_lease_released emits a lease_released event with default reason."""
+        from ghosthands.output.jsonl import emit_lease_released
+
+        obj = _capture_emit(emit_lease_released, "lease-abc-123")
+        assert obj["event"] == "lease_released"
+        assert obj["leaseId"] == "lease-abc-123"
+        assert obj["reason"] == "completed"
+        assert "timestamp" in obj
+
+    def test_lease_released_custom_reason(self):
+        """emit_lease_released accepts a custom reason."""
+        from ghosthands.output.jsonl import emit_lease_released
+
+        obj = _capture_emit(emit_lease_released, "lease-1", reason="error")
+        assert obj["reason"] == "error"
+
+    def test_lease_released_failed_reason(self):
+        """emit_lease_released with reason='failed'."""
+        from ghosthands.output.jsonl import emit_lease_released
+
+        obj = _capture_emit(emit_lease_released, "lease-1", reason="failed")
+        assert obj["reason"] == "failed"
+
+
+class TestEmitLeaseHeartbeat:
+    """Tests for the emit_lease_heartbeat() lease protocol event."""
+
+    def test_lease_heartbeat(self):
+        """emit_lease_heartbeat emits a lease_heartbeat event with leaseId."""
+        from ghosthands.output.jsonl import emit_lease_heartbeat
+
+        obj = _capture_emit(emit_lease_heartbeat, "lease-abc-123")
+        assert obj["event"] == "lease_heartbeat"
+        assert obj["leaseId"] == "lease-abc-123"
+        assert "timestamp" in obj
+
