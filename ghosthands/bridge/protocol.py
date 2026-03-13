@@ -143,13 +143,14 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> s
     str
         One of ``"complete"``, ``"cancel"``, ``"timeout"``, or ``"eof"``.
 
-    NOTE: Does NOT emit a second ``done`` event.  The main flow already
-    emitted ``done`` before entering review.  Emitting another would
-    confuse the Desktop App event handler (R-1 fix).
+    The CLI is responsible for emitting the terminal ``done`` event once
+    this function returns a review outcome.
     """
     from ghosthands.output.jsonl import emit_error, emit_status
 
     review_timeout_seconds = 30 * 60  # 30 minutes
+    warning_before_seconds = 5 * 60  # Warn 5 minutes before timeout.
+    warning_emitted = False
     start_time = _time.monotonic()
     result = "eof"
 
@@ -157,6 +158,14 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> s
         while True:
             elapsed = _time.monotonic() - start_time
             remaining = review_timeout_seconds - elapsed
+
+            if not warning_emitted and remaining <= warning_before_seconds and remaining > 0:
+                emit_status(
+                    "Your review session will expire in 5 minutes. Please submit or cancel soon.",
+                    job_id=job_id,
+                )
+                warning_emitted = True
+
             if remaining <= 0:
                 logger.warning("review_timeout_exceeded", timeout_seconds=review_timeout_seconds)
                 emit_error(
