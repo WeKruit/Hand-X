@@ -224,148 +224,156 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     # -- Lease acquired (after all preflight succeeds) -------------------------
     emit_lease_acquired(lease_id, job_id=args.job_id)
 
-    llm = get_chat_model(model=args.model)
-
-    # -- DomHand actions ----------------------------------------------------
-    tools: Tools = Tools()
+    # -- Init block (LLM, tools, browser, agent) ----------------------------
+    # Wrapped in try/except so lease_released is always emitted on failure.
     try:
-        from ghosthands.actions import register_domhand_actions
+        llm = get_chat_model(model=args.model)
 
-        register_domhand_actions(tools)
-        emit_status("DomHand actions registered", job_id=args.job_id)
-    except Exception as e:
-        emit_status(f"DomHand unavailable: {e}, using generic actions", job_id=args.job_id)
+        # -- DomHand actions ----------------------------------------------------
+        tools: Tools = Tools()
+        try:
+            from ghosthands.actions import register_domhand_actions
 
-    # -- Platform detection -------------------------------------------------
-    platform = "generic"
-    try:
-        from ghosthands.platforms import detect_platform
+            register_domhand_actions(tools)
+            emit_status("DomHand actions registered", job_id=args.job_id)
+        except Exception as e:
+            emit_status(f"DomHand unavailable: {e}, using generic actions", job_id=args.job_id)
 
-        platform = detect_platform(args.job_url)
-    except ImportError:
-        pass
+        # -- Platform detection -------------------------------------------------
+        platform = "generic"
+        try:
+            from ghosthands.platforms import detect_platform
 
-    # -- Domain lockdown ----------------------------------------------------
-    from ghosthands.security.domain_lockdown import create_lockdown_for_platform
+            platform = detect_platform(args.job_url)
+        except ImportError:
+            pass
 
-    additional_domains: list[str] | None = None
-    if args.allowed_domains:
-        additional_domains = [d.strip() for d in args.allowed_domains.split(",") if d.strip()]
+        # -- Domain lockdown ----------------------------------------------------
+        from ghosthands.security.domain_lockdown import create_lockdown_for_platform
 
-    lockdown = create_lockdown_for_platform(
-        job_url=args.job_url,
-        platform=platform,
-        additional_domains=additional_domains,
-    )
-    allowed_domains = lockdown.get_allowed_domains()
+        additional_domains: list[str] | None = None
+        if args.allowed_domains:
+            additional_domains = [d.strip() for d in args.allowed_domains.split(",") if d.strip()]
 
-    # -- System prompt ------------------------------------------------------
-    system_ext = ""
-    try:
-        from ghosthands.agent.prompts import build_system_prompt
-
-        system_ext = build_system_prompt(profile, platform)
-    except ImportError:
-        pass
-
-    # -- Credentials --------------------------------------------------------
-    sensitive_data: dict[str, str | dict[str, str]] | None = None
-    if args.email and args.password:
-        sensitive_data = {"email": args.email, "password": args.password}
-
-    # -- Engine selection ---------------------------------------------------
-    engine = args.engine
-    if engine == "auto":
-        from browser_use.browser.providers.route_selector import RouteSelector
-
-        engine = RouteSelector.select_engine(args.job_url, platform)
-        emit_status(f"Auto-selected browser engine: {engine}", job_id=args.job_id)
-
-    # TODO: wire CamoufoxProvider when ready
-    if engine == "firefox":
-        emit_status(
-            "Firefox/Camoufox engine is not yet wired — falling back to chromium",
-            job_id=args.job_id,
+        lockdown = create_lockdown_for_platform(
+            job_url=args.job_url,
+            platform=platform,
+            additional_domains=additional_domains,
         )
-        engine = "chromium"
+        allowed_domains = lockdown.get_allowed_domains()
 
-    # -- Browser ------------------------------------------------------------
-    browser_profile = BrowserProfile(
-        headless=args.headless,
-        keep_alive=True,
-        aboutblank_loading_logo_enabled=True,
-        demo_mode=False,
-        interaction_highlight_color="rgb(37, 99, 235)",
-        wait_between_actions=settings.wait_between_actions,
-        allowed_domains=allowed_domains,
-        engine=engine,
-    )
-    browser = BrowserSession(browser_profile=browser_profile)
+        # -- System prompt ------------------------------------------------------
+        system_ext = ""
+        try:
+            from ghosthands.agent.prompts import build_system_prompt
 
-    # -- Task prompt --------------------------------------------------------
-    resume_path = str(Path(args.resume).resolve()) if args.resume else ""
-    task = _build_task_prompt(args.job_url, resume_path, sensitive_data, platform)
+            system_ext = build_system_prompt(profile, platform)
+        except ImportError:
+            pass
 
-    # -- Create agent -------------------------------------------------------
-    available_files = [resume_path] if resume_path else []
-    agent = Agent(
-        task=task,
-        llm=llm,
-        browser_session=browser,
-        tools=tools,
-        extend_system_message=system_ext or None,
-        sensitive_data=sensitive_data,
-        available_file_paths=available_files or None,
-        use_vision=True,
-        max_actions_per_step=settings.agent_max_actions_per_step,
-        calculate_cost=True,
-        use_judge=False,
-    )
+        # -- Credentials --------------------------------------------------------
+        sensitive_data: dict[str, str | dict[str, str]] | None = None
+        if args.email and args.password:
+            sensitive_data = {"email": args.email, "password": args.password}
 
-    emit_status(
-        f"Starting application: {args.job_url}",
-        step=1,
-        max_steps=args.max_steps,
-        job_id=args.job_id,
-    )
+        # -- Engine selection ---------------------------------------------------
+        engine = args.engine
+        if engine == "auto":
+            from browser_use.browser.providers.route_selector import RouteSelector
 
-    # -- Step hooks for live JSONL events -----------------------------------
-    _browser_ready_emitted = False
+            engine = RouteSelector.select_engine(args.job_url, platform)
+            emit_status(f"Auto-selected browser engine: {engine}", job_id=args.job_id)
 
-    async def _on_step_start(ag: Agent) -> None:
-        nonlocal _browser_ready_emitted
-        await install_same_tab_guard(ag)
+        # TODO: wire CamoufoxProvider when ready
+        if engine == "firefox":
+            emit_status(
+                "Firefox/Camoufox engine is not yet wired — falling back to chromium",
+                job_id=args.job_id,
+            )
+            engine = "chromium"
 
-        # Emit browser_ready once, on the first step (browser is now live)
-        if not _browser_ready_emitted:
-            _browser_ready_emitted = True
-            cdp_url = getattr(ag.browser_session, "cdp_url", "") or ""
-            emit_browser_ready(cdp_url)
+        # -- Browser ------------------------------------------------------------
+        browser_profile = BrowserProfile(
+            headless=args.headless,
+            keep_alive=True,
+            aboutblank_loading_logo_enabled=True,
+            demo_mode=False,
+            interaction_highlight_color="rgb(37, 99, 235)",
+            wait_between_actions=settings.wait_between_actions,
+            allowed_domains=allowed_domains,
+            engine=engine,
+        )
+        browser = BrowserSession(browser_profile=browser_profile)
 
-        step = ag.state.n_steps
-        goal = ""
-        if ag.state.last_model_output:
-            goal = ag.state.last_model_output.next_goal or ""
+        # -- Task prompt --------------------------------------------------------
+        resume_path = str(Path(args.resume).resolve()) if args.resume else ""
+        task = _build_task_prompt(args.job_url, resume_path, sensitive_data, platform)
+
+        # -- Create agent -------------------------------------------------------
+        available_files = [resume_path] if resume_path else []
+        agent = Agent(
+            task=task,
+            llm=llm,
+            browser_session=browser,
+            tools=tools,
+            extend_system_message=system_ext or None,
+            sensitive_data=sensitive_data,
+            available_file_paths=available_files or None,
+            use_vision=True,
+            max_actions_per_step=settings.agent_max_actions_per_step,
+            calculate_cost=True,
+            use_judge=False,
+        )
+
         emit_status(
-            goal or f"Step {step}...",
-            step=step,
+            f"Starting application: {args.job_url}",
+            step=1,
             max_steps=args.max_steps,
             job_id=args.job_id,
         )
 
-    async def _on_step_end(ag: Agent) -> None:
-        usage = ag.history.usage
-        if usage:
-            emit_cost(
-                total_usd=usage.total_cost or 0.0,
-                prompt_tokens=usage.total_prompt_tokens or 0,
-                completion_tokens=usage.total_completion_tokens or 0,
+        # -- Step hooks for live JSONL events -----------------------------------
+        _browser_ready_emitted = False
+
+        async def _on_step_start(ag: Agent) -> None:
+            nonlocal _browser_ready_emitted
+            await install_same_tab_guard(ag)
+
+            # Emit browser_ready once, on the first step (browser is now live)
+            if not _browser_ready_emitted:
+                _browser_ready_emitted = True
+                cdp_url = getattr(ag.browser_session, "cdp_url", "") or ""
+                emit_browser_ready(cdp_url)
+
+            step = ag.state.n_steps
+            goal = ""
+            if ag.state.last_model_output:
+                goal = ag.state.last_model_output.next_goal or ""
+            emit_status(
+                goal or f"Step {step}...",
+                step=step,
+                max_steps=args.max_steps,
+                job_id=args.job_id,
             )
 
-        # Budget check
-        if usage and usage.total_cost and usage.total_cost >= args.max_budget:
-            ag.state.stopped = True
-            emit_error("Budget exceeded", fatal=False, job_id=args.job_id)
+        async def _on_step_end(ag: Agent) -> None:
+            usage = ag.history.usage
+            if usage:
+                emit_cost(
+                    total_usd=usage.total_cost or 0.0,
+                    prompt_tokens=usage.total_prompt_tokens or 0,
+                    completion_tokens=usage.total_completion_tokens or 0,
+                )
+
+            # Budget check
+            if usage and usage.total_cost and usage.total_cost >= args.max_budget:
+                ag.state.stopped = True
+                emit_error("Budget exceeded", fatal=False, job_id=args.job_id)
+
+    except Exception as e:
+        emit_error(str(e), fatal=True, job_id=args.job_id)
+        emit_lease_released(lease_id, reason="error")
+        sys.exit(1)
 
     # -- Run ----------------------------------------------------------------
     try:
