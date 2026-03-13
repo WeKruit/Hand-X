@@ -19,13 +19,17 @@ class BrowserProvider(ABC):
 
 	@abstractmethod
 	async def launch(self, profile: BrowserProfile) -> tuple[str, int | None]:
-		"""Launch browser and return (cdp_url, process_pid_or_none).
+		"""Launch browser and return (connection_url, process_pid_or_none).
+
+		The *connection_url* is a WebSocket endpoint compatible with
+		Playwright's ``connect_over_cdp`` (Chromium) or equivalent
+		connect methods (Firefox/Juggler).
 
 		Args:
 			profile: Browser profile with launch configuration.
 
 		Returns:
-			Tuple of (cdp_url, process_pid_or_none).
+			Tuple of (connection_url, process_pid_or_none).
 		"""
 		...
 

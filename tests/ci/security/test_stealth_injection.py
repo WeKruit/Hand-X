@@ -42,10 +42,14 @@ class TestStealthConfig:
 		assert cfg.enabled is False
 
 	def test_all_patches_default_true_when_enabled(self):
-		"""When enabled=True, every individual patch flag should default to True."""
+		"""When enabled=True, every individual patch flag should default to True (except disabled no-ops)."""
 		cfg = StealthConfig(enabled=True)
+		disabled_by_default = {'iframe_contentwindow_patch'}  # no-op, needs implementation
 		for flag, _ in _PATCHES:
-			assert getattr(cfg, flag) is True, f'{flag} should default to True'
+			if flag in disabled_by_default:
+				assert getattr(cfg, flag) is False, f'{flag} should default to False (no-op)'
+			else:
+				assert getattr(cfg, flag) is True, f'{flag} should default to True'
 
 	def test_individual_patch_disable(self):
 		"""Individual patches can be disabled."""
@@ -71,17 +75,21 @@ class TestGetStealthScripts:
 		scripts = get_stealth_scripts(cfg)
 		assert scripts == []
 
-	def test_enabled_returns_all_by_default(self):
-		"""When enabled=True with defaults, all 8 scripts are returned."""
+	def test_enabled_returns_active_by_default(self):
+		"""When enabled=True with defaults, all active scripts are returned."""
 		cfg = StealthConfig(enabled=True)
 		scripts = get_stealth_scripts(cfg)
-		assert len(scripts) == len(_PATCHES)
+		# iframe_contentwindow_patch is disabled by default (no-op)
+		active_patches = [(f, s) for f, s in _PATCHES if getattr(cfg, f)]
+		assert len(scripts) == len(active_patches)
 
 	def test_disabling_one_patch_reduces_count(self):
 		"""Disabling a single patch should return one fewer script."""
+		cfg_base = StealthConfig(enabled=True)
+		base_count = len(get_stealth_scripts(cfg_base))
 		cfg = StealthConfig(enabled=True, webdriver_patch=False)
 		scripts = get_stealth_scripts(cfg)
-		assert len(scripts) == len(_PATCHES) - 1
+		assert len(scripts) == base_count - 1
 		assert WEBDRIVER_PATCH not in scripts
 
 	def test_disabling_all_patches_returns_empty(self):
@@ -110,10 +118,10 @@ class TestGetStealthScripts:
 		assert WEBGL_PATCH in scripts
 
 	def test_order_preserved(self):
-		"""Scripts should be returned in the same order as _PATCHES."""
+		"""Scripts should be returned in the same order as _PATCHES (active only)."""
 		cfg = StealthConfig(enabled=True)
 		scripts = get_stealth_scripts(cfg)
-		expected = [script for _, script in _PATCHES]
+		expected = [script for flag, script in _PATCHES if getattr(cfg, flag)]
 		assert scripts == expected
 
 
@@ -248,3 +256,38 @@ class TestStealthWatchdogRegistration:
 
 		assert hasattr(StealthWatchdog, 'on_BrowserConnectedEvent')
 		assert callable(getattr(StealthWatchdog, 'on_BrowserConnectedEvent'))
+
+
+class TestStealthFirefoxGuard:
+	"""Tests for Firefox/Camoufox stealth interaction (M-6)."""
+
+	def test_firefox_stealth_scripts_available(self):
+		"""get_firefox_stealth_scripts() returns non-empty list when enabled."""
+		from browser_use.browser.stealth.firefox_scripts import get_firefox_stealth_scripts
+
+		scripts = get_firefox_stealth_scripts(enabled=True)
+		assert len(scripts) >= 2, 'Expected at least Permissions + MediaCodecs patches'
+		for script in scripts:
+			assert isinstance(script, str)
+			assert len(script) > 10
+
+	def test_firefox_stealth_scripts_disabled(self):
+		"""get_firefox_stealth_scripts(enabled=False) returns empty list."""
+		from browser_use.browser.stealth.firefox_scripts import get_firefox_stealth_scripts
+
+		assert get_firefox_stealth_scripts(enabled=False) == []
+
+	def test_is_firefox_engine_detection(self):
+		"""is_firefox_engine identifies Firefox and Camoufox engines."""
+		from browser_use.browser.stealth.firefox_scripts import is_firefox_engine
+
+		assert is_firefox_engine('firefox') is True
+		assert is_firefox_engine('camoufox') is True
+		assert is_firefox_engine('Firefox') is True
+		assert is_firefox_engine('chromium') is False
+		assert is_firefox_engine('chrome') is False
+
+	def test_iframe_contentwindow_patch_disabled_by_default(self):
+		"""IFRAME_CONTENTWINDOW_PATCH defaults to disabled (no-op guard)."""
+		config = StealthConfig(enabled=True)
+		assert config.iframe_contentwindow_patch is False

@@ -69,18 +69,9 @@ MEDIA_CODECS_PATCH = """
 })();
 """
 
-TIMEZONE_CONSISTENCY_PATCH = """
-// Ensure Date timezone methods are consistent.
-// Some detection scripts compare Intl.DateTimeFormat timezone with
-// Date.getTimezoneOffset() to detect spoofing.
-(function() {
-    try {
-        // Only patch if there's no timezone override already set
-        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-        if (!tz) return;  // Let Camoufox handle it
-    } catch(e) {}
-})();
-"""
+# Timezone consistency: Camoufox handles this at the C++ engine level —
+# no supplemental JS patch is needed.  Removed the no-op
+# TIMEZONE_CONSISTENCY_PATCH that read the timezone but did nothing.
 
 
 def get_firefox_stealth_scripts(enabled: bool = True) -> list[str]:
@@ -101,7 +92,6 @@ def get_firefox_stealth_scripts(enabled: bool = True) -> list[str]:
     return [
         PERMISSIONS_PATCH,
         MEDIA_CODECS_PATCH,
-        TIMEZONE_CONSISTENCY_PATCH,
     ]
 
 
