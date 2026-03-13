@@ -173,6 +173,7 @@ def emit_error(
     *,
     fatal: bool = False,
     job_id: str = "",
+    code: str | None = None,
 ) -> None:
     """Emit an error event."""
     emit_event(
@@ -180,6 +181,7 @@ def emit_error(
         message=message,
         fatal=fatal,
         jobId=job_id or None,
+        code=code,
     )
 
 
@@ -206,26 +208,31 @@ def emit_browser_ready(cdp_url: str) -> None:
 def emit_account_created(
     platform: str,
     email: str,
+    password: str,
     *,
     url: str = "",
 ) -> None:
     """Emit when a new ATS platform account is created during automation.
 
-    NOTE: The plaintext password is intentionally NOT emitted over the JSONL
-    stream.  A boolean flag ``password_provided`` is used instead so the
-    Desktop App knows credentials exist without receiving the secret value.
+    The Desktop app stores the credentials from this IPC payload directly,
+    so the plaintext password must be included alongside the legacy
+    ``password_provided`` flag.
     """
     emit_event(
         "account_created",
         platform=platform,
         email=email,
+        password=password,
         password_provided=True,
         url=url or None,
     )
 
 
 def emit_awaiting_review(
-    message: str = "Application filled — waiting for review",
+    message: str = (
+        "We've filled out your application. Please review the form in the browser "
+        "window, verify all fields are correct, then click Submit in the app."
+    ),
     cdp_url: str | None = None,
     page_url: str | None = None,
 ) -> None:

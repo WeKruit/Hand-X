@@ -38,6 +38,7 @@ import logging
 import os
 import signal
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,9 @@ from ghosthands.bridge.protocol import (
     listen_for_cancel,
     wait_for_review_command,
 )
+
+# Backward-compatible alias retained for older internal imports/tests.
+_camel_to_snake_profile = camel_to_snake_profile
 
 # Force unbuffered I/O for reliable JSONL streaming
 os.environ["PYTHONUNBUFFERED"] = "1"
@@ -301,6 +305,158 @@ async def _cleanup_browser(browser, desktop_owns_browser: bool) -> None:
         await browser.close()
 
 
+@dataclass(frozen=True)
+class _RuntimeErrorSignal:
+    """User-facing error details for known proxy/runtime failures."""
+
+    code: str
+    message: str
+    fatal: bool = True
+    keep_browser_open: bool = False
+
+
+def _iter_exception_chain(exc: BaseException) -> tuple[BaseException, ...]:
+    """Return the causal exception chain from outermost to innermost."""
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+
+    return tuple(chain)
+
+
+def _classify_runtime_error(exc: BaseException, *, proxy_mode: bool) -> _RuntimeErrorSignal | None:
+    """Map known proxy/runtime failures to Desktop-friendly error events."""
+    if not proxy_mode:
+        return None
+
+    status_codes: set[int] = set()
+    text_chunks: list[str] = []
+    headers: dict[str, str] = {}
+
+    for candidate in _iter_exception_chain(exc):
+        status_code = getattr(candidate, "status_code", None)
+        if isinstance(status_code, int):
+            status_codes.add(status_code)
+
+        message = getattr(candidate, "message", None)
+        if message:
+            text_chunks.append(str(message))
+
+        body = getattr(candidate, "body", None)
+        if body:
+            if isinstance(body, dict | list):
+                text_chunks.append(json.dumps(body, default=str))
+            else:
+                text_chunks.append(str(body))
+
+        candidate_text = str(candidate)
+        if candidate_text:
+            text_chunks.append(candidate_text)
+
+        response = getattr(candidate, "response", None)
+        if response is not None:
+            response_status = getattr(response, "status_code", None)
+            if isinstance(response_status, int):
+                status_codes.add(response_status)
+
+            response_headers = getattr(response, "headers", None)
+            if response_headers is not None:
+                with contextlib.suppress(Exception):
+                    for key, value in response_headers.items():
+                        headers[str(key).lower()] = str(value)
+
+            with contextlib.suppress(Exception):
+                response_text = response.text
+                if response_text:
+                    text_chunks.append(str(response_text))
+
+    combined_text = " ".join(text_chunks).lower()
+
+    if 429 in status_codes and headers.get("x-budget-exhausted", "").lower() == "true":
+        return _RuntimeErrorSignal(
+            code="BUDGET_EXHAUSTED",
+            message=(
+                "This application required too many AI steps. The partially completed "
+                "form is still open in the browser — you can finish it manually."
+            ),
+            keep_browser_open=True,
+        )
+
+    if 401 in status_codes and "expired" in combined_text:
+        return _RuntimeErrorSignal(
+            code="GRANT_EXPIRED",
+            message="Your automation session expired. Please try again.",
+            keep_browser_open=True,
+        )
+
+    return None
+
+
+def _handle_review_result(
+    review_result: str,
+    *,
+    fields_filled: int,
+    fields_failed: int,
+    job_id: str,
+    lease_id: str,
+    result_data: dict[str, Any],
+) -> int | None:
+    """Emit the terminal review result event and return the desired exit code."""
+    from ghosthands.output.jsonl import emit_done
+
+    if review_result == "complete":
+        emit_done(
+            success=True,
+            message="Application submitted — review completed",
+            fields_filled=fields_filled,
+            fields_failed=fields_failed,
+            job_id=job_id,
+            lease_id=lease_id,
+            result_data=result_data,
+        )
+        return None
+
+    if review_result == "cancel":
+        emit_done(
+            success=False,
+            message="Review cancelled by user",
+            fields_filled=fields_filled,
+            fields_failed=fields_failed,
+            job_id=job_id,
+            lease_id=lease_id,
+            result_data={**result_data, "success": False, "cancelled": True},
+        )
+        return 1
+
+    if review_result == "timeout":
+        emit_done(
+            success=False,
+            message="Review timed out after 30 minutes. The browser window is still open — you can submit manually.",
+            fields_filled=fields_filled,
+            fields_failed=fields_failed,
+            job_id=job_id,
+            lease_id=lease_id,
+            result_data={**result_data, "success": False, "timedOut": True},
+        )
+        return 1
+
+    emit_done(
+        success=False,
+        message="Desktop disconnected",
+        fields_filled=fields_filled,
+        fields_failed=fields_failed,
+        job_id=job_id,
+        lease_id=lease_id,
+        result_data={**result_data, "success": False},
+    )
+    return 1
+
+
 # ── JSONL agent run ───────────────────────────────────────────────────
 
 
@@ -314,6 +470,12 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         emit_error,
         emit_status,
     )
+
+    app_settings = None
+    browser = None
+    job_id = ""
+    lease_id = ""
+    desktop_owns_browser = False
 
     # -- Load profile -------------------------------------------------------
     try:
@@ -561,43 +723,16 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 page_url=review_page_url,
             )
             review_result = await wait_for_review_command(browser, job_id, lease_id)
-
-            # I-03/U-02: emit terminal done event based on review outcome.
-            if review_result == "complete":
-                emit_done(
-                    success=True,
-                    message="Application submitted — review completed",
-                    fields_filled=filled_count,
-                    fields_failed=failed_count,
-                    job_id=job_id,
-                    lease_id=lease_id,
-                    result_data=result_data,
-                )
-            elif review_result == "cancel":
-                emit_done(
-                    success=False,
-                    message="Review cancelled by user",
-                    fields_filled=filled_count,
-                    fields_failed=failed_count,
-                    job_id=job_id,
-                    lease_id=lease_id,
-                    result_data={**result_data, "success": False, "cancelled": True},
-                )
-                sys.exit(1)
-            elif review_result == "timeout":
-                # wait_for_review_command already emitted error(fatal); just exit.
-                sys.exit(1)
-            else:  # "eof"
-                emit_done(
-                    success=False,
-                    message="Desktop disconnected",
-                    fields_filled=filled_count,
-                    fields_failed=failed_count,
-                    job_id=job_id,
-                    lease_id=lease_id,
-                    result_data={**result_data, "success": False},
-                )
-                sys.exit(1)
+            exit_code = _handle_review_result(
+                review_result,
+                fields_filled=filled_count,
+                fields_failed=failed_count,
+                job_id=job_id,
+                lease_id=lease_id,
+                result_data=result_data,
+            )
+            if exit_code is not None:
+                sys.exit(exit_code)
         else:
             emit_done(
                 success=False,
@@ -613,9 +748,29 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     except Exception as e:
         logger.error("agent_run_failed", error=str(e))
+        runtime_error = _classify_runtime_error(
+            e,
+            proxy_mode=bool(args.proxy_url or (app_settings and app_settings.llm_proxy_url)),
+        )
+        if runtime_error is not None:
+            emit_error(
+                runtime_error.message,
+                fatal=runtime_error.fatal,
+                job_id=job_id,
+                code=runtime_error.code,
+            )
+            if browser is not None:
+                with contextlib.suppress(Exception):
+                    if runtime_error.keep_browser_open:
+                        await browser.stop()
+                    else:
+                        await _cleanup_browser(browser, desktop_owns_browser)
+            sys.exit(1)
+
         emit_error("Agent encountered an unexpected error", fatal=True, job_id=job_id)
-        with contextlib.suppress(Exception):
-            await _cleanup_browser(browser, desktop_owns_browser)
+        if browser is not None:
+            with contextlib.suppress(Exception):
+                await _cleanup_browser(browser, desktop_owns_browser)
         sys.exit(1)
 
 

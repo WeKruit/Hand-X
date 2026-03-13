@@ -15,7 +15,6 @@ import asyncio
 import io
 import json
 import os
-import sys
 import types
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -73,7 +72,7 @@ class TestEmitBrowserReady:
 
         events = _capture_jsonl_output(emit_browser_ready, "http://localhost:9222")
         ts = events[0]["timestamp"]
-        assert isinstance(ts, (int, float))
+        assert isinstance(ts, int | float)
         # Sanity check: timestamp should be a recent Unix-millisecond value
         # (greater than 2024-01-01 in milliseconds)
         assert ts > 1_704_067_200_000
@@ -103,8 +102,8 @@ class TestEmitBrowserReady:
 
     def test_uses_real_stdout_when_guard_is_active(self):
         """When the stdout guard is installed, output goes to the saved fd, not sys.stdout."""
-        from ghosthands.output.jsonl import emit_browser_ready
         import ghosthands.output.jsonl as jsonl_mod
+        from ghosthands.output.jsonl import emit_browser_ready
 
         fake_fd = io.StringIO()
         original_guard = jsonl_mod._jsonl_out
@@ -141,13 +140,14 @@ class TestEmitAwaitingReview:
         assert events[0]["event"] == "awaiting_review"
 
     def test_default_message_is_present(self):
-        """Calling with no arguments should still include a non-empty message."""
+        """Calling with no arguments should include review instructions."""
         from ghosthands.output.jsonl import emit_awaiting_review
 
         events = _capture_jsonl_output(emit_awaiting_review)
-        msg = events[0].get("message", "")
-        assert isinstance(msg, str)
-        assert len(msg) > 0
+        assert events[0]["message"] == (
+            "We've filled out your application. Please review the form in the browser "
+            "window, verify all fields are correct, then click Submit in the app."
+        )
 
     def test_custom_message_is_emitted(self):
         from ghosthands.output.jsonl import emit_awaiting_review
@@ -161,7 +161,7 @@ class TestEmitAwaitingReview:
 
         events = _capture_jsonl_output(emit_awaiting_review)
         ts = events[0]["timestamp"]
-        assert isinstance(ts, (int, float))
+        assert isinstance(ts, int | float)
         assert ts > 1_704_067_200_000
 
     def test_empty_string_message_not_omitted(self):
@@ -198,6 +198,7 @@ class TestEmitAccountCreated:
         assert e["platform"] == "workday"
         assert e["email"] == "user@test.com"
         assert e["password"] == "pass123"
+        assert e["password_provided"] is True
         assert e["url"] == "https://workday.com"
 
     def test_url_omitted_when_empty(self):
@@ -244,7 +245,7 @@ class TestListenForCancel:
 
     @pytest.mark.asyncio
     async def test_eof_breaks_loop(self):
-        """Empty readline (EOF / stdin closed) must exit without error."""
+        """EOF should stop the agent because Desktop disconnected."""
         from ghosthands.bridge.protocol import listen_for_cancel
 
         agent = _make_mock_agent()
@@ -256,8 +257,7 @@ class TestListenForCancel:
         ):
             await listen_for_cancel(agent)
 
-        # Agent should NOT be stopped — it was a clean EOF, not a cancel
-        assert agent.state.stopped is False
+        assert agent.state.stopped is True
 
     @pytest.mark.asyncio
     async def test_invalid_json_is_ignored(self):
@@ -274,11 +274,11 @@ class TestListenForCancel:
             # Should not raise
             await listen_for_cancel(agent)
 
-        assert agent.state.stopped is False
+        assert agent.state.stopped is True
 
     @pytest.mark.asyncio
     async def test_non_cancel_command_is_ignored(self):
-        """A valid JSON command that is not "cancel" must not stop the agent."""
+        """Unknown commands are ignored; the eventual EOF still stops the agent."""
         from ghosthands.bridge.protocol import listen_for_cancel
 
         agent = _make_mock_agent()
@@ -291,11 +291,11 @@ class TestListenForCancel:
         ):
             await listen_for_cancel(agent)
 
-        assert agent.state.stopped is False
+        assert agent.state.stopped is True
 
     @pytest.mark.asyncio
     async def test_blank_lines_are_ignored(self):
-        """Blank / whitespace-only lines must not crash or stop the agent."""
+        """Blank lines are ignored; the eventual EOF still stops the agent."""
         from ghosthands.bridge.protocol import listen_for_cancel
 
         agent = _make_mock_agent()
@@ -306,7 +306,7 @@ class TestListenForCancel:
         ):
             await listen_for_cancel(agent)
 
-        assert agent.state.stopped is False
+        assert agent.state.stopped is True
 
     @pytest.mark.asyncio
     async def test_cancel_after_other_commands(self):
@@ -349,8 +349,8 @@ class TestEventContract:
         """Emit one of every event type and return the parsed JSON objects."""
         from ghosthands.output.jsonl import (
             emit_account_created,
-            emit_browser_ready,
             emit_awaiting_review,
+            emit_browser_ready,
             emit_cost,
             emit_done,
             emit_error,
@@ -389,7 +389,7 @@ class TestEventContract:
     def test_all_events_have_timestamp_field(self):
         for event in self._emit_all_events():
             assert "timestamp" in event, f"Missing 'timestamp' in {event}"
-            assert isinstance(event["timestamp"], (int, float))
+            assert isinstance(event["timestamp"], int | float)
 
     def test_browser_ready_contract(self):
         from ghosthands.output.jsonl import emit_browser_ready
@@ -459,11 +459,12 @@ class TestEventContract:
     def test_error_contract(self):
         from ghosthands.output.jsonl import emit_error
 
-        events = _capture_jsonl_output(emit_error, "Timeout", fatal=True)
+        events = _capture_jsonl_output(emit_error, "Timeout", fatal=True, code="TIMEOUT")
         e = events[0]
         assert e["event"] == "error"
         assert "message" in e
         assert "fatal" in e
+        assert e["code"] == "TIMEOUT"
 
     def test_cost_contract(self):
         from ghosthands.output.jsonl import emit_cost
@@ -487,9 +488,7 @@ class TestEventContract:
         """emit_done must include fields_failed when provided."""
         from ghosthands.output.jsonl import emit_done
 
-        events = _capture_jsonl_output(
-            emit_done, True, "Done", fields_filled=8, fields_failed=2
-        )
+        events = _capture_jsonl_output(emit_done, True, "Done", fields_filled=8, fields_failed=2)
         e = events[0]
         assert e["event"] == "done"
         assert e["fields_filled"] == 8
@@ -560,9 +559,8 @@ class TestProfileLoadingEnvFallback:
 
         args = argparse.Namespace(profile=None, test_data=None)
 
-        with patch.dict(os.environ, {"GH_USER_PROFILE_TEXT": "not valid json"}):
-            with pytest.raises(json.JSONDecodeError):
-                _load_profile(args)
+        with patch.dict(os.environ, {"GH_USER_PROFILE_TEXT": "not valid json"}), pytest.raises(json.JSONDecodeError):
+            _load_profile(args)
 
     def test_profile_flag_takes_precedence_over_env(self):
         """--profile must take precedence over GH_USER_PROFILE_TEXT."""
@@ -570,9 +568,7 @@ class TestProfileLoadingEnvFallback:
 
         flag_data = {"source": "flag"}
         env_data = {"source": "env"}
-        args = argparse.Namespace(
-            profile=json.dumps(flag_data), test_data=None
-        )
+        args = argparse.Namespace(profile=json.dumps(flag_data), test_data=None)
 
         with patch.dict(os.environ, {"GH_USER_PROFILE_TEXT": json.dumps(env_data)}):
             result = _load_profile(args)
@@ -945,6 +941,7 @@ class TestAccountCreatedEmission:
     def test_cli_does_not_import_emit_account_created(self):
         """cli.py should no longer import or reference emit_account_created."""
         import inspect
+
         import ghosthands.cli as cli_mod
 
         source = inspect.getsource(cli_mod)
@@ -1286,6 +1283,7 @@ class TestThreadSafeEmission:
         """Multiple threads emitting simultaneously must each produce a
         complete, parseable JSONL line."""
         import threading
+
         import ghosthands.output.jsonl as jsonl_mod
 
         buf = io.StringIO()
@@ -1459,7 +1457,7 @@ class TestListenForCancelExtended:
             "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(side_effect=[cancel_line, ""]),
         ):
-            await _listen_for_cancel(agent, cancel_requested)
+            await listen_for_cancel(agent, cancel_requested)
 
         assert cancel_requested.is_set()
         assert agent.state.stopped is True
@@ -1478,7 +1476,7 @@ class TestListenForCancelExtended:
             "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(side_effect=[cancel_line, ""]),
         ):
-            await _listen_for_cancel(agent, cancel_requested)
+            await listen_for_cancel(agent, cancel_requested)
 
         assert agent.state.stopped is True
         assert cancel_requested.is_set()
@@ -1502,7 +1500,7 @@ class TestListenForCancelExtended:
             await listen_for_cancel(agent)
 
         assert call_count == 3
-        assert agent.state.stopped is False
+        assert agent.state.stopped is True
 
 
 # ---------------------------------------------------------------------------
@@ -1516,7 +1514,7 @@ class TestWaitForReviewCommand:
 
     @pytest.mark.asyncio
     async def test_complete_review_closes_browser(self):
-        from ghosthands.cli import _wait_for_review_command
+        from ghosthands.bridge.protocol import wait_for_review_command
 
         browser = AsyncMock()
         cmd = json.dumps({"type": "complete_review"}) + "\n"
@@ -1525,13 +1523,14 @@ class TestWaitForReviewCommand:
             "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(side_effect=[cmd]),
         ):
-            await _wait_for_review_command(browser, "j1", "l1")
+            result = await wait_for_review_command(browser, "j1", "l1")
 
-        browser.close.assert_called_once()
+        assert result == "complete"
+        browser.stop.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_cancel_during_review_closes_browser(self):
-        from ghosthands.cli import _wait_for_review_command
+        from ghosthands.bridge.protocol import wait_for_review_command
 
         browser = AsyncMock()
         cmd = json.dumps({"type": "cancel"}) + "\n"
@@ -1540,14 +1539,15 @@ class TestWaitForReviewCommand:
             "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(side_effect=[cmd]),
         ):
-            await _wait_for_review_command(browser, "j1", "l1")
+            result = await wait_for_review_command(browser, "j1", "l1")
 
-        browser.close.assert_called_once()
+        assert result == "cancel"
+        browser.stop.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_eof_during_review_closes_browser(self):
         """EOF (Electron crashed) should cleanly close browser."""
-        from ghosthands.cli import _wait_for_review_command
+        from ghosthands.bridge.protocol import wait_for_review_command
 
         browser = AsyncMock()
 
@@ -1555,14 +1555,15 @@ class TestWaitForReviewCommand:
             "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(return_value=""),
         ):
-            await _wait_for_review_command(browser, "j1", "l1")
+            result = await wait_for_review_command(browser, "j1", "l1")
 
-        browser.close.assert_called_once()
+        assert result == "eof"
+        browser.stop.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_ignores_unknown_commands_during_review(self):
         """Unknown commands should be ignored, loop continues."""
-        from ghosthands.cli import _wait_for_review_command
+        from ghosthands.bridge.protocol import wait_for_review_command
 
         browser = AsyncMock()
 
@@ -1575,9 +1576,112 @@ class TestWaitForReviewCommand:
             "ghosthands.bridge.protocol.read_stdin_line",
             new=AsyncMock(side_effect=seq),
         ):
-            await _wait_for_review_command(browser, "j1", "l1")
+            result = await wait_for_review_command(browser, "j1", "l1")
 
-        browser.close.assert_called_once()
+        assert result == "complete"
+        browser.stop.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_timeout_emits_warning_before_fatal_error(self):
+        from ghosthands.bridge.protocol import wait_for_review_command
+
+        browser = AsyncMock()
+
+        with (
+            patch(
+                "ghosthands.bridge.protocol.read_stdin_line",
+                new=AsyncMock(side_effect=[TimeoutError(), TimeoutError()]),
+            ),
+            patch(
+                "ghosthands.bridge.protocol._time.monotonic",
+                side_effect=[0.0, 1501.0, 1800.0],
+            ),
+            patch("ghosthands.output.jsonl.emit_status") as emit_status,
+            patch("ghosthands.output.jsonl.emit_error") as emit_error,
+        ):
+            result = await wait_for_review_command(browser, "j1", "l1")
+
+        assert result == "timeout"
+        emit_status.assert_any_call(
+            "Your review session will expire in 5 minutes. Please submit or cancel soon.",
+            job_id="j1",
+        )
+        emit_error.assert_called_once_with(
+            "Review timed out after 30 minutes",
+            fatal=True,
+            job_id="j1",
+        )
+        browser.stop.assert_called_once()
+
+
+class TestReviewOutcomeHandling:
+    def test_timeout_emits_done_failure_message(self):
+        from ghosthands.cli import _handle_review_result
+
+        with patch("ghosthands.output.jsonl.emit_done") as emit_done:
+            exit_code = _handle_review_result(
+                "timeout",
+                fields_filled=8,
+                fields_failed=2,
+                job_id="job-1",
+                lease_id="lease-1",
+                result_data={"success": True},
+            )
+
+        assert exit_code == 1
+        emit_done.assert_called_once_with(
+            success=False,
+            message="Review timed out after 30 minutes. The browser window is still open — you can submit manually.",
+            fields_filled=8,
+            fields_failed=2,
+            job_id="job-1",
+            lease_id="lease-1",
+            result_data={"success": False, "timedOut": True},
+        )
+
+
+class TestRuntimeErrorClassification:
+    @staticmethod
+    def _make_error(status_code, message, *, headers=None, body=None):
+        response = types.SimpleNamespace(
+            status_code=status_code,
+            headers=headers or {},
+            text=message,
+        )
+        error = RuntimeError(message)
+        error.status_code = status_code
+        error.message = message
+        error.response = response
+        error.body = body
+        return error
+
+    def test_detects_grant_expiry_from_401(self):
+        from ghosthands.cli import _classify_runtime_error
+
+        error = self._make_error(401, "Runtime grant expired")
+
+        result = _classify_runtime_error(error, proxy_mode=True)
+
+        assert result is not None
+        assert result.code == "GRANT_EXPIRED"
+        assert result.message == "Your automation session expired. Please try again."
+        assert result.keep_browser_open is True
+
+    def test_detects_budget_exhaustion_header(self):
+        from ghosthands.cli import _classify_runtime_error
+
+        error = self._make_error(
+            429,
+            "Runtime grant budget exhausted",
+            headers={"X-Budget-Exhausted": "true"},
+        )
+
+        result = _classify_runtime_error(error, proxy_mode=True)
+
+        assert result is not None
+        assert result.code == "BUDGET_EXHAUSTED"
+        assert "partially completed form is still open in the browser" in result.message
+        assert result.keep_browser_open is True
 
 
 # ---------------------------------------------------------------------------
@@ -1622,7 +1726,7 @@ class TestJSONLOutputFormat:
         """Multiple calls must each produce separate lines."""
 
         def emit_two():
-            from ghosthands.output.jsonl import emit_status, emit_progress
+            from ghosthands.output.jsonl import emit_progress, emit_status
 
             emit_status("step one")
             emit_progress(1, 5)
