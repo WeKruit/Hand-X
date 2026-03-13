@@ -35,11 +35,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv
+
 load_dotenv(ROOT / ".env")
 
 from browser_use import Agent, Browser, BrowserProfile, Tools
 from ghosthands.agent.hooks import install_same_tab_guard
-from ghosthands.agent.prompts import _format_profile_summary
+from ghosthands.agent.prompts import (
+    FAIL_OVER_CUSTOM_WIDGET,
+    FAIL_OVER_NATIVE_SELECT,
+    _format_profile_summary,
+    build_completion_detection_text,
+)
 from ghosthands.config.settings import settings
 
 # ── Defaults ──────────────────────────────────────────────────────────
@@ -51,150 +57,126 @@ DEFAULT_JOB_URL = "https://job-boards.greenhouse.io/starburst/jobs/5123053008"
 DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
 
 
-def _truncate_text(text: str | None, limit: int = 220) -> str:
-	"""Keep terminal summaries compact without changing agent behavior."""
-	if not text:
-		return ""
-	clean = " ".join(str(text).split())
-	if len(clean) <= limit:
-		return clean
-	return clean[: limit - 1].rstrip() + "…"
-
-
-def _print_history_summary(history) -> None:
-	"""Print a short end-of-run summary for human debugging."""
-	print()
-	print("=" * 60)
-	print("  RESULT")
-	print("=" * 60)
-	final_result = history.final_result() or ""
-	status = "done" if history.is_done() else "stopped"
-	print(f"  Status:  {status}")
-	print(f"  Steps:   {len(history.history)}")
-	if history.usage:
-		try:
-			print(f"  Cost:    ${history.usage.total_cost:.4f}")
-			in_tok = getattr(history.usage, 'total_prompt_tokens', None) or getattr(history.usage, 'total_input_tokens', 0)
-			out_tok = getattr(history.usage, 'total_completion_tokens', None) or getattr(history.usage, 'total_output_tokens', 0)
-			print(f"  Tokens:  {in_tok} in / {out_tok} out")
-		except Exception:
-			print("  Tokens:  unavailable")
-	if final_result:
-		print(f"  Result:  {_truncate_text(final_result)}")
-	print("=" * 60)
-	print()
-
-
 def _get_llm(model: str | None = None):
-	"""Get LLM — uses VALET proxy if GH_LLM_PROXY_URL is set."""
-	try:
-		from ghosthands.llm.client import get_chat_model
-		return get_chat_model(model=model or DEFAULT_MODEL)
-	except ImportError:
-		# Fallback for running without ghosthands installed
-		model = model or DEFAULT_MODEL
-		if model.startswith("gpt-") or model.startswith("o"):
-			from browser_use import ChatOpenAI
-			return ChatOpenAI(model=model)
-		if model.startswith("claude-"):
-			from browser_use import ChatAnthropic
-			return ChatAnthropic(model=model)
-		from browser_use import ChatGoogle
-		return ChatGoogle(model=model)
+    """Get LLM — uses VALET proxy if GH_LLM_PROXY_URL is set."""
+    try:
+        from ghosthands.llm.client import get_chat_model
+
+        return get_chat_model(model=model or DEFAULT_MODEL)
+    except ImportError:
+        # Fallback for running without ghosthands installed
+        model = model or DEFAULT_MODEL
+        if model.startswith("gpt-") or model.startswith("o"):
+            from browser_use import ChatOpenAI
+
+            return ChatOpenAI(model=model)
+        if model.startswith("claude-"):
+            from browser_use import ChatAnthropic
+
+            return ChatAnthropic(model=model)
+        from browser_use import ChatGoogle
+
+        return ChatGoogle(model=model)
 
 
 async def apply_to_job(
-	info: dict,
-	resume_path: str,
-	job_url: str,
-	model: str | None = None,
-	email: str | None = None,
-	password: str | None = None,
-	headless: bool = False,
-	max_steps: int = 50,
-	max_budget: float = 1.00,
+    info: dict,
+    resume_path: str,
+    job_url: str,
+    model: str | None = None,
+    email: str | None = None,
+    password: str | None = None,
+    headless: bool = False,
+    max_steps: int = 50,
+    max_budget: float = 1.00,
 ):
-	llm = _get_llm(model=model)
+    llm = _get_llm(model=model)
 
-	# ── Set profile text for DomHand (domhand_fill reads from env) ─
-	os.environ["GH_USER_PROFILE_TEXT"] = _format_profile_summary(info)
-	os.environ["GH_USER_PROFILE_JSON"] = json.dumps(info)
-	if resume_path:
-		os.environ["GH_RESUME_PATH"] = str(resume_path)
+    # ── Set profile text for DomHand (domhand_fill reads from env) ─
+    os.environ["GH_USER_PROFILE_TEXT"] = _format_profile_summary(info)
+    os.environ["GH_USER_PROFILE_JSON"] = json.dumps(info)
+    if resume_path:
+        os.environ["GH_RESUME_PATH"] = str(resume_path)
 
-	# ── Register DomHand actions ──────────────────────────────────
-	tools = Tools()
-	try:
-		from ghosthands.actions import register_domhand_actions
-		register_domhand_actions(tools)
-		print("DomHand actions registered (DOM-first form filling active)")
-	except Exception as e:
-		print(f"DomHand not available ({e}), using vanilla browser-use")
+    # ── Register DomHand actions ──────────────────────────────────
+    tools = Tools()
+    try:
+        from ghosthands.actions import register_domhand_actions
 
-	# ── Detect platform for guardrails ────────────────────────────
-	platform = "generic"
-	try:
-		from ghosthands.platforms import detect_platform
-		platform = detect_platform(job_url)
-	except ImportError:
-		pass
-	print(f"Platform: {platform}")
+        register_domhand_actions(tools)
+        print("DomHand actions registered (DOM-first form filling active)")
+    except Exception as e:
+        print(f"DomHand not available ({e}), using vanilla browser-use")
 
-	# ── Build system prompt with profile + guardrails ─────────────
-	system_ext = ""
-	try:
-		from ghosthands.agent.prompts import build_system_prompt
-		system_ext = build_system_prompt(info, platform)
-	except ImportError:
-		pass
+    # ── Detect platform for guardrails ────────────────────────────
+    platform = "generic"
+    try:
+        from ghosthands.platforms import detect_platform
 
-	# ── Credentials as sensitive_data ─────────────────────────────
-	sensitive_data = None
-	if email and password:
-		sensitive_data = {"email": email, "password": password}
+        platform = detect_platform(job_url)
+    except ImportError:
+        pass
+    print(f"Platform: {platform}")
 
-	# ── Browser config ────────────────────────────────────────────
-	browser = Browser(
-		browser_profile=BrowserProfile(
-			headless=headless,
-			keep_alive=True,  # Keep browser open for user review
-			wait_between_actions=settings.wait_between_actions,
-		),
-	)
+    # ── Build system prompt with profile + guardrails ─────────────
+    system_ext = ""
+    try:
+        from ghosthands.agent.prompts import build_system_prompt
 
-	# ── Task prompt ───────────────────────────────────────────────
-	workday_start_flow_rules = ""
-	if platform == "workday":
-		workday_start_flow_rules = (
-			"- If a start dialog offers a SAME-SITE option such as 'Autofill with Resume'\n"
-			"  or 'Apply with Resume', prefer that path over manual entry.\n"
-			"- Do NOT choose external apply/import options such as LinkedIn, Indeed,\n"
-			"  Google, or other third-party account flows.\n"
-			"- After uploading a resume on Workday, WAIT for the filename or a\n"
-			"  success message to appear and for the Continue button to become\n"
-			"  enabled before clicking it.\n"
-			"- Do NOT upload a resume and click Continue in the same action batch.\n"
-		)
+        system_ext = build_system_prompt(info, platform)
+    except ImportError:
+        pass
 
-	task = f"""Go to {job_url} and fill out the job application form completely.
+    # ── Credentials as sensitive_data ─────────────────────────────
+    sensitive_data = None
+    if email and password:
+        sensitive_data = {"email": email, "password": password}
+
+    # ── Browser config ────────────────────────────────────────────
+    browser = Browser(
+        browser_profile=BrowserProfile(
+            headless=headless,
+            keep_alive=True,  # Keep browser open for user review
+            wait_between_actions=settings.wait_between_actions,
+        ),
+    )
+
+    # ── Task prompt ───────────────────────────────────────────────
+    workday_start_flow_rules = ""
+    if platform == "workday":
+        workday_start_flow_rules = (
+            "- If a start dialog offers a SAME-SITE option such as 'Autofill with Resume'\n"
+            "  or 'Apply with Resume', prefer that path over manual entry.\n"
+            "- Do NOT choose external apply/import options such as LinkedIn, Indeed,\n"
+            "  Google, or other third-party account flows.\n"
+            "- After uploading a resume on Workday, WAIT for the filename or a\n"
+            "  success message to appear and for the Continue button to become\n"
+            "  enabled before clicking it.\n"
+            "- Do NOT upload a resume and click Continue in the same action batch.\n"
+        )
+
+    task = f"""Go to {job_url} and fill out the job application form completely.
 
 FORM PAGE SEQUENCE (repeat on EVERY form page):
+0. If a popup, modal, interstitial, or newsletter prompt is visibly blocking the form, call domhand_close_popup first. Use Escape or raw coordinate clicks only if domhand_close_popup fails.
 1. domhand_fill — fills all visible fields in one call. ALWAYS first.
-2. Handle domhand_fill's unresolved fields with domhand_select or click.
+2. domhand_assess_state — classify the page, unresolved required fields, and scroll direction before deciding what to do next.
+3. Handle domhand_fill's unresolved fields with domhand_select or click.
    Do this for REQUIRED fields.
    For OPTIONAL fields, only do it when the applicant profile clearly maps
    to that field with high confidence (address, LinkedIn, website,
    referral source, etc.). If the optional match is ambiguous, leave it blank.
-3. Upload resume: domhand_upload or upload_file with path: {resume_path}
-4. For repeater sections (Work Experience, Education):
+4. Upload resume: domhand_upload or upload_file with path: {resume_path}
+5. For repeater sections (Work Experience, Education):
    a. Call domhand_expand(section="Work Experience") to click Add
    b. Call domhand_fill with heading_boundary matching the new entry heading
       and entry_data containing ONLY that one profile entry
    c. Repeat for each entry in the applicant profile
-5. AFTER all fields are filled: click Next / Continue / Save & Continue.
-   *** YOU MUST CLICK NEXT. Do NOT call done() until you reach a
-   read-only review/confirmation page with no editable fields. ***
-6. On the new page, start over from step 1.
+6. Before any large scroll or any Next / Continue / Save & Continue click, call domhand_assess_state again and follow its unresolved field list plus scroll_bias.
+7. AFTER all fields are filled: click Next / Continue / Save & Continue.
+   *** YOU MUST CLICK NEXT while the page is still in `advanceable`.
+   Use the completion-state rules below for final stopping. ***
+8. On the new page, start over from step 1.
 
 AUTH PAGE SEQUENCE (Create Account / Sign In):
 Do NOT call domhand_fill on auth pages — it uses the wrong email.
@@ -207,140 +189,181 @@ WAIT 5-10 seconds before going back, reopening the dialog, or retrying the click
 Never use navigate() to go back to the original job URL after entering the
 application flow. Waiting is the default recovery, not restarting.
 
-DROPDOWN RULE: If domhand_select returns [FAIL-OVER], STOP retrying it.
-Click the dropdown open yourself, find the option visually, click it.
+DROPDOWN RULE:
+If domhand_select returns {FAIL_OVER_NATIVE_SELECT}, do NOT click the native
+<select>. Use dropdown_options(index=...) to inspect the exact option
+text/value, then use select_dropdown(index=..., text=...) with the exact
+text/value.
+If domhand_select returns {FAIL_OVER_CUSTOM_WIDGET}, STOP retrying it.
+Click the widget open yourself, search if supported, and click the final leaf
+option visually.
 If a dropdown is searchable or multi-layer, type/search, WAIT 2-3 seconds,
 and keep clicking until the FINAL leaf option is selected and the field text
 changes. Do NOT move on after the first click if a submenu appears or the
 field still looks empty/invalid. Do NOT click a dropdown option and then
 Save/Continue in the same action batch; wait briefly and re-evaluate first.
-If a control still shows validation after 2 attempts, STOP writing larger
-evaluate()/JS hacks for it. Re-open the same visible control, use a real
-click / coordinate click on the exact option, and verify the state changed
-before continuing.
+For phone country code or phone type dropdowns, if the first term fails, try
+close variants like "United States +1", "United States", "+1", "USA", "US",
+"Mobile", and "Cell" before giving up.
+For stubborn checkbox/radio/button controls, if the intended option still does
+not stick after 2 tries, stop blind retries: click the currently selected
+option once to clear/reset stale state, then click the intended option again
+and verify the visible state changed.
+For text/date/search inputs that visibly contain the value but still show
+validation errors, focus the field and press Enter or Tab to commit it before
+moving on.
+
+COMPLETION STATES:
+{build_completion_detection_text(platform)}
 
 Other rules:
-- {'Use the provided credentials to log in or create an account if needed. For Workday, fill email + password + confirm password on the Create Account page.' if sensitive_data else 'If a login wall appears, report it as a blocker.'}
-- Do NOT click the final Submit button. Stop at the review page and use the done action.
-- If anything pops up blocking the form, close it and continue.
+- {"Use the provided credentials to log in or create an account if needed. For Workday, fill email + password + confirm password on the Create Account page." if sensitive_data else "If a login wall appears, report it as a blocker."}
+- Do NOT click the final Submit button. Use the completion-state rules above and stop with the done action when the page is review, confirmation, or an allowed presubmit_single_page state.
+- If anything pops up blocking the form, call domhand_close_popup first. Only fall back to Escape or coordinate clicks if that DOM-first popup close action fails.
+- Every non-consent applicant value must come from the provided user profile. If the profile does not provide it, leave it empty or unresolved.
+- Never invent placeholder personal info like John, Doe, or John Doe. Use the exact applicant identity from the provided profile only.
 {workday_start_flow_rules.rstrip()}
 - Stay on this site — do NOT open new tabs or navigate away.
 - After auth, continue from wherever the redirect lands — do NOT go back to the job URL.
+- Use domhand_assess_state before any large scroll, before clicking Next/Continue/Save, and before calling done(). Follow its unresolved field list and scroll_bias instead of doing a full-page reverification loop.
+- Keep working near the current unresolved section and continue downward. Do NOT scroll back to the top just to re-check earlier fields unless a specific earlier required field is visibly empty or invalid.
+- When close to completion, keep memory and next_goal short. Do NOT restate the whole form or do a top-to-bottom verification loop once a terminal completion state is reached.
 """
 
-	async def _on_step_start(agent_instance):
-		await install_same_tab_guard(agent_instance)
-		try:
-			pass
-		except Exception:
-			pass  # Non-fatal — best effort
+    async def _on_step_start(agent_instance):
+        await install_same_tab_guard(agent_instance)
+        try:
+            pass
+        except Exception:
+            pass  # Non-fatal — best effort
 
-	# ── Create agent ──────────────────────────────────────────────
-	agent = Agent(
-		task=task,
-		llm=llm,
-		browser=browser,
-		tools=tools,
-		extend_system_message=system_ext if system_ext else None,
-		sensitive_data=sensitive_data,
-		available_file_paths=[resume_path],
-		use_vision=True,
-		max_actions_per_step=settings.agent_max_actions_per_step,
-		calculate_cost=True,
-		use_judge=False,
-	)
+    # ── Create agent ──────────────────────────────────────────────
+    agent = Agent(
+        task=task,
+        llm=llm,
+        browser=browser,
+        tools=tools,
+        extend_system_message=system_ext if system_ext else None,
+        sensitive_data=sensitive_data,
+        available_file_paths=[resume_path],
+        use_vision=True,
+        max_actions_per_step=settings.agent_max_actions_per_step,
+        calculate_cost=True,
+    )
 
-	# ── Run ───────────────────────────────────────────────────────
-	print()
-	print("=" * 60)
-	print(f"  URL:       {job_url}")
-	print(f"  Platform:  {platform}")
-	print(f"  Model:     {llm.model if hasattr(llm, 'model') else '?'}")
-	print(f"  Resume:    {resume_path}")
-	print(f"  Headless:  {headless}")
-	print(f"  Max steps: {max_steps}")
-	proxy_url = os.environ.get("GH_LLM_PROXY_URL", "")
-	if proxy_url:
-		print(f"  LLM Proxy: {proxy_url}")
-	else:
-		print("  LLM:       Direct API")
-	print("=" * 60)
-	print()
+    # ── Run ───────────────────────────────────────────────────────
+    print()
+    print("=" * 60)
+    print(f"  URL:       {job_url}")
+    print(f"  Platform:  {platform}")
+    print(f"  Model:     {llm.model if hasattr(llm, 'model') else '?'}")
+    print(f"  Resume:    {resume_path}")
+    print(f"  Headless:  {headless}")
+    print(f"  Max steps: {max_steps}")
+    proxy_url = os.environ.get("GH_LLM_PROXY_URL", "")
+    if proxy_url:
+        print(f"  LLM Proxy: {proxy_url}")
+    else:
+        print("  LLM:       Direct API")
+    print("=" * 60)
+    print()
 
-	history = await agent.run(max_steps=max_steps, on_step_start=_on_step_start)
-	result = history.final_result()
+    history = await agent.run(max_steps=max_steps, on_step_start=_on_step_start)
 
-	# ── Results ───────────────────────────────────────────────────
-	_print_history_summary(history)
-	print("  Browser is still open — review the application before submitting.")
-	print("  Press Ctrl+C to close when done.")
-	print()
+    # ── Results ───────────────────────────────────────────────────
+    print()
+    print("=" * 60)
+    print("  RESULT")
+    print("=" * 60)
+    print(f"  Done:    {history.is_done()}")
+    print(f"  Steps:   {len(history.history)}")
+    if history.usage:
+        try:
+            print(f"  Cost:    ${history.usage.total_cost:.4f}")
+            in_tok = getattr(history.usage, "total_prompt_tokens", None) or getattr(
+                history.usage, "total_input_tokens", 0
+            )
+            out_tok = getattr(history.usage, "total_completion_tokens", None) or getattr(
+                history.usage, "total_output_tokens", 0
+            )
+            print(f"  Tokens:  {in_tok} in / {out_tok} out")
+        except Exception:
+            print("  (token stats unavailable)")
+    result = history.final_result()
+    if result:
+        print(f"  Output:  {result[:500]}")
+    print("=" * 60)
+    print()
+    print("  Browser is still open — review the application before submitting.")
+    print("  Press Ctrl+C to close when done.")
+    print()
 
-	# Keep process alive so browser stays open for review
-	try:
-		while True:
-			await asyncio.sleep(1)
-	except (KeyboardInterrupt, asyncio.CancelledError):
-		print("\nClosing browser...")
-		await browser.kill()
+    # Keep process alive so browser stays open for review
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("\nClosing browser...")
+        await browser.kill()
 
-	return result
+    return result
 
 
 async def main():
-	parser = argparse.ArgumentParser(description="Apply to a job with Hand-X + DomHand")
-	parser.add_argument("--job-url", default=DEFAULT_JOB_URL, help="Job posting URL")
-	parser.add_argument("--test-data", default=str(DEFAULT_DATA), help="Applicant info JSON")
-	parser.add_argument("--resume", default=str(DEFAULT_RESUME), help="Resume PDF path")
-	parser.add_argument("--model", default=None, help="LLM model (claude-sonnet-4-0, o3, etc.)")
-	parser.add_argument("--email", default=None, help="Login email")
-	parser.add_argument("--password", default=None, help="Login password")
-	parser.add_argument("--headless", action="store_true", help="Run headless")
-	parser.add_argument("--max-steps", type=int, default=50, help="Max steps (default: 50)")
-	parser.add_argument("--max-budget", type=float, default=1.00, help="Max LLM budget USD")
-	parser.add_argument("--proxy-url", default=None, help="VALET LLM proxy URL (routes all LLM calls through VALET)")
-	parser.add_argument("--runtime-grant", default=None, help="VALET runtime grant token for managed inference")
-	args = parser.parse_args()
+    parser = argparse.ArgumentParser(description="Apply to a job with Hand-X + DomHand")
+    parser.add_argument("--job-url", default=DEFAULT_JOB_URL, help="Job posting URL")
+    parser.add_argument("--test-data", default=str(DEFAULT_DATA), help="Applicant info JSON")
+    parser.add_argument("--resume", default=str(DEFAULT_RESUME), help="Resume PDF path")
+    parser.add_argument("--model", default=None, help="LLM model (claude-sonnet-4-0, o3, etc.)")
+    parser.add_argument("--email", default=None, help="Login email")
+    parser.add_argument("--password", default=None, help="Login password")
+    parser.add_argument("--headless", action="store_true", help="Run headless")
+    parser.add_argument("--max-steps", type=int, default=50, help="Max steps (default: 50)")
+    parser.add_argument("--max-budget", type=float, default=1.00, help="Max LLM budget USD")
+    parser.add_argument("--proxy-url", default=None, help="VALET LLM proxy URL (routes all LLM calls through VALET)")
+    parser.add_argument("--runtime-grant", default=None, help="VALET runtime grant token for managed inference")
+    args = parser.parse_args()
 
-	# Set proxy env vars if provided
-	if args.proxy_url:
-		os.environ["GH_LLM_PROXY_URL"] = args.proxy_url
-	if args.runtime_grant:
-		os.environ["GH_LLM_RUNTIME_GRANT"] = args.runtime_grant
+    # Set proxy env vars if provided
+    if args.proxy_url:
+        os.environ["GH_LLM_PROXY_URL"] = args.proxy_url
+    if args.runtime_grant:
+        os.environ["GH_LLM_RUNTIME_GRANT"] = args.runtime_grant
 
-	# Validate files
-	if not Path(args.test_data).exists():
-		print(f"ERROR: Test data not found: {args.test_data}")
-		print("  Create one or use: --test-data path/to/data.json")
-		sys.exit(1)
-	if not Path(args.resume).exists():
-		print(f"ERROR: Resume not found: {args.resume}")
-		print("  Add a resume PDF or use: --resume path/to/resume.pdf")
-		sys.exit(1)
+    # Validate files
+    if not Path(args.test_data).exists():
+        print(f"ERROR: Test data not found: {args.test_data}")
+        print("  Create one or use: --test-data path/to/data.json")
+        sys.exit(1)
+    if not Path(args.resume).exists():
+        print(f"ERROR: Resume not found: {args.resume}")
+        print("  Add a resume PDF or use: --resume path/to/resume.pdf")
+        sys.exit(1)
 
-	with open(args.test_data) as f:
-		info = json.load(f)
+    with open(args.test_data) as f:
+        info = json.load(f)
 
-	# If using ghosthands resume_loader format, normalize it
-	try:
-		from ghosthands.integrations.resume_loader import load_resume_from_file
-		info = load_resume_from_file(args.test_data)
-	except Exception:
-		pass  # Use raw JSON as-is
+    # If using ghosthands resume_loader format, normalize it
+    try:
+        from ghosthands.integrations.resume_loader import load_resume_from_file
 
-	result = await apply_to_job(
-		info=info,
-		resume_path=str(Path(args.resume).resolve()),
-		job_url=args.job_url,
-		model=args.model,
-		email=args.email,
-		password=args.password,
-		headless=args.headless,
-		max_steps=args.max_steps,
-		max_budget=args.max_budget,
-	)
-	print("\nResult:", _truncate_text(result))
+        info = load_resume_from_file(args.test_data)
+    except Exception:
+        pass  # Use raw JSON as-is
+
+    result = await apply_to_job(
+        info=info,
+        resume_path=str(Path(args.resume).resolve()),
+        job_url=args.job_url,
+        model=args.model,
+        email=args.email,
+        password=args.password,
+        headless=args.headless,
+        max_steps=args.max_steps,
+        max_budget=args.max_budget,
+    )
+    print("\nResult:", result)
 
 
 if __name__ == "__main__":
-	asyncio.run(main())
+    asyncio.run(main())

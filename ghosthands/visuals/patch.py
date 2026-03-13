@@ -38,8 +38,9 @@ _INJECT_CURSOR_EXPR = r"""(function() {
         #gh-cursor-visual.gh-hidden { display: none !important; }\
         #gh-click-ripple {\
             position: fixed; width: 0; height: 0; border-radius: 50%;\
-            background: rgba(59, 130, 246, 0.3);\
-            border: 2px solid rgba(59, 130, 246, 0.6);\
+            background: rgba(96, 165, 250, 0.18);\
+            border: 2px solid rgba(96, 165, 250, 0.72);\
+            box-shadow: 0 0 0 8px rgba(96, 165, 250, 0.14);\
             pointer-events: none; z-index: 2147483645;\
             transform: translate(-50%, -50%); opacity: 0;\
         }\
@@ -53,9 +54,11 @@ _INJECT_CURSOR_EXPR = r"""(function() {
         #gh-action-label {\
             position: fixed; bottom: 16px; left: 50%;\
             transform: translateX(-50%); z-index: 2147483646;\
-            pointer-events: none; background: rgba(0,0,0,0.75);\
-            color: #fff; font-family: -apple-system, BlinkMacSystemFont, sans-serif;\
-            font-size: 13px; padding: 6px 14px; border-radius: 6px;\
+            pointer-events: none; background: rgba(2,6,23,0.84);\
+            border: 1px solid rgba(96,165,250,0.24);\
+            box-shadow: 0 12px 30px rgba(2,6,23,0.28);\
+            color: #eff6ff; font-family: -apple-system, BlinkMacSystemFont, sans-serif;\
+            font-size: 13px; padding: 6px 14px; border-radius: 999px;\
             opacity: 0; transition: opacity 0.2s ease;\
             white-space: nowrap; max-width: 400px; overflow: hidden; text-overflow: ellipsis;\
         }\
@@ -65,9 +68,10 @@ _INJECT_CURSOR_EXPR = r"""(function() {
 
     var cursor = document.createElement('div');
     cursor.id = 'gh-cursor-visual';
-    cursor.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none">' +
-        '<path d="M5 3L19 12L12 13L9 20L5 3Z" fill="#3b82f6" stroke="#1e40af" ' +
-        'stroke-width="1.5" stroke-linejoin="round"/></svg>';
+    cursor.innerHTML = '<svg width="28" height="28" viewBox="0 0 28 28" fill="none">' +
+        '<path d="M6 4L21 12.5L13.6 14.4L10.9 23L6 4Z" fill="#2563eb" stroke="#dbeafe" ' +
+        'stroke-width="1.6" stroke-linejoin="round"/>' +
+        '<circle cx="20.2" cy="20.4" r="3.1" fill="#93c5fd" opacity="0.98"/></svg>';
     document.body.appendChild(cursor);
 
     var ripple = document.createElement('div');
@@ -100,12 +104,12 @@ def _click_ripple_expr(x: int, y: int) -> str:
 
 
 _HIDE_CURSOR_EXPR = (
-    "(function(){ var c=document.getElementById('gh-cursor-visual');"
-    "if(c) c.classList.add('gh-hidden'); })()"
+    "(function(){ var c=document.getElementById('gh-cursor-visual');if(c) c.classList.add('gh-hidden'); })()"
 )
 
 
 # ── CDP helpers ──────────────────────────────────────────────────────
+
 
 async def _eval_safe(client, session_id: str | None, expression: str) -> None:
     """Run a JS expression via CDP Runtime.evaluate, swallowing errors."""
@@ -121,6 +125,7 @@ async def _eval_safe(client, session_id: str | None, expression: str) -> None:
 
 
 # ── Patched methods ──────────────────────────────────────────────────
+
 
 async def _visual_mouse_click(self, x, y, button="left", click_count=1):
     """Mouse.click with visual cursor feedback."""
@@ -187,6 +192,7 @@ async def _visual_element_click(self, button="left", click_count=1, modifiers=No
 
 
 # ── Public API ───────────────────────────────────────────────────────
+
 
 def enable_visual_cursor() -> None:
     """Patch Mouse and Element globally to show visual cursor on all interactions."""

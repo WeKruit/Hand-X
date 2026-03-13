@@ -4026,14 +4026,33 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		"""Detect reusable variables in agent history"""
 		from browser_use.agent.variable_detector import detect_variables_in_history
 
-		return detect_variables_in_history(self.history)
+		return detect_variables_in_history(
+			self.history,
+			allow_value_pattern_fallback=not self._is_apply_flow_task(),
+		)
+
+	def _is_apply_flow_task(self) -> bool:
+		"""Return True when the current task is a job-application flow."""
+		task_norm = (self.task or '').lower()
+		return any(
+			phrase in task_norm
+			for phrase in (
+				'job application',
+				'apply for this job',
+				'fill out the job application',
+				'applicant tracking system',
+			)
+		)
 
 	def _substitute_variables_in_history(self, history: AgentHistoryList, variables: dict[str, str]) -> AgentHistoryList:
 		"""Substitute variables in history with new values for rerunning with different data"""
 		from browser_use.agent.variable_detector import detect_variables_in_history
 
 		# Detect variables in the history
-		detected_vars = detect_variables_in_history(history)
+		detected_vars = detect_variables_in_history(
+			history,
+			allow_value_pattern_fallback=not self._is_apply_flow_task(),
+		)
 
 		# Build a mapping of original values to new values
 		value_replacements: dict[str, str] = {}
