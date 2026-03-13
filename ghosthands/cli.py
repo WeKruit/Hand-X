@@ -182,41 +182,47 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     # -- Protocol handshake (must be the very first event) ----------------------
     emit_handshake()
 
-    # -- Lease acquired --------------------------------------------------------
-    emit_lease_acquired(lease_id, job_id=args.job_id)
-
     emit_status("Hand-X engine initialized", job_id=args.job_id)
 
-    # -- Load profile -------------------------------------------------------
+    # -- Preflight: load profile, set env, import deps -------------------------
     try:
+        # -- Load profile -------------------------------------------------------
         profile = _load_profile(args)
+
+        # -- Set env vars -------------------------------------------------------
+        if args.proxy_url:
+            os.environ["GH_LLM_PROXY_URL"] = args.proxy_url
+        if args.runtime_grant:
+            os.environ["GH_LLM_RUNTIME_GRANT"] = args.runtime_grant
+        if args.browsers_path:
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = args.browsers_path
+
+        os.environ["GH_USER_PROFILE_TEXT"] = json.dumps(profile, indent=2)
+        os.environ["GH_USER_PROFILE_JSON"] = json.dumps(profile)
+        if args.resume:
+            os.environ["GH_RESUME_PATH"] = str(Path(args.resume).resolve())
+
+        # -- Install DomHand field event callback --------------------------------
+        from ghosthands.output import field_events
+
+        field_events.install_jsonl_callback()
+
+        # -- Import heavy deps after env setup ----------------------------------
+        from browser_use import Agent, BrowserProfile, BrowserSession, Tools
+        from ghosthands.llm.client import get_chat_model
+
+        emit_status("Setting up agent...", job_id=args.job_id)
     except (json.JSONDecodeError, OSError, ValueError) as e:
-        emit_error(f"Failed to load profile: {e}", fatal=True)
+        emit_error(f"Preflight failed: {e}", fatal=True)
+        emit_lease_released(lease_id, reason="error")
+        sys.exit(1)
+    except Exception as e:
+        emit_error(f"Preflight failed: {e}", fatal=True)
+        emit_lease_released(lease_id, reason="error")
         sys.exit(1)
 
-    # -- Set env vars -------------------------------------------------------
-    if args.proxy_url:
-        os.environ["GH_LLM_PROXY_URL"] = args.proxy_url
-    if args.runtime_grant:
-        os.environ["GH_LLM_RUNTIME_GRANT"] = args.runtime_grant
-    if args.browsers_path:
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = args.browsers_path
-
-    os.environ["GH_USER_PROFILE_TEXT"] = json.dumps(profile, indent=2)
-    os.environ["GH_USER_PROFILE_JSON"] = json.dumps(profile)
-    if args.resume:
-        os.environ["GH_RESUME_PATH"] = str(Path(args.resume).resolve())
-
-    # -- Install DomHand field event callback --------------------------------
-    from ghosthands.output import field_events
-
-    field_events.install_jsonl_callback()
-
-    # -- Import heavy deps after env setup ----------------------------------
-    from browser_use import Agent, BrowserProfile, BrowserSession, Tools
-    from ghosthands.llm.client import get_chat_model
-
-    emit_status("Setting up agent...", job_id=args.job_id)
+    # -- Lease acquired (after all preflight succeeds) -------------------------
+    emit_lease_acquired(lease_id, job_id=args.job_id)
 
     llm = get_chat_model(model=args.model)
 
