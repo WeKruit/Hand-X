@@ -64,7 +64,7 @@ def install_jsonl_callback() -> None:
             else:
                 emit_field_failed(
                     field=result.name,
-                    error=result.error or "unknown error",
+                    reason=result.error or "unknown error",
                 )
 
             # Emit cumulative progress after each field
