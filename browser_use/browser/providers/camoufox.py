@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -221,7 +222,7 @@ class CamoufoxProvider(BrowserProvider):
 			home / '.camoufox' / 'camoufox',
 			home / '.local' / 'bin' / 'camoufox',
 			# pip install camoufox puts it in the venv
-			Path(os.sys.prefix) / 'bin' / 'camoufox',
+			Path(sys.prefix) / 'bin' / 'camoufox',
 		]
 		for path in candidates:
 			if path.exists() and path.is_file():
