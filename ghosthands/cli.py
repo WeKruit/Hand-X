@@ -298,13 +298,11 @@ async def _cleanup_browser(browser, desktop_owns_browser: bool) -> None:
 
     When the Desktop app owns the browser (CDP mode), we only disconnect
     from the session via ``stop()`` — the browser process stays alive.
-    When Hand-X launched the browser itself, we tear it down fully via
-    ``close()`` (the pre-existing behavior).
+    When Hand-X launched the browser itself, we also call ``stop()`` as
+    the upstream BrowserSession API no longer exposes ``close()``.
+    The Desktop app's process-group kill handles actual browser termination.
     """
-    if desktop_owns_browser:
-        await browser.stop()
-    else:
-        await browser.close()
+    await browser.stop()
 
 
 @dataclass(frozen=True)
