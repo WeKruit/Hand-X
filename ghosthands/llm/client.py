@@ -58,21 +58,36 @@ def get_chat_model(model: str | None = None) -> Any:
 	"""Get a browser-use chat model for the agent loop.
 
 	When proxy is configured:
-	  - Always uses ``ChatAnthropic`` routed through VALET (VALET only proxies Anthropic)
-	  - Model defaults to ``settings.agent_model``
+	  - Gemini models → ``ChatGoogle`` with ``http_options.baseUrl`` pointed at VALET's
+	    ``/gemini`` passthrough route.  The SDK appends ``/v1beta/models/{model}:generateContent``
+	    and sends the runtime grant as ``x-goog-api-key``.
+	  - Claude models → ``ChatAnthropic`` routed through VALET (existing behaviour).
+	  - GPT/OpenAI models → overridden to Claude Sonnet (no Gemini or OpenAI proxy route).
 
 	When NOT configured:
-	  - Uses the appropriate provider based on model name
+	  - Uses the appropriate provider based on model name (direct API keys).
 	"""
 	model = model or settings.agent_model
 
 	if settings.llm_proxy_url:
-		from browser_use.llm.anthropic.chat import ChatAnthropic
+		proxy_url = settings.llm_proxy_url.rstrip("/")
 
-		# When proxied, force Anthropic provider (VALET proxy only supports Anthropic format).
-		# If agent_model is non-Claude, fall back to Sonnet (capable enough for agent loop).
-		# Note: domhand_model (Haiku) is too weak for the agent loop — it needs reasoning.
-		if model.startswith("gemini") or model.startswith("models/") or model.startswith("gpt-") or model.startswith("o"):
+		# ── Gemini models → ChatGoogle via VALET /gemini passthrough ──
+		if model.startswith("gemini") or model.startswith("models/"):
+			from browser_use.llm.google.chat import ChatGoogle
+
+			logger.info(
+				"llm.proxy_gemini",
+				extra={"model": model, "proxy_url": proxy_url},
+			)
+			return ChatGoogle(
+				model=model,
+				api_key=settings.llm_runtime_grant or settings.google_api_key or "dummy",
+				http_options={"baseUrl": proxy_url + "/gemini"},
+			)
+
+		# ── GPT/OpenAI models → override to Sonnet (no OpenAI proxy route) ──
+		if model.startswith("gpt-") or model.startswith("o"):
 			proxy_model = "claude-sonnet-4-20250514"
 			logger.info(
 				"llm.proxy_model_override",
@@ -80,11 +95,14 @@ def get_chat_model(model: str | None = None) -> Any:
 			)
 			model = proxy_model
 
-		proxy_url = _ensure_trailing_slash(settings.llm_proxy_url)
+		# ── Claude (or overridden-to-Claude) models → ChatAnthropic via VALET ──
+		from browser_use.llm.anthropic.chat import ChatAnthropic
+
+		anthropic_proxy_url = _ensure_trailing_slash(proxy_url)
 		return ChatAnthropic(
 			model=model,
 			api_key=settings.llm_runtime_grant or settings.anthropic_api_key or None,
-			base_url=proxy_url,
+			base_url=anthropic_proxy_url,
 		)
 
 	# Direct mode -- pick provider based on model name
