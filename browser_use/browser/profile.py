@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from pydantic import AfterValidator, AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from browser_use.browser.cloud.views import CloudBrowserParams
+from browser_use.browser.stealth.config import StealthConfig
 from browser_use.config import CONFIG
 from browser_use.utils import _log_pretty_path, logger
 
@@ -22,6 +23,11 @@ def _get_enable_default_extensions_default() -> bool:
 		# If DISABLE_EXTENSIONS is truthy, return False (extensions disabled)
 		return env_val.lower() in ('0', 'false', 'no', 'off', '')
 	return True
+
+
+def _stealth_config_factory() -> StealthConfig:
+	"""Factory for the StealthConfig default."""
+	return StealthConfig()
 
 
 CHROME_DEBUG_PORT = 9242  # use a non-default port to avoid conflicts with other tools / devs using 9222
@@ -605,6 +611,10 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 	captcha_solver: bool = Field(
 		default=True,
 		description='Enable the captcha solver watchdog that listens for captcha events from the browser proxy. Automatically pauses agent steps while a CAPTCHA is being solved. Only active when the browser emits BrowserUse CDP events (e.g. Browser Use cloud browsers). Harmless when disabled or when events are not emitted.',
+	)
+	stealth: StealthConfig = Field(
+		default_factory=_stealth_config_factory,
+		description='Anti-detection stealth layer configuration. When enabled, injects JS patches to hide automation fingerprints (webdriver flag, plugins, WebGL, etc.).',
 	)
 	aboutblank_loading_logo_enabled: bool = Field(
 		default=True,
