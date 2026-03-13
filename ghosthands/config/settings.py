@@ -29,17 +29,18 @@ class Settings(BaseSettings):
         alias="GOOGLE_API_KEY",
         description="Google API key for Gemini models (agent model)",
     )
-    agent_model: str = Field("gemini-3.1-flash-lite-preview", description="Model for agent decisions")
+    agent_model: str = Field("gemini-3-flash-preview", description="Model for agent decisions")
     domhand_model: str = Field(
-        "gemini-3.1-flash-lite-preview",
+        "gemini-3-flash-preview",
         description="Cheap model for DomHand answer generation",
     )
 
     # --- LLM Proxy (VALET) ---
     llm_proxy_url: str = Field(
         "",
-        description="VALET LLM proxy base URL. When set, all LLM calls route through VALET. "
-        "Example: https://api.valet.wekruit.com/api/v1/local-workers/anthropic",
+        description="VALET LLM proxy base URL. When set, LLM calls route through VALET. "
+        "Anthropic requests use this URL directly; Gemini requests append /gemini. "
+        "Example: https://api.valet.wekruit.com/api/v1/local-workers",
     )
     llm_runtime_grant: str = Field(
         "",
