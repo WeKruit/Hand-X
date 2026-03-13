@@ -152,12 +152,10 @@ async def create_job_agent(
         sensitive_data=sensitive_data,
         # Cost tracking — browser-use will populate history.usage
         calculate_cost=True,
-        # Vision control: DomHand handles most form fields via DOM, so vision isn't
-        # strictly required.  With direct Gemini the image tokens are cheap (~$0.01/job),
-        # but through the VALET proxy we haven't verified Gemini vision end-to-end yet.
-        # Keep vision disabled for proxy path until we confirm screenshots survive the
-        # passthrough without inflating costs or breaking structured output.
-        use_vision=not bool(settings.llm_proxy_url),
+        # Vision helps the agent handle complex form fields, custom widgets,
+        # and multi-step flows.  The VALET proxy fully supports vision, so
+        # keep it enabled in both direct and proxy modes.
+        use_vision=True,
         # No judge needed — we detect completion ourselves
         use_judge=False,
         # Reasonable defaults for job-application flows
@@ -177,7 +175,7 @@ async def create_job_agent(
             "headless": headless,
             "has_credentials": credentials is not None,
             "domain_count": len(allowed_domains),
-            "use_vision": not bool(settings.llm_proxy_url),
+            "use_vision": True,
             "llm_proxy": bool(settings.llm_proxy_url),
         },
     )
