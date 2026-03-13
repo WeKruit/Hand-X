@@ -2809,17 +2809,37 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 r"^(n/?a|na|none|not applicable|unknown|placeholder)$", matched_answer.strip(), re.IGNORECASE
             ):
                 matched_answer = ""
-            # [NEEDS_USER_INPUT] marker — event was already emitted by
-            # _sanitize_no_guess_answer; skip the field instead of typing
-            # the literal marker string into the form.
+            # [NEEDS_USER_INPUT] marker — skip the field instead of typing
+            # the literal marker string into the form.  The marker may
+            # arrive via _sanitize_no_guess_answer (which emits the event)
+            # OR via fuzzy match in _match_answer (which does NOT emit it).
+            # Always emit `field_needs_input` here to cover both paths,
+            # guarded to avoid duplicates.
             if matched_answer and "[NEEDS_USER_INPUT]" in matched_answer:
                 key = get_stable_field_key(f)
+                # Ensure the event is emitted even when the marker came
+                # through _match_answer without passing _sanitize_no_guess_answer.
+                if key not in fields_skipped:
+                    from ghosthands.output.jsonl import emit_event
+
+                    emit_event(
+                        "field_needs_input",
+                        field_label=_preferred_field_label(f),
+                        field_type=f.field_type or "unknown",
+                        question_text=f.raw_label or f.name or "",
+                    )
+                # Use REQUIRED prefix so required-skip reporting picks it up.
+                error_msg = (
+                    "REQUIRED — Needs user input"
+                    if f.required
+                    else "Needs user input"
+                )
                 fr = FillFieldResult(
                     field_id=f.field_id,
                     name=_preferred_field_label(f),
                     success=False,
                     actor="skipped",
-                    error="Needs user input",
+                    error=error_msg,
                     required=f.required,
                     control_kind=f.field_type,
                     section=f.section or "",
@@ -2828,7 +2848,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         f,
                         False,
                         "skipped",
-                        "Needs user input",
+                        error_msg,
                     ),
                 )
                 all_results.append(fr)
