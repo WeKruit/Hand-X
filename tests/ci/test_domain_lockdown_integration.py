@@ -1,12 +1,12 @@
-"""Baseline regression tests for ghosthands.security.domain_lockdown.
+"""Regression tests for ghosthands.security.domain_lockdown.
 
 Tests cover:
 - DomainLockdown.is_allowed() — URL allowlist enforcement
 - Platform-specific domain lists (Workday, Greenhouse, Lever, etc.)
 - check_and_record() — stats tracking and cross-origin resource handling
 - Convenience functions: is_url_allowed(), create_lockdown_for_platform()
-- CRITICAL: Documents that cli.py does NOT use DomainLockdown — BrowserProfile
-  is created without allowed_domains, leaving the security gap that S4 will fix.
+- S4 FIXED: Verifies cli.py NOW wires DomainLockdown — BrowserProfile
+  is created with allowed_domains in both JSONL and human paths.
 """
 
 import inspect
@@ -431,33 +431,26 @@ def test_create_lockdown_for_platform():
 
 
 # ---------------------------------------------------------------------------
-# CLI path does NOT wire domain lockdown (security gap S4 will fix)
+# CLI path DOES wire domain lockdown (S4 fixed the security gap)
 # ---------------------------------------------------------------------------
 
 
-def test_cli_path_does_not_use_domain_lockdown():
-    """BASELINE: CLI creates BrowserProfile WITHOUT allowed_domains.
-    NOTE: Stream S4 will fix this security gap by wiring DomainLockdown
-    into the CLI path.
+def test_cli_path_uses_domain_lockdown():
+    """S4 FIXED: CLI creates BrowserProfile WITH allowed_domains.
 
-    The CLI's run_agent_jsonl and run_agent_human both construct BrowserProfile
-    without passing allowed_domains, leaving the browser unrestricted.
-    In contrast, create_job_agent in factory.py DOES pass allowed_domains."""
+    Both run_agent_jsonl and run_agent_human construct BrowserProfile with
+    allowed_domains via create_lockdown_for_platform(), matching the security
+    boundary that already existed in factory.py's create_job_agent."""
     import ast
 
     from ghosthands import cli
 
-    # Read the source of cli.py and check that BrowserProfile is constructed
-    # without allowed_domains in both run_agent_jsonl and run_agent_human
     source = inspect.getsource(cli)
-
-    # Parse into AST
     tree = ast.parse(source)
 
     browser_profile_calls = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
-            # Check if this is a BrowserProfile(...) call
             func = node.func
             func_name = None
             if isinstance(func, ast.Name):
@@ -466,33 +459,33 @@ def test_cli_path_does_not_use_domain_lockdown():
                 func_name = func.attr
 
             if func_name == "BrowserProfile":
-                # Collect keyword argument names
                 kwarg_names = [kw.arg for kw in node.keywords if kw.arg is not None]
                 browser_profile_calls.append(kwarg_names)
 
-    # BASELINE: There should be BrowserProfile calls in cli.py
+    # There should be BrowserProfile calls in cli.py (jsonl + human)
     assert len(browser_profile_calls) >= 2, (
         f"Expected at least 2 BrowserProfile calls in cli.py (jsonl + human), "
         f"found {len(browser_profile_calls)}"
     )
 
-    # BASELINE: NONE of the BrowserProfile calls include 'allowed_domains'
+    # S4 FIXED: ALL BrowserProfile calls in cli.py now include 'allowed_domains'
     for i, kwargs in enumerate(browser_profile_calls):
-        assert "allowed_domains" not in kwargs, (
-            f"BrowserProfile call #{i + 1} in cli.py has 'allowed_domains' — "
-            f"this test documents the ABSENCE of domain lockdown in CLI. "
-            f"If S4 has been implemented, update this test."
+        assert "allowed_domains" in kwargs, (
+            f"BrowserProfile call #{i + 1} in cli.py is missing 'allowed_domains' — "
+            f"S4 domain lockdown wiring is incomplete"
         )
 
 
 def test_factory_path_does_use_domain_lockdown():
     """BASELINE: create_job_agent in factory.py DOES pass allowed_domains to BrowserProfile.
-    This confirms the security boundary exists in the worker path but not CLI."""
+    This confirms the security boundary exists in the worker path as well as CLI."""
     import ast
+    from pathlib import Path
 
-    from ghosthands.agent import factory
-
-    source = inspect.getsource(factory)
+    # Read factory.py by file path instead of inspect.getsource() to avoid
+    # failures when another test has stubbed ghosthands.agent.factory in sys.modules.
+    factory_path = Path(__file__).resolve().parent.parent.parent / "ghosthands" / "agent" / "factory.py"
+    source = factory_path.read_text()
     tree = ast.parse(source)
 
     browser_profile_calls = []
