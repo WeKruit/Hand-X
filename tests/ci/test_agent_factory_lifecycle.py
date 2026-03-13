@@ -387,19 +387,19 @@ async def test_run_job_agent_keep_alive_true_preserves_browser(mock_create, samp
 
 
 @patch("ghosthands.agent.factory.create_job_agent")
-async def test_run_job_agent_keep_alive_none_preserves_browser(mock_create, sample_profile):
-    """S3: keep_alive=None (default) treats as True — event_bus.stop(), NOT kill()."""
+async def test_run_job_agent_default_keep_alive_kills_browser(mock_create, sample_profile):
+    """P1-5: keep_alive defaults to False — kill() the browser (safe worker default)."""
     mock_agent = _make_mock_agent()
     mock_create.return_value = mock_agent
 
     await run_job_agent(
         task="Apply to https://example.com",
         resume_profile=sample_profile,
-        # keep_alive defaults to None
+        # keep_alive defaults to False (P1-5 fix)
     )
 
-    mock_agent.browser_session.kill.assert_not_called()
-    mock_agent.browser_session.event_bus.stop.assert_called_once_with(clear=False, timeout=1.0)
+    mock_agent.browser_session.kill.assert_called_once()
+    mock_agent.browser_session.event_bus.stop.assert_not_called()
 
 
 @patch("ghosthands.agent.factory.create_job_agent")
