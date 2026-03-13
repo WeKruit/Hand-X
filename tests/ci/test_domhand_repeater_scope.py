@@ -222,6 +222,25 @@ GREENHOUSE_PRESUBMIT_HTML = """
 </html>
 """
 
+GREENHOUSE_PRESUBMIT_WITH_SOCIAL_CONTINUE_HTML = """
+<!DOCTYPE html>
+<html>
+<body>
+	<form id="application_form">
+		<section>
+			<h2>Personal Information</h2>
+			<label>First Name <input data-ff-id="first-name" type="text" required value="Ruiyang" /></label>
+			<label>Last Name <input data-ff-id="last-name" type="text" required value="Chen" /></label>
+			<label>Email <input data-ff-id="email" type="email" required value="rc5663@nyu.edu" /></label>
+		</section>
+		<button type="button">Continue with Google</button>
+		<button type="button">Save and Continue Later</button>
+		<button type="submit">Submit Application</button>
+	</form>
+</body>
+</html>
+"""
+
 GREENHOUSE_BLOCKED_HTML = """
 <!DOCTYPE html>
 <html>
@@ -1104,6 +1123,30 @@ async def test_domhand_assess_state_detects_greenhouse_presubmit_single_page(
         assert state["terminal_state"] == "presubmit_single_page"
         assert state["platform_hint"] == "greenhouse"
         assert state["unresolved_required_fields"] == []
+
+
+async def test_domhand_assess_state_ignores_social_or_later_continue_buttons_on_presubmit(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/jobs/greenhouse-presubmit-social").respond_with_data(
+            GREENHOUSE_PRESUBMIT_WITH_SOCIAL_CONTINUE_HTML,
+            content_type="text/html",
+        )
+        await tools.navigate(
+            url=httpserver.url_for("/jobs/greenhouse-presubmit-social") + "?gh_jid=7393132",
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+
+        result = await domhand_assess_state(DomHandAssessStateParams(), browser_session)
+        assert result.extracted_content is not None
+        state = json.loads(result.extracted_content.split("APPLICATION_STATE_JSON:\n", 1)[1])
+
+        assert state["advance_visible"] is False
+        assert state["terminal_state"] == "presubmit_single_page"
 
 
 async def test_domhand_assess_state_requires_fix_when_submit_blocked(
