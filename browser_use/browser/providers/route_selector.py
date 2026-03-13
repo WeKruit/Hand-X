@@ -73,13 +73,13 @@ class RouteSelector:
 
 		# Check Firefox-preferred domains
 		for _platform, domains in cls.FIREFOX_PREFERRED.items():
-			if any(domain.endswith(d) for d in domains):
+			if any(domain == d or domain.endswith('.' + d) for d in domains):
 				return 'firefox'
 
 		# Check Chromium-preferred domains (explicit match, not strictly needed
 		# since chromium is the default, but useful for documentation and logging)
 		for _platform, domains in cls.CHROMIUM_PREFERRED.items():
-			if any(domain.endswith(d) for d in domains):
+			if any(domain == d or domain.endswith('.' + d) for d in domains):
 				return 'chromium'
 
 		# Default to chromium (widest compatibility)
@@ -100,7 +100,7 @@ class RouteSelector:
 			return None
 
 		for platform, domains in {**cls.FIREFOX_PREFERRED, **cls.CHROMIUM_PREFERRED}.items():
-			if any(domain.endswith(d) for d in domains):
+			if any(domain == d or domain.endswith('.' + d) for d in domains):
 				return platform
 
 		return None
