@@ -668,16 +668,18 @@ def _build_task_prompt(
     return task
 
 
-async def _wait_for_review_command(browser, job_id: str, lease_id: str) -> None:
+async def _wait_for_review_command(browser, job_id: str, lease_id: str) -> str:
     """Wait for a command from Electron on stdin.
 
     Expected commands:
     - {"event": "complete_review"} -- user approved, close browser
     - {"event": "cancel_job"}     -- user cancelled, close browser
-    """
-    from ghosthands.output.jsonl import emit_done
 
+    Returns:
+        "completed", "cancelled", or "aborted".
+    """
     loop = asyncio.get_event_loop()
+    outcome = "aborted"
 
     try:
         while True:
@@ -697,26 +699,18 @@ async def _wait_for_review_command(browser, job_id: str, lease_id: str) -> None:
             cmd_type = cmd.get("event", "")
 
             if cmd_type == "complete_review":
-                emit_done(
-                    success=True,
-                    message="Review complete -- closing browser",
-                    job_id=job_id,
-                    lease_id=lease_id,
-                )
+                outcome = "completed"
                 break
             elif cmd_type == "cancel_job":
-                emit_done(
-                    success=False,
-                    message="Job cancelled by user",
-                    job_id=job_id,
-                    lease_id=lease_id,
-                )
+                outcome = "cancelled"
                 break
     except (EOFError, KeyboardInterrupt):
         pass
     finally:
         with contextlib.suppress(Exception):
             await browser.kill()
+
+    return outcome
 
 
 # ── Entry point ───────────────────────────────────────────────────────
