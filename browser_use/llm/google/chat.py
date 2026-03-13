@@ -34,6 +34,7 @@ VerifiedGeminiModels = Literal[
 	'gemini-2.5-pro',
 	'gemini-3-pro-preview',
 	'gemini-3-flash-preview',
+	'gemini-3.1-flash-lite-preview',
 	'gemma-3-27b-it',
 	'gemma-3-4b',
 	'gemma-3-12b',

@@ -182,6 +182,7 @@ excluded_modules = [
     "tkinter",
     "unittest",
     "test",
+    # NOTE: "email" was previously excluded here but pydantic → importlib.metadata needs it
     "xmlrpc",
     "pydoc",
     "doctest",

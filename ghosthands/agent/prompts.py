@@ -14,439 +14,707 @@ from __future__ import annotations
 # ---------------------------------------------------------------------------
 
 PLATFORM_GUARDRAILS: dict[str, str] = {
-	"workday": (
-		"Workday often uses multi-step sections with repeated 'Next' buttons.\n"
-		"Treat any visible 'Submit', 'Submit Application', or final review CTA "
-		"as a stop condition — do NOT click it.\n"
-		"\n"
-		"ACCOUNT CREATION / SIGN-IN:\n"
-		"CRITICAL: Do NOT use domhand_fill on account creation or sign-in pages.\n"
-		"The email/password must come from your credentials (sensitive_data),\n"
-		"NOT from the applicant profile.  domhand_fill would use the wrong email.\n"
-		"\n"
-		"On the Create Account page, follow this EXACT sequence:\n"
-		"  1. Type the credential email into the Email Address field using input_text\n"
-		"  2. Type the credential password into the Password field using input_text\n"
-		"  3. Type the credential password into the Verify/Confirm Password field\n"
-		"  4. Call domhand_check_agreement to check the 'I agree' checkbox — "
-		"this is REQUIRED, the Create Account button will NOT work without it.\n"
-		"     Do NOT try to click the checkbox manually — Workday uses custom "
-		"widgets that need JavaScript-based checking.  domhand_check_agreement "
-		"handles this reliably.\n"
-		"  5. Use domhand_click_button with button_label='Create Account' to click the button.\n"
-		"     CRITICAL: Do NOT use the regular click action for Create Account or Sign In.\n"
-		"     Workday buttons require trusted events — regular click uses CDP mouse events\n"
-		"     which Workday silently ignores. domhand_click_button uses Playwright native\n"
-		"     click which produces trusted events.\n"
-		"\n"
-		"If domhand_check_agreement reports 'no agreement checkboxes found' or "
-		"the checkbox still appears unchecked, use the evaluate action with:\n"
-		"  evaluate(\"document.querySelectorAll('input[type=checkbox]').forEach(c => {c.checked=true; c.dispatchEvent(new Event('change',{bubbles:true}))})\")\n"
-		"\n"
-		"IMPORTANT: For ALL Workday auth buttons (Create Account, Sign In), use\n"
-		"domhand_click_button instead of the regular click action.\n"
-		"\n"
-		"NEVER click the 'Sign In' button when you are on the Create Account page.\n"
-		"NEVER toggle between Create Account and Sign In.  Pick ONE path and stick to it.\n"
-		"If the first page shown is Create Account, stay on Create Account.\n"
-		"If Create Account fails with 'Invalid Username/Password' or similar error,\n"
-		"report it as: done(success=False, text='blocker: account creation failed — "
-		"invalid credentials or account already exists').\n"
-		"Do NOT switch to Sign In after a Create Account failure.\n"
-		"\n"
-		"NEVER click any SSO/social login icons (Google, LinkedIn, Facebook, Apple,\n"
-		"or any icon-based login buttons).  Stay on the native email/password path ONLY.\n"
-		"\n"
-		"After sign-in or account creation, you may see a verification code "
-		"page. Report it as: done(success=False, text='blocker: verification code required').\n"
-		"\n"
-		"FORM FILLING:\n"
-		"- If 'Apply Manually' is visible after clicking Apply, choose that first "
-		"before any field-filling.\n"
-		"- Use expand_repeaters or click 'Add' buttons when work history or "
-		"education sections expose visible 'Add' controls.\n"
-		"- Workday uses shadow DOM with data-automation-id selectors. DomHand "
-		"handles these, but if it fails, use generic input/click.\n"
-		"- Date fields use MM/DD/YYYY format. For segmented date inputs, type "
-		"continuous digits (e.g. '06152024') — Workday auto-advances segments."
-	),
-	"greenhouse": (
-		"Greenhouse usually has a single-page application flow with resume "
-		"upload near the top.\n"
-		"The initial 'Apply' button can be valid, but never click a final "
-		"'Submit Application' button.\n"
-		"If the page shows a review/confirmation summary, call done with "
-		"success=True and provide extracted data."
-	),
-	"lever": (
-		"Lever often keeps the application on one long page with a final "
-		"submit button at the bottom.\n"
-		"Prefer filling while editable fields remain visible; never convert "
-		"a visible submit button into a click.\n"
-		"Scrolling is acceptable when the page is long and no higher-priority "
-		"action is clear."
-	),
-	"smartrecruiters": (
-		"SmartRecruiters may split flows across apply, login, and review steps.\n"
-		"If authentication prompts appear, prefer login or create_account "
-		"rather than generic click actions.\n"
-		"SmartRecruiters uses shadow DOM custom elements — 'Add' buttons for "
-		"work experience, education, and other repeatable sections may appear "
-		"inside shadow roots.\n"
-		"CRITICAL: Before filling a repeater section, expand ALL visible 'Add' "
-		"or '+' buttons to create enough entries for the applicant profile.\n"
-		"After expanding, re-observe before filling to see the newly created "
-		"fields.\n"
-		"Any CAPTCHA, turnstile, or verification wall must be reported as a "
-		"blocker via done(success=False, text='blocker: CAPTCHA detected')."
-	),
-	"generic": (
-		"Stay conservative on unfamiliar platforms.\n"
-		"Prefer filling editable fields over navigation when fields remain.\n"
-		"Never press a button whose text implies final submission.\n"
-		"Call done(success=True) on read-only review pages and true "
-		"confirmation/success pages."
-	),
+    "workday": (
+        "Workday uses multi-step sections.  Treat any visible 'Submit' or "
+        "'Submit Application' button as the FINAL submission — do NOT click it.\n"
+        "\n"
+        "ACCOUNT CREATION / SIGN-IN:\n"
+        "Do NOT use domhand_fill on auth pages — it uses the applicant email\n"
+        "instead of login credentials.\n"
+        "\n"
+        "EXACT sequence for the Create Account page:\n"
+        "  1. input_text: credential email → Email Address field\n"
+        "  2. input_text: credential password → Password field\n"
+        "  3. input_text: credential password → Verify/Confirm Password field\n"
+        "  4. domhand_check_agreement → checks the 'I agree' checkbox.\n"
+        "     *** THIS IS REQUIRED.  The Create Account button SILENTLY FAILS\n"
+        "     if the checkbox is unchecked.  Do NOT skip this step. ***\n"
+        "  5. VERIFY: Look at the checkbox.  If it still appears unchecked,\n"
+        "     click it manually before proceeding.\n"
+        "  6. domhand_click_button(button_label='Create Account').\n"
+        "     Use domhand_click_button, NOT the regular click action.\n"
+        "\n"
+        "Auth page rules:\n"
+        "- Pick ONE path (Create Account OR Sign In) and commit.  Do NOT\n"
+        "  toggle between them.\n"
+        "- If a confirm-password field is visible, you are on Create Account.\n"
+        "- NEVER use SSO/social login (Google, LinkedIn, Facebook, Apple).\n"
+        "- If account creation fails, report as blocker — do NOT switch to Sign In.\n"
+        "- If a verification code is required, report as blocker.\n"
+        "\n"
+        "FORM FILLING:\n"
+        "- Click the main 'Apply' button first.\n"
+        "- If a Workday start dialog offers a SAME-SITE option such as "
+        "  'Autofill with Resume' or 'Apply with Resume', prefer that path.\n"
+        "- Use 'Apply Manually' only when no same-site resume-autofill option "
+        "  exists.\n"
+        "- NEVER choose external apply paths such as LinkedIn, Indeed, Google, "
+        "  or other third-party apply/import options.\n"
+        "- Use domhand_expand or click 'Add' buttons to expand work history\n"
+        "  and education sections before filling.\n"
+        "- Workday uses shadow DOM with data-automation-id selectors.\n"
+        "- Date fields: click MM segment, type continuous digits (e.g. '06152024').\n"
+        "- After filling all fields, click 'Save and Continue' / 'Next' to advance.\n"
+        "  NEVER click the final 'Submit' button."
+    ),
+    "greenhouse": (
+        "Greenhouse usually has a single-page application flow with resume "
+        "upload near the top.\n"
+        "The initial 'Apply' button can be valid, but never click a final "
+        "'Submit Application' button.\n"
+        "If the page shows a review/confirmation summary, call done with "
+        "success=True and provide extracted data."
+    ),
+    "lever": (
+        "Lever often keeps the application on one long page with a final "
+        "submit button at the bottom.\n"
+        "Prefer filling while editable fields remain visible; never convert "
+        "a visible submit button into a click.\n"
+        "Scrolling is acceptable when the page is long and no higher-priority "
+        "action is clear."
+    ),
+    "smartrecruiters": (
+        "SmartRecruiters may split flows across apply, login, and review steps.\n"
+        "SmartRecruiters may also stay on a single editable application page "
+        "until the final submit button.\n"
+        "If authentication prompts appear, prefer login or create_account "
+        "rather than generic click actions.\n"
+        "SmartRecruiters uses shadow DOM custom elements — 'Add' buttons for "
+        "work experience, education, and other repeatable sections may appear "
+        "inside shadow roots.\n"
+        "CRITICAL: Before filling a repeater section, expand ALL visible 'Add' "
+        "or '+' buttons to create enough entries for the applicant profile.\n"
+        "After expanding, re-observe before filling to see the newly created "
+        "fields.\n"
+        "Any CAPTCHA, turnstile, or verification wall must be reported as a "
+        "blocker via done(success=False, text='blocker: CAPTCHA detected')."
+    ),
+    "generic": (
+        "Stay conservative on unfamiliar platforms.\n"
+        "Prefer filling editable fields over navigation when fields remain.\n"
+        "Never press a button whose text implies final submission.\n"
+        "Call done(success=True) on read-only review pages and true "
+        "confirmation/success pages."
+    ),
 }
 
 
+COMPLETION_STATE_ADVANCEABLE = "advanceable"
+COMPLETION_STATE_REVIEW = "review"
+COMPLETION_STATE_CONFIRMATION = "confirmation"
+COMPLETION_STATE_PRESUBMIT_SINGLE_PAGE = "presubmit_single_page"
+
+FAIL_OVER_NATIVE_SELECT = "[FAIL-OVER:NATIVE_SELECT]"
+FAIL_OVER_CUSTOM_WIDGET = "[FAIL-OVER:CUSTOM_WIDGET]"
+
+
+def _platform_allows_single_page_presubmit(platform: str) -> bool:
+    """Return whether this platform may stop at a final pre-submit state."""
+    from ghosthands.platforms import get_config_by_name
+
+    return bool(get_config_by_name(platform).single_page_presubmit_allowed)
+
+
+def build_completion_detection_lines(platform: str) -> list[str]:
+    """Return reusable completion-state guidance for prompts and task text."""
+    lines = [
+        "Classify the current page into exactly one completion state before acting:",
+        f"- `{COMPLETION_STATE_ADVANCEABLE}` — a real non-final 'Next', 'Continue', or 'Save & Continue' step still remains. Fill/fix fields and advance. Do NOT call done().",
+        f"- `{COMPLETION_STATE_REVIEW}` — read-only review or summary page before final submit. Call done(success=True).",
+        f"- `{COMPLETION_STATE_CONFIRMATION}` — thank-you, submitted, or success page. Call done(success=True).",
+    ]
+    if _platform_allows_single_page_presubmit(platform):
+        lines.append(
+            f"- `{COMPLETION_STATE_PRESUBMIT_SINGLE_PAGE}` — final submit-like CTA is visible, there is NO real 'Next' / 'Continue' / 'Save & Continue' step left, no visible required/error/invalid markers remain, the submit control is not disabled for missing inputs, and no DomHand-required unresolved fields remain. Call done(success=True) without clicking final submit."
+        )
+        lines.append(
+            "- On this platform, editable fields may still be visible in `presubmit_single_page`. Do NOT start a top-to-bottom re-verification loop once this state is reached."
+        )
+    else:
+        lines.append(
+            f"- `{COMPLETION_STATE_PRESUBMIT_SINGLE_PAGE}` — ignore this state on this platform. Keep filling or advancing until you reach `{COMPLETION_STATE_REVIEW}` or `{COMPLETION_STATE_CONFIRMATION}`."
+        )
+    lines.append(
+        "- Once the page is in a terminal-state candidate (`review`, `confirmation`, or allowed `presubmit_single_page`), only do one of two things next: fix one concrete unresolved invalid/required field, or call done(success=True)."
+    )
+    lines.append(
+        "- Use domhand_assess_state before any large scroll, before clicking Next/Continue/Save, and before calling done(). Follow its unresolved field list and scroll_bias instead of doing a full-page reverification loop."
+    )
+    return lines
+
+
+def build_domhand_select_failover_lines() -> list[str]:
+    """Return reusable failover guidance for domhand_select."""
+    return [
+        f"If domhand_select returns `{FAIL_OVER_NATIVE_SELECT}`:",
+        "- STOP. Do NOT click the native <select> element.",
+        "- Call dropdown_options(index=...) to inspect the exact option text/value, then use select_dropdown(index=..., text=...).",
+        "- Use the exact text/value string that appears in the dropdown options.",
+        f"If domhand_select returns `{FAIL_OVER_CUSTOM_WIDGET}`:",
+        "- STOP retrying domhand_select for that field.",
+        "- Open the widget manually, type/search if supported, click the option directly, and keep going until the final leaf option visibly sticks.",
+    ]
+
+
+def build_compact_reasoning_lines() -> list[str]:
+    """Return concise reasoning rules to reduce late-stage loops and token use."""
+    return [
+        "Keep memory and next_goal short.",
+        "Do NOT restate all completed fields after each step.",
+        "When close to completion, mention only the unresolved blocker or the terminal-state decision.",
+    ]
+
+
+def build_completion_detection_text(platform: str) -> str:
+    """Return completion guidance as a newline-joined text block."""
+    return "\n".join(build_completion_detection_lines(platform))
+
+
+def build_domhand_select_failover_text() -> str:
+    """Return domhand_select failover guidance as a newline-joined text block."""
+    return "\n".join(build_domhand_select_failover_lines())
+
+
 def _format_profile_summary(resume_profile: dict) -> str:
-	"""Build a concise applicant profile summary from the resume dict.
+    """Build a concise applicant profile summary from the resume dict.
 
-	The summary is included in the system prompt so the agent knows what
-	data is available for form filling without needing an extra LLM call.
+    The summary is included in the system prompt so the agent knows what
+    data is available for form filling without needing an extra LLM call.
 
-	Handles both structured resume format (name, experience, education)
-	and flat JSON format (first_name, last_name, email, etc.).
-	"""
-	lines: list[str] = []
+    Handles both structured resume format (name, experience, education)
+    and flat JSON format (first_name, last_name, email, etc.).
+    """
+    lines: list[str] = []
 
-	# ── Name (handle both formats) ───────────────────────────────
-	name = resume_profile.get("name")
-	if not name:
-		first = resume_profile.get("first_name", "")
-		last = resume_profile.get("last_name", "")
-		if first or last:
-			name = f"{first} {last}".strip()
-	if name:
-		lines.append(f"Name: {name}")
+    def _entry_current_flag(entry: dict, *keys: str) -> bool:
+        for key in keys:
+            value = entry.get(key)
+            if value is not None:
+                return bool(value)
+        return False
 
-	if email := resume_profile.get("email"):
-		lines.append(f"Email: {email}")
-	if phone := resume_profile.get("phone"):
-		lines.append(f"Phone: {phone}")
+    def _entry_end_date(entry: dict) -> str:
+        return str(entry.get("end_date") or entry.get("graduation_date") or "").strip()
 
-	# ── Location (handle both formats) ───────────────────────────
-	location = resume_profile.get("location")
-	if not location:
-		city = resume_profile.get("city", "")
-		state = resume_profile.get("state", "")
-		country = resume_profile.get("country", "")
-		postal = resume_profile.get("postal_code", "")
-		address = resume_profile.get("address", "")
-		loc_parts = []
-		for p in [address, city, state, postal, country]:
-			if p is None or p == "":
-				continue
-			if isinstance(p, str):
-				loc_parts.append(p.strip())
-			elif isinstance(p, dict):
-				loc_parts.append(", ".join(str(v).strip() for v in p.values() if v))
-			elif isinstance(p, (list, tuple)):
-				loc_parts.append(", ".join(str(x).strip() for x in p if x))
-			else:
-				loc_parts.append(str(p).strip())
-		if loc_parts:
-			location = ", ".join(loc_parts)
-	if location:
-		if isinstance(location, dict):
-			location = ", ".join(str(v).strip() for v in location.values() if v)
-		elif not isinstance(location, str):
-			location = str(location)
-		lines.append(f"Location: {location}")
+    # ── Name (handle both formats) ───────────────────────────────
+    name = resume_profile.get("name")
+    if not name:
+        first = resume_profile.get("first_name", "")
+        last = resume_profile.get("last_name", "")
+        if first or last:
+            name = f"{first} {last}".strip()
+    first_name = str(resume_profile.get("first_name") or "").strip()
+    last_name = str(resume_profile.get("last_name") or "").strip()
+    if first_name:
+        lines.append(f"First name: {first_name}")
+    if last_name:
+        lines.append(f"Last name: {last_name}")
+    if name:
+        lines.append(f"Full name: {name}")
+    preferred_name = str(resume_profile.get("preferred_name") or "").strip()
+    if preferred_name:
+        lines.append(f"Preferred name: {preferred_name}")
 
-	# ── Flat fields common in sample data ────────────────────────
-	flat_fields = {
-		"age": "Age",
-		"gender": "Gender",
-		"race_ethnicity": "Race/Ethnicity",
-		"years_experience": "Years of experience",
-		"veteran_status": "Veteran status",
-		"disability_status": "Disability status",
-		"hispanic_latino": "Hispanic/Latino",
-		"visa_sponsorship": "Visa sponsorship",
-	}
-	for key, label in flat_fields.items():
-		val = resume_profile.get(key)
-		if val is not None and val != "":
-			lines.append(f"{label}: {val}")
+    if email := resume_profile.get("email"):
+        lines.append(f"Email: {email}")
+    if phone := resume_profile.get("phone"):
+        lines.append(f"Phone: {phone}")
 
-	# ── Boolean fields ───────────────────────────────────────────
-	if resume_profile.get("US_citizen") is not None:
-		lines.append(f"US Citizen: {'Yes' if resume_profile['US_citizen'] else 'No'}")
-	if resume_profile.get("sponsorship_needed") is not None:
-		lines.append(f"Sponsorship needed: {'Yes' if resume_profile['sponsorship_needed'] else 'No'}")
+    # ── Location (handle both formats) ───────────────────────────
+    location = resume_profile.get("location")
+    if not location:
+        city = resume_profile.get("city", "")
+        state = resume_profile.get("state", "")
+        country = resume_profile.get("country", "")
+        postal = resume_profile.get("postal_code", "")
+        address = resume_profile.get("address", "")
+        loc_parts = []
+        for p in [address, city, state, postal, country]:
+            if p is None or p == "":
+                continue
+            if isinstance(p, str):
+                loc_parts.append(p.strip())
+            elif isinstance(p, dict):
+                loc_parts.append(", ".join(str(v).strip() for v in p.values() if v))
+            elif isinstance(p, (list, tuple)):
+                loc_parts.append(", ".join(str(x).strip() for x in p if x))
+            else:
+                loc_parts.append(str(p).strip())
+        if loc_parts:
+            location = ", ".join(loc_parts)
+    if location:
+        if isinstance(location, dict):
+            location = ", ".join(str(v).strip() for v in location.values() if v)
+        elif not isinstance(location, str):
+            location = str(location)
+        lines.append(f"Location: {location}")
+    if address := resume_profile.get("address"):
+        lines.append(f"Address: {address}")
+    if address2 := resume_profile.get("address_line_2"):
+        lines.append(f"Address line 2: {address2}")
+    if city := resume_profile.get("city"):
+        lines.append(f"City: {city}")
+    if state := resume_profile.get("state"):
+        lines.append(f"State: {state}")
+    if postal := resume_profile.get("postal_code"):
+        lines.append(f"Postal code: {postal}")
+    if country := resume_profile.get("country"):
+        lines.append(f"Country: {country}")
+    if phone_type := resume_profile.get("phone_type") or resume_profile.get("phone_device_type"):
+        lines.append(f"Phone type: {phone_type}")
 
-	# ── Work experience (structured format) ──────────────────────
-	experiences = resume_profile.get("experience", [])
-	if experiences:
-		exp_lines: list[str] = []
-		for exp in experiences[:5]:
-			title = exp.get("title", "")
-			company = exp.get("company", "")
-			location = exp.get("location", "")
-			start = exp.get("start_date", "")
-			end = exp.get("end_date", "")
-			current = exp.get("currently_working", False)
-			desc = exp.get("description", "")
-			if title or company:
-				date_range = f"{start} — {'Present' if current else end}" if start else ""
-				loc_str = f" ({location})" if location else ""
-				line = f"  - {title} at {company}{loc_str}"
-				if date_range:
-					line += f" [{date_range}]"
-				exp_lines.append(line.strip())
-				if desc:
-					exp_lines.append(f"    {desc[:200]}")
-		if exp_lines:
-			lines.append("Work experience:")
-			lines.extend(exp_lines)
+    # ── Flat fields common in sample data ────────────────────────
+    flat_fields = {
+        "age": "Age",
+        "gender": "Gender",
+        "race": "Race",
+        "race_ethnicity": "Race/Ethnicity",
+        "years_experience": "Years of experience",
+        "veteran_status": "Veteran status",
+        "Veteran_status": "Veteran status",
+        "disability_status": "Disability status",
+        "hispanic_latino": "Hispanic/Latino",
+        "visa_sponsorship": "Visa sponsorship",
+    }
+    for key, label in flat_fields.items():
+        val = resume_profile.get(key)
+        if val is not None and val != "":
+            lines.append(f"{label}: {val}")
 
-	# ── Education (structured format) ────────────────────────────
-	education = resume_profile.get("education", [])
-	if education:
-		edu_lines: list[str] = []
-		for edu in education[:3]:
-			degree = edu.get("degree", "")
-			school = edu.get("school", "")
-			field = edu.get("field_of_study", "")
-			grad_date = edu.get("graduation_date", "")
-			gpa = edu.get("gpa", "")
-			if degree or school:
-				degree_str = f"{degree} in {field}" if field else degree
-				line = f"  - {degree_str} — {school}"
-				if grad_date:
-					line += f" (Graduated {grad_date})"
-				if gpa:
-					line += f" GPA: {gpa}"
-				edu_lines.append(line.strip())
-		if edu_lines:
-			lines.append("Education:")
-			lines.extend(edu_lines)
+    # ── Boolean fields ───────────────────────────────────────────
+    if resume_profile.get("US_citizen") is not None:
+        lines.append(f"US Citizen: {'Yes' if resume_profile['US_citizen'] else 'No'}")
+    if resume_profile.get("sponsorship_needed") is not None:
+        lines.append(f"Sponsorship needed: {'Yes' if resume_profile['sponsorship_needed'] else 'No'}")
 
-	# ── Skills ───────────────────────────────────────────────────
-	skills = resume_profile.get("skills", [])
-	if skills:
-		lines.append(f"Skills: {', '.join(skills[:20])}")
+    # ── Work experience (structured format) ──────────────────────
+    experiences = resume_profile.get("experience", [])
+    if experiences:
+        exp_lines: list[str] = []
+        for exp in experiences[:5]:
+            title = exp.get("title", "")
+            company = exp.get("company", "")
+            location = exp.get("location", "")
+            start = exp.get("start_date", "")
+            end = _entry_end_date(exp)
+            current = _entry_current_flag(exp, "currently_working", "currently_work_here")
+            end_type = str(exp.get("end_date_type") or "").strip()
+            desc = exp.get("description", "")
+            if title or company:
+                end_display = "Present" if current else end
+                date_range = ""
+                if start or end_display:
+                    date_range = f"{start or '?'} — {end_display or '?'}"
+                    if end_type and not current:
+                        date_range += f" ({end_type} end)"
+                loc_str = f" ({location})" if location else ""
+                line = f"  - {title} at {company}{loc_str}"
+                if date_range:
+                    line += f" [{date_range}]"
+                exp_lines.append(line.strip())
+                if desc:
+                    exp_lines.append(f"    {desc[:200]}")
+        if exp_lines:
+            lines.append("Work experience:")
+            lines.extend(exp_lines)
 
-	# ── Languages ────────────────────────────────────────────────
-	languages = resume_profile.get("languages", [])
-	if languages:
-		lang_strs = [f"{l.get('language', '')} ({l.get('proficiency', '')})" for l in languages if l.get("language")]
-		if lang_strs:
-			lines.append(f"Languages: {', '.join(lang_strs)}")
+    # ── Education (structured format) ────────────────────────────
+    education = resume_profile.get("education", [])
+    if education:
+        edu_lines: list[str] = []
+        for edu in education[:3]:
+            degree = edu.get("degree", "")
+            school = edu.get("school", "")
+            field = edu.get("field_of_study", "")
+            start = str(edu.get("start_date") or "").strip()
+            end = _entry_end_date(edu)
+            end_type = str(edu.get("end_date_type") or "").strip()
+            gpa = edu.get("gpa", "")
+            if degree or school:
+                degree_str = f"{degree} in {field}" if field else degree
+                line = f"  - {degree_str} — {school}"
+                if start or end:
+                    line += f" [{start or '?'} — {end or '?'}]"
+                if end_type:
+                    line += f" ({end_type} end)"
+                if gpa:
+                    line += f" GPA: {gpa}"
+                edu_lines.append(line.strip())
+        if edu_lines:
+            lines.append("Education:")
+            lines.extend(edu_lines)
 
-	# ── Certifications ───────────────────────────────────────────
-	certs = resume_profile.get("certifications", [])
-	if certs:
-		cert_strs = [f"{c.get('name', '')} ({c.get('issuer', '')})" for c in certs if c.get("name")]
-		if cert_strs:
-			lines.append(f"Certifications: {', '.join(cert_strs)}")
+    # ── Skills ───────────────────────────────────────────────────
+    skills = resume_profile.get("skills", [])
+    if skills:
+        lines.append(f"Skills: {', '.join(skills[:20])}")
 
-	# ── Work authorization / availability ────────────────────────
-	if wa := resume_profile.get("work_authorization"):
-		lines.append(f"Work authorization: {wa}")
-	if start := resume_profile.get("available_start_date"):
-		lines.append(f"Available start date: {start}")
-	if salary := resume_profile.get("salary_expectation"):
-		currency = resume_profile.get("salary_currency", "USD")
-		lines.append(f"Salary expectation: {salary} {currency}")
-	if resume_profile.get("willing_to_relocate") is not None:
-		lines.append(f"Willing to relocate: {'Yes' if resume_profile['willing_to_relocate'] else 'No'}")
-	if source := resume_profile.get("how_did_you_hear"):
-		lines.append(f"How did you hear about us: {source}")
+    # ── Languages ────────────────────────────────────────────────
+    languages = resume_profile.get("languages", [])
+    if languages:
+        lang_strs = [f"{l.get('language', '')} ({l.get('proficiency', '')})" for l in languages if l.get("language")]
+        if lang_strs:
+            lines.append(f"Languages: {', '.join(lang_strs)}")
 
-	# ── Open-ended answers ───────────────────────────────────────
-	for key, val in resume_profile.items():
-		if key.startswith("what_") or key.startswith("why_") or key.startswith("how_"):
-			if isinstance(val, str) and val.strip():
-				label = key.replace("_", " ").capitalize()
-				lines.append(f"{label}: {val}")
+    # ── Certifications ───────────────────────────────────────────
+    certs = resume_profile.get("certifications", [])
+    if certs:
+        cert_strs = [f"{c.get('name', '')} ({c.get('issuer', '')})" for c in certs if c.get("name")]
+        if cert_strs:
+            lines.append(f"Certifications: {', '.join(cert_strs)}")
 
-	if not lines:
-		return "No applicant profile provided."
+    # ── Work authorization / availability ────────────────────────
+    if wa := resume_profile.get("work_authorization"):
+        lines.append(f"Work authorization: {wa}")
+    if start := resume_profile.get("available_start_date"):
+        lines.append(f"Available start date: {start}")
+    if salary := resume_profile.get("salary_expectation"):
+        currency = resume_profile.get("salary_currency", "USD")
+        lines.append(f"Salary expectation: {salary} {currency}")
+    if resume_profile.get("willing_to_relocate") is not None:
+        lines.append(f"Willing to relocate: {'Yes' if resume_profile['willing_to_relocate'] else 'No'}")
+    if source := resume_profile.get("how_did_you_hear"):
+        lines.append(f"How did you hear about us: {source}")
 
-	return "\n".join(lines)
+    # ── Open-ended answers ───────────────────────────────────────
+    for key, val in resume_profile.items():
+        if key.startswith("what_") or key.startswith("why_") or key.startswith("how_"):
+            if isinstance(val, str) and val.strip():
+                label = key.replace("_", " ").capitalize()
+                lines.append(f"{label}: {val}")
+
+    if not lines:
+        return "No applicant profile provided."
+
+    return "\n".join(lines)
 
 
 def build_system_prompt(
-	resume_profile: dict,
-	platform: str = "generic",
+    resume_profile: dict,
+    platform: str = "generic",
 ) -> str:
-	"""Build the ``extend_system_message`` string for the browser-use Agent.
+    """Build the ``extend_system_message`` string for the browser-use Agent.
 
-	This prompt is **appended** to browser-use's native system prompt.  It
-	defines the agent's job-application role, the DomHand action preference
-	hierarchy, platform-specific guardrails, and the applicant profile.
+    This prompt is **appended** to browser-use's native system prompt.  It
+    defines the agent's job-application role, the DomHand action preference
+    hierarchy, platform-specific guardrails, and the applicant profile.
 
-	Parameters
-	----------
-	resume_profile:
-		Dict containing the applicant's parsed resume data (name, email,
-		experience, education, skills, etc.).
-	platform:
-		ATS identifier used to select platform-specific guardrails.
-		One of ``"workday"``, ``"greenhouse"``, ``"lever"``,
-		``"smartrecruiters"``, or ``"generic"`` (default).
+    Parameters
+    ----------
+    resume_profile:
+            Dict containing the applicant's parsed resume data (name, email,
+            experience, education, skills, etc.).
+    platform:
+            ATS identifier used to select platform-specific guardrails.
+            One of ``"workday"``, ``"greenhouse"``, ``"lever"``,
+            ``"smartrecruiters"``, or ``"generic"`` (default).
 
-	Returns
-	-------
-	str
-		The prompt extension string.
-	"""
-	guardrails = PLATFORM_GUARDRAILS.get(platform, PLATFORM_GUARDRAILS["generic"])
-	profile_summary = _format_profile_summary(resume_profile)
+    Returns
+    -------
+    str
+            The prompt extension string.
+    """
+    guardrails = PLATFORM_GUARDRAILS.get(platform, PLATFORM_GUARDRAILS["generic"])
+    profile_summary = _format_profile_summary(resume_profile)
 
-	prompt_parts: list[str] = [
-		# ── Role ────────────────────────────────────────────────────
-		"<ghosthands_role>",
-		"You are a job application automation agent.  Your job is to navigate",
-		"an ATS (Applicant Tracking System), fill out every form field, upload",
-		"the resume when prompted, and advance through each step of the",
-		"application flow — WITHOUT ever clicking the final submit button.",
-		"</ghosthands_role>",
-		"",
-		# ── DomHand action hierarchy ───────────────────────────────
-		"<domhand_actions>",
-		"You have access to DomHand actions that fill forms efficiently by",
-		"operating directly on the DOM.  ALWAYS prefer them over generic",
-		"click/input actions when filling forms:",
-		"",
-		"Action preference hierarchy (highest to lowest priority):",
-		"1. domhand_fill — Fills ALL visible form fields in one call for",
-		"   near-zero cost.  Try this FIRST whenever you see a form.",
-		"2. domhand_select — Selects dropdown/radio/checkbox options by",
-		"   label matching.  Use when domhand_fill reports unresolved",
-		"   select/radio/checkbox fields.",
-		"3. domhand_upload — Uploads the applicant's resume file.  Use",
-		"   when you see a file-upload input.",
-		"4. Generic browser-use actions (click, input_text, etc.) — Use",
-		"   ONLY as a fallback when DomHand actions fail, e.g. due to",
-		"   shadow DOM, custom widgets, or iframes that DomHand cannot",
-		"   reach.",
-		"",
-		"After calling domhand_fill, inspect its result to see which fields",
-		"were filled and which remain unresolved.  Handle unresolved fields",
-		"individually with domhand_select, generic input, or by skipping",
-		"optional fields the applicant profile does not cover.",
-		"</domhand_actions>",
-		"",
-		# ── Hard rules ─────────────────────────────────────────────
-		"<hard_rules>",
-		"- NEVER click any final 'Submit', 'Submit Application', 'Finish',",
-		"  or equivalent CTA.  When you reach a review page or the next",
-		"  action would be final submission, call done(success=True) and",
-		"  include any extracted confirmation data in the text.",
-		"- Leave optional fields empty when the applicant profile does not",
-		"  provide an explicit value.  Do NOT invent information.",
-		"- After filling a step, look for 'Next', 'Continue', or",
-		"  'Save & Continue' buttons and click them to advance.",
-		"- Prefer the smallest reversible action that advances the flow.",
-		"- If the page is ambiguous or unstable, wait one step before",
-		"  forcing a risky action.",
-		"</hard_rules>",
-		"",
-		# ── Blocker handling ───────────────────────────────────────
-		"<blocker_handling>",
-		"If you encounter any of the following blockers, call done immediately",
-		"with success=False and a descriptive text:",
-		"- CAPTCHA / turnstile / bot detection → done(success=False,",
-		"  text='blocker: CAPTCHA detected')",
-		"- Login wall requiring credentials you do not have →",
-		"  done(success=False, text='blocker: login required')",
-		"- 403 / access-denied / geo-blocked page →",
-		"  done(success=False, text='blocker: access denied')",
-		"- Application already submitted or position closed →",
-		"  done(success=False, text='blocker: position closed')",
-		"Do NOT retry blockers.  Report them and stop.",
-		"</blocker_handling>",
-		"",
-		# ── Multi-page flow guidance ──────────────────────────────
-		"<multi_page_flow>",
-		"Many ATS platforms split applications across multiple pages or",
-		"sections.  Follow this EXACT sequence on EVERY page transition:",
-		"",
-		"MANDATORY PAGE ENTRY SEQUENCE:",
-		"1. When you land on ANY new page or section, your VERY FIRST",
-		"   action MUST be domhand_fill.  No exceptions.  Do NOT use",
-		"   click or input_text before trying domhand_fill.",
-		"2. After domhand_fill completes, review its output for unresolved",
-		"   fields.  Handle them with domhand_select or generic actions.",
-		"3. Check for agreement checkboxes ('I agree', 'I accept', 'I",
-		"   understand', privacy policy consent, terms of service).  These",
-		"   are often missed by domhand_fill.  Click any unchecked agreement",
-		"   checkbox before proceeding.",
-		"4. Look for a 'Next' / 'Continue' / 'Save & Continue' button.",
-		"5. Click it to advance to the next section.",
-		"6. On the new page, go back to step 1 — domhand_fill FIRST.",
-		"",
-		"Repeat until you reach a review/confirmation page, then call",
-		"done(success=True).",
-		"</multi_page_flow>",
-		"",
-		# ── Review / completion detection ─────────────────────────
-		"<completion_detection>",
-		"- Review pages are usually read-only summaries with a visible final",
-		"  submit button and few or no editable fields → call done(success=True).",
-		"- Confirmation pages usually contain thank-you, submitted, received,",
-		"  or success language → call done(success=True).",
-		"- If you detect a review page, DO NOT click submit.  Just call done.",
-		"</completion_detection>",
-		"",
-		# ── Platform guardrails ───────────────────────────────────
-		"<platform_guardrails>",
-		f"Platform: {platform}",
-		guardrails,
-		"</platform_guardrails>",
-		"",
-		# ── Applicant profile ─────────────────────────────────────
-		"<applicant_profile>",
-		profile_summary,
-		"</applicant_profile>",
-	]
+    prompt_parts: list[str] = [
+        # ── Role ────────────────────────────────────────────────────
+        "<ghosthands_role>",
+        "You are a job application automation agent.  Your job is to navigate",
+        "an ATS (Applicant Tracking System), fill out every form field, upload",
+        "the resume when prompted, and advance through each step of the",
+        "application flow — WITHOUT ever clicking the final submit button.",
+        "</ghosthands_role>",
+        "",
+        # ── DomHand action hierarchy ───────────────────────────────
+        "<domhand_actions>",
+        "You have access to DomHand actions that fill forms efficiently by",
+        "operating directly on the DOM.  ALWAYS prefer them over generic",
+        "click/input actions when filling forms:",
+        "",
+        "Action preference hierarchy (highest to lowest priority):",
+        "1. domhand_fill — Fills ALL visible form fields in one call for",
+        "   near-zero cost.  Try this FIRST whenever you see a form.",
+        "2. domhand_assess_state — Classifies the page into advanceable,",
+        "   review, confirmation, or presubmit_single_page and reports",
+        "   unresolved required fields plus scroll bias. Use it before",
+        "   major scrolling, before clicking Next/Continue/Save, and before",
+        "   calling done().",
+        "3. domhand_close_popup — Dismisses blocking modals, newsletter",
+        "   prompts, promo dialogs, and interstitial overlays before you",
+        "   keep filling the form. Prefer this over blind Escape or",
+        "   coordinate clicks when the page is blocked by a popup.",
+        "4. domhand_select — Selects dropdown/radio/checkbox options by",
+        "   label matching.  Use when domhand_fill reports unresolved",
+        "   select/radio/checkbox fields.",
+        "5. domhand_upload — Uploads the applicant's resume file.  Use",
+        "   when you see a file-upload input.",
+        "6. Generic browser-use actions (click, input_text, etc.) — Use",
+        "   ONLY as a fallback when DomHand actions fail, e.g. due to",
+        "   shadow DOM, custom widgets, or iframes that DomHand cannot",
+        "   reach.",
+        "",
+        "After calling domhand_fill, inspect its result to see which fields",
+        "were filled and which remain unresolved.  Handle unresolved fields",
+        "individually with domhand_select, generic input, or by skipping",
+        "ONLY optional fields the applicant profile does not cover.",
+        "If an optional field is visible AND the applicant profile provides",
+        "a value (address, website, referral source, LinkedIn, etc.), you",
+        "SHOULD make a best-effort attempt to fill it only when the",
+        "field-to-profile mapping is high confidence.",
+        "</domhand_actions>",
+        "",
+        # ── Hard rules ─────────────────────────────────────────────
+        "<hard_rules>",
+        "- NEVER click any final 'Submit', 'Submit Application', 'Finish',",
+        "  or equivalent CTA.  When you reach a review page or the next",
+        "  action would be final submission, call done(success=True) and",
+        "  include any extracted confirmation data in the text.",
+        "- Leave optional fields empty when the applicant profile does not",
+        "  provide a value OR when the field-to-profile mapping is low",
+        "  confidence. Do NOT guess on optional fields.",
+        "- NEVER invent placeholder personal information such as 'John',",
+        "  'Doe', 'John Doe', fake emails, or fake addresses. Use the exact",
+        "  applicant identity from the profile. If it is missing, leave the",
+        "  field unresolved and continue or report a blocker.",
+        "- Every non-consent answer must come from the provided applicant",
+        "  profile. Do NOT infer missing applicant data from the page, the",
+        "  job description, common defaults, or model assumptions.",
+        "- If the applicant profile clearly provides the value and the match",
+        "  is high confidence, make a best-effort fill attempt for that",
+        "  optional field before advancing.",
+        "- If a popup, modal, newsletter prompt, promo interstitial, or",
+        "  dimmed overlay is blocking the form, call domhand_close_popup",
+        "  FIRST. Do NOT start with blind coordinate clicks while a DOM",
+        "  close path is still available.",
+        "- After filling a step, look for 'Next', 'Continue', or",
+        "  'Save & Continue' buttons and click them to advance.",
+        "- Prefer the smallest reversible action that advances the flow.",
+        "- On long or single-page forms, keep working near the current",
+        "  unresolved section and continue downward. Do NOT jump back to the",
+        "  top for reverification unless a specific earlier required field is",
+        "  visibly empty or invalid.",
+        "- If the page is ambiguous or unstable, wait one step before",
+        "  forcing a risky action.",
+        "</hard_rules>",
+        "",
+        "<reasoning_style>",
+        *build_compact_reasoning_lines(),
+        "</reasoning_style>",
+        "",
+        # ── Action batching rules ─────────────────────────────────
+        "<action_batching>",
+        "CRITICAL: Do NOT batch dropdown/select actions with navigation or",
+        "other actions.  Dropdown interactions MUST be their own step:",
+        "",
+        "- After clicking a dropdown option, STOP and observe the result.",
+        "  Workday dropdowns often reveal sub-options or sub-categories",
+        "  that require a second selection before the field is resolved.",
+        "- NEVER combine a dropdown click with 'Save and Continue',",
+        "  'Next', or any navigation button in the same step.",
+        "- After ANY dropdown interaction (click option, domhand_select),",
+        "  wait one step to verify the selection stuck and no sub-options",
+        "  appeared before proceeding to the next action.",
+        "- For phone country code or phone type dropdowns, if the first",
+        "  selection term fails, try close variants before giving up:",
+        "  'United States +1', 'United States', '+1', 'USA', 'US',",
+        "  'Mobile', and 'Cell' as appropriate.",
+        "- For stubborn checkbox/radio/button-style controls: if the same",
+        "  intended option still does not stick after 2 tries, STOP blind",
+        "  retries. Re-check which option is currently selected, click the",
+        "  currently selected option once to clear/reset stale state, then",
+        "  click the intended option again and verify the visible state",
+        "  changed before moving on.",
+        "- For text/date/search fields that visibly contain the value but",
+        "  still show validation errors, focus the field and press Enter",
+        "  or Tab to commit the value before continuing.",
+        "- Safe to batch in one step: multiple text input fills, or",
+        "  filling text + clicking a non-dropdown checkbox.",
+        "</action_batching>",
+        "",
+        # ── Blocker handling ───────────────────────────────────────
+        "<blocker_handling>",
+        "If you encounter any of the following blockers, call done immediately",
+        "with success=False and a descriptive text:",
+        "- CAPTCHA / turnstile / bot detection → done(success=False,",
+        "  text='blocker: CAPTCHA detected')",
+        "- Login wall requiring credentials you do not have →",
+        "  done(success=False, text='blocker: login required')",
+        "- 403 / access-denied / geo-blocked page →",
+        "  done(success=False, text='blocker: access denied')",
+        "- Application already submitted or position closed →",
+        "  done(success=False, text='blocker: position closed')",
+        "Do NOT retry blockers.  Report them and stop.",
+        "</blocker_handling>",
+        "",
+        # ── Multi-page flow guidance ──────────────────────────────
+        "<multi_page_flow>",
+        "Many ATS platforms split applications across multiple pages or",
+        "sections.  There are TWO page types with different sequences:",
+        "",
+        "AUTH PAGES (Create Account / Sign In):",
+        "These pages have email, password, and optionally confirm-password",
+        "fields.  Do NOT call domhand_fill on auth pages — it would use the",
+        "applicant profile email instead of the login credentials.",
+        "If credentials were provided for this run, they are available and",
+        "you MUST use them here. Do NOT claim 'blocker: login required' on",
+        "any page that visibly shows email/password fields when credentials",
+        "were provided.",
+        "Follow this sequence instead:",
+        "  1. Type the credential email into the Email field (input_text).",
+        "  2. Type the credential password into the Password field.",
+        "  3. If a Confirm Password field is visible, type password again.",
+        "  4. Call domhand_check_agreement to check any 'I agree' checkbox.",
+        "     This step is REQUIRED — the submit button will silently fail",
+        "     if the agreement checkbox is unchecked.",
+        "  5. VERIFY the checkbox is checked before proceeding.  If",
+        "     domhand_check_agreement reports no checkboxes found, look for",
+        "     a checkbox visually and click it manually.",
+        "  6. Only AFTER the checkbox is confirmed checked, use",
+        "     domhand_click_button to click 'Create Account' or 'Sign In'.",
+        "  7. Only report 'blocker: login required' if NO credentials were",
+        "     provided and you are stuck on an auth page.",
+        "",
+        "FORM PAGES (everything else):",
+        "  1. Your FIRST action MUST be domhand_fill.  Do NOT use click or",
+        "     input_text before trying domhand_fill.",
+        "  2. Immediately call domhand_assess_state to understand the active",
+        "     section, unresolved required fields, and scroll direction.",
+        "  3. Review domhand_fill output for unresolved fields.  Handle them",
+        "     with domhand_select or generic actions. Do this for required",
+        "     fields, and for optional fields only when the applicant",
+        "     profile maps to that field with high confidence.",
+        "  4. Check for agreement checkboxes and click any that are unchecked.",
+        "  5. Before scrolling away or clicking 'Next' / 'Continue' /",
+        "     'Save & Continue', call domhand_assess_state again and follow",
+        "     its scroll_bias and completion-state result.",
+        "  6. Click 'Next' / 'Continue' / 'Save & Continue' to advance when",
+        "     domhand_assess_state still says the page is advanceable.",
+        "  7. On the new page, determine if it's an auth page or form page",
+        "     and follow the appropriate sequence above.",
+        "",
+        "CRITICAL: If the page is in `advanceable`, you MUST click",
+        "Next / Continue / Save & Continue to advance.",
+        "Do NOT call done() while a real non-final advance step remains.",
+        "Use the completion-state model below to decide when to advance versus when to stop.",
+        "</multi_page_flow>",
+        "",
+        "<transition_waiting>",
+        "If the page looks blank, partially rendered, or still loading after",
+        "you click a start/continue button, WAIT 5-10 seconds before doing",
+        "anything else.",
+        "Never use navigate() to return to the original job URL as recovery",
+        "after you have already clicked into the application flow. Waiting",
+        "is the default recovery, not restarting.",
+        "</transition_waiting>",
+        "",
+        # ── Repeater sections (Work Experience, Education, etc.) ──
+        "<repeater_sections>",
+        "Work Experience, Education, and similar sections have 'Add' buttons",
+        "to create new entries.  Fill entries ONE AT A TIME with scoped data:",
+        "",
+        "  1. If the first empty entry is already visible, call domhand_fill",
+        "     with heading_boundary set to that entry heading and entry_data set",
+        "     to ONLY that single profile entry.",
+        "  2. For additional entries, call domhand_expand(section='Work Experience')",
+        "     or domhand_expand(section='Education') to reveal the next blank block.",
+        "  3. Immediately call domhand_fill with heading_boundary matching the",
+        "     new entry heading (for example 'Work Experience 2') and entry_data",
+        "     containing ONLY that one experience or education record.",
+        "  4. If domhand_expand fails, click the visible 'Add' or '+' button",
+        "     yourself, then call scoped domhand_fill for the new heading.",
+        "  5. Repeat steps 1-4 for each additional entry in the profile.",
+        "",
+        "Rules:",
+        "- The applicant profile lists how many entries to create.",
+        "  If it has 2 work experiences, expand and fill 2 entries.",
+        "- Fill each entry BEFORE expanding the next one.",
+        "- NEVER call bare domhand_fill for a repeater entry when there are",
+        "  already filled entries above it — always scope it with",
+        "  heading_boundary and entry_data.",
+        "- Example: domhand_fill(heading_boundary='Work Experience 2',",
+        "  entry_data={'title': '...', 'company': '...', 'start_date': '...'})",
+        "  fills only that second entry instead of the entire page.",
+        "- NEVER delete a filled entry.",
+        "</repeater_sections>",
+        "",
+        # ── Dropdown fallback guidance ────────────────────────────
+        "<dropdown_fallback>",
+        "For searchable or multi-layer dropdowns, selection may take",
+        "multiple actions.  Do NOT assume one click is enough.",
+        "- After opening the dropdown, type the target value or a shorter",
+        "  search term, then WAIT 2-3 seconds for the list to update.",
+        "- If a category is selected and a second list appears, keep going",
+        "  until you click the final leaf option.  Do NOT navigate away",
+        "  after the first click in a multi-layer dropdown.",
+        "- Source/referral fields such as 'How Did You Hear About Us?' are",
+        "  dropdowns even when they look like text inputs. Typing a value or",
+        "  clicking a parent category is NOT enough; you must click the final",
+        "  leaf option that matches the applicant profile value.",
+        "- Example: if the applicant profile says LinkedIn and the first menu",
+        "  shows a parent option like 'Job Board/Social Media Web Site', click",
+        "  that parent, WAIT for the next menu, then click the final leaf such",
+        "  as 'LinkedIn'. Only the final leaf clears the validation error.",
+        "- After clicking an option, verify the field text changed or the",
+        "  validation error cleared before clicking Save/Continue.",
+        "- Do NOT click a dropdown option and then Save/Continue in the same",
+        "  action batch. After any option click, WAIT briefly and re-evaluate",
+        "  before the next click.",
+        "- NEVER click Save/Continue immediately after the first dropdown",
+        "  click when the widget still looks open or the field still looks",
+        "  empty.",
+        *build_domhand_select_failover_lines(),
+        "</dropdown_fallback>",
+        "",
+        # ── Review / completion detection ─────────────────────────
+        "<completion_detection>",
+        *build_completion_detection_lines(platform),
+        "</completion_detection>",
+        "",
+        # ── Platform guardrails ───────────────────────────────────
+        "<platform_guardrails>",
+        f"Platform: {platform}",
+        guardrails,
+        "</platform_guardrails>",
+        "",
+        # ── Applicant profile ─────────────────────────────────────
+        "<applicant_profile>",
+        profile_summary,
+        "</applicant_profile>",
+    ]
 
-	return "\n".join(prompt_parts)
+    return "\n".join(prompt_parts)
 
 
 def build_task_prompt(
-	job_url: str,
-	resume_path: str,
-	sensitive_data: dict | None,
+    job_url: str,
+    resume_path: str,
+    sensitive_data: dict | None,
 ) -> str:
-	"""Build the task prompt for the agent."""
-	task = (
-		f"Go to {job_url} and fill out the job application form completely.\n"
-		"\n"
-		"CRITICAL -- Action Order:\n"
-		"1. After navigating to the page, your FIRST action MUST be domhand_fill.\n"
-		"2. After domhand_fill completes, review its output to see which fields were filled and which failed.\n"
-		"3. For failed dropdowns/selects, use domhand_select.\n"
-		f"4. For file uploads (resume), use domhand_upload or upload_file action with path: {resume_path}\n"
-		"5. Only use generic browser-use actions (click, input_text) as a LAST RESORT.\n"
-		"6. After all fields on the current page are filled, click Next/Continue/Save to advance.\n"
-		"7. On each new page, call domhand_fill AGAIN as the first action.\n"
-		"\n"
-		"Other rules:\n"
-	)
-	if sensitive_data:
-		task += (
-			"- Use the provided credentials to log in or create an account if needed. "
-			"For Workday, fill email + password + confirm password on the Create Account page.\n"
-		)
-	else:
-		task += "- If a login wall appears, report it as a blocker.\n"
-	task += (
-		"- Do NOT click the final Submit button. Stop at the review page and use the done action.\n"
-		"- If anything pops up blocking the form, close it and continue.\n"
-	)
-	return task
+    """Build the task prompt for the agent."""
+    task = (
+        f"Go to {job_url} and fill out the job application form completely.\n"
+        "\n"
+        "CRITICAL -- Action Order:\n"
+        "1. After navigating to the page, your FIRST action MUST be domhand_fill.\n"
+        "2. After domhand_fill completes, review its output to see which fields were filled and which failed.\n"
+        "3. For failed dropdowns/selects, use domhand_select.\n"
+        f"4. For file uploads (resume), use domhand_upload or upload_file action with path: {resume_path}\n"
+        "5. Only use generic browser-use actions (click, input_text) as a LAST RESORT.\n"
+        "6. After all fields on the current page are filled, click Next/Continue/Save to advance.\n"
+        "7. On each new page, call domhand_fill AGAIN as the first action.\n"
+        "\n"
+        "Other rules:\n"
+    )
+    if sensitive_data:
+        task += (
+            "- Use the provided credentials to log in or create an account if needed. "
+            "For Workday, fill email + password + confirm password on the Create Account page.\n"
+        )
+    else:
+        task += "- If a login wall appears, report it as a blocker.\n"
+    task += (
+        "- Do NOT click the final Submit button. Stop at the review page and use the done action.\n"
+        "- If anything pops up blocking the form, close it and continue.\n"
+    )
+    return task

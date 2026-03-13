@@ -62,8 +62,9 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 # Suppress browser-use's own logging setup so we control stderr exclusively
 os.environ["BROWSER_USE_SETUP_LOGGING"] = "false"
 
-logger = structlog.get_logger()
+from ghosthands.agent.hooks import install_same_tab_guard
 
+logger = structlog.get_logger()
 
 # ── Argument parsing ──────────────────────────────────────────────────
 
@@ -209,6 +210,7 @@ def _apply_runtime_env(
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = args.browsers_path
 
     os.environ["GH_USER_PROFILE_TEXT"] = json.dumps(profile, indent=2)
+    os.environ["GH_USER_PROFILE_JSON"] = json.dumps(profile)
 
     resume_path = str(Path(args.resume).resolve()) if args.resume else ""
     if resume_path:
@@ -579,7 +581,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
         emit_status("Connecting to Desktop-owned browser via CDP", job_id=job_id)
     else:
-        browser_profile = BrowserProfile(headless=args.headless, keep_alive=True, allowed_domains=allowed_domains)
+        browser_profile = BrowserProfile(
+            headless=args.headless,
+            keep_alive=True,
+            allowed_domains=allowed_domains,
+            aboutblank_loading_logo_enabled=True,
+            demo_mode=False,
+            interaction_highlight_color="rgb(37, 99, 235)",
+        )
         browser = BrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
@@ -598,6 +607,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     async def _on_step_start(ag: Agent) -> None:
         from ghosthands.agent.hooks import infer_phase_from_goal
 
+        await install_same_tab_guard(ag)
         step = ag.state.n_steps
         goal = ""
         if ag.state.last_model_output:
@@ -869,7 +879,13 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
         print(f"Connecting to Desktop-owned browser via CDP: {cdp_url}")
     else:
-        browser_profile = BrowserProfile(headless=args.headless, keep_alive=True)
+        browser_profile = BrowserProfile(
+            headless=args.headless,
+            keep_alive=True,
+            aboutblank_loading_logo_enabled=True,
+            demo_mode=False,
+            interaction_highlight_color="rgb(37, 99, 235)",
+        )
         browser = BrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
