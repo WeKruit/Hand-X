@@ -135,9 +135,11 @@ fi
 echo ""
 echo "Smoke testing binary..."
 chmod +x "$BUILD_BINARY"
-# Remove macOS quarantine from build output (Gatekeeper kills unsigned binaries)
+# Remove macOS quarantine + provenance (Gatekeeper kills unsigned binaries)
 if [ "$PLATFORM" = "darwin" ]; then
-  xattr -d com.apple.quarantine "$BUILD_BINARY" 2>/dev/null || true
+  xattr -cr "$BUILD_BINARY" 2>/dev/null || true
+  # Re-sign adhoc after stripping xattrs
+  codesign --force --sign - "$BUILD_BINARY" 2>/dev/null || true
 fi
 if "$BUILD_BINARY" --help >/dev/null 2>&1; then
   echo "  --help: OK"
@@ -180,9 +182,10 @@ fi
 cat "$BUILD_BINARY" > "$BINARY_DEST"
 chmod 755 "$BINARY_DEST"
 
-# Remove macOS quarantine + provenance if they snuck in
+# Remove macOS quarantine + provenance, re-sign adhoc
 if [ "$PLATFORM" = "darwin" ]; then
   xattr -cr "$BINARY_DEST" 2>/dev/null || true
+  codesign --force --sign - "$BINARY_DEST" 2>/dev/null || true
 fi
 
 # Write version state (Desktop checks this)
