@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from typing import IO, Any
 
@@ -57,25 +58,43 @@ def _get_output() -> IO[str]:
 
 # ── Core emitter ──────────────────────────────────────────────────────
 
+_emit_lock = threading.Lock()
+_pipe_broken = False
+
 
 def emit_event(event_type: str, **kwargs: Any) -> None:
     """Emit a single JSONL event.
 
-    Every event gets ``type`` and ``timestamp``.  All other fields are
+    Every event gets ``event`` and ``timestamp``.  All other fields are
     passed through as keyword arguments -- ``None`` values are omitted
     to keep the wire format compact.
     """
+    global _pipe_broken
+    if _pipe_broken:
+        if event_type in ("done", "error"):
+            print(
+                f"WARNING: JSONL pipe broken — suppressed critical event '{event_type}'",
+                file=sys.stderr,
+            )
+        return
+
     event: dict[str, Any] = {
-        "type": event_type,
+        "event": event_type,
         "timestamp": int(time.time() * 1000),
     }
     for key, value in kwargs.items():
         if value is not None:
             event[key] = value
 
-    out = _get_output()
-    out.write(json.dumps(event, separators=(",", ":")) + "\n")
-    out.flush()
+    line = json.dumps(event, separators=(",", ":")) + "\n"
+    with _emit_lock:
+        try:
+            out = _get_output()
+            out.write(line)
+            out.flush()
+        except (BrokenPipeError, OSError):
+            _pipe_broken = True
+            print("JSONL pipe broken — further events will be suppressed", file=sys.stderr)
 
 
 # ── Typed convenience emitters ────────────────────────────────────────
@@ -98,6 +117,11 @@ def emit_status(
     )
 
 
+def emit_phase(phase: str, detail: str | None = None) -> None:
+    """Emit a high-level progress phase for user display."""
+    emit_event("phase", phase=phase, detail=detail)
+
+
 def emit_field_filled(
     field: str,
     value: str,
@@ -110,20 +134,20 @@ def emit_field_filled(
 
 def emit_field_failed(
     field: str,
-    error: str,
+    reason: str,
 ) -> None:
     """Emit when a field fill attempt fails."""
-    emit_event("field_failed", field=field, error=error)
+    emit_event("field_failed", field=field, reason=reason)
 
 
 def emit_progress(
-    filled: int,
-    total: int,
+    step: int,
+    max_steps: int,
     *,
-    round: int = 1,
+    description: str = "",
 ) -> None:
-    """Emit a progress snapshot (fields filled so far)."""
-    emit_event("progress", filled=filled, total=total, round=round)
+    """Emit a progress snapshot."""
+    emit_event("progress", step=step, maxSteps=max_steps, description=description)
 
 
 def emit_done(
@@ -131,6 +155,7 @@ def emit_done(
     message: str,
     *,
     fields_filled: int = 0,
+    fields_failed: int = 0,
     job_id: str = "",
     lease_id: str = "",
     result_data: dict[str, Any] | None = None,
@@ -141,6 +166,7 @@ def emit_done(
         success=success,
         message=message,
         fields_filled=fields_filled,
+        fields_failed=fields_failed,
         jobId=job_id or None,
         leaseId=lease_id or None,
         resultData=result_data,
@@ -152,6 +178,7 @@ def emit_error(
     *,
     fatal: bool = False,
     job_id: str = "",
+    code: str | None = None,
 ) -> None:
     """Emit an error event."""
     emit_event(
@@ -159,6 +186,7 @@ def emit_error(
         message=message,
         fatal=fatal,
         jobId=job_id or None,
+        code=code,
     )
 
 
@@ -175,3 +203,53 @@ def emit_cost(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
     )
+
+
+def emit_browser_ready(cdp_url: str) -> None:
+    """Emit browser_ready event with CDP WebSocket URL."""
+    emit_event("browser_ready", cdpUrl=cdp_url)
+
+
+def emit_account_created(
+    platform: str,
+    email: str,
+    password: str,
+    *,
+    url: str = "",
+) -> None:
+    """Emit when a new ATS platform account is created during automation.
+
+    The Desktop app stores the credentials from this IPC payload directly,
+    so the plaintext password must be included alongside the legacy
+    ``password_provided`` flag.
+    """
+    emit_event(
+        "account_created",
+        platform=platform,
+        email=email,
+        password=password,
+        password_provided=True,
+        url=url or None,
+    )
+
+
+def emit_awaiting_review(
+    message: str = (
+        "We've filled out your application. Please review the form in the browser "
+        "window, verify all fields are correct, then click Submit in the app."
+    ),
+    cdp_url: str | None = None,
+    page_url: str | None = None,
+) -> None:
+    """Emit awaiting_review event when browser is open for user review."""
+    emit_event("awaiting_review", message=message, cdpUrl=cdp_url, pageUrl=page_url)
+
+
+# ── Protocol handshake ───────────────────────────────────────────────
+
+PROTOCOL_VERSION = 1
+
+
+def emit_handshake() -> None:
+    """Emit protocol version handshake as the first JSONL event."""
+    emit_event("handshake", protocol_version=PROTOCOL_VERSION, min_desktop_version="0.1.0")
