@@ -220,8 +220,10 @@ WEBGL_PATCH = """\
 
 IFRAME_CONTENTWINDOW_PATCH = """\
 (() => {
-  // Patch iframe contentWindow to avoid returning null for cross-origin iframes
-  // (bot detectors check whether contentWindow is accessible)
+  // Patch iframe contentWindow for cross-origin iframes.
+  // Bot detectors check whether contentWindow is accessible.  When null
+  // (cross-origin), return null -- never return the parent window as that
+  // would let arbitrary code operate on the wrong browsing context.
   try {
     const descriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
     if (descriptor && descriptor.get) {
@@ -230,8 +232,7 @@ IFRAME_CONTENTWINDOW_PATCH = """\
         get: function () {
           const result = originalGetter.call(this);
           if (result === null) {
-            // Return a minimal proxy that looks like a real window
-            return window;
+            return null;
           }
           return result;
         },
