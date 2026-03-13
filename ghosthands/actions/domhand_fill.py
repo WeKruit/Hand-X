@@ -2288,7 +2288,11 @@ def _sanitize_no_guess_answer(
     proposed = (answer or "").strip()
 
     # ── [NEEDS_USER_INPUT] passthrough ────────────────────────────────
-    if proposed and "[NEEDS_USER_INPUT]" in proposed:
+    if proposed and "[NEEDS_USER_INPUT]" in proposed.upper():
+        if not required:
+            # LLM should not emit this marker for optional fields; treat as
+            # empty so the field is simply skipped.
+            return ""
         from ghosthands.output.jsonl import emit_event
 
         emit_event(
@@ -2805,6 +2809,34 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 r"^(n/?a|na|none|not applicable|unknown|placeholder)$", matched_answer.strip(), re.IGNORECASE
             ):
                 matched_answer = ""
+            # [NEEDS_USER_INPUT] marker — event was already emitted by
+            # _sanitize_no_guess_answer; skip the field instead of typing
+            # the literal marker string into the form.
+            if matched_answer and "[NEEDS_USER_INPUT]" in matched_answer:
+                key = get_stable_field_key(f)
+                fr = FillFieldResult(
+                    field_id=f.field_id,
+                    name=_preferred_field_label(f),
+                    success=False,
+                    actor="skipped",
+                    error="Needs user input",
+                    required=f.required,
+                    control_kind=f.field_type,
+                    section=f.section or "",
+                    failure_reason="needs_user_input",
+                    takeover_suggestion=_takeover_suggestion_for_field(
+                        f,
+                        False,
+                        "skipped",
+                        "Needs user input",
+                    ),
+                )
+                all_results.append(fr)
+                if _on_field_result:
+                    _on_field_result(fr, round_num)
+                fields_seen.add(key)
+                fields_skipped.add(key)
+                continue
             if not matched_answer:
                 key = get_stable_field_key(f)
                 error_msg = "No confident profile match for this field"
