@@ -3588,9 +3588,7 @@ async def _fill_toggle(page: Any, field: FormField, value: str, tag: str) -> boo
 
 
 def _get_profile_text() -> str | None:
-    text = os.environ.get("GH_USER_PROFILE_TEXT", "")
-    if text.strip():
-        return text.strip()
+    # Prefer file-based path (secure, avoids /proc/pid/environ exposure)
     path = os.environ.get("GH_USER_PROFILE_PATH", "")
     if path:
         try:
@@ -3601,11 +3599,30 @@ def _get_profile_text() -> str | None:
                 return p.read_text(encoding="utf-8").strip()
         except Exception as e:
             logger.warning(f"Failed to read profile from {path}: {e}")
+    # Fallback to env var for backwards compat (desktop bridge)
+    text = os.environ.get("GH_USER_PROFILE_TEXT", "")
+    if text.strip():
+        return text.strip()
     return None
 
 
 def _get_profile_data() -> dict[str, Any]:
     """Return structured applicant profile data when available."""
+    # Prefer file-based path (secure, avoids /proc/pid/environ exposure)
+    path = os.environ.get("GH_USER_PROFILE_PATH", "")
+    if path:
+        try:
+            import pathlib
+
+            p = pathlib.Path(path)
+            if p.is_file():
+                parsed = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(parsed, dict):
+                    return parsed
+        except Exception as e:
+            logger.warning(f"Failed to parse profile JSON from {path}: {e}")
+
+    # Fallback to env vars for backwards compat
     raw_json = os.environ.get("GH_USER_PROFILE_JSON", "")
     if raw_json.strip():
         try:
@@ -3623,18 +3640,5 @@ def _get_profile_data() -> dict[str, Any]:
                 return parsed
         except Exception:
             pass
-
-    path = os.environ.get("GH_USER_PROFILE_PATH", "")
-    if path:
-        try:
-            import pathlib
-
-            p = pathlib.Path(path)
-            if p.is_file():
-                parsed = json.loads(p.read_text(encoding="utf-8"))
-                if isinstance(parsed, dict):
-                    return parsed
-        except Exception as e:
-            logger.warning(f"Failed to parse profile JSON from {path}: {e}")
 
     return {}
