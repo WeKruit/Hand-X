@@ -107,6 +107,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--proxy-url", default=None, help="VALET LLM proxy URL")
     parser.add_argument("--runtime-grant", default=None, help="VALET runtime grant token")
 
+    # Security
+    parser.add_argument(
+        "--allowed-domains",
+        type=str,
+        default=None,
+        help="Comma-separated list of additional allowed domains",
+    )
+
     # Playwright
     parser.add_argument("--browsers-path", default=None, help="Path to Playwright browser binaries")
 
@@ -116,6 +124,14 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Connect to an existing browser via CDP URL instead of launching a new one (Desktop-owned browser mode)",
+    )
+
+    # Browser engine
+    parser.add_argument(
+        "--engine",
+        choices=["chromium", "firefox", "auto"],
+        default="auto",
+        help="Browser engine to use: chromium, firefox (Camoufox), or auto (route-based selection, default)",
     )
 
     return parser.parse_args(argv)
@@ -565,10 +581,34 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     sensitive_data = _resolve_sensitive_data(app_settings, embedded_credentials, platform=platform)
 
     # -- Domain lockdown ----------------------------------------------------
-    from ghosthands.security.domain_lockdown import DomainLockdown
+    from ghosthands.security.domain_lockdown import create_lockdown_for_platform
 
-    lockdown = DomainLockdown(job_url=args.job_url, platform=platform)
+    additional_domains: list[str] | None = None
+    if args.allowed_domains:
+        additional_domains = [d.strip() for d in args.allowed_domains.split(",") if d.strip()]
+
+    lockdown = create_lockdown_for_platform(
+        job_url=args.job_url,
+        platform=platform,
+        additional_domains=additional_domains,
+    )
     allowed_domains = lockdown.get_allowed_domains()
+
+    # -- Engine selection ---------------------------------------------------
+    engine = args.engine
+    if engine == "auto":
+        from browser_use.browser.providers.route_selector import RouteSelector
+
+        engine = RouteSelector.select_engine(args.job_url, platform)
+        emit_status(f"Auto-selected browser engine: {engine}", job_id=job_id)
+
+    # TODO: wire CamoufoxProvider when ready
+    if engine == "firefox":
+        emit_status(
+            "Firefox/Camoufox engine is not yet wired — falling back to chromium",
+            job_id=job_id,
+        )
+        engine = "chromium"
 
     # -- Browser ------------------------------------------------------------
     cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
@@ -577,7 +617,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     if cdp_url:
         # Desktop-owned browser: connect to existing browser via CDP URL.
         # Do not launch a new browser; headless flag is irrelevant here.
-        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains)
+        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains, engine=engine)
         browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
         emit_status("Connecting to Desktop-owned browser via CDP", job_id=job_id)
     else:
@@ -588,6 +628,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             aboutblank_loading_logo_enabled=True,
             demo_mode=False,
             interaction_highlight_color="rgb(37, 99, 235)",
+            engine=engine,
         )
         browser = BrowserSession(browser_profile=browser_profile)
 
@@ -870,12 +911,39 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     # -- Credentials --------------------------------------------------------
     sensitive_data = _resolve_sensitive_data(app_settings, embedded_credentials, platform=platform)
 
+    # -- Domain lockdown ----------------------------------------------------
+    from ghosthands.security.domain_lockdown import create_lockdown_for_platform
+
+    additional_domains: list[str] | None = None
+    if args.allowed_domains:
+        additional_domains = [d.strip() for d in args.allowed_domains.split(",") if d.strip()]
+
+    lockdown = create_lockdown_for_platform(
+        job_url=args.job_url,
+        platform=platform,
+        additional_domains=additional_domains,
+    )
+    allowed_domains = lockdown.get_allowed_domains()
+
+    # -- Engine selection ---------------------------------------------------
+    engine = args.engine
+    if engine == "auto":
+        from browser_use.browser.providers.route_selector import RouteSelector
+
+        engine = RouteSelector.select_engine(args.job_url, platform)
+        print(f"Auto-selected browser engine: {engine}")
+
+    # TODO: wire CamoufoxProvider when ready
+    if engine == "firefox":
+        print("WARNING: Firefox/Camoufox engine is not yet wired — falling back to chromium")
+        engine = "chromium"
+
     # -- Browser ------------------------------------------------------------
     cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
     desktop_owns_browser = cdp_url is not None
 
     if cdp_url:
-        browser_profile = BrowserProfile(keep_alive=True)
+        browser_profile = BrowserProfile(keep_alive=True, engine=engine)
         browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
         print(f"Connecting to Desktop-owned browser via CDP: {cdp_url}")
     else:
@@ -885,6 +953,8 @@ async def run_agent_human(args: argparse.Namespace) -> None:
             aboutblank_loading_logo_enabled=True,
             demo_mode=False,
             interaction_highlight_color="rgb(37, 99, 235)",
+            allowed_domains=allowed_domains,
+            engine=engine,
         )
         browser = BrowserSession(browser_profile=browser_profile)
 
@@ -917,6 +987,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     print(f"  Resume:    {resume_path or '(none)'}")
     print(f"  Headless:  {args.headless}")
     print(f"  CDP URL:   {cdp_url or '(launching own browser)'}")
+    print(f"  Engine:    {engine}")
     print(f"  Max steps: {args.max_steps}")
     proxy_url = os.environ.get("GH_LLM_PROXY_URL", "")
     print(f"  LLM:       {'Proxy: ' + proxy_url if proxy_url else 'Direct API'}")
