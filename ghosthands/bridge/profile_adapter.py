@@ -27,9 +27,9 @@ DOMHAND_PROFILE_DEFAULTS: dict[str, Any] = {
     "work_authorization": "Yes",
     "visa_sponsorship": "No",
     "veteran_status": "I am not a protected veteran",
-    "disability_status": "No, I Don't Have A Disability",
-    "gender": "Male",
-    "race_ethnicity": "Asian (Not Hispanic or Latino)",
+    "disability_status": "Prefer Not To Answer",
+    "gender": "Decline to Self Identify",
+    "race_ethnicity": "Decline to Self Identify",
 }
 
 # Demographic / sensitive fields that warrant a user-visible warning when
