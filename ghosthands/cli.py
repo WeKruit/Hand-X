@@ -799,6 +799,10 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 lease_id=lease_id,
                 result_data=result_data,
             )
+            # Clean up browser after review (wait_for_review_command no longer
+            # does this — ownership-aware cleanup belongs here in cli.py)
+            with contextlib.suppress(Exception):
+                await _cleanup_browser(browser, desktop_owns_browser)
             if exit_code is not None:
                 sys.exit(exit_code)
         else:

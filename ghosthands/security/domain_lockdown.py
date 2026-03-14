@@ -91,7 +91,7 @@ RESOURCE_ALLOWLIST: list[str] = [
 	"unpkg.com",
 	"googletagmanager.com",
 	"google-analytics.com",
-	"google.com",
+	"www.google.com",
 	"gstatic.com",
 	"recaptcha.net",
 	"hcaptcha.com",
