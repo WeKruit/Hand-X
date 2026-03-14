@@ -748,20 +748,25 @@ def build_task_prompt(
         f"Go to {job_url} and fill out the job application form completely.\n"
         "\n"
         "CRITICAL -- Action Order:\n"
-        "1. After navigating to the page, your FIRST action MUST be domhand_fill.\n"
-        "2. After domhand_fill completes, review its output to see which fields were filled and which failed.\n"
-        "3. For failed dropdowns/selects, use domhand_select.\n"
-        f"4. For file uploads (resume), use domhand_upload or upload_file action with path: {resume_path}\n"
-        "5. Only use generic browser-use actions (click, input_text) as a LAST RESORT.\n"
-        "6. After all fields on the current page are filled, click Next/Continue/Save to advance.\n"
-        "7. On each new page, call domhand_fill AGAIN as the first action.\n"
+        "1. After navigating to the page, LOOK for an 'Easy Apply' section or\n"
+        "   a resume upload area at the top of the form. If present, upload the\n"
+        f"   resume FIRST using domhand_upload with path: {resume_path}\n"
+        "   Easy Apply with resume upload is ALWAYS the preferred path — it\n"
+        "   auto-fills many fields and shortens the application.\n"
+        "2. Then call domhand_fill to fill remaining visible form fields.\n"
+        "3. After domhand_fill completes, review its output to see which fields were filled and which failed.\n"
+        "4. For failed dropdowns/selects, use domhand_select.\n"
+        f"5. For other file uploads, use domhand_upload with path: {resume_path}\n"
+        "6. Only use generic browser-use actions (click, input_text) as a LAST RESORT.\n"
+        "7. After all fields on the current page are filled, click Next/Continue/Save to advance.\n"
+        "8. On each new page, repeat from step 1 (check for Easy Apply / resume upload first).\n"
         "\n"
         "Other rules:\n"
     )
     if sensitive_data:
         task += (
             "- Use the provided credentials to log in or create an account if needed. "
-            "For Workday, fill email + password + confirm password on the Create Account page.\n"
+            "Fill email + password (+ confirm password if visible) on auth pages.\n"
         )
     else:
         task += "- If a login wall appears, report it as a blocker.\n"
