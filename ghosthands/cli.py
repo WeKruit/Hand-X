@@ -196,19 +196,19 @@ def _load_profile(args: argparse.Namespace) -> dict:
         except Exception:
             return _validate_profile(data)
 
-    # Environment variable fallback (for desktop bridge)
-    profile_text = os.environ.get("GH_USER_PROFILE_TEXT", "")
-    if profile_text:
-        return _validate_profile(json.loads(profile_text))
-
-    # File-based profile fallback
+    # File-based profile (preferred — avoids /proc/pid/environ exposure)
     profile_path = os.environ.get("GH_USER_PROFILE_PATH", "")
     if profile_path:
         p = Path(profile_path)
         if p.is_file():
             return _validate_profile(json.loads(p.read_text(encoding="utf-8")))
 
-    raise ValueError("Either --profile, --test-data, or GH_USER_PROFILE_TEXT env var is required")
+    # Environment variable fallback (for backwards compat with desktop bridge)
+    profile_text = os.environ.get("GH_USER_PROFILE_TEXT", "")
+    if profile_text:
+        return _validate_profile(json.loads(profile_text))
+
+    raise ValueError("Either --profile, --test-data, GH_USER_PROFILE_PATH, or GH_USER_PROFILE_TEXT env var is required")
 
 
 def _apply_runtime_env(
