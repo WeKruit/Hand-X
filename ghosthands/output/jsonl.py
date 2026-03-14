@@ -57,6 +57,8 @@ def _get_output() -> IO[str]:
 
 
 # ── Core emitter ──────────────────────────────────────────────────────
+_emit_lock = threading.Lock()
+_pipe_broken = False
 
 _emit_lock = threading.Lock()
 _pipe_broken = False
@@ -253,3 +255,21 @@ PROTOCOL_VERSION = 1
 def emit_handshake() -> None:
     """Emit protocol version handshake as the first JSONL event."""
     emit_event("handshake", protocol_version=PROTOCOL_VERSION, min_desktop_version="0.1.0")
+
+
+# ── Lease protocol events ────────────────────────────────────────────
+
+
+def emit_lease_acquired(lease_id: str, job_id: str = "") -> None:
+    """Emit when a lease is acquired from the Desktop app."""
+    emit_event("lease_acquired", leaseId=lease_id, jobId=job_id or None)
+
+
+def emit_lease_released(lease_id: str, reason: str = "completed") -> None:
+    """Emit when a lease is released (agent done or cancelled)."""
+    emit_event("lease_released", leaseId=lease_id, reason=reason)
+
+
+def emit_lease_heartbeat(lease_id: str) -> None:
+    """Emit periodic lease heartbeat to indicate the process is alive."""
+    emit_event("lease_heartbeat", leaseId=lease_id)

@@ -169,11 +169,11 @@ Parse each stdout line as JSON and map to the desktop app's `ProgressEvent` inte
 
 **Hand-X JSONL events** (from `ghosthands/output/jsonl.py`):
 
-| Hand-X Event Type | Desktop ProgressEvent Type | Notes |
-|-------------------|--------------------------|-------|
+| Hand-X `event` value | Desktop ProgressEvent Type | Notes |
+|----------------------|--------------------------|-------|
 | `status` | `status` | Direct map. `message` field passes through. |
 | `field_filled` | `action` | Map to `message: "Filled: {field} = {value}"` |
-| `field_failed` | `action` | Map to `message: "Failed: {field} — {error}"` |
+| `field_failed` | `action` | Map to `message: "Failed: {field} — {reason}"` |
 | `progress` | `status` | Map to `message: "Filled {filled}/{total} fields (round {round})"` |
 | `done` | `complete` | Map `success` → message. Set `runSnapshot` from accumulated cost. |
 | `error` | `error` | Direct map. `fatal` field → stop process. |
@@ -183,22 +183,22 @@ Parse each stdout line as JSON and map to the desktop app's `ProgressEvent` inte
 ```typescript
 function parseHandXEvent(line: string): ProgressEvent | null {
   try {
-    const event = JSON.parse(line);
-    switch (event.type) {
+    const raw = JSON.parse(line);
+    switch (raw.event) {
       case 'status':
-        return { type: 'status', message: event.message, timestamp: event.timestamp };
+        return { type: 'status', message: raw.message, timestamp: raw.timestamp };
       case 'field_filled':
-        return { type: 'action', message: `Filled: ${event.field} = ${event.value}`, timestamp: event.timestamp };
+        return { type: 'action', message: `Filled: ${raw.field} = ${raw.value}`, timestamp: raw.timestamp };
       case 'field_failed':
-        return { type: 'action', message: `Failed: ${event.field} — ${event.error}`, timestamp: event.timestamp };
+        return { type: 'action', message: `Failed: ${raw.field} — ${raw.reason}`, timestamp: raw.timestamp };
       case 'progress':
-        return { type: 'status', message: `Filled ${event.filled}/${event.total} fields`, timestamp: event.timestamp };
+        return { type: 'status', message: `Filled ${raw.filled}/${raw.total} fields`, timestamp: raw.timestamp };
       case 'done':
-        return { type: 'complete', message: event.message, timestamp: event.timestamp };
+        return { type: 'complete', message: raw.message, timestamp: raw.timestamp };
       case 'error':
-        return { type: 'error', message: event.message, timestamp: event.timestamp };
+        return { type: 'error', message: raw.message, timestamp: raw.timestamp };
       case 'cost':
-        return { type: 'status', message: `Cost: $${event.total_usd.toFixed(4)}`, timestamp: event.timestamp };
+        return { type: 'status', message: `Cost: $${raw.total_usd.toFixed(4)}`, timestamp: raw.timestamp };
       default:
         return null;
     }
@@ -244,7 +244,7 @@ function buildLocalRunSnapshot(state: RunningCostState, workflowRunId: string): 
 **Cancel a running job:**
 ```typescript
 // Write cancel command to Hand-X stdin
-handXProcess.stdin.write(JSON.stringify({ type: 'cancel' }) + '\n');
+handXProcess.stdin.write(JSON.stringify({ event: 'cancel' }) + '\n');
 
 // If process doesn't exit within 5s, SIGTERM
 setTimeout(() => {
@@ -267,7 +267,7 @@ async def _listen_for_commands(proc: asyncio.subprocess.Process) -> None:
         if not line:
             break
         cmd = json.loads(line.decode())
-        if cmd.get("type") == "cancel":
+        if cmd.get("event") == "cancel":
             # Signal the agent to stop
             raise KeyboardInterrupt
 ```
@@ -287,7 +287,7 @@ async def _listen_for_commands(proc: asyncio.subprocess.Process) -> None:
 
 **Required Hand-X JSONL event:**
 ```json
-{"type": "browser_ready", "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/...", "timestamp": 1710000000000}
+{"event": "browser_ready", "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/...", "timestamp": 1710000000000}
 ```
 
 **Required Hand-X change:** Emit `browser_ready` event after browser launches with the CDP WebSocket URL.
@@ -423,18 +423,21 @@ After the bridge is verified working:
 
 ```typescript
 // Events emitted by Hand-X on stdout (one JSON object per line)
+// NOTE: the wire key is "event", not "type".  "field_failed" uses "reason", not "error".
 type HandXEvent =
-  | { type: 'status'; message: string; step?: number; maxSteps?: number; jobId?: string; timestamp: number }
-  | { type: 'field_filled'; field: string; value: string; method: string; timestamp: number }
-  | { type: 'field_failed'; field: string; error: string; timestamp: number }
-  | { type: 'progress'; filled: number; total: number; round: number; timestamp: number }
-  | { type: 'browser_ready'; cdpUrl: string; timestamp: number }
-  | { type: 'awaiting_review'; message: string; timestamp: number }
-  | { type: 'done'; success: boolean; message: string; fields_filled: number; jobId?: string; leaseId?: string; resultData?: Record<string, unknown>; timestamp: number }
-  | { type: 'error'; message: string; fatal: boolean; jobId?: string; timestamp: number }
-  | { type: 'cost'; total_usd: number; prompt_tokens: number; completion_tokens: number; timestamp: number }
+  | { event: 'status'; message: string; step?: number; maxSteps?: number; jobId?: string; timestamp: number }
+  | { event: 'field_filled'; field: string; value: string; method: string; timestamp: number }
+  | { event: 'field_failed'; field: string; reason: string; timestamp: number }
+  | { event: 'progress'; filled: number; total: number; round: number; timestamp: number }
+  | { event: 'browser_ready'; cdpUrl: string; timestamp: number }
+  | { event: 'awaiting_review'; message: string; timestamp: number }
+  | { event: 'done'; success: boolean; message: string; fields_filled: number; jobId?: string; leaseId?: string; resultData?: Record<string, unknown>; timestamp: number }
+  | { event: 'error'; message: string; fatal: boolean; jobId?: string; timestamp: number }
+  | { event: 'cost'; total_usd: number; prompt_tokens: number; completion_tokens: number; timestamp: number }
 
 // Commands sent to Hand-X on stdin (one JSON object per line)
+// NOTE: stdin commands use "type" (not "event") as the discriminator key.
+// This is intentional — stdout events use "event", stdin commands use "type".
 type HandXCommand =
   | { type: 'cancel' }
   | { type: 'complete_review' }
