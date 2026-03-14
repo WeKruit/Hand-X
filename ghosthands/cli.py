@@ -32,12 +32,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import contextlib
 import json
 import logging
 import os
 import signal
+import stat
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -65,6 +68,10 @@ os.environ["BROWSER_USE_SETUP_LOGGING"] = "false"
 from ghosthands.agent.hooks import install_same_tab_guard
 
 logger = structlog.get_logger()
+
+# Pre-step budget guard: estimated cost of one agent step in USD.
+# If remaining budget is less than this, the agent stops before the next step.
+_STEP_COST_ESTIMATE = 0.10
 
 # ── Argument parsing ──────────────────────────────────────────────────
 
@@ -194,6 +201,13 @@ def _load_profile(args: argparse.Namespace) -> dict:
     if profile_text:
         return _validate_profile(json.loads(profile_text))
 
+    # File-based profile fallback
+    profile_path = os.environ.get("GH_USER_PROFILE_PATH", "")
+    if profile_path:
+        p = Path(profile_path)
+        if p.is_file():
+            return _validate_profile(json.loads(p.read_text(encoding="utf-8")))
+
     raise ValueError("Either --profile, --test-data, or GH_USER_PROFILE_TEXT env var is required")
 
 
@@ -209,14 +223,32 @@ def _apply_runtime_env(
     if args.browsers_path:
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = args.browsers_path
 
-    os.environ["GH_USER_PROFILE_TEXT"] = json.dumps(profile, indent=2)
-    os.environ["GH_USER_PROFILE_JSON"] = json.dumps(profile)
+    # Write profile to temp file instead of env var (avoids /proc/pid/environ exposure)
+    profile_fd, profile_path = tempfile.mkstemp(prefix="gh_profile_", suffix=".json")
+    try:
+        os.fchmod(profile_fd, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+        os.write(profile_fd, json.dumps(profile, indent=2).encode())
+        os.close(profile_fd)
+        os.environ["GH_USER_PROFILE_PATH"] = profile_path
+        atexit.register(_cleanup_profile_tempfile)
+    except Exception:
+        os.close(profile_fd)
+        os.unlink(profile_path)
+        raise
 
     resume_path = str(Path(args.resume).resolve()) if args.resume else ""
     if resume_path:
         os.environ["GH_RESUME_PATH"] = resume_path
 
     return resume_path
+
+
+def _cleanup_profile_tempfile() -> None:
+    """Remove the temporary profile file created by _apply_runtime_env."""
+    profile_path = os.environ.pop("GH_USER_PROFILE_PATH", "")
+    if profile_path:
+        with contextlib.suppress(OSError):
+            os.unlink(profile_path)
 
 
 def _load_runtime_settings():
@@ -572,6 +604,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     from ghosthands.security.domain_lockdown import DomainLockdown
 
     lockdown = DomainLockdown(job_url=args.job_url, platform=platform)
+    lockdown.freeze()
     allowed_domains = lockdown.get_allowed_domains()
 
     # -- Browser ------------------------------------------------------------
@@ -639,6 +672,10 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         if usage and usage.total_cost and usage.total_cost >= args.max_budget:
             ag.state.stopped = True
             emit_error("Budget exceeded", fatal=False, job_id=job_id)
+
+        # Pre-step budget guard: stop if less than estimated step cost remaining
+        if usage and usage.total_cost and (args.max_budget - usage.total_cost) < _STEP_COST_ESTIMATE:
+            ag.state.stopped = True
 
     # -- Run ----------------------------------------------------------------
     try:
@@ -874,18 +911,26 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     # -- Credentials --------------------------------------------------------
     sensitive_data = _resolve_sensitive_data(app_settings, embedded_credentials, platform=platform)
 
+    # -- Domain lockdown ----------------------------------------------------
+    from ghosthands.security.domain_lockdown import DomainLockdown
+
+    lockdown = DomainLockdown(job_url=args.job_url, platform=platform)
+    lockdown.freeze()
+    allowed_domains = lockdown.get_allowed_domains()
+
     # -- Browser ------------------------------------------------------------
     cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
     desktop_owns_browser = cdp_url is not None
 
     if cdp_url:
-        browser_profile = BrowserProfile(keep_alive=True)
+        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains)
         browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
         print(f"Connecting to Desktop-owned browser via CDP: {cdp_url}")
     else:
         browser_profile = BrowserProfile(
             headless=args.headless,
             keep_alive=True,
+            allowed_domains=allowed_domains,
             aboutblank_loading_logo_enabled=True,
             demo_mode=False,
             interaction_highlight_color="rgb(37, 99, 235)",

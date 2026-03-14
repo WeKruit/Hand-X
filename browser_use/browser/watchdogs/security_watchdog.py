@@ -68,8 +68,7 @@ class SecurityWatchdog(BaseWatchdog):
 				await session.cdp_client.send.Page.navigate(params={'url': 'about:blank'}, session_id=session.session_id)
 				self.logger.info(f'⛔️ Navigated to about:blank after blocked URL: {event.url}')
 			except Exception as e:
-				pass
-				self.logger.error(f'⛔️ Failed to navigate to about:blank: {type(e).__name__} {e}')
+				self.logger.error(f'⛔️ Failed to navigate to about:blank after blocked redirect: {type(e).__name__} {e}')
 
 	async def on_TabCreatedEvent(self, event: TabCreatedEvent) -> None:
 		"""Check if new tab URL is allowed."""
@@ -179,8 +178,16 @@ class SecurityWatchdog(BaseWatchdog):
 			# Invalid URL
 			return False
 
-		# Allow data: and blob: URLs (they don't have hostnames)
-		if parsed.scheme in ['data', 'blob']:
+		# Allow blob: URLs (origin-bound, safe)
+		if parsed.scheme == 'blob':
+			return True
+
+		# Allow data: URLs only for non-executable MIME types (images, fonts, etc.)
+		# Block data:text/html which can execute JS for credential exfiltration
+		if parsed.scheme == 'data':
+			data_content = url.split(',', 1)[0].lower()
+			if 'text/html' in data_content or 'application/javascript' in data_content or 'text/javascript' in data_content:
+				return False
 			return True
 
 		# Get the actual host (domain)
