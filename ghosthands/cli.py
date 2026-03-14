@@ -393,9 +393,7 @@ def _classify_runtime_error(exc: BaseException, *, proxy_mode: bool) -> _Runtime
             keep_browser_open=True,
         )
 
-    if 401 in status_codes and any(
-        keyword in combined_text for keyword in ("expired", "invalid", "revoked", "unauthorized", "grant")
-    ):
+    if 401 in status_codes and any(keyword in combined_text for keyword in ("expired", "revoked", "grant")):
         return _RuntimeErrorSignal(
             code="GRANT_ERROR",
             message="Your automation session is no longer valid. Please try again.",
