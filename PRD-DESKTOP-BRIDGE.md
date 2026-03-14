@@ -436,9 +436,11 @@ type HandXEvent =
   | { event: 'cost'; total_usd: number; prompt_tokens: number; completion_tokens: number; timestamp: number }
 
 // Commands sent to Hand-X on stdin (one JSON object per line)
+// NOTE: stdin commands use "type" (not "event") as the discriminator key.
+// This is intentional — stdout events use "event", stdin commands use "type".
 type HandXCommand =
-  | { event: 'cancel' }
-  | { event: 'complete_review' }
+  | { type: 'cancel' }
+  | { type: 'complete_review' }
 ```
 
 ---
