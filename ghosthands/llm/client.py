@@ -104,4 +104,4 @@ def get_chat_model(model: str | None = None) -> Any:
 	# Default: Google Gemini
 	from browser_use.llm.google.chat import ChatGoogle
 
-	return ChatGoogle(model=model)
+	return ChatGoogle(model=model, max_output_tokens=16384)
