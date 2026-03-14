@@ -53,6 +53,13 @@ MODEL_CATALOG: dict[str, ModelConfig] = {
         output_cost_per_1k=0.0003,
         max_context=1_048_576,
     ),
+    "gemini-3-flash-preview": ModelConfig(
+        model_id="gemini-3-flash-preview",
+        provider="google",
+        input_cost_per_1k=0.0001,
+        output_cost_per_1k=0.0004,
+        max_context=1_048_576,
+    ),
 }
 
 
@@ -65,6 +72,20 @@ def get_model(model_id: str) -> ModelConfig:
 
 
 def estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> float:
-    """Estimate LLM cost in dollars for a given token count."""
-    model = get_model(model_id)
+    """Estimate LLM cost in dollars for a given token count.
+
+    For unknown models, falls back to a conservative estimate using
+    gemini-3.1-flash-lite-preview pricing rather than raising.
+    """
+    try:
+        model = get_model(model_id)
+    except KeyError:
+        # Unknown model — use cheap fallback pricing so cost tracking
+        # still works instead of logging a warning every LLM call.
+        fallback = MODEL_CATALOG.get("gemini-3.1-flash-lite-preview")
+        if fallback:
+            return (input_tokens / 1000 * fallback.input_cost_per_1k) + (
+                output_tokens / 1000 * fallback.output_cost_per_1k
+            )
+        return 0.0
     return (input_tokens / 1000 * model.input_cost_per_1k) + (output_tokens / 1000 * model.output_cost_per_1k)
