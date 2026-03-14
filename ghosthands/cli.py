@@ -114,6 +114,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--proxy-url", default=None, help="VALET LLM proxy URL")
     parser.add_argument("--runtime-grant", default=None, help="VALET runtime grant token")
 
+    # Security
+    parser.add_argument(
+        "--allowed-domains",
+        type=str,
+        default=None,
+        help="Comma-separated list of additional allowed domains",
+    )
+
     # Playwright
     parser.add_argument("--browsers-path", default=None, help="Path to Playwright browser binaries")
 

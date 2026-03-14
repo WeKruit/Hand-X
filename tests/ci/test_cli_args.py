@@ -1,8 +1,7 @@
-"""Baseline regression tests for ghosthands.cli argument parsing.
+"""Regression tests for ghosthands.cli argument parsing.
 
-These tests capture the CURRENT behavior of the CLI argument parser so that
-future changes (e.g., S4 adding --allowed-domains) are validated against a
-known-good baseline.
+These tests capture the behavior of the CLI argument parser. S4 added
+--allowed-domains for domain lockdown wiring.
 
 Because ghosthands.cli imports heavy dependencies at module level
 (ghosthands.agent.hooks -> browser-use -> cdp_use), we mock those modules
@@ -100,12 +99,13 @@ class TestParseArgsDefaults:
         assert args.max_steps == 50
         assert args.max_budget == 0.50
         assert args.headless is False
-        assert args.email is None
-        assert args.password is None
         assert args.output_format == "jsonl"
         assert args.proxy_url is None
         assert args.runtime_grant is None
         assert args.browsers_path is None
+        assert args.cdp_url is None
+        assert args.engine == "auto"
+        assert args.allowed_domains is None
 
 
 # ---------------------------------------------------------------------------
@@ -299,28 +299,50 @@ class TestProxyArgs:
 # ---------------------------------------------------------------------------
 
 
-class TestCredentialArgs:
-    """Tests for --email and --password."""
+class TestDesktopBridgeArgs:
+    """Tests for desktop-bridge-specific args (--cdp-url, --engine)."""
 
-    def test_email_default_none(self):
-        """--email defaults to None."""
+    def test_cdp_url_default_none(self):
+        """--cdp-url defaults to None."""
         args = _parse(["--job-url", "https://example.com"])
-        assert args.email is None
+        assert args.cdp_url is None
 
-    def test_password_default_none(self):
-        """--password defaults to None."""
-        args = _parse(["--job-url", "https://example.com"])
-        assert args.password is None
-
-    def test_email_and_password_set(self):
-        """--email and --password store provided values."""
+    def test_cdp_url_set(self):
+        """--cdp-url stores the provided CDP URL."""
         args = _parse([
             "--job-url", "https://example.com",
-            "--email", "user@test.com",
-            "--password", "s3cret",
+            "--cdp-url", "ws://127.0.0.1:9222/devtools/browser/abc",
         ])
-        assert args.email == "user@test.com"
-        assert args.password == "s3cret"
+        assert args.cdp_url == "ws://127.0.0.1:9222/devtools/browser/abc"
+
+    def test_engine_default_auto(self):
+        """--engine defaults to auto."""
+        args = _parse(["--job-url", "https://example.com"])
+        assert args.engine == "auto"
+
+    def test_engine_chromium(self):
+        """--engine accepts chromium."""
+        args = _parse([
+            "--job-url", "https://example.com",
+            "--engine", "chromium",
+        ])
+        assert args.engine == "chromium"
+
+    def test_engine_firefox(self):
+        """--engine accepts firefox."""
+        args = _parse([
+            "--job-url", "https://example.com",
+            "--engine", "firefox",
+        ])
+        assert args.engine == "firefox"
+
+    def test_engine_invalid_rejected(self):
+        """--engine rejects invalid values."""
+        with pytest.raises(SystemExit):
+            _parse([
+                "--job-url", "https://example.com",
+                "--engine", "webkit",
+            ])
 
 
 # ---------------------------------------------------------------------------
@@ -430,32 +452,57 @@ class TestApplySubcommand:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# --allowed-domains (S4: domain lockdown wiring)
+# ---------------------------------------------------------------------------
+
+
+class TestAllowedDomains:
+    """Tests for --allowed-domains argument (added in S4)."""
+
+    def test_allowed_domains_default_none(self):
+        """--allowed-domains defaults to None when not provided."""
+        args = _parse(["--job-url", "https://example.com"])
+        assert args.allowed_domains is None
+
+    def test_allowed_domains_single(self):
+        """--allowed-domains accepts a single domain."""
+        args = _parse([
+            "--job-url", "https://example.com",
+            "--allowed-domains", "greenhouse.io",
+        ])
+        assert args.allowed_domains == "greenhouse.io"
+
+    def test_allowed_domains_comma_separated(self):
+        """--allowed-domains accepts a comma-separated list."""
+        args = _parse([
+            "--job-url", "https://example.com",
+            "--allowed-domains", "greenhouse.io,lever.co,sso.company.com",
+        ])
+        assert args.allowed_domains == "greenhouse.io,lever.co,sso.company.com"
+
+    def test_allowed_domains_is_string(self):
+        """--allowed-domains is stored as a raw string (parsed later in CLI flow)."""
+        args = _parse([
+            "--job-url", "https://example.com",
+            "--allowed-domains", "example.com",
+        ])
+        assert isinstance(args.allowed_domains, str)
+
+
+# ---------------------------------------------------------------------------
+# Remaining gaps for future streams
+# ---------------------------------------------------------------------------
+
+
 class TestFutureGaps:
-    """Document arguments that do NOT currently exist.
-
-    These tests serve as a contract: if a future stream adds these args,
-    the corresponding test should be updated to assert the new behavior.
-    """
-
-    def test_allowed_domains_does_not_exist(self):
-        """--allowed-domains is NOT a current CLI argument.
-
-        # BASELINE: S4 will add --allowed-domains for domain allowlisting.
-        # When S4 lands, this test should be replaced with positive tests.
-        """
-        with pytest.raises(SystemExit):
-            _parse([
-                "--job-url", "https://example.com",
-                "--allowed-domains", "greenhouse.io,lever.co",
-            ])
+    """Document arguments that do NOT currently exist."""
 
     def test_keep_alive_does_not_exist_as_cli_flag(self):
         """--keep-alive is NOT a current CLI argument.
 
         Note: keep_alive is hardcoded to True in the BrowserProfile construction
         inside run_agent_jsonl/run_agent_human, but is not exposed as a CLI flag.
-
-        # BASELINE: keep_alive is always True, not configurable via CLI.
         """
         with pytest.raises(SystemExit):
             _parse([
