@@ -13,89 +13,90 @@ from __future__ import annotations
 # Platform guardrails — one block per ATS, injected into the system prompt
 # ---------------------------------------------------------------------------
 
-PLATFORM_GUARDRAILS: dict[str, str] = {
+# ---------------------------------------------------------------------------
+# Generic form-filling strategies (platform-agnostic)
+# ---------------------------------------------------------------------------
+# These cover ALL ATS patterns. A platform hint is injected separately
+# so the agent knows which patterns are most likely, without the system
+# prompt being bloated with platform-specific text.
+
+GENERIC_FORM_STRATEGIES = (
+    "GENERAL APPROACH:\n"
+    "- Stay conservative. Prefer filling editable fields over navigation.\n"
+    "- Never press a button whose text implies final submission.\n"
+    "- Call done(success=True) on read-only review pages and confirmation pages.\n"
+    "\n"
+    "APPLY BUTTON PREFERENCE:\n"
+    "- If the page shows BOTH an 'Easy Apply' and a longer apply button\n"
+    "  ('I'm interested', 'Apply', etc.), ALWAYS prefer 'Easy Apply'.\n"
+    "- NEVER choose external apply paths (LinkedIn, Indeed, Google, etc.).\n"
+    "- If a start dialog offers a same-site 'Autofill with Resume' or\n"
+    "  'Apply with Resume' option, prefer that path.\n"
+    "\n"
+    "SHADOW DOM / CUSTOM WIDGETS:\n"
+    "- Some platforms use shadow DOM with custom elements. If domhand_fill\n"
+    "  or domhand_select fails on a custom widget (e.g. custom dropdowns,\n"
+    "  custom checkboxes), fall back to browser-use click actions.\n"
+    "- 'Add' buttons for repeater sections (experience, education) may be\n"
+    "  inside shadow roots — try clicking them directly.\n"
+    "\n"
+    "ACCOUNT CREATION / SIGN-IN:\n"
+    "- Do NOT use domhand_fill on auth pages — it uses the applicant email\n"
+    "  instead of login credentials.\n"
+    "- Pick ONE path (Create Account OR Sign In) and commit.\n"
+    "- If a confirm-password field is visible, you are on Create Account.\n"
+    "- NEVER use SSO/social login (Google, LinkedIn, Facebook, Apple).\n"
+    "- Always check for agreement checkboxes before clicking Create Account.\n"
+    "- If account creation fails, report as blocker.\n"
+    "- If a verification code is required, report as blocker.\n"
+    "\n"
+    "MULTI-STEP FLOWS:\n"
+    "- Some platforms split applications across multiple pages/sections.\n"
+    "- After filling all fields on a page, click Next/Continue/Save to advance.\n"
+    "- On each new page, call domhand_fill AGAIN as the first action.\n"
+    "\n"
+    "DATE FIELDS:\n"
+    "- Some platforms use segmented date fields (click MM, type digits).\n"
+    "- Try typing the full date string first, then Tab to commit.\n"
+    "- If a calendar picker opens, press Escape to dismiss it, then Tab.\n"
+    "\n"
+    "CAPTCHA / BLOCKERS:\n"
+    "- Any CAPTCHA, turnstile, or verification wall must be reported as a\n"
+    "  blocker via done(success=False, text='blocker: CAPTCHA detected')."
+)
+
+# Platform hints — short context-setting lines injected when the platform
+# is detected from the URL. These are NOT instructions — just hints about
+# what to expect so the agent can apply the generic strategies above.
+PLATFORM_HINTS: dict[str, str] = {
     "workday": (
-        "Workday uses multi-step sections.  Treat any visible 'Submit' or "
-        "'Submit Application' button as the FINAL submission — do NOT click it.\n"
-        "\n"
-        "ACCOUNT CREATION / SIGN-IN:\n"
-        "Do NOT use domhand_fill on auth pages — it uses the applicant email\n"
-        "instead of login credentials.\n"
-        "\n"
-        "EXACT sequence for the Create Account page:\n"
-        "  1. input_text: credential email → Email Address field\n"
-        "  2. input_text: credential password → Password field\n"
-        "  3. input_text: credential password → Verify/Confirm Password field\n"
-        "  4. domhand_check_agreement → checks the 'I agree' checkbox.\n"
-        "     *** THIS IS REQUIRED.  The Create Account button SILENTLY FAILS\n"
-        "     if the checkbox is unchecked.  Do NOT skip this step. ***\n"
-        "  5. VERIFY: Look at the checkbox.  If it still appears unchecked,\n"
-        "     click it manually before proceeding.\n"
-        "  6. domhand_click_button(button_label='Create Account').\n"
-        "     Use domhand_click_button, NOT the regular click action.\n"
-        "\n"
-        "Auth page rules:\n"
-        "- Pick ONE path (Create Account OR Sign In) and commit.  Do NOT\n"
-        "  toggle between them.\n"
-        "- If a confirm-password field is visible, you are on Create Account.\n"
-        "- NEVER use SSO/social login (Google, LinkedIn, Facebook, Apple).\n"
-        "- If account creation fails, report as blocker — do NOT switch to Sign In.\n"
-        "- If a verification code is required, report as blocker.\n"
-        "\n"
-        "FORM FILLING:\n"
-        "- Click the main 'Apply' button first.\n"
-        "- If a Workday start dialog offers a SAME-SITE option such as "
-        "  'Autofill with Resume' or 'Apply with Resume', prefer that path.\n"
-        "- Use 'Apply Manually' only when no same-site resume-autofill option "
-        "  exists.\n"
-        "- NEVER choose external apply paths such as LinkedIn, Indeed, Google, "
-        "  or other third-party apply/import options.\n"
-        "- Use domhand_expand or click 'Add' buttons to expand work history\n"
-        "  and education sections before filling.\n"
-        "- Workday uses shadow DOM with data-automation-id selectors.\n"
-        "- Date fields: click MM segment, type continuous digits (e.g. '06152024').\n"
-        "- After filling all fields, click 'Save and Continue' / 'Next' to advance.\n"
-        "  NEVER click the final 'Submit' button."
+        "Detected platform: Workday. Expect multi-step sections, shadow DOM "
+        "with data-automation-id selectors, segmented date fields (MM/DD/YYYY "
+        "typed as continuous digits), and 'Select One' dropdown buttons."
     ),
     "greenhouse": (
-        "Greenhouse usually has a single-page application flow with resume "
-        "upload near the top.\n"
-        "The initial 'Apply' button can be valid, but never click a final "
-        "'Submit Application' button.\n"
-        "If the page shows a review/confirmation summary, call done with "
-        "success=True and provide extracted data."
+        "Detected platform: Greenhouse. Expect a single-page application flow "
+        "with resume upload near the top."
     ),
     "lever": (
-        "Lever often keeps the application on one long page with a final "
-        "submit button at the bottom.\n"
-        "Prefer filling while editable fields remain visible; never convert "
-        "a visible submit button into a click.\n"
-        "Scrolling is acceptable when the page is long and no higher-priority "
-        "action is clear."
+        "Detected platform: Lever. Expect a single long page with all fields "
+        "visible. Scrolling may be needed."
     ),
     "smartrecruiters": (
-        "SmartRecruiters may split flows across apply, login, and review steps.\n"
-        "SmartRecruiters may also stay on a single editable application page "
-        "until the final submit button.\n"
-        "If authentication prompts appear, prefer login or create_account "
-        "rather than generic click actions.\n"
-        "SmartRecruiters uses shadow DOM custom elements — 'Add' buttons for "
-        "work experience, education, and other repeatable sections may appear "
-        "inside shadow roots.\n"
-        "CRITICAL: Before filling a repeater section, expand ALL visible 'Add' "
-        "or '+' buttons to create enough entries for the applicant profile.\n"
-        "After expanding, re-observe before filling to see the newly created "
-        "fields.\n"
-        "Any CAPTCHA, turnstile, or verification wall must be reported as a "
-        "blocker via done(success=False, text='blocker: CAPTCHA detected')."
+        "Detected platform: SmartRecruiters. Expect shadow DOM custom elements, "
+        "possible split across apply/login/review steps, and custom dropdown "
+        "widgets that require click-to-open + search + click-to-select."
     ),
     "generic": (
-        "Stay conservative on unfamiliar platforms.\n"
-        "Prefer filling editable fields over navigation when fields remain.\n"
-        "Never press a button whose text implies final submission.\n"
-        "Call done(success=True) on read-only review pages and true "
-        "confirmation/success pages."
+        "Platform not recognized. Apply generic strategies. Be conservative "
+        "and watch for custom widget patterns."
     ),
+}
+
+# Legacy compatibility — keep the old dict structure for any external callers
+PLATFORM_GUARDRAILS: dict[str, str] = {
+    platform: f"{PLATFORM_HINTS.get(platform, '')}\n\n{GENERIC_FORM_STRATEGIES}"
+    for platform in PLATFORM_HINTS
 }
 
 
@@ -313,7 +314,9 @@ def _format_profile_summary(resume_profile: dict) -> str:
                     line += f" [{date_range}]"
                 exp_lines.append(line.strip())
                 if desc:
-                    exp_lines.append(f"    {desc[:200]}")
+                    # Include the full description (up to 1000 chars) so the
+                    # agent has enough context for description/summary fields.
+                    exp_lines.append(f"    {desc[:1000]}")
         if exp_lines:
             lines.append("Work experience:")
             lines.extend(exp_lines)
@@ -414,7 +417,6 @@ def build_system_prompt(
     str
             The prompt extension string.
     """
-    guardrails = PLATFORM_GUARDRAILS.get(platform, PLATFORM_GUARDRAILS["generic"])
     profile_summary = _format_profile_summary(resume_profile)
 
     prompt_parts: list[str] = [
@@ -530,6 +532,46 @@ def build_system_prompt(
         "  or Tab to commit the value before continuing.",
         "- Safe to batch in one step: multiple text input fills, or",
         "  filling text + clicking a non-dropdown checkbox.",
+        "",
+        "DATE PICKER STRATEGY:",
+        "- Do NOT use domhand_fill for interactive date pickers (calendar",
+        "  widgets, month/year selectors, date popovers). domhand_fill",
+        "  cannot reliably interact with date picker UIs.",
+        "- Instead, use browser-use actions: click the date field, type",
+        "  the date string (e.g. '08/2024'), then click the matching",
+        "  calendar cell or press Enter/Tab to confirm.",
+        "- If a date picker opens a calendar grid, click the correct",
+        "  month/year cell directly.",
+        "",
+        "SEARCH / AUTOCOMPLETE RESILIENCE:",
+        "- For ANY searchable field (country, city, location, job title,",
+        "  school, company, etc.), if the first search term does not",
+        "  produce results, try progressively shorter or alternative",
+        "  forms before giving up:",
+        "  Example: 'United States of America' → 'United States' → 'US'",
+        "  Example: 'University of Southern California' → 'USC' → 'Southern California'",
+        "- After typing a search term, ALWAYS wait 2-3 seconds for the",
+        "  autocomplete dropdown to appear before concluding it failed.",
+        "- If no results appear after waiting, clear the field and try a",
+        "  shorter/alternative term.",
+        "",
+        "STUBBORN CHECKBOX/TOGGLE RECOVERY:",
+        "- CRITICAL: If domhand_assess_state reports 0 unresolved required",
+        "  fields and 0 visible errors, TRUST THAT RESULT. Do NOT override",
+        "  it based on your visual evaluation of checkbox state. The DOM",
+        "  state assessment is more reliable than visual inspection.",
+        "  If assess_state says advanceable with 0 unresolved — ADVANCE.",
+        "- If a checkbox or toggle does not stick after 2 click attempts,",
+        "  call domhand_assess_state IMMEDIATELY. If it reports 0 unresolved",
+        "  fields, the checkbox DID work — stop retrying and move on.",
+        "- If domhand_assess_state still shows unresolved fields after 2",
+        "  checkbox click attempts, try these alternatives:",
+        "  1. Click the <label> element associated with the checkbox.",
+        "  2. Click the <span> text inside the label.",
+        "  3. If the checkbox is for 'I currently work here' and it keeps",
+        "     reverting, fill the 'To' date field with today's date as a",
+        "     workaround and move on.",
+        "- NEVER spend more than 4 steps on a single checkbox.",
         "</action_batching>",
         "",
         # ── Blocker handling ───────────────────────────────────────
@@ -632,8 +674,14 @@ def build_system_prompt(
         "- NEVER call bare domhand_fill for a repeater entry when there are",
         "  already filled entries above it — always scope it with",
         "  heading_boundary and entry_data.",
+        "- CRITICAL: Keep entry_data SHORT. Include only structured fields:",
+        "  title, company, location, start_date, end_date, currently_work_here,",
+        "  school, degree, field_of_study, gpa.",
+        "  Do NOT include the full description text in entry_data — domhand_fill",
+        "  already has the full profile and will match descriptions automatically.",
+        "  Including long descriptions causes the response to exceed token limits.",
         "- Example: domhand_fill(heading_boundary='Work Experience 2',",
-        "  entry_data={'title': '...', 'company': '...', 'start_date': '...'})",
+        "  entry_data={'title': 'PM', 'company': 'Acme', 'start_date': '2023-01'})",
         "  fills only that second entry instead of the entire page.",
         "- NEVER delete a filled entry.",
         "</repeater_sections>",
@@ -671,11 +719,15 @@ def build_system_prompt(
         *build_completion_detection_lines(platform),
         "</completion_detection>",
         "",
-        # ── Platform guardrails ───────────────────────────────────
-        "<platform_guardrails>",
-        f"Platform: {platform}",
-        guardrails,
-        "</platform_guardrails>",
+        # ── Platform-agnostic form strategies ─────────────────────
+        "<form_strategies>",
+        GENERIC_FORM_STRATEGIES,
+        "</form_strategies>",
+        "",
+        # ── Platform hint (injected from URL detection) ───────────
+        "<platform_hint>",
+        PLATFORM_HINTS.get(platform, PLATFORM_HINTS["generic"]),
+        "</platform_hint>",
         "",
         # ── Applicant profile ─────────────────────────────────────
         "<applicant_profile>",
@@ -696,20 +748,25 @@ def build_task_prompt(
         f"Go to {job_url} and fill out the job application form completely.\n"
         "\n"
         "CRITICAL -- Action Order:\n"
-        "1. After navigating to the page, your FIRST action MUST be domhand_fill.\n"
-        "2. After domhand_fill completes, review its output to see which fields were filled and which failed.\n"
-        "3. For failed dropdowns/selects, use domhand_select.\n"
-        f"4. For file uploads (resume), use domhand_upload or upload_file action with path: {resume_path}\n"
-        "5. Only use generic browser-use actions (click, input_text) as a LAST RESORT.\n"
-        "6. After all fields on the current page are filled, click Next/Continue/Save to advance.\n"
-        "7. On each new page, call domhand_fill AGAIN as the first action.\n"
+        "1. After navigating to the page, LOOK for an 'Easy Apply' section or\n"
+        "   a resume upload area at the top of the form. If present, upload the\n"
+        f"   resume FIRST using domhand_upload with path: {resume_path}\n"
+        "   Easy Apply with resume upload is ALWAYS the preferred path — it\n"
+        "   auto-fills many fields and shortens the application.\n"
+        "2. Then call domhand_fill to fill remaining visible form fields.\n"
+        "3. After domhand_fill completes, review its output to see which fields were filled and which failed.\n"
+        "4. For failed dropdowns/selects, use domhand_select.\n"
+        f"5. For other file uploads, use domhand_upload or upload_file action with path: {resume_path}\n"
+        "6. Only use generic browser-use actions (click, input_text) as a LAST RESORT.\n"
+        "7. After all fields on the current page are filled, click Next/Continue/Save to advance.\n"
+        "8. On each new page, repeat from step 1 (check for Easy Apply / resume upload first).\n"
         "\n"
         "Other rules:\n"
     )
     if sensitive_data:
         task += (
             "- Use the provided credentials to log in or create an account if needed. "
-            "For Workday, fill email + password + confirm password on the Create Account page.\n"
+            "Fill email + password (+ confirm password if visible) on auth pages.\n"
         )
     else:
         task += "- If a login wall appears, report it as a blocker.\n"

@@ -2390,10 +2390,14 @@ Rules:
 
 Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because..."}}"""
 
+    # Scale max_tokens based on field count — forms with many fields (e.g. 60+
+    # on SmartRecruiters with 5 experience entries) need more output budget to
+    # avoid truncation of long descriptions and other text fields.
+    scaled_max_tokens = max(4096, min(len(fields) * 128, 16384))
     try:
         response = await llm.ainvoke(
             [UserMessage(content=prompt)],
-            max_tokens=4096,
+            max_tokens=scaled_max_tokens,
         )
         text = response.completion if isinstance(response.completion, str) else ""
         input_tokens = response.usage.prompt_tokens if response.usage else 0
@@ -3085,46 +3089,72 @@ async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag
     if not value:
         logger.debug(f"skip {tag} (searchable dropdown, no answer)")
         return False
-    try:
-        await page.evaluate(
-            r"""(ffId) => {
-			var el = window.__ff ? window.__ff.byId(ffId) : null;
-			if (el) el.click();
-			return 'ok';
-		}""",
-            ff_id,
-        )
-        await asyncio.sleep(0.4)
 
-        await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
-        await asyncio.sleep(0.1)
-        await page.evaluate(_FILL_FIELD_JS, ff_id, value, "text")
-        await page.evaluate(
-            r"""(ffId) => {
-			var el = window.__ff ? window.__ff.byId(ffId) : null;
-			if (el) { el.dispatchEvent(new Event('input', {bubbles: true})); el.dispatchEvent(new Event('keyup', {bubbles: true})); }
-			return 'ok';
-		}""",
-            ff_id,
-        )
-        await asyncio.sleep(1.5)
+    # Generate fallback search terms: "United States of America" → "United States" → "US"
+    search_terms = generate_dropdown_search_terms(value)
+    if not search_terms:
+        search_terms = [value]
 
-        clicked_json = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, value)
-        clicked = json.loads(clicked_json)
-        if clicked.get("clicked"):
-            logger.debug(f'search-select {tag} -> "{clicked.get("text", value)}"')
+    for term_idx, search_term in enumerate(search_terms):
+        try:
+            await page.evaluate(
+                r"""(ffId) => {
+				var el = window.__ff ? window.__ff.byId(ffId) : null;
+				if (el) el.click();
+				return 'ok';
+			}""",
+                ff_id,
+            )
+            await asyncio.sleep(0.4)
+
+            await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
+            await asyncio.sleep(0.1)
+            await page.evaluate(_FILL_FIELD_JS, ff_id, search_term, "text")
+            await page.evaluate(
+                r"""(ffId) => {
+				var el = window.__ff ? window.__ff.byId(ffId) : null;
+				if (el) { el.dispatchEvent(new Event('input', {bubbles: true})); el.dispatchEvent(new Event('keyup', {bubbles: true})); }
+				return 'ok';
+			}""",
+                ff_id,
+            )
+            # Wait longer on first attempt, shorter on retries
+            await asyncio.sleep(2.0 if term_idx == 0 else 1.5)
+
+            clicked_json = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, value)
+            clicked = json.loads(clicked_json)
+            if clicked.get("clicked"):
+                logger.debug(f'search-select {tag} -> "{clicked.get("text", value)}" (term: "{search_term}")')
+                await _settle_dropdown_selection(page)
+                return True
+
+            # Also try clicking by the search term itself (may differ from value)
+            if search_term != value:
+                clicked_json = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, search_term)
+                clicked = json.loads(clicked_json)
+                if clicked.get("clicked"):
+                    logger.debug(f'search-select {tag} -> "{clicked.get("text", search_term)}" (alt term)')
+                    await _settle_dropdown_selection(page)
+                    return True
+
+            if term_idx < len(search_terms) - 1:
+                logger.debug(f'search-select {tag}: "{search_term}" no match, trying next term')
+                continue
+
+            # Last resort: ArrowDown + Enter on the final term
+            await page.press("ArrowDown")
+            await asyncio.sleep(0.2)
+            await page.press("Enter")
+            logger.debug(f"search-select {tag} -> first result (keyboard, term: \"{search_term}\")")
             await _settle_dropdown_selection(page)
             return True
+        except Exception as e:
+            logger.debug(f"search-select {tag}: term \"{search_term}\" failed: {str(e)[:60]}")
+            if term_idx < len(search_terms) - 1:
+                continue
+            return False
 
-        await page.press("ArrowDown")
-        await asyncio.sleep(0.2)
-        await page.press("Enter")
-        logger.debug(f"search-select {tag} -> first result (keyboard)")
-        await _settle_dropdown_selection(page)
-        return True
-    except Exception as e:
-        logger.debug(f"skip {tag} (searchable dropdown failed: {str(e)[:60]})")
-        return False
+    return False
 
 
 async def _fill_date_field(page: Any, field: FormField, value: str, tag: str) -> bool:
@@ -3132,17 +3162,41 @@ async def _fill_date_field(page: Any, field: FormField, value: str, tag: str) ->
     if not val:
         logger.debug(f"skip {tag} (date, no value)")
         return False
-    if await _fill_text_like_with_keyboard(page, field, val, tag):
-        logger.debug(f'fill {tag} = "{val}" (keyboard-first)')
-        return True
-    try:
-        result_json = await page.evaluate(_FILL_FIELD_JS, field.field_id, val, "text")
-        result = json.loads(result_json) if isinstance(result_json, str) else result_json
-        if isinstance(result, dict) and result.get("success") and await _confirm_text_like_value(page, field, val, tag):
-            logger.debug(f'fill {tag} = "{val}"')
+
+    # Try multiple date format variations for resilience
+    date_variants = [val]
+    # If value looks like YYYY-MM, also try MM/YYYY
+    if re.match(r"^\d{4}-\d{2}$", val):
+        parts = val.split("-")
+        date_variants.append(f"{parts[1]}/{parts[0]}")  # MM/YYYY
+    # If value looks like MM/YYYY, also try YYYY-MM
+    elif re.match(r"^\d{2}/\d{4}$", val):
+        parts = val.split("/")
+        date_variants.append(f"{parts[1]}-{parts[0]}")  # YYYY-MM
+
+    for attempt_val in date_variants:
+        if await _fill_text_like_with_keyboard(page, field, attempt_val, tag):
+            # Dismiss any calendar popup (Escape) then commit the value (Tab)
+            try:
+                selector = f'[data-ff-id="{field.field_id}"]'
+                await page.press(selector, "Escape")
+                await asyncio.sleep(0.15)
+                await page.press(selector, "Tab")
+                await asyncio.sleep(0.3)
+            except Exception:
+                pass
+            logger.debug(f'fill {tag} = "{attempt_val}" (keyboard-first)')
             return True
-    except Exception:
-        pass
+        try:
+            result_json = await page.evaluate(_FILL_FIELD_JS, field.field_id, attempt_val, "text")
+            result = json.loads(result_json) if isinstance(result_json, str) else result_json
+            if isinstance(result, dict) and result.get("success") and await _confirm_text_like_value(page, field, attempt_val, tag):
+                logger.debug(f'fill {tag} = "{attempt_val}"')
+                return True
+        except Exception:
+            pass
+
+    # Final attempt: special date JS fill with original value
     try:
         result_json = await page.evaluate(_FILL_DATE_JS, field.field_id, val)
         result = json.loads(result_json) if isinstance(result_json, str) else result_json
