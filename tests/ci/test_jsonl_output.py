@@ -313,28 +313,28 @@ class TestEmitProgress:
     """Tests for the emit_progress() convenience emitter."""
 
     def test_basic_progress(self):
-        """emit_progress produces a progress event with filled/total."""
+        """emit_progress produces a progress event with step/maxSteps."""
         from ghosthands.output.jsonl import emit_progress
 
         obj = _capture_emit(emit_progress, 5, 10)
         assert obj["event"] == "progress"
-        assert obj["filled"] == 5
-        assert obj["total"] == 10
+        assert obj["step"] == 5
+        assert obj["maxSteps"] == 10
         assert "timestamp" in obj
 
-    def test_progress_default_round(self):
-        """The default round is 1."""
+    def test_progress_description_default(self):
+        """The default description is an empty string."""
         from ghosthands.output.jsonl import emit_progress
 
         obj = _capture_emit(emit_progress, 0, 8)
-        assert obj["round"] == 1
+        assert obj["description"] == ""
 
-    def test_progress_custom_round(self):
-        """A custom round number can be specified."""
+    def test_progress_custom_description(self):
+        """A custom description can be specified."""
         from ghosthands.output.jsonl import emit_progress
 
-        obj = _capture_emit(emit_progress, 3, 8, round=2)
-        assert obj["round"] == 2
+        obj = _capture_emit(emit_progress, 3, 8, description="Filling page 2")
+        assert obj["description"] == "Filling page 2"
 
 
 # ---------------------------------------------------------------------------
@@ -451,22 +451,22 @@ class TestGetOutput:
 
 
 class TestEmitProgressS2:
-    """Tests for the S2 additions to emit_progress()."""
+    """Tests for the desktop-bridge emit_progress() signature (step, max_steps)."""
 
     def test_progress_includes_step_and_maxsteps(self):
-        """emit_progress also emits step (= filled) and maxSteps (= total)."""
+        """emit_progress emits step and maxSteps."""
         from ghosthands.output.jsonl import emit_progress
 
         obj = _capture_emit(emit_progress, 5, 10)
         assert obj["step"] == 5
         assert obj["maxSteps"] == 10
 
-    def test_progress_description_omitted_when_empty(self):
-        """description is omitted when not provided (empty string -> None)."""
+    def test_progress_description_included_when_empty(self):
+        """description is included even when empty (desktop-bridge format)."""
         from ghosthands.output.jsonl import emit_progress
 
         obj = _capture_emit(emit_progress, 3, 8)
-        assert "description" not in obj
+        assert obj["description"] == ""
 
     def test_progress_description_included_when_provided(self):
         """description is included when a non-empty string is provided."""
@@ -482,23 +482,24 @@ class TestEmitProgressS2:
 
 
 class TestEmitHandshake:
-    """Tests for the emit_handshake() lease protocol event."""
+    """Tests for the emit_handshake() protocol event (desktop-bridge format)."""
 
     def test_handshake_default_version(self):
-        """emit_handshake emits a handshake event with protocol_version=2."""
+        """emit_handshake emits a handshake event with protocol_version=1."""
         from ghosthands.output.jsonl import emit_handshake
 
         obj = _capture_emit(emit_handshake)
         assert obj["event"] == "handshake"
-        assert obj["protocol_version"] == 2
+        assert obj["protocol_version"] == 1
+        assert obj["min_desktop_version"] == "0.1.0"
         assert "timestamp" in obj
 
-    def test_handshake_custom_version(self):
-        """emit_handshake accepts a custom protocol version."""
+    def test_handshake_has_min_desktop_version(self):
+        """emit_handshake includes min_desktop_version field."""
         from ghosthands.output.jsonl import emit_handshake
 
-        obj = _capture_emit(emit_handshake, protocol_version=3)
-        assert obj["protocol_version"] == 3
+        obj = _capture_emit(emit_handshake)
+        assert "min_desktop_version" in obj
 
 
 class TestEmitBrowserReady:

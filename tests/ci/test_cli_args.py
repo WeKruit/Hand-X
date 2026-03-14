@@ -99,12 +99,13 @@ class TestParseArgsDefaults:
         assert args.max_steps == 50
         assert args.max_budget == 0.50
         assert args.headless is False
-        assert args.email is None
-        assert args.password is None
         assert args.output_format == "jsonl"
         assert args.proxy_url is None
         assert args.runtime_grant is None
         assert args.browsers_path is None
+        assert args.cdp_url is None
+        assert args.engine == "auto"
+        assert args.allowed_domains is None
 
 
 # ---------------------------------------------------------------------------
@@ -298,28 +299,50 @@ class TestProxyArgs:
 # ---------------------------------------------------------------------------
 
 
-class TestCredentialArgs:
-    """Tests for --email and --password."""
+class TestDesktopBridgeArgs:
+    """Tests for desktop-bridge-specific args (--cdp-url, --engine)."""
 
-    def test_email_default_none(self):
-        """--email defaults to None."""
+    def test_cdp_url_default_none(self):
+        """--cdp-url defaults to None."""
         args = _parse(["--job-url", "https://example.com"])
-        assert args.email is None
+        assert args.cdp_url is None
 
-    def test_password_default_none(self):
-        """--password defaults to None."""
-        args = _parse(["--job-url", "https://example.com"])
-        assert args.password is None
-
-    def test_email_and_password_set(self):
-        """--email and --password store provided values."""
+    def test_cdp_url_set(self):
+        """--cdp-url stores the provided CDP URL."""
         args = _parse([
             "--job-url", "https://example.com",
-            "--email", "user@test.com",
-            "--password", "s3cret",
+            "--cdp-url", "ws://127.0.0.1:9222/devtools/browser/abc",
         ])
-        assert args.email == "user@test.com"
-        assert args.password == "s3cret"
+        assert args.cdp_url == "ws://127.0.0.1:9222/devtools/browser/abc"
+
+    def test_engine_default_auto(self):
+        """--engine defaults to auto."""
+        args = _parse(["--job-url", "https://example.com"])
+        assert args.engine == "auto"
+
+    def test_engine_chromium(self):
+        """--engine accepts chromium."""
+        args = _parse([
+            "--job-url", "https://example.com",
+            "--engine", "chromium",
+        ])
+        assert args.engine == "chromium"
+
+    def test_engine_firefox(self):
+        """--engine accepts firefox."""
+        args = _parse([
+            "--job-url", "https://example.com",
+            "--engine", "firefox",
+        ])
+        assert args.engine == "firefox"
+
+    def test_engine_invalid_rejected(self):
+        """--engine rejects invalid values."""
+        with pytest.raises(SystemExit):
+            _parse([
+                "--job-url", "https://example.com",
+                "--engine", "webkit",
+            ])
 
 
 # ---------------------------------------------------------------------------

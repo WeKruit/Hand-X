@@ -943,7 +943,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     desktop_owns_browser = cdp_url is not None
 
     if cdp_url:
-        browser_profile = BrowserProfile(keep_alive=True, engine=engine)
+        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains, engine=engine)
         browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
         print(f"Connecting to Desktop-owned browser via CDP: {cdp_url}")
     else:
