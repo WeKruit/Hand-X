@@ -182,13 +182,18 @@ class SecurityWatchdog(BaseWatchdog):
 		if parsed.scheme == 'blob':
 			return True
 
-		# Allow data: URLs only for non-executable MIME types (images, fonts, etc.)
-		# Block data:text/html which can execute JS for credential exfiltration
+		# Allow data: URLs only for known-safe MIME types (images, fonts, audio, video).
+		# Allowlist approach — blocks everything not explicitly safe, including
+		# image/svg+xml, application/xhtml+xml, text/xml which can contain scripts.
 		if parsed.scheme == 'data':
-			data_content = url.split(',', 1)[0].lower()
-			if 'text/html' in data_content or 'application/javascript' in data_content or 'text/javascript' in data_content:
+			data_header = url.split(',', 1)[0].lower()
+			safe_prefixes = ('data:image/', 'data:font/', 'data:audio/', 'data:video/', 'data:application/font-', 'data:application/octet-stream')
+			# SVG can execute scripts — explicitly exclude even though it starts with image/
+			if 'image/svg' in data_header:
 				return False
-			return True
+			if any(data_header.startswith(p) for p in safe_prefixes):
+				return True
+			return False
 
 		# Get the actual host (domain)
 		host = parsed.hostname
