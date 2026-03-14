@@ -114,3 +114,48 @@ def test_sanitize_normal_values_unchanged():
         "First Name", True, "Jane", {"first_name": "Jane"},
     )
     assert result == "Jane"
+
+
+# ---------------------------------------------------------------------------
+# Search term generation (drives _fill_searchable_dropdown retry logic)
+# ---------------------------------------------------------------------------
+
+
+def test_search_terms_for_country():
+    """Country names should generate progressively shorter search terms."""
+    from ghosthands.actions.views import generate_dropdown_search_terms
+
+    terms = generate_dropdown_search_terms("United States of America")
+    assert "United States of America" in terms
+    # Should include shorter variants
+    assert any("United" in t for t in terms)
+    assert len(terms) >= 2  # At least the original + one shorter
+
+
+def test_search_terms_for_us_country_code():
+    """US country code should hit the synonym cluster."""
+    from ghosthands.actions.views import generate_dropdown_search_terms
+
+    terms = generate_dropdown_search_terms("United States +1")
+    # Should include synonyms from the cluster
+    assert "United States +1" in terms
+    assert "United States" in terms
+    assert "US" in terms
+
+
+def test_search_terms_empty_input():
+    """Empty input should return empty list."""
+    from ghosthands.actions.views import generate_dropdown_search_terms
+
+    assert generate_dropdown_search_terms("") == []
+    assert generate_dropdown_search_terms("   ") == []
+
+
+def test_search_terms_hierarchical():
+    """Hierarchical values should split into segments."""
+    from ghosthands.actions.views import generate_dropdown_search_terms
+
+    terms = generate_dropdown_search_terms("Social Media > LinkedIn")
+    assert "Social Media > LinkedIn" in terms
+    assert "Social Media" in terms
+    assert "LinkedIn" in terms
