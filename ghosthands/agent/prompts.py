@@ -313,7 +313,9 @@ def _format_profile_summary(resume_profile: dict) -> str:
                     line += f" [{date_range}]"
                 exp_lines.append(line.strip())
                 if desc:
-                    exp_lines.append(f"    {desc[:200]}")
+                    # Include the full description (up to 1000 chars) so the
+                    # agent has enough context for description/summary fields.
+                    exp_lines.append(f"    {desc[:1000]}")
         if exp_lines:
             lines.append("Work experience:")
             lines.extend(exp_lines)
@@ -530,6 +532,40 @@ def build_system_prompt(
         "  or Tab to commit the value before continuing.",
         "- Safe to batch in one step: multiple text input fills, or",
         "  filling text + clicking a non-dropdown checkbox.",
+        "",
+        "DATE PICKER STRATEGY:",
+        "- Do NOT use domhand_fill for interactive date pickers (calendar",
+        "  widgets, month/year selectors, date popovers). domhand_fill",
+        "  cannot reliably interact with date picker UIs.",
+        "- Instead, use browser-use actions: click the date field, type",
+        "  the date string (e.g. '08/2024'), then click the matching",
+        "  calendar cell or press Enter/Tab to confirm.",
+        "- If a date picker opens a calendar grid, click the correct",
+        "  month/year cell directly.",
+        "",
+        "SEARCH / AUTOCOMPLETE RESILIENCE:",
+        "- For ANY searchable field (country, city, location, job title,",
+        "  school, company, etc.), if the first search term does not",
+        "  produce results, try progressively shorter or alternative",
+        "  forms before giving up:",
+        "  Example: 'United States of America' → 'United States' → 'US'",
+        "  Example: 'University of Southern California' → 'USC' → 'Southern California'",
+        "- After typing a search term, ALWAYS wait 2-3 seconds for the",
+        "  autocomplete dropdown to appear before concluding it failed.",
+        "- If no results appear after waiting, clear the field and try a",
+        "  shorter/alternative term.",
+        "",
+        "STUBBORN CHECKBOX/TOGGLE RECOVERY:",
+        "- If a checkbox or toggle does not stick after 2 click attempts,",
+        "  STOP the click-and-retry loop. Instead:",
+        "  1. Try clicking the <label> element associated with the checkbox.",
+        "  2. Try clicking the <span> text inside the label.",
+        "  3. If still failing, try using JavaScript: page.evaluate to",
+        "     toggle the checked attribute and dispatch a change event.",
+        "  4. If the checkbox is for 'I currently work here' and it keeps",
+        "     reverting, fill the 'To' date field with today's date as a",
+        "     workaround and move on.",
+        "- NEVER spend more than 4 steps on a single checkbox.",
         "</action_batching>",
         "",
         # ── Blocker handling ───────────────────────────────────────
