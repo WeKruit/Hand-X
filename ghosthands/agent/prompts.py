@@ -13,93 +13,90 @@ from __future__ import annotations
 # Platform guardrails — one block per ATS, injected into the system prompt
 # ---------------------------------------------------------------------------
 
-PLATFORM_GUARDRAILS: dict[str, str] = {
+# ---------------------------------------------------------------------------
+# Generic form-filling strategies (platform-agnostic)
+# ---------------------------------------------------------------------------
+# These cover ALL ATS patterns. A platform hint is injected separately
+# so the agent knows which patterns are most likely, without the system
+# prompt being bloated with platform-specific text.
+
+GENERIC_FORM_STRATEGIES = (
+    "GENERAL APPROACH:\n"
+    "- Stay conservative. Prefer filling editable fields over navigation.\n"
+    "- Never press a button whose text implies final submission.\n"
+    "- Call done(success=True) on read-only review pages and confirmation pages.\n"
+    "\n"
+    "APPLY BUTTON PREFERENCE:\n"
+    "- If the page shows BOTH an 'Easy Apply' and a longer apply button\n"
+    "  ('I'm interested', 'Apply', etc.), ALWAYS prefer 'Easy Apply'.\n"
+    "- NEVER choose external apply paths (LinkedIn, Indeed, Google, etc.).\n"
+    "- If a start dialog offers a same-site 'Autofill with Resume' or\n"
+    "  'Apply with Resume' option, prefer that path.\n"
+    "\n"
+    "SHADOW DOM / CUSTOM WIDGETS:\n"
+    "- Some platforms use shadow DOM with custom elements. If domhand_fill\n"
+    "  or domhand_select fails on a custom widget (e.g. custom dropdowns,\n"
+    "  custom checkboxes), fall back to browser-use click actions.\n"
+    "- 'Add' buttons for repeater sections (experience, education) may be\n"
+    "  inside shadow roots — try clicking them directly.\n"
+    "\n"
+    "ACCOUNT CREATION / SIGN-IN:\n"
+    "- Do NOT use domhand_fill on auth pages — it uses the applicant email\n"
+    "  instead of login credentials.\n"
+    "- Pick ONE path (Create Account OR Sign In) and commit.\n"
+    "- If a confirm-password field is visible, you are on Create Account.\n"
+    "- NEVER use SSO/social login (Google, LinkedIn, Facebook, Apple).\n"
+    "- Always check for agreement checkboxes before clicking Create Account.\n"
+    "- If account creation fails, report as blocker.\n"
+    "- If a verification code is required, report as blocker.\n"
+    "\n"
+    "MULTI-STEP FLOWS:\n"
+    "- Some platforms split applications across multiple pages/sections.\n"
+    "- After filling all fields on a page, click Next/Continue/Save to advance.\n"
+    "- On each new page, call domhand_fill AGAIN as the first action.\n"
+    "\n"
+    "DATE FIELDS:\n"
+    "- Some platforms use segmented date fields (click MM, type digits).\n"
+    "- Try typing the full date string first, then Tab to commit.\n"
+    "- If a calendar picker opens, press Escape to dismiss it, then Tab.\n"
+    "\n"
+    "CAPTCHA / BLOCKERS:\n"
+    "- Any CAPTCHA, turnstile, or verification wall must be reported as a\n"
+    "  blocker via done(success=False, text='blocker: CAPTCHA detected')."
+)
+
+# Platform hints — short context-setting lines injected when the platform
+# is detected from the URL. These are NOT instructions — just hints about
+# what to expect so the agent can apply the generic strategies above.
+PLATFORM_HINTS: dict[str, str] = {
     "workday": (
-        "Workday uses multi-step sections.  Treat any visible 'Submit' or "
-        "'Submit Application' button as the FINAL submission — do NOT click it.\n"
-        "\n"
-        "ACCOUNT CREATION / SIGN-IN:\n"
-        "Do NOT use domhand_fill on auth pages — it uses the applicant email\n"
-        "instead of login credentials.\n"
-        "\n"
-        "EXACT sequence for the Create Account page:\n"
-        "  1. input_text: credential email → Email Address field\n"
-        "  2. input_text: credential password → Password field\n"
-        "  3. input_text: credential password → Verify/Confirm Password field\n"
-        "  4. domhand_check_agreement → checks the 'I agree' checkbox.\n"
-        "     *** THIS IS REQUIRED.  The Create Account button SILENTLY FAILS\n"
-        "     if the checkbox is unchecked.  Do NOT skip this step. ***\n"
-        "  5. VERIFY: Look at the checkbox.  If it still appears unchecked,\n"
-        "     click it manually before proceeding.\n"
-        "  6. domhand_click_button(button_label='Create Account').\n"
-        "     Use domhand_click_button, NOT the regular click action.\n"
-        "\n"
-        "Auth page rules:\n"
-        "- Pick ONE path (Create Account OR Sign In) and commit.  Do NOT\n"
-        "  toggle between them.\n"
-        "- If a confirm-password field is visible, you are on Create Account.\n"
-        "- NEVER use SSO/social login (Google, LinkedIn, Facebook, Apple).\n"
-        "- If account creation fails, report as blocker — do NOT switch to Sign In.\n"
-        "- If a verification code is required, report as blocker.\n"
-        "\n"
-        "FORM FILLING:\n"
-        "- Click the main 'Apply' button first.\n"
-        "- If a Workday start dialog offers a SAME-SITE option such as "
-        "  'Autofill with Resume' or 'Apply with Resume', prefer that path.\n"
-        "- Use 'Apply Manually' only when no same-site resume-autofill option "
-        "  exists.\n"
-        "- NEVER choose external apply paths such as LinkedIn, Indeed, Google, "
-        "  or other third-party apply/import options.\n"
-        "- Use domhand_expand or click 'Add' buttons to expand work history\n"
-        "  and education sections before filling.\n"
-        "- Workday uses shadow DOM with data-automation-id selectors.\n"
-        "- Date fields: click MM segment, type continuous digits (e.g. '06152024').\n"
-        "- After filling all fields, click 'Save and Continue' / 'Next' to advance.\n"
-        "  NEVER click the final 'Submit' button."
+        "Detected platform: Workday. Expect multi-step sections, shadow DOM "
+        "with data-automation-id selectors, segmented date fields (MM/DD/YYYY "
+        "typed as continuous digits), and 'Select One' dropdown buttons."
     ),
     "greenhouse": (
-        "Greenhouse usually has a single-page application flow with resume "
-        "upload near the top.\n"
-        "The initial 'Apply' button can be valid, but never click a final "
-        "'Submit Application' button.\n"
-        "If the page shows a review/confirmation summary, call done with "
-        "success=True and provide extracted data."
+        "Detected platform: Greenhouse. Expect a single-page application flow "
+        "with resume upload near the top."
     ),
     "lever": (
-        "Lever often keeps the application on one long page with a final "
-        "submit button at the bottom.\n"
-        "Prefer filling while editable fields remain visible; never convert "
-        "a visible submit button into a click.\n"
-        "Scrolling is acceptable when the page is long and no higher-priority "
-        "action is clear."
+        "Detected platform: Lever. Expect a single long page with all fields "
+        "visible. Scrolling may be needed."
     ),
     "smartrecruiters": (
-        "SmartRecruiters may split flows across apply, login, and review steps.\n"
-        "SmartRecruiters may also stay on a single editable application page "
-        "until the final submit button.\n"
-        "APPLY BUTTON PREFERENCE: If the page shows BOTH an 'Easy Apply' and "
-        "an 'I'm interested' button, ALWAYS prefer 'Easy Apply' — it skips "
-        "the full application form and uses a shorter flow. Only use "
-        "'I'm interested' when 'Easy Apply' is NOT available.\n"
-        "If authentication prompts appear, prefer login or create_account "
-        "rather than generic click actions.\n"
-        "SmartRecruiters uses shadow DOM custom elements — 'Add' buttons for "
-        "work experience, education, and other repeatable sections may appear "
-        "inside shadow roots.\n"
-        "CRITICAL: Before filling a repeater section, expand ALL visible 'Add' "
-        "or '+' buttons to create enough entries for the applicant profile.\n"
-        "After expanding, re-observe before filling to see the newly created "
-        "fields.\n"
-        "Any CAPTCHA, turnstile, or verification wall must be reported as a "
-        "blocker via done(success=False, text='blocker: CAPTCHA detected')."
+        "Detected platform: SmartRecruiters. Expect shadow DOM custom elements, "
+        "possible split across apply/login/review steps, and custom dropdown "
+        "widgets that require click-to-open + search + click-to-select."
     ),
     "generic": (
-        "Stay conservative on unfamiliar platforms.\n"
-        "Prefer filling editable fields over navigation when fields remain.\n"
-        "Never press a button whose text implies final submission.\n"
-        "Call done(success=True) on read-only review pages and true "
-        "confirmation/success pages."
+        "Platform not recognized. Apply generic strategies. Be conservative "
+        "and watch for custom widget patterns."
     ),
+}
+
+# Legacy compatibility — keep the old dict structure for any external callers
+PLATFORM_GUARDRAILS: dict[str, str] = {
+    platform: f"{PLATFORM_HINTS.get(platform, '')}\n\n{GENERIC_FORM_STRATEGIES}"
+    for platform in PLATFORM_HINTS
 }
 
 
@@ -420,7 +417,6 @@ def build_system_prompt(
     str
             The prompt extension string.
     """
-    guardrails = PLATFORM_GUARDRAILS.get(platform, PLATFORM_GUARDRAILS["generic"])
     profile_summary = _format_profile_summary(resume_profile)
 
     prompt_parts: list[str] = [
@@ -723,11 +719,15 @@ def build_system_prompt(
         *build_completion_detection_lines(platform),
         "</completion_detection>",
         "",
-        # ── Platform guardrails ───────────────────────────────────
-        "<platform_guardrails>",
-        f"Platform: {platform}",
-        guardrails,
-        "</platform_guardrails>",
+        # ── Platform-agnostic form strategies ─────────────────────
+        "<form_strategies>",
+        GENERIC_FORM_STRATEGIES,
+        "</form_strategies>",
+        "",
+        # ── Platform hint (injected from URL detection) ───────────
+        "<platform_hint>",
+        PLATFORM_HINTS.get(platform, PLATFORM_HINTS["generic"]),
+        "</platform_hint>",
         "",
         # ── Applicant profile ─────────────────────────────────────
         "<applicant_profile>",
