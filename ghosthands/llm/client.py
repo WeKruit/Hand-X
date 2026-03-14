@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from ghosthands.config.settings import settings
+
+# Match OpenAI o-series reasoning models (o1, o3, o4-mini, etc.)
+# but NOT models that merely start with "o" (opus, ocr, ...).
+_is_openai_o_model = re.compile(r"^o\d").match
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +92,7 @@ def get_chat_model(model: str | None = None) -> Any:
 			)
 
 		# ── GPT/OpenAI models → override to Sonnet (no OpenAI proxy route) ──
-		if model.startswith("gpt-") or model.startswith("o"):
+		if model.startswith("gpt-") or _is_openai_o_model(model):
 			proxy_model = "claude-sonnet-4-20250514"
 			logger.info(
 				"llm.proxy_model_override",
@@ -106,7 +111,7 @@ def get_chat_model(model: str | None = None) -> Any:
 		)
 
 	# Direct mode -- pick provider based on model name
-	if model.startswith("gpt-") or model.startswith("o"):
+	if model.startswith("gpt-") or _is_openai_o_model(model):
 		from browser_use.llm.openai.chat import ChatOpenAI
 
 		return ChatOpenAI(model=model)
