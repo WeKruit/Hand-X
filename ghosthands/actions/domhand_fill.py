@@ -3124,9 +3124,11 @@ async def _fill_date_field(page: Any, field: FormField, value: str, tag: str) ->
 
     for attempt_val in date_variants:
         if await _fill_text_like_with_keyboard(page, field, attempt_val, tag):
-            # Press Tab to commit the value and dismiss any date picker popup
+            # Dismiss any calendar popup (Escape) then commit the value (Tab)
             try:
                 selector = f'[data-ff-id="{field.field_id}"]'
+                await page.press(selector, "Escape")
+                await asyncio.sleep(0.15)
                 await page.press(selector, "Tab")
                 await asyncio.sleep(0.3)
             except Exception:
