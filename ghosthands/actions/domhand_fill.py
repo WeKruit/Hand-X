@@ -2276,9 +2276,35 @@ def _sanitize_no_guess_answer(
     required: bool,
     answer: str | None,
     evidence: dict[str, str | None],
+    *,
+    field_type: str = "",
+    section: str = "",
 ) -> str:
-    """Prevent fabrication of sensitive identity fields not in profile."""
+    """Prevent fabrication of sensitive identity fields not in profile.
+
+    If the LLM returned ``[NEEDS_USER_INPUT]``, emit a ``field_needs_input``
+    event and pass the marker through unchanged so the caller can surface it.
+    """
     proposed = (answer or "").strip()
+
+    # ── [NEEDS_USER_INPUT] passthrough ────────────────────────────────
+    if proposed and "[NEEDS_USER_INPUT]" in proposed.upper():
+        if not required:
+            return ""
+        try:
+            from ghosthands.output.jsonl import emit_event
+
+            emit_event(
+                "field_needs_input",
+                field_label=field_name,
+                field_type=field_type or "unknown",
+                question_text=field_name,
+                section=section or None,
+            )
+        except Exception:
+            pass
+        return "[NEEDS_USER_INPUT]"
+
     known = _known_profile_value(field_name, evidence)
     if known:
         return known
@@ -2400,7 +2426,10 @@ Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because.
         for i, field in enumerate(fields):
             key = disambiguated_names[i]
             if key in parsed and isinstance(parsed[key], str):
-                parsed[key] = _sanitize_no_guess_answer(field.name, field.required, parsed[key], evidence)
+                parsed[key] = _sanitize_no_guess_answer(
+                    field.name, field.required, parsed[key], evidence,
+                    field_type=field.field_type, section=field.section or "",
+                )
 
         return parsed, input_tokens, output_tokens, step_cost, model_id
     except json.JSONDecodeError:
