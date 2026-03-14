@@ -86,14 +86,14 @@ def test_sanitize_passes_through_needs_user_input_for_required():
     with patch("ghosthands.output.jsonl.emit_event", mock_emit):
         result = _sanitize_no_guess_answer(
             "Country code", True, "[NEEDS_USER_INPUT]", {},
-            field_type="select", section="Contact Info",
+            field_type="select", question_text="Select country code",
         )
 
     assert result == "[NEEDS_USER_INPUT]"
     assert len(events) == 1
     assert events[0]["event"] == "field_needs_input"
     assert events[0]["field_label"] == "Country code"
-    assert events[0]["section"] == "Contact Info"
+    assert events[0]["question_text"] == "Select country code"
 
 
 def test_sanitize_skips_needs_user_input_for_optional():

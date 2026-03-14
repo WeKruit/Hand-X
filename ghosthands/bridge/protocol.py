@@ -212,10 +212,8 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> s
                 break
     except (EOFError, KeyboardInterrupt):
         pass
-    # NOTE: browser cleanup is NOT done here — the caller (cli.py) is
-    # responsible for calling _cleanup_browser() with ownership awareness.
-    # Previously this finally block called browser.stop() unconditionally,
-    # which only disconnects Playwright but doesn't kill a self-launched
-    # Chromium process, causing process leaks.
+    finally:
+        with contextlib.suppress(Exception):
+            await browser.stop()
 
     return result

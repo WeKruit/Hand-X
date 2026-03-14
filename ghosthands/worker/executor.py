@@ -8,7 +8,9 @@ database and VALET.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
 import traceback
 from typing import Any
 from urllib.parse import urlparse
@@ -67,18 +69,25 @@ def validate_domain(url: str, allowed_domains: list[str]) -> bool:
 
 # ── Heartbeat task ────────────────────────────────────────────────────────
 
+HEARTBEAT_INTERVAL = 30
+HEARTBEAT_JITTER = 5
 
-async def _heartbeat_loop(db: Database, job_id: str, interval: float = 30.0) -> None:
+
+async def _heartbeat_loop(db: Database, job_id: str) -> None:
     """Background task that updates the heartbeat timestamp periodically.
 
     Runs until cancelled. Prevents the stuck-job recovery from reclaiming
-    our job while it's still running.
+    our job while it's still running. Includes random jitter to avoid
+    thundering-herd heartbeats across multiple workers.
     """
+    import random
+
     while True:
         try:
             await db.heartbeat(job_id)
         except Exception as exc:
             logger.warning("executor.heartbeat_failed", job_id=job_id, error=str(exc))
+        interval = HEARTBEAT_INTERVAL + random.uniform(0, HEARTBEAT_JITTER)
         await asyncio.sleep(interval)
 
 
@@ -361,7 +370,11 @@ async def _run_agent(
     Creates a fully-configured agent via the factory, runs it against the
     target URL, and returns structured results.
     """
-    import os
+    # ── Set profile env var for domhand_fill ──────────────────────
+    # domhand_fill reads GH_USER_PROFILE_PATH to generate field answers.
+    # Write to temp file instead of env var to avoid /proc/pid/environ exposure.
+    import stat
+    import tempfile
 
     from ghosthands.agent.factory import run_job_agent
     from ghosthands.agent.prompts import (
@@ -370,11 +383,17 @@ async def _run_agent(
         build_completion_detection_text,
     )
 
-    # ── Set profile env var for domhand_fill ──────────────────────
-    # domhand_fill reads GH_USER_PROFILE_TEXT to generate field answers.
     profile = resume_profile or {}
-    os.environ["GH_USER_PROFILE_TEXT"] = json.dumps(profile, indent=2)
-    os.environ["GH_USER_PROFILE_JSON"] = json.dumps(profile)
+    profile_fd, profile_path = tempfile.mkstemp(prefix="gh_profile_", suffix=".json")
+    try:
+        os.fchmod(profile_fd, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+        os.write(profile_fd, json.dumps(profile, indent=2).encode())
+        os.close(profile_fd)
+        os.environ["GH_USER_PROFILE_PATH"] = profile_path
+    except Exception:
+        os.close(profile_fd)
+        os.unlink(profile_path)
+        raise
 
     # ── Build task prompt ────────────────────────────────────────
     resume_path = input_data.get("resume_path", "")
@@ -483,21 +502,23 @@ Other rules:
     log.info("executor.launching_agent", platform=platform, headless=settings.headless)
 
     # ── Run the agent ────────────────────────────────────────────
-    # keep_alive=True so the browser survives for HITL inspection when
-    # the agent reports a blocker.  If there is no blocker we close the
-    # browser ourselves below.
-    result = await run_job_agent(
-        task=task,
-        resume_profile=profile,
-        credentials=credentials,
-        platform=platform,
-        headless=settings.headless,
-        max_steps=settings.max_steps_per_job,
-        job_id=job_id,
-        max_budget=settings.max_budget_per_job,
-        on_status_update=_on_status,
-        keep_alive=True,
-    )
+    try:
+        result = await run_job_agent(
+            task=task,
+            resume_profile=profile,
+            credentials=credentials,
+            platform=platform,
+            headless=settings.headless,
+            max_steps=settings.max_steps_per_job,
+            job_id=job_id,
+            max_budget=settings.max_budget_per_job,
+            on_status_update=_on_status,
+        )
+    finally:
+        # Clean up PII temp file
+        with contextlib.suppress(OSError):
+            os.unlink(profile_path)
+        os.environ.pop("GH_USER_PROFILE_PATH", None)
 
     log.info(
         "executor.agent_finished",

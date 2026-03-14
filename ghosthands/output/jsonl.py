@@ -60,6 +60,9 @@ def _get_output() -> IO[str]:
 _emit_lock = threading.Lock()
 _pipe_broken = False
 
+_emit_lock = threading.Lock()
+_pipe_broken = False
+
 
 def emit_event(event_type: str, **kwargs: Any) -> None:
     """Emit a single JSONL event.

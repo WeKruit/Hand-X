@@ -756,7 +756,7 @@ def build_task_prompt(
         "2. Then call domhand_fill to fill remaining visible form fields.\n"
         "3. After domhand_fill completes, review its output to see which fields were filled and which failed.\n"
         "4. For failed dropdowns/selects, use domhand_select.\n"
-        f"5. For other file uploads, use domhand_upload with path: {resume_path}\n"
+        f"5. For other file uploads, use domhand_upload or upload_file action with path: {resume_path}\n"
         "6. Only use generic browser-use actions (click, input_text) as a LAST RESORT.\n"
         "7. After all fields on the current page are filled, click Next/Continue/Save to advance.\n"
         "8. On each new page, repeat from step 1 (check for Easy Apply / resume upload first).\n"

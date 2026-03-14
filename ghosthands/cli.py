@@ -32,12 +32,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import contextlib
 import json
 import logging
 import os
 import signal
+import stat
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -65,6 +68,10 @@ os.environ["BROWSER_USE_SETUP_LOGGING"] = "false"
 from ghosthands.agent.hooks import install_same_tab_guard
 
 logger = structlog.get_logger()
+
+# Pre-step budget guard: estimated cost of one agent step in USD.
+# If remaining budget is less than this, the agent stops before the next step.
+_STEP_COST_ESTIMATE = 0.10
 
 # ── Argument parsing ──────────────────────────────────────────────────
 
@@ -124,14 +131,6 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Connect to an existing browser via CDP URL instead of launching a new one (Desktop-owned browser mode)",
-    )
-
-    # Browser engine
-    parser.add_argument(
-        "--engine",
-        choices=["chromium", "firefox", "auto"],
-        default="auto",
-        help="Browser engine to use: chromium, firefox (Camoufox), or auto (route-based selection, default)",
     )
 
     return parser.parse_args(argv)
@@ -205,12 +204,19 @@ def _load_profile(args: argparse.Namespace) -> dict:
         except Exception:
             return _validate_profile(data)
 
-    # Environment variable fallback (for desktop bridge)
+    # File-based profile (preferred — avoids /proc/pid/environ exposure)
+    profile_path = os.environ.get("GH_USER_PROFILE_PATH", "")
+    if profile_path:
+        p = Path(profile_path)
+        if p.is_file():
+            return _validate_profile(json.loads(p.read_text(encoding="utf-8")))
+
+    # Environment variable fallback (for backwards compat with desktop bridge)
     profile_text = os.environ.get("GH_USER_PROFILE_TEXT", "")
     if profile_text:
         return _validate_profile(json.loads(profile_text))
 
-    raise ValueError("Either --profile, --test-data, or GH_USER_PROFILE_TEXT env var is required")
+    raise ValueError("Either --profile, --test-data, GH_USER_PROFILE_PATH, or GH_USER_PROFILE_TEXT env var is required")
 
 
 def _apply_runtime_env(
@@ -225,14 +231,32 @@ def _apply_runtime_env(
     if args.browsers_path:
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = args.browsers_path
 
-    os.environ["GH_USER_PROFILE_TEXT"] = json.dumps(profile, indent=2)
-    os.environ["GH_USER_PROFILE_JSON"] = json.dumps(profile)
+    # Write profile to temp file instead of env var (avoids /proc/pid/environ exposure)
+    profile_fd, profile_path = tempfile.mkstemp(prefix="gh_profile_", suffix=".json")
+    try:
+        os.fchmod(profile_fd, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+        os.write(profile_fd, json.dumps(profile, indent=2).encode())
+        os.close(profile_fd)
+        os.environ["GH_USER_PROFILE_PATH"] = profile_path
+        atexit.register(_cleanup_profile_tempfile)
+    except Exception:
+        os.close(profile_fd)
+        os.unlink(profile_path)
+        raise
 
     resume_path = str(Path(args.resume).resolve()) if args.resume else ""
     if resume_path:
         os.environ["GH_RESUME_PATH"] = resume_path
 
     return resume_path
+
+
+def _cleanup_profile_tempfile() -> None:
+    """Remove the temporary profile file created by _apply_runtime_env."""
+    profile_path = os.environ.pop("GH_USER_PROFILE_PATH", "")
+    if profile_path:
+        with contextlib.suppress(OSError):
+            os.unlink(profile_path)
 
 
 def _load_runtime_settings():
@@ -313,14 +337,18 @@ async def _cleanup_browser(browser, desktop_owns_browser: bool) -> None:
     """Shut down the browser session with ownership-aware cleanup.
 
     When the Desktop app owns the browser (CDP mode), we only disconnect
-    from the session via ``stop()`` — the browser process stays alive.
-    When Hand-X launched the browser itself, we tear it down fully via
-    ``close()`` (the pre-existing behavior).
+    from the session via ``stop()`` — the browser process stays alive for
+    the Desktop app to manage.
+
+    When Hand-X launched the browser itself (standalone mode), we call
+    ``kill()`` which dispatches a force-stop event that actually terminates
+    the Chromium process.  Using ``stop()`` here would only disconnect
+    without killing the process, leaking Chromium instances.
     """
     if desktop_owns_browser:
         await browser.stop()
     else:
-        await browser.close()
+        await browser.kill()
 
 
 @dataclass(frozen=True)
@@ -405,10 +433,10 @@ def _classify_runtime_error(exc: BaseException, *, proxy_mode: bool) -> _Runtime
             keep_browser_open=True,
         )
 
-    if 401 in status_codes and "expired" in combined_text:
+    if 401 in status_codes and any(keyword in combined_text for keyword in ("expired", "revoked", "grant")):
         return _RuntimeErrorSignal(
-            code="GRANT_EXPIRED",
-            message="Your automation session expired. Please try again.",
+            code="GRANT_ERROR",
+            message="Your automation session is no longer valid. Please try again.",
             keep_browser_open=True,
         )
 
@@ -581,34 +609,11 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     sensitive_data = _resolve_sensitive_data(app_settings, embedded_credentials, platform=platform)
 
     # -- Domain lockdown ----------------------------------------------------
-    from ghosthands.security.domain_lockdown import create_lockdown_for_platform
+    from ghosthands.security.domain_lockdown import DomainLockdown
 
-    additional_domains: list[str] | None = None
-    if args.allowed_domains:
-        additional_domains = [d.strip() for d in args.allowed_domains.split(",") if d.strip()]
-
-    lockdown = create_lockdown_for_platform(
-        job_url=args.job_url,
-        platform=platform,
-        additional_domains=additional_domains,
-    )
+    lockdown = DomainLockdown(job_url=args.job_url, platform=platform)
+    lockdown.freeze()
     allowed_domains = lockdown.get_allowed_domains()
-
-    # -- Engine selection ---------------------------------------------------
-    engine = args.engine
-    if engine == "auto":
-        from browser_use.browser.providers.route_selector import RouteSelector
-
-        engine = RouteSelector.select_engine(args.job_url, platform)
-        emit_status(f"Auto-selected browser engine: {engine}", job_id=job_id)
-
-    # TODO: wire CamoufoxProvider when ready
-    if engine == "firefox":
-        emit_status(
-            "Firefox/Camoufox engine is not yet wired — falling back to chromium",
-            job_id=job_id,
-        )
-        engine = "chromium"
 
     # -- Browser ------------------------------------------------------------
     cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
@@ -617,7 +622,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     if cdp_url:
         # Desktop-owned browser: connect to existing browser via CDP URL.
         # Do not launch a new browser; headless flag is irrelevant here.
-        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains, engine=engine)
+        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains)
         browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
         emit_status("Connecting to Desktop-owned browser via CDP", job_id=job_id)
     else:
@@ -628,7 +633,6 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             aboutblank_loading_logo_enabled=True,
             demo_mode=False,
             interaction_highlight_color="rgb(37, 99, 235)",
-            engine=engine,
         )
         browser = BrowserSession(browser_profile=browser_profile)
 
@@ -676,6 +680,10 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         if usage and usage.total_cost and usage.total_cost >= args.max_budget:
             ag.state.stopped = True
             emit_error("Budget exceeded", fatal=False, job_id=job_id)
+
+        # Pre-step budget guard: stop if less than estimated step cost remaining
+        if usage and usage.total_cost and (args.max_budget - usage.total_cost) < _STEP_COST_ESTIMATE:
+            ag.state.stopped = True
 
     # -- Run ----------------------------------------------------------------
     try:
@@ -799,10 +807,6 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 lease_id=lease_id,
                 result_data=result_data,
             )
-            # Clean up browser after review (wait_for_review_command no longer
-            # does this — ownership-aware cleanup belongs here in cli.py)
-            with contextlib.suppress(Exception):
-                await _cleanup_browser(browser, desktop_owns_browser)
             if exit_code is not None:
                 sys.exit(exit_code)
         else:
@@ -916,49 +920,28 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     sensitive_data = _resolve_sensitive_data(app_settings, embedded_credentials, platform=platform)
 
     # -- Domain lockdown ----------------------------------------------------
-    from ghosthands.security.domain_lockdown import create_lockdown_for_platform
+    from ghosthands.security.domain_lockdown import DomainLockdown
 
-    additional_domains: list[str] | None = None
-    if args.allowed_domains:
-        additional_domains = [d.strip() for d in args.allowed_domains.split(",") if d.strip()]
-
-    lockdown = create_lockdown_for_platform(
-        job_url=args.job_url,
-        platform=platform,
-        additional_domains=additional_domains,
-    )
+    lockdown = DomainLockdown(job_url=args.job_url, platform=platform)
+    lockdown.freeze()
     allowed_domains = lockdown.get_allowed_domains()
-
-    # -- Engine selection ---------------------------------------------------
-    engine = args.engine
-    if engine == "auto":
-        from browser_use.browser.providers.route_selector import RouteSelector
-
-        engine = RouteSelector.select_engine(args.job_url, platform)
-        print(f"Auto-selected browser engine: {engine}")
-
-    # TODO: wire CamoufoxProvider when ready
-    if engine == "firefox":
-        print("WARNING: Firefox/Camoufox engine is not yet wired — falling back to chromium")
-        engine = "chromium"
 
     # -- Browser ------------------------------------------------------------
     cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
     desktop_owns_browser = cdp_url is not None
 
     if cdp_url:
-        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains, engine=engine)
+        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains)
         browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
         print(f"Connecting to Desktop-owned browser via CDP: {cdp_url}")
     else:
         browser_profile = BrowserProfile(
             headless=args.headless,
             keep_alive=True,
+            allowed_domains=allowed_domains,
             aboutblank_loading_logo_enabled=True,
             demo_mode=False,
             interaction_highlight_color="rgb(37, 99, 235)",
-            allowed_domains=allowed_domains,
-            engine=engine,
         )
         browser = BrowserSession(browser_profile=browser_profile)
 
@@ -991,7 +974,6 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     print(f"  Resume:    {resume_path or '(none)'}")
     print(f"  Headless:  {args.headless}")
     print(f"  CDP URL:   {cdp_url or '(launching own browser)'}")
-    print(f"  Engine:    {engine}")
     print(f"  Max steps: {args.max_steps}")
     proxy_url = os.environ.get("GH_LLM_PROXY_URL", "")
     print(f"  LLM:       {'Proxy: ' + proxy_url if proxy_url else 'Direct API'}")

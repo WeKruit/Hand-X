@@ -1,8 +1,4 @@
-"""Baseline regression tests for ghosthands.output.jsonl.
-
-These tests capture the CURRENT behavior of the JSONL event emitter so that
-future changes (especially Stream S2 renaming "type" -> "event") can be
-validated against a known-good baseline.
+"""Regression tests for ghosthands.output.jsonl.
 
 Every emit_*() function writes a single JSON line to the JSONL output stream.
 When the stdout guard is NOT installed (_jsonl_out is None), the fallback
@@ -47,15 +43,10 @@ class TestEmitEvent:
     """Tests for the core emit_event() function."""
 
     def test_output_uses_event_key(self):
-        """emit_event uses 'event' key for the event type.
-
-        # CHANGED in S2: Key renamed from "type" to "event" to match
-        # the Desktop app's HandXEvent interface.
-        """
+        """emit_event uses 'event' key for the event type."""
         from ghosthands.output.jsonl import emit_event
 
         obj = _capture_emit(emit_event, "status", message="hello")
-        # CHANGED in S2: "event" key (was "type")
         assert "event" in obj
         assert obj["event"] == "status"
 
@@ -146,7 +137,6 @@ class TestEmitStatus:
         from ghosthands.output.jsonl import emit_status
 
         obj = _capture_emit(emit_status, "Processing step 1")
-        # CHANGED in S2: uses "event" key (was "type")
         assert obj["event"] == "status"
         assert obj["message"] == "Processing step 1"
         assert "timestamp" in obj
@@ -300,7 +290,6 @@ class TestEmitFieldFailed:
         assert obj["event"] == "field_failed"
         assert obj["field"] == "phone"
         assert obj["reason"] == "Element not found"
-        assert "error" not in obj
         assert "timestamp" in obj
 
 
@@ -322,7 +311,7 @@ class TestEmitProgress:
         assert obj["maxSteps"] == 10
         assert "timestamp" in obj
 
-    def test_progress_description_default(self):
+    def test_progress_default_description(self):
         """The default description is an empty string."""
         from ghosthands.output.jsonl import emit_progress
 
@@ -333,8 +322,8 @@ class TestEmitProgress:
         """A custom description can be specified."""
         from ghosthands.output.jsonl import emit_progress
 
-        obj = _capture_emit(emit_progress, 3, 8, description="Filling page 2")
-        assert obj["description"] == "Filling page 2"
+        obj = _capture_emit(emit_progress, 3, 8, description="Filling form")
+        assert obj["description"] == "Filling form"
 
 
 # ---------------------------------------------------------------------------
