@@ -176,6 +176,7 @@ class DomainLockdown:
 		self._blocked_urls: deque[str] = deque(maxlen=20)
 		self._allow_cross_origin_resources = allow_cross_origin_resources
 		self._on_blocked = on_blocked
+		self._frozen = False
 
 		# Add the job URL's domain
 		job_domain = _extract_domain(job_url)
@@ -241,8 +242,14 @@ class DomainLockdown:
 		self._record_blocked(url, reason)
 		return False
 
+	def freeze(self) -> None:
+		"""Prevent further domain additions after initialization."""
+		self._frozen = True
+
 	def add_allowed_domain(self, domain: str) -> None:
 		"""Add a domain to the allowlist at runtime."""
+		if self._frozen:
+			raise RuntimeError("Cannot add domains after lockdown is frozen")
 		self._allowed_domains.add(domain.lower())
 
 	def get_allowed_domains(self) -> list[str]:
