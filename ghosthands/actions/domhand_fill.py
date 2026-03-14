@@ -2364,10 +2364,14 @@ Rules:
 
 Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because..."}}"""
 
+    # Scale max_tokens based on field count — forms with many fields (e.g. 60+
+    # on SmartRecruiters with 5 experience entries) need more output budget to
+    # avoid truncation of long descriptions and other text fields.
+    scaled_max_tokens = max(4096, min(len(fields) * 128, 16384))
     try:
         response = await llm.ainvoke(
             [UserMessage(content=prompt)],
-            max_tokens=4096,
+            max_tokens=scaled_max_tokens,
         )
         text = response.completion if isinstance(response.completion, str) else ""
         input_tokens = response.usage.prompt_tokens if response.usage else 0
