@@ -68,8 +68,7 @@ class SecurityWatchdog(BaseWatchdog):
 				await session.cdp_client.send.Page.navigate(params={'url': 'about:blank'}, session_id=session.session_id)
 				self.logger.info(f'⛔️ Navigated to about:blank after blocked URL: {event.url}')
 			except Exception as e:
-				pass
-				self.logger.error(f'⛔️ Failed to navigate to about:blank: {type(e).__name__} {e}')
+				self.logger.error(f'⛔️ Failed to navigate to about:blank after blocked redirect: {type(e).__name__} {e}')
 
 	async def on_TabCreatedEvent(self, event: TabCreatedEvent) -> None:
 		"""Check if new tab URL is allowed."""
@@ -179,9 +178,22 @@ class SecurityWatchdog(BaseWatchdog):
 			# Invalid URL
 			return False
 
-		# Allow data: and blob: URLs (they don't have hostnames)
-		if parsed.scheme in ['data', 'blob']:
+		# Allow blob: URLs (origin-bound, safe)
+		if parsed.scheme == 'blob':
 			return True
+
+		# Allow data: URLs only for known-safe MIME types (images, fonts, audio, video).
+		# Allowlist approach — blocks everything not explicitly safe, including
+		# image/svg+xml, application/xhtml+xml, text/xml which can contain scripts.
+		if parsed.scheme == 'data':
+			data_header = url.split(',', 1)[0].lower()
+			safe_prefixes = ('data:image/', 'data:font/', 'data:audio/', 'data:video/', 'data:application/font-', 'data:application/octet-stream')
+			# SVG can execute scripts — explicitly exclude even though it starts with image/
+			if 'image/svg' in data_header:
+				return False
+			if any(data_header.startswith(p) for p in safe_prefixes):
+				return True
+			return False
 
 		# Get the actual host (domain)
 		host = parsed.hostname

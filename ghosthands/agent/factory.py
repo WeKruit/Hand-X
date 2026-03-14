@@ -152,7 +152,9 @@ async def create_job_agent(
         sensitive_data=sensitive_data,
         # Cost tracking — browser-use will populate history.usage
         calculate_cost=True,
-        # Vision enabled for screenshot-based navigation
+        # Vision helps the agent handle complex form fields, custom widgets,
+        # and multi-step flows.  The VALET proxy fully supports vision, so
+        # keep it enabled in both direct and proxy modes.
         use_vision=True,
         # No judge needed — we detect completion ourselves
         use_judge=False,
@@ -173,6 +175,8 @@ async def create_job_agent(
             "headless": headless,
             "has_credentials": credentials is not None,
             "domain_count": len(allowed_domains),
+            "use_vision": True,
+            "llm_proxy": bool(settings.llm_proxy_url),
         },
     )
 

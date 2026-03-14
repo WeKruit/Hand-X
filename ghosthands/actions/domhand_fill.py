@@ -2278,7 +2278,7 @@ def _sanitize_no_guess_answer(
     evidence: dict[str, str | None],
     *,
     field_type: str = "",
-    section: str = "",
+    question_text: str = "",
 ) -> str:
     """Prevent fabrication of sensitive identity fields not in profile.
 
@@ -2290,19 +2290,17 @@ def _sanitize_no_guess_answer(
     # ── [NEEDS_USER_INPUT] passthrough ────────────────────────────────
     if proposed and "[NEEDS_USER_INPUT]" in proposed.upper():
         if not required:
+            # LLM should not emit this marker for optional fields; treat as
+            # empty so the field is simply skipped.
             return ""
-        try:
-            from ghosthands.output.jsonl import emit_event
+        from ghosthands.output.jsonl import emit_event
 
-            emit_event(
-                "field_needs_input",
-                field_label=field_name,
-                field_type=field_type or "unknown",
-                question_text=field_name,
-                section=section or None,
-            )
-        except Exception:
-            pass
+        emit_event(
+            "field_needs_input",
+            field_label=field_name,
+            field_type=field_type or "unknown",
+            question_text=question_text or field_name,
+        )
         return "[NEEDS_USER_INPUT]"
 
     known = _known_profile_value(field_name, evidence)
@@ -2367,25 +2365,27 @@ Here are the form fields to fill:
 Rules:
 - For each field, decide what value to put based on the profile.
 - For each field, use ONLY the applicant's actual profile data. Every non-consent value must come directly from the provided applicant profile.
-- If the profile has NO relevant data for a field, return "" (empty string) — even for required fields. NEVER make up data or use placeholder values like "N/A", "None", "Not applicable", etc.
-- NEVER fabricate personal identifiers or social handles/URLs not explicitly in the profile. If missing: return "" (empty string) regardless of whether the field is required or optional.
+- If the profile has NO relevant data for an OPTIONAL field, return "" (empty string). NEVER make up data or use placeholder values like "N/A", "None", "Not applicable", etc.
+- If the profile has NO relevant data for a REQUIRED field: if a neutral/decline option exists (e.g., "Prefer not to say", "N/A", "Other"), select it. Otherwise, return exactly "[NEEDS_USER_INPUT]".
+- NEVER fabricate answers for salary, start date, referral source, or other substantive fields. If the profile does not contain the answer, return "[NEEDS_USER_INPUT]" for required fields or "" for optional fields.
+- NEVER fabricate personal identifiers or social handles/URLs not explicitly in the profile. If missing: return "" (empty string) for optional fields, or "[NEEDS_USER_INPUT]" for required fields.
 - For dropdowns/radio groups with listed options, pick the EXACT text of one of the available options.
 - For hierarchical dropdown options (format "Category > SubOption"), pick the EXACT full path including the " > " separator.
 - For dropdowns WITHOUT listed options, provide the value from the profile if available. If the field name closely matches a profile entry, use that value.
-- For "How did you hear about us?" or similar source/referral fields: only answer from the applicant profile. If the profile has no source, return "".
-- For "Phone Device Type" or similar phone type fields: only answer from the applicant profile. If the profile has no phone type, return "".
+- For "How did you hear about us?" or similar source/referral fields: only answer from the applicant profile. If the profile has no source, return "[NEEDS_USER_INPUT]" for required fields or "" for optional.
+- For "Phone Device Type" or similar phone type fields: only answer from the applicant profile. If the profile has no phone type, return "" for optional or "[NEEDS_USER_INPUT]" for required.
 - For skill typeahead fields, return an ARRAY of relevant skills from the applicant profile.
 - For multi-select fields, return a JSON array of ALL matching options (e.g., ["Python", "Java"]).
 - For checkboxes/toggles, respond with "checked" or "unchecked".
 - IMPORTANT: For agreement/consent checkboxes (e.g., "I agree", "I accept", "I understand", privacy policy, terms of service, candidate consent), ALWAYS respond with "checked". The applicant consents to standard application agreements.
 - For file upload fields, skip them (don't include in output).
-- For textarea fields, use an explicit open-ended answer from the applicant profile when available. If the profile does not contain that answer, return "".
+- For textarea fields, use an explicit open-ended answer from the applicant profile when available. If the profile does not contain that answer, return "" for optional or "[NEEDS_USER_INPUT]" for required.
 - For demographic/EEO fields, use the applicant's actual info only. If no info is provided in the profile, return "".
 - NEVER select a default placeholder value like "Select One", "Please select", etc.
-- NEVER use placeholder strings like "N/A", "NA", "None", "Not applicable", "Unknown". If you don't have data, return "" (empty string).
-- For salary fields, only use salary expectations explicitly provided in the applicant profile. If missing, return "".
+- NEVER use placeholder strings like "N/A", "NA", "None", "Not applicable", "Unknown". If you don't have data, return "" for optional fields or "[NEEDS_USER_INPUT]" for required fields.
+- For salary fields, only use salary expectations explicitly provided in the applicant profile. If missing, return "[NEEDS_USER_INPUT]" for required fields or "" for optional.
 - Use the EXACT field names shown above (including any "#N" suffix) as JSON keys.
-- Only include fields you have a real answer for. Omit fields you cannot answer from the JSON output.
+- Only include fields you have a real answer for (or "[NEEDS_USER_INPUT]" for required fields without data). Omit optional fields you cannot answer from the JSON output.
 - Respond with ONLY a valid JSON object. No explanation, no markdown fences.
 
 Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because..."}}"""
@@ -2427,8 +2427,12 @@ Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because.
             key = disambiguated_names[i]
             if key in parsed and isinstance(parsed[key], str):
                 parsed[key] = _sanitize_no_guess_answer(
-                    field.name, field.required, parsed[key], evidence,
-                    field_type=field.field_type, section=field.section or "",
+                    field.name,
+                    field.required,
+                    parsed[key],
+                    evidence,
+                    field_type=field.field_type,
+                    question_text=field.raw_label or field.name,
                 )
 
         return parsed, input_tokens, output_tokens, step_cost, model_id
@@ -2809,6 +2813,54 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 r"^(n/?a|na|none|not applicable|unknown|placeholder)$", matched_answer.strip(), re.IGNORECASE
             ):
                 matched_answer = ""
+            # [NEEDS_USER_INPUT] marker — skip the field instead of typing
+            # the literal marker string into the form.  The marker may
+            # arrive via _sanitize_no_guess_answer (which emits the event)
+            # OR via fuzzy match in _match_answer (which does NOT emit it).
+            # Always emit `field_needs_input` here to cover both paths,
+            # guarded to avoid duplicates.
+            if matched_answer and "[NEEDS_USER_INPUT]" in matched_answer:
+                key = get_stable_field_key(f)
+                # Ensure the event is emitted even when the marker came
+                # through _match_answer without passing _sanitize_no_guess_answer.
+                if key not in fields_skipped:
+                    from ghosthands.output.jsonl import emit_event
+
+                    emit_event(
+                        "field_needs_input",
+                        field_label=_preferred_field_label(f),
+                        field_type=f.field_type or "unknown",
+                        question_text=f.raw_label or f.name or "",
+                    )
+                # Use REQUIRED prefix so required-skip reporting picks it up.
+                error_msg = (
+                    "REQUIRED — Needs user input"
+                    if f.required
+                    else "Needs user input"
+                )
+                fr = FillFieldResult(
+                    field_id=f.field_id,
+                    name=_preferred_field_label(f),
+                    success=False,
+                    actor="skipped",
+                    error=error_msg,
+                    required=f.required,
+                    control_kind=f.field_type,
+                    section=f.section or "",
+                    failure_reason="needs_user_input",
+                    takeover_suggestion=_takeover_suggestion_for_field(
+                        f,
+                        False,
+                        "skipped",
+                        error_msg,
+                    ),
+                )
+                all_results.append(fr)
+                if _on_field_result:
+                    _on_field_result(fr, round_num)
+                fields_seen.add(key)
+                fields_skipped.add(key)
+                continue
             if not matched_answer:
                 key = get_stable_field_key(f)
                 error_msg = "No confident profile match for this field"
@@ -3590,9 +3642,7 @@ async def _fill_toggle(page: Any, field: FormField, value: str, tag: str) -> boo
 
 
 def _get_profile_text() -> str | None:
-    text = os.environ.get("GH_USER_PROFILE_TEXT", "")
-    if text.strip():
-        return text.strip()
+    # Prefer file-based path (secure, avoids /proc/pid/environ exposure)
     path = os.environ.get("GH_USER_PROFILE_PATH", "")
     if path:
         try:
@@ -3603,11 +3653,30 @@ def _get_profile_text() -> str | None:
                 return p.read_text(encoding="utf-8").strip()
         except Exception as e:
             logger.warning(f"Failed to read profile from {path}: {e}")
+    # Fallback to env var for backwards compat (desktop bridge)
+    text = os.environ.get("GH_USER_PROFILE_TEXT", "")
+    if text.strip():
+        return text.strip()
     return None
 
 
 def _get_profile_data() -> dict[str, Any]:
     """Return structured applicant profile data when available."""
+    # Prefer file-based path (secure, avoids /proc/pid/environ exposure)
+    path = os.environ.get("GH_USER_PROFILE_PATH", "")
+    if path:
+        try:
+            import pathlib
+
+            p = pathlib.Path(path)
+            if p.is_file():
+                parsed = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(parsed, dict):
+                    return parsed
+        except Exception as e:
+            logger.warning(f"Failed to parse profile JSON from {path}: {e}")
+
+    # Fallback to env vars for backwards compat
     raw_json = os.environ.get("GH_USER_PROFILE_JSON", "")
     if raw_json.strip():
         try:
@@ -3625,18 +3694,5 @@ def _get_profile_data() -> dict[str, Any]:
                 return parsed
         except Exception:
             pass
-
-    path = os.environ.get("GH_USER_PROFILE_PATH", "")
-    if path:
-        try:
-            import pathlib
-
-            p = pathlib.Path(path)
-            if p.is_file():
-                parsed = json.loads(p.read_text(encoding="utf-8"))
-                if isinstance(parsed, dict):
-                    return parsed
-        except Exception as e:
-            logger.warning(f"Failed to parse profile JSON from {path}: {e}")
 
     return {}
