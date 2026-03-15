@@ -82,11 +82,48 @@ async def read_stdin_line(timeout: float | None = None) -> str:
     return line
 
 
+# ── Shared answer queue for HITL field answers from Desktop ──────────
+# When the Desktop sends { type: "answer_field", field_label, answer },
+# the answer is stored here. domhand_fill can await get_field_answer()
+# to block until the user responds.
+_pending_answers: dict[str, str] = {}
+_answer_events: dict[str, asyncio.Event] = {}
+
+
+def put_field_answer(field_label: str, answer: str) -> None:
+    """Store an answer received from the Desktop for a pending HITL field."""
+    _pending_answers[field_label] = answer
+    evt = _answer_events.get(field_label)
+    if evt:
+        evt.set()
+
+
+async def get_field_answer(field_label: str, timeout: float = 300.0) -> str | None:
+    """Wait for a HITL answer from the Desktop, with timeout.
+
+    Returns the answer string, or None if timed out.
+    """
+    # Check if answer already arrived
+    if field_label in _pending_answers:
+        return _pending_answers.pop(field_label)
+
+    # Create event and wait
+    evt = asyncio.Event()
+    _answer_events[field_label] = evt
+    try:
+        await asyncio.wait_for(evt.wait(), timeout=timeout)
+        return _pending_answers.pop(field_label, None)
+    except (asyncio.TimeoutError, TimeoutError):
+        return None
+    finally:
+        _answer_events.pop(field_label, None)
+
+
 async def listen_for_cancel(
     agent: Any,
     cancel_requested: asyncio.Event | None = None,
 ) -> None:
-    """Read stdin concurrently during agent run for cancel commands."""
+    """Read stdin concurrently during agent run for cancel and answer commands."""
     while not agent.state.stopped:
         try:
             line = await read_stdin_line(timeout=1.0)
@@ -126,6 +163,17 @@ async def listen_for_cancel(
                 cancel_requested.set()
             agent.state.stopped = True
             break
+        elif cmd_type == "answer_field":
+            field_label = cmd.get("field_label", "")
+            answer = cmd.get("answer", "")
+            if field_label:
+                logger.info("answer_field_received", field_label=field_label)
+                put_field_answer(field_label, answer)
+        elif cmd_type == "skip_field":
+            field_label = cmd.get("field_label", "")
+            if field_label:
+                logger.info("skip_field_received", field_label=field_label)
+                put_field_answer(field_label, "")
 
 
 async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> str:
