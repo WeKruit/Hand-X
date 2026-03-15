@@ -114,6 +114,7 @@ async def get_field_answer(field_label: str, timeout: float = 300.0) -> str | No
         await asyncio.wait_for(evt.wait(), timeout=timeout)
         return _pending_answers.pop(field_label, None)
     except (asyncio.TimeoutError, TimeoutError):
+        _pending_answers.pop(field_label, None)  # Clean up stale answer if it arrived late
         return None
     finally:
         _answer_events.pop(field_label, None)
