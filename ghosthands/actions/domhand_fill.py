@@ -2866,6 +2866,26 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 error_msg = "No confident profile match for this field"
                 if f.required:
                     error_msg = "REQUIRED — could not fill automatically"
+
+                # For required checkbox/radio/select/toggle fields with no
+                # profile match, emit a field_needs_input event so the Desktop
+                # HITL modal surfaces them to the user instead of silently
+                # skipping.  Optional fields are still silently skipped.
+                _interactive_types = {
+                    "checkbox", "radio", "checkbox-group", "radio-group",
+                    "select", "toggle",
+                }
+                if f.required and f.field_type in _interactive_types and key not in fields_skipped:
+                    from ghosthands.output.jsonl import emit_event
+
+                    emit_event(
+                        "field_needs_input",
+                        field_label=_preferred_field_label(f),
+                        field_type=f.field_type or "unknown",
+                        question_text=f.raw_label or f.name or "",
+                        section=f.section or "",
+                    )
+
                 fr = FillFieldResult(
                     field_id=f.field_id,
                     name=_preferred_field_label(f),
