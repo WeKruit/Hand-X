@@ -191,6 +191,22 @@ async def execute_job(
             except Exception as exc:
                 log.warning("executor.credential_load_failed", error=str(exc))
 
+        # Step 3b: Generate credentials for account creation if none stored.
+        # Uses the applicant's email + a generated password so the agent can
+        # create an account on platforms that require login (e.g. Workday).
+        if not credentials and resume_profile:
+            applicant_email = resume_profile.get("email", "")
+            if applicant_email:
+                import secrets
+                import string
+
+                generated_pw = "".join(
+                    secrets.choice(string.ascii_letters + string.digits + "!@#$%&")
+                    for _ in range(18)
+                )
+                credentials = {"email": applicant_email, "password": generated_pw}
+                log.info("executor.credentials_generated", email=applicant_email)
+
         # Step 4: Detect platform and validate domain
         platform = detect_platform(target_url)
         log.info("executor.platform_detected", platform=platform)

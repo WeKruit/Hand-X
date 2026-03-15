@@ -148,8 +148,8 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> s
     """
     from ghosthands.output.jsonl import emit_error, emit_status
 
-    review_timeout_seconds = 30 * 60  # 30 minutes
-    warning_before_seconds = 5 * 60  # Warn 5 minutes before timeout.
+    review_timeout_seconds = 24 * 60 * 60  # 24 hours — users may come back next day
+    warning_before_seconds = 60 * 60  # Warn 1 hour before timeout.
     warning_emitted = False
     start_time = _time.monotonic()
     result = "eof"
@@ -169,7 +169,7 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> s
             if remaining <= 0:
                 logger.warning("review_timeout_exceeded", timeout_seconds=review_timeout_seconds)
                 emit_error(
-                    "Review timed out after 30 minutes",
+                    "Review session expired — please submit or cancel your application",
                     fatal=True,
                     job_id=job_id,
                 )
