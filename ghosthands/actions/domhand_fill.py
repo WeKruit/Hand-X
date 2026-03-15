@@ -2367,13 +2367,13 @@ Rules:
 - For each field, use ONLY the applicant's actual profile data. Every non-consent value must come directly from the provided applicant profile.
 - If the profile has NO relevant data for an OPTIONAL field, return "" (empty string). NEVER make up data or use placeholder values like "N/A", "None", "Not applicable", etc.
 - If the profile has NO relevant data for a REQUIRED field: if a neutral/decline option exists (e.g., "Prefer not to say", "N/A", "Other"), select it. Otherwise, return exactly "[NEEDS_USER_INPUT]".
-- NEVER fabricate answers for salary, start date, referral source, or other substantive fields. If the profile does not contain the answer, return "[NEEDS_USER_INPUT]" for required fields or "" for optional fields.
+- NEVER fabricate answers for salary, start date, or other substantive fields. If the profile does not contain the answer, return "[NEEDS_USER_INPUT]" for required fields or "" for optional fields.
 - NEVER fabricate personal identifiers or social handles/URLs not explicitly in the profile. If missing: return "" (empty string) for optional fields, or "[NEEDS_USER_INPUT]" for required fields.
 - For dropdowns/radio groups with listed options, pick the EXACT text of one of the available options.
 - For hierarchical dropdown options (format "Category > SubOption"), pick the EXACT full path including the " > " separator.
 - For dropdowns WITHOUT listed options, provide the value from the profile if available. If the field name closely matches a profile entry, use that value.
-- For "How did you hear about us?" or similar source/referral fields: only answer from the applicant profile. If the profile has no source, return "[NEEDS_USER_INPUT]" for required fields or "" for optional.
-- For "Phone Device Type" or similar phone type fields: only answer from the applicant profile. If the profile has no phone type, return "" for optional or "[NEEDS_USER_INPUT]" for required.
+- For "How did you hear about us?" or similar source/referral fields: use the applicant profile value if available. If the profile has no source, default to "LinkedIn" (or the closest matching option like "Job Board", "Online Job Board", "Internet"). NEVER return "[NEEDS_USER_INPUT]" for referral source fields — they always have a safe default.
+- For "Phone Device Type" or similar phone type fields: default to "Mobile" if the profile has no phone type. NEVER return "[NEEDS_USER_INPUT]" for phone type fields.
 - For skill typeahead fields, return an ARRAY of relevant skills from the applicant profile.
 - For multi-select fields, return a JSON array of ALL matching options (e.g., ["Python", "Java"]).
 - For checkboxes/toggles, respond with "checked" or "unchecked".
