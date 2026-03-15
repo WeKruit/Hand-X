@@ -2821,46 +2821,67 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             # guarded to avoid duplicates.
             if matched_answer and "[NEEDS_USER_INPUT]" in matched_answer:
                 key = get_stable_field_key(f)
-                # Ensure the event is emitted even when the marker came
-                # through _match_answer without passing _sanitize_no_guess_answer.
+                field_label = _preferred_field_label(f)
+                # Emit field_needs_input event so the Desktop HITL modal shows it
                 if key not in fields_skipped:
                     from ghosthands.output.jsonl import emit_event
 
                     emit_event(
                         "field_needs_input",
-                        field_label=_preferred_field_label(f),
+                        field_label=field_label,
                         field_type=f.field_type or "unknown",
                         question_text=f.raw_label or f.name or "",
+                        section=f.section or "",
                     )
-                # Use REQUIRED prefix so required-skip reporting picks it up.
-                error_msg = (
-                    "REQUIRED — Needs user input"
-                    if f.required
-                    else "Needs user input"
-                )
-                fr = FillFieldResult(
-                    field_id=f.field_id,
-                    name=_preferred_field_label(f),
-                    success=False,
-                    actor="skipped",
-                    error=error_msg,
-                    required=f.required,
-                    control_kind=f.field_type,
-                    section=f.section or "",
-                    failure_reason="needs_user_input",
-                    takeover_suggestion=_takeover_suggestion_for_field(
-                        f,
-                        False,
-                        "skipped",
-                        error_msg,
-                    ),
-                )
-                all_results.append(fr)
-                if _on_field_result:
-                    _on_field_result(fr, round_num)
-                fields_seen.add(key)
-                fields_skipped.add(key)
-                continue
+
+                # For REQUIRED fields: wait for the user's answer from Desktop
+                # via stdin before continuing. This prevents the agent from
+                # trying to handle the field itself and getting stuck.
+                if f.required:
+                    try:
+                        from ghosthands.bridge.protocol import get_field_answer
+
+                        user_answer = await get_field_answer(field_label, timeout=300.0)
+                        if user_answer:
+                            # User provided an answer — use it to fill the field
+                            matched_answer = user_answer
+                            # Fall through to the filling logic below
+                        else:
+                            # Timeout or skip — mark as skipped
+                            matched_answer = ""
+                    except Exception:
+                        matched_answer = ""
+
+                if not matched_answer or "[NEEDS_USER_INPUT]" in (matched_answer or ""):
+                    # Use REQUIRED prefix so required-skip reporting picks it up.
+                    error_msg = (
+                        "REQUIRED — Needs user input"
+                        if f.required
+                        else "Needs user input"
+                    )
+                    fr = FillFieldResult(
+                        field_id=f.field_id,
+                        name=field_label,
+                        success=False,
+                        actor="skipped",
+                        error=error_msg,
+                        required=f.required,
+                        control_kind=f.field_type,
+                        section=f.section or "",
+                        failure_reason="needs_user_input",
+                        takeover_suggestion=_takeover_suggestion_for_field(
+                            f,
+                            False,
+                            "skipped",
+                            error_msg,
+                        ),
+                    )
+                    all_results.append(fr)
+                    if _on_field_result:
+                        _on_field_result(fr, round_num)
+                    fields_seen.add(key)
+                    fields_skipped.add(key)
+                    continue
             if not matched_answer:
                 key = get_stable_field_key(f)
                 error_msg = "No confident profile match for this field"
