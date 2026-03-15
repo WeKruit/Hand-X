@@ -2293,14 +2293,8 @@ def _sanitize_no_guess_answer(
             # LLM should not emit this marker for optional fields; treat as
             # empty so the field is simply skipped.
             return ""
-        from ghosthands.output.jsonl import emit_event
-
-        emit_event(
-            "field_needs_input",
-            field_label=field_name,
-            field_type=field_type or "unknown",
-            question_text=question_text or field_name,
-        )
+        # Return the marker — the main fill loop emits field_needs_input
+        # with the correct label and section context.
         return "[NEEDS_USER_INPUT]"
 
     known = _known_profile_value(field_name, evidence)
@@ -2832,6 +2826,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         field_type=f.field_type or "unknown",
                         question_text=f.raw_label or f.name or "",
                         section=f.section or "",
+                        options=[{"value": o.value, "text": o.text} for o in (f.options or [])],
+                        page_url=page.url if page else "",
                     )
 
                 # For REQUIRED fields: wait for the user's answer from Desktop
@@ -2905,31 +2901,73 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         field_type=f.field_type or "unknown",
                         question_text=f.raw_label or f.name or "",
                         section=f.section or "",
+                        options=[{"value": o.value, "text": o.text} for o in (f.options or [])],
+                        page_url=page.url if page else "",
                     )
 
-                fr = FillFieldResult(
-                    field_id=f.field_id,
-                    name=_preferred_field_label(f),
-                    success=False,
-                    actor="skipped",
-                    error=error_msg,
-                    required=f.required,
-                    control_kind=f.field_type,
-                    section=f.section or "",
-                    failure_reason="missing_profile_data" if not f.required else "required_missing_profile_data",
-                    takeover_suggestion=_takeover_suggestion_for_field(
-                        f,
-                        False,
-                        "skipped",
-                        error_msg,
-                    ),
-                )
-                all_results.append(fr)
-                if _on_field_result:
-                    _on_field_result(fr, round_num)
-                fields_seen.add(key)
-                fields_skipped.add(key)  # Never retry — no data exists
-                continue
+                    # Wait for user's answer from Desktop HITL modal
+                    try:
+                        from ghosthands.bridge.protocol import get_field_answer
+
+                        user_answer = await get_field_answer(_preferred_field_label(f), timeout=300.0)
+                        if user_answer:
+                            matched_answer = user_answer
+                        else:
+                            matched_answer = ""
+                    except Exception:
+                        matched_answer = ""
+
+                    # User provided an answer — fall through to filling logic
+                    if matched_answer:
+                        pass  # fall through to _fill_single_field below
+                    else:
+                        fr = FillFieldResult(
+                            field_id=f.field_id,
+                            name=_preferred_field_label(f),
+                            success=False,
+                            actor="skipped",
+                            error=error_msg,
+                            required=f.required,
+                            control_kind=f.field_type,
+                            section=f.section or "",
+                            failure_reason="required_missing_profile_data",
+                            takeover_suggestion=_takeover_suggestion_for_field(
+                                f,
+                                False,
+                                "skipped",
+                                error_msg,
+                            ),
+                        )
+                        all_results.append(fr)
+                        if _on_field_result:
+                            _on_field_result(fr, round_num)
+                        fields_seen.add(key)
+                        fields_skipped.add(key)
+                        continue
+                else:
+                    fr = FillFieldResult(
+                        field_id=f.field_id,
+                        name=_preferred_field_label(f),
+                        success=False,
+                        actor="skipped",
+                        error=error_msg,
+                        required=f.required,
+                        control_kind=f.field_type,
+                        section=f.section or "",
+                        failure_reason="missing_profile_data" if not f.required else "required_missing_profile_data",
+                        takeover_suggestion=_takeover_suggestion_for_field(
+                            f,
+                            False,
+                            "skipped",
+                            error_msg,
+                        ),
+                    )
+                    all_results.append(fr)
+                    if _on_field_result:
+                        _on_field_result(fr, round_num)
+                    fields_seen.add(key)
+                    fields_skipped.add(key)  # Never retry — no data exists
+                    continue
             if await _field_already_matches(page, f, matched_answer):
                 success = True
             else:
