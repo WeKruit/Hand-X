@@ -2844,25 +2844,28 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 # For REQUIRED fields: wait for the user's answer from Desktop
                 # via stdin before continuing. This prevents the agent from
                 # trying to handle the field itself and getting stuck.
+                # Guard: only wait if HITL listener is active (JSONL/Desktop mode).
+                # In non-JSONL CLI mode, no listener runs so waits block forever.
                 if f.required:
-                    try:
-                        from ghosthands.bridge.protocol import get_field_answer
+                    from ghosthands.bridge.protocol import get_field_answer, is_hitl_available
 
-                        user_answer = await get_field_answer(f.field_id, timeout=300.0, field_label=field_label)
-                        if user_answer:
-                            # User provided an answer — use it to fill the field
-                            matched_answer = user_answer
-                            # Fall through to the filling logic below
-                        else:
-                            # Timeout or skip on a REQUIRED field — log as a blocker-level warning
-                            from ghosthands.output.jsonl import emit_event as _emit_event
-                            _emit_event(
-                                "status",
-                                message=f"⚠️ Required field '{field_label}' was not answered (timed out). Application may be incomplete.",
-                            )
-                            matched_answer = ""
-                    except Exception:
+                    if not is_hitl_available():
+                        # Non-JSONL CLI mode — no stdin listener, skip without waiting
                         matched_answer = ""
+                    else:
+                        try:
+                            user_answer = await get_field_answer(f.field_id, timeout=300.0, field_label=field_label)
+                            if user_answer:
+                                matched_answer = user_answer
+                            else:
+                                from ghosthands.output.jsonl import emit_event as _emit_event
+                                _emit_event(
+                                    "status",
+                                    message=f"⚠️ Required field '{field_label}' was not answered (timed out). Application may be incomplete.",
+                                )
+                                matched_answer = ""
+                        except Exception:
+                            matched_answer = ""
 
                 if not matched_answer or "[NEEDS_USER_INPUT]" in (matched_answer or ""):
                     # Use REQUIRED prefix so required-skip reporting picks it up.
@@ -2931,22 +2934,24 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     )
 
                     # Wait for user's answer from Desktop HITL modal
-                    try:
-                        from ghosthands.bridge.protocol import get_field_answer
+                    from ghosthands.bridge.protocol import get_field_answer, is_hitl_available
 
-                        user_answer = await get_field_answer(f.field_id, timeout=300.0, field_label=_preferred_field_label(f))
-                        if user_answer:
-                            matched_answer = user_answer
-                        else:
-                            # Timeout or skip on a REQUIRED field — log as a blocker-level warning
-                            from ghosthands.output.jsonl import emit_event as _emit_event
-                            _emit_event(
-                                "status",
-                                message=f"⚠️ Required field '{_preferred_field_label(f)}' was not answered (timed out). Application may be incomplete.",
-                            )
-                            matched_answer = ""
-                    except Exception:
+                    if not is_hitl_available():
                         matched_answer = ""
+                    else:
+                        try:
+                            user_answer = await get_field_answer(f.field_id, timeout=300.0, field_label=_preferred_field_label(f))
+                            if user_answer:
+                                matched_answer = user_answer
+                            else:
+                                from ghosthands.output.jsonl import emit_event as _emit_event
+                                _emit_event(
+                                    "status",
+                                    message=f"⚠️ Required field '{_preferred_field_label(f)}' was not answered (timed out). Application may be incomplete.",
+                                )
+                                matched_answer = ""
+                        except Exception:
+                            matched_answer = ""
 
                     # User provided an answer — fall through to filling logic
                     if matched_answer:
