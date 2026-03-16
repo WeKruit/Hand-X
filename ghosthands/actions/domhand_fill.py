@@ -2820,13 +2820,19 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 if key not in fields_skipped:
                     from ghosthands.output.jsonl import emit_event
 
+                    # Build options list — include both FormField.options and choices
+                    field_options = [{"value": o.value, "text": o.text} for o in (f.options or [])]
+                    if not field_options and hasattr(f, 'choices') and f.choices:
+                        field_options = [{"value": c, "text": c} for c in f.choices]
+
                     emit_event(
                         "field_needs_input",
                         field_label=field_label,
+                        field_id=f.field_id,
                         field_type=f.field_type or "unknown",
                         question_text=f.raw_label or f.name or "",
                         section=f.section or "",
-                        options=[{"value": o.value, "text": o.text} for o in (f.options or [])],
+                        options=field_options,
                         page_url=page.url if page else "",
                     )
 
@@ -2837,13 +2843,18 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     try:
                         from ghosthands.bridge.protocol import get_field_answer
 
-                        user_answer = await get_field_answer(field_label, timeout=300.0)
+                        user_answer = await get_field_answer(f.field_id, timeout=300.0, field_label=field_label)
                         if user_answer:
                             # User provided an answer — use it to fill the field
                             matched_answer = user_answer
                             # Fall through to the filling logic below
                         else:
-                            # Timeout or skip — mark as skipped
+                            # Timeout or skip on a REQUIRED field — log as a blocker-level warning
+                            from ghosthands.output.jsonl import emit_event as _emit_event
+                            _emit_event(
+                                "status",
+                                message=f"⚠️ Required field '{field_label}' was not answered (timed out). Application may be incomplete.",
+                            )
                             matched_answer = ""
                     except Exception:
                         matched_answer = ""
@@ -2884,24 +2895,28 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 if f.required:
                     error_msg = "REQUIRED — could not fill automatically"
 
-                # For required checkbox/radio/select/toggle fields with no
-                # profile match, emit a field_needs_input event so the Desktop
-                # HITL modal surfaces them to the user instead of silently
-                # skipping.  Optional fields are still silently skipped.
-                _interactive_types = {
-                    "checkbox", "radio", "checkbox-group", "radio-group",
-                    "select", "toggle",
-                }
-                if f.required and f.field_type in _interactive_types and key not in fields_skipped:
+                # M14: For ALL required fields with no profile match, emit a
+                # field_needs_input event so the Desktop HITL modal surfaces
+                # them to the user instead of silently skipping.
+                # Previously limited to _interactive_types only, but required
+                # text/textarea/date fields were silently skipped too.
+                # Optional fields are still silently skipped.
+                if f.required and key not in fields_skipped:
                     from ghosthands.output.jsonl import emit_event
+
+                    # Build options list — include both FormField.options and choices
+                    field_options = [{"value": o.value, "text": o.text} for o in (f.options or [])]
+                    if not field_options and hasattr(f, 'choices') and f.choices:
+                        field_options = [{"value": c, "text": c} for c in f.choices]
 
                     emit_event(
                         "field_needs_input",
                         field_label=_preferred_field_label(f),
+                        field_id=f.field_id,
                         field_type=f.field_type or "unknown",
                         question_text=f.raw_label or f.name or "",
                         section=f.section or "",
-                        options=[{"value": o.value, "text": o.text} for o in (f.options or [])],
+                        options=field_options,
                         page_url=page.url if page else "",
                     )
 
@@ -2909,10 +2924,16 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     try:
                         from ghosthands.bridge.protocol import get_field_answer
 
-                        user_answer = await get_field_answer(_preferred_field_label(f), timeout=300.0)
+                        user_answer = await get_field_answer(f.field_id, timeout=300.0, field_label=_preferred_field_label(f))
                         if user_answer:
                             matched_answer = user_answer
                         else:
+                            # Timeout or skip on a REQUIRED field — log as a blocker-level warning
+                            from ghosthands.output.jsonl import emit_event as _emit_event
+                            _emit_event(
+                                "status",
+                                message=f"⚠️ Required field '{_preferred_field_label(f)}' was not answered (timed out). Application may be incomplete.",
+                            )
                             matched_answer = ""
                     except Exception:
                         matched_answer = ""
