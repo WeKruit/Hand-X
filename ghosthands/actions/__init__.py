@@ -79,9 +79,10 @@ def register_domhand_actions(tools: "Tools") -> None:
             "Extracts fields, generates answers from user profile via a single LLM call, "
             "and fills each field via DOM. Handles text inputs, selects, checkboxes, "
             "textareas, and radio buttons. Supports scoped repeater fills via "
-            "target_section, heading_boundary, entry_data, and auth-aware fills via "
-            "use_auth_credentials. Use this as the FIRST "
-            "approach for any form page. Only fall back to individual input/click actions "
+            "target_section, heading_boundary, and entry_data. Use this as the FIRST "
+            "approach for any APPLICATION FORM page. Do NOT use on auth/login pages — "
+            "use standard browser-use input actions for email/password fields instead. "
+            "Only fall back to individual input/click actions "
             "for fields this cannot handle."
         ),
         param_model=DomHandFillParams,
