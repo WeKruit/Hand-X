@@ -89,6 +89,12 @@ def parse_args() -> argparse.Namespace:
         description="Hand-X -- browser automation engine for job applications",
     )
 
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__import__('ghosthands').__version__}",
+    )
+
     # Required
     parser.add_argument("--job-url", required=True, help="Job posting URL to apply to")
 

@@ -157,11 +157,19 @@ fi
 VERSION_OUTPUT=$("$BUILD_BINARY" --version 2>/dev/null || true)
 echo "  --version: $VERSION_OUTPUT"
 
-# Extract semver
+# Extract semver from --version output, fallback to __init__.py, fallback to git tag
 VERSION=$(echo "$VERSION_OUTPUT" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
 if [ -z "$VERSION" ]; then
-  VERSION="0.1.0-dev"
-  echo "  Warning: Could not parse version, using $VERSION"
+  # Try reading from source
+  VERSION=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' "$REPO_ROOT/ghosthands/__init__.py" 2>/dev/null | head -1 || true)
+fi
+if [ -z "$VERSION" ]; then
+  # Try latest git tag
+  VERSION=$(git describe --tags --abbrev=0 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)
+fi
+if [ -z "$VERSION" ]; then
+  VERSION="0.0.0-dev"
+  echo "  Warning: Could not determine version, using $VERSION"
 fi
 
 # ---------- Install ----------
