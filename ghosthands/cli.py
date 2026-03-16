@@ -707,6 +707,19 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 memory = (last.model_output.current_state.memory or "").lower()
                 eval_text = (last.model_output.current_state.evaluation_previous_goal or "").lower()
                 combined = memory + " " + eval_text
+                marker_status: str | None = None
+                marker_note: str | None = None
+                marker_evidence: str | None = None
+
+                if "auth_result=account_created_pending_verification" in combined:
+                    marker_status = "pending_verification"
+                    marker_note = "Account likely exists, but email verification is still required."
+                    marker_evidence = "auth_marker_pending_verification"
+                elif "auth_result=account_created_active" in combined:
+                    marker_status = "active"
+                    marker_note = "Account creation succeeded and the run moved past the auth wall."
+                    marker_evidence = "auth_marker_active"
+
                 _acct_signals = (
                     "account created",
                     "account creation was successful",
@@ -718,22 +731,73 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                     "successfully created",
                     "new account",
                 )
-                if any(s in combined for s in _acct_signals):
+                _verification_signals = (
+                    "email verification required",
+                    "verify your account",
+                    "check your inbox",
+                    "confirm your email",
+                    "verification email",
+                )
+
+                if marker_status is None and any(s in combined for s in _verification_signals):
+                    marker_status = "pending_verification"
+                    marker_note = "Account likely exists, but email verification is still required."
+                    marker_evidence = "heuristic_pending_verification"
+
+                if marker_status is None and any(s in combined for s in _acct_signals):
+                    marker_status = "active"
+                    marker_note = "Account creation succeeded and the run moved past the auth wall."
+                    marker_evidence = "heuristic_account_created"
+
+                if marker_status:
                     try:
                         url = args.job_url if hasattr(args, "job_url") else ""
+                        hostname = ""
+                        platform = url
                         try:
                             from urllib.parse import urlparse
-                            platform = urlparse(url).hostname or url
+                            hostname = (urlparse(url).hostname or "").lower()
                         except Exception:
-                            platform = url
+                            hostname = ""
+
+                        if (
+                            "myworkdayjobs.com" in hostname
+                            or "myworkday.com" in hostname
+                            or "workday.com" in hostname
+                        ):
+                            platform = "workday"
+                        elif "greenhouse.io" in hostname:
+                            platform = "greenhouse"
+                        elif "smartrecruiters.com" in hostname:
+                            platform = "smartrecruiters"
+                        elif "icims.com" in hostname:
+                            platform = "icims"
+                        elif "taleo.net" in hostname:
+                            platform = "taleo"
+                        elif "bamboohr.com" in hostname:
+                            platform = "bamboohr"
+                        elif "lever.co" in hostname:
+                            platform = "lever"
+                        elif "ashbyhq.com" in hostname:
+                            platform = "ashby"
+                        elif hostname:
+                            platform = hostname
+
                         emit_account_created(
                             platform=platform,
+                            domain=hostname or None,
                             email=app_settings.email,
                             password=app_settings.password,
+                            credential_status=marker_status,
+                            note=marker_note,
+                            evidence=marker_evidence,
                             url=url,
                         )
                         account_created_emitted = True
-                        logger.info("cli.account_created_emitted", extra={"url": url})
+                        logger.info(
+                            "cli.account_created_emitted",
+                            extra={"url": url, "credential_status": marker_status},
+                        )
                     except Exception:
                         logger.warning("cli.account_created_emit_failed", exc_info=True)
 

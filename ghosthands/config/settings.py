@@ -66,8 +66,10 @@ class Settings(BaseSettings):
     password: str = Field("", description="Login password for ATS (prefer env var over CLI arg)")
     credential_source: str = Field(
         "",
-        description="How the password was obtained: 'stored' (from VALET DB), "
-        "'generated' (new password for first-time account), or 'user' (user-provided)",
+        description="How the password was obtained: 'stored' (from VALET DB, active), "
+        "'generated' (new password for first-time account), 'user' (user-provided), "
+        "'await_verification' (account exists but needs email verification), "
+        "'repair_credentials' (credential is known broken)",
     )
     allowed_domains: list[str] = Field(
         default_factory=lambda: [

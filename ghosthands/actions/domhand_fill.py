@@ -1662,6 +1662,68 @@ def _known_entry_value(field_name: str, entry_data: dict[str, Any] | None) -> st
     return None
 
 
+def _get_auth_override_data(enabled: bool) -> dict[str, str] | None:
+    """Load auth credentials from GH_* env vars when auth-mode fills are enabled."""
+    if not enabled:
+        return None
+
+    email = (os.environ.get("GH_EMAIL") or "").strip()
+    password = (os.environ.get("GH_PASSWORD") or "").strip()
+    if not email and not password:
+        return None
+
+    overrides: dict[str, str] = {}
+    if email:
+        overrides["email"] = email
+    if password:
+        overrides["password"] = password
+        overrides["confirm_password"] = password
+    return overrides or None
+
+
+def _is_auth_like_field(field: FormField) -> bool:
+    """Return True for auth fields that should prefer credential overrides."""
+    if field.field_type == "password":
+        return True
+
+    for label in _field_label_candidates(field):
+        name = normalize_name(label)
+        if not name:
+            continue
+        if any(token in name for token in ("email", "e-mail", "username", "user name", "login")):
+            return True
+    return False
+
+
+def _known_auth_override_for_field(field: FormField, auth_overrides: dict[str, str] | None) -> str | None:
+    """Match auth-like fields to GH_EMAIL/GH_PASSWORD values."""
+    if not auth_overrides:
+        return None
+
+    password = auth_overrides.get("password")
+    confirm_password = auth_overrides.get("confirm_password") or password
+    email = auth_overrides.get("email")
+
+    for label in _field_label_candidates(field):
+        name = normalize_name(label)
+        if not name:
+            continue
+
+        if "password" in name:
+            if any(token in name for token in ("confirm", "re-enter", "reenter", "repeat", "again")):
+                return confirm_password
+            return password
+
+        if any(token in name for token in ("email", "e-mail", "username", "user name", "login")):
+            return email
+
+    if field.field_type == "password":
+        return password
+    if field.field_type == "email":
+        return email
+    return None
+
+
 def _known_entry_value_for_field(field: FormField, entry_data: dict[str, Any] | None) -> str | None:
     """Try scoped repeater entry matching against all known labels for a field."""
     for label in _field_label_candidates(field):
@@ -2851,6 +2913,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         )
 
     profile_data = _get_profile_data()
+    auth_overrides = _get_auth_override_data(params.use_auth_credentials)
     entry_data = params.entry_data if isinstance(params.entry_data, dict) and params.entry_data else None
     if not entry_data:
         entry_data = _infer_entry_data_from_scope(profile_data, params.heading_boundary, params.target_section)
@@ -3004,6 +3067,31 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         for f in fillable_fields:
             if f.current_value and not is_placeholder_value(f.current_value):
                 fields_seen.add(get_stable_field_key(f))
+                continue
+            auth_val = _known_auth_override_for_field(f, auth_overrides)
+            if auth_val:
+                direct_fills[f.field_id] = auth_val
+                continue
+            if auth_overrides and _is_auth_like_field(f):
+                fr = FillFieldResult(
+                    field_id=f.field_id,
+                    name=_preferred_field_label(f),
+                    success=False,
+                    actor="skipped",
+                    error="Missing auth override for auth field",
+                    value_set=None,
+                    required=f.required,
+                    control_kind=f.field_type,
+                    section=f.section or "",
+                    failure_reason="auth_override_missing",
+                    takeover_suggestion=(
+                        "Retry domhand_fill with use_auth_credentials=true or use a targeted "
+                        "browser-use input action for this auth field only."
+                    ),
+                )
+                all_results.append(fr)
+                if _on_field_result:
+                    _on_field_result(fr, round_num)
                 continue
             profile_val = _known_entry_value_for_field(f, entry_data) or _known_profile_value_for_field(
                 f,

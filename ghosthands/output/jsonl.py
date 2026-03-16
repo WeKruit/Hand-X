@@ -217,6 +217,10 @@ def emit_account_created(
     email: str,
     password: str,
     *,
+    domain: str | None = None,
+    credential_status: str = "active",
+    note: str | None = None,
+    evidence: str | None = None,
     url: str = "",
 ) -> None:
     """Emit when a new ATS platform account is created during automation.
@@ -228,9 +232,13 @@ def emit_account_created(
     emit_event(
         "account_created",
         platform=platform,
+        domain=domain or None,
         email=email,
         password=password,
         password_provided=True,
+        credentialStatus=credential_status or "active",
+        note=note or None,
+        evidence=evidence or None,
         url=url or None,
     )
 
