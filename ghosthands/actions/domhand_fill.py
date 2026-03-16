@@ -2820,33 +2820,52 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 if key not in fields_skipped:
                     from ghosthands.output.jsonl import emit_event
 
+                    # Build options list — FormField.options may be list[str] or list[object]
+                    field_options = []
+                    for o in (f.options or []):
+                        if isinstance(o, str):
+                            field_options.append({"value": o, "text": o})
+                        elif hasattr(o, "value") and hasattr(o, "text"):
+                            field_options.append({"value": o.value, "text": o.text})
+                    if not field_options and hasattr(f, 'choices') and f.choices:
+                        field_options = [{"value": c, "text": c} for c in f.choices]
+
                     emit_event(
                         "field_needs_input",
                         field_label=field_label,
+                        field_id=f.field_id,
                         field_type=f.field_type or "unknown",
                         question_text=f.raw_label or f.name or "",
                         section=f.section or "",
-                        options=[{"value": o.value, "text": o.text} for o in (f.options or [])],
+                        options=field_options,
                         page_url=page.url if page else "",
                     )
 
                 # For REQUIRED fields: wait for the user's answer from Desktop
                 # via stdin before continuing. This prevents the agent from
                 # trying to handle the field itself and getting stuck.
+                # Guard: only wait if HITL listener is active (JSONL/Desktop mode).
+                # In non-JSONL CLI mode, no listener runs so waits block forever.
                 if f.required:
-                    try:
-                        from ghosthands.bridge.protocol import get_field_answer
+                    from ghosthands.bridge.protocol import get_field_answer, is_hitl_available
 
-                        user_answer = await get_field_answer(field_label, timeout=300.0)
-                        if user_answer:
-                            # User provided an answer — use it to fill the field
-                            matched_answer = user_answer
-                            # Fall through to the filling logic below
-                        else:
-                            # Timeout or skip — mark as skipped
-                            matched_answer = ""
-                    except Exception:
+                    if not is_hitl_available():
+                        # Non-JSONL CLI mode — no stdin listener, skip without waiting
                         matched_answer = ""
+                    else:
+                        try:
+                            user_answer = await get_field_answer(f.field_id, timeout=300.0, field_label=field_label)
+                            if user_answer:
+                                matched_answer = user_answer
+                            else:
+                                from ghosthands.output.jsonl import emit_event as _emit_event
+                                _emit_event(
+                                    "status",
+                                    message=f"⚠️ Required field '{field_label}' was not answered (timed out). Application may be incomplete.",
+                                )
+                                matched_answer = ""
+                        except Exception:
+                            matched_answer = ""
 
                 if not matched_answer or "[NEEDS_USER_INPUT]" in (matched_answer or ""):
                     # Use REQUIRED prefix so required-skip reporting picks it up.
@@ -2884,38 +2903,55 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 if f.required:
                     error_msg = "REQUIRED — could not fill automatically"
 
-                # For required checkbox/radio/select/toggle fields with no
-                # profile match, emit a field_needs_input event so the Desktop
-                # HITL modal surfaces them to the user instead of silently
-                # skipping.  Optional fields are still silently skipped.
-                _interactive_types = {
-                    "checkbox", "radio", "checkbox-group", "radio-group",
-                    "select", "toggle",
-                }
-                if f.required and f.field_type in _interactive_types and key not in fields_skipped:
+                # M14: For ALL required fields with no profile match, emit a
+                # field_needs_input event so the Desktop HITL modal surfaces
+                # them to the user instead of silently skipping.
+                # Previously limited to _interactive_types only, but required
+                # text/textarea/date fields were silently skipped too.
+                # Optional fields are still silently skipped.
+                if f.required and key not in fields_skipped:
                     from ghosthands.output.jsonl import emit_event
+
+                    # Build options list — FormField.options may be list[str] or list[object]
+                    field_options = []
+                    for o in (f.options or []):
+                        if isinstance(o, str):
+                            field_options.append({"value": o, "text": o})
+                        elif hasattr(o, "value") and hasattr(o, "text"):
+                            field_options.append({"value": o.value, "text": o.text})
+                    if not field_options and hasattr(f, 'choices') and f.choices:
+                        field_options = [{"value": c, "text": c} for c in f.choices]
 
                     emit_event(
                         "field_needs_input",
                         field_label=_preferred_field_label(f),
+                        field_id=f.field_id,
                         field_type=f.field_type or "unknown",
                         question_text=f.raw_label or f.name or "",
                         section=f.section or "",
-                        options=[{"value": o.value, "text": o.text} for o in (f.options or [])],
+                        options=field_options,
                         page_url=page.url if page else "",
                     )
 
                     # Wait for user's answer from Desktop HITL modal
-                    try:
-                        from ghosthands.bridge.protocol import get_field_answer
+                    from ghosthands.bridge.protocol import get_field_answer, is_hitl_available
 
-                        user_answer = await get_field_answer(_preferred_field_label(f), timeout=300.0)
-                        if user_answer:
-                            matched_answer = user_answer
-                        else:
-                            matched_answer = ""
-                    except Exception:
+                    if not is_hitl_available():
                         matched_answer = ""
+                    else:
+                        try:
+                            user_answer = await get_field_answer(f.field_id, timeout=300.0, field_label=_preferred_field_label(f))
+                            if user_answer:
+                                matched_answer = user_answer
+                            else:
+                                from ghosthands.output.jsonl import emit_event as _emit_event
+                                _emit_event(
+                                    "status",
+                                    message=f"⚠️ Required field '{_preferred_field_label(f)}' was not answered (timed out). Application may be incomplete.",
+                                )
+                                matched_answer = ""
+                        except Exception:
+                            matched_answer = ""
 
                     # User provided an answer — fall through to filling logic
                     if matched_answer:
