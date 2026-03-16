@@ -602,7 +602,16 @@ def build_system_prompt(
         "you MUST use them here. Do NOT claim 'blocker: login required' on",
         "any page that visibly shows email/password fields when credentials",
         "were provided.",
-        "Follow this sequence instead:",
+        "",
+        "IMPORTANT AUTH FLOW RULES:",
+        "- If the task says STORED CREDENTIALS: go to Sign In ONLY.",
+        "  Do NOT create a new account. If sign-in fails, report blocker.",
+        "- If the task says NEW CREDENTIALS: go to Create Account FIRST.",
+        "  After creation, sign in. Do NOT loop — max 1 attempt each.",
+        "- NEVER loop between Sign In ↔ Create Account more than once.",
+        "  If both fail, report done(success=False) immediately.",
+        "",
+        "Follow this sequence on auth pages:",
         "  1. Type the credential email into the Email field (input_text).",
         "  2. Type the credential password into the Password field.",
         "  3. If a Confirm Password field is visible, type password again.",
@@ -742,6 +751,7 @@ def build_task_prompt(
     job_url: str,
     resume_path: str,
     sensitive_data: dict | None,
+    credential_source: str = "",
 ) -> str:
     """Build the task prompt for the agent."""
     task = (
@@ -764,10 +774,29 @@ def build_task_prompt(
         "Other rules:\n"
     )
     if sensitive_data:
-        task += (
-            "- Use the provided credentials to log in or create an account if needed. "
-            "Fill email + password (+ confirm password if visible) on auth pages.\n"
-        )
+        if credential_source == "stored":
+            task += (
+                "- STORED CREDENTIALS: We have a saved account for this platform from a previous application. "
+                "On auth pages, go DIRECTLY to Sign In — do NOT click Create Account. "
+                "If sign-in fails (error message appears after clicking Sign In), "
+                "report done(success=False, text='blocker: sign-in failed — stored credentials may be incorrect'). "
+                "Do NOT retry sign-in more than once. Do NOT attempt to create a new account.\n"
+            )
+        elif credential_source == "generated":
+            task += (
+                "- NEW CREDENTIALS: This is a first-time application on this platform — no existing account. "
+                "On auth pages, go DIRECTLY to Create Account (not Sign In). "
+                "Fill email + password + confirm password, check agreement, click Create Account. "
+                "After account creation succeeds, sign in with the same credentials. "
+                "If Create Account fails with 'account already exists', switch to Sign In. "
+                "If Sign In also fails after that, report done(success=False, text='blocker: account creation failed'). "
+                "Do NOT loop between Sign In and Create Account more than once each.\n"
+            )
+        else:
+            task += (
+                "- Use the provided credentials to log in or create an account if needed. "
+                "Fill email + password (+ confirm password if visible) on auth pages.\n"
+            )
     else:
         task += "- If a login wall appears, report it as a blocker.\n"
     task += (

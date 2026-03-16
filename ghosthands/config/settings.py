@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     )
     email: str = Field("", description="Login email for ATS (prefer env var over CLI arg)")
     password: str = Field("", description="Login password for ATS (prefer env var over CLI arg)")
+    credential_source: str = Field(
+        "",
+        description="How the password was obtained: 'stored' (from VALET DB), "
+        "'generated' (new password for first-time account), or 'user' (user-provided)",
+    )
     allowed_domains: list[str] = Field(
         default_factory=lambda: [
             "myworkdayjobs.com",
