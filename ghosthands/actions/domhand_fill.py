@@ -117,6 +117,99 @@ _MATCH_CONFIDENCE_RANKS = {
     "weak": 1,
 }
 
+# ── Q&A bank constants ───────────────────────────────────────────────
+
+# Maximum number of Q&A bank entries to keep in LLM context.
+MAX_QA_ENTRIES = 20
+
+# Confidence ranking for Q&A bank entries.
+_QA_CONFIDENCE_RANKS: dict[str, int] = {
+    "exact": 0,
+    "inferred": 1,
+    "learned": 2,
+}
+
+# Canonical question synonyms for fuzzy Q&A matching.
+# Each canonical key maps to a list of alternative phrasings.
+_QA_QUESTION_SYNONYMS: dict[str, list[str]] = {
+    "how did you hear about us": [
+        "how did you hear",
+        "how did you learn",
+        "referral source",
+        "source of application",
+        "where did you hear",
+        "source",
+        "how did you find this job",
+        "how did you find us",
+        "how did you find this position",
+        "heard about us",
+        "how did you hear about this position",
+        "how did you learn about this job",
+        "source of referral",
+    ],
+    "work authorization": [
+        "authorized to work",
+        "are you authorized",
+        "legally authorized",
+        "work permit",
+        "right to work",
+        "employment eligibility",
+        "us citizen",
+        "citizen or permanent resident",
+        "are you legally authorized to work",
+    ],
+    "visa sponsorship": [
+        "sponsorship",
+        "require sponsorship",
+        "need sponsorship",
+        "immigration sponsorship",
+        "visa support",
+        "sponsorship needed",
+    ],
+    "willing to relocate": [
+        "relocation",
+        "open to relocation",
+        "willing to move",
+        "relocate",
+        "can you relocate",
+        "willingness to relocate",
+    ],
+    "salary expectation": [
+        "salary",
+        "compensation",
+        "desired salary",
+        "pay expectation",
+        "salary requirement",
+        "expected compensation",
+        "desired compensation",
+    ],
+    "start date": [
+        "available start date",
+        "when can you start",
+        "availability",
+        "earliest start",
+        "start date availability",
+    ],
+    "gender": [
+        "what is your gender",
+        "gender identity",
+    ],
+    "race ethnicity": [
+        "race",
+        "ethnicity",
+        "racial background",
+    ],
+    "veteran status": [
+        "are you a protected veteran",
+        "veteran",
+    ],
+    "disability status": [
+        "disability",
+        "do you have a disability",
+        "please indicate if you have a disability",
+    ],
+}
+
 _GENERIC_SINGLE_WORD_LABELS = frozenset(
     {
         "source",
@@ -1633,6 +1726,84 @@ def _get_nested_profile_value(profile_data: dict[str, Any], *paths: tuple[str, .
     return None
 
 
+def _normalize_qa_text(text: str) -> str:
+    """Normalize question text for fuzzy Q&A matching."""
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s]", "", text)  # Remove punctuation
+    text = re.sub(r"\s+", " ", text)  # Collapse whitespace
+    return text
+
+
+def _cap_qa_entries(
+    qa_entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Cap Q&A bank at MAX_QA_ENTRIES entries, prioritized by usage mode,
+    times_used descending, then confidence (exact > inferred > learned)."""
+    if len(qa_entries) <= MAX_QA_ENTRIES:
+        return qa_entries
+    qa_entries.sort(
+        key=lambda e: (
+            e.get("usageMode", e.get("usage_mode")) != "always_use",  # always_use first
+            -int(e.get("timesUsed", e.get("times_used", 0)) or 0),  # most used first
+            _QA_CONFIDENCE_RANKS.get(
+                e.get("confidence", "learned"), 3
+            ),  # exact > inferred > learned
+        )
+    )
+    return qa_entries[:MAX_QA_ENTRIES]
+
+
+def _match_qa_answer(field_label: str, qa_entries: list[dict[str, Any]]) -> str | None:
+    """Try to match a form field label against Q&A bank entries with fuzzy matching.
+
+    Checks exact normalized match first, then synonym-based matching.
+    Returns the answer string or None if no match found.
+    """
+    if not qa_entries or not field_label:
+        return None
+
+    normalized_label = _normalize_qa_text(field_label)
+    if not normalized_label:
+        return None
+
+    for entry in qa_entries:
+        stored_q = _normalize_qa_text(entry.get("question", ""))
+        if not stored_q:
+            continue
+
+        # Exact normalized match
+        if normalized_label == stored_q:
+            answer = entry.get("answer", "")
+            if answer:
+                return answer
+
+        # Substring containment (short label inside long stored question or vice versa)
+        shorter = min(normalized_label, stored_q, key=len)
+        if len(shorter) >= 8 and (shorter in normalized_label and shorter in stored_q):
+            answer = entry.get("answer", "")
+            if answer:
+                return answer
+
+    # Synonym-based matching: both the field label and stored question
+    # must match the same canonical synonym group.
+    for canonical, synonyms in _QA_QUESTION_SYNONYMS.items():
+        all_variants = [canonical, *synonyms]
+        label_matches = any(v in normalized_label for v in all_variants)
+        if not label_matches:
+            continue
+        for entry in qa_entries:
+            stored_q = _normalize_qa_text(entry.get("question", ""))
+            if not stored_q:
+                continue
+            stored_matches = any(v in stored_q for v in all_variants)
+            if stored_matches:
+                answer = entry.get("answer", "")
+                if answer:
+                    return answer
+
+    return None
+
+
 def _build_profile_answer_map(
     profile_data: dict[str, Any],
     evidence: dict[str, str | None],
@@ -1739,6 +1910,22 @@ def _build_profile_answer_map(
                 add("Yes", "Are you at least 18 years old?", "Are you 18 years of age or older?")
         except ValueError:
             pass
+
+    # ── Inject Q&A bank entries into the answer map ──────────────────
+    # The answer bank arrives from Desktop/VALET as profile_data["answerBank"]
+    # or profile_data["answer_bank"]. Each entry has {question, answer,
+    # intentTag?, usageMode?}. Cap at MAX_QA_ENTRIES and add each entry's
+    # question as a key in the answer map (profile values take precedence).
+    raw_bank = profile_data.get("answerBank") or profile_data.get("answer_bank")
+    if isinstance(raw_bank, list) and raw_bank:
+        capped = _cap_qa_entries(list(raw_bank))
+        for entry in capped:
+            if not isinstance(entry, dict):
+                continue
+            question = str(entry.get("question", "")).strip()
+            answer = str(entry.get("answer", "")).strip()
+            if question and answer and question not in answer_map:
+                answer_map[question] = answer
 
     return answer_map
 
@@ -2232,6 +2419,19 @@ def _known_profile_value_for_field(
         value = _known_profile_value(label, evidence)
         if value:
             return _coerce_answer_to_field(field, value)
+
+    # ── Q&A bank fuzzy matching (synonym-based) ──────────────────────
+    # If the answer bank has an entry whose question is a synonym of the
+    # field label, use it. This catches cases like "How did you hear about
+    # this position?" matching a stored answer for "How did you hear about us?"
+    raw_bank = (profile_data or {}).get("answerBank") or (profile_data or {}).get("answer_bank")
+    if isinstance(raw_bank, list) and raw_bank:
+        capped = _cap_qa_entries(list(raw_bank))
+        for label in _field_label_candidates(field):
+            qa_val = _match_qa_answer(label, capped)
+            if qa_val:
+                return _coerce_answer_to_field(field, qa_val)
+
     default_answer = _default_screening_answer(field, profile_data or {})
     if default_answer:
         return default_answer
