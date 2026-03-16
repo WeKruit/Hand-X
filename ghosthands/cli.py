@@ -639,7 +639,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     # -- Task prompt --------------------------------------------------------
     from ghosthands.agent.prompts import build_task_prompt
 
-    task = build_task_prompt(args.job_url, resume_path, sensitive_data)
+    task = build_task_prompt(args.job_url, resume_path, sensitive_data, credential_source=app_settings.credential_source)
 
     emit_status(
         f"Starting application: {args.job_url}",
@@ -948,7 +948,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     # -- Task prompt --------------------------------------------------------
     from ghosthands.agent.prompts import build_task_prompt
 
-    task = build_task_prompt(args.job_url, resume_path, sensitive_data)
+    task = build_task_prompt(args.job_url, resume_path, sensitive_data, credential_source=app_settings.credential_source)
 
     # -- Agent --------------------------------------------------------------
     available_files = [resume_path] if resume_path else []
