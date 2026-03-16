@@ -2820,8 +2820,13 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 if key not in fields_skipped:
                     from ghosthands.output.jsonl import emit_event
 
-                    # Build options list — include both FormField.options and choices
-                    field_options = [{"value": o.value, "text": o.text} for o in (f.options or [])]
+                    # Build options list — FormField.options may be list[str] or list[object]
+                    field_options = []
+                    for o in (f.options or []):
+                        if isinstance(o, str):
+                            field_options.append({"value": o, "text": o})
+                        elif hasattr(o, "value") and hasattr(o, "text"):
+                            field_options.append({"value": o.value, "text": o.text})
                     if not field_options and hasattr(f, 'choices') and f.choices:
                         field_options = [{"value": c, "text": c} for c in f.choices]
 
@@ -2904,8 +2909,13 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 if f.required and key not in fields_skipped:
                     from ghosthands.output.jsonl import emit_event
 
-                    # Build options list — include both FormField.options and choices
-                    field_options = [{"value": o.value, "text": o.text} for o in (f.options or [])]
+                    # Build options list — FormField.options may be list[str] or list[object]
+                    field_options = []
+                    for o in (f.options or []):
+                        if isinstance(o, str):
+                            field_options.append({"value": o, "text": o})
+                        elif hasattr(o, "value") and hasattr(o, "text"):
+                            field_options.append({"value": o.value, "text": o.text})
                     if not field_options and hasattr(f, 'choices') and f.choices:
                         field_options = [{"value": c, "text": c} for c in f.choices]
 
