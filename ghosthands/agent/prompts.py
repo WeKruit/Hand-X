@@ -790,7 +790,12 @@ def build_task_prompt(
         if credential_source == "stored":
             task += (
                 "- STORED CREDENTIALS: We have a saved account for this platform from a previous application. "
-                "On auth pages, go DIRECTLY to Sign In — do NOT click Create Account.\n"
+                "On auth pages, go DIRECTLY to Sign In — do NOT click Create Account. "
+                "Fill email + password using the standard input action (NOT domhand_fill), "
+                "then click Sign In using the standard click action (NOT domhand_click_button).\n"
+                "  IMPORTANT: For ALL auth actions (typing credentials, clicking Sign In), "
+                "use ONLY standard browser-use actions (input, click). Do NOT use domhand_fill or "
+                "domhand_click_button for auth — those are only for application form fields.\n"
                 "  CRITICAL AUTH RULES:\n"
                 "  - Sign In: attempt EXACTLY ONCE. If it fails for ANY reason (error message, wrong password, "
                 "account not found, page reload, etc.), immediately report "
@@ -802,7 +807,12 @@ def build_task_prompt(
             task += (
                 "- NEW CREDENTIALS: This is a first-time application on this platform — no existing account. "
                 "On auth pages, go DIRECTLY to Create Account (not Sign In). "
-                "Fill email + password + confirm password, check agreement, click Create Account.\n"
+                "Fill email + password + confirm password using the standard input action (NOT domhand_fill), "
+                "check agreement using domhand_check_agreement, then click the Create Account button "
+                "using the standard click action (NOT domhand_click_button).\n"
+                "  IMPORTANT: For ALL auth actions (typing credentials, clicking Sign In / Create Account), "
+                "use ONLY standard browser-use actions (input, click). Do NOT use domhand_fill or "
+                "domhand_click_button for auth — those are only for application form fields.\n"
                 "  CRITICAL AUTH RULES:\n"
                 "  - Create Account: attempt EXACTLY ONCE. If it fails, report blocker immediately.\n"
                 "  - If Create Account fails with 'account already exists', switch to Sign In ONCE.\n"
@@ -816,7 +826,8 @@ def build_task_prompt(
         else:
             task += (
                 "- Use the provided credentials to log in or create an account if needed. "
-                "Fill email + password (+ confirm password if visible) on auth pages.\n"
+                "Fill email + password (+ confirm password if visible) on auth pages "
+                "using the standard input and click actions (NOT domhand_fill or domhand_click_button).\n"
                 "  CRITICAL AUTH RULES:\n"
                 "  - Sign In: attempt EXACTLY ONCE. If it fails, immediately report "
                 "done(success=False, text='blocker: sign-in failed — [describe the error]'). Do NOT retry.\n"

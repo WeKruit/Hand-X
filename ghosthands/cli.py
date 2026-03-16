@@ -510,6 +510,7 @@ def _handle_review_result(
 async def run_agent_jsonl(args: argparse.Namespace) -> None:
     """Run the agent with JSONL event output on stdout."""
     from ghosthands.output.jsonl import (
+        emit_account_created,
         emit_awaiting_review,
         emit_browser_ready,
         emit_cost,
@@ -525,6 +526,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     lease_id = ""
     desktop_owns_browser = False
     last_phase: str | None = None
+    account_created_emitted = False
 
     def _emit_phase_if_changed(phase: str, detail: str | None = None) -> None:
         nonlocal last_phase
@@ -669,6 +671,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         )
 
     async def _on_step_end(ag: Agent) -> None:
+        nonlocal account_created_emitted
+
         usage = ag.history.usage
         if usage:
             emit_cost(
@@ -685,6 +689,53 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         # Pre-step budget guard: stop if less than estimated step cost remaining
         if usage and usage.total_cost and (args.max_budget - usage.total_cost) < _STEP_COST_ESTIMATE:
             ag.state.stopped = True
+
+        # ── Account creation detection ──
+        # When credential_source is "generated", detect successful account
+        # creation from the agent's evaluation and emit immediately so
+        # Desktop records the credential before the job finishes/crashes.
+        if (
+            not account_created_emitted
+            and app_settings
+            and app_settings.credential_source == "generated"
+            and app_settings.email
+            and app_settings.password
+            and ag.history.history
+        ):
+            last = ag.history.history[-1]
+            if last.model_output and last.model_output.current_state:
+                memory = (last.model_output.current_state.memory or "").lower()
+                eval_text = (last.model_output.current_state.evaluation_previous_goal or "").lower()
+                combined = memory + " " + eval_text
+                _acct_signals = (
+                    "account created",
+                    "account creation was successful",
+                    "created account",
+                    "registration complete",
+                    "signed up successfully",
+                    "sign up was successful",
+                    "successfully registered",
+                    "successfully created",
+                    "new account",
+                )
+                if any(s in combined for s in _acct_signals):
+                    try:
+                        url = args.job_url if hasattr(args, "job_url") else ""
+                        try:
+                            from urllib.parse import urlparse
+                            platform = urlparse(url).hostname or url
+                        except Exception:
+                            platform = url
+                        emit_account_created(
+                            platform=platform,
+                            email=app_settings.email,
+                            password=app_settings.password,
+                            url=url,
+                        )
+                        account_created_emitted = True
+                        logger.info("cli.account_created_emitted", extra={"url": url})
+                    except Exception:
+                        logger.warning("cli.account_created_emit_failed", exc_info=True)
 
     # -- Run ----------------------------------------------------------------
     try:

@@ -970,16 +970,17 @@ class TestGetFieldCounts:
 
 
 # ---------------------------------------------------------------------------
-# Test 8 — account_created no longer emitted unconditionally
+# Test 8 — account_created emission
 # ---------------------------------------------------------------------------
 
 
 class TestAccountCreatedEmission:
-    """account_created must NOT be unconditionally emitted on success.
+    """account_created is emitted by cli.py's _on_step_end when the agent's
+    evaluation indicates that an account was successfully created and
+    credential_source is 'generated'.
 
-    The emit_account_created function still exists in the JSONL module (for
-    future use when actual account creation is detected), but cli.py no
-    longer calls it on every successful apply.
+    The emit_account_created function exists in the JSONL module and is
+    imported by cli.py for this purpose.
     """
 
     def test_emit_account_created_function_still_exists(self):
@@ -997,15 +998,15 @@ class TestAccountCreatedEmission:
         assert len(events) == 1
         assert events[0]["event"] == "account_created"
 
-    def test_cli_does_not_import_emit_account_created(self):
-        """cli.py should no longer import or reference emit_account_created."""
+    def test_cli_imports_emit_account_created(self):
+        """cli.py should import emit_account_created for step-end detection."""
         import inspect
 
         import ghosthands.cli as cli_mod
 
         source = inspect.getsource(cli_mod)
-        # The function name should not appear in cli.py at all
-        assert "emit_account_created" not in source
+        # The function is now used in _on_step_end for account creation detection
+        assert "emit_account_created" in source
 
 
 # ---------------------------------------------------------------------------
