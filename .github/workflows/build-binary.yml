@@ -29,15 +29,16 @@ jobs:
           - os: macos-14        # Apple Silicon (M1+)
             name: darwin-arm64
             runner_arch: arm64
-          - os: macos-15        # x64 Python via Rosetta on Apple Silicon
-            name: darwin-x64
-            runner_arch: x64
-          - os: ubuntu-22.04    # Linux x64
-            name: linux-x64
-            runner_arch: x64
-          - os: windows-latest  # Windows x64
-            name: win-x64
-            runner_arch: x64
+          # TODO: re-enable when needed
+          # - os: macos-15        # x64 Python via Rosetta on Apple Silicon
+          #   name: darwin-x64
+          #   runner_arch: x64
+          # - os: ubuntu-22.04    # Linux x64
+          #   name: linux-x64
+          #   runner_arch: x64
+          # - os: windows-latest  # Windows x64
+          #   name: win-x64
+          #   runner_arch: x64
 
     runs-on: ${{ matrix.os }}
     name: Build (${{ matrix.name }})
