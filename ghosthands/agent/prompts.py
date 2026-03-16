@@ -49,6 +49,10 @@ GENERIC_FORM_STRATEGIES = (
     "- Always check for agreement checkboxes before clicking Create Account.\n"
     "- If account creation fails, report as blocker.\n"
     "- If a verification code is required, report as blocker.\n"
+    "- Sign In: attempt EXACTLY ONCE. If it fails, report as blocker immediately.\n"
+    "- If the page shows 'verify your account', 'verification email', 'confirm\n"
+    "  your email', 'check your inbox', report as blocker immediately.\n"
+    "- NEVER loop between Sign In and Create Account.\n"
     "\n"
     "MULTI-STEP FLOWS:\n"
     "- Some platforms split applications across multiple pages/sections.\n"
@@ -774,29 +778,50 @@ def build_task_prompt(
         "Other rules:\n"
     )
     if sensitive_data:
+        # Shared verification-detection rule injected for all credential modes.
+        _verification_rule = (
+            "- VERIFICATION DETECTION: If after clicking Sign In or Create Account the page shows "
+            "ANY text like 'Verify your account', 'verification email', 'confirm your email', "
+            "'check your inbox', 'check your spam', 'verify your email address', or any banner "
+            "asking the user to verify/confirm via email, IMMEDIATELY report "
+            "done(success=False, text='blocker: email verification required — user must verify email then retry'). "
+            "Do NOT attempt to sign in again. Do NOT refresh. Do NOT wait.\n"
+        )
         if credential_source == "stored":
             task += (
                 "- STORED CREDENTIALS: We have a saved account for this platform from a previous application. "
-                "On auth pages, go DIRECTLY to Sign In — do NOT click Create Account. "
-                "If sign-in fails (error message appears after clicking Sign In), "
-                "report done(success=False, text='blocker: sign-in failed — stored credentials may be incorrect'). "
-                "Do NOT retry sign-in more than once. Do NOT attempt to create a new account.\n"
+                "On auth pages, go DIRECTLY to Sign In — do NOT click Create Account.\n"
+                "  CRITICAL AUTH RULES:\n"
+                "  - Sign In: attempt EXACTLY ONCE. If it fails for ANY reason (error message, wrong password, "
+                "account not found, page reload, etc.), immediately report "
+                "done(success=False, text='blocker: sign-in failed — [describe the error]'). Do NOT retry.\n"
+                "  - NEVER attempt to create a new account with stored credentials.\n"
             )
+            task += _verification_rule
         elif credential_source == "generated":
             task += (
                 "- NEW CREDENTIALS: This is a first-time application on this platform — no existing account. "
                 "On auth pages, go DIRECTLY to Create Account (not Sign In). "
-                "Fill email + password + confirm password, check agreement, click Create Account. "
-                "After account creation succeeds, sign in with the same credentials. "
-                "If Create Account fails with 'account already exists', switch to Sign In. "
-                "If Sign In also fails after that, report done(success=False, text='blocker: account creation failed'). "
-                "Do NOT loop between Sign In and Create Account more than once each.\n"
+                "Fill email + password + confirm password, check agreement, click Create Account.\n"
+                "  CRITICAL AUTH RULES:\n"
+                "  - Create Account: attempt EXACTLY ONCE. If it fails, report blocker immediately.\n"
+                "  - If Create Account fails with 'account already exists', switch to Sign In ONCE.\n"
+                "  - Sign In after account creation: attempt EXACTLY ONCE. If it fails, immediately report "
+                "done(success=False, text='blocker: account created but sign-in failed — may need email verification').\n"
+                "  - NEVER go back to Create Account after attempting Sign In.\n"
+                "  - NEVER go back to Sign In after a failed Sign In attempt. One attempt only.\n"
+                "  - NEVER loop between Sign In and Create Account. One direction only.\n"
             )
+            task += _verification_rule
         else:
             task += (
                 "- Use the provided credentials to log in or create an account if needed. "
                 "Fill email + password (+ confirm password if visible) on auth pages.\n"
+                "  CRITICAL AUTH RULES:\n"
+                "  - Sign In: attempt EXACTLY ONCE. If it fails, immediately report "
+                "done(success=False, text='blocker: sign-in failed — [describe the error]'). Do NOT retry.\n"
             )
+            task += _verification_rule
     else:
         task += "- If a login wall appears, report it as a blocker.\n"
     task += (
