@@ -70,6 +70,13 @@ class DomHandFillParams(BaseModel):
             '"end_date": "Present", "description": "Built distributed systems..."}'
         ),
     )
+    use_auth_credentials: bool = Field(
+        False,
+        description=(
+            "When true, domhand_fill uses GH_EMAIL/GH_PASSWORD for auth-like fields "
+            "(email, password, confirm password) instead of the applicant profile."
+        ),
+    )
 
 
 class DomHandSelectParams(BaseModel):

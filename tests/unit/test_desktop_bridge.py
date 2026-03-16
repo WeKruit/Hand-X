@@ -239,13 +239,25 @@ class TestEmitAccountCreated:
         from ghosthands.output.jsonl import emit_account_created
 
         events = _capture_jsonl_output(
-            emit_account_created, "workday", "user@test.com", "pass123", url="https://workday.com"
+            emit_account_created,
+            "workday",
+            "user@test.com",
+            "pass123",
+            domain="acme.wd1.myworkdayjobs.com",
+            credential_status="pending_verification",
+            note="Check your inbox to verify the account.",
+            evidence="auth_marker_pending_verification",
+            url="https://workday.com",
         )
         e = events[0]
         assert e["platform"] == "workday"
+        assert e["domain"] == "acme.wd1.myworkdayjobs.com"
         assert e["email"] == "user@test.com"
         assert e["password"] == "pass123"
         assert e["password_provided"] is True
+        assert e["credentialStatus"] == "pending_verification"
+        assert e["note"] == "Check your inbox to verify the account."
+        assert e["evidence"] == "auth_marker_pending_verification"
         assert e["url"] == "https://workday.com"
 
     def test_url_omitted_when_empty(self):
@@ -1000,11 +1012,10 @@ class TestAccountCreatedEmission:
 
     def test_cli_imports_emit_account_created(self):
         """cli.py should import emit_account_created for step-end detection."""
-        import inspect
+        from pathlib import Path
 
-        import ghosthands.cli as cli_mod
-
-        source = inspect.getsource(cli_mod)
+        cli_path = Path(__file__).resolve().parents[2] / "ghosthands" / "cli.py"
+        source = cli_path.read_text(encoding="utf-8")
         # The function is now used in _on_step_end for account creation detection
         assert "emit_account_created" in source
 

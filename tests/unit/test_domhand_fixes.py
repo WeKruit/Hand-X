@@ -159,3 +159,47 @@ def test_search_terms_hierarchical():
     assert "Social Media > LinkedIn" in terms
     assert "Social Media" in terms
     assert "LinkedIn" in terms
+
+
+# ---------------------------------------------------------------------------
+# Auth-field overrides for domhand_fill
+# ---------------------------------------------------------------------------
+
+
+def test_auth_override_matches_email_and_password_fields():
+    """Auth-mode domhand_fill should prefer GH_EMAIL/GH_PASSWORD for auth fields."""
+    from ghosthands.actions.domhand_fill import _known_auth_override_for_field
+    from ghosthands.actions.views import FormField
+
+    overrides = {
+        "email": "user@example.com",
+        "password": "Secret!123",
+        "confirm_password": "Secret!123",
+    }
+
+    email_field = FormField(field_id="f-email", name="Email", field_type="email")
+    password_field = FormField(field_id="f-password", name="Password", field_type="password")
+    confirm_field = FormField(
+        field_id="f-confirm",
+        name="Confirm Password",
+        field_type="password",
+    )
+
+    assert _known_auth_override_for_field(email_field, overrides) == "user@example.com"
+    assert _known_auth_override_for_field(password_field, overrides) == "Secret!123"
+    assert _known_auth_override_for_field(confirm_field, overrides) == "Secret!123"
+
+
+def test_build_task_prompt_prefers_domhand_for_auth_pages():
+    """Auth instructions should route through domhand_fill and domhand_click_button."""
+    from ghosthands.agent.prompts import build_task_prompt
+
+    prompt = build_task_prompt(
+        "https://example.wd1.myworkdayjobs.com/en-US/job/123/apply",
+        "/tmp/resume.pdf",
+        {"email": "user@example.com", "password": "Secret!123"},
+        credential_source="generated",
+    )
+
+    assert "domhand_fill(use_auth_credentials=true)" in prompt
+    assert "domhand_click_button" in prompt
