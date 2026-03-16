@@ -83,48 +83,163 @@ async def read_stdin_line(timeout: float | None = None) -> str:
 
 
 # ── Shared answer queue for HITL field answers from Desktop ──────────
-# When the Desktop sends { type: "answer_field", field_label, answer },
+# When the Desktop sends { type: "answer_field", field_id, answer },
 # the answer is stored here. domhand_fill can await get_field_answer()
 # to block until the user responds.
+#
+# Keys are field_id (unique per field occurrence) to avoid collisions
+# when two fields share the same label (e.g. "Email" in personal info
+# and "Email" in emergency contact).  Falls back to field_label for
+# backward compatibility with older Desktop versions.
 _pending_answers: dict[str, str] = {}
 _answer_events: dict[str, asyncio.Event] = {}
+_hitl_lock = asyncio.Lock()
+# M13: Cancel event — set when the run is cancelled so pending
+# get_field_answer() calls wake up immediately instead of blocking 300s.
+# Must be cleared at run start via reset_hitl_state().
+_cancel_event = asyncio.Event()
 
 
-def put_field_answer(field_label: str, answer: str) -> None:
-    """Store an answer received from the Desktop for a pending HITL field."""
-    _pending_answers[field_label] = answer
-    evt = _answer_events.get(field_label)
+_hitl_available = False  # Set True when listen_for_cancel starts (JSONL/Desktop mode)
+
+
+def reset_hitl_state() -> None:
+    """Clear all HITL state between runs.
+
+    Must be called at the start of each job to prevent cancel/answer
+    leakage from previous runs in the same process.
+    """
+    global _hitl_available
+    _pending_answers.clear()
+    _answer_events.clear()
+    _cancel_event.clear()
+    _hitl_available = False
+
+
+def is_hitl_available() -> bool:
+    """Return True if a stdin listener is active (JSONL/Desktop mode).
+
+    In non-JSONL CLI mode, no listener runs, so HITL waits would block
+    indefinitely. Callers should skip the wait and treat as "no answer".
+    """
+    return _hitl_available
+
+
+def put_field_answer(field_id: str, answer: str, *, field_label: str = "") -> None:
+    """Store an answer received from the Desktop for a pending HITL field.
+
+    Parameters
+    ----------
+    field_id:
+        Unique key for the field (preferred).  Falls back to *field_label*
+        when empty/None for backward compatibility.
+    answer:
+        The user-provided value (empty string for a skip).
+    field_label:
+        Optional human-readable label, used as fallback key when
+        *field_id* is not provided.
+    """
+    key = field_id or field_label
+    if not key:
+        return
+    _pending_answers[key] = answer
+    evt = _answer_events.get(key)
     if evt:
         evt.set()
+    # Also store under field_label if different from key, so that
+    # get_field_answer waiting on field_id can also be woken by a
+    # legacy Desktop that only sends field_label.
+    if field_label and field_label != key:
+        _pending_answers[field_label] = answer
+        evt2 = _answer_events.get(field_label)
+        if evt2:
+            evt2.set()
 
 
-async def get_field_answer(field_label: str, timeout: float = 300.0) -> str | None:
+async def get_field_answer(
+    field_id: str,
+    timeout: float = 300.0,
+    *,
+    field_label: str = "",
+) -> str | None:
     """Wait for a HITL answer from the Desktop, with timeout.
+
+    Parameters
+    ----------
+    field_id:
+        Unique key for the field (preferred).  Falls back to *field_label*
+        when empty/None for backward compatibility.
+    timeout:
+        Seconds to wait before giving up.
+    field_label:
+        Optional human-readable label, used as fallback key when
+        *field_id* is not provided.
 
     Returns the answer string, or None if timed out.
     """
-    # Check if answer already arrived
-    if field_label in _pending_answers:
-        return _pending_answers.pop(field_label)
+    key = field_id or field_label
+    if not key:
+        return None
 
-    # Create event and wait
-    evt = asyncio.Event()
-    _answer_events[field_label] = evt
+    async with _hitl_lock:
+        # Check if answer already arrived (under either key)
+        if key in _pending_answers:
+            return _pending_answers.pop(key)
+        if field_label and field_label != key and field_label in _pending_answers:
+            return _pending_answers.pop(field_label)
+
+        # Register event under primary key. Also register under field_label
+        # so legacy Desktop answers (keyed by label only) wake us.
+        evt = asyncio.Event()
+        _answer_events[key] = evt
+        if field_label and field_label != key:
+            _answer_events[field_label] = evt  # same event, two keys
+
+    # Wait outside the lock so other coroutines can put_field_answer.
+    # M13: Also watch the cancel event so cancellation wakes us immediately.
     try:
-        await asyncio.wait_for(evt.wait(), timeout=timeout)
-        return _pending_answers.pop(field_label, None)
+        cancel_task = asyncio.create_task(_cancel_event.wait())
+        answer_task = asyncio.create_task(evt.wait())
+        done, pending = await asyncio.wait(
+            {cancel_task, answer_task},
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+
+        if cancel_task in done:
+            # Run was cancelled — treat as skip
+            logger.info("hitl_cancelled_during_wait", field_id=key)
+            return None
+
+        if answer_task in done:
+            async with _hitl_lock:
+                return _pending_answers.pop(key, None)
+
+        # Neither completed — timeout
+        async with _hitl_lock:
+            _pending_answers.pop(key, None)  # Clean up stale answer if it arrived late
+        return None
     except (asyncio.TimeoutError, TimeoutError):
-        _pending_answers.pop(field_label, None)  # Clean up stale answer if it arrived late
+        async with _hitl_lock:
+            _pending_answers.pop(key, None)
         return None
     finally:
-        _answer_events.pop(field_label, None)
+        async with _hitl_lock:
+            _answer_events.pop(key, None)
+            if field_label and field_label != key:
+                _answer_events.pop(field_label, None)
+                _pending_answers.pop(field_label, None)
 
 
 async def listen_for_cancel(
-    agent: Any,
+    agent: Any,  # noqa: ANN401
     cancel_requested: asyncio.Event | None = None,
 ) -> None:
     """Read stdin concurrently during agent run for cancel and answer commands."""
+    global _hitl_available
+    _hitl_available = True
     while not agent.state.stopped:
         try:
             line = await read_stdin_line(timeout=1.0)
@@ -139,6 +254,7 @@ async def listen_for_cancel(
         if not line:
             # EOF — stdin closed (Electron died); treat as cancellation
             logger.warning("stdin_eof_treating_as_cancel")
+            _cancel_event.set()  # M13: wake any pending HITL waits
             if cancel_requested is not None:
                 cancel_requested.set()
             agent.state.stopped = True
@@ -160,21 +276,26 @@ async def listen_for_cancel(
         cmd_type = cmd.get("type")
         if cmd_type in {"cancel", "cancel_job"}:
             logger.info("cancel_command_received_from_stdin", command_type=cmd_type)
+            _cancel_event.set()  # M13: wake any pending HITL waits
             if cancel_requested is not None:
                 cancel_requested.set()
             agent.state.stopped = True
             break
         elif cmd_type == "answer_field":
+            field_id = cmd.get("field_id", "")
             field_label = cmd.get("field_label", "")
             answer = cmd.get("answer", "")
-            if field_label:
-                logger.info("answer_field_received", field_label=field_label)
-                put_field_answer(field_label, answer)
+            key = field_id or field_label
+            if key:
+                logger.info("answer_field_received", field_id=field_id, field_label=field_label)
+                put_field_answer(key, answer)
         elif cmd_type == "skip_field":
+            field_id = cmd.get("field_id", "")
             field_label = cmd.get("field_label", "")
-            if field_label:
-                logger.info("skip_field_received", field_label=field_label)
-                put_field_answer(field_label, "")
+            key = field_id or field_label
+            if key:
+                logger.info("skip_field_received", field_id=field_id, field_label=field_label)
+                put_field_answer(key, "")
 
 
 async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> str:
@@ -185,7 +306,7 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> s
     - {"type": "cancel_job"}     -- user cancelled, close browser
     - {"type": "cancel"}         -- user cancelled, close browser
 
-    Times out after 30 minutes if no command is received.
+    Times out after 24 hours if no command is received.
 
     Returns
     -------
@@ -210,7 +331,7 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> s
 
             if not warning_emitted and remaining <= warning_before_seconds and remaining > 0:
                 emit_status(
-                    "Your review session will expire in 5 minutes. Please submit or cancel soon.",
+                    "Your review session will expire in about 1 hour. Please submit or cancel soon.",
                     job_id=job_id,
                 )
                 warning_emitted = True

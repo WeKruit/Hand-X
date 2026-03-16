@@ -53,6 +53,7 @@ from ghosthands.bridge.profile_adapter import (
 )
 from ghosthands.bridge.protocol import (
     listen_for_cancel,
+    reset_hitl_state,
     wait_for_review_command,
 )
 
@@ -712,6 +713,9 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             calculate_cost=True,
             use_judge=False,
         )
+
+        # Clear HITL state from any previous run in this process
+        reset_hitl_state()
 
         cancel_requested = asyncio.Event()
         cancel_task = asyncio.create_task(listen_for_cancel(agent, cancel_requested))
