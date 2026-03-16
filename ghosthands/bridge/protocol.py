@@ -100,15 +100,29 @@ _hitl_lock = asyncio.Lock()
 _cancel_event = asyncio.Event()
 
 
+_hitl_available = False  # Set True when listen_for_cancel starts (JSONL/Desktop mode)
+
+
 def reset_hitl_state() -> None:
     """Clear all HITL state between runs.
 
     Must be called at the start of each job to prevent cancel/answer
     leakage from previous runs in the same process.
     """
+    global _hitl_available
     _pending_answers.clear()
     _answer_events.clear()
     _cancel_event.clear()
+    _hitl_available = False
+
+
+def is_hitl_available() -> bool:
+    """Return True if a stdin listener is active (JSONL/Desktop mode).
+
+    In non-JSONL CLI mode, no listener runs, so HITL waits would block
+    indefinitely. Callers should skip the wait and treat as "no answer".
+    """
+    return _hitl_available
 
 
 def put_field_answer(field_id: str, answer: str, *, field_label: str = "") -> None:
@@ -132,6 +146,14 @@ def put_field_answer(field_id: str, answer: str, *, field_label: str = "") -> No
     evt = _answer_events.get(key)
     if evt:
         evt.set()
+    # Also store under field_label if different from key, so that
+    # get_field_answer waiting on field_id can also be woken by a
+    # legacy Desktop that only sends field_label.
+    if field_label and field_label != key:
+        _pending_answers[field_label] = answer
+        evt2 = _answer_events.get(field_label)
+        if evt2:
+            evt2.set()
 
 
 async def get_field_answer(
@@ -160,13 +182,18 @@ async def get_field_answer(
         return None
 
     async with _hitl_lock:
-        # Check if answer already arrived
+        # Check if answer already arrived (under either key)
         if key in _pending_answers:
             return _pending_answers.pop(key)
+        if field_label and field_label != key and field_label in _pending_answers:
+            return _pending_answers.pop(field_label)
 
-        # Create event while holding the lock
+        # Register event under primary key. Also register under field_label
+        # so legacy Desktop answers (keyed by label only) wake us.
         evt = asyncio.Event()
         _answer_events[key] = evt
+        if field_label and field_label != key:
+            _answer_events[field_label] = evt  # same event, two keys
 
     # Wait outside the lock so other coroutines can put_field_answer.
     # M13: Also watch the cancel event so cancellation wakes us immediately.
@@ -201,13 +228,18 @@ async def get_field_answer(
     finally:
         async with _hitl_lock:
             _answer_events.pop(key, None)
+            if field_label and field_label != key:
+                _answer_events.pop(field_label, None)
+                _pending_answers.pop(field_label, None)
 
 
 async def listen_for_cancel(
-    agent: Any,
+    agent: Any,  # noqa: ANN401
     cancel_requested: asyncio.Event | None = None,
 ) -> None:
     """Read stdin concurrently during agent run for cancel and answer commands."""
+    global _hitl_available
+    _hitl_available = True
     while not agent.state.stopped:
         try:
             line = await read_stdin_line(timeout=1.0)
