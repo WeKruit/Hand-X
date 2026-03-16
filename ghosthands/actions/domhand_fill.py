@@ -2243,6 +2243,14 @@ def _default_value(field: FormField) -> str:
     name_lower = normalize_name(field.name or "")
     if any(token in name_lower for token in ("signature date", "today", "current date")):
         return date.today().isoformat()
+
+    # EEO / demographic decline defaults — last resort for required fields
+    # that were not matched by _match_answer.
+    if field.required:
+        norm = _normalize_match_label(field.name or "")
+        if norm in _EEO_DECLINE_DEFAULTS:
+            return _EEO_DECLINE_DEFAULTS[norm]
+
     return ""
 
 
@@ -2374,7 +2382,7 @@ Rules:
 - IMPORTANT: For agreement/consent checkboxes (e.g., "I agree", "I accept", "I understand", privacy policy, terms of service, candidate consent), ALWAYS respond with "checked". The applicant consents to standard application agreements.
 - For file upload fields, skip them (don't include in output).
 - For textarea fields, use an explicit open-ended answer from the applicant profile when available. If the profile does not contain that answer, return "" for optional or "[NEEDS_USER_INPUT]" for required.
-- For demographic/EEO fields, use the applicant's actual info only. If no info is provided in the profile, return "".
+- For demographic/EEO fields (gender, race, ethnicity, veteran status, disability status, sexual orientation), use the applicant's actual info if provided. If no info is provided in the profile, use a neutral decline option: "I decline to self-identify", "I am not a protected veteran", or "I do not wish to answer" (pick whichever matches the available options). NEVER return "[NEEDS_USER_INPUT]" for EEO fields — always use a decline default.
 - NEVER select a default placeholder value like "Select One", "Please select", etc.
 - NEVER use placeholder strings like "N/A", "NA", "None", "Not applicable", "Unknown". If you don't have data, return "" for optional fields or "[NEEDS_USER_INPUT]" for required fields.
 - For salary fields, only use salary expectations explicitly provided in the applicant profile. If missing, return "[NEEDS_USER_INPUT]" for required fields or "" for optional.
@@ -2506,6 +2514,43 @@ _AUTHORITATIVE_SELECT_DEFAULTS: dict[str, str] = {
     "phone country code": "+1",
     "phone device type": "Mobile",
     "phone type": "Mobile",
+    # Common non-personal fields — safe defaults that should never trigger HITL
+    "how did you hear": "LinkedIn",
+    "how did you hear about us": "LinkedIn",
+    "how did you hear about this position": "LinkedIn",
+    "how did you learn about this job": "LinkedIn",
+    "referral source": "LinkedIn",
+    "source": "LinkedIn",
+    "where did you hear": "LinkedIn",
+    "country": "United States",
+    "country of residence": "United States",
+    "preferred language": "English",
+    "language": "English",
+    "willing to relocate": "Yes",
+    "willingness to relocate": "Yes",
+    "relocation": "Yes",
+}
+
+_AUTHORITATIVE_TEXT_DEFAULTS: dict[str, str] = {
+    "how did you hear about this position": "LinkedIn",
+    "how did you hear about us": "LinkedIn",
+    "referral source": "LinkedIn",
+    "source of application": "LinkedIn",
+}
+
+# EEO / demographic fields — "decline to self-identify" defaults when profile
+# data is empty.  Prevents required EEO fields from triggering HITL.
+_EEO_DECLINE_DEFAULTS: dict[str, str] = {
+    "gender": "I decline to self-identify",
+    "race": "I decline to self-identify",
+    "race ethnicity": "I decline to self-identify",
+    "ethnicity": "I decline to self-identify",
+    "veteran status": "I am not a protected veteran",
+    "veteran": "I am not a protected veteran",
+    "disability": "I do not wish to answer",
+    "disability status": "I do not wish to answer",
+    "sexual orientation": "I decline to self-identify",
+    "lgbtq": "I decline to self-identify",
 }
 
 
@@ -2554,6 +2599,25 @@ def _match_answer(
 
     if best_val is not None:
         return best_val
+
+    # ── Authoritative defaults for non-personal fields ────────────
+    # Check select defaults for ANY field type (some "select" fields render
+    # as text inputs, button-groups, or radios).
+    for norm_name in candidate_norms:
+        if norm_name in _AUTHORITATIVE_SELECT_DEFAULTS:
+            return _AUTHORITATIVE_SELECT_DEFAULTS[norm_name]
+
+    # Check text defaults for text/textarea fields.
+    if field.field_type in {"text", "textarea", "search"}:
+        for norm_name in candidate_norms:
+            if norm_name in _AUTHORITATIVE_TEXT_DEFAULTS:
+                return _AUTHORITATIVE_TEXT_DEFAULTS[norm_name]
+
+    # ── EEO "decline" defaults — only for required fields with no profile data ──
+    if field.required:
+        for norm_name in candidate_norms:
+            if norm_name in _EEO_DECLINE_DEFAULTS:
+                return _EEO_DECLINE_DEFAULTS[norm_name]
 
     return None
 
