@@ -1300,13 +1300,26 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 								return {cleared: true, method: 'contenteditable', finalText: this.textContent};
 							} else if (this.value !== undefined) {
-								// For regular inputs with value property
+								// For regular inputs with value property.
+								// Use React-compatible value setter to ensure React's
+								// internal _valueTracker sees the change. Direct
+								// this.value = "" bypasses React's synthetic event
+								// system, causing stale values on form submission.
 								try {
 									this.select();
 								} catch (e) {
 									// ignore
 								}
-								this.value = "";
+								const nativeSetter = Object.getOwnPropertyDescriptor(
+									window.HTMLInputElement.prototype, 'value'
+								)?.set || Object.getOwnPropertyDescriptor(
+									window.HTMLTextAreaElement.prototype, 'value'
+								)?.set;
+								if (nativeSetter) {
+									nativeSetter.call(this, "");
+								} else {
+									this.value = "";
+								}
 								this.dispatchEvent(new Event("input", { bubbles: true }));
 								this.dispatchEvent(new Event("change", { bubbles: true }));
 								return {cleared: true, method: 'value', finalText: this.value};
