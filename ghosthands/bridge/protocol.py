@@ -94,9 +94,21 @@ async def read_stdin_line(timeout: float | None = None) -> str:
 _pending_answers: dict[str, str] = {}
 _answer_events: dict[str, asyncio.Event] = {}
 _hitl_lock = asyncio.Lock()
-# M13: Global cancel event — set when the run is cancelled so pending
+# M13: Cancel event — set when the run is cancelled so pending
 # get_field_answer() calls wake up immediately instead of blocking 300s.
+# Must be cleared at run start via reset_hitl_state().
 _cancel_event = asyncio.Event()
+
+
+def reset_hitl_state() -> None:
+    """Clear all HITL state between runs.
+
+    Must be called at the start of each job to prevent cancel/answer
+    leakage from previous runs in the same process.
+    """
+    _pending_answers.clear()
+    _answer_events.clear()
+    _cancel_event.clear()
 
 
 def put_field_answer(field_id: str, answer: str, *, field_label: str = "") -> None:
