@@ -190,8 +190,8 @@ def test_auth_override_matches_email_and_password_fields():
     assert _known_auth_override_for_field(confirm_field, overrides) == "Secret!123"
 
 
-def test_build_task_prompt_prefers_domhand_for_auth_pages():
-    """Auth instructions should route through domhand_fill and domhand_click_button."""
+def test_build_task_prompt_uses_browser_use_for_auth_pages():
+    """Auth instructions should use browser-use input actions, not domhand_fill."""
     from ghosthands.agent.prompts import build_task_prompt
 
     prompt = build_task_prompt(
@@ -201,5 +201,35 @@ def test_build_task_prompt_prefers_domhand_for_auth_pages():
         credential_source="generated",
     )
 
-    assert "domhand_fill(use_auth_credentials=true)" in prompt
-    assert "domhand_click_button" in prompt
+    assert "NOT domhand_fill" in prompt
+    assert "browser-use input" in prompt
+
+
+def test_build_task_prompt_await_verification():
+    """await_verification should tell agent to report blocker immediately."""
+    from ghosthands.agent.prompts import build_task_prompt
+
+    prompt = build_task_prompt(
+        "https://example.wd1.myworkdayjobs.com/en-US/job/123/apply",
+        "/tmp/resume.pdf",
+        {"email": "user@example.com", "password": "Secret!123"},
+        credential_source="await_verification",
+    )
+
+    assert "ACCOUNT NEEDS VERIFICATION" in prompt
+    assert "Do NOT attempt to sign in" in prompt
+
+
+def test_build_task_prompt_repair_credentials():
+    """repair_credentials should tell agent to report blocker immediately."""
+    from ghosthands.agent.prompts import build_task_prompt
+
+    prompt = build_task_prompt(
+        "https://example.wd1.myworkdayjobs.com/en-US/job/123/apply",
+        "/tmp/resume.pdf",
+        {"email": "user@example.com", "password": "Secret!123"},
+        credential_source="repair_credentials",
+    )
+
+    assert "CREDENTIALS NEED REPAIR" in prompt
+    assert "Do NOT attempt to sign in" in prompt

@@ -41,9 +41,10 @@ GENERIC_FORM_STRATEGIES = (
     "  inside shadow roots — try clicking them directly.\n"
     "\n"
     "ACCOUNT CREATION / SIGN-IN:\n"
-    "- On auth pages, use domhand_fill with use_auth_credentials=true so\n"
-    "  email/password fields come from GH_EMAIL/GH_PASSWORD instead of the\n"
-    "  applicant profile.\n"
+    "- Do NOT use domhand_fill on auth pages — it uses the applicant profile\n"
+    "  instead of login credentials. Use standard browser-use input actions.\n"
+    "- Credentials are in GH_EMAIL / GH_PASSWORD environment variables.\n"
+    "  Type the email into the Email field, password into Password field.\n"
     "- Pick ONE path (Create Account OR Sign In) and commit.\n"
     "- If a confirm-password field is visible, you are on Create Account.\n"
     "- NEVER use SSO/social login (Google, LinkedIn, Facebook, Apple).\n"
@@ -601,8 +602,9 @@ def build_system_prompt(
         "",
         "AUTH PAGES (Create Account / Sign In):",
         "These pages have email, password, and optionally confirm-password",
-        "fields. Call domhand_fill with use_auth_credentials=true on auth pages",
-        "so it uses the login credentials instead of the applicant profile.",
+        "fields. Do NOT call domhand_fill on auth pages — it would use the",
+        "applicant profile email instead of the login credentials.",
+        "Use standard browser-use input actions to type credentials.",
         "If credentials were provided for this run, they are available and",
         "you MUST use them here. Do NOT claim 'blocker: login required' on",
         "any page that visibly shows email/password fields when credentials",
@@ -613,24 +615,26 @@ def build_system_prompt(
         "  Do NOT create a new account. If sign-in fails, report blocker.",
         "- If the task says NEW CREDENTIALS: go to Create Account FIRST.",
         "  After creation, sign in. Do NOT loop — max 1 attempt each.",
+        "- If the task says ACCOUNT NEEDS VERIFICATION: do NOT attempt auth.",
+        "  Report the verification blocker immediately.",
+        "- If the task says CREDENTIALS NEED REPAIR: do NOT attempt auth.",
+        "  Report the repair blocker immediately.",
         "- NEVER loop between Sign In ↔ Create Account more than once.",
         "  If both fail, report done(success=False) immediately.",
         "",
         "Follow this sequence on auth pages:",
-        "  1. FIRST call domhand_fill(use_auth_credentials=true).",
-        "  2. Review domhand_fill output and confirm the auth fields were filled.",
-        "     If one auth field is still unresolved, fix ONLY that field with a",
-        "     targeted browser-use input action.",
-        "  3. If a Confirm Password field is visible, ensure it matches the same password.",
+        "  1. Type the credential email into the Email field (input_text).",
+        "  2. Type the credential password into the Password field.",
+        "  3. If a Confirm Password field is visible, type password again.",
         "  4. Call domhand_check_agreement to check any 'I agree' checkbox.",
         "     This step is REQUIRED — the submit button will silently fail",
         "     if the agreement checkbox is unchecked.",
         "  5. VERIFY the checkbox is checked before proceeding.  If",
         "     domhand_check_agreement reports no checkboxes found, look for",
         "     a checkbox visually and click it manually.",
-        "  6. Only AFTER the checkbox is confirmed checked, use",
-        "     domhand_click_button to click 'Create Account' or 'Sign In'.",
-        "  7. After domhand_click_button, wait 3 seconds before deciding the outcome.",
+        "  6. Only AFTER the checkbox is confirmed checked, click",
+        "     'Create Account' or 'Sign In' using a standard click action.",
+        "  7. Wait 3 seconds before deciding the outcome.",
         "  8. Only report 'blocker: login required' if NO credentials were",
         "     provided and you are stuck on an auth page.",
         "",
@@ -795,11 +799,9 @@ def build_task_prompt(
             task += (
                 "- STORED CREDENTIALS: We have a saved account for this platform from a previous application. "
                 "On auth pages, go DIRECTLY to Sign In — do NOT click Create Account. "
-                "Use domhand_fill(use_auth_credentials=true) to fill auth fields, then use "
-                "domhand_click_button for Sign In.\n"
-                "  After clicking Sign In, use the standard wait action for 3 seconds before deciding what happened.\n"
-                "  IMPORTANT: domhand_fill should be the primary auth-entry tool here because it "
-                "verifies that the email/password values actually stick in the fields.\n"
+                "Fill email + password using browser-use input actions (NOT domhand_fill), "
+                "then click Sign In.\n"
+                "  After clicking Sign In, wait 3 seconds before deciding what happened.\n"
                 "  When sign-in succeeds, include EXACTLY `AUTH_RESULT=STORED_SIGN_IN_SUCCESS` in your memory or evaluation.\n"
                 "  CRITICAL AUTH RULES:\n"
                 "  - Sign In: attempt EXACTLY ONCE. If it fails for ANY reason (error message, wrong password, "
@@ -812,12 +814,9 @@ def build_task_prompt(
             task += (
                 "- NEW CREDENTIALS: This is a first-time application on this platform — no existing account. "
                 "On auth pages, go DIRECTLY to Create Account (not Sign In). "
-                "Use domhand_fill(use_auth_credentials=true) to fill email + password + confirm password, "
-                "check agreement using domhand_check_agreement, then click the Create Account button "
-                "using domhand_click_button.\n"
-                "  After clicking Create Account, use the standard wait action for 3 seconds before deciding the outcome.\n"
-                "  IMPORTANT: domhand_fill should be the primary auth-entry tool here because it "
-                "verifies that the email/password values actually stick in the fields.\n"
+                "Fill email + password + confirm password using browser-use input actions (NOT domhand_fill), "
+                "check agreement using domhand_check_agreement, then click the Create Account button.\n"
+                "  After clicking Create Account, wait 3 seconds before deciding the outcome.\n"
                 "  AUTH OUTCOME MARKERS:\n"
                 "  - If the account appears created and you move past the auth wall, include EXACTLY "
                 "`AUTH_RESULT=ACCOUNT_CREATED_ACTIVE` in your memory or evaluation.\n"
@@ -838,11 +837,28 @@ def build_task_prompt(
                 "  - NEVER loop between Sign In and Create Account. One direction only.\n"
             )
             task += _verification_rule
+        elif credential_source == "await_verification":
+            task += (
+                "- ACCOUNT NEEDS VERIFICATION: An account was previously created on this platform "
+                "but email verification has not been completed yet. "
+                "Do NOT attempt to sign in or create a new account. "
+                "Report immediately: done(success=False, text='blocker: account needs email verification — "
+                "user must verify their email before this application can proceed'). "
+                "Do NOT retry or attempt any auth actions.\n"
+            )
+        elif credential_source == "repair_credentials":
+            task += (
+                "- CREDENTIALS NEED REPAIR: The stored credentials for this platform are known to be "
+                "broken or invalid. Do NOT attempt to sign in with them. "
+                "Report immediately: done(success=False, text='blocker: stored credentials are invalid — "
+                "user must fix or reset their account credentials before this application can proceed'). "
+                "Do NOT retry, create a new account, or attempt any auth actions.\n"
+            )
         else:
             task += (
                 "- Use the provided credentials to log in or create an account if needed. "
                 "Fill email + password (+ confirm password if visible) on auth pages "
-                "using domhand_fill(use_auth_credentials=true), then use domhand_click_button.\n"
+                "using browser-use input actions (NOT domhand_fill), then click the submit button.\n"
                 "  CRITICAL AUTH RULES:\n"
                 "  - Sign In: attempt EXACTLY ONCE. If it fails, immediately report "
                 "done(success=False, text='blocker: sign-in failed — [describe the error]'). Do NOT retry.\n"
