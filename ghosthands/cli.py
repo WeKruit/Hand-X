@@ -753,8 +753,15 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                     marker_evidence = "heuristic_pending_verification"
 
                 if marker_status is None and any(s in combined for s in _acct_signals):
-                    marker_status = "active"
-                    marker_note = "Account creation succeeded and the run moved past the auth wall."
+                    # Default to pending_verification for heuristic detection.
+                    # Only the explicit AUTH_RESULT=ACCOUNT_CREATED_ACTIVE marker
+                    # (set by the agent after confirming the page moved past auth)
+                    # should produce "active" status. Heuristic signals like
+                    # "account created" in eval text are not strong enough — the
+                    # Create Account button may have been clicked but the page
+                    # may not have actually transitioned.
+                    marker_status = "pending_verification"
+                    marker_note = "Account creation signals detected but page transition not confirmed."
                     marker_evidence = "heuristic_account_created"
 
                 if marker_status:

@@ -622,7 +622,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
             result["inShadowRoot"] = preview_result["inShadowRoot"]
 
         if result.get("found") and result.get("clicked"):
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(1.5)
             url_after, fingerprint_after, state_changed = await _capture_transition_state()
 
             method = result.get("clicked", "unknown")
@@ -641,6 +641,11 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
             if url_before != url_after:
                 return ActionResult(
                     extracted_content=f"DomHand click: clicked '{label}' via JS event sequence. Page navigated to {url_after}.",
+                    include_in_memory=True,
+                )
+            if state_changed:
+                return ActionResult(
+                    extracted_content=f"DomHand click: clicked '{label}' via JS event sequence. Page content changed (same-page transition). Check if auth succeeded.",
                     include_in_memory=True,
                 )
 
@@ -674,6 +679,11 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                         extracted_content=f"DomHand click: clicked '{label}' via CDP Element.click(). Page navigated to {url_after}.",
                         include_in_memory=True,
                     )
+                if state_changed:
+                    return ActionResult(
+                        extracted_content=f"DomHand click: clicked '{label}' via CDP Element.click(). Page content changed (same-page transition). Check if auth succeeded.",
+                        include_in_memory=True,
+                    )
         except Exception as e:
             logger.debug(f"CDP Element click failed for '{label}': {e}")
 
@@ -701,6 +711,11 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                 if url_before != url_after:
                     return ActionResult(
                         extracted_content=f"DomHand click: submitted form for '{label}'. Page navigated to {url_after}.",
+                        include_in_memory=True,
+                    )
+                if state_changed:
+                    return ActionResult(
+                        extracted_content=f"DomHand click: submitted form for '{label}'. Page content changed (same-page transition). Check if auth succeeded.",
                         include_in_memory=True,
                     )
         except Exception as e:
@@ -731,6 +746,11 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                 if url_before != url_after:
                     return ActionResult(
                         extracted_content=f"DomHand click: pressed Enter on '{label}'. Page navigated to {url_after}.",
+                        include_in_memory=True,
+                    )
+                if state_changed:
+                    return ActionResult(
+                        extracted_content=f"DomHand click: pressed Enter on '{label}'. Page content changed (same-page transition). Check if auth succeeded.",
                         include_in_memory=True,
                     )
         except Exception as e:
