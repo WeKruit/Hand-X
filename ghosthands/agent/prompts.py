@@ -689,11 +689,16 @@ def build_system_prompt(
         "     domhand_assess_state reports unresolved_required_fields, call",
         "     domhand_fill AGAIN with target_section set to the reported",
         "     current_section and focus_fields set to those exact unresolved",
-        "     labels before falling back to manual clicks.",
+        "     labels before falling back to manual clicks. If the unresolved",
+        "     field belongs to a repeater entry, preserve the same",
+        "     heading_boundary instead of broadening to the whole section.",
         "  4. Only after that targeted domhand_fill attempt should you use",
-        "     domhand_select or generic actions. Do this for required",
+        "     domhand_select, dropdown_options/select_dropdown, or generic",
+        "     DOM actions. Do this for required",
         "     fields, and for optional fields only when the applicant",
         "     profile maps to that field with high confidence.",
+        "  4a. Do NOT jump straight to vision/screenshot fallback while",
+        "      DOM/manual takeover options are still available.",
         "  5. Check for agreement checkboxes and click any that are unchecked.",
         "  6. Before scrolling away or clicking 'Next' / 'Continue' /",
         "     'Save & Continue', call domhand_assess_state again and follow",
@@ -783,6 +788,11 @@ def build_system_prompt(
         "- NEVER click Save/Continue immediately after the first dropdown",
         "  click when the widget still looks open or the field still looks",
         "  empty.",
+        "- If domhand_fill and domhand_select both fail, try the existing DOM",
+        "  interaction tools first: dropdown_options, select_dropdown, click,",
+        "  input_text, Enter, Tab, and focused retry actions.",
+        "- Only use vision/screenshot as a last automated fallback after the",
+        "  DOM/manual path has failed for that exact field.",
         *build_domhand_select_failover_lines(),
         "</dropdown_fallback>",
         "",
@@ -829,12 +839,16 @@ def build_task_prompt(
         "   auto-fills many fields and shortens the application.\n"
         "2. Then call domhand_fill to fill remaining visible form fields.\n"
         "3. After domhand_fill completes, review its output to see which fields were filled and which failed.\n"
-        "4. For failed dropdowns/selects, use domhand_select.\n"
-        f"5. For other file uploads, use domhand_upload or upload_file action with path: {resume_path}\n"
-        "6. Only use generic browser-use actions (click, input_text) as a LAST RESORT.\n"
-        "7. After all fields on the current page are filled, click Next/Continue/Save to advance.\n"
-        "8. On each new page, repeat from step 1 (check for Easy Apply / resume upload first).\n"
-        "9. Prefer short waits: use wait(seconds=2) or wait(seconds=3) for auth transitions, resume-processing, "
+        "4. Immediately call domhand_assess_state. If unresolved fields remain, call domhand_fill again with "
+        "target_section=current_section and focus_fields set to those exact unresolved labels. Preserve "
+        "heading_boundary when you are inside a repeater entry.\n"
+        "5. For fields still unresolved after the targeted domhand_fill retry, use existing DOM/manual tools first: "
+        "domhand_select, dropdown_options/select_dropdown, click, input_text, Enter, Tab, scroll, and focus actions.\n"
+        "6. Only use vision/screenshot-style fallback after those DOM/manual actions fail for that exact field.\n"
+        f"7. For other file uploads, use domhand_upload or upload_file action with path: {resume_path}\n"
+        "8. After all fields on the current page are filled, click Next/Continue/Save to advance.\n"
+        "9. On each new page, repeat from step 1 (check for Easy Apply / resume upload first).\n"
+        "10. Prefer short waits: use wait(seconds=2) or wait(seconds=3) for auth transitions, resume-processing, "
         "and SPA loading. Only use wait(seconds=5) if two shorter waits still leave the page blank/loading.\n"
         "\n"
         "Other rules:\n"

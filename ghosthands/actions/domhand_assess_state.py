@@ -47,6 +47,69 @@ _FIELD_LAYOUT_JS = r"""(fieldIds) => {
 	return JSON.stringify(out);
 }"""
 
+_FIELD_CONTEXT_JS = r"""(ffId) => {
+	const ff = window.__ff;
+	const el = ff ? ff.byId(ffId) : null;
+	if (!el) return JSON.stringify({error_text: "", widget_kind: ""});
+
+	const visible = (node) => {
+		if (!node) return false;
+		const style = window.getComputedStyle(node);
+		if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+		const rect = node.getBoundingClientRect();
+		return rect.width > 0 && rect.height > 0;
+	};
+	const norm = (text) => (text || '').replace(/\s+/g, ' ').trim();
+	const gather = [];
+	const seen = new Set();
+	const push = (node) => {
+		if (!node || seen.has(node)) return;
+		seen.add(node);
+		gather.push(node);
+	};
+	push(el);
+	push(ff ? ff.closestCrossRoot(el, '[aria-invalid], [role="group"], [role="radiogroup"], fieldset, label, [role="row"], [role="cell"], .form-group, .field, [data-automation-id*="formField"]') : null);
+	if (el.querySelector) {
+		push(el.querySelector('[aria-invalid], input, textarea, select, [role="checkbox"], [role="radio"], [role="switch"], [role="textbox"], [role="combobox"]'));
+	}
+
+	let errorText = "";
+	const errorSelectors = '[role="alert"], [aria-live="assertive"], .error, .errors, .invalid, .field-error, [data-error], [class*="error"]';
+	for (const node of gather) {
+		if (!node) continue;
+		const direct = [];
+		if (node.matches && node.matches(errorSelectors)) direct.push(node);
+		if (node.querySelectorAll) {
+			for (const err of Array.from(node.querySelectorAll(errorSelectors))) direct.push(err);
+		}
+		for (const err of direct) {
+			if (!visible(err)) continue;
+			const text = norm(err.innerText || err.getAttribute('aria-label') || err.getAttribute('data-error') || '');
+			if (text) {
+				errorText = text;
+				break;
+			}
+		}
+		if (errorText) break;
+	}
+
+	let widgetKind = '';
+	if (el.tagName === 'SELECT') widgetKind = 'native_select';
+	else if (el.tagName === 'TEXTAREA') widgetKind = 'textarea';
+	else if (el.tagName === 'INPUT') widgetKind = (el.getAttribute('type') || 'text').toLowerCase();
+	else if (el.getAttribute('role') === 'combobox' || el.getAttribute('data-uxi-widget-type') === 'selectinput') widgetKind = 'custom_combobox';
+	else if (el.getAttribute('role') === 'listbox') widgetKind = 'listbox';
+	else if (el.getAttribute('role') === 'radio') widgetKind = 'radio';
+	else if (el.getAttribute('role') === 'checkbox') widgetKind = 'checkbox';
+	else if (el.getAttribute('role') === 'switch') widgetKind = 'switch';
+	else widgetKind = 'custom_widget';
+
+	return JSON.stringify({
+		error_text: errorText,
+		widget_kind: widgetKind,
+	});
+}"""
+
 _SCAN_PAGE_STATE_JS = r"""() => {
 	const visible = (el) => {
 		if (!el) return false;
@@ -176,6 +239,26 @@ def _field_is_empty(field: FormField) -> bool:
     return not bool((field.current_value or "").strip()) or is_placeholder_value(field.current_value)
 
 
+def _widget_kind_for_field(field: FormField, browser_context: dict[str, Any] | None = None) -> str:
+    if browser_context and isinstance(browser_context.get("widget_kind"), str) and browser_context["widget_kind"].strip():
+        return str(browser_context["widget_kind"]).strip()
+    if field.field_type == "select":
+        return "native_select" if field.is_native else "custom_select"
+    if field.field_type in {"radio-group", "radio"}:
+        return "radio_group" if field.field_type == "radio-group" else "radio"
+    if field.field_type in {"checkbox-group", "checkbox"}:
+        return "checkbox_group" if field.field_type == "checkbox-group" else "checkbox"
+    if field.field_type in {"button-group"}:
+        return "button_group"
+    if field.field_type in {"search"}:
+        return "search_input"
+    if field.field_type in {"textarea"}:
+        return "textarea"
+    if field.field_type in {"date"}:
+        return "date_input"
+    return "text_input" if field.is_native else "custom_widget"
+
+
 def _classify_terminal_state(
     platform: str,
     has_editable_fields: bool,
@@ -246,6 +329,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
     unresolved_required: list[ApplicationFieldIssue] = []
     unresolved_optional: list[ApplicationFieldIssue] = []
     sections_in_view: list[str] = []
+    field_context_by_id: dict[str, dict[str, Any]] = {}
 
     for field in fields:
         if field.field_type == "file" or _is_navigation_field(field):
@@ -275,6 +359,14 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             field.current_value = "checked" if binary_state else ""
 
         has_error = await _field_has_validation_error(page, field.field_id)
+        if field.field_id not in field_context_by_id:
+            try:
+                raw_context = await page.evaluate(_FIELD_CONTEXT_JS, field.field_id)
+                field_context_by_id[field.field_id] = (
+                    json.loads(raw_context) if isinstance(raw_context, str) else raw_context or {}
+                )
+            except Exception:
+                field_context_by_id[field.field_id] = {}
         is_empty = _field_is_empty(field)
         if not field.required and not has_error:
             continue
@@ -284,15 +376,21 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             continue
 
         reason = "validation_error" if has_error else "required_missing_value"
+        field_context = field_context_by_id.get(field.field_id) or {}
         issue = ApplicationFieldIssue(
             field_id=field.field_id,
             name=_preferred_field_label(field),
             field_type=field.field_type,
             section=field.section or "",
+            section_path=field.section or "",
             required=field.required,
             reason=reason,
             relative_position=relative_position,
             takeover_suggestion="browser_use_takeover",
+            question_text=(field.raw_label or _preferred_field_label(field) or "").strip() or None,
+            current_value=(field.current_value or "").strip(),
+            visible_error=str(field_context.get("error_text") or "").strip() or None,
+            widget_kind=_widget_kind_for_field(field, field_context),
             options=[
                 str(option).strip()
                 for option in (field.options or field.choices or [])
@@ -369,7 +467,15 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         for issue in application_state.unresolved_required_fields[:10]:
             location = issue.relative_position.replace("_", " ")
             section = f" [{issue.section}]" if issue.section else ""
-            summary_lines.append(f"  - {issue.name}{section} ({issue.reason}, {location})")
+            extra = []
+            if issue.current_value:
+                extra.append(f'current="{issue.current_value}"')
+            if issue.visible_error:
+                extra.append(f'error="{issue.visible_error}"')
+            if issue.widget_kind:
+                extra.append(f"widget={issue.widget_kind}")
+            extras = f" | {'; '.join(extra)}" if extra else ""
+            summary_lines.append(f"  - {issue.name}{section} ({issue.reason}, {location}){extras}")
     if application_state.visible_errors:
         summary_lines.append("Visible errors:")
         for error_text in application_state.visible_errors[:6]:

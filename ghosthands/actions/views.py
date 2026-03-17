@@ -126,10 +126,15 @@ class ApplicationFieldIssue(BaseModel):
     name: str
     field_type: str
     section: str = ""
+    section_path: str = ""
     required: bool = False
     reason: str = ""
     relative_position: RelativePosition = "unknown"
     takeover_suggestion: str | None = None
+    question_text: str | None = None
+    current_value: str = ""
+    visible_error: str | None = None
+    widget_kind: str | None = None
     options: list[str] = Field(default_factory=list)
 
 

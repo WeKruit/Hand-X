@@ -290,3 +290,31 @@ def test_focus_filter_targets_exact_unresolved_fields():
     filtered = _filter_fields_for_focus(fields, ["Comprehension", "Reading"])
 
     assert [field.field_id for field in filtered] == ["f1", "f2"]
+
+
+def test_focus_filter_does_not_broaden_when_no_match():
+    from ghosthands.actions.domhand_fill import _filter_fields_for_focus
+    from ghosthands.actions.views import FormField
+
+    fields = [
+        FormField(field_id="f1", name="Comprehension", field_type="select", section="Languages"),
+        FormField(field_id="f2", name="Reading", field_type="select", section="Languages"),
+    ]
+
+    filtered = _filter_fields_for_focus(fields, ["Nonexistent blocker"])
+
+    assert filtered == []
+
+
+def test_coerce_answer_to_field_rejects_nonexistent_option():
+    from ghosthands.actions.domhand_fill import _coerce_answer_to_field
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="f1",
+        name="Overall",
+        field_type="select",
+        options=["Beginner", "Intermediate", "Expert"],
+    )
+
+    assert _coerce_answer_to_field(field, "Fluent") is None

@@ -383,6 +383,36 @@ class TestOpenQuestionAutoAnswering:
             "Overall language ability": "Expert",
         }
 
+    @pytest.mark.asyncio
+    async def test_llm_recovery_does_not_try_open_ended_textareas(self, monkeypatch):
+        from ghosthands.cli import _OpenQuestionIssue, _infer_open_question_answers_with_domhand
+
+        called = False
+
+        async def _fake_infer(fields, *, profile_text=None, profile_data=None):
+            nonlocal called
+            called = True
+            return {}
+
+        monkeypatch.setattr(
+            "ghosthands.actions.domhand_fill.infer_answers_for_fields",
+            _fake_infer,
+        )
+
+        issues = [
+            _OpenQuestionIssue(
+                field_label="Why do you want this job?",
+                field_type="textarea",
+                section="Questions",
+            ),
+        ]
+
+        resolved, unresolved = await _infer_open_question_answers_with_domhand(issues, {})
+
+        assert called is False
+        assert resolved == {}
+        assert [issue.field_label for issue in unresolved] == ["Why do you want this job?"]
+
 
 # ---------------------------------------------------------------------------
 # Test 3 — _listen_for_cancel

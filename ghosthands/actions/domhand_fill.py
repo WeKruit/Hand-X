@@ -1556,7 +1556,7 @@ def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
 
     if best_choice and best_score > 0:
         return best_choice
-    return text
+    return None
 
 
 def _field_label_candidates(field: FormField) -> list[str]:
@@ -1674,10 +1674,10 @@ def _filter_fields_for_focus(fields: list[FormField], focus_fields: list[str] | 
         return focused
 
     logger.info(
-        "DomHand focus fallback: no fields matched focus_fields, using scoped fields",
+        "DomHand focus mismatch: no fields matched focus_fields",
         extra={"focus_fields": focus_fields, "field_count": len(fields)},
     )
-    return fields
+    return []
 
 
 def _format_entry_profile_text(entry_data: dict[str, Any]) -> str:
@@ -3355,6 +3355,13 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     "Verify the entry heading is visible before calling domhand_fill."
                 ),
             )
+        if params.focus_fields and not fields:
+            return ActionResult(
+                error=(
+                    "No visible fields matched the requested focus_fields. "
+                    "Use domhand_assess_state again and then fall back to domhand_select or targeted browser-use actions."
+                ),
+            )
 
         fillable_fields: list[FormField] = []
         for f in fields:
@@ -3518,6 +3525,9 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         field_type=f.field_type or "unknown",
                         question_text=f.raw_label or f.name or "",
                         section=f.section or "",
+                        section_path=f.section or "",
+                        current_value=f.current_value or "",
+                        widget_kind=("native_" if f.is_native else "custom_") + (f.field_type or "unknown"),
                         options=field_options,
                         source="domhand_fill",
                         page_url=await _safe_page_url(page),
@@ -3616,6 +3626,9 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         field_type=f.field_type or "unknown",
                         question_text=f.raw_label or f.name or "",
                         section=f.section or "",
+                        section_path=f.section or "",
+                        current_value=f.current_value or "",
+                        widget_kind=("native_" if f.is_native else "custom_") + (f.field_type or "unknown"),
                         options=field_options,
                         source="domhand_fill",
                         page_url=await _safe_page_url(page),

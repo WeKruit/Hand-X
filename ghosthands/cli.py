@@ -457,6 +457,10 @@ class _OpenQuestionIssue:
     field_type: str = "text"
     question_text: str | None = None
     section: str | None = None
+    section_path: str | None = None
+    current_value: str | None = None
+    visible_error: str | None = None
+    widget_kind: str | None = None
     options: tuple[str, ...] = ()
 
 
@@ -621,8 +625,12 @@ async def _collect_open_question_issues_from_browser(browser: Any) -> list[_Open
                         field_label=field_label,
                         field_id=str(issue.get("field_id") or "").strip() or None,
                         field_type=str(issue.get("field_type") or "text").strip() or "text",
-                        question_text=field_label,
+                        question_text=str(issue.get("question_text") or field_label).strip() or field_label,
                         section=str(issue.get("section") or "").strip() or None,
+                        section_path=str(issue.get("section_path") or issue.get("section") or "").strip() or None,
+                        current_value=str(issue.get("current_value") or "").strip() or None,
+                        visible_error=str(issue.get("visible_error") or "").strip() or None,
+                        widget_kind=str(issue.get("widget_kind") or "").strip() or None,
                         options=tuple(
                             str(option).strip()
                             for option in (issue.get("options") or [])
@@ -699,9 +707,13 @@ def _auto_answer_open_question_issues(
             synthetic_field = FormField(
                 field_id=issue.field_id or issue.field_label,
                 name=label,
+                raw_label=issue.question_text or label,
                 field_type=issue.field_type or "text",
                 section=issue.section or "",
                 required=True,
+                current_value=issue.current_value or "",
+                options=list(issue.options),
+                choices=list(issue.options),
             )
             answer = _default_screening_answer(synthetic_field, profile)
 
@@ -725,7 +737,7 @@ async def _infer_open_question_answers_with_domhand(
     issues: list[_OpenQuestionIssue],
     profile: dict[str, Any] | None,
 ) -> tuple[dict[str, str], list[_OpenQuestionIssue]]:
-    """Use DomHand's LLM-backed field inference before escalating to HITL."""
+    """Use DomHand's LLM-backed field inference for structured fields before HITL."""
     if not issues:
         return {}, issues
     if not isinstance(profile, dict):
@@ -734,9 +746,22 @@ async def _infer_open_question_answers_with_domhand(
     from ghosthands.actions.domhand_fill import infer_answers_for_fields
     from ghosthands.actions.views import FormField
 
+    structured_types = {
+        "select",
+        "radio",
+        "radio-group",
+        "button-group",
+        "checkbox-group",
+        "search",
+    }
+
     synthetic_fields: list[FormField] = []
     issue_by_field_id: dict[str, _OpenQuestionIssue] = {}
+    unresolved: list[_OpenQuestionIssue] = []
     for index, issue in enumerate(issues, start=1):
+        if issue.field_type not in structured_types and not issue.options:
+            unresolved.append(issue)
+            continue
         field_id = issue.field_id or f"open-question-{index}"
         synthetic_fields.append(
             FormField(
@@ -753,6 +778,9 @@ async def _infer_open_question_answers_with_domhand(
         )
         issue_by_field_id[field_id] = issue
 
+    if not synthetic_fields:
+        return {}, unresolved
+
     inferred = await infer_answers_for_fields(
         synthetic_fields,
         profile_text=json.dumps(profile),
@@ -760,7 +788,6 @@ async def _infer_open_question_answers_with_domhand(
     )
 
     resolved: dict[str, str] = {}
-    unresolved: list[_OpenQuestionIssue] = []
     for field in synthetic_fields:
         issue = issue_by_field_id[field.field_id]
         answer = str(inferred.get(field.field_id) or "").strip()
@@ -826,6 +853,11 @@ async def _request_open_question_answers(
                 field_type=issue.field_type,
                 question_text=issue.question_text or issue.field_label,
                 section=issue.section or "",
+                section_path=issue.section_path or issue.section or "",
+                current_value=issue.current_value or "",
+                visible_error=issue.visible_error or "",
+                widget_kind=issue.widget_kind or "",
+                form_context=issue.visible_error or issue.widget_kind or "",
                 options=list(issue.options),
                 source="cli_blocker_recovery",
             )
