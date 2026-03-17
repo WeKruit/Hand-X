@@ -47,6 +47,9 @@ GENERIC_FORM_STRATEGIES = (
     "  Type the email into the Email field, password into Password field.\n"
     "- Pick ONE path (Create Account OR Sign In) and commit.\n"
     "- If a confirm-password field is visible, you are on Create Account.\n"
+    "- A standalone 'Sign In' button in a header, nav, or start dialog is NOT\n"
+    "  permission to switch auth paths. Treat it as navigation unless the page\n"
+    "  is clearly a Sign In form.\n"
     "- NEVER use SSO/social login (Google, LinkedIn, Facebook, Apple).\n"
     "- Always check for agreement checkboxes before clicking Create Account.\n"
     "- If account creation fails, report as blocker.\n"
@@ -361,7 +364,11 @@ def _format_profile_summary(resume_profile: dict) -> str:
     # ── Languages ────────────────────────────────────────────────
     languages = resume_profile.get("languages", [])
     if languages:
-        lang_strs = [f"{l.get('language', '')} ({l.get('proficiency', '')})" for l in languages if l.get("language")]
+        lang_strs = [
+            f"{lang.get('language', '')} ({lang.get('proficiency', '')})"
+            for lang in languages
+            if lang.get("language")
+        ]
         if lang_strs:
             lines.append(f"Languages: {', '.join(lang_strs)}")
 
@@ -380,17 +387,35 @@ def _format_profile_summary(resume_profile: dict) -> str:
     if salary := resume_profile.get("salary_expectation"):
         currency = resume_profile.get("salary_currency", "USD")
         lines.append(f"Salary expectation: {salary} {currency}")
-    if resume_profile.get("willing_to_relocate") is not None:
-        lines.append(f"Willing to relocate: {'Yes' if resume_profile['willing_to_relocate'] else 'No'}")
+    if spoken_languages := resume_profile.get("spoken_languages"):
+        lines.append(f"Preferred spoken languages: {spoken_languages}")
+    if english_proficiency := resume_profile.get("english_proficiency"):
+        lines.append(f"English proficiency: {english_proficiency}")
+    if country_of_residence := resume_profile.get("country_of_residence"):
+        lines.append(f"Country of residence: {country_of_residence}")
+    relocate = resume_profile.get("willing_to_relocate")
+    if relocate not in (None, ""):
+        if isinstance(relocate, bool):
+            relocate_text = "Yes" if relocate else "No"
+        else:
+            relocate_text = str(relocate)
+        lines.append(f"Willing to relocate: {relocate_text}")
     if source := resume_profile.get("how_did_you_hear"):
         lines.append(f"How did you hear about us: {source}")
+    if preferred_mode := resume_profile.get("preferred_work_mode"):
+        lines.append(f"Preferred work setup: {preferred_mode}")
+    if preferred_locations := resume_profile.get("preferred_locations"):
+        lines.append(f"Preferred locations: {preferred_locations}")
+    if availability_window := resume_profile.get("availability_window"):
+        lines.append(f"Availability to start: {availability_window}")
+    if notice_period := resume_profile.get("notice_period"):
+        lines.append(f"Notice period: {notice_period}")
 
     # ── Open-ended answers ───────────────────────────────────────
     for key, val in resume_profile.items():
-        if key.startswith("what_") or key.startswith("why_") or key.startswith("how_"):
-            if isinstance(val, str) and val.strip():
-                label = key.replace("_", " ").capitalize()
-                lines.append(f"{label}: {val}")
+        if (key.startswith("what_") or key.startswith("why_") or key.startswith("how_")) and isinstance(val, str) and val.strip():
+            label = key.replace("_", " ").capitalize()
+            lines.append(f"{label}: {val}")
 
     if not lines:
         return "No applicant profile provided."
@@ -480,17 +505,29 @@ def build_system_prompt(
         "  include any extracted confirmation data in the text.",
         "- Leave optional fields empty when the applicant profile does not",
         "  provide a value OR when the field-to-profile mapping is low",
-        "  confidence. Do NOT guess on optional fields.",
+        "  confidence, EXCEPT for low-risk standardized screening fields",
+        "  where saved defaults or closest-option matching are explicitly",
+        "  allowed below.",
         "- NEVER invent placeholder personal information such as 'John',",
         "  'Doe', 'John Doe', fake emails, or fake addresses. Use the exact",
         "  applicant identity from the profile. If it is missing, leave the",
         "  field unresolved and continue or report a blocker.",
-        "- Every non-consent answer must come from the provided applicant",
-        "  profile. Do NOT infer missing applicant data from the page, the",
-        "  job description, common defaults, or model assumptions.",
+        "- Every substantive applicant answer must come from the provided",
+        "  profile. Do NOT infer missing salary, start date, work history,",
+        "  education history, essays, or personal identifiers from the page,",
+        "  job description, or model assumptions.",
+        "- For low-risk standardized screening fields, make a best-effort",
+        "  selection before escalating: use saved profile defaults, EEO",
+        "  decline answers, referral source defaults, phone type defaults,",
+        "  country defaults, work-setup defaults, relocation defaults, and",
+        "  language-rubric defaults, then pick the closest matching option",
+        "  visible in the UI.",
         "- If the applicant profile clearly provides the value and the match",
         "  is high confidence, make a best-effort fill attempt for that",
         "  optional field before advancing.",
+        "- Avoid HITL for standardized dropdown/radio screening fields unless",
+        "  the field is truly substantive and no safe profile/default answer",
+        "  exists after closest-option matching.",
         "- If a popup, modal, newsletter prompt, promo interstitial, or",
         "  dimmed overlay is blocking the form, call domhand_close_popup",
         "  FIRST. Do NOT start with blind coordinate clicks while a DOM",
@@ -592,6 +629,9 @@ def build_system_prompt(
         "  done(success=False, text='blocker: access denied')",
         "- Application already submitted or position closed →",
         "  done(success=False, text='blocker: position closed')",
+        "- Missing user-provided application data is NOT a blocker.",
+        "  If a required field needs an answer that is not in the profile or",
+        "  QA bank, call domhand_request_user_input instead of done(...).",
         "Do NOT retry blockers.  Report them and stop.",
         "</blocker_handling>",
         "",
@@ -614,6 +654,8 @@ def build_system_prompt(
         "- If the task says STORED CREDENTIALS: go to Sign In ONLY.",
         "  Do NOT create a new account. If sign-in fails, report blocker.",
         "- If the task says NEW CREDENTIALS: go to Create Account FIRST.",
+        "  Do NOT click any Sign In control unless the page explicitly says",
+        "  the account already exists after a failed Create Account attempt.",
         "  After creation, sign in. Do NOT loop — max 1 attempt each.",
         "- If the task says ACCOUNT NEEDS VERIFICATION: do NOT attempt auth.",
         "  Report the verification blocker immediately.",
@@ -643,17 +685,22 @@ def build_system_prompt(
         "     input_text before trying domhand_fill.",
         "  2. Immediately call domhand_assess_state to understand the active",
         "     section, unresolved required fields, and scroll direction.",
-        "  3. Review domhand_fill output for unresolved fields.  Handle them",
-        "     with domhand_select or generic actions. Do this for required",
+        "  3. Review domhand_fill output for unresolved fields. If",
+        "     domhand_assess_state reports unresolved_required_fields, call",
+        "     domhand_fill AGAIN with target_section set to the reported",
+        "     current_section and focus_fields set to those exact unresolved",
+        "     labels before falling back to manual clicks.",
+        "  4. Only after that targeted domhand_fill attempt should you use",
+        "     domhand_select or generic actions. Do this for required",
         "     fields, and for optional fields only when the applicant",
         "     profile maps to that field with high confidence.",
-        "  4. Check for agreement checkboxes and click any that are unchecked.",
-        "  5. Before scrolling away or clicking 'Next' / 'Continue' /",
+        "  5. Check for agreement checkboxes and click any that are unchecked.",
+        "  6. Before scrolling away or clicking 'Next' / 'Continue' /",
         "     'Save & Continue', call domhand_assess_state again and follow",
         "     its scroll_bias and completion-state result.",
-        "  6. Click 'Next' / 'Continue' / 'Save & Continue' to advance when",
+        "  7. Click 'Next' / 'Continue' / 'Save & Continue' to advance when",
         "     domhand_assess_state still says the page is advanceable.",
-        "  7. On the new page, determine if it's an auth page or form page",
+        "  8. On the new page, determine if it's an auth page or form page",
         "     and follow the appropriate sequence above.",
         "",
         "CRITICAL: If the page is in `advanceable`, you MUST click",
@@ -666,6 +713,10 @@ def build_system_prompt(
         "If the page looks blank, partially rendered, or still loading after",
         "you click a start/continue button, WAIT 5-10 seconds before doing",
         "anything else.",
+        "While the page is settling, do NOT click header/nav controls such as",
+        "'Sign In', 'Careers Home', or other fallback navigation buttons.",
+        "A blank/loading transition is not evidence that the flow requires",
+        "switching from Create Account to Sign In.",
         "Never use navigate() to return to the original job URL as recovery",
         "after you have already clicked into the application flow. Waiting",
         "is the default recovery, not restarting.",
@@ -764,6 +815,7 @@ def build_task_prompt(
     resume_path: str,
     sensitive_data: dict | None,
     credential_source: str = "",
+    credential_intent: str = "",
 ) -> str:
     """Build the task prompt for the agent."""
     task = (
@@ -782,6 +834,8 @@ def build_task_prompt(
         "6. Only use generic browser-use actions (click, input_text) as a LAST RESORT.\n"
         "7. After all fields on the current page are filled, click Next/Continue/Save to advance.\n"
         "8. On each new page, repeat from step 1 (check for Easy Apply / resume upload first).\n"
+        "9. Prefer short waits: use wait(seconds=2) or wait(seconds=3) for auth transitions, resume-processing, "
+        "and SPA loading. Only use wait(seconds=5) if two shorter waits still leave the page blank/loading.\n"
         "\n"
         "Other rules:\n"
     )
@@ -800,8 +854,7 @@ def build_task_prompt(
                 "- STORED CREDENTIALS: We have a saved account for this platform from a previous application. "
                 "On auth pages, go DIRECTLY to Sign In — do NOT click Create Account. "
                 "Fill email + password using browser-use input actions (NOT domhand_fill), "
-                "then click Sign In using domhand_click_button (NOT the standard click action — "
-                "Workday and similar React-based ATS sites need domhand_click_button for form submission).\n"
+                "then click Sign In using a standard click action.\n"
                 "  After clicking Sign In, wait 3 seconds before deciding what happened.\n"
                 "  When sign-in succeeds, include EXACTLY `AUTH_RESULT=STORED_SIGN_IN_SUCCESS` in your memory or evaluation.\n"
                 "  CRITICAL AUTH RULES:\n"
@@ -817,12 +870,14 @@ def build_task_prompt(
                 "On auth pages, go DIRECTLY to Create Account (not Sign In). "
                 "Fill email + password + confirm password using browser-use input actions (NOT domhand_fill), "
                 "check agreement using domhand_check_agreement, then click the Create Account button "
-                "using domhand_click_button (NOT the standard click action — "
-                "Workday and similar React-based ATS sites need domhand_click_button for form submission).\n"
+                "using a standard click action.\n"
                 "  After clicking Create Account, wait 3 seconds before deciding the outcome.\n"
                 "  AUTH OUTCOME MARKERS:\n"
                 "  - If the account appears created and you move past the auth wall, include EXACTLY "
                 "`AUTH_RESULT=ACCOUNT_CREATED_ACTIVE` in your memory or evaluation.\n"
+                "  - If Create Account submission lands on the native Sign In page (email + password, no confirm-password field), "
+                "treat that as the expected post-create step on Workday. This is NOT a failure. "
+                "Use the SAME email/password to sign in ONCE. Do NOT click Create Account again.\n"
                 "  - If Create Account leads to email verification / check inbox / confirm your email, include EXACTLY "
                 "`AUTH_RESULT=ACCOUNT_CREATED_PENDING_VERIFICATION` in your memory or evaluation BEFORE reporting the blocker.\n"
                 "  - If Create Account fails before the account exists, include EXACTLY "
@@ -831,6 +886,8 @@ def build_task_prompt(
                 "`AUTH_RESULT=ACCOUNT_ALREADY_EXISTS` in your memory or evaluation.\n"
                 "  CRITICAL AUTH RULES:\n"
                 "  - Create Account: attempt EXACTLY ONCE. If it fails, report blocker immediately.\n"
+                "  - NEVER click Sign In proactively on a blank/loading page or because a header/nav Sign In button is visible.\n"
+                "  - Sign In is allowed ONLY after Create Account fails with an explicit 'account already exists' signal.\n"
                 "  - If Create Account fails with 'account already exists', switch to Sign In ONCE.\n"
                 "  - After clicking Sign In, use the standard wait action for 3 seconds before deciding the outcome.\n"
                 "  - Sign In after account creation: attempt EXACTLY ONCE. If it fails, immediately report "
@@ -857,12 +914,41 @@ def build_task_prompt(
                 "user must fix or reset their account credentials before this application can proceed'). "
                 "Do NOT retry, create a new account, or attempt any auth actions.\n"
             )
+        elif credential_source == "user" and credential_intent == "existing_account":
+            task += (
+                "- USER-PROVIDED EXISTING ACCOUNT: The user supplied credentials for an account that already exists. "
+                "On auth pages, go DIRECTLY to Sign In — do NOT click Create Account. "
+                "Fill email + password using browser-use input actions (NOT domhand_fill), then click Sign In using a standard click action.\n"
+                "  After clicking Sign In, wait 3 seconds before deciding what happened.\n"
+                "  CRITICAL AUTH RULES:\n"
+                "  - Sign In: attempt EXACTLY ONCE. If it fails for ANY reason, immediately report "
+                "done(success=False, text='blocker: sign-in failed — [describe the error]'). Do NOT retry.\n"
+                "  - NEVER attempt to create a new account with these credentials.\n"
+            )
+            task += _verification_rule
+        elif credential_source == "user" and credential_intent == "create_account":
+            task += (
+                "- USER-PROVIDED NEW ACCOUNT: The user supplied credentials that must be used to create the account on this platform. "
+                "On auth pages, go DIRECTLY to Create Account first — do NOT click Sign In first. "
+                "Fill email + password + confirm password using browser-use input actions (NOT domhand_fill), "
+                "check agreement using domhand_check_agreement, then click the Create Account button using a standard click action.\n"
+                "  After clicking Create Account, wait 3 seconds before deciding the outcome.\n"
+                "  CRITICAL AUTH RULES:\n"
+                "  - Create Account: attempt EXACTLY ONCE. If it fails, report blocker immediately.\n"
+                "  - If Create Account submission lands on the native Sign In page (email + password, no confirm-password field), "
+                "treat that as the expected next step. Use the SAME email/password to sign in ONCE. Do NOT click Create Account again.\n"
+                "  - Sign In after account creation: attempt EXACTLY ONCE. If it fails, immediately report "
+                "done(success=False, text='blocker: account created but sign-in failed — [describe the error]').\n"
+                "  - NEVER go back to Create Account after attempting Sign In.\n"
+                "  - NEVER loop between Sign In and Create Account.\n"
+            )
+            task += _verification_rule
         else:
             task += (
                 "- Use the provided credentials to log in or create an account if needed. "
                 "Fill email + password (+ confirm password if visible) on auth pages "
                 "using browser-use input actions (NOT domhand_fill), then click the submit button "
-                "using domhand_click_button.\n"
+                "using a standard click action.\n"
                 "  CRITICAL AUTH RULES:\n"
                 "  - Sign In: attempt EXACTLY ONCE. If it fails, immediately report "
                 "done(success=False, text='blocker: sign-in failed — [describe the error]'). Do NOT retry.\n"

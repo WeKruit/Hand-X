@@ -71,6 +71,11 @@ class Settings(BaseSettings):
         "'await_verification' (account exists but needs email verification), "
         "'repair_credentials' (credential is known broken)",
     )
+    credential_intent: str = Field(
+        "",
+        description="How user-provided credentials should be used on auth pages: "
+        "'existing_account' (sign in directly) or 'create_account' (use for registration first)",
+    )
     allowed_domains: list[str] = Field(
         default_factory=lambda: [
             "myworkdayjobs.com",

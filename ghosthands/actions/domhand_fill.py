@@ -23,6 +23,7 @@ job application form filling.  It:
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -54,6 +55,7 @@ _on_field_result: Any = None  # Callable[[FillFieldResult, int], None] | None
 # ── Constants ────────────────────────────────────────────────────────
 
 MAX_FILL_ROUNDS = 3
+DEFAULT_HITL_TIMEOUT_SECONDS = int(os.getenv("GH_OPEN_QUESTION_TIMEOUT_SECONDS", "5400"))
 
 # Selector for all interactive form elements (matches GH formFiller.ts).
 INTERACTIVE_SELECTOR = ", ".join(
@@ -117,6 +119,36 @@ _MATCH_CONFIDENCE_RANKS = {
     "weak": 1,
 }
 
+
+async def _safe_page_url(page: Any) -> str:
+    """Best-effort page URL extraction across Playwright/CDP page wrappers."""
+    if not page:
+        return ""
+
+    try:
+        url_attr = getattr(page, "url", None)
+        if callable(url_attr):
+            value = url_attr()
+        else:
+            value = url_attr
+        if isinstance(value, str):
+            return value
+    except Exception:
+        pass
+
+    try:
+        get_url = getattr(page, "get_url", None)
+        if callable(get_url):
+            value = get_url()
+            if inspect.isawaitable(value):
+                value = await value
+            if isinstance(value, str):
+                return value
+    except Exception:
+        pass
+
+    return ""
+
 # ── Q&A bank constants ───────────────────────────────────────────────
 
 # Maximum number of Q&A bank entries to keep in LLM context.
@@ -177,11 +209,15 @@ _QA_QUESTION_SYNONYMS: dict[str, list[str]] = {
     "salary expectation": [
         "salary",
         "compensation",
+        "total compensation",
+        "expectations on compensation",
         "desired salary",
         "pay expectation",
         "salary requirement",
         "expected compensation",
         "desired compensation",
+        "compensation range",
+        "salary range",
     ],
     "start date": [
         "available start date",
@@ -1273,10 +1309,18 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
                 # Workday-relevant fields
                 "work_authorization": str(data.get("work_authorization") or "").strip() or None,
                 "available_start_date": str(data.get("available_start_date") or "").strip() or None,
+                "availability_window": str(data.get("availability_window") or "").strip() or None,
+                "notice_period": str(data.get("notice_period") or "").strip() or None,
                 "salary_expectation": str(data.get("salary_expectation") or "").strip() or None,
+                "spoken_languages": str(data.get("spoken_languages") or "").strip() or None,
+                "english_proficiency": str(data.get("english_proficiency") or "").strip() or None,
+                "languages": data.get("languages") if isinstance(data.get("languages"), list) else None,
+                "country_of_residence": str(data.get("country_of_residence") or "").strip() or None,
                 "how_did_you_hear": str(data.get("how_did_you_hear") or data.get("referral_source") or "").strip()
                 or None,
                 "willing_to_relocate": str(data.get("willing_to_relocate") or "").strip() or None,
+                "preferred_work_mode": str(data.get("preferred_work_mode") or "").strip() or None,
+                "preferred_locations": str(data.get("preferred_locations") or "").strip() or None,
             }
 
     def read_line(label: str) -> str | None:
@@ -1329,9 +1373,24 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
         # Workday-relevant fields
         "work_authorization": read_line("Work authorization"),
         "available_start_date": read_line("Available start date"),
+        "availability_window": read_line("Availability to start") or read_line("Earliest start date"),
+        "notice_period": read_line("Notice period"),
         "salary_expectation": read_line("Salary expectation"),
+        "spoken_languages": read_line("Preferred spoken languages")
+        or read_line("Spoken languages")
+        or read_line("Languages spoken")
+        or read_line("Language proficiency"),
+        "english_proficiency": read_line("English proficiency")
+        or read_line("Overall")
+        or read_line("Reading")
+        or read_line("Writing")
+        or read_line("Speaking")
+        or read_line("Comprehension"),
+        "country_of_residence": read_line("Country of residence") or read_line("Country"),
         "how_did_you_hear": read_line("How did you hear about us"),
         "willing_to_relocate": read_line("Willing to relocate"),
+        "preferred_work_mode": read_line("Preferred work setup"),
+        "preferred_locations": read_line("Preferred locations"),
     }
 
 
@@ -1522,15 +1581,44 @@ def _preferred_field_label(field: FormField) -> str:
     return (field.name or field.raw_label or "").strip()
 
 
+def _canonical_section_name(value: str | None) -> str:
+    normalized = normalize_name(value or "")
+    replacements = {
+        "my information": "information",
+        "personal information": "information",
+        "my experience": "experience",
+        "work experience": "experience",
+        "professional experience": "experience",
+        "my education": "education",
+        "education history": "education",
+    }
+    return replacements.get(normalized, normalized)
+
+
+_SECTION_SCOPE_CHILDREN: dict[str, set[str]] = {
+    # Workday nests Education / Languages under the page-level "My Experience"
+    # step. When domhand_fill targets "My Experience", it should treat those
+    # subsections as part of the same fill scope instead of excluding them.
+    "experience": {"education", "languages", "language", "skills", "certifications"},
+}
+
+
 def _section_matches_scope(section: str | None, scope: str | None) -> bool:
     """Return True when a field section matches a requested scope/boundary."""
-    section_norm = normalize_name(section or "")
-    scope_norm = normalize_name(scope or "")
+    section_norm = _canonical_section_name(section)
+    scope_norm = _canonical_section_name(scope)
     if not scope_norm:
         return True
     if not section_norm:
         return False
-    return section_norm == scope_norm or scope_norm in section_norm or section_norm in scope_norm
+    if section_norm == scope_norm or scope_norm in section_norm or section_norm in scope_norm:
+        return True
+    child_sections = _SECTION_SCOPE_CHILDREN.get(scope_norm)
+    if child_sections and section_norm in child_sections:
+        return True
+    section_tokens = {token for token in section_norm.split() if token not in {"my", "work", "personal"}}
+    scope_tokens = {token for token in scope_norm.split() if token not in {"my", "work", "personal"}}
+    return bool(section_tokens & scope_tokens)
 
 
 def _filter_fields_for_scope(
@@ -1552,6 +1640,44 @@ def _filter_fields_for_scope(
     if heading_boundary:
         filtered = [f for f in filtered if _section_matches_scope(f.section, heading_boundary)]
     return filtered
+
+
+def _filter_fields_for_focus(fields: list[FormField], focus_fields: list[str] | None = None) -> list[FormField]:
+    """Restrict fields to explicit blocker labels when the agent knows them."""
+    if not focus_fields:
+        return fields
+
+    normalized_focus = [_normalize_match_label(label) for label in focus_fields if _normalize_match_label(label)]
+    if not normalized_focus:
+        return fields
+
+    focused: list[FormField] = []
+    for field in fields:
+        labels = _field_label_candidates(field) or [field.name]
+        matched = False
+        for focus_label in normalized_focus:
+            for candidate in labels:
+                confidence = _label_match_confidence(candidate, focus_label)
+                if _meets_match_confidence(confidence, "medium"):
+                    matched = True
+                    break
+                reverse_confidence = _label_match_confidence(focus_label, candidate)
+                if _meets_match_confidence(reverse_confidence, "medium"):
+                    matched = True
+                    break
+            if matched:
+                break
+        if matched:
+            focused.append(field)
+
+    if focused:
+        return focused
+
+    logger.info(
+        "DomHand focus fallback: no fields matched focus_fields, using scoped fields",
+        extra={"focus_fields": focus_fields, "field_count": len(fields)},
+    )
+    return fields
 
 
 def _format_entry_profile_text(entry_data: dict[str, Any]) -> str:
@@ -1945,6 +2071,64 @@ def _build_profile_answer_map(
     )
     add(canonical.get("linkedin"), "LinkedIn", "LinkedIn URL", "LinkedIn Profile")
     add(
+        canonical.get("spoken_languages"),
+        "Languages spoken",
+        "Spoken languages",
+        "Preferred spoken languages",
+        "Preferred language",
+        "Language",
+        "Language proficiency",
+    )
+    add(
+        canonical.get("english_proficiency"),
+        "English proficiency",
+        "Overall",
+        "Reading",
+        "Writing",
+        "Speaking",
+        "Comprehension",
+        "Overall proficiency",
+        "Reading proficiency",
+        "Writing proficiency",
+        "Speaking proficiency",
+        "Comprehension proficiency",
+    )
+    add(
+        canonical.get("country_of_residence"),
+        "Country of residence",
+        "Country/Region",
+        "Country region",
+    )
+    add(
+        canonical.get("preferred_work_mode"),
+        "Preferred work setup",
+        "Preferred work arrangement",
+        "Work arrangement",
+        "Remote/Hybrid preference",
+    )
+    add(
+        canonical.get("preferred_locations"),
+        "Preferred locations",
+        "Preferred work locations",
+        "Preferred city",
+        "Preferred office location",
+    )
+    add(
+        canonical.get("availability_window"),
+        "Availability to start",
+        "Earliest start date",
+        "Available start date",
+        "Start date",
+    )
+    add(canonical.get("notice_period"), "Notice period")
+    add(
+        canonical.get("salary_expectation"),
+        "Expected annual salary",
+        "Expected salary range",
+        "Expected compensation",
+        "Compensation expectation",
+    )
+    add(
         canonical.get("portfolio"),
         "Website",
         "Website URL",
@@ -2030,6 +2214,23 @@ def _default_screening_answer(field: FormField, profile_data: dict[str, Any]) ->
     options = [normalize_name(choice) for choice in (field.options or field.choices or [])]
     if options and not ({"yes", "no"} & set(options)):
         return None
+
+    if any(
+        phrase in norm
+        for phrase in (
+            "previously worked",
+            "previously employed",
+            "worked for this organization",
+            "worked for this company",
+            "worked here before",
+            "prior employment",
+            "prior employer",
+            "former employee",
+            "current or previous employee",
+            "previous employee",
+        )
+    ):
+        return _coerce_answer_to_field(field, "No")
 
     sponsorship_value = profile_data.get("sponsorship_needed")
     if sponsorship_value is None:
@@ -2450,11 +2651,47 @@ def _known_profile_value(field_name: str, evidence: dict[str, str | None]) -> st
     if any(kw in name for kw in ("work authorization", "authorized to work", "legally authorized")):
         return evidence.get("work_authorization")
     if any(kw in name for kw in ("start date", "earliest start", "available date", "availability")):
-        return evidence.get("available_start_date")
+        return evidence.get("availability_window") or evidence.get("available_start_date")
+    if "notice period" in name:
+        return evidence.get("notice_period")
     if any(kw in name for kw in ("salary", "compensation", "pay expectation")):
         return evidence.get("salary_expectation")
+    if any(
+        kw in name
+        for kw in (
+            "language",
+            "languages spoken",
+            "spoken languages",
+            "preferred language",
+            "language proficiency",
+            "reading",
+            "writing",
+            "speaking",
+            "comprehension",
+            "overall",
+        )
+    ):
+        return evidence.get("english_proficiency") or evidence.get("spoken_languages")
+    if any(kw in name for kw in ("country of residence", "country/region", "country region", "country")):
+        return evidence.get("country_of_residence") or evidence.get("country")
     if any(kw in name for kw in ("willing to relocate", "relocation")):
         return evidence.get("willing_to_relocate")
+    if any(
+        kw in name
+        for kw in (
+            "preferred work",
+            "work setup",
+            "work arrangement",
+            "remote",
+            "hybrid",
+            "onsite",
+            "on site",
+            "location preference",
+            "preferred location",
+            "preferred office",
+        )
+    ):
+        return evidence.get("preferred_work_mode") or evidence.get("preferred_locations")
     # Auto-check agreement/consent checkboxes — always agree on behalf of applicant
     if any(
         kw in name
@@ -2594,9 +2831,23 @@ def _sanitize_no_guess_answer(
     return ""
 
 
+def _disambiguated_field_names(fields: list[FormField]) -> list[str]:
+    """Build deterministic display names for batched LLM answer generation."""
+    name_counts: dict[str, int] = {}
+    disambiguated_names: list[str] = []
+    for i, field in enumerate(fields):
+        base_name = _preferred_field_label(field) or f"Field {i + 1}"
+        norm = normalize_name(base_name) or f"field-{i + 1}"
+        count = name_counts.get(norm, 0) + 1
+        name_counts[norm] = count
+        disambiguated_names.append(f"{base_name} #{count}" if count > 1 else base_name)
+    return disambiguated_names
+
+
 async def _generate_answers(
     fields: list[FormField],
     profile_text: str,
+    profile_data: dict[str, Any] | None = None,
 ) -> tuple[dict[str, str], int, int, float, str | None]:
     """Call the configured DomHand model to generate answers for all fields in a single batch."""
     try:
@@ -2615,14 +2866,7 @@ async def _generate_answers(
     output_tokens = 0
     step_cost = 0.0
 
-    name_counts: dict[str, int] = {}
-    disambiguated_names: list[str] = []
-    for i, field in enumerate(fields):
-        base_name = _preferred_field_label(field) or f"Field {i + 1}"
-        norm = normalize_name(base_name) or f"field-{i + 1}"
-        count = name_counts.get(norm, 0) + 1
-        name_counts[norm] = count
-        disambiguated_names.append(f"{base_name} #{count}" if count > 1 else base_name)
+    disambiguated_names = _disambiguated_field_names(fields)
 
     field_descriptions = "\n".join(
         _build_field_description(field, disambiguated_names[i]) for i, field in enumerate(fields)
@@ -2641,16 +2885,24 @@ Here are the form fields to fill:
 
 Rules:
 - For each field, decide what value to put based on the profile.
-- For each field, use ONLY the applicant's actual profile data. Every non-consent value must come directly from the provided applicant profile.
+- For substantive applicant fields, use ONLY the applicant's actual profile data. Do not invent salary, start dates, work history, education, essays, addresses, or personal identifiers.
 - If the profile has NO relevant data for an OPTIONAL field, return "" (empty string). NEVER make up data or use placeholder values like "N/A", "None", "Not applicable", etc.
 - If the profile has NO relevant data for a REQUIRED field: if a neutral/decline option exists (e.g., "Prefer not to say", "N/A", "Other"), select it. Otherwise, return exactly "[NEEDS_USER_INPUT]".
 - NEVER fabricate answers for salary, start date, or other substantive fields. If the profile does not contain the answer, return "[NEEDS_USER_INPUT]" for required fields or "" for optional fields.
 - NEVER fabricate personal identifiers or social handles/URLs not explicitly in the profile. If missing: return "" (empty string) for optional fields, or "[NEEDS_USER_INPUT]" for required fields.
 - For dropdowns/radio groups with listed options, pick the EXACT text of one of the available options.
 - For hierarchical dropdown options (format "Category > SubOption"), pick the EXACT full path including the " > " separator.
+- Use the section, current field value, sibling field names, and listed options together to infer meaning for short or generic labels.
+- If a label is generic (for example "Overall", "Type", "Status", or "Source"), do NOT rely on label matching alone. Use section context plus the available options to choose the best answer.
 - For dropdowns WITHOUT listed options, provide the value from the profile if available. If the field name closely matches a profile entry, use that value.
+- For low-risk standardized screening fields, prefer a best-effort answer instead of "[NEEDS_USER_INPUT]". This includes referral/source fields, phone type, country/country of residence, work arrangement, relocation, language/rubric proficiency fields, and demographic/EEO fields.
+- For low-risk standardized screening dropdowns/radios, use the saved profile/default answer and choose the closest matching option text if the wording differs slightly.
 - For "How did you hear about us?" or similar source/referral fields: use the applicant profile value if available. If the profile has no source, default to "LinkedIn" (or the closest matching option like "Job Board", "Online Job Board", "Internet"). NEVER return "[NEEDS_USER_INPUT]" for referral source fields — they always have a safe default.
 - For "Phone Device Type" or similar phone type fields: default to "Mobile" if the profile has no phone type. NEVER return "[NEEDS_USER_INPUT]" for phone type fields.
+- For language proficiency rubrics like "Overall", "Reading", "Writing", "Speaking", and "Comprehension": use the applicant's saved English proficiency if present. If no explicit value is present, default to the closest option matching "Native / bilingual" or "Fluent". NEVER return "[NEEDS_USER_INPUT]" for these rubric fields.
+- When the profile wording and the site wording differ, map to the semantically closest visible option instead of escalating. Example: "Native / bilingual" may map to the top proficiency tier such as "Expert", "Advanced", or "Fluent".
+- For work-setup/location preference fields, use the saved preferred work mode / preferred locations if present. If the field is broad and only asks for an arrangement, prefer the work-mode answer over escalating.
+- For relocation fields, use the applicant's saved relocation preference; default to "Yes" when the profile has no contrary preference.
 - For skill typeahead fields, return an ARRAY of relevant skills from the applicant profile.
 - For multi-select fields, return a JSON array of ALL matching options (e.g., ["Python", "Java"]).
 - For checkboxes/toggles, respond with "checked" or "unchecked".
@@ -2721,6 +2973,43 @@ Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because.
         return {}, input_tokens, output_tokens, step_cost, model_id
 
 
+async def infer_answers_for_fields(
+    fields: list[FormField],
+    *,
+    profile_text: str | None = None,
+    profile_data: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Infer answers for an arbitrary field set using DomHand's option-aware LLM path."""
+    if not fields:
+        return {}
+
+    effective_profile_text = profile_text or _get_profile_text() or ""
+    if not effective_profile_text and profile_data:
+        effective_profile_text = json.dumps(profile_data)
+    if not effective_profile_text:
+        return {}
+
+    answers, *_ = await _generate_answers(
+        fields,
+        effective_profile_text,
+        profile_data=profile_data,
+    )
+    evidence = _parse_profile_evidence(effective_profile_text)
+    display_names = _disambiguated_field_names(fields)
+    resolved: dict[str, str] = {}
+
+    for field, display_name in zip(fields, display_names, strict=False):
+        proposed = answers.get(display_name)
+        if proposed is None:
+            proposed = _match_answer(field, answers, evidence, profile_data)
+        coerced = _coerce_answer_to_field(field, str(proposed).strip() if proposed is not None else None)
+        if not coerced or "[NEEDS_USER_INPUT]" in coerced.upper():
+            continue
+        resolved[field.field_id] = coerced
+
+    return resolved
+
+
 def _build_field_description(field: FormField, display_name: str) -> str:
     type_label = "multi-select" if field.is_multi_select else field.field_type
     req_marker = " *" if field.required else ""
@@ -2731,6 +3020,10 @@ def _build_field_description(field: FormField, display_name: str) -> str:
         desc += f" choices: [{', '.join(field.choices[:30])}]"
     if field.section:
         desc += f" [section: {field.section}]"
+    if field.raw_label and normalize_name(field.raw_label) != normalize_name(display_name):
+        desc += f' [question: "{field.raw_label}"]'
+    if field.current_value:
+        desc += f' [current: "{field.current_value}"]'
     return desc
 
 
@@ -2799,8 +3092,25 @@ _AUTHORITATIVE_SELECT_DEFAULTS: dict[str, str] = {
     "where did you hear": "LinkedIn",
     "country": "United States",
     "country of residence": "United States",
+    "worked for this company": "No",
+    "worked for this organization": "No",
+    "worked here before": "No",
+    "previously worked": "No",
+    "previously employed": "No",
+    "prior employment": "No",
+    "previous employee": "No",
     "preferred language": "English",
     "language": "English",
+    "overall": "Native / bilingual",
+    "overall proficiency": "Native / bilingual",
+    "reading": "Native / bilingual",
+    "reading proficiency": "Native / bilingual",
+    "writing": "Native / bilingual",
+    "writing proficiency": "Native / bilingual",
+    "speaking": "Native / bilingual",
+    "speaking proficiency": "Native / bilingual",
+    "comprehension": "Native / bilingual",
+    "language proficiency": "Native / bilingual",
     "willing to relocate": "Yes",
     "willingness to relocate": "Yes",
     "relocation": "Yes",
@@ -3036,6 +3346,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             target_section=params.target_section,
             heading_boundary=params.heading_boundary,
         )
+        fields = _filter_fields_for_focus(fields, params.focus_fields)
 
         if params.heading_boundary and not fields:
             return ActionResult(
@@ -3119,7 +3430,11 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 
         answers: dict[str, str] = {}
         if needs_llm:
-            llm_answers, in_tok, out_tok, step_cost, llm_model_name = await _generate_answers(needs_llm, profile_text)
+            llm_answers, in_tok, out_tok, step_cost, llm_model_name = await _generate_answers(
+                needs_llm,
+                profile_text,
+                profile_data=profile_data,
+            )
             answers = llm_answers
             total_step_cost += step_cost
             total_input_tokens += in_tok
@@ -3199,11 +3514,13 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         "field_needs_input",
                         field_label=field_label,
                         field_id=f.field_id,
+                        question_key=get_stable_field_key(f),
                         field_type=f.field_type or "unknown",
                         question_text=f.raw_label or f.name or "",
                         section=f.section or "",
                         options=field_options,
-                        page_url=page.url if page else "",
+                        source="domhand_fill",
+                        page_url=await _safe_page_url(page),
                     )
 
                 # For REQUIRED fields: wait for the user's answer from Desktop
@@ -3219,7 +3536,11 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         matched_answer = ""
                     else:
                         try:
-                            user_answer = await get_field_answer(f.field_id, timeout=300.0, field_label=field_label)
+                            user_answer = await get_field_answer(
+                                f.field_id,
+                                timeout=DEFAULT_HITL_TIMEOUT_SECONDS,
+                                field_label=field_label,
+                            )
                             if user_answer:
                                 matched_answer = user_answer
                             else:
@@ -3291,11 +3612,13 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         "field_needs_input",
                         field_label=_preferred_field_label(f),
                         field_id=f.field_id,
+                        question_key=key,
                         field_type=f.field_type or "unknown",
                         question_text=f.raw_label or f.name or "",
                         section=f.section or "",
                         options=field_options,
-                        page_url=page.url if page else "",
+                        source="domhand_fill",
+                        page_url=await _safe_page_url(page),
                     )
 
                     # Wait for user's answer from Desktop HITL modal
@@ -3305,7 +3628,11 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         matched_answer = ""
                     else:
                         try:
-                            user_answer = await get_field_answer(f.field_id, timeout=300.0, field_label=_preferred_field_label(f))
+                            user_answer = await get_field_answer(
+                                f.field_id,
+                                timeout=DEFAULT_HITL_TIMEOUT_SECONDS,
+                                field_label=_preferred_field_label(f),
+                            )
                             if user_answer:
                                 matched_answer = user_answer
                             else:

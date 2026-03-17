@@ -2,20 +2,11 @@
 
 Covers:
 - max_tokens scaling based on field count (prevents description truncation)
-- _sanitize_no_guess_answer emits field_needs_input for [NEEDS_USER_INPUT]
+- _sanitize_no_guess_answer passes through [NEEDS_USER_INPUT] for required fields
 - estimate_cost fault tolerance for unknown models
 
 All tests are offline (no browser, no database, no API calls).
 """
-
-from __future__ import annotations
-
-import io
-import json
-from unittest.mock import patch
-
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # max_tokens scaling
@@ -74,26 +65,15 @@ def test_estimate_cost_gemini_3_flash_preview():
 
 
 def test_sanitize_passes_through_needs_user_input_for_required():
-    """Required fields with [NEEDS_USER_INPUT] should emit event and pass through."""
+    """Required fields with [NEEDS_USER_INPUT] should pass through unchanged."""
     from ghosthands.actions.domhand_fill import _sanitize_no_guess_answer
 
-    events = []
-    original_emit = None
-
-    def mock_emit(event_type, **kwargs):
-        events.append({"event": event_type, **kwargs})
-
-    with patch("ghosthands.output.jsonl.emit_event", mock_emit):
-        result = _sanitize_no_guess_answer(
-            "Country code", True, "[NEEDS_USER_INPUT]", {},
-            field_type="select", question_text="Select country code",
-        )
+    result = _sanitize_no_guess_answer(
+        "Country code", True, "[NEEDS_USER_INPUT]", {},
+        field_type="select", question_text="Select country code",
+    )
 
     assert result == "[NEEDS_USER_INPUT]"
-    assert len(events) == 1
-    assert events[0]["event"] == "field_needs_input"
-    assert events[0]["field_label"] == "Country code"
-    assert events[0]["question_text"] == "Select country code"
 
 
 def test_sanitize_skips_needs_user_input_for_optional():
@@ -203,6 +183,9 @@ def test_build_task_prompt_uses_browser_use_for_auth_pages():
 
     assert "NOT domhand_fill" in prompt
     assert "browser-use input" in prompt
+    assert "standard click action" in prompt
+    assert "domhand_click_button" not in prompt
+    assert "Sign In is allowed ONLY after Create Account fails with an explicit 'account already exists' signal." in prompt
 
 
 def test_build_task_prompt_await_verification():
@@ -233,3 +216,77 @@ def test_build_task_prompt_repair_credentials():
 
     assert "CREDENTIALS NEED REPAIR" in prompt
     assert "Do NOT attempt to sign in" in prompt
+
+
+def test_build_task_prompt_user_existing_account():
+    """User-provided existing-account credentials should force sign-in only."""
+    from ghosthands.agent.prompts import build_task_prompt
+
+    prompt = build_task_prompt(
+        "https://example.wd1.myworkdayjobs.com/en-US/job/123/apply",
+        "/tmp/resume.pdf",
+        {"email": "user@example.com", "password": "Secret!123"},
+        credential_source="user",
+        credential_intent="existing_account",
+    )
+
+    assert "USER-PROVIDED EXISTING ACCOUNT" in prompt
+    assert "go DIRECTLY to Sign In" in prompt
+    assert "NEVER attempt to create a new account" in prompt
+
+
+def test_build_task_prompt_user_create_account():
+    """User-provided new-account credentials should force create-account first."""
+    from ghosthands.agent.prompts import build_task_prompt
+
+    prompt = build_task_prompt(
+        "https://example.wd1.myworkdayjobs.com/en-US/job/123/apply",
+        "/tmp/resume.pdf",
+        {"email": "user@example.com", "password": "Secret!123"},
+        credential_source="user",
+        credential_intent="create_account",
+    )
+
+    assert "USER-PROVIDED NEW ACCOUNT" in prompt
+    assert "go DIRECTLY to Create Account first" in prompt
+    assert "Use the SAME email/password to sign in ONCE" in prompt
+
+
+def test_format_profile_summary_includes_structured_languages():
+    from ghosthands.agent.prompts import _format_profile_summary
+
+    summary = _format_profile_summary(
+        {
+            "languages": [
+                {"language": "English", "proficiency": "Native / bilingual"},
+                {"language": "Mandarin", "proficiency": "Conversational"},
+            ],
+            "spoken_languages": "English (Native / bilingual), Mandarin (Conversational)",
+            "english_proficiency": "Native / bilingual",
+        }
+    )
+
+    assert "Languages: English (Native / bilingual), Mandarin (Conversational)" in summary
+    assert "English proficiency: Native / bilingual" in summary
+
+
+def test_section_scope_treats_languages_as_part_of_my_experience():
+    from ghosthands.actions.domhand_fill import _section_matches_scope
+
+    assert _section_matches_scope("Languages", "My Experience") is True
+    assert _section_matches_scope("Education", "My Experience") is True
+
+
+def test_focus_filter_targets_exact_unresolved_fields():
+    from ghosthands.actions.domhand_fill import _filter_fields_for_focus
+    from ghosthands.actions.views import FormField
+
+    fields = [
+        FormField(field_id="f1", name="Comprehension", field_type="select", section="Languages"),
+        FormField(field_id="f2", name="Reading", field_type="select", section="Languages"),
+        FormField(field_id="f3", name="I currently work here", field_type="checkbox", section="My Experience"),
+    ]
+
+    filtered = _filter_fields_for_focus(fields, ["Comprehension", "Reading"])
+
+    assert [field.field_id for field in filtered] == ["f1", "f2"]

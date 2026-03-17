@@ -234,6 +234,7 @@ class TestEmitAccountCreated:
         events = _capture_jsonl_output(emit_account_created, "workday", "user@test.com", "pass123")
         assert len(events) == 1
         assert events[0]["event"] == "account_created"
+        assert events[0]["credentialStatus"] == "pending_verification"
 
     def test_includes_all_fields(self):
         from ghosthands.output.jsonl import emit_account_created
@@ -265,6 +266,122 @@ class TestEmitAccountCreated:
 
         events = _capture_jsonl_output(emit_account_created, "greenhouse", "user@test.com", "pass")
         assert "url" not in events[0]
+
+
+class TestOpenQuestionAutoAnswering:
+    def test_recovers_language_rubric_from_profile_before_hitl(self):
+        from ghosthands.cli import _OpenQuestionIssue, _auto_answer_open_question_issues
+
+        profile = {
+            "spoken_languages": "English (Native / bilingual)",
+            "english_proficiency": "Native / bilingual",
+            "how_did_you_hear": "LinkedIn",
+        }
+        issues = [
+            _OpenQuestionIssue(field_label="Comprehension", field_type="select", section="Languages"),
+            _OpenQuestionIssue(field_label="Overall", field_type="select", section="Languages"),
+            _OpenQuestionIssue(field_label="Reading", field_type="select", section="Languages"),
+            _OpenQuestionIssue(field_label="Speaking", field_type="select", section="Languages"),
+            _OpenQuestionIssue(field_label="Writing", field_type="select", section="Languages"),
+        ]
+
+        resolved, unresolved = _auto_answer_open_question_issues(issues, profile)
+
+        assert unresolved == []
+        assert resolved == {
+            "Comprehension": "Native / bilingual",
+            "Overall": "Native / bilingual",
+            "Reading": "Native / bilingual",
+            "Speaking": "Native / bilingual",
+            "Writing": "Native / bilingual",
+        }
+
+    def test_preserves_unknown_issues_for_real_hitl(self):
+        from ghosthands.cli import _OpenQuestionIssue, _auto_answer_open_question_issues
+
+        issues = [
+            _OpenQuestionIssue(field_label="Why do you want this job?", field_type="textarea"),
+        ]
+
+        resolved, unresolved = _auto_answer_open_question_issues(issues, {})
+
+        assert resolved == {}
+        assert len(unresolved) == 1
+        assert unresolved[0].field_label == "Why do you want this job?"
+
+    def test_recovers_compensation_open_question_from_profile(self):
+        from ghosthands.cli import _OpenQuestionIssue, _auto_answer_open_question_issues
+
+        profile = {
+            "salary_expectation": "$90,000-$120,000 base (flexible)",
+        }
+        issues = [
+            _OpenQuestionIssue(
+                field_label="Expectations on Compensation - Please state your expectations of total compensation for this position.(Please list a value and/or range)*",
+                field_type="textarea",
+                section="My Information",
+            ),
+        ]
+
+        resolved, unresolved = _auto_answer_open_question_issues(issues, profile)
+
+        assert unresolved == []
+        assert resolved == {
+            "Expectations on Compensation - Please state your expectations of total compensation for this position.(Please list a value and/or range)*":
+                "$90,000-$120,000 base (flexible)"
+        }
+
+    def test_defaults_previous_employment_questions_to_no(self):
+        from ghosthands.cli import _OpenQuestionIssue, _auto_answer_open_question_issues
+
+        issues = [
+            _OpenQuestionIssue(
+                field_label="Have you previously worked for this organization?",
+                field_type="select",
+                section="My Information",
+            ),
+        ]
+
+        resolved, unresolved = _auto_answer_open_question_issues(issues, {})
+
+        assert unresolved == []
+        assert resolved == {
+            "Have you previously worked for this organization?": "No",
+        }
+
+    @pytest.mark.asyncio
+    async def test_llm_recovery_uses_visible_options_before_hitl(self, monkeypatch):
+        from ghosthands.cli import _OpenQuestionIssue, _infer_open_question_answers_with_domhand
+
+        async def _fake_infer(fields, *, profile_text=None, profile_data=None):
+            assert len(fields) == 1
+            assert fields[0].options == ["Beginner", "Intermediate", "Expert"]
+            return {fields[0].field_id: "Expert"}
+
+        monkeypatch.setattr(
+            "ghosthands.actions.domhand_fill.infer_answers_for_fields",
+            _fake_infer,
+        )
+
+        issues = [
+            _OpenQuestionIssue(
+                field_label="Overall language ability",
+                field_type="select",
+                section="Languages",
+                options=("Beginner", "Intermediate", "Expert"),
+            ),
+        ]
+        profile = {
+            "spoken_languages": "English (Native / bilingual)",
+            "english_proficiency": "Native / bilingual",
+        }
+
+        resolved, unresolved = await _infer_open_question_answers_with_domhand(issues, profile)
+
+        assert unresolved == []
+        assert resolved == {
+            "Overall language ability": "Expert",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -989,7 +1106,7 @@ class TestGetFieldCounts:
 class TestAccountCreatedEmission:
     """account_created is emitted by cli.py's _on_step_end when the agent's
     evaluation indicates that an account was successfully created and
-    credential_source is 'generated'.
+    the runtime is in a create-account credential mode.
 
     The emit_account_created function exists in the JSONL module and is
     imported by cli.py for this purpose.
@@ -1018,6 +1135,16 @@ class TestAccountCreatedEmission:
         source = cli_path.read_text(encoding="utf-8")
         # The function is now used in _on_step_end for account creation detection
         assert "emit_account_created" in source
+
+    def test_cli_supports_user_create_account_emission(self):
+        """User-provided create-account credentials should also trigger
+        account_created emission logic, not just generated passwords."""
+        from pathlib import Path
+
+        cli_path = Path(__file__).resolve().parents[2] / "ghosthands" / "cli.py"
+        source = cli_path.read_text(encoding="utf-8")
+        assert 'credential_source == "user"' in source
+        assert 'credential_intent == "create_account"' in source
 
 
 # ---------------------------------------------------------------------------
@@ -1696,7 +1823,7 @@ class TestWaitForReviewCommand:
             ),
             patch(
                 "ghosthands.bridge.protocol._time.monotonic",
-                side_effect=[0.0, 1501.0, 1800.0],
+                side_effect=[0.0, 23 * 60 * 60 + 1.0, 24 * 60 * 60 + 1.0],
             ),
             patch("ghosthands.output.jsonl.emit_status") as emit_status,
             patch("ghosthands.output.jsonl.emit_error") as emit_error,
@@ -1705,11 +1832,11 @@ class TestWaitForReviewCommand:
 
         assert result == "timeout"
         emit_status.assert_any_call(
-            "Your review session will expire in 5 minutes. Please submit or cancel soon.",
+            "Your review session will expire in about 1 hour. Please submit or cancel soon.",
             job_id="j1",
         )
         emit_error.assert_called_once_with(
-            "Review timed out after 30 minutes",
+            "Review session expired — please submit or cancel your application",
             fatal=True,
             job_id="j1",
         )

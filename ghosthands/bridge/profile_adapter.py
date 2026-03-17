@@ -57,6 +57,16 @@ CAMEL_TO_SNAKE_SCALAR: dict[str, str] = {
     "disabilityStatus": "disability_status",
     "phoneDeviceType": "phone_device_type",
     "phoneCountryCode": "phone_country_code",
+    "salaryExpectation": "salary_expectation",
+    "spokenLanguages": "spoken_languages",
+    "englishProficiency": "english_proficiency",
+    "countryOfResidence": "country_of_residence",
+    "preferredWorkMode": "preferred_work_mode",
+    "preferredLocations": "preferred_locations",
+    "willingToRelocate": "willing_to_relocate",
+    "howDidYouHear": "how_did_you_hear",
+    "availabilityWindow": "availability_window",
+    "noticePeriod": "notice_period",
 }
 
 CAMEL_TO_SNAKE_NESTED: dict[str, str] = {

@@ -60,6 +60,14 @@ from browser_use.tools.views import (
 	UploadFileAction,
 )
 from browser_use.utils import create_task_with_error_handling, sanitize_surrogates, time_execution_sync
+from ghosthands.button_attempts import (
+	annotate_button_descriptor,
+	assess_button_outcome,
+	build_button_descriptor_from_node,
+	capture_button_state,
+	emit_button_no_transition_event,
+	format_button_no_transition_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -599,6 +607,28 @@ class Tools(Generic[Context]):
 
 				# Get description of clicked element
 				element_desc = get_click_description(node)
+				before_snapshot = await capture_button_state(browser_session)
+				descriptor = annotate_button_descriptor(build_button_descriptor_from_node(node), before_snapshot)
+				if descriptor.get('critical'):
+					logger.info(
+						'button_attempt',
+						extra={
+							'label': descriptor.get('label'),
+							'kind': descriptor.get('kind'),
+							'click_method': 'standard_click',
+							'auth_state_before': before_snapshot.get('auth_state'),
+							'url_before': before_snapshot.get('url'),
+						},
+					)
+					if descriptor.get('kind') == 'auth_submit':
+						logger.info(
+							'auth_state_before',
+							extra={
+								'label': descriptor.get('label'),
+								'auth_state': before_snapshot.get('auth_state'),
+								'url': before_snapshot.get('url'),
+							},
+						)
 
 				# Capture tab IDs before click to detect new tabs
 				tabs_before = {t.target_id for t in await browser_session.get_tabs()}
@@ -628,6 +658,125 @@ class Tools(Generic[Context]):
 							)
 					return ActionResult(error=error_msg)
 
+				metadata = dict(click_metadata) if isinstance(click_metadata, dict) else {}
+				button_outcome = None
+				if descriptor.get('critical'):
+					button_outcome = await assess_button_outcome(
+						browser_session,
+						descriptor,
+						before_snapshot,
+						click_method='standard_click',
+					)
+					metadata['button_attempt'] = button_outcome
+					if button_outcome.get('visual_recheck', {}).get('performed'):
+						metadata['include_screenshot'] = True
+					if descriptor.get('kind') == 'auth_submit':
+						logger.info(
+							'auth_state_after',
+							extra={
+								'label': descriptor.get('label'),
+								'auth_state': button_outcome.get('auth_state_after'),
+								'url': button_outcome.get('url_after'),
+							},
+						)
+
+				if button_outcome and button_outcome.get('no_transition'):
+					logger.warning(
+						'button_no_transition',
+						extra={
+							'label': descriptor.get('label'),
+							'kind': descriptor.get('kind'),
+							'click_method': 'standard_click',
+							'auth_state_before': button_outcome.get('auth_state_before'),
+							'auth_state_after': button_outcome.get('auth_state_after'),
+							'screenshot_path': button_outcome.get('screenshot_path'),
+						},
+					)
+
+					secondary_result = None
+					secondary_summary = None
+					attachments = [button_outcome['screenshot_path']] if button_outcome.get('screenshot_path') else None
+					if descriptor.get('allow_secondary_fallback') and descriptor.get('label'):
+						logger.info(
+							'button_secondary_attempt',
+							extra={
+								'label': descriptor.get('label'),
+								'kind': descriptor.get('kind'),
+								'primary_click_method': 'standard_click',
+							},
+						)
+						try:
+							from ghosthands.actions.domhand_click_button import (
+								DomHandClickButtonParams,
+								domhand_click_button,
+							)
+
+							secondary_result = await domhand_click_button(
+								DomHandClickButtonParams(button_label=str(descriptor.get('label'))),
+								browser_session,
+							)
+						except Exception as secondary_exc:
+							secondary_summary = (
+								f"Secondary fallback failed before execution: {type(secondary_exc).__name__}: {secondary_exc}"
+							)
+						else:
+							secondary_meta = secondary_result.metadata if isinstance(secondary_result.metadata, dict) else {}
+							metadata['secondary_attempt'] = {
+								'error': secondary_result.error,
+								'extracted_content': secondary_result.extracted_content,
+								'button_attempt': secondary_meta.get('button_attempt'),
+							}
+							if secondary_result.attachments:
+								attachments = list(dict.fromkeys((attachments or []) + secondary_result.attachments))
+							secondary_outcome = secondary_meta.get('button_attempt')
+							secondary_changed = bool(
+								isinstance(secondary_outcome, dict) and secondary_outcome.get('meaningful_change')
+							)
+							if not secondary_changed and secondary_result.extracted_content:
+								secondary_changed = any(
+									token in secondary_result.extracted_content
+									for token in ('Page navigated', 'Page content changed', 'submitted form', 'auto-checked agreement checkbox')
+								)
+
+							if secondary_changed:
+								message = f'Clicked {element_desc}'
+								message += await _detect_new_tab_opened(browser_session, tabs_before)
+								if secondary_result.extracted_content:
+									message += f'\nSecondary fallback succeeded: {secondary_result.extracted_content}'
+								logger.info(f'🖱️ {message}')
+								return ActionResult(
+									extracted_content=message,
+									metadata=metadata or None,
+									attachments=attachments,
+								)
+
+							secondary_summary = secondary_result.error or secondary_result.extracted_content
+
+					error_msg = format_button_no_transition_message(
+						button_outcome,
+						secondary_summary=secondary_summary,
+					)
+					emit_button_no_transition_event(
+						button_outcome,
+						secondary_summary=secondary_summary,
+					)
+					logger.warning(
+						'button_failure',
+						extra={
+							'label': descriptor.get('label'),
+							'kind': descriptor.get('kind'),
+							'click_method': 'standard_click',
+							'screenshot_path': button_outcome.get('screenshot_path'),
+						},
+					)
+					return ActionResult(
+						error=error_msg,
+						extracted_content=error_msg,
+						long_term_memory=error_msg,
+						metadata=metadata or None,
+						attachments=attachments,
+					)
+
 				# Build memory with element info
 				memory = f'Clicked {element_desc}'
 				memory += await _detect_new_tab_opened(browser_session, tabs_before)
@@ -636,7 +785,7 @@ class Tools(Generic[Context]):
 				# Include click coordinates in metadata if available
 				return ActionResult(
 					extracted_content=memory,
-					metadata=click_metadata if isinstance(click_metadata, dict) else None,
+					metadata=metadata or None,
 				)
 			except BrowserError as e:
 				return handle_browser_error(e)

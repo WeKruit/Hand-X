@@ -293,6 +293,11 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             reason=reason,
             relative_position=relative_position,
             takeover_suggestion="browser_use_takeover",
+            options=[
+                str(option).strip()
+                for option in (field.options or field.choices or [])
+                if str(option).strip()
+            ],
         )
         if field.required:
             unresolved_required.append(issue)

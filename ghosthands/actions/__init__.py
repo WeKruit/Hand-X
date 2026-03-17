@@ -21,6 +21,7 @@ from ghosthands.actions.views import (
     DomHandClosePopupParams,
     DomHandExpandParams,
     DomHandFillParams,
+    DomHandRequestUserInputParams,
     DomHandSelectParams,
     DomHandUploadParams,
 )
@@ -47,6 +48,7 @@ def register_domhand_actions(tools: "Tools") -> None:
     from ghosthands.actions.domhand_close_popup import domhand_close_popup
     from ghosthands.actions.domhand_expand import domhand_expand
     from ghosthands.actions.domhand_fill import domhand_fill
+    from ghosthands.actions.domhand_request_user_input import domhand_request_user_input
     from ghosthands.actions.domhand_select import domhand_select
     from ghosthands.actions.domhand_upload import domhand_upload
 
@@ -79,7 +81,7 @@ def register_domhand_actions(tools: "Tools") -> None:
             "Extracts fields, generates answers from user profile via a single LLM call, "
             "and fills each field via DOM. Handles text inputs, selects, checkboxes, "
             "textareas, and radio buttons. Supports scoped repeater fills via "
-            "target_section, heading_boundary, and entry_data. Use this as the FIRST "
+            "target_section, heading_boundary, focus_fields, and entry_data. Use this as the FIRST "
             "approach for any APPLICATION FORM page. Do NOT use on auth/login pages — "
             "use standard browser-use input actions for email/password fields instead. "
             "Only fall back to individual input/click actions "
@@ -152,17 +154,15 @@ def register_domhand_actions(tools: "Tools") -> None:
         func=domhand_check_agreement,
     )
 
-    # ── domhand_click_button: Trusted-event button click ──────
-    # Uses Playwright's native click() instead of CDP mouse events.
-    # Critical for React-based sites like Workday where buttons check
-    # event.isTrusted and ignore CDP-dispatched untrusted events.
+    # ── domhand_click_button: Multi-strategy button fallback ───
+    # Diagnostic/fallback helper for button-like controls that need
+    # extra candidate selection or submission heuristics.
     _register_action(
         description=(
-            "Click a button using Playwright trusted events. Use this for buttons "
-            "that do not respond to regular click actions (e.g., Create Account, "
-            "Sign In on Workday). Regular clicks use CDP mouse events which are "
-            "untrusted — this action uses Playwright native click which produces "
-            "trusted events that React/Workday form handlers require."
+            "Try multiple strategies to activate a button-like control and report "
+            "what changed. Use this as a fallback when the normal click action "
+            "cannot find or activate the intended button, or when you need richer "
+            "diagnostics about why a submit control did not advance."
         ),
         param_model=DomHandClickButtonParams,
         func=domhand_click_button,
@@ -179,6 +179,18 @@ def register_domhand_actions(tools: "Tools") -> None:
         ),
         param_model=DomHandExpandParams,
         func=domhand_expand,
+    )
+
+    _register_action(
+        description=(
+            "Pause the current run and ask the user for one missing required answer. "
+            "Use this when you discover a required field that cannot be answered from "
+            "the profile or QA bank, but it is not a true blocker like CAPTCHA or "
+            "access denied. After the user answers and resumes, this action returns "
+            "the answer so you can continue filling the field."
+        ),
+        param_model=DomHandRequestUserInputParams,
+        func=domhand_request_user_input,
     )
 
     # Log what was registered

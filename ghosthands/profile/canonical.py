@@ -68,6 +68,23 @@ def _copy_profile_list(value: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _copy_language_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        language = _as_text(item.get("language"))
+        proficiency = _as_text(item.get("proficiency"))
+        if language:
+            out.append({
+                "language": language,
+                "proficiency": proficiency or "",
+            })
+    return out
+
+
 def build_canonical_profile(
     profile_data: dict[str, Any] | None,
     evidence: dict[str, str | None] | None = None,
@@ -128,7 +145,14 @@ def build_canonical_profile(
     register_profile_alias("twitter", ("twitter",), ("twitter_url",), ("x",), ("x_url",))
     register_profile_alias("work_authorization", ("work_authorization",))
     register_profile_alias("available_start_date", ("available_start_date",))
+    register_profile_alias("availability_window", ("availability_window",), ("available_start_date",))
+    register_profile_alias("notice_period", ("notice_period",))
     register_profile_alias("salary_expectation", ("salary_expectation",))
+    register_profile_alias("spoken_languages", ("spoken_languages",))
+    register_profile_alias("english_proficiency", ("english_proficiency",))
+    register_profile_alias("country_of_residence", ("country_of_residence",))
+    register_profile_alias("preferred_work_mode", ("preferred_work_mode",))
+    register_profile_alias("preferred_locations", ("preferred_locations",))
     register_profile_alias("how_did_you_hear", ("how_did_you_hear",), ("referral_source",))
     register_profile_alias("willing_to_relocate", ("willing_to_relocate",))
     register_profile_alias("gender", ("gender",))
@@ -137,6 +161,31 @@ def build_canonical_profile(
     register_profile_alias("disability_status", ("disability_status",))
     register_profile_alias("authorized_to_work", ("authorized_to_work",), ("US_citizen",))
     register_profile_alias("sponsorship_needed", ("sponsorship_needed",), ("visa_sponsorship",))
+
+    language_entries = _copy_language_list(profile.get("languages"))
+    if language_entries:
+        if "spoken_languages" not in canonical.values:
+            register(
+                "spoken_languages",
+                ", ".join(
+                    f"{entry['language']} ({entry['proficiency']})".strip()
+                    if entry.get("proficiency")
+                    else entry["language"]
+                    for entry in language_entries
+                ),
+                source_path="languages",
+                provenance="derived",
+            )
+        if "english_proficiency" not in canonical.values:
+            for entry in language_entries:
+                if entry.get("language", "").strip().lower() == "english" and entry.get("proficiency"):
+                    register(
+                        "english_proficiency",
+                        entry["proficiency"],
+                        source_path="languages.english.proficiency",
+                        provenance="derived",
+                    )
+                    break
 
     for key, source_key in {
         "first_name": "first_name",
@@ -157,7 +206,14 @@ def build_canonical_profile(
         "twitter": "twitter",
         "work_authorization": "work_authorization",
         "available_start_date": "available_start_date",
+        "availability_window": "availability_window",
+        "notice_period": "notice_period",
         "salary_expectation": "salary_expectation",
+        "spoken_languages": "spoken_languages",
+        "english_proficiency": "english_proficiency",
+        "country_of_residence": "country_of_residence",
+        "preferred_work_mode": "preferred_work_mode",
+        "preferred_locations": "preferred_locations",
         "how_did_you_hear": "how_did_you_hear",
         "willing_to_relocate": "willing_to_relocate",
     }.items():
