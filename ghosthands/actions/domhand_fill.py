@@ -1929,8 +1929,8 @@ def _build_profile_answer_map(
     add(canonical.get("state"), "State", "State/Province", "State / Province", "Province", "Region")
     add(canonical.get("postal_code"), "Postal Code", "Postal/Zip Code", "ZIP", "ZIP Code", "Zip/Postal Code")
     # Compose location from city + state for combined location fields
-    _city = canonical.get("city", "")
-    _state = canonical.get("state", "")
+    _city = canonical.get("city") or ""
+    _state = canonical.get("state") or ""
     _location_val = canonical.get("location") or (f"{_city}, {_state}" if _city and _state else _city or _state)
     if _location_val:
         add(_location_val, "Location", "City/State", "City, State")
