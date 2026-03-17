@@ -1928,6 +1928,12 @@ def _build_profile_answer_map(
     add(canonical.get("city"), "City", "Town")
     add(canonical.get("state"), "State", "State/Province", "State / Province", "Province", "Region")
     add(canonical.get("postal_code"), "Postal Code", "Postal/Zip Code", "ZIP", "ZIP Code", "Zip/Postal Code")
+    # Compose location from city + state for combined location fields
+    _city = canonical.get("city", "")
+    _state = canonical.get("state", "")
+    _location_val = canonical.get("location") or (f"{_city}, {_state}" if _city and _state else _city or _state)
+    if _location_val:
+        add(_location_val, "Location", "City/State", "City, State")
     add(
         canonical.get("how_did_you_hear"),
         "How Did You Hear About Us?",
@@ -2418,6 +2424,13 @@ def _known_profile_value(field_name: str, evidence: dict[str, str | None]) -> st
         return evidence.get("zip")
     if any(kw in name for kw in ("country/region", "country region", "country")):
         return evidence.get("country")
+    # Combined location fields (e.g. "Location", "City, State")
+    if "location" in name:
+        city = evidence.get("city", "")
+        state = evidence.get("state", "")
+        if city and state:
+            return f"{city}, {state}"
+        return city or state or evidence.get("location", "") or None
     if "linkedin" in name:
         return evidence.get("linkedin")
     if "github" in name:
