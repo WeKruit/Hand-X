@@ -34,6 +34,10 @@ class Settings(BaseSettings):
         "gemini-3-flash-preview",
         description="Cheap model for DomHand answer generation",
     )
+    semantic_match_model: str = Field(
+        "",
+        description="Optional cheap text model for classification-only semantic matching. Defaults to domhand_model.",
+    )
 
     # --- LLM Proxy (VALET) ---
     llm_proxy_url: str = Field(
@@ -70,6 +74,11 @@ class Settings(BaseSettings):
         "'generated' (new password for first-time account), 'user' (user-provided), "
         "'await_verification' (account exists but needs email verification), "
         "'repair_credentials' (credential is known broken)",
+    )
+    credential_intent: str = Field(
+        "",
+        description="How user-provided credentials should be used on auth pages: "
+        "'existing_account' (sign in directly) or 'create_account' (use for registration first)",
     )
     allowed_domains: list[str] = Field(
         default_factory=lambda: [

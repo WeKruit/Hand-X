@@ -23,6 +23,7 @@ job application form filling.  It:
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -42,7 +43,21 @@ from ghosthands.actions.views import (
     normalize_name,
     split_dropdown_value_hierarchy,
 )
+from ghosthands.bridge.profile_adapter import camel_to_snake_profile
 from ghosthands.profile.canonical import build_canonical_profile
+from ghosthands.runtime_learning import (
+    SemanticQuestionIntent,
+    cache_semantic_alias,
+    confirm_learned_question_alias,
+    detect_host_from_url,
+    detect_platform_from_url,
+    get_learned_question_alias,
+    get_interaction_recipe,
+    get_cached_semantic_alias,
+    has_cached_semantic_alias,
+    record_interaction_recipe,
+    stage_learned_question_alias,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +69,7 @@ _on_field_result: Any = None  # Callable[[FillFieldResult, int], None] | None
 # ── Constants ────────────────────────────────────────────────────────
 
 MAX_FILL_ROUNDS = 3
+DEFAULT_HITL_TIMEOUT_SECONDS = int(os.getenv("GH_OPEN_QUESTION_TIMEOUT_SECONDS", "5400"))
 
 # Selector for all interactive form elements (matches GH formFiller.ts).
 INTERACTIVE_SELECTOR = ", ".join(
@@ -117,6 +133,104 @@ _MATCH_CONFIDENCE_RANKS = {
     "weak": 1,
 }
 
+_PROFILE_TRACE_LABEL_TOKENS = (
+    "salary",
+    "compensation",
+    "pay expectation",
+    "how did you hear",
+    "heard about",
+    "referral source",
+    "source of referral",
+    "language",
+    "reading",
+    "writing",
+    "speaking",
+    "comprehension",
+    "overall",
+    "authorization",
+    "authorized",
+    "eligible to work",
+    "sponsorship",
+    "relocate",
+    "country of residence",
+    "notice period",
+    "availability",
+    "veteran",
+    "disability",
+    "gender",
+    "race",
+    "ethnicity",
+    "worked at",
+    "worked for",
+    "employed by",
+    "former employee",
+    "government employee",
+    "linkedin",
+)
+
+
+def _profile_debug_enabled() -> bool:
+    return os.getenv("GH_DEBUG_PROFILE_PASS_THROUGH") == "1"
+
+
+def _profile_debug_preview(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "EMPTY"
+    if len(text) <= 96:
+        return text
+    return f"{text[:93]}..."
+
+
+def _should_trace_profile_label(label: str) -> bool:
+    norm = normalize_name(label or "")
+    return any(token in norm for token in _PROFILE_TRACE_LABEL_TOKENS)
+
+
+def _trace_profile_resolution(event: str, *, field_label: str, **extra: Any) -> None:
+    if not _profile_debug_enabled():
+        return
+    if not _should_trace_profile_label(field_label):
+        return
+    logger.info(
+        event,
+        extra={
+            "field_label": field_label,
+            **extra,
+        },
+    )
+
+
+async def _safe_page_url(page: Any) -> str:
+    """Best-effort page URL extraction across Playwright/CDP page wrappers."""
+    if not page:
+        return ""
+
+    try:
+        url_attr = getattr(page, "url", None)
+        if callable(url_attr):
+            value = url_attr()
+        else:
+            value = url_attr
+        if isinstance(value, str):
+            return value
+    except Exception:
+        pass
+
+    try:
+        get_url = getattr(page, "get_url", None)
+        if callable(get_url):
+            value = get_url()
+            if inspect.isawaitable(value):
+                value = await value
+            if isinstance(value, str):
+                return value
+    except Exception:
+        pass
+
+    return ""
+
+
 # ── Q&A bank constants ───────────────────────────────────────────────
 
 # Maximum number of Q&A bank entries to keep in LLM context.
@@ -177,11 +291,15 @@ _QA_QUESTION_SYNONYMS: dict[str, list[str]] = {
     "salary expectation": [
         "salary",
         "compensation",
+        "total compensation",
+        "expectations on compensation",
         "desired salary",
         "pay expectation",
         "salary requirement",
         "expected compensation",
         "desired compensation",
+        "compensation range",
+        "salary range",
     ],
     "start date": [
         "available start date",
@@ -400,8 +518,15 @@ def _build_inject_helpers_js() -> str:
 		getSection: function(el) {{
 			var n = window.__ff.rootParent(el);
 			while (n) {{
-				var h = n.querySelector(':scope > h1, :scope > h2, :scope > h3, :scope > legend');
-				if (h) return h.textContent.trim();
+				var heading = n.querySelector(':scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > [data-automation-id="pageHeader"], :scope > [data-automation-id*="pageHeader"], :scope > [data-automation-id*="sectionTitle"], :scope > [data-automation-id*="stepTitle"]');
+				if (heading) return heading.textContent.trim();
+				var isFieldWrapper =
+					n.matches &&
+					n.matches('fieldset, [data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field, .form-field');
+				if (!isFieldWrapper) {{
+					var localLabel = n.querySelector(':scope > legend, :scope > [data-automation-id="fieldLabel"], :scope > [data-automation-id*="fieldLabel"], :scope > label');
+					if (localLabel) return localLabel.textContent.trim();
+				}}
 				n = window.__ff.rootParent(n);
 			}}
 			return '';
@@ -431,6 +556,7 @@ _EXTRACT_FIELDS_JS = r"""() => {
 		if (ff.closestCrossRoot(el, '[class*="select-dropdown"], [class*="select-option"]')) return true;
 		if (ff.closestCrossRoot(el, '.iti__dropdown-content')) return true;
 		if (ff.closestCrossRoot(el, '[data-automation-id="activeListContainer"]')) return true;
+		if (ff.closestCrossRoot(el, '[role="listbox"], [role="menu"]')) return true;
 		if (el.getAttribute('role') === 'listbox' && el.closest('[role="combobox"]')) return true;
 		if (el.getAttribute('role') === 'listbox' && el.id) {
 			var controller = ff.queryOne('[role="combobox"][aria-controls="' + el.id + '"]');
@@ -445,6 +571,56 @@ _EXTRACT_FIELDS_JS = r"""() => {
 		var clone = opt.cloneNode(true);
 		clone.querySelectorAll('[class*="desc"], [class*="sub"], [class*="hint"], .option-desc, small').forEach(function(x) { x.remove(); });
 		return clone.textContent ? clone.textContent.trim() : '';
+	};
+
+	var cleanControlText = function(node) {
+		if (!node) return '';
+		var clone = node.cloneNode(true);
+		clone.querySelectorAll(
+			'input, textarea, select, button, [role="radio"], [role="checkbox"], [role="switch"], [class*="desc"], [class*="sub"], [class*="hint"], .option-desc, small'
+		).forEach(function(x) { x.remove(); });
+		return clone.textContent ? clone.textContent.replace(/\s+/g, ' ').trim() : '';
+	};
+
+	var getGroupQuestionLabel = function(el, itemLabel) {
+		var itemNorm = (itemLabel || '').replace(/\s+/g, ' ').trim().toLowerCase();
+		var container = ff.closestCrossRoot(
+			el,
+			'fieldset, [role="radiogroup"], [role="group"], .radio-group, .checkbox-group, .radio-cards, [data-automation-id="formField"], [data-automation-id*="formField"]'
+		) || ff.rootParent(el) || el;
+
+		var candidates = [];
+		var push = function(node) {
+			if (!node) return;
+			var text = cleanControlText(node);
+			if (!text) return;
+			var norm = text.toLowerCase();
+			if (itemNorm && (norm === itemNorm || norm === ('* ' + itemNorm) || norm === (itemNorm + ' *'))) return;
+			if (text.length > 200) return;
+			candidates.push(text);
+		};
+
+		push(container.querySelector(':scope > legend'));
+		push(container.querySelector(':scope > [data-automation-id="fieldLabel"]'));
+		push(container.querySelector(':scope > [data-automation-id*="fieldLabel"]'));
+		push(container.querySelector(':scope > label'));
+		push(container.querySelector(':scope > [class*="question"]'));
+		push(container.previousElementSibling);
+
+		var formField = ff.closestCrossRoot(container, '[data-automation-id="formField"], [data-automation-id*="formField"]');
+		if (formField && formField !== container) {
+			push(formField.querySelector('legend'));
+			push(formField.querySelector('[data-automation-id="fieldLabel"]'));
+			push(formField.querySelector('[data-automation-id*="fieldLabel"]'));
+			push(formField.querySelector('label'));
+			push(formField.querySelector('[class*="question"]'));
+			push(formField.previousElementSibling);
+		}
+
+		for (var i = 0; i < candidates.length; i++) {
+			if (candidates[i]) return candidates[i];
+		}
+		return '';
 	};
 
 	ff.queryAll(ff.SELECTOR).forEach(function(el) {
@@ -547,6 +723,12 @@ _EXTRACT_FIELDS_JS = r"""() => {
 				}
 			}
 			entry.itemValue = el.value || (el.querySelector('input') ? el.querySelector('input').value : '') || '';
+			entry.questionLabel = getGroupQuestionLabel(el, entry.itemLabel);
+			entry.groupKey = el.name || el.getAttribute('name') || entry.questionLabel || entry.itemLabel || id;
+			if (entry.questionLabel) {
+				entry.name = entry.questionLabel;
+				entry.raw_label = entry.questionLabel;
+			}
 		}
 
 		if (el.tagName === 'SELECT') {
@@ -574,7 +756,9 @@ _EXTRACT_BUTTON_GROUPS_JS = (
 	var ff = window.__ff;
 	if (!ff) return JSON.stringify([]);
 	var results = [];
-	var allBtnEls = document.querySelectorAll('button, [role="button"]');
+	var allBtnEls = document.querySelectorAll(
+		'button, [role="button"], [role="radio"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], [data-automation-id*="radio"], [data-automation-id*="Radio"]'
+	);
 	var parentMap = {};
 
 	var navLabels = new Set("""
@@ -597,7 +781,9 @@ _EXTRACT_BUTTON_GROUPS_JS = (
 
 		var parent = btn.parentElement;
 		for (var pu = 0; pu < 3 && parent; pu++) {
-			var childBtns = parent.querySelectorAll('button, [role="button"]');
+			var childBtns = parent.querySelectorAll(
+				'button, [role="button"], [role="radio"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], [data-automation-id*="radio"], [data-automation-id*="Radio"]'
+			);
 			var visibleCount = 0;
 			for (var vc = 0; vc < childBtns.length; vc++) {
 				if (ff.isVisible(childBtns[vc])) visibleCount++;
@@ -637,7 +823,7 @@ _EXTRACT_BUTTON_GROUPS_JS = (
 		if (!questionLabel) {
 			var parentEl = container.parentElement;
 			if (parentEl) {
-				var labelEl = parentEl.querySelector('label, .label, h3, h4, legend, [class*="question"]');
+				var labelEl = parentEl.querySelector('[data-automation-id="fieldLabel"], [data-automation-id*="fieldLabel"], label, .label, h3, h4, legend, [class*="question"]');
 				if (labelEl) questionLabel = (labelEl.textContent || '').trim();
 			}
 		}
@@ -763,19 +949,41 @@ _CLICK_RADIO_OPTION_JS = r"""(ffId, text) => {
 	var ff = window.__ff;
 	var el = ff ? ff.byId(ffId) : null;
 	if (!el) return JSON.stringify({clicked: false, error: 'Element not found'});
-	var group = ff.closestCrossRoot(el, '[role="radiogroup"], [role="group"], .radio-cards, .radio-group') || el;
-	var items = group.querySelectorAll('[role="radio"], label.radio-card, .radio-card, input[type="radio"]');
+	var group = ff.closestCrossRoot(
+		el,
+		'fieldset, [role="radiogroup"], [role="group"], .radio-cards, .radio-group, [data-automation-id="formField"], [data-automation-id*="formField"]'
+	) || ff.rootParent(el) || el;
+	var items = group.querySelectorAll(
+		'[role="radio"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], label.radio-card, .radio-card, .radio-option, [role="button"], [role="cell"], input[type="radio"]'
+	);
 	var lower = text.toLowerCase().trim();
+	var getClickable = function(item) {
+		return ff.closestCrossRoot(
+			item,
+			'button, label, [role="row"], [role="cell"], [role="button"], [role="radio"], .radio-card, .radio-option, [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], [data-automation-id*="radio"]'
+		) || item.parentElement || item;
+	};
+	var getText = function(item) {
+		var labelEl = item.querySelector('[class*="label"], .rc-label');
+		if (labelEl && labelEl.textContent) return labelEl.textContent.trim();
+		var clickable = getClickable(item);
+		return (clickable && clickable.textContent ? clickable.textContent : item.textContent || '').trim();
+	};
 	for (var i = 0; i < items.length; i++) {
 		var item = items[i];
-		var labelEl = item.querySelector('[class*="label"], .rc-label');
-		var itemText = labelEl ? (labelEl.textContent || '').trim() : (item.textContent || '').trim();
+		var itemText = getText(item);
 		var itemLower = itemText.toLowerCase();
 		if (itemLower === lower || itemLower.includes(lower) || lower.includes(itemLower)) {
-			item.click(); return JSON.stringify({clicked: true, text: itemText});
+			var clickable = getClickable(item);
+			clickable.click();
+			return JSON.stringify({clicked: true, text: itemText});
 		}
 	}
-	if (items.length > 0) { items[0].click(); return JSON.stringify({clicked: true, text: '(first)'}); }
+	if (items.length > 0) {
+		var firstClickable = getClickable(items[0]);
+		firstClickable.click();
+		return JSON.stringify({clicked: true, text: getText(items[0]) || '(first)'});
+	}
 	return JSON.stringify({clicked: false, error: 'No matching radio option'});
 }"""
 
@@ -966,8 +1174,15 @@ _READ_GROUP_SELECTION_JS = r"""(ffId) => {
 	var ff = window.__ff;
 	var el = ff ? ff.byId(ffId) : null;
 	if (!el) return JSON.stringify({selected: ''});
-	var group = ff.closestCrossRoot(el, '[role="radiogroup"], [role="group"], fieldset, .radio-group, .radio-cards') || el;
-	var nodes = Array.from(group.querySelectorAll('[role="radio"], input[type="radio"], label.radio-card, .radio-card, .radio-option, button, [role="button"], [role="cell"]'));
+	var group = ff.closestCrossRoot(
+		el,
+		'fieldset, [role="radiogroup"], [role="group"], .radio-group, .radio-cards, [data-automation-id="formField"], [data-automation-id*="formField"]'
+	) || ff.rootParent(el) || el;
+	var nodes = Array.from(
+		group.querySelectorAll(
+			'[role="radio"], input[type="radio"], label.radio-card, .radio-card, .radio-option, button, [role="button"], [role="cell"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"]'
+		)
+	);
 	var seen = new Set();
 	var filtered = [];
 	for (var i = 0; i < nodes.length; i++) {
@@ -984,7 +1199,10 @@ _READ_GROUP_SELECTION_JS = r"""(ffId) => {
 		}
 		var ariaLabel = node.getAttribute('aria-label');
 		if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
-		var wrap = ff.closestCrossRoot(node, 'label, [role="radio"], .radio-card, .radio-option, [role="button"], [role="cell"]') || node;
+		var wrap = ff.closestCrossRoot(
+			node,
+			'label, [role="radio"], .radio-card, .radio-option, [role="button"], [role="cell"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"]'
+		) || node;
 		return (wrap.textContent || '').trim();
 	};
 	var isSelected = function(node) {
@@ -1015,10 +1233,23 @@ _GET_GROUP_OPTION_TARGET_JS = r"""(ffId, text) => {
 	var ff = window.__ff;
 	var el = ff ? ff.byId(ffId) : null;
 	if (!el) return JSON.stringify({found: false, error: 'Element not found'});
-	var group = ff.closestCrossRoot(el, '[role="radiogroup"], [role="group"], fieldset, .radio-group, .radio-cards') || el;
-	var nodes = Array.from(group.querySelectorAll('[role="radio"], input[type="radio"], label.radio-card, .radio-card, .radio-option, button, [role="button"], [role="cell"]'));
+	var group = ff.closestCrossRoot(
+		el,
+		'fieldset, [role="radiogroup"], [role="group"], .radio-group, .radio-cards, [data-automation-id="formField"], [data-automation-id*="formField"]'
+	) || ff.rootParent(el) || el;
+	var nodes = Array.from(
+		group.querySelectorAll(
+			'[role="radio"], input[type="radio"], label.radio-card, .radio-card, .radio-option, button, [role="button"], [role="cell"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"]'
+		)
+	);
 	var lower = text.toLowerCase().trim();
 	var best = null;
+	var getClickable = function(node) {
+		return ff.closestCrossRoot(
+			node,
+			'button, label, [role="row"], [role="cell"], [role="button"], [role="radio"], .radio-card, .radio-option, [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], [data-automation-id*="radio"]'
+		) || node.parentElement || node;
+	};
 	var getLabel = function(node) {
 		if (!node) return '';
 		if (node.id) {
@@ -1027,7 +1258,7 @@ _GET_GROUP_OPTION_TARGET_JS = r"""(ffId, text) => {
 		}
 		var ariaLabel = node.getAttribute('aria-label');
 		if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
-		var wrap = ff.closestCrossRoot(node, 'label, [role="radio"], .radio-card, .radio-option, [role="button"], [role="cell"]') || node;
+		var wrap = getClickable(node);
 		return (wrap.textContent || '').trim();
 	};
 	for (var i = 0; i < nodes.length; i++) {
@@ -1039,9 +1270,7 @@ _GET_GROUP_OPTION_TARGET_JS = r"""(ffId, text) => {
 		if (labelLower === lower) score = 3;
 		else if (labelLower.includes(lower) || lower.includes(labelLower)) score = 2;
 		if (score === 0) continue;
-		var clickable = node.matches('input[type="radio"], button, [role="radio"], [role="button"], [role="cell"]')
-			? node
-			: node.querySelector('input[type="radio"], button, [role="radio"], [role="button"], [role="cell"]') || node;
+		var clickable = getClickable(node);
 		var rect = clickable.getBoundingClientRect();
 		if (!rect || rect.width === 0 || rect.height === 0) continue;
 		if (!best || score > best.score) {
@@ -1086,16 +1315,61 @@ _READ_FIELD_VALUE_JS = r"""(ffId) => {
 	var ff = window.__ff;
 	var el = ff ? ff.byId(ffId) : null;
 	if (!el) return JSON.stringify('');
+	var visibleText = function(node) {
+		if (!node) return '';
+		var style = window.getComputedStyle(node);
+		if (!style || style.visibility === 'hidden' || style.display === 'none') return '';
+		var rect = node.getBoundingClientRect();
+		if (!rect || rect.width === 0 || rect.height === 0) return '';
+		return (node.textContent || '').replace(/\s+/g, ' ').trim();
+	};
 	if (el.tagName === 'SELECT') {
 		var selOpt = el.options[el.selectedIndex];
 		return JSON.stringify(selOpt ? (selOpt.textContent || '').trim() : '');
 	}
 	if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-		return JSON.stringify((el.value || '').trim());
+		var directValue = (el.value || '').trim();
+		if (directValue) return JSON.stringify(directValue);
 	}
 	var value = '';
 	if (typeof el.value === 'string' && el.value.trim()) {
 		value = el.value.trim();
+	}
+	if (!value && (el.getAttribute('role') === 'combobox' || el.getAttribute('data-uxi-widget-type') === 'selectinput' || el.getAttribute('aria-haspopup') === 'listbox')) {
+		var wrapper = ff.closestCrossRoot(
+			el,
+			'[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field'
+		) || el.parentElement || el;
+		var tokenSelectors = [
+			'[data-automation-id*="selected"]',
+			'[data-automation-id*="Selected"]',
+			'[data-automation-id*="token"]',
+			'[data-automation-id*="Token"]',
+			'[class*="token"]',
+			'[class*="Token"]',
+			'[class*="pill"]',
+			'[class*="Pill"]',
+			'[class*="chip"]',
+			'[class*="Chip"]',
+			'[class*="tag"]',
+			'[class*="Tag"]'
+		];
+		for (var i = 0; i < tokenSelectors.length && !value; i++) {
+			var tokenNodes = wrapper.querySelectorAll(tokenSelectors[i]);
+			for (var j = 0; j < tokenNodes.length; j++) {
+				var tokenText = visibleText(tokenNodes[j]);
+				if (!tokenText) continue;
+				if (/^(select one|choose one|required)$/i.test(tokenText)) continue;
+				value = tokenText;
+				break;
+			}
+		}
+		if (!value) {
+			var wrapperText = visibleText(wrapper);
+			if (wrapperText && !/^(select one|choose one|required)$/i.test(wrapperText) && wrapperText.length <= 120) {
+				value = wrapperText;
+			}
+		}
 	}
 	if (!value) {
 		var ariaLabel = el.getAttribute('aria-label');
@@ -1209,15 +1483,89 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
     """Extract structured fields from profile text for direct field matching."""
     stripped = profile_text.strip()
 
+    def _score_date(value: Any) -> int:
+        text = str(value or "").strip()
+        if not text:
+            return 0
+        parts = text.split("-")
+        try:
+            year = int(parts[0])
+        except (TypeError, ValueError):
+            return 0
+        month = 1
+        day = 1
+        if len(parts) > 1:
+            try:
+                month = int(parts[1])
+            except (TypeError, ValueError):
+                month = 1
+        if len(parts) > 2:
+            try:
+                day = int(parts[2])
+            except (TypeError, ValueError):
+                day = 1
+        return (year * 10_000) + (month * 100) + day
+
+    def _pick_latest_education_entry(raw_entries: Any) -> dict[str, Any] | None:
+        if not isinstance(raw_entries, list):
+            return None
+        entries = [entry for entry in raw_entries if isinstance(entry, dict)]
+        if not entries:
+            return None
+        ranked = sorted(
+            entries,
+            key=lambda entry: _score_date(entry.get("endDate") or entry.get("end_date") or entry.get("graduationDate") or entry.get("graduation_date") or entry.get("startDate") or entry.get("start_date")),
+            reverse=True,
+        )
+        return ranked[0] if ranked else None
+
+    def _format_graduation_date(value: Any) -> str | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        parts = text.split("-")
+        if len(parts) < 2:
+            return text
+        try:
+            month_index = int(parts[1])
+        except (TypeError, ValueError):
+            return text
+        if month_index < 1 or month_index > 12:
+            return text
+        month_labels = [
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ]
+        return f"{month_labels[month_index - 1]} {parts[0]}"
+
     if stripped.startswith("{"):
         try:
             data = json.loads(stripped)
         except json.JSONDecodeError:
             data = None
         if isinstance(data, dict):
+
+            def _read_text(*keys: str) -> str | None:
+                for key in keys:
+                    value = data.get(key)
+                    text = str(value or "").strip() if value is not None else ""
+                    if text:
+                        return text
+                return None
+
             name = str(data.get("name") or "").strip() or None
-            first_name = str(data.get("first_name") or "").strip() or None
-            last_name = str(data.get("last_name") or "").strip() or None
+            first_name = _read_text("first_name", "firstName")
+            last_name = _read_text("last_name", "lastName")
             if name and not first_name:
                 first_name = name.split()[0] if name.split() else None
             if name and not last_name and len(name.split()) > 1:
@@ -1227,6 +1575,7 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
             city = str(data.get("city") or "").strip() or None
             state = str(data.get("state") or data.get("province") or "").strip() or None
             zip_code = str(data.get("zip") or data.get("zip_code") or data.get("postal_code") or "").strip() or None
+            county = str(data.get("county") or "").strip() or None
             if isinstance(location, str) and location.strip() and (not city or not state or not zip_code):
                 parts = [p.strip() for p in location.split(",") if p.strip()]
                 if len(parts) >= 2:
@@ -1234,6 +1583,30 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
                     state_zip = parts[1].split()
                     state = state or (state_zip[0] if state_zip else None)
                     zip_code = zip_code or (state_zip[1] if len(state_zip) > 1 else None)
+
+            latest_education = _pick_latest_education_entry(data.get("education"))
+            latest_degree = (
+                str(
+                    (latest_education or {}).get("degree")
+                    or ""
+                ).strip()
+                or None
+            )
+            latest_field_of_study = (
+                str(
+                    (latest_education or {}).get("field")
+                    or (latest_education or {}).get("fieldOfStudy")
+                    or (latest_education or {}).get("field_of_study")
+                    or ""
+                ).strip()
+                or None
+            )
+            latest_graduation_date = _format_graduation_date(
+                (latest_education or {}).get("graduationDate")
+                or (latest_education or {}).get("graduation_date")
+                or (latest_education or {}).get("endDate")
+                or (latest_education or {}).get("end_date")
+            )
 
             github = str(data.get("github") or data.get("github_url") or "").strip() or None
             if not github:
@@ -1260,23 +1633,40 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
                 "city": city,
                 "state": state,
                 "zip": zip_code,
-                "country": str(data.get("country") or "").strip() or None,
-                "phone_device_type": str(data.get("phone_device_type") or data.get("phone_type") or "").strip() or None,
-                "phone_country_code": str(data.get("phone_country_code") or "").strip() or None,
-                "linkedin": str(data.get("linkedin") or data.get("linkedin_url") or "").strip() or None,
+                "county": county,
+                "country": _read_text("country"),
+                "phone_device_type": _read_text("phone_device_type", "phone_type", "phoneDeviceType"),
+                "phone_country_code": _read_text("phone_country_code", "phoneCountryCode"),
+                "linkedin": _read_text("linkedin", "linkedin_url", "linkedIn"),
                 "portfolio": str(
-                    data.get("portfolio") or data.get("website") or data.get("personal_website") or ""
+                    data.get("portfolio")
+                    or data.get("website")
+                    or data.get("personal_website")
+                    or data.get("personalWebsite")
+                    or ""
                 ).strip()
                 or None,
                 "github": github,
                 "twitter": twitter,
                 # Workday-relevant fields
-                "work_authorization": str(data.get("work_authorization") or "").strip() or None,
-                "available_start_date": str(data.get("available_start_date") or "").strip() or None,
-                "salary_expectation": str(data.get("salary_expectation") or "").strip() or None,
-                "how_did_you_hear": str(data.get("how_did_you_hear") or data.get("referral_source") or "").strip()
-                or None,
-                "willing_to_relocate": str(data.get("willing_to_relocate") or "").strip() or None,
+                "work_authorization": _read_text("work_authorization", "workAuthorization"),
+                "available_start_date": _read_text("available_start_date", "availableStartDate"),
+                "availability_window": _read_text("availability_window", "availabilityWindow"),
+                "notice_period": _read_text("notice_period", "noticePeriod"),
+                "salary_expectation": _read_text("salary_expectation", "salaryExpectation"),
+                "current_school_year": _read_text("current_school_year", "currentSchoolYear"),
+                "graduation_date": _read_text("graduation_date", "graduationDate") or latest_graduation_date,
+                "degree_seeking": _read_text("degree_seeking", "degreeSeeking") or latest_degree,
+                "certifications_licenses": _read_text("certifications_licenses", "certificationsLicenses"),
+                "field_of_study": latest_field_of_study,
+                "spoken_languages": _read_text("spoken_languages", "spokenLanguages"),
+                "english_proficiency": _read_text("english_proficiency", "englishProficiency"),
+                "languages": data.get("languages") if isinstance(data.get("languages"), list) else None,
+                "country_of_residence": _read_text("country_of_residence", "countryOfResidence"),
+                "how_did_you_hear": _read_text("how_did_you_hear", "referral_source", "howDidYouHear"),
+                "willing_to_relocate": _read_text("willing_to_relocate", "willingToRelocate"),
+                "preferred_work_mode": _read_text("preferred_work_mode", "preferredWorkMode"),
+                "preferred_locations": _read_text("preferred_locations", "preferredLocations"),
             }
 
     def read_line(label: str) -> str | None:
@@ -1319,6 +1709,7 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
         "city": city,
         "state": state,
         "zip": zip_code,
+        "county": read_line("County"),
         "country": read_line("Country"),
         "phone_device_type": read_line("Phone type") or read_line("Phone device type"),
         "phone_country_code": read_line("Phone country code") or read_line("Country phone code"),
@@ -1329,9 +1720,30 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
         # Workday-relevant fields
         "work_authorization": read_line("Work authorization"),
         "available_start_date": read_line("Available start date"),
+        "availability_window": read_line("Availability to start") or read_line("Earliest start date"),
+        "notice_period": read_line("Notice period"),
         "salary_expectation": read_line("Salary expectation"),
+        "current_school_year": read_line("Current year in school") or read_line("School year"),
+        "graduation_date": read_line("Graduation date") or read_line("Estimated graduation date"),
+        "degree_seeking": read_line("Degree seeking") or read_line("What degree are you seeking"),
+        "certifications_licenses": read_line("Certifications or licenses")
+        or read_line("Relevant certifications or licenses"),
+        "field_of_study": read_line("Field of study") or read_line("Major") or read_line("Area of study"),
+        "spoken_languages": read_line("Preferred spoken languages")
+        or read_line("Spoken languages")
+        or read_line("Languages spoken")
+        or read_line("Language proficiency"),
+        "english_proficiency": read_line("English proficiency")
+        or read_line("Overall")
+        or read_line("Reading")
+        or read_line("Writing")
+        or read_line("Speaking")
+        or read_line("Comprehension"),
+        "country_of_residence": read_line("Country of residence") or read_line("Country"),
         "how_did_you_hear": read_line("How did you hear about us"),
         "willing_to_relocate": read_line("Willing to relocate"),
+        "preferred_work_mode": read_line("Preferred work setup"),
+        "preferred_locations": read_line("Preferred locations"),
     }
 
 
@@ -1375,7 +1787,10 @@ def _choice_words(text: str) -> set[str]:
 def _stem_word(word: str) -> str:
     """Apply a lightweight stemmer for fuzzy question/choice matching."""
     return re.sub(
-        r"(ating|ting|ing|tion|sion|ment|ness|able|ible|ed|ly|er|est|ies|es|s)$", "", word, flags=re.IGNORECASE
+        r"(ating|ting|ing|tion|sion|m" r"ent|ness|able|ible|ed|ly|er|est|ies|es|s)$",
+        "",
+        word,
+        flags=re.IGNORECASE,
     )
 
 
@@ -1455,6 +1870,52 @@ def _meets_match_confidence(confidence: str | None, minimum_confidence: str) -> 
     return _MATCH_CONFIDENCE_RANKS.get(confidence, 0) >= _MATCH_CONFIDENCE_RANKS.get(minimum_confidence, 0)
 
 
+def _proficiency_rank(text: str) -> int | None:
+    norm = normalize_name(text)
+    if not norm:
+        return None
+    if any(token in norm for token in ("native", "bilingual", "mother tongue", "expert", "master")):
+        return 6
+    if any(token in norm for token in ("fluent", "full professional", "professional working")):
+        return 5
+    if any(
+        token in norm
+        for token in (
+            "advanced",
+            "proficient",
+        )
+    ):
+        return 4
+    if any(token in norm for token in ("intermediate", "conversational", "working knowledge", "working")):
+        return 3
+    if any(token in norm for token in ("elementary", "basic", "beginner", "novice", "limited")):
+        return 1
+    return None
+
+
+def _coerce_proficiency_choice(choices: list[str], answer: str) -> str | None:
+    answer_rank = _proficiency_rank(answer)
+    if answer_rank is None:
+        return None
+
+    ranked_choices = [(choice, _proficiency_rank(choice)) for choice in choices]
+    ranked_choices = [(choice, rank) for choice, rank in ranked_choices if rank is not None]
+    if not ranked_choices:
+        return None
+
+    best_choice: str | None = None
+    best_distance: int | None = None
+    best_rank = -1
+    for choice, rank in ranked_choices:
+        distance = abs(answer_rank - rank)
+        if best_distance is None or distance < best_distance or (distance == best_distance and rank > best_rank):
+            best_choice = choice
+            best_distance = distance
+            best_rank = rank
+
+    return best_choice
+
+
 def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
     """Map a profile answer onto the closest available field option when present."""
     if answer in (None, ""):
@@ -1478,6 +1939,16 @@ def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
             if normalize_name(choice) == normalize_name(boolish):
                 return choice
 
+    proficiency_choice = _coerce_proficiency_choice(choices, text)
+    if proficiency_choice:
+        _trace_profile_resolution(
+            "domhand.profile_proficiency_coerced",
+            field_label=field.name or field.raw_label or "",
+            requested=_profile_debug_preview(text),
+            selected=_profile_debug_preview(proficiency_choice),
+        )
+        return proficiency_choice
+
     for choice in choices:
         choice_norm = normalize_name(choice)
         if choice_norm and (choice_norm in text_norm or text_norm in choice_norm):
@@ -1497,7 +1968,7 @@ def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
 
     if best_choice and best_score > 0:
         return best_choice
-    return text
+    return None
 
 
 def _field_label_candidates(field: FormField) -> list[str]:
@@ -1522,15 +1993,51 @@ def _preferred_field_label(field: FormField) -> str:
     return (field.name or field.raw_label or "").strip()
 
 
+def _canonical_section_name(value: str | None) -> str:
+    normalized = normalize_name(value or "")
+    replacements = {
+        "my information": "information",
+        "personal information": "information",
+        "my experience": "experience",
+        "work experience": "experience",
+        "professional experience": "experience",
+        "my education": "education",
+        "education history": "education",
+    }
+    return replacements.get(normalized, normalized)
+
+
+_SECTION_SCOPE_CHILDREN: dict[str, set[str]] = {
+    # Workday nests Education / Languages under the page-level "My Experience"
+    # step. When domhand_fill targets "My Experience", it should treat those
+    # subsections as part of the same fill scope instead of excluding them.
+    "experience": {"education", "languages", "language", "skills", "certifications"},
+    # Workday also nests address/phone/legal-name groups under the page-level
+    # "My Information" step.
+    "information": {"address", "phone", "legal name", "name", "contact", "contact information"},
+}
+
+
 def _section_matches_scope(section: str | None, scope: str | None) -> bool:
     """Return True when a field section matches a requested scope/boundary."""
-    section_norm = normalize_name(section or "")
-    scope_norm = normalize_name(scope or "")
+    section_norm = _canonical_section_name(section)
+    scope_norm = _canonical_section_name(scope)
     if not scope_norm:
         return True
     if not section_norm:
         return False
-    return section_norm == scope_norm or scope_norm in section_norm or section_norm in scope_norm
+    if section_norm == scope_norm or scope_norm in section_norm or section_norm in scope_norm:
+        return True
+    child_sections = _SECTION_SCOPE_CHILDREN.get(scope_norm)
+    if child_sections and section_norm in child_sections:
+        return True
+    section_tokens = {token for token in section_norm.split() if token not in {"my", "work", "personal"}}
+    scope_tokens = {token for token in scope_norm.split() if token not in {"my", "work", "personal"}}
+    section_numbers = {token for token in section_tokens if token.isdigit()}
+    scope_numbers = {token for token in scope_tokens if token.isdigit()}
+    if section_numbers and scope_numbers and section_numbers != scope_numbers:
+        return False
+    return bool(section_tokens & scope_tokens)
 
 
 def _filter_fields_for_scope(
@@ -1543,7 +2050,30 @@ def _filter_fields_for_scope(
     if target_section:
         section_filtered = [f for f in filtered if _section_matches_scope(f.section, target_section)]
         if section_filtered:
-            filtered = section_filtered
+            if not heading_boundary:
+                blank_section_fields = [f for f in filtered if not normalize_name(f.section or "")]
+                if blank_section_fields:
+                    merged: list[FormField] = []
+                    seen_ids: set[str] = set()
+                    for field in [*section_filtered, *blank_section_fields]:
+                        if field.field_id in seen_ids:
+                            continue
+                        seen_ids.add(field.field_id)
+                        merged.append(field)
+                    filtered = merged
+                    logger.info(
+                        "DomHand scope kept blank-section fields with matching target section",
+                        extra={
+                            "target_section": target_section,
+                            "matched_count": len(section_filtered),
+                            "blank_section_count": len(blank_section_fields),
+                            "result_count": len(filtered),
+                        },
+                    )
+                else:
+                    filtered = section_filtered
+            else:
+                filtered = section_filtered
         elif not heading_boundary:
             logger.info(
                 "DomHand scope fallback: no fields matched target section, using all visible fields",
@@ -1552,6 +2082,57 @@ def _filter_fields_for_scope(
     if heading_boundary:
         filtered = [f for f in filtered if _section_matches_scope(f.section, heading_boundary)]
     return filtered
+
+
+def _filter_fields_for_focus(fields: list[FormField], focus_fields: list[str] | None = None) -> list[FormField]:
+    """Restrict fields to explicit blocker labels when the agent knows them."""
+    if not focus_fields:
+        return fields
+
+    normalized_focus = [_normalize_match_label(label) for label in focus_fields if _normalize_match_label(label)]
+    if not normalized_focus:
+        return fields
+
+    focused: list[FormField] = []
+    for field in fields:
+        labels = _field_label_candidates(field) or [field.name]
+        matched = False
+        for focus_label in normalized_focus:
+            for candidate in labels:
+                confidence = _label_match_confidence(candidate, focus_label)
+                if _meets_match_confidence(confidence, "medium"):
+                    matched = True
+                    break
+                reverse_confidence = _label_match_confidence(focus_label, candidate)
+                if _meets_match_confidence(reverse_confidence, "medium"):
+                    matched = True
+                    break
+            if matched:
+                break
+        if matched:
+            focused.append(field)
+
+    if focused:
+        return focused
+
+    logger.info(
+        "DomHand focus mismatch: no fields matched focus_fields",
+        extra={
+            "focus_fields": focus_fields,
+            "field_count": len(fields),
+            "available_fields": [
+                {
+                    "field_id": field.field_id,
+                    "label": _preferred_field_label(field),
+                    "field_type": field.field_type,
+                    "section": field.section,
+                    "current_value": field.current_value,
+                }
+                for field in fields[:20]
+            ],
+        },
+    )
+    return []
 
 
 def _format_entry_profile_text(entry_data: dict[str, Any]) -> str:
@@ -1807,9 +2388,7 @@ def _cap_qa_entries(
         key=lambda e: (
             e.get("usageMode", e.get("usage_mode")) != "always_use",  # always_use first
             -int(e.get("timesUsed", e.get("times_used", 0)) or 0),  # most used first
-            _QA_CONFIDENCE_RANKS.get(
-                e.get("confidence", "learned"), 3
-            ),  # exact > inferred > learned
+            _QA_CONFIDENCE_RANKS.get(e.get("confidence", "learned"), 3),  # exact > inferred > learned
         )
     )
     return qa_entries[:MAX_QA_ENTRIES]
@@ -1928,6 +2507,7 @@ def _build_profile_answer_map(
     add(canonical.get("city"), "City", "Town")
     add(canonical.get("state"), "State", "State/Province", "State / Province", "Province", "Region")
     add(canonical.get("postal_code"), "Postal Code", "Postal/Zip Code", "ZIP", "ZIP Code", "Zip/Postal Code")
+    add(canonical.get("county"), "County", "County / Parish / Borough", "Parish", "Borough")
     # Compose location from city + state for combined location fields
     _city = canonical.get("city") or ""
     _state = canonical.get("state") or ""
@@ -1944,6 +2524,103 @@ def _build_profile_answer_map(
         "Source of Referral",
     )
     add(canonical.get("linkedin"), "LinkedIn", "LinkedIn URL", "LinkedIn Profile")
+    add(
+        canonical.get("spoken_languages"),
+        "Languages spoken",
+        "Spoken languages",
+        "Preferred spoken languages",
+        "Preferred language",
+        "Language",
+        "Language proficiency",
+    )
+    add(
+        canonical.get("english_proficiency"),
+        "English proficiency",
+        "Overall",
+        "Reading",
+        "Writing",
+        "Speaking",
+        "Comprehension",
+        "Overall proficiency",
+        "Reading proficiency",
+        "Writing proficiency",
+        "Speaking proficiency",
+        "Comprehension proficiency",
+    )
+    add(
+        canonical.get("country_of_residence"),
+        "Country of residence",
+        "Country/Region",
+        "Country region",
+    )
+    add(
+        canonical.get("preferred_work_mode"),
+        "Preferred work setup",
+        "Preferred work arrangement",
+        "Work arrangement",
+        "Remote/Hybrid preference",
+    )
+    add(
+        canonical.get("preferred_locations"),
+        "Preferred locations",
+        "Preferred work locations",
+        "Preferred city",
+        "Preferred office location",
+    )
+    add(
+        canonical.get("availability_window"),
+        "Availability to start",
+        "Earliest start date",
+        "Available start date",
+        "Start date",
+    )
+    add(canonical.get("notice_period"), "Notice period")
+    add(
+        canonical.get("salary_expectation"),
+        "Expected annual salary",
+        "Expected salary range",
+        "Expected compensation",
+        "Compensation expectation",
+        "Hourly compensation requirements",
+        "Hourly compensation",
+    )
+    add(
+        canonical.get("current_school_year"),
+        "Current year in school",
+        "What is your current year in school?",
+        "School year",
+        "Academic standing",
+        "Class standing",
+    )
+    add(
+        canonical.get("graduation_date"),
+        "Estimated graduation date",
+        "Expected graduation date",
+        "Graduation date",
+        "Already graduated date",
+        "Degree completion date",
+    )
+    add(
+        canonical.get("degree_seeking"),
+        "What degree are you seeking?",
+        "Degree seeking",
+        "Degree sought",
+        "Degree pursuing",
+    )
+    add(
+        canonical.get("field_of_study"),
+        "Field of study",
+        "Area of study",
+        "Major",
+        "Please list your area of study (major).",
+    )
+    add(
+        canonical.get("certifications_licenses", allow_policy=True) or "None",
+        "Certifications or licenses",
+        "Relevant certifications or licenses",
+        "Relevant certifications",
+        "Licenses",
+    )
     add(
         canonical.get("portfolio"),
         "Website",
@@ -2023,6 +2700,151 @@ def _find_best_profile_answer(
     return best_answer
 
 
+def _is_employer_history_screening_question(norm: str) -> bool:
+    """Return True for low-risk yes/no questions about prior employment with an employer."""
+    direct_phrases = (
+        "previously worked",
+        "previously employed",
+        "worked for this organization",
+        "worked for this company",
+        "worked here before",
+        "prior employment",
+        "prior employer",
+        "former employee",
+        "current or previous employee",
+        "current or former employee",
+        "previous employee",
+        "government employee",
+        "government employment",
+        "worked for the government",
+        "worked in government",
+    )
+    if any(phrase in norm for phrase in direct_phrases):
+        return True
+
+    if any(
+        token in norm
+        for token in (
+            "years",
+            "year",
+            "months",
+            "month",
+            "experience",
+            "experienced",
+            "skill",
+            "skills",
+            "technology",
+            "technologies",
+        )
+    ):
+        return False
+
+    employer_question_prefixes = (
+        "have you worked at ",
+        "have you ever worked at ",
+        "have you previously worked at ",
+        "have you worked for ",
+        "have you ever worked for ",
+        "have you previously worked for ",
+        "have you been employed by ",
+        "have you ever been employed by ",
+        "have you previously been employed by ",
+        "were you previously employed by ",
+        "are you a current or former employee",
+        "are you a current or previous employee",
+        "are you a former employee",
+    )
+    return any(norm.startswith(prefix) for prefix in employer_question_prefixes)
+
+
+def _extract_named_employer_from_question(norm: str) -> str | None:
+    """Extract a concrete employer name from a screening question when present."""
+    patterns = (
+        r"have you (?:ever |previously )?worked (?:at|for) (?P<employer>.+)",
+        r"have you (?:ever |previously )?been employed by (?P<employer>.+)",
+        r"were you previously employed by (?P<employer>.+)",
+        r"are you a current or former employee of (?P<employer>.+)",
+        r"are you a current or previous employee of (?P<employer>.+)",
+        r"are you a former employee of (?P<employer>.+)",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, norm)
+        if not match:
+            continue
+        employer = re.sub(
+            r"\b(before|previously|currently|now|today|already|or its subsidiaries|or its affiliates)\b$",
+            "",
+            match.group("employer").strip(),
+        ).strip(" ?.:;!,")
+        if employer in {
+            "",
+            "this company",
+            "this organization",
+            "this employer",
+            "the company",
+            "the organization",
+            "the employer",
+            "here",
+        }:
+            return None
+        return employer
+    return None
+
+
+def _normalized_employer_tokens(text: str) -> set[str]:
+    """Normalize an employer name into comparable tokens."""
+    ignored = {
+        "the",
+        "inc",
+        "incorporated",
+        "llc",
+        "ltd",
+        "limited",
+        "corp",
+        "corporation",
+        "co",
+        "company",
+        "plc",
+        "lp",
+        "llp",
+        "gmbh",
+        "ag",
+        "sa",
+        "pte",
+        "pty",
+    }
+    return {token for token in normalize_name(text).split() if token and token not in ignored}
+
+
+def _profile_has_employer_history(profile_data: dict[str, Any], employer_name: str) -> bool:
+    """Return True when the named employer appears in the applicant's work history."""
+    target_tokens = _normalized_employer_tokens(employer_name)
+    if not target_tokens:
+        return False
+
+    employers: list[str] = []
+    experience_entries = profile_data.get("experience")
+    if isinstance(experience_entries, list):
+        for entry in experience_entries:
+            if not isinstance(entry, dict):
+                continue
+            for key in ("company", "employer", "organization", "company_name"):
+                value = entry.get(key)
+                if isinstance(value, str) and value.strip():
+                    employers.append(value.strip())
+
+    for key in ("current_company", "company", "employer", "organization"):
+        value = profile_data.get(key)
+        if isinstance(value, str) and value.strip():
+            employers.append(value.strip())
+
+    for employer in employers:
+        employer_tokens = _normalized_employer_tokens(employer)
+        if employer_tokens and (target_tokens <= employer_tokens or employer_tokens <= target_tokens):
+            return True
+    return False
+
+
 def _default_screening_answer(field: FormField, profile_data: dict[str, Any]) -> str | None:
     """Return an answer only when the profile explicitly supports it."""
     label = _preferred_field_label(field)
@@ -2030,6 +2852,14 @@ def _default_screening_answer(field: FormField, profile_data: dict[str, Any]) ->
     options = [normalize_name(choice) for choice in (field.options or field.choices or [])]
     if options and not ({"yes", "no"} & set(options)):
         return None
+
+    named_employer = _extract_named_employer_from_question(norm)
+    if named_employer:
+        answer = "Yes" if _profile_has_employer_history(profile_data, named_employer) else "No"
+        return _coerce_answer_to_field(field, answer)
+
+    if _is_employer_history_screening_question(norm):
+        return _coerce_answer_to_field(field, "No")
 
     sponsorship_value = profile_data.get("sponsorship_needed")
     if sponsorship_value is None:
@@ -2055,6 +2885,250 @@ def _default_screening_answer(field: FormField, profile_data: dict[str, Any]) ->
             return None
 
     return None
+
+
+_SEMANTIC_INTENT_DESCRIPTIONS: dict[SemanticQuestionIntent, str] = {
+    "work_authorization": "Legal authorization or eligibility to work.",
+    "visa_sponsorship": "Need for current or future visa / immigration sponsorship.",
+    "how_did_you_hear": "Referral source or how the applicant heard about the role/company.",
+    "willing_to_relocate": "Willingness or openness to relocate or move.",
+    "salary_expectation": "Expected compensation or salary expectation.",
+    "current_school_year": "Current year in school or class standing.",
+    "graduation_date": "Estimated, expected, or completed graduation date.",
+    "degree_seeking": "Degree sought or currently being pursued.",
+    "certifications_licenses": "Relevant certifications or licenses held by the applicant.",
+    "spoken_languages": "Languages the applicant speaks or prefers.",
+    "english_proficiency": "English or language rubric proficiency such as overall/reading/writing/speaking.",
+    "country_of_residence": "Current country or region of residence.",
+    "preferred_work_mode": "Remote, hybrid, onsite, or work arrangement preference.",
+    "preferred_locations": "Preferred city, office, or work location.",
+    "availability_window": "Availability or earliest possible start window/date.",
+    "notice_period": "Notice period before the applicant can start.",
+    "gender": "Gender self-identification question.",
+    "race_ethnicity": "Race or ethnicity self-identification question.",
+    "veteran_status": "Veteran self-identification question.",
+    "disability_status": "Disability self-identification question.",
+    "employer_history": "Whether the applicant previously worked for the named employer or a government organization.",
+}
+
+
+def _resolve_semantic_intent_answer(
+    field: FormField,
+    intent: SemanticQuestionIntent,
+    profile_data: dict[str, Any] | None,
+    evidence: dict[str, str | None],
+) -> str | None:
+    """Resolve a classified semantic intent into an explicit saved answer."""
+    canonical = build_canonical_profile(profile_data or {}, evidence)
+
+    if intent == "work_authorization":
+        return _coerce_answer_to_field(
+            field,
+            canonical.get("work_authorization") or canonical.get("authorized_to_work"),
+        )
+    if intent == "visa_sponsorship":
+        return _coerce_answer_to_field(
+            field,
+            canonical.get("sponsorship_needed"),
+        )
+    if intent == "how_did_you_hear":
+        return _coerce_answer_to_field(field, canonical.get("how_did_you_hear"))
+    if intent == "willing_to_relocate":
+        return _coerce_answer_to_field(field, canonical.get("willing_to_relocate"))
+    if intent == "salary_expectation":
+        return _coerce_answer_to_field(field, canonical.get("salary_expectation"))
+    if intent == "current_school_year":
+        return _coerce_answer_to_field(field, canonical.get("current_school_year"))
+    if intent == "graduation_date":
+        return _coerce_answer_to_field(field, canonical.get("graduation_date"))
+    if intent == "degree_seeking":
+        return _coerce_answer_to_field(field, canonical.get("degree_seeking"))
+    if intent == "certifications_licenses":
+        return _coerce_answer_to_field(
+            field,
+            canonical.get("certifications_licenses", allow_policy=True) or "None",
+        )
+    if intent == "spoken_languages":
+        return _coerce_answer_to_field(field, canonical.get("spoken_languages"))
+    if intent == "english_proficiency":
+        return _coerce_answer_to_field(field, canonical.get("english_proficiency"))
+    if intent == "country_of_residence":
+        return _coerce_answer_to_field(
+            field,
+            canonical.get("country_of_residence") or canonical.get("country"),
+        )
+    if intent == "preferred_work_mode":
+        return _coerce_answer_to_field(field, canonical.get("preferred_work_mode"))
+    if intent == "preferred_locations":
+        return _coerce_answer_to_field(field, canonical.get("preferred_locations"))
+    if intent == "availability_window":
+        return _coerce_answer_to_field(
+            field,
+            canonical.get("availability_window") or canonical.get("available_start_date"),
+        )
+    if intent == "notice_period":
+        return _coerce_answer_to_field(field, canonical.get("notice_period"))
+    if intent == "gender":
+        return _coerce_answer_to_field(field, canonical.get("gender"))
+    if intent == "race_ethnicity":
+        return _coerce_answer_to_field(field, canonical.get("race_ethnicity"))
+    if intent == "veteran_status":
+        return _coerce_answer_to_field(field, canonical.get("veteran_status"))
+    if intent == "disability_status":
+        return _coerce_answer_to_field(field, canonical.get("disability_status"))
+    if intent == "employer_history":
+        return _default_screening_answer(field, profile_data or {})
+    return None
+
+
+def _available_semantic_intent_answers(
+    field: FormField,
+    profile_data: dict[str, Any] | None,
+    evidence: dict[str, str | None],
+) -> dict[SemanticQuestionIntent, str]:
+    """Return the known semantic intents that have an explicit answer right now."""
+    available: dict[SemanticQuestionIntent, str] = {}
+    for intent in _SEMANTIC_INTENT_DESCRIPTIONS:
+        answer = _resolve_semantic_intent_answer(field, intent, profile_data, evidence)
+        if answer:
+            available[intent] = answer
+    return available
+
+
+async def _classify_known_intent_for_field(
+    field: FormField,
+    profile_data: dict[str, Any] | None,
+    evidence: dict[str, str | None],
+) -> tuple[SemanticQuestionIntent | None, str | None]:
+    """Classify a blocking field into a known intent using a cheap text model."""
+    if not field.required:
+        return None, None
+
+    label = _preferred_field_label(field)
+    if has_cached_semantic_alias(label):
+        cached = get_cached_semantic_alias(label)
+        return (cached.intent, cached.confidence) if cached else (None, None)
+
+    available = _available_semantic_intent_answers(field, profile_data, evidence)
+    if not available:
+        cache_semantic_alias(label, None)
+        return None, None
+
+    try:
+        from browser_use.llm.messages import UserMessage
+        from ghosthands.config.settings import settings as _settings
+        from ghosthands.llm.client import get_chat_model
+    except ImportError:
+        return None, None
+
+    model_id = _settings.semantic_match_model or _settings.domhand_model
+    llm = get_chat_model(model=model_id)
+    allowed_intents = [
+        {
+            "intent": intent,
+            "description": _SEMANTIC_INTENT_DESCRIPTIONS[intent],
+        }
+        for intent in available.keys()
+    ]
+    prompt = (
+        "You classify one job-application field into a known saved-profile intent.\n"
+        "Return ONLY valid JSON with keys intent and confidence.\n"
+        'confidence must be one of "high", "medium", or "low".\n'
+        "Do not generate answer text.\n\n"
+        f"Field label: {label}\n"
+        f"Question text: {field.raw_label or field.name}\n"
+        f"Section: {field.section or ''}\n"
+        f"Field type: {field.field_type}\n"
+        f"Options: {json.dumps((field.options or field.choices or [])[:20], ensure_ascii=True)}\n"
+        f"Allowed intents: {json.dumps(allowed_intents, ensure_ascii=True)}\n"
+    )
+
+    try:
+        response = await llm.ainvoke([UserMessage(content=prompt)], max_tokens=200)
+        text = response.completion if isinstance(response.completion, str) else ""
+        cleaned = re.sub(r"^```(?:json)?\s*\n?", "", text, flags=re.MULTILINE)
+        cleaned = re.sub(r"\n?```\s*$", "", cleaned, flags=re.MULTILINE).strip()
+        parsed = json.loads(cleaned)
+        intent = parsed.get("intent")
+        confidence = str(parsed.get("confidence") or "").strip().lower()
+        if intent not in available or confidence != "high":
+            _trace_profile_resolution(
+                "domhand.profile_semantic_classifier_rejected",
+                field_label=label,
+                available_intents=",".join(sorted(available.keys())),
+                proposed_intent=str(intent or ""),
+                confidence=confidence or "missing",
+            )
+            cache_semantic_alias(label, None)
+            return None, None
+        alias = get_learned_question_alias(label, profile_data)
+        if alias is None or alias.intent != intent:
+            stage_learned_question_alias(
+                label,
+                intent,  # type: ignore[arg-type]
+                source="semantic_fallback",
+                confidence=confidence,
+                profile_data=profile_data,
+            )
+        cache_semantic_alias(
+            label,
+            get_learned_question_alias(label, profile_data),
+        )
+        _trace_profile_resolution(
+            "domhand.profile_semantic_classifier_resolved",
+            field_label=label,
+            available_intents=",".join(sorted(available.keys())),
+            intent=intent,
+            confidence=confidence,
+            model=model_id,
+        )
+        return intent, confidence
+    except Exception as exc:
+        _trace_profile_resolution(
+            "domhand.profile_semantic_classifier_failed",
+            field_label=label,
+            available_intents=",".join(sorted(available.keys())),
+            error=str(exc)[:160],
+            model=model_id,
+        )
+        cache_semantic_alias(label, None)
+        return None, None
+
+
+async def _semantic_profile_value_for_field(
+    field: FormField,
+    evidence: dict[str, str | None],
+    profile_data: dict[str, Any] | None = None,
+) -> str | None:
+    """Resolve a field via learned aliases or classification-only semantic fallback."""
+    for label in _field_label_candidates(field):
+        alias = get_learned_question_alias(label, profile_data)
+        if alias is None:
+            continue
+        answer = _resolve_semantic_intent_answer(field, alias.intent, profile_data, evidence)
+        if answer:
+            _trace_profile_resolution(
+                "domhand.profile_learned_alias_match",
+                field_label=_preferred_field_label(field),
+                source_label=label,
+                intent=alias.intent,
+                coerced_value=_profile_debug_preview(answer),
+            )
+            return answer
+
+    intent, confidence = await _classify_known_intent_for_field(field, profile_data, evidence)
+    if intent is None:
+        return None
+    answer = _resolve_semantic_intent_answer(field, intent, profile_data, evidence)
+    if answer:
+        _trace_profile_resolution(
+            "domhand.profile_semantic_intent_match",
+            field_label=_preferred_field_label(field),
+            intent=intent,
+            confidence=confidence,
+            coerced_value=_profile_debug_preview(answer),
+        )
+    return answer
 
 
 def _parse_dropdown_click_result(raw_result: Any) -> dict[str, Any]:
@@ -2345,6 +3419,66 @@ async def _refresh_binary_field(page: Any, field: FormField, tag: str, desired_c
     return False
 
 
+async def _load_field_interaction_recipe(page: Any, field: FormField) -> dict[str, Any] | None:
+    """Load a host-scoped interaction recipe for a non-select field when available."""
+    page_url = await _safe_page_url(page)
+    if not page_url:
+        return None
+
+    profile_data = _get_profile_data()
+    label = _preferred_field_label(field)
+    widget_signature = field.field_type or "unknown"
+    recipe = get_interaction_recipe(
+        platform=detect_platform_from_url(page_url),
+        host=detect_host_from_url(page_url),
+        label=label,
+        widget_signature=widget_signature,
+        profile_data=profile_data,
+    )
+    if recipe is not None:
+        _trace_profile_resolution(
+            "domhand.field_recipe_loaded",
+            field_label=label,
+            widget_signature=widget_signature,
+            preferred_action_chain=",".join(recipe.preferred_action_chain),
+        )
+    return {
+        "page_url": page_url,
+        "profile_data": profile_data,
+        "label": label,
+        "widget_signature": widget_signature,
+        "recipe": recipe,
+    }
+
+
+def _record_field_interaction_recipe(context: dict[str, Any] | None, action_chain: list[str]) -> None:
+    """Persist a successful GUI/reset recovery as a learned interaction recipe."""
+    if not context or not action_chain:
+        return
+
+    page_url = str(context.get("page_url") or "")
+    label = str(context.get("label") or "")
+    widget_signature = str(context.get("widget_signature") or "")
+    if not page_url or not label or not widget_signature:
+        return
+
+    record_interaction_recipe(
+        platform=detect_platform_from_url(page_url),
+        host=detect_host_from_url(page_url),
+        label=label,
+        widget_signature=widget_signature,
+        preferred_action_chain=action_chain,
+        source="visual_fallback",
+        profile_data=context.get("profile_data"),
+    )
+    _trace_profile_resolution(
+        "domhand.field_recipe_recorded",
+        field_label=label,
+        widget_signature=widget_signature,
+        preferred_action_chain=",".join(action_chain),
+    )
+
+
 async def _field_already_matches(page: Any, field: FormField, value: str | None) -> bool:
     """Live DOM check to avoid re-filling a field that already settled correctly."""
     if not value:
@@ -2420,6 +3554,8 @@ def _known_profile_value(field_name: str, evidence: dict[str, str | None]) -> st
         or name == "region"
     ):
         return evidence.get("state")
+    if any(kw in name for kw in ("county", "parish", "borough")):
+        return evidence.get("county")
     if "postal" in name or "zip" in name:
         return evidence.get("zip")
     if any(kw in name for kw in ("country/region", "country region", "country")):
@@ -2450,11 +3586,57 @@ def _known_profile_value(field_name: str, evidence: dict[str, str | None]) -> st
     if any(kw in name for kw in ("work authorization", "authorized to work", "legally authorized")):
         return evidence.get("work_authorization")
     if any(kw in name for kw in ("start date", "earliest start", "available date", "availability")):
-        return evidence.get("available_start_date")
+        return evidence.get("availability_window") or evidence.get("available_start_date")
+    if "notice period" in name:
+        return evidence.get("notice_period")
     if any(kw in name for kw in ("salary", "compensation", "pay expectation")):
         return evidence.get("salary_expectation")
+    if any(kw in name for kw in ("current year in school", "school year", "academic standing", "class standing")):
+        return evidence.get("current_school_year")
+    if any(kw in name for kw in ("graduation date", "graduated date", "completion date")):
+        return evidence.get("graduation_date")
+    if any(kw in name for kw in ("degree seeking", "degree are you seeking", "degree sought", "degree pursuing")):
+        return evidence.get("degree_seeking")
+    if any(kw in name for kw in ("field of study", "area of study", "major", "discipline")):
+        return evidence.get("field_of_study")
+    if "certification" in name or "relevant license" in name or ("licenses" in name and "relevant" in name):
+        return evidence.get("certifications_licenses") or "None"
+    if any(
+        kw in name
+        for kw in (
+            "language",
+            "languages spoken",
+            "spoken languages",
+            "preferred language",
+            "language proficiency",
+            "reading",
+            "writing",
+            "speaking",
+            "comprehension",
+            "overall",
+        )
+    ):
+        return evidence.get("english_proficiency") or evidence.get("spoken_languages")
+    if any(kw in name for kw in ("country of residence", "country/region", "country region", "country")):
+        return evidence.get("country_of_residence") or evidence.get("country")
     if any(kw in name for kw in ("willing to relocate", "relocation")):
         return evidence.get("willing_to_relocate")
+    if any(
+        kw in name
+        for kw in (
+            "preferred work",
+            "work setup",
+            "work arrangement",
+            "remote",
+            "hybrid",
+            "onsite",
+            "on site",
+            "location preference",
+            "preferred location",
+            "preferred office",
+        )
+    ):
+        return evidence.get("preferred_work_mode") or evidence.get("preferred_locations")
     # Auto-check agreement/consent checkboxes — always agree on behalf of applicant
     if any(
         kw in name
@@ -2483,17 +3665,41 @@ def _known_profile_value_for_field(
     minimum_confidence: str = "medium",
 ) -> str | None:
     """Try direct profile matching against all known labels for a field."""
+    field_label = _preferred_field_label(field)
     profile_answer_map = _build_profile_answer_map(profile_data or {}, evidence)
     for label in _field_label_candidates(field):
         value = _find_best_profile_answer(label, profile_answer_map, minimum_confidence=minimum_confidence)
         if value:
-            return _coerce_answer_to_field(field, value)
+            coerced = _coerce_answer_to_field(field, value)
+            _trace_profile_resolution(
+                "domhand.profile_answer_map_match",
+                field_label=field_label,
+                source_label=label,
+                minimum_confidence=minimum_confidence,
+                raw_value=_profile_debug_preview(value),
+                coerced_value=_profile_debug_preview(coerced),
+            )
+            return coerced
     if _MATCH_CONFIDENCE_RANKS.get(minimum_confidence, 0) >= _MATCH_CONFIDENCE_RANKS["strong"]:
+        _trace_profile_resolution(
+            "domhand.profile_lookup_miss",
+            field_label=field_label,
+            minimum_confidence=minimum_confidence,
+            reason="strong_match_required",
+        )
         return None
     for label in _field_label_candidates(field):
         value = _known_profile_value(label, evidence)
         if value:
-            return _coerce_answer_to_field(field, value)
+            coerced = _coerce_answer_to_field(field, value)
+            _trace_profile_resolution(
+                "domhand.profile_keyword_match",
+                field_label=field_label,
+                source_label=label,
+                raw_value=_profile_debug_preview(value),
+                coerced_value=_profile_debug_preview(coerced),
+            )
+            return coerced
 
     # ── Q&A bank fuzzy matching (synonym-based) ──────────────────────
     # If the answer bank has an entry whose question is a synonym of the
@@ -2505,12 +3711,33 @@ def _known_profile_value_for_field(
         for label in _field_label_candidates(field):
             qa_val = _match_qa_answer(label, capped)
             if qa_val:
-                return _coerce_answer_to_field(field, qa_val)
+                coerced = _coerce_answer_to_field(field, qa_val)
+                _trace_profile_resolution(
+                    "domhand.profile_answer_bank_match",
+                    field_label=field_label,
+                    source_label=label,
+                    raw_value=_profile_debug_preview(qa_val),
+                    coerced_value=_profile_debug_preview(coerced),
+                    answer_bank_count=len(capped),
+                )
+                return coerced
 
     default_answer = _default_screening_answer(field, profile_data or {})
     if default_answer:
+        _trace_profile_resolution(
+            "domhand.profile_default_answer",
+            field_label=field_label,
+            raw_value=_profile_debug_preview(default_answer),
+        )
         return default_answer
-    return _coerce_answer_to_field(field, _known_profile_value(field.name, evidence))
+    fallback = _coerce_answer_to_field(field, _known_profile_value(field.name, evidence))
+    _trace_profile_resolution(
+        "domhand.profile_fallback_lookup",
+        field_label=field_label,
+        raw_value=_profile_debug_preview(_known_profile_value(field.name, evidence)),
+        coerced_value=_profile_debug_preview(fallback),
+    )
+    return fallback
 
 
 def _default_value(field: FormField) -> str:
@@ -2525,6 +3752,8 @@ def _default_value(field: FormField) -> str:
         norm = _normalize_match_label(field.name or "")
         if norm in _EEO_DECLINE_DEFAULTS:
             return _EEO_DECLINE_DEFAULTS[norm]
+        if "certification" in norm or "relevant license" in norm or ("licenses" in norm and "relevant" in norm):
+            return "None"
 
     return ""
 
@@ -2565,22 +3794,43 @@ def _sanitize_no_guess_answer(
 ) -> str:
     """Prevent fabrication of sensitive identity fields not in profile.
 
-    If the LLM returned ``[NEEDS_USER_INPUT]``, emit a ``field_needs_input``
-    event and pass the marker through unchanged so the caller can surface it.
+    Apply flows do not pause for HITL. If the model still emits the legacy
+    ``[NEEDS_USER_INPUT]`` marker, suppress it and fall back to saved/best-effort
+    answers instead.
     """
     proposed = (answer or "").strip()
+    known = _known_profile_value(field_name, evidence)
 
     # ── [NEEDS_USER_INPUT] passthrough ────────────────────────────────
     if proposed and "[NEEDS_USER_INPUT]" in proposed.upper():
-        if not required:
-            # LLM should not emit this marker for optional fields; treat as
-            # empty so the field is simply skipped.
-            return ""
-        # Return the marker — the main fill loop emits field_needs_input
-        # with the correct label and section context.
-        return "[NEEDS_USER_INPUT]"
+        if known:
+            _trace_profile_resolution(
+                "domhand.profile_needs_input_overridden",
+                field_label=field_name,
+                proposed_marker="[NEEDS_USER_INPUT]",
+                recovered_value=_profile_debug_preview(known),
+            )
+            return known
+        best_effort = _known_profile_value(question_text or field_name, evidence)
+        if best_effort:
+            _trace_profile_resolution(
+                "domhand.profile_needs_input_best_effort",
+                field_label=field_name,
+                proposed_marker="[NEEDS_USER_INPUT]",
+                recovered_value=_profile_debug_preview(best_effort),
+            )
+            return best_effort
+        # No-HITL apply flows never surface the marker. Required fields are
+        # retried through best-effort inference and remain unresolved only if
+        # DomHand still cannot infer a value.
+        _trace_profile_resolution(
+            "domhand.profile_needs_input_suppressed",
+            field_label=field_name,
+            proposed_marker="[NEEDS_USER_INPUT]",
+            recovered_value="EMPTY",
+        )
+        return ""
 
-    known = _known_profile_value(field_name, evidence)
     if known:
         return known
     if not _SOCIAL_OR_ID_NO_GUESS_RE.search(field_name or ""):
@@ -2594,9 +3844,23 @@ def _sanitize_no_guess_answer(
     return ""
 
 
+def _disambiguated_field_names(fields: list[FormField]) -> list[str]:
+    """Build deterministic display names for batched LLM answer generation."""
+    name_counts: dict[str, int] = {}
+    disambiguated_names: list[str] = []
+    for i, field in enumerate(fields):
+        base_name = _preferred_field_label(field) or f"Field {i + 1}"
+        norm = normalize_name(base_name) or f"field-{i + 1}"
+        count = name_counts.get(norm, 0) + 1
+        name_counts[norm] = count
+        disambiguated_names.append(f"{base_name} #{count}" if count > 1 else base_name)
+    return disambiguated_names
+
+
 async def _generate_answers(
     fields: list[FormField],
     profile_text: str,
+    profile_data: dict[str, Any] | None = None,
 ) -> tuple[dict[str, str], int, int, float, str | None]:
     """Call the configured DomHand model to generate answers for all fields in a single batch."""
     try:
@@ -2615,14 +3879,7 @@ async def _generate_answers(
     output_tokens = 0
     step_cost = 0.0
 
-    name_counts: dict[str, int] = {}
-    disambiguated_names: list[str] = []
-    for i, field in enumerate(fields):
-        base_name = _preferred_field_label(field) or f"Field {i + 1}"
-        norm = normalize_name(base_name) or f"field-{i + 1}"
-        count = name_counts.get(norm, 0) + 1
-        name_counts[norm] = count
-        disambiguated_names.append(f"{base_name} #{count}" if count > 1 else base_name)
+    disambiguated_names = _disambiguated_field_names(fields)
 
     field_descriptions = "\n".join(
         _build_field_description(field, disambiguated_names[i]) for i, field in enumerate(fields)
@@ -2641,28 +3898,35 @@ Here are the form fields to fill:
 
 Rules:
 - For each field, decide what value to put based on the profile.
-- For each field, use ONLY the applicant's actual profile data. Every non-consent value must come directly from the provided applicant profile.
+- For substantive applicant fields, use ONLY the applicant's actual profile data. Do not invent salary, start dates, work history, education, essays, addresses, or personal identifiers.
 - If the profile has NO relevant data for an OPTIONAL field, return "" (empty string). NEVER make up data or use placeholder values like "N/A", "None", "Not applicable", etc.
-- If the profile has NO relevant data for a REQUIRED field: if a neutral/decline option exists (e.g., "Prefer not to say", "N/A", "Other"), select it. Otherwise, return exactly "[NEEDS_USER_INPUT]".
-- NEVER fabricate answers for salary, start date, or other substantive fields. If the profile does not contain the answer, return "[NEEDS_USER_INPUT]" for required fields or "" for optional fields.
-- NEVER fabricate personal identifiers or social handles/URLs not explicitly in the profile. If missing: return "" (empty string) for optional fields, or "[NEEDS_USER_INPUT]" for required fields.
+- If the profile has NO direct answer for a REQUIRED field: first use a saved survey/profile answer, then a semantically equivalent QA-bank answer, then the closest structured education/experience value, then a deterministic default when one exists, and finally your best-effort guess. NEVER return "[NEEDS_USER_INPUT]".
+- NEVER fabricate personal identifiers or social handles/URLs not explicitly in the profile. If missing: return "" (empty string) for optional fields, and omit the field if you still cannot infer a safe answer.
 - For dropdowns/radio groups with listed options, pick the EXACT text of one of the available options.
 - For hierarchical dropdown options (format "Category > SubOption"), pick the EXACT full path including the " > " separator.
+- Use the section, current field value, sibling field names, and listed options together to infer meaning for short or generic labels.
+- If a label is generic (for example "Overall", "Type", "Status", or "Source"), do NOT rely on label matching alone. Use section context plus the available options to choose the best answer.
 - For dropdowns WITHOUT listed options, provide the value from the profile if available. If the field name closely matches a profile entry, use that value.
+- For low-risk standardized screening fields, prefer a best-effort answer instead of "[NEEDS_USER_INPUT]". This includes referral/source fields, phone type, country/country of residence, work arrangement, relocation, language/rubric proficiency fields, and demographic/EEO fields.
+- For low-risk standardized screening dropdowns/radios, use the saved profile/default answer and choose the closest matching option text if the wording differs slightly.
 - For "How did you hear about us?" or similar source/referral fields: use the applicant profile value if available. If the profile has no source, default to "LinkedIn" (or the closest matching option like "Job Board", "Online Job Board", "Internet"). NEVER return "[NEEDS_USER_INPUT]" for referral source fields — they always have a safe default.
 - For "Phone Device Type" or similar phone type fields: default to "Mobile" if the profile has no phone type. NEVER return "[NEEDS_USER_INPUT]" for phone type fields.
+- For language proficiency rubrics like "Overall", "Reading", "Writing", "Speaking", and "Comprehension": use the applicant's saved English proficiency if present. If no explicit value is present, default to the closest option matching "Native / bilingual" or "Fluent". NEVER return "[NEEDS_USER_INPUT]" for these rubric fields.
+- When the profile wording and the site wording differ, map to the semantically closest visible option instead of escalating. Example: "Native / bilingual" may map to the top proficiency tier such as "Expert", "Advanced", or "Fluent".
+- For work-setup/location preference fields, use the saved preferred work mode / preferred locations if present. If the field is broad and only asks for an arrangement, prefer the work-mode answer over escalating.
+- For relocation fields, use the applicant's saved relocation preference; default to "Yes" when the profile has no contrary preference.
 - For skill typeahead fields, return an ARRAY of relevant skills from the applicant profile.
 - For multi-select fields, return a JSON array of ALL matching options (e.g., ["Python", "Java"]).
 - For checkboxes/toggles, respond with "checked" or "unchecked".
 - IMPORTANT: For agreement/consent checkboxes (e.g., "I agree", "I accept", "I understand", privacy policy, terms of service, candidate consent), ALWAYS respond with "checked". The applicant consents to standard application agreements.
 - For file upload fields, skip them (don't include in output).
-- For textarea fields, use an explicit open-ended answer from the applicant profile when available. If the profile does not contain that answer, return "" for optional or "[NEEDS_USER_INPUT]" for required.
+- For textarea fields, use an explicit open-ended answer from the applicant profile when available. If the profile does not contain that answer, use a semantically matched survey/profile value, structured education/experience fallback, deterministic default, or best-effort guess for required fields.
 - For demographic/EEO fields (gender, race, ethnicity, veteran status, disability status, sexual orientation), use the applicant's actual info if provided. If no info is provided in the profile, use a neutral decline option: "I decline to self-identify", "I am not a protected veteran", or "I do not wish to answer" (pick whichever matches the available options). NEVER return "[NEEDS_USER_INPUT]" for EEO fields — always use a decline default.
 - NEVER select a default placeholder value like "Select One", "Please select", etc.
-- NEVER use placeholder strings like "N/A", "NA", "None", "Not applicable", "Unknown". If you don't have data, return "" for optional fields or "[NEEDS_USER_INPUT]" for required fields.
-- For salary fields, only use salary expectations explicitly provided in the applicant profile. If missing, return "[NEEDS_USER_INPUT]" for required fields or "" for optional.
+- NEVER use placeholder strings like "N/A", "NA", "Not applicable", or "Unknown". Use the literal string "None" only when the question is asking about certifications/licenses and the applicant has none.
+- For salary or compensation fields, use the saved salary expectation first. If the profile does not contain one, make a best-effort guess instead of returning "[NEEDS_USER_INPUT]".
 - Use the EXACT field names shown above (including any "#N" suffix) as JSON keys.
-- Only include fields you have a real answer for (or "[NEEDS_USER_INPUT]" for required fields without data). Omit optional fields you cannot answer from the JSON output.
+- Only include fields you have a real answer for. For REQUIRED fields you must provide your best answer and never emit "[NEEDS_USER_INPUT]".
 - Respond with ONLY a valid JSON object. No explanation, no markdown fences.
 
 Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because..."}}"""
@@ -2721,6 +3985,43 @@ Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because.
         return {}, input_tokens, output_tokens, step_cost, model_id
 
 
+async def infer_answers_for_fields(
+    fields: list[FormField],
+    *,
+    profile_text: str | None = None,
+    profile_data: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Infer answers for an arbitrary field set using DomHand's option-aware LLM path."""
+    if not fields:
+        return {}
+
+    effective_profile_text = profile_text or _get_profile_text() or ""
+    if not effective_profile_text and profile_data:
+        effective_profile_text = json.dumps(profile_data)
+    if not effective_profile_text:
+        return {}
+
+    answers, *_ = await _generate_answers(
+        fields,
+        effective_profile_text,
+        profile_data=profile_data,
+    )
+    evidence = _parse_profile_evidence(effective_profile_text)
+    display_names = _disambiguated_field_names(fields)
+    resolved: dict[str, str] = {}
+
+    for field, display_name in zip(fields, display_names, strict=False):
+        proposed = answers.get(display_name)
+        if proposed is None:
+            proposed = _match_answer(field, answers, evidence, profile_data)
+        coerced = _coerce_answer_to_field(field, str(proposed).strip() if proposed is not None else None)
+        if not coerced or "[NEEDS_USER_INPUT]" in coerced.upper():
+            continue
+        resolved[field.field_id] = coerced
+
+    return resolved
+
+
 def _build_field_description(field: FormField, display_name: str) -> str:
     type_label = "multi-select" if field.is_multi_select else field.field_type
     req_marker = " *" if field.required else ""
@@ -2731,6 +4032,10 @@ def _build_field_description(field: FormField, display_name: str) -> str:
         desc += f" choices: [{', '.join(field.choices[:30])}]"
     if field.section:
         desc += f" [section: {field.section}]"
+    if field.raw_label and normalize_name(field.raw_label) != normalize_name(display_name):
+        desc += f' [question: "{field.raw_label}"]'
+    if field.current_value:
+        desc += f' [current: "{field.current_value}"]'
     return desc
 
 
@@ -2799,8 +4104,25 @@ _AUTHORITATIVE_SELECT_DEFAULTS: dict[str, str] = {
     "where did you hear": "LinkedIn",
     "country": "United States",
     "country of residence": "United States",
+    "worked for this company": "No",
+    "worked for this organization": "No",
+    "worked here before": "No",
+    "previously worked": "No",
+    "previously employed": "No",
+    "prior employment": "No",
+    "previous employee": "No",
     "preferred language": "English",
     "language": "English",
+    "overall": "Native / bilingual",
+    "overall proficiency": "Native / bilingual",
+    "reading": "Native / bilingual",
+    "reading proficiency": "Native / bilingual",
+    "writing": "Native / bilingual",
+    "writing proficiency": "Native / bilingual",
+    "speaking": "Native / bilingual",
+    "speaking proficiency": "Native / bilingual",
+    "comprehension": "Native / bilingual",
+    "language proficiency": "Native / bilingual",
     "willing to relocate": "Yes",
     "willingness to relocate": "Yes",
     "relocation": "Yes",
@@ -2913,6 +4235,124 @@ def _is_navigation_field(field: FormField) -> bool:
 # ── Core action function ─────────────────────────────────────────────
 
 
+async def extract_visible_form_fields(page: Any) -> list[FormField]:
+    """Extract visible form fields and synthetic button groups using DomHand helpers."""
+    raw_json = await page.evaluate(_EXTRACT_FIELDS_JS)
+    raw_fields: list[dict[str, Any]] = json.loads(raw_json) if isinstance(raw_json, str) else raw_json or []
+
+    fields: list[FormField] = []
+    grouped_names: set[str] = set()
+    seen_ids: set[str] = set()
+
+    for f_data in raw_fields:
+        fid = f_data.get("field_id", "")
+        if not fid or fid in seen_ids:
+            continue
+        ftype = f_data.get("field_type", "text")
+        fname = f_data.get("name", "")
+        group_key = f_data.get("groupKey") or f_data.get("questionLabel") or fname or fid
+
+        if ftype in ("checkbox", "radio"):
+            normalized_group_key = normalize_name(str(group_key or "")) or str(group_key or "")
+            if normalized_group_key in grouped_names:
+                continue
+            seen_ids.add(fid)
+            siblings = [
+                r
+                for r in raw_fields
+                if r.get("field_type") in ("checkbox", "radio")
+                and (normalize_name(str(r.get("groupKey") or r.get("questionLabel") or r.get("name", ""))) or "")
+                == normalized_group_key
+            ]
+            if len(siblings) > 1:
+                grouped_names.add(normalized_group_key)
+                for s in siblings:
+                    seen_ids.add(s.get("field_id", ""))
+                selected_choice = ""
+                for s in siblings:
+                    if s.get("current_value"):
+                        selected_choice = s.get("itemLabel", s.get("name", "")) or ""
+                        break
+                field_label = (
+                    f_data.get("questionLabel")
+                    or f_data.get("raw_label")
+                    or f_data.get("name")
+                    or fname
+                )
+                choice_labels = [
+                    str(s.get("itemLabel", s.get("name", "")) or "").strip()
+                    for s in siblings
+                    if str(s.get("itemLabel", s.get("name", "")) or "").strip()
+                ]
+                choice_norms = {normalize_name(choice) for choice in choice_labels if normalize_name(choice)}
+                label_norm = normalize_name(str(field_label or ""))
+                sibling_sections = []
+                for sibling in siblings:
+                    section_text = str(sibling.get("section", "") or "").strip()
+                    if not section_text:
+                        continue
+                    section_norm = normalize_name(section_text)
+                    if choice_norms and section_norm in choice_norms:
+                        continue
+                    if label_norm and section_norm == label_norm:
+                        continue
+                    sibling_sections.append(section_text)
+                group_section = sibling_sections[0] if sibling_sections else ""
+                inferred_required = any(bool(s.get("required")) for s in siblings)
+                if not inferred_required and "*" in str(field_label or ""):
+                    inferred_required = True
+                fields.append(
+                    FormField(
+                        field_id=fid,
+                        name=str(field_label or "").strip(),
+                        field_type=f"{ftype}-group",
+                        section=group_section,
+                        required=inferred_required,
+                        options=[],
+                        choices=choice_labels,
+                        is_native=False,
+                        visible=True,
+                        raw_label=str(field_label or "").strip() or None,
+                        current_value=selected_choice,
+                    )
+                )
+            else:
+                field_label = f_data.get("questionLabel") or f_data.get("raw_label") or f_data.get("itemLabel") or fname
+                field_section = str(f_data.get("section", "") or "").strip()
+                item_label = str(f_data.get("itemLabel", "") or "").strip()
+                if item_label and normalize_name(field_section) == normalize_name(item_label):
+                    field_section = ""
+                fields.append(
+                    FormField(
+                        field_id=fid,
+                        name=str(field_label or "").strip(),
+                        field_type=ftype,
+                        section=field_section,
+                        required=bool(f_data.get("required", False)) or "*" in str(field_label or ""),
+                        is_native=False,
+                        visible=True,
+                        raw_label=str(field_label or "").strip() or None,
+                        current_value=f_data.get("current_value", ""),
+                    )
+                )
+        else:
+            seen_ids.add(fid)
+            fields.append(FormField.model_validate(f_data))
+
+    try:
+        btn_json = await page.evaluate(_EXTRACT_BUTTON_GROUPS_JS)
+        btn_groups: list[dict[str, Any]] = json.loads(btn_json) if isinstance(btn_json, str) else btn_json
+        for bg in btn_groups:
+            bg_id = bg.get("field_id", "")
+            if bg_id and bg_id not in seen_ids:
+                seen_ids.add(bg_id)
+                fields.append(FormField.model_validate(bg))
+    except Exception as e:
+        logger.debug(f"Button group extraction failed: {e}")
+
+    return fields
+
+
 async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSession) -> ActionResult:
     """Fill all visible form fields using fast DOM manipulation."""
     page = await browser_session.get_current_page()
@@ -2956,92 +4396,30 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 pass
 
         try:
-            raw_json = await page.evaluate(_EXTRACT_FIELDS_JS)
-            raw_fields: list[dict[str, Any]] = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+            fields = await extract_visible_form_fields(page)
         except Exception as e:
             logger.error(f"Field extraction failed: {e}")
             return ActionResult(error=f"Failed to extract form fields: {e}")
-
-        fields: list[FormField] = []
-        grouped_names: set[str] = set()
-        seen_ids: set[str] = set()
-
-        for f_data in raw_fields:
-            fid = f_data.get("field_id", "")
-            if not fid or fid in seen_ids:
-                continue
-            ftype = f_data.get("field_type", "text")
-            fname = f_data.get("name", "")
-
-            if ftype in ("checkbox", "radio"):
-                group_key = f"group:{fname}"
-                if group_key in grouped_names:
-                    continue
-                seen_ids.add(fid)
-                siblings = [
-                    r
-                    for r in raw_fields
-                    if r.get("field_type") in ("checkbox", "radio")
-                    and r.get("name") == fname
-                    and r.get("section", "") == f_data.get("section", "")
-                ]
-                if len(siblings) > 1:
-                    grouped_names.add(group_key)
-                    for s in siblings:
-                        seen_ids.add(s.get("field_id", ""))
-                    fields.append(
-                        FormField(
-                            field_id=fid,
-                            name=fname,
-                            field_type=f"{ftype}-group",
-                            section=f_data.get("section", ""),
-                            required=f_data.get("required", False),
-                            options=[],
-                            choices=[s.get("itemLabel", s.get("name", "")) for s in siblings],
-                            is_native=False,
-                            visible=True,
-                            raw_label=f_data.get("raw_label"),
-                        )
-                    )
-                else:
-                    fields.append(
-                        FormField(
-                            field_id=fid,
-                            name=f_data.get("itemLabel", fname) or fname,
-                            field_type=ftype,
-                            section=f_data.get("section", ""),
-                            required=f_data.get("required", False),
-                            is_native=False,
-                            visible=True,
-                            raw_label=f_data.get("raw_label"),
-                        )
-                    )
-            else:
-                seen_ids.add(fid)
-                fields.append(FormField.model_validate(f_data))
-
-        try:
-            btn_json = await page.evaluate(_EXTRACT_BUTTON_GROUPS_JS)
-            btn_groups: list[dict[str, Any]] = json.loads(btn_json) if isinstance(btn_json, str) else btn_json
-            for bg in btn_groups:
-                bg_id = bg.get("field_id", "")
-                if bg_id and bg_id not in seen_ids:
-                    seen_ids.add(bg_id)
-                    fields.append(FormField.model_validate(bg))
-        except Exception as e:
-            logger.debug(f"Button group extraction failed: {e}")
 
         fields = _filter_fields_for_scope(
             fields,
             target_section=params.target_section,
             heading_boundary=params.heading_boundary,
         )
+        fields = _filter_fields_for_focus(fields, params.focus_fields)
 
         if params.heading_boundary and not fields:
             return ActionResult(
                 error=(
                     f'No visible fields matched heading boundary "{params.heading_boundary}". '
                     "Verify the entry heading is visible before calling domhand_fill."
+                ),
+            )
+        if params.focus_fields and not fields:
+            return ActionResult(
+                error=(
+                    "No visible fields matched the requested focus_fields. "
+                    "Use domhand_assess_state again and then fall back to domhand_select or targeted browser-use actions."
                 ),
             )
 
@@ -3112,6 +4490,12 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 profile_data,
                 minimum_confidence="medium" if f.required else "strong",
             )
+            if not profile_val:
+                profile_val = await _semantic_profile_value_for_field(
+                    f,
+                    evidence,
+                    profile_data,
+                )
             if profile_val:
                 direct_fills[f.field_id] = profile_val
             else:
@@ -3119,7 +4503,11 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 
         answers: dict[str, str] = {}
         if needs_llm:
-            llm_answers, in_tok, out_tok, step_cost, llm_model_name = await _generate_answers(needs_llm, profile_text)
+            llm_answers, in_tok, out_tok, step_cost, llm_model_name = await _generate_answers(
+                needs_llm,
+                profile_text,
+                profile_data=profile_data,
+            )
             answers = llm_answers
             total_step_cost += step_cost
             total_input_tokens += in_tok
@@ -3156,6 +4544,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         None if success else "DOM fill failed",
                     ),
                 )
+                if success:
+                    confirm_learned_question_alias(_preferred_field_label(f))
                 all_results.append(fr)
                 if _on_field_result:
                     _on_field_result(fr, round_num)
@@ -3172,203 +4562,37 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 r"^(n/?a|na|none|not applicable|unknown|placeholder)$", matched_answer.strip(), re.IGNORECASE
             ):
                 matched_answer = ""
-            # [NEEDS_USER_INPUT] marker — skip the field instead of typing
-            # the literal marker string into the form.  The marker may
-            # arrive via _sanitize_no_guess_answer (which emits the event)
-            # OR via fuzzy match in _match_answer (which does NOT emit it).
-            # Always emit `field_needs_input` here to cover both paths,
-            # guarded to avoid duplicates.
+            # Legacy marker cleanup for no-HITL apply flows.
             if matched_answer and "[NEEDS_USER_INPUT]" in matched_answer:
-                key = get_stable_field_key(f)
-                field_label = _preferred_field_label(f)
-                # Emit field_needs_input event so the Desktop HITL modal shows it
-                if key not in fields_skipped:
-                    from ghosthands.output.jsonl import emit_event
-
-                    # Build options list — FormField.options may be list[str] or list[object]
-                    field_options = []
-                    for o in (f.options or []):
-                        if isinstance(o, str):
-                            field_options.append({"value": o, "text": o})
-                        elif hasattr(o, "value") and hasattr(o, "text"):
-                            field_options.append({"value": o.value, "text": o.text})
-                    if not field_options and hasattr(f, 'choices') and f.choices:
-                        field_options = [{"value": c, "text": c} for c in f.choices]
-
-                    emit_event(
-                        "field_needs_input",
-                        field_label=field_label,
-                        field_id=f.field_id,
-                        field_type=f.field_type or "unknown",
-                        question_text=f.raw_label or f.name or "",
-                        section=f.section or "",
-                        options=field_options,
-                        page_url=page.url if page else "",
-                    )
-
-                # For REQUIRED fields: wait for the user's answer from Desktop
-                # via stdin before continuing. This prevents the agent from
-                # trying to handle the field itself and getting stuck.
-                # Guard: only wait if HITL listener is active (JSONL/Desktop mode).
-                # In non-JSONL CLI mode, no listener runs so waits block forever.
-                if f.required:
-                    from ghosthands.bridge.protocol import get_field_answer, is_hitl_available
-
-                    if not is_hitl_available():
-                        # Non-JSONL CLI mode — no stdin listener, skip without waiting
-                        matched_answer = ""
-                    else:
-                        try:
-                            user_answer = await get_field_answer(f.field_id, timeout=300.0, field_label=field_label)
-                            if user_answer:
-                                matched_answer = user_answer
-                            else:
-                                from ghosthands.output.jsonl import emit_event as _emit_event
-                                _emit_event(
-                                    "status",
-                                    message=f"⚠️ Required field '{field_label}' was not answered (timed out). Application may be incomplete.",
-                                )
-                                matched_answer = ""
-                        except Exception:
-                            matched_answer = ""
-
-                if not matched_answer or "[NEEDS_USER_INPUT]" in (matched_answer or ""):
-                    # Use REQUIRED prefix so required-skip reporting picks it up.
-                    error_msg = (
-                        "REQUIRED — Needs user input"
-                        if f.required
-                        else "Needs user input"
-                    )
-                    fr = FillFieldResult(
-                        field_id=f.field_id,
-                        name=field_label,
-                        success=False,
-                        actor="skipped",
-                        error=error_msg,
-                        required=f.required,
-                        control_kind=f.field_type,
-                        section=f.section or "",
-                        failure_reason="needs_user_input",
-                        takeover_suggestion=_takeover_suggestion_for_field(
-                            f,
-                            False,
-                            "skipped",
-                            error_msg,
-                        ),
-                    )
-                    all_results.append(fr)
-                    if _on_field_result:
-                        _on_field_result(fr, round_num)
-                    fields_seen.add(key)
-                    fields_skipped.add(key)
-                    continue
+                matched_answer = ""
             if not matched_answer:
                 key = get_stable_field_key(f)
                 error_msg = "No confident profile match for this field"
                 if f.required:
                     error_msg = "REQUIRED — could not fill automatically"
-
-                # M14: For ALL required fields with no profile match, emit a
-                # field_needs_input event so the Desktop HITL modal surfaces
-                # them to the user instead of silently skipping.
-                # Previously limited to _interactive_types only, but required
-                # text/textarea/date fields were silently skipped too.
-                # Optional fields are still silently skipped.
-                if f.required and key not in fields_skipped:
-                    from ghosthands.output.jsonl import emit_event
-
-                    # Build options list — FormField.options may be list[str] or list[object]
-                    field_options = []
-                    for o in (f.options or []):
-                        if isinstance(o, str):
-                            field_options.append({"value": o, "text": o})
-                        elif hasattr(o, "value") and hasattr(o, "text"):
-                            field_options.append({"value": o.value, "text": o.text})
-                    if not field_options and hasattr(f, 'choices') and f.choices:
-                        field_options = [{"value": c, "text": c} for c in f.choices]
-
-                    emit_event(
-                        "field_needs_input",
-                        field_label=_preferred_field_label(f),
-                        field_id=f.field_id,
-                        field_type=f.field_type or "unknown",
-                        question_text=f.raw_label or f.name or "",
-                        section=f.section or "",
-                        options=field_options,
-                        page_url=page.url if page else "",
-                    )
-
-                    # Wait for user's answer from Desktop HITL modal
-                    from ghosthands.bridge.protocol import get_field_answer, is_hitl_available
-
-                    if not is_hitl_available():
-                        matched_answer = ""
-                    else:
-                        try:
-                            user_answer = await get_field_answer(f.field_id, timeout=300.0, field_label=_preferred_field_label(f))
-                            if user_answer:
-                                matched_answer = user_answer
-                            else:
-                                from ghosthands.output.jsonl import emit_event as _emit_event
-                                _emit_event(
-                                    "status",
-                                    message=f"⚠️ Required field '{_preferred_field_label(f)}' was not answered (timed out). Application may be incomplete.",
-                                )
-                                matched_answer = ""
-                        except Exception:
-                            matched_answer = ""
-
-                    # User provided an answer — fall through to filling logic
-                    if matched_answer:
-                        pass  # fall through to _fill_single_field below
-                    else:
-                        fr = FillFieldResult(
-                            field_id=f.field_id,
-                            name=_preferred_field_label(f),
-                            success=False,
-                            actor="skipped",
-                            error=error_msg,
-                            required=f.required,
-                            control_kind=f.field_type,
-                            section=f.section or "",
-                            failure_reason="required_missing_profile_data",
-                            takeover_suggestion=_takeover_suggestion_for_field(
-                                f,
-                                False,
-                                "skipped",
-                                error_msg,
-                            ),
-                        )
-                        all_results.append(fr)
-                        if _on_field_result:
-                            _on_field_result(fr, round_num)
-                        fields_seen.add(key)
-                        fields_skipped.add(key)
-                        continue
-                else:
-                    fr = FillFieldResult(
-                        field_id=f.field_id,
-                        name=_preferred_field_label(f),
-                        success=False,
-                        actor="skipped",
-                        error=error_msg,
-                        required=f.required,
-                        control_kind=f.field_type,
-                        section=f.section or "",
-                        failure_reason="missing_profile_data" if not f.required else "required_missing_profile_data",
-                        takeover_suggestion=_takeover_suggestion_for_field(
-                            f,
-                            False,
-                            "skipped",
-                            error_msg,
-                        ),
-                    )
-                    all_results.append(fr)
-                    if _on_field_result:
-                        _on_field_result(fr, round_num)
-                    fields_seen.add(key)
-                    fields_skipped.add(key)  # Never retry — no data exists
-                    continue
+                fr = FillFieldResult(
+                    field_id=f.field_id,
+                    name=_preferred_field_label(f),
+                    success=False,
+                    actor="skipped",
+                    error=error_msg,
+                    required=f.required,
+                    control_kind=f.field_type,
+                    section=f.section or "",
+                    failure_reason="missing_profile_data" if not f.required else "required_missing_profile_data",
+                    takeover_suggestion=_takeover_suggestion_for_field(
+                        f,
+                        False,
+                        "skipped",
+                        error_msg,
+                    ),
+                )
+                all_results.append(fr)
+                if _on_field_result:
+                    _on_field_result(fr, round_num)
+                fields_seen.add(key)
+                fields_skipped.add(key)
+                continue
             if await _field_already_matches(page, f, matched_answer):
                 success = True
             else:
@@ -3391,6 +4615,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     None if success else "DOM fill failed",
                 ),
             )
+            if success:
+                confirm_learned_question_alias(_preferred_field_label(f))
             all_results.append(fr)
             if _on_field_result:
                 _on_field_result(fr, round_num)
@@ -3625,11 +4851,11 @@ async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag
             await page.press("ArrowDown")
             await asyncio.sleep(0.2)
             await page.press("Enter")
-            logger.debug(f"search-select {tag} -> first result (keyboard, term: \"{search_term}\")")
+            logger.debug(f'search-select {tag} -> first result (keyboard, term: "{search_term}")')
             await _settle_dropdown_selection(page)
             return True
         except Exception as e:
-            logger.debug(f"search-select {tag}: term \"{search_term}\" failed: {str(e)[:60]}")
+            logger.debug(f'search-select {tag}: term "{search_term}" failed: {str(e)[:60]}')
             if term_idx < len(search_terms) - 1:
                 continue
             return False
@@ -3670,7 +4896,11 @@ async def _fill_date_field(page: Any, field: FormField, value: str, tag: str) ->
         try:
             result_json = await page.evaluate(_FILL_FIELD_JS, field.field_id, attempt_val, "text")
             result = json.loads(result_json) if isinstance(result_json, str) else result_json
-            if isinstance(result, dict) and result.get("success") and await _confirm_text_like_value(page, field, attempt_val, tag):
+            if (
+                isinstance(result, dict)
+                and result.get("success")
+                and await _confirm_text_like_value(page, field, attempt_val, tag)
+            ):
                 logger.debug(f'fill {tag} = "{attempt_val}"')
                 return True
         except Exception:
@@ -3902,10 +5132,34 @@ async def _fill_radio_group(page: Any, field: FormField, value: str, tag: str) -
     if not choice:
         logger.debug(f"skip {tag} (radio-group, no answer)")
         return False
+    recipe_context = await _load_field_interaction_recipe(page, field)
     current = await _read_group_selection(page, field.field_id)
     if _field_value_matches_expected(current, choice) and not await _field_has_validation_error(page, field.field_id):
         logger.debug(f"skip {tag} (already selected)")
         return True
+    recipe = recipe_context.get("recipe") if recipe_context else None
+    if recipe is not None:
+        if "group_option_reset" in recipe.preferred_action_chain and current:
+            if await _reset_group_selection_with_gui(page, field, current, choice, tag):
+                _trace_profile_resolution(
+                    "domhand.field_recipe_applied",
+                    field_label=_preferred_field_label(field),
+                    widget_signature=field.field_type,
+                    preferred_action_chain="group_option_reset,group_option_gui_click",
+                )
+                return True
+        if "group_option_gui_click" in recipe.preferred_action_chain:
+            if await _click_group_option_with_gui(page, field, choice, tag) and not await _field_has_validation_error(
+                page,
+                field.field_id,
+            ):
+                _trace_profile_resolution(
+                    "domhand.field_recipe_applied",
+                    field_label=_preferred_field_label(field),
+                    widget_signature=field.field_type,
+                    preferred_action_chain="group_option_gui_click",
+                )
+                return True
     try:
         result_json = await page.evaluate(_CLICK_RADIO_OPTION_JS, field.field_id, choice)
         result = json.loads(result_json)
@@ -3933,12 +5187,17 @@ async def _fill_radio_group(page: Any, field: FormField, value: str, tag: str) -
     if await _click_group_option_with_gui(page, field, choice, tag) and not await _field_has_validation_error(
         page, field.field_id
     ):
+        _record_field_interaction_recipe(recipe_context, ["group_option_gui_click"])
         return True
     current = await _read_group_selection(page, field.field_id)
     if (_field_value_matches_expected(current, choice) and await _field_has_validation_error(page, field.field_id)) or (
         current and not _field_value_matches_expected(current, choice)
     ):
         if await _reset_group_selection_with_gui(page, field, current, choice, tag):
+            _record_field_interaction_recipe(
+                recipe_context,
+                ["group_option_reset", "group_option_gui_click"],
+            )
             return True
     logger.debug(f"skip {tag} (no matching radio option)")
     return False
@@ -3948,10 +5207,34 @@ async def _fill_single_radio(page: Any, field: FormField, value: str, tag: str) 
     if not value:
         logger.debug(f"skip {tag} (radio, no answer)")
         return False
+    recipe_context = await _load_field_interaction_recipe(page, field)
     current = await _read_group_selection(page, field.field_id)
     if _field_value_matches_expected(current, value) and not await _field_has_validation_error(page, field.field_id):
         logger.debug(f"skip {tag} (already selected)")
         return True
+    recipe = recipe_context.get("recipe") if recipe_context else None
+    if recipe is not None:
+        if "group_option_reset" in recipe.preferred_action_chain and current:
+            if await _reset_group_selection_with_gui(page, field, current, value, tag):
+                _trace_profile_resolution(
+                    "domhand.field_recipe_applied",
+                    field_label=_preferred_field_label(field),
+                    widget_signature=field.field_type,
+                    preferred_action_chain="group_option_reset,group_option_gui_click",
+                )
+                return True
+        if "group_option_gui_click" in recipe.preferred_action_chain:
+            if await _click_group_option_with_gui(page, field, value, tag) and not await _field_has_validation_error(
+                page,
+                field.field_id,
+            ):
+                _trace_profile_resolution(
+                    "domhand.field_recipe_applied",
+                    field_label=_preferred_field_label(field),
+                    widget_signature=field.field_type,
+                    preferred_action_chain="group_option_gui_click",
+                )
+                return True
     try:
         result_json = await page.evaluate(_CLICK_SINGLE_RADIO_JS, field.field_id, value)
         result = json.loads(result_json)
@@ -3971,12 +5254,17 @@ async def _fill_single_radio(page: Any, field: FormField, value: str, tag: str) 
     if await _click_group_option_with_gui(page, field, value, tag) and not await _field_has_validation_error(
         page, field.field_id
     ):
+        _record_field_interaction_recipe(recipe_context, ["group_option_gui_click"])
         return True
     current = await _read_group_selection(page, field.field_id)
     if (_field_value_matches_expected(current, value) and await _field_has_validation_error(page, field.field_id)) or (
         current and not _field_value_matches_expected(current, value)
     ):
         if await _reset_group_selection_with_gui(page, field, current, value, tag):
+            _record_field_interaction_recipe(
+                recipe_context,
+                ["group_option_reset", "group_option_gui_click"],
+            )
             return True
     logger.debug(f'skip {tag} (no matching radio for "{value}")')
     return False
@@ -3987,10 +5275,34 @@ async def _fill_button_group(page: Any, field: FormField, value: str, tag: str) 
     if not choice:
         logger.debug(f"skip {tag} (button-group, no answer)")
         return False
+    recipe_context = await _load_field_interaction_recipe(page, field)
     current = await _read_group_selection(page, field.field_id)
     if _field_value_matches_expected(current, choice) and not await _field_has_validation_error(page, field.field_id):
         logger.debug(f"skip {tag} (already selected)")
         return True
+    recipe = recipe_context.get("recipe") if recipe_context else None
+    if recipe is not None:
+        if "group_option_reset" in recipe.preferred_action_chain and current:
+            if await _reset_group_selection_with_gui(page, field, current, choice, tag):
+                _trace_profile_resolution(
+                    "domhand.field_recipe_applied",
+                    field_label=_preferred_field_label(field),
+                    widget_signature=field.field_type,
+                    preferred_action_chain="group_option_reset,group_option_gui_click",
+                )
+                return True
+        if "group_option_gui_click" in recipe.preferred_action_chain:
+            if await _click_group_option_with_gui(page, field, choice, tag) and not await _field_has_validation_error(
+                page,
+                field.field_id,
+            ):
+                _trace_profile_resolution(
+                    "domhand.field_recipe_applied",
+                    field_label=_preferred_field_label(field),
+                    widget_signature=field.field_type,
+                    preferred_action_chain="group_option_gui_click",
+                )
+                return True
     try:
         result_json = await page.evaluate(_CLICK_BUTTON_GROUP_JS, field.field_id, choice)
         result = json.loads(result_json)
@@ -4018,12 +5330,17 @@ async def _fill_button_group(page: Any, field: FormField, value: str, tag: str) 
     if await _click_group_option_with_gui(page, field, choice, tag) and not await _field_has_validation_error(
         page, field.field_id
     ):
+        _record_field_interaction_recipe(recipe_context, ["group_option_gui_click"])
         return True
     current = await _read_group_selection(page, field.field_id)
     if (_field_value_matches_expected(current, choice) and await _field_has_validation_error(page, field.field_id)) or (
         current and not _field_value_matches_expected(current, choice)
     ):
         if await _reset_group_selection_with_gui(page, field, current, choice, tag):
+            _record_field_interaction_recipe(
+                recipe_context,
+                ["group_option_reset", "group_option_gui_click"],
+            )
             return True
     logger.debug(f"skip {tag} (button-group, no matching button)")
     return False
@@ -4033,6 +5350,33 @@ async def _fill_checkbox_group(page: Any, field: FormField, value: str, tag: str
     if _is_explicit_false(value):
         logger.debug(f"check {tag} -> skip (answer=unchecked)")
         return True
+    recipe_context = await _load_field_interaction_recipe(page, field)
+    recipe = recipe_context.get("recipe") if recipe_context else None
+    if recipe is not None:
+        if "binary_refresh" in recipe.preferred_action_chain:
+            if await _refresh_binary_field(page, field, tag, True) and not await _field_has_validation_error(
+                page,
+                field.field_id,
+            ):
+                _trace_profile_resolution(
+                    "domhand.field_recipe_applied",
+                    field_label=_preferred_field_label(field),
+                    widget_signature=field.field_type,
+                    preferred_action_chain="binary_refresh,binary_gui_click",
+                )
+                return True
+        if "binary_gui_click" in recipe.preferred_action_chain:
+            if await _click_binary_with_gui(page, field, tag, True) and not await _field_has_validation_error(
+                page,
+                field.field_id,
+            ):
+                _trace_profile_resolution(
+                    "domhand.field_recipe_applied",
+                    field_label=_preferred_field_label(field),
+                    widget_signature=field.field_type,
+                    preferred_action_chain="binary_gui_click",
+                )
+                return True
     try:
         result_json = await page.evaluate(_CLICK_CHECKBOX_GROUP_JS, field.field_id)
         result = json.loads(result_json)
@@ -4046,8 +5390,10 @@ async def _fill_checkbox_group(page: Any, field: FormField, value: str, tag: str
                 return True
             if current is True and await _field_has_validation_error(page, field.field_id):
                 if await _refresh_binary_field(page, field, tag, True):
+                    _record_field_interaction_recipe(recipe_context, ["binary_refresh", "binary_gui_click"])
                     return True
             if await _click_binary_with_gui(page, field, tag, True):
+                _record_field_interaction_recipe(recipe_context, ["binary_gui_click"])
                 return True
     except Exception:
         pass
@@ -4060,10 +5406,37 @@ async def _fill_checkbox(page: Any, field: FormField, value: str, tag: str) -> b
     if not desired_checked:
         logger.debug(f"check {tag} -> skip (answer=unchecked)")
         return True
+    recipe_context = await _load_field_interaction_recipe(page, field)
     state = await _read_binary_state(page, field.field_id)
     if state is True and not await _field_has_validation_error(page, field.field_id):
         logger.debug(f"skip {tag} (already checked)")
         return True
+    recipe = recipe_context.get("recipe") if recipe_context else None
+    if recipe is not None:
+        if "binary_refresh" in recipe.preferred_action_chain:
+            if await _refresh_binary_field(page, field, tag, desired_checked) and not await _field_has_validation_error(
+                page,
+                field.field_id,
+            ):
+                _trace_profile_resolution(
+                    "domhand.field_recipe_applied",
+                    field_label=_preferred_field_label(field),
+                    widget_signature=field.field_type,
+                    preferred_action_chain="binary_refresh,binary_gui_click",
+                )
+                return True
+        if "binary_gui_click" in recipe.preferred_action_chain:
+            if await _click_binary_with_gui(page, field, tag, desired_checked) and not await _field_has_validation_error(
+                page,
+                field.field_id,
+            ):
+                _trace_profile_resolution(
+                    "domhand.field_recipe_applied",
+                    field_label=_preferred_field_label(field),
+                    widget_signature=field.field_type,
+                    preferred_action_chain="binary_gui_click",
+                )
+                return True
     for attempt in range(2):
         try:
             result_json = await page.evaluate(_CLICK_BINARY_FIELD_JS, field.field_id, desired_checked)
@@ -4079,10 +5452,12 @@ async def _fill_checkbox(page: Any, field: FormField, value: str, tag: str) -> b
     if await _click_binary_with_gui(page, field, tag, desired_checked) and not await _field_has_validation_error(
         page, field.field_id
     ):
+        _record_field_interaction_recipe(recipe_context, ["binary_gui_click"])
         return True
     if await _refresh_binary_field(page, field, tag, desired_checked) and not await _field_has_validation_error(
         page, field.field_id
     ):
+        _record_field_interaction_recipe(recipe_context, ["binary_refresh", "binary_gui_click"])
         return True
     logger.debug(f"skip {tag} (did not remain checked)")
     return False
@@ -4093,10 +5468,37 @@ async def _fill_toggle(page: Any, field: FormField, value: str, tag: str) -> boo
     if not desired_on:
         logger.debug(f"toggle {tag} -> skip (answer=off)")
         return True
+    recipe_context = await _load_field_interaction_recipe(page, field)
     state = await _read_binary_state(page, field.field_id)
     if state is True and not await _field_has_validation_error(page, field.field_id):
         logger.debug(f"skip {tag} (already on)")
         return True
+    recipe = recipe_context.get("recipe") if recipe_context else None
+    if recipe is not None:
+        if "binary_refresh" in recipe.preferred_action_chain:
+            if await _refresh_binary_field(page, field, tag, desired_on) and not await _field_has_validation_error(
+                page,
+                field.field_id,
+            ):
+                _trace_profile_resolution(
+                    "domhand.field_recipe_applied",
+                    field_label=_preferred_field_label(field),
+                    widget_signature=field.field_type,
+                    preferred_action_chain="binary_refresh,binary_gui_click",
+                )
+                return True
+        if "binary_gui_click" in recipe.preferred_action_chain:
+            if await _click_binary_with_gui(page, field, tag, desired_on) and not await _field_has_validation_error(
+                page,
+                field.field_id,
+            ):
+                _trace_profile_resolution(
+                    "domhand.field_recipe_applied",
+                    field_label=_preferred_field_label(field),
+                    widget_signature=field.field_type,
+                    preferred_action_chain="binary_gui_click",
+                )
+                return True
     for attempt in range(2):
         try:
             result_json = await page.evaluate(_CLICK_BINARY_FIELD_JS, field.field_id, desired_on)
@@ -4112,10 +5514,12 @@ async def _fill_toggle(page: Any, field: FormField, value: str, tag: str) -> boo
     if await _click_binary_with_gui(page, field, tag, desired_on) and not await _field_has_validation_error(
         page, field.field_id
     ):
+        _record_field_interaction_recipe(recipe_context, ["binary_gui_click"])
         return True
     if await _refresh_binary_field(page, field, tag, desired_on) and not await _field_has_validation_error(
         page, field.field_id
     ):
+        _record_field_interaction_recipe(recipe_context, ["binary_refresh", "binary_gui_click"])
         return True
     logger.debug(f"skip {tag} (did not remain on)")
     return False
@@ -4142,6 +5546,10 @@ def _get_profile_text() -> str | None:
 
 def _get_profile_data() -> dict[str, Any]:
     """Return structured applicant profile data when available."""
+
+    def _normalize(parsed: dict[str, Any]) -> dict[str, Any]:
+        return camel_to_snake_profile(parsed)
+
     # Prefer file-based path (secure, avoids /proc/pid/environ exposure)
     path = os.environ.get("GH_USER_PROFILE_PATH", "")
     if path:
@@ -4152,7 +5560,7 @@ def _get_profile_data() -> dict[str, Any]:
             if p.is_file():
                 parsed = json.loads(p.read_text(encoding="utf-8"))
                 if isinstance(parsed, dict):
-                    return parsed
+                    return _normalize(parsed)
         except Exception as e:
             logger.warning(f"Failed to parse profile JSON from {path}: {e}")
 
@@ -4162,7 +5570,7 @@ def _get_profile_data() -> dict[str, Any]:
         try:
             parsed = json.loads(raw_json)
             if isinstance(parsed, dict):
-                return parsed
+                return _normalize(parsed)
         except Exception as e:
             logger.warning(f"Failed to parse GH_USER_PROFILE_JSON: {e}")
 
@@ -4171,7 +5579,7 @@ def _get_profile_data() -> dict[str, Any]:
         try:
             parsed = json.loads(text)
             if isinstance(parsed, dict):
-                return parsed
+                return _normalize(parsed)
         except Exception:
             pass
 
