@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from typing import Any
 
 from browser_use.agent.views import ActionResult
@@ -341,6 +342,20 @@ _VERIFY_SELECTION_ON_NODE_JS = r"""function() {
 		return JSON.stringify({value: sel ? sel.text.trim() : ''});
 	}
 
+	const looksLikeOpaqueValue = (text) => {
+		const value = (text || '').replace(/\s+/g, ' ').trim();
+		if (!value) return false;
+		return /^(?:[0-9a-f]{16,}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.test(value);
+	};
+
+	const isUnsetLike = (text) => {
+		const value = (text || '').replace(/\s+/g, ' ').trim();
+		if (!value) return true;
+		if (/^(select one|choose one|please select)$/i.test(value)) return true;
+		if (/\b(select one|choose one|please select)\b/i.test(value)) return true;
+		return looksLikeOpaqueValue(value);
+	};
+
 	const visibleText = (node) => {
 		if (!node) return '';
 		const style = window.getComputedStyle(node);
@@ -350,8 +365,19 @@ _VERIFY_SELECTION_ON_NODE_JS = r"""function() {
 		return (node.textContent || '').replace(/\s+/g, ' ').trim();
 	};
 
-	let value = el.value || '';
-	if (!value && (el.getAttribute('role') === 'combobox' || el.getAttribute('data-uxi-widget-type') === 'selectinput' || el.getAttribute('aria-haspopup') === 'listbox')) {
+	const isSelectLike = el.getAttribute('role') === 'combobox'
+		|| el.getAttribute('data-uxi-widget-type') === 'selectinput'
+		|| el.getAttribute('aria-haspopup') === 'listbox';
+
+	let value = '';
+	if (!isSelectLike && typeof el.value === 'string' && el.value.trim()) {
+		value = el.value.trim();
+	}
+	if (!value && isSelectLike) {
+		const ownText = visibleText(el);
+		if (ownText && !isUnsetLike(ownText)) {
+			value = ownText;
+		}
 		const wrapper = el.closest('[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field') || el.parentElement || el;
 		const tokenSelectors = [
 			'[data-automation-id*="selected"]',
@@ -366,7 +392,7 @@ _VERIFY_SELECTION_ON_NODE_JS = r"""function() {
 			const nodes = wrapper.querySelectorAll(selector);
 			for (const node of nodes) {
 				const text = visibleText(node);
-				if (!text || /^(select one|choose one|required)$/i.test(text)) continue;
+				if (!text || isUnsetLike(text) || /^required$/i.test(text)) continue;
 				value = text;
 				break;
 			}
@@ -374,36 +400,57 @@ _VERIFY_SELECTION_ON_NODE_JS = r"""function() {
 		}
 		if (!value) {
 			const wrapperText = visibleText(wrapper);
-			if (wrapperText && wrapperText.length <= 120 && !/^(select one|choose one|required)$/i.test(wrapperText)) {
+			if (wrapperText && wrapperText.length <= 120 && !isUnsetLike(wrapperText) && !/^required$/i.test(wrapperText)) {
 				value = wrapperText;
 			}
 		}
 	}
 	if (!value) {
-		value = el.getAttribute('aria-label') || '';
+		const ariaLabel = el.getAttribute('aria-label') || '';
+		if (!isUnsetLike(ariaLabel)) {
+			value = ariaLabel;
+		}
 	}
 	if (!value && el.textContent) {
 		value = el.textContent.trim();
 	}
+	if (isUnsetLike(value)) value = '';
 	return JSON.stringify({value: value});
 }"""
 
 _READ_LABEL_CONTEXT_ON_NODE_JS = r"""function() {
 	const el = this;
 	const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
-	let label = clean(el.getAttribute("aria-label"));
+	const visibleText = (node) => {
+		if (!node) return '';
+		const style = window.getComputedStyle(node);
+		if (!style || style.visibility === 'hidden' || style.display === 'none') return '';
+		const rect = node.getBoundingClientRect();
+		if (!rect || rect.width === 0 || rect.height === 0) return '';
+		return clean(node.textContent || '');
+	};
+	const ownValue = visibleText(el);
+	const prune = (text) => {
+		let next = clean(text);
+		if (!next) return '';
+		if (ownValue && next.endsWith(ownValue)) {
+			next = clean(next.slice(0, -ownValue.length));
+		}
+		next = next.replace(/\brequired\b$/i, '').trim();
+		next = next.replace(/\*+\s*$/, '').trim();
+		return next;
+	};
+	let label = "";
 
-	if (!label) {
-		const labelledBy = el.getAttribute("aria-labelledby");
-		if (labelledBy) {
-			const parts = labelledBy.split(/\s+/).filter(Boolean);
-			const texts = parts.map((id) => {
-				const target = document.getElementById(id);
-				return target ? clean(target.textContent) : "";
-			}).filter(Boolean);
-			if (texts.length > 0) {
-				label = texts.join(" ");
-			}
+	const labelledBy = el.getAttribute("aria-labelledby");
+	if (labelledBy) {
+		const parts = labelledBy.split(/\s+/).filter(Boolean);
+		const texts = parts.map((id) => {
+			const target = document.getElementById(id);
+			return target ? prune(target.textContent) : "";
+		}).filter((text) => text && text !== ownValue);
+		if (texts.length > 0) {
+			label = texts[0];
 		}
 	}
 
@@ -411,26 +458,38 @@ _READ_LABEL_CONTEXT_ON_NODE_JS = r"""function() {
 		const escaped = window.CSS && window.CSS.escape ? window.CSS.escape(el.id) : el.id;
 		const externalLabel = document.querySelector(`label[for="${escaped}"]`);
 		if (externalLabel) {
-			label = clean(externalLabel.textContent);
+			label = prune(externalLabel.textContent);
 		}
 	}
 
 	if (!label) {
 		const ancestorLabel = el.closest("label");
-		if (ancestorLabel) {
-			label = clean(ancestorLabel.textContent);
+		if (ancestorLabel && ancestorLabel !== el) {
+			label = prune(ancestorLabel.textContent);
 		}
 	}
 
 	if (!label) {
-		const wrapper = el.closest("fieldset,[role='group'],[data-automation-id='formField']");
+		const wrapper = el.closest("fieldset,[role='group'],[data-automation-id='formField'],[data-automation-id*='formField']");
 		if (wrapper) {
-			const labelNode = wrapper.querySelector(
-				"legend,[data-automation-id='fieldLabel'],label,[aria-label]"
+			const labelNodes = wrapper.querySelectorAll(
+				"legend,[data-automation-id='fieldLabel'],[data-automation-id*='fieldLabel'],label,[class*='question']"
 			);
-			if (labelNode) {
-				label = clean(labelNode.textContent || labelNode.getAttribute("aria-label"));
+			for (const node of labelNodes) {
+				if (!node || node === el) continue;
+				const text = prune(node.textContent || node.getAttribute("aria-label"));
+				if (text && text !== ownValue) {
+					label = text;
+					break;
+				}
 			}
+		}
+	}
+
+	if (!label) {
+		const ariaLabel = prune(el.getAttribute("aria-label"));
+		if (ariaLabel && ariaLabel !== ownValue) {
+			label = ariaLabel;
 		}
 	}
 
@@ -597,11 +656,28 @@ async def _search_and_click_dropdown_path(page: Any, value: str) -> dict[str, An
     return last_result
 
 
+def _looks_like_internal_widget_value(value: str | None) -> bool:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return False
+    return bool(re.fullmatch(r"(?:[0-9a-f]{16,}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})", text, re.IGNORECASE))
+
+
+def _is_effectively_unset_select_value(value: str | None) -> bool:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return True
+    normalized = normalize_name(text)
+    if "select one" in normalized or "choose one" in normalized or "please select" in normalized:
+        return True
+    return _looks_like_internal_widget_value(text)
+
+
 def _selection_matches_value(current: str, expected: str) -> bool:
     """Return True when the widget visibly reflects the intended selection."""
     current_norm = normalize_name(current or "")
     expected_norm = normalize_name(expected or "")
-    if not current_norm or "select one" in current_norm or "choose one" in current_norm:
+    if _is_effectively_unset_select_value(current):
         return False
     if expected_norm and (expected_norm in current_norm or current_norm in expected_norm):
         return True

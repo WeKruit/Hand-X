@@ -13,6 +13,7 @@ from ghosthands.actions.domhand_fill import (
     _filter_fields_for_scope,
     extract_visible_form_fields,
     _field_has_validation_error,
+    _is_effectively_unset_field_value,
     _is_navigation_field,
     _preferred_field_label,
     _read_binary_state,
@@ -54,6 +55,19 @@ def _field_log_snapshot(fields: list[FormField], target_section: str | None = No
             }
         )
     return snapshot
+
+
+def _is_meaningful_section_label(section: str | None, field_label: str | None = None) -> bool:
+    text = str(section or "").strip()
+    if not text:
+        return False
+    if field_label and normalize_name(text) == normalize_name(field_label):
+        return False
+    if len(text) > 80:
+        return False
+    if "?" in text:
+        return False
+    return True
 
 
 _FIELD_LAYOUT_JS = r"""(fieldIds) => {
@@ -270,7 +284,7 @@ def _group_form_fields(raw_fields: list[dict[str, Any]], button_groups: list[dic
 def _field_is_empty(field: FormField) -> bool:
     if field.field_type in {"checkbox", "checkbox-group", "radio", "radio-group", "toggle", "button-group"}:
         return not bool((field.current_value or "").strip())
-    return not bool((field.current_value or "").strip()) or is_placeholder_value(field.current_value)
+    return _is_effectively_unset_field_value(field.current_value)
 
 
 def _widget_kind_for_field(field: FormField, browser_context: dict[str, Any] | None = None) -> str:
@@ -445,10 +459,10 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                 relative_position = "above"
             elif top > 0:
                 relative_position = "below"
-        if field.section and relative_position == "in_view":
+        if _is_meaningful_section_label(field.section, _preferred_field_label(field)) and relative_position == "in_view":
             sections_in_view.append(field.section)
 
-        if field.field_type in {"radio-group", "button-group"} and not field.current_value:
+        if field.field_type in {"radio-group", "button-group", "checkbox-group"} and not field.current_value:
             field.current_value = await _read_group_selection(page, field.field_id)
         elif field.field_type == "select":
             observed_value = await _read_field_value(page, field.field_id)
@@ -524,20 +538,20 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         if str(text).strip()
     ]
     current_section = params.target_section if target_section_has_live_match else ""
-    if not current_section and heading_texts:
-        current_section = heading_texts[0]
     if not current_section:
         for issue in unresolved_required:
-            if issue.section and issue.relative_position == "in_view":
+            if _is_meaningful_section_label(issue.section, issue.name) and issue.relative_position == "in_view":
                 current_section = issue.section
                 break
     if not current_section:
         for issue in unresolved_required:
-            if issue.section:
+            if _is_meaningful_section_label(issue.section, issue.name):
                 current_section = issue.section
                 break
     if not current_section and sections_in_view:
         current_section = sections_in_view[0]
+    if not current_section and heading_texts:
+        current_section = heading_texts[0]
 
     visible_errors = [
         text

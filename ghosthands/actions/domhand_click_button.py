@@ -595,6 +595,20 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
         state_changed = bool(fingerprint_before and fingerprint_after and fingerprint_before != fingerprint_after)
         return url_after, fingerprint_after, state_changed
 
+    async def _wait_for_transition(timeout_seconds: float = 4.5, poll_interval: float = 0.45) -> tuple[str, dict, bool]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        url_after = url_before
+        fingerprint_after: dict = {}
+        state_changed = False
+        while True:
+            await asyncio.sleep(poll_interval)
+            url_after, fingerprint_after, state_changed = await _capture_transition_state()
+            if url_before != url_after or state_changed:
+                return url_after, fingerprint_after, state_changed
+            if loop.time() >= deadline:
+                return url_after, fingerprint_after, state_changed
+
     # ── Strategy 1: preview, highlight, then JS event sequence ────────────
     try:
         preview_json = await page.evaluate(_FIND_AND_CLICK_JS, label, False)
@@ -622,8 +636,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
             result["inShadowRoot"] = preview_result["inShadowRoot"]
 
         if result.get("found") and result.get("clicked"):
-            await asyncio.sleep(1.5)
-            url_after, fingerprint_after, state_changed = await _capture_transition_state()
+            url_after, fingerprint_after, state_changed = await _wait_for_transition()
 
             method = result.get("clicked", "unknown")
             logger.info(
@@ -660,8 +673,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
             elements = await page.get_elements_by_css_selector(selector)
             if elements:
                 await elements[0].click()
-                await asyncio.sleep(1.0)
-                url_after, fingerprint_after, state_changed = await _capture_transition_state()
+                url_after, fingerprint_after, state_changed = await _wait_for_transition()
 
                 logger.info(
                     "domhand_click_button.cdp_click",
@@ -694,8 +706,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
             submit_result = json.loads(submit_json)
 
             if submit_result.get("submitted") or submit_result.get("clicked"):
-                await asyncio.sleep(1.5)
-                url_after, fingerprint_after, state_changed = await _capture_transition_state()
+                url_after, fingerprint_after, state_changed = await _wait_for_transition()
 
                 logger.info(
                     "domhand_click_button.form_submit",
@@ -730,8 +741,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
 
             if focus_result.get("focused"):
                 await page.keyboard.press("Enter")
-                await asyncio.sleep(1.5)
-                url_after, fingerprint_after, state_changed = await _capture_transition_state()
+                url_after, fingerprint_after, state_changed = await _wait_for_transition()
 
                 logger.info(
                     "domhand_click_button.enter_key",
@@ -810,8 +820,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                 retry_json = await page.evaluate(_FIND_AND_CLICK_JS, label, True)
                 retry_result = json.loads(retry_json)
                 if retry_result.get("found") and retry_result.get("clicked"):
-                    await asyncio.sleep(1.5)
-                    url_after, _fingerprint_after, _state_changed = await _capture_transition_state()
+                    url_after, _fingerprint_after, _state_changed = await _wait_for_transition()
 
                     if url_before != url_after:
                         logger.info(

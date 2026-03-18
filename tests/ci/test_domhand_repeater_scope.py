@@ -1397,6 +1397,8 @@ def test_dropdown_selection_match_requires_final_visible_value():
     assert _selection_matches_value("LinkedIn", "How did you hear about us > LinkedIn")
     assert not _selection_matches_value("Job Board/Social Media Web Site", "LinkedIn")
     assert not _selection_matches_value("Select One", "LinkedIn")
+    assert not _selection_matches_value("05e15101582a10019dbe3ae8c5a80000", "Yes")
+    assert not _selection_matches_value("What degree are you seeking? Select One", "Bachelor's Degree")
 
 
 def test_fill_dropdown_confirmation_requires_final_visible_value():

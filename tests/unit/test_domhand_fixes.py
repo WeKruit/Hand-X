@@ -9,6 +9,7 @@ All tests are offline (no browser, no database, no API calls).
 """
 
 import asyncio
+import pytest
 from unittest.mock import AsyncMock, patch
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,76 @@ def test_sanitize_normal_values_unchanged():
     assert result == "Jane"
 
 
+def test_sanitize_does_not_guess_optional_suffix():
+    """Optional legal-name fragments should stay blank unless explicitly saved."""
+    from ghosthands.actions.domhand_fill import _sanitize_no_guess_answer
+
+    result = _sanitize_no_guess_answer(
+        "Suffix",
+        False,
+        "II",
+        {},
+        field_type="text",
+        question_text="Suffix",
+    )
+
+    assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_checkbox_group_already_matches_uses_selected_label_not_binary_state():
+    from ghosthands.actions.domhand_fill import _field_already_matches
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="disability",
+        name="Please check one of the boxes below:*",
+        field_type="checkbox-group",
+        choices=[
+            "Yes, I have a disability, or have had one in the past",
+            "No, I do not have a disability and have not had one in the past",
+        ],
+        required=True,
+    )
+
+    with (
+        patch("ghosthands.actions.domhand_fill._read_group_selection", AsyncMock(return_value="No, I do not have a disability and have not had one in the past")),
+        patch("ghosthands.actions.domhand_fill._field_has_validation_error", AsyncMock(return_value=False)),
+    ):
+        assert await _field_already_matches(
+            AsyncMock(),
+            field,
+            "No, I do not have a disability and have not had one in the past",
+        ) is True
+
+
+@pytest.mark.asyncio
+async def test_fill_checkbox_group_does_not_skip_explicit_no_choice():
+    from ghosthands.actions.domhand_fill import _fill_checkbox_group
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="relatives",
+        name="Do you have any relatives that work for DLH?",
+        field_type="checkbox-group",
+        choices=["Yes", "No"],
+        required=True,
+    )
+    page = AsyncMock()
+    page.evaluate = AsyncMock(return_value='{"clicked": true, "text": "No"}')
+
+    with (
+        patch("ghosthands.actions.domhand_fill._load_field_interaction_recipe", AsyncMock(return_value=None)),
+        patch("ghosthands.actions.domhand_fill._read_group_selection", AsyncMock(side_effect=["Yes", "No"])),
+        patch("ghosthands.actions.domhand_fill._field_has_validation_error", AsyncMock(return_value=False)),
+        patch("ghosthands.actions.domhand_fill._click_group_option_with_gui", AsyncMock(return_value=False)),
+        patch("ghosthands.actions.domhand_fill._reset_group_selection_with_gui", AsyncMock(return_value=False)),
+        patch("ghosthands.actions.domhand_fill._record_field_interaction_recipe"),
+    ):
+        assert await _fill_checkbox_group(page, field, "No", "[Relatives]") is True
+        page.evaluate.assert_awaited()
+
+
 # ---------------------------------------------------------------------------
 # Resolution provenance
 # ---------------------------------------------------------------------------
@@ -197,6 +268,29 @@ def test_resolve_llm_answer_marks_best_effort_guess():
     assert resolved.source == "llm"
 
 
+def test_resolve_llm_answer_does_not_guess_skills():
+    """Skill fields should use saved profile skills only, never LLM guesses."""
+    from ghosthands.actions.domhand_fill import _resolve_llm_answer_for_field
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="skills",
+        name="Type to Add Skills",
+        raw_label="Type to Add Skills",
+        field_type="select",
+        required=False,
+    )
+
+    resolved = _resolve_llm_answer_for_field(
+        field,
+        {"Type to Add Skills": "Azure, Web Development, Backend Development"},
+        {},
+        {},
+    )
+
+    assert resolved is None
+
+
 def test_resolve_llm_answer_uses_deterministic_default_for_certifications():
     """Certifications/licenses should default to literal None without guess provenance."""
     from ghosthands.actions.domhand_fill import _resolve_llm_answer_for_field
@@ -216,6 +310,43 @@ def test_resolve_llm_answer_uses_deterministic_default_for_certifications():
     assert resolved.value == "None"
     assert resolved.answer_mode is None
     assert resolved.source == "dom"
+
+
+def test_known_profile_value_uses_profile_skills_only_and_caps_to_ten():
+    """Skill sourcing should preserve order, dedupe, and cap at 10."""
+    from ghosthands.actions.domhand_fill import _known_profile_value
+
+    result = _known_profile_value(
+        "Type to Add Skills",
+        {},
+        {
+            "skills": [
+                "Python",
+                "React",
+                "Python",
+                "Node.js",
+                "TypeScript",
+                "PostgreSQL",
+                "Docker",
+                "Kubernetes",
+                "AWS",
+                "GraphQL",
+                "Redis",
+                "Terraform",
+            ]
+        },
+    )
+
+    assert result == "Python, React, Node.js, TypeScript, PostgreSQL, Docker, Kubernetes, AWS, GraphQL, Redis"
+
+
+def test_effectively_unset_field_value_rejects_opaque_widget_ids():
+    """Workday select UUIDs must not count as visible selections."""
+    from ghosthands.actions.domhand_fill import _is_effectively_unset_field_value
+
+    assert _is_effectively_unset_field_value("05e15101582a10019dbe3ae8c5a80000") is True
+    assert _is_effectively_unset_field_value("What degree are you seeking? Select One") is True
+    assert _is_effectively_unset_field_value("Bachelor's Degree") is False
 
 
 def test_recovery_task_no_longer_uses_hitl_wording():

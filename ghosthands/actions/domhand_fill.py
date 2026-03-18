@@ -109,6 +109,13 @@ _SOCIAL_OR_ID_NO_GUESS_RE = re.compile(
     r"|tax\s*id|itin|ein|ssn|social security)\b",
     re.IGNORECASE,
 )
+_OPAQUE_WIDGET_VALUE_RE = re.compile(
+    r"^(?:[0-9a-f]{16,}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$",
+    re.IGNORECASE,
+)
+_SELECT_PLACEHOLDER_FRAGMENT_RE = re.compile(r"\b(select one|choose one|please select)\b", re.IGNORECASE)
+_NAME_FRAGMENT_NO_GUESS_RE = re.compile(r"\b(suffix|preferred name|nickname)\b", re.IGNORECASE)
+_SKILL_FIELD_MAX_ITEMS = 10
 
 # Navigation-like button labels to skip when detecting button groups.
 _NAV_BUTTON_LABELS = frozenset(
@@ -190,6 +197,58 @@ def _profile_debug_preview(value: Any) -> str:
     if len(text) <= 96:
         return text
     return f"{text[:93]}..."
+
+
+def _looks_like_internal_widget_value(value: str | None) -> bool:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return False
+    return bool(_OPAQUE_WIDGET_VALUE_RE.fullmatch(text))
+
+
+def _is_effectively_unset_field_value(value: str | None) -> bool:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return True
+    if is_placeholder_value(text):
+        return True
+    if _looks_like_internal_widget_value(text):
+        return True
+    if _SELECT_PLACEHOLDER_FRAGMENT_RE.search(text):
+        return True
+    return False
+
+
+def _is_non_guess_name_fragment(field_name: str | None) -> bool:
+    norm = normalize_name(field_name or "")
+    if not norm:
+        return False
+    if _NAME_FRAGMENT_NO_GUESS_RE.search(norm):
+        return True
+    if norm == "name":
+        return True
+    return False
+
+
+def _profile_skill_values(profile_data: dict[str, Any] | None) -> list[str]:
+    raw_values = (profile_data or {}).get("skills")
+    if not isinstance(raw_values, list):
+        return []
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for entry in raw_values:
+        text = str(entry or "").strip()
+        if not text:
+            continue
+        key = normalize_name(text)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(text)
+        if len(ordered) >= _SKILL_FIELD_MAX_ITEMS:
+            break
+    return ordered
 
 
 def _should_trace_profile_label(label: str) -> bool:
@@ -695,6 +754,65 @@ _EXTRACT_FIELDS_JS = r"""() => {
 			field_fingerprint: null,
 			current_value: ''
 		};
+		var isSelectLike = type === 'select';
+		var looksLikeOpaqueValue = function(text) {
+			var value = (text || '').replace(/\s+/g, ' ').trim();
+			if (!value) return false;
+			return /^(?:[0-9a-f]{16,}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.test(value);
+		};
+		var isUnsetLike = function(text) {
+			var value = (text || '').replace(/\s+/g, ' ').trim();
+			if (!value) return true;
+			if (/^(select one|choose one|please select)$/i.test(value)) return true;
+			if (/\b(select one|choose one|please select)\b/i.test(value)) return true;
+			return looksLikeOpaqueValue(value);
+		};
+		var readVisibleSelectValue = function(node) {
+			if (!node) return '';
+			var localVisibleText = function(target) {
+				if (!target) return '';
+				var style = window.getComputedStyle(target);
+				if (!style || style.visibility === 'hidden' || style.display === 'none') return '';
+				var rect = target.getBoundingClientRect();
+				if (!rect || rect.width === 0 || rect.height === 0) return '';
+				return (target.textContent || '').replace(/\s+/g, ' ').trim();
+			};
+			var ownText = localVisibleText(node);
+			if (ownText && !isUnsetLike(ownText)) return ownText;
+			var wrapper = ff.closestCrossRoot(
+				node,
+				'[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field'
+			) || node.parentElement || node;
+			var tokenSelectors = [
+				'[data-automation-id*="selected"]',
+				'[data-automation-id*="Selected"]',
+				'[data-automation-id*="token"]',
+				'[data-automation-id*="Token"]',
+				'[class*="token"]',
+				'[class*="Token"]',
+				'[class*="pill"]',
+				'[class*="Pill"]',
+				'[class*="chip"]',
+				'[class*="Chip"]',
+				'[class*="tag"]',
+				'[class*="Tag"]'
+			];
+			for (var si = 0; si < tokenSelectors.length; si++) {
+				var tokenNodes = wrapper.querySelectorAll(tokenSelectors[si]);
+				for (var sj = 0; sj < tokenNodes.length; sj++) {
+					var tokenText = localVisibleText(tokenNodes[sj]);
+					if (!tokenText || isUnsetLike(tokenText)) continue;
+					return tokenText;
+				}
+			}
+			var wrapperText = localVisibleText(wrapper);
+			if (wrapperText && !isUnsetLike(wrapperText) && wrapperText.length <= 120) {
+				return wrapperText;
+			}
+			var ariaLabel = (node.getAttribute('aria-label') || '').trim();
+			if (ariaLabel && !isUnsetLike(ariaLabel)) return ariaLabel;
+			return '';
+		};
 
 		if (type === 'select') {
 			var opts = [];
@@ -744,6 +862,8 @@ _EXTRACT_FIELDS_JS = r"""() => {
 		if (el.tagName === 'SELECT') {
 			var selOpt = el.options[el.selectedIndex];
 			entry.current_value = selOpt ? selOpt.text.trim() : '';
+		} else if (isSelectLike) {
+			entry.current_value = readVisibleSelectValue(el);
 		} else if (type === 'checkbox' || type === 'radio') {
 			if (el.tagName === 'INPUT') entry.current_value = el.checked ? 'checked' : '';
 			else entry.current_value = el.getAttribute('aria-checked') === 'true' ? 'checked' : '';
@@ -961,16 +1081,16 @@ _CLICK_RADIO_OPTION_JS = r"""(ffId, text) => {
 	if (!el) return JSON.stringify({clicked: false, error: 'Element not found'});
 	var group = ff.closestCrossRoot(
 		el,
-		'fieldset, [role="radiogroup"], [role="group"], .radio-cards, .radio-group, [data-automation-id="formField"], [data-automation-id*="formField"]'
+		'fieldset, [role="radiogroup"], [role="group"], .radio-cards, .radio-group, .checkbox-group, [data-automation-id="formField"], [data-automation-id*="formField"]'
 	) || ff.rootParent(el) || el;
 	var items = group.querySelectorAll(
-		'[role="radio"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], label.radio-card, .radio-card, .radio-option, [role="button"], [role="cell"], input[type="radio"]'
+		'[role="radio"], [role="checkbox"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], label.radio-card, .radio-card, .radio-option, label.checkbox-card, .checkbox-card, .checkbox-option, [role="button"], [role="cell"], input[type="radio"], input[type="checkbox"]'
 	);
 	var lower = text.toLowerCase().trim();
 	var getClickable = function(item) {
 		return ff.closestCrossRoot(
 			item,
-			'button, label, [role="row"], [role="cell"], [role="button"], [role="radio"], .radio-card, .radio-option, [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], [data-automation-id*="radio"]'
+			'button, label, [role="row"], [role="cell"], [role="button"], [role="radio"], [role="checkbox"], .radio-card, .radio-option, .checkbox-card, .checkbox-option, [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], [data-automation-id*="radio"], [data-automation-id*="checkbox"]'
 		) || item.parentElement || item;
 	};
 	var getText = function(item) {
@@ -1186,11 +1306,11 @@ _READ_GROUP_SELECTION_JS = r"""(ffId) => {
 	if (!el) return JSON.stringify({selected: ''});
 	var group = ff.closestCrossRoot(
 		el,
-		'fieldset, [role="radiogroup"], [role="group"], .radio-group, .radio-cards, [data-automation-id="formField"], [data-automation-id*="formField"]'
+		'fieldset, [role="radiogroup"], [role="group"], .radio-group, .radio-cards, .checkbox-group, [data-automation-id="formField"], [data-automation-id*="formField"]'
 	) || ff.rootParent(el) || el;
 	var nodes = Array.from(
 		group.querySelectorAll(
-			'[role="radio"], input[type="radio"], label.radio-card, .radio-card, .radio-option, button, [role="button"], [role="cell"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"]'
+			'[role="radio"], [role="checkbox"], input[type="radio"], input[type="checkbox"], label.radio-card, .radio-card, .radio-option, label.checkbox-card, .checkbox-card, .checkbox-option, button, [role="button"], [role="cell"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"]'
 		)
 	);
 	var seen = new Set();
@@ -1211,22 +1331,22 @@ _READ_GROUP_SELECTION_JS = r"""(ffId) => {
 		if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
 		var wrap = ff.closestCrossRoot(
 			node,
-			'label, [role="radio"], .radio-card, .radio-option, [role="button"], [role="cell"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"]'
+			'label, [role="radio"], [role="checkbox"], .radio-card, .radio-option, .checkbox-card, .checkbox-option, [role="button"], [role="cell"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"]'
 		) || node;
 		return (wrap.textContent || '').trim();
 	};
 	var isSelected = function(node) {
 		if (!node) return false;
-		if (node.matches && node.matches('input[type="radio"]') && node.checked) return true;
+		if (node.matches && node.matches('input[type="radio"], input[type="checkbox"]') && node.checked) return true;
 		var ariaChecked = node.getAttribute && node.getAttribute('aria-checked');
 		if (ariaChecked === 'true') return true;
 		var ariaPressed = node.getAttribute && node.getAttribute('aria-pressed');
 		if (ariaPressed === 'true') return true;
 		var ariaSelected = node.getAttribute && node.getAttribute('aria-selected');
 		if (ariaSelected === 'true') return true;
-		var nested = node.querySelector && node.querySelector('input[type="radio"], [role="radio"]');
+		var nested = node.querySelector && node.querySelector('input[type="radio"], input[type="checkbox"], [role="radio"], [role="checkbox"]');
 		if (nested) {
-			if (nested.matches && nested.matches('input[type="radio"]') && nested.checked) return true;
+			if (nested.matches && nested.matches('input[type="radio"], input[type="checkbox"]') && nested.checked) return true;
 			if (nested.getAttribute && nested.getAttribute('aria-checked') === 'true') return true;
 		}
 		var className = typeof node.className === 'string' ? node.className : '';
@@ -1245,11 +1365,11 @@ _GET_GROUP_OPTION_TARGET_JS = r"""(ffId, text) => {
 	if (!el) return JSON.stringify({found: false, error: 'Element not found'});
 	var group = ff.closestCrossRoot(
 		el,
-		'fieldset, [role="radiogroup"], [role="group"], .radio-group, .radio-cards, [data-automation-id="formField"], [data-automation-id*="formField"]'
+		'fieldset, [role="radiogroup"], [role="group"], .radio-group, .radio-cards, .checkbox-group, [data-automation-id="formField"], [data-automation-id*="formField"]'
 	) || ff.rootParent(el) || el;
 	var nodes = Array.from(
 		group.querySelectorAll(
-			'[role="radio"], input[type="radio"], label.radio-card, .radio-card, .radio-option, button, [role="button"], [role="cell"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"]'
+			'[role="radio"], [role="checkbox"], input[type="radio"], input[type="checkbox"], label.radio-card, .radio-card, .radio-option, label.checkbox-card, .checkbox-card, .checkbox-option, button, [role="button"], [role="cell"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"]'
 		)
 	);
 	var lower = text.toLowerCase().trim();
@@ -1257,7 +1377,7 @@ _GET_GROUP_OPTION_TARGET_JS = r"""(ffId, text) => {
 	var getClickable = function(node) {
 		return ff.closestCrossRoot(
 			node,
-			'button, label, [role="row"], [role="cell"], [role="button"], [role="radio"], .radio-card, .radio-option, [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], [data-automation-id*="radio"]'
+			'button, label, [role="row"], [role="cell"], [role="button"], [role="radio"], [role="checkbox"], .radio-card, .radio-option, .checkbox-card, .checkbox-option, [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], [data-automation-id*="radio"], [data-automation-id*="checkbox"]'
 		) || node.parentElement || node;
 	};
 	var getLabel = function(node) {
@@ -1325,6 +1445,18 @@ _READ_FIELD_VALUE_JS = r"""(ffId) => {
 	var ff = window.__ff;
 	var el = ff ? ff.byId(ffId) : null;
 	if (!el) return JSON.stringify('');
+	var looksLikeOpaqueValue = function(text) {
+		var value = (text || '').replace(/\s+/g, ' ').trim();
+		if (!value) return false;
+		return /^(?:[0-9a-f]{16,}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.test(value);
+	};
+	var isUnsetLike = function(text) {
+		var value = (text || '').replace(/\s+/g, ' ').trim();
+		if (!value) return true;
+		if (/^(select one|choose one|please select)$/i.test(value)) return true;
+		if (/\b(select one|choose one|please select)\b/i.test(value)) return true;
+		return looksLikeOpaqueValue(value);
+	};
 	var visibleText = function(node) {
 		if (!node) return '';
 		var style = window.getComputedStyle(node);
@@ -1333,19 +1465,27 @@ _READ_FIELD_VALUE_JS = r"""(ffId) => {
 		if (!rect || rect.width === 0 || rect.height === 0) return '';
 		return (node.textContent || '').replace(/\s+/g, ' ').trim();
 	};
+	var isSelectLike = el.getAttribute('role') === 'combobox'
+		|| el.getAttribute('role') === 'listbox'
+		|| el.getAttribute('data-uxi-widget-type') === 'selectinput'
+		|| el.getAttribute('aria-haspopup') === 'listbox';
 	if (el.tagName === 'SELECT') {
 		var selOpt = el.options[el.selectedIndex];
 		return JSON.stringify(selOpt ? (selOpt.textContent || '').trim() : '');
 	}
-	if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+	if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !isSelectLike) {
 		var directValue = (el.value || '').trim();
 		if (directValue) return JSON.stringify(directValue);
 	}
 	var value = '';
-	if (typeof el.value === 'string' && el.value.trim()) {
+	if (!isSelectLike && typeof el.value === 'string' && el.value.trim()) {
 		value = el.value.trim();
 	}
-	if (!value && (el.getAttribute('role') === 'combobox' || el.getAttribute('data-uxi-widget-type') === 'selectinput' || el.getAttribute('aria-haspopup') === 'listbox')) {
+	if (!value && isSelectLike) {
+		var ownText = visibleText(el);
+		if (ownText && !isUnsetLike(ownText)) {
+			value = ownText;
+		}
 		var wrapper = ff.closestCrossRoot(
 			el,
 			'[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field'
@@ -1369,27 +1509,28 @@ _READ_FIELD_VALUE_JS = r"""(ffId) => {
 			for (var j = 0; j < tokenNodes.length; j++) {
 				var tokenText = visibleText(tokenNodes[j]);
 				if (!tokenText) continue;
-				if (/^(select one|choose one|required)$/i.test(tokenText)) continue;
+				if (isUnsetLike(tokenText) || /^required$/i.test(tokenText)) continue;
 				value = tokenText;
 				break;
 			}
 		}
 		if (!value) {
 			var wrapperText = visibleText(wrapper);
-			if (wrapperText && !/^(select one|choose one|required)$/i.test(wrapperText) && wrapperText.length <= 120) {
+			if (wrapperText && !isUnsetLike(wrapperText) && !/^required$/i.test(wrapperText) && wrapperText.length <= 120) {
 				value = wrapperText;
 			}
 		}
 	}
 	if (!value) {
 		var ariaLabel = el.getAttribute('aria-label');
-		if (ariaLabel && ariaLabel.trim() && ariaLabel.trim().toLowerCase() !== 'select one') {
+		if (ariaLabel && ariaLabel.trim() && !isUnsetLike(ariaLabel)) {
 			value = ariaLabel.trim();
 		}
 	}
 	if (!value && el.textContent) {
 		value = el.textContent.trim();
 	}
+	if (isUnsetLike(value)) value = '';
 	return JSON.stringify(value || '');
 }"""
 
@@ -2490,8 +2631,8 @@ def _build_profile_answer_map(
         "Your name",
         "Full name",
         "Signature",
-        "Name",
     )
+    add(canonical.get("preferred_name"), "Preferred name", "Nickname")
     add(
         canonical.get("address"),
         "Address",
@@ -2665,6 +2806,17 @@ def _build_profile_answer_map(
                 add("Yes", "Are you at least 18 years old?", "Are you 18 years of age or older?")
         except ValueError:
             pass
+
+    skills = _profile_skill_values(profile_data)
+    if skills:
+        add(
+            ", ".join(skills),
+            "Skills",
+            "Skill",
+            "Technical skills",
+            "Technologies",
+            "Type to Add Skills",
+        )
 
     # ── Inject Q&A bank entries into the answer map ──────────────────
     # The answer bank arrives from Desktop/VALET as profile_data["answerBank"]
@@ -3158,7 +3310,7 @@ def _field_value_matches_expected(current: str, expected: str) -> bool:
     expected_text = (expected or "").strip()
     if not current_text or not expected_text:
         return False
-    if is_placeholder_value(current_text):
+    if _is_effectively_unset_field_value(current_text):
         return False
 
     current_norm = normalize_name(current_text)
@@ -3493,11 +3645,11 @@ async def _field_already_matches(page: Any, field: FormField, value: str | None)
     """Live DOM check to avoid re-filling a field that already settled correctly."""
     if not value:
         return False
-    if field.field_type in {"checkbox", "checkbox-group", "toggle"}:
+    if field.field_type in {"checkbox", "toggle"}:
         desired_checked = not _is_explicit_false(value)
         state = await _read_binary_state(page, field.field_id)
         return state is desired_checked and not await _field_has_validation_error(page, field.field_id)
-    if field.field_type in {"radio-group", "radio", "button-group"}:
+    if field.field_type in {"checkbox-group", "radio-group", "radio", "button-group"}:
         current = await _read_group_selection(page, field.field_id)
         return _field_value_matches_expected(current, value) and not await _field_has_validation_error(
             page, field.field_id
@@ -3506,20 +3658,28 @@ async def _field_already_matches(page: Any, field: FormField, value: str | None)
     return _field_value_matches_expected(current, value) and not await _field_has_validation_error(page, field.field_id)
 
 
-def _known_profile_value(field_name: str, evidence: dict[str, str | None]) -> str | None:
+def _known_profile_value(
+    field_name: str,
+    evidence: dict[str, str | None],
+    profile_data: dict[str, Any] | None = None,
+) -> str | None:
     """Return a profile value if the field name matches a known personal field."""
     name = normalize_name(field_name)
     if not name:
         return None
+    if _is_skill_like(field_name):
+        skills = _profile_skill_values(profile_data)
+        if skills:
+            return ", ".join(skills)
+    if "suffix" in name:
+        return None
+    if "preferred name" in name or "nickname" in name:
+        canonical = build_canonical_profile(profile_data or {}, evidence)
+        return canonical.get("preferred_name")
     if "first name" in name and evidence.get("first_name"):
         return evidence["first_name"]
     if "last name" in name and evidence.get("last_name"):
         return evidence["last_name"]
-    if name == "name":
-        first = evidence.get("first_name", "")
-        last = evidence.get("last_name", "")
-        if first or last:
-            return f"{first} {last}".strip()
     if "full name" in name:
         first = evidence.get("first_name", "")
         last = evidence.get("last_name", "")
@@ -3699,7 +3859,7 @@ def _known_profile_value_for_field(
         )
         return None
     for label in _field_label_candidates(field):
-        value = _known_profile_value(label, evidence)
+        value = _known_profile_value(label, evidence, profile_data)
         if value:
             coerced = _coerce_answer_to_field(field, value)
             _trace_profile_resolution(
@@ -3740,11 +3900,11 @@ def _known_profile_value_for_field(
             raw_value=_profile_debug_preview(default_answer),
         )
         return default_answer
-    fallback = _coerce_answer_to_field(field, _known_profile_value(field.name, evidence))
+    fallback = _coerce_answer_to_field(field, _known_profile_value(field.name, evidence, profile_data))
     _trace_profile_resolution(
         "domhand.profile_fallback_lookup",
         field_label=field_label,
-        raw_value=_profile_debug_preview(_known_profile_value(field.name, evidence)),
+        raw_value=_profile_debug_preview(_known_profile_value(field.name, evidence, profile_data)),
         coerced_value=_profile_debug_preview(fallback),
     )
     return fallback
@@ -3824,7 +3984,7 @@ def _resolve_known_profile_value_for_field(
         )
         return None
     for label in _field_label_candidates(field):
-        value = _known_profile_value(label, evidence)
+        value = _known_profile_value(label, evidence, profile_data)
         if value:
             coerced = _coerce_answer_to_field(field, value)
             if not coerced:
@@ -3881,11 +4041,11 @@ def _resolve_known_profile_value_for_field(
             confidence=0.68,
         )
 
-    fallback = _coerce_answer_to_field(field, _known_profile_value(field.name, evidence))
+    fallback = _coerce_answer_to_field(field, _known_profile_value(field.name, evidence, profile_data))
     _trace_profile_resolution(
         "domhand.profile_fallback_lookup",
         field_label=field_label,
-        raw_value=_profile_debug_preview(_known_profile_value(field.name, evidence)),
+        raw_value=_profile_debug_preview(_known_profile_value(field.name, evidence, profile_data)),
         coerced_value=_profile_debug_preview(fallback),
     )
     if not fallback:
@@ -3922,7 +4082,11 @@ def _resolve_llm_answer_for_field(
     evidence: dict[str, str | None],
     profile_data: dict[str, Any] | None = None,
 ) -> ResolvedFieldValue | None:
+    if _is_skill_like(field.name):
+        return None
     label_candidates = _field_label_candidates(field) or [field.name]
+    if any(_is_non_guess_name_fragment(label) for label in label_candidates):
+        return None
     candidate_norms = [_normalize_match_label(label) for label in label_candidates if _normalize_match_label(label)]
     minimum_confidence = "medium" if field.required else "strong"
 
@@ -4069,6 +4233,8 @@ def _sanitize_no_guess_answer(
     """
     proposed = (answer or "").strip()
     known = _known_profile_value(field_name, evidence)
+    if _is_non_guess_name_fragment(question_text or field_name):
+        return known or ""
 
     # ── [NEEDS_USER_INPUT] passthrough ────────────────────────────────
     if proposed and "[NEEDS_USER_INPUT]" in proposed.upper():
@@ -4699,7 +4865,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             key = get_stable_field_key(f)
             if key in fields_skipped:
                 continue  # Already determined no profile data — don't retry
-            if key in fields_seen and f.current_value and not is_placeholder_value(f.current_value):
+            if key in fields_seen and f.current_value and not _is_effectively_unset_field_value(f.current_value):
                 continue
             if _is_navigation_field(f):
                 continue
@@ -4726,7 +4892,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         direct_fills: dict[str, str] = {}
         resolved_values: dict[str, ResolvedFieldValue] = {}
         for f in fillable_fields:
-            if f.current_value and not is_placeholder_value(f.current_value):
+            if f.current_value and not _is_effectively_unset_field_value(f.current_value):
                 fields_seen.add(get_stable_field_key(f))
                 continue
             auth_val = _known_auth_override_for_field(f, auth_overrides)
@@ -5300,7 +5466,7 @@ async def _fill_select_field(page: Any, field: FormField, value: str, tag: str) 
 
     is_skill = _is_skill_like(field.name)
     all_values = [v.strip() for v in value.split(",") if v.strip()]
-    values = all_values[:3] if is_skill else all_values
+    values = all_values[:_SKILL_FIELD_MAX_ITEMS] if is_skill else all_values
     if len(values) > 1 or is_skill:
         return await _fill_multi_select(page, field, values, tag)
     return await _fill_custom_dropdown(page, field, value, tag)
@@ -5686,26 +5852,28 @@ async def _fill_button_group(page: Any, field: FormField, value: str, tag: str) 
 
 
 async def _fill_checkbox_group(page: Any, field: FormField, value: str, tag: str) -> bool:
-    if _is_explicit_false(value):
-        logger.debug(f"check {tag} -> skip (answer=unchecked)")
-        return True
+    choice = value or (field.choices[0] if field.choices else "")
+    if not choice:
+        logger.debug(f"skip {tag} (checkbox-group, no answer)")
+        return False
     recipe_context = await _load_field_interaction_recipe(page, field)
+    current = await _read_group_selection(page, field.field_id)
+    if _field_value_matches_expected(current, choice) and not await _field_has_validation_error(page, field.field_id):
+        logger.debug(f"skip {tag} (already selected)")
+        return True
     recipe = recipe_context.get("recipe") if recipe_context else None
     if recipe is not None:
-        if "binary_refresh" in recipe.preferred_action_chain:
-            if await _refresh_binary_field(page, field, tag, True) and not await _field_has_validation_error(
-                page,
-                field.field_id,
-            ):
+        if "group_option_reset" in recipe.preferred_action_chain and current:
+            if await _reset_group_selection_with_gui(page, field, current, choice, tag):
                 _trace_profile_resolution(
                     "domhand.field_recipe_applied",
                     field_label=_preferred_field_label(field),
                     widget_signature=field.field_type,
-                    preferred_action_chain="binary_refresh,binary_gui_click",
+                    preferred_action_chain="group_option_reset,group_option_gui_click",
                 )
                 return True
-        if "binary_gui_click" in recipe.preferred_action_chain:
-            if await _click_binary_with_gui(page, field, tag, True) and not await _field_has_validation_error(
+        if "group_option_gui_click" in recipe.preferred_action_chain:
+            if await _click_group_option_with_gui(page, field, choice, tag) and not await _field_has_validation_error(
                 page,
                 field.field_id,
             ):
@@ -5713,29 +5881,36 @@ async def _fill_checkbox_group(page: Any, field: FormField, value: str, tag: str
                     "domhand.field_recipe_applied",
                     field_label=_preferred_field_label(field),
                     widget_signature=field.field_type,
-                    preferred_action_chain="binary_gui_click",
+                    preferred_action_chain="group_option_gui_click",
                 )
                 return True
     try:
-        result_json = await page.evaluate(_CLICK_CHECKBOX_GROUP_JS, field.field_id)
+        result_json = await page.evaluate(_CLICK_RADIO_OPTION_JS, field.field_id, choice)
         result = json.loads(result_json)
         if result.get("clicked"):
-            current = await _read_binary_state(page, field.field_id)
-            if result.get("alreadyChecked") and not await _field_has_validation_error(page, field.field_id):
-                logger.debug(f"skip {tag} (already checked)")
-                return True
-            if current is True and not await _field_has_validation_error(page, field.field_id):
-                logger.debug(f"check {tag} -> first")
-                return True
-            if current is True and await _field_has_validation_error(page, field.field_id):
-                if await _refresh_binary_field(page, field, tag, True):
-                    _record_field_interaction_recipe(recipe_context, ["binary_refresh", "binary_gui_click"])
-                    return True
-            if await _click_binary_with_gui(page, field, tag, True):
-                _record_field_interaction_recipe(recipe_context, ["binary_gui_click"])
+            current = await _read_group_selection(page, field.field_id)
+            if _field_value_matches_expected(current, choice) and not await _field_has_validation_error(
+                page, field.field_id
+            ):
+                logger.debug(f'checkbox-group {tag} -> "{choice}"')
                 return True
     except Exception:
         pass
+    if await _click_group_option_with_gui(page, field, choice, tag) and not await _field_has_validation_error(
+        page, field.field_id
+    ):
+        _record_field_interaction_recipe(recipe_context, ["group_option_gui_click"])
+        return True
+    current = await _read_group_selection(page, field.field_id)
+    if (_field_value_matches_expected(current, choice) and await _field_has_validation_error(page, field.field_id)) or (
+        current and not _field_value_matches_expected(current, choice)
+    ):
+        if await _reset_group_selection_with_gui(page, field, current, choice, tag):
+            _record_field_interaction_recipe(
+                recipe_context,
+                ["group_option_reset", "group_option_gui_click"],
+            )
+            return True
     logger.debug(f"skip {tag} (checkbox-group)")
     return False
 
