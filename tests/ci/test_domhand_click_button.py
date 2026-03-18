@@ -620,6 +620,40 @@ async def test_generated_credentials_guard_blocks_sign_in_click_on_create_accoun
         assert int(sign_in_clicks) == 0
 
 
+async def test_user_create_account_guard_blocks_sign_in_click_on_create_account_page(
+    httpserver: HTTPServer,
+    monkeypatch,
+):
+    """User-provided create-account runs should not click Sign In while Create Account is active."""
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        monkeypatch.setenv("GH_CREDENTIAL_SOURCE", "user")
+        monkeypatch.setenv("GH_CREDENTIAL_INTENT", "create_account")
+        httpserver.expect_request("/user-create-account-guard").respond_with_data(
+            GENERATED_AUTH_GUARD_HTML, content_type="text/html"
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/user-create-account-guard"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.5)
+        await browser_session.get_browser_state_summary()
+
+        index = await browser_session.get_index_by_id("nav-sign-in")
+        assert index is not None, "Could not find nav-sign-in in selector map"
+
+        result = await tools.click(index=index, browser_session=browser_session)
+        assert result.error is not None
+        assert "Create-account-first run" in result.error
+
+        page = await browser_session.get_current_page()
+        assert page is not None
+        sign_in_clicks = await page.evaluate("() => window.__signInClicks")
+        assert int(sign_in_clicks) == 0
+
+
 async def test_generated_credentials_guard_blocks_reentering_create_account_after_submit(
     httpserver: HTTPServer,
     monkeypatch,

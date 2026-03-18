@@ -347,14 +347,14 @@ class DefaultActionWatchdog(BaseWatchdog):
 			element_node = event.node
 			index_for_logging = element_node.backend_node_id or 'unknown'
 
-			# Guard generated-credential runs from drifting into Sign In while the
+			# Guard create-account-first runs from drifting into Sign In while the
 			# page still clearly offers or expects Create Account.
-			auth_click_guard = await self._guard_generated_auth_click(element_node)
+			auth_click_guard = await self._guard_create_account_first_auth_click(element_node)
 			if auth_click_guard:
 				self.logger.info(auth_click_guard)
 				return {'validation_error': auth_click_guard}
 
-			await self._mark_generated_create_account_attempt(element_node)
+			await self._mark_create_account_first_attempt(element_node)
 
 			# Check if element is a file input (should not be clicked)
 			if self.browser_session.is_file_input(element_node):
@@ -395,10 +395,23 @@ class DefaultActionWatchdog(BaseWatchdog):
 		except Exception:
 			raise
 
-	async def _guard_generated_auth_click(self, element_node: EnhancedDOMTreeNode) -> str | None:
+	def _is_create_account_first_run(self) -> bool:
+		"""Return whether this auth flow must stay on Create Account until proven otherwise."""
+		source = os.getenv('GH_CREDENTIAL_SOURCE', '').strip().lower()
+		intent = os.getenv('GH_CREDENTIAL_INTENT', '').strip().lower()
+		return source == 'generated' or (source == 'user' and intent == 'create_account')
+
+	def _create_account_first_guard_prefix(self) -> str:
+		"""Return the user-facing prefix for create-account-first auth guard messages."""
+		source = os.getenv('GH_CREDENTIAL_SOURCE', '').strip().lower()
+		if source == 'generated':
+			return 'NEW_CREDENTIALS run'
+		return 'Create-account-first run'
+
+	async def _guard_create_account_first_auth_click(self, element_node: EnhancedDOMTreeNode) -> str | None:
 		"""Block premature Sign In clicks when the run is known to need account creation."""
 		try:
-			if os.getenv('GH_CREDENTIAL_SOURCE', '').strip().lower() != 'generated':
+			if not self._is_create_account_first_run():
 				return None
 
 			attrs = element_node.attributes or {}
@@ -430,10 +443,14 @@ class DefaultActionWatchdog(BaseWatchdog):
 			if state.get('accountExistsSignals'):
 				return None
 
-			create_attempted = bool(getattr(self.browser_session, '_gh_generated_create_account_attempted', False))
+			create_attempted = bool(
+				getattr(self.browser_session, '_gh_create_account_first_attempted', False)
+				or getattr(self.browser_session, '_gh_generated_create_account_attempted', False)
+			)
+			prefix = self._create_account_first_guard_prefix()
 			if create_attempted and is_create_account_target and state.get('authState') == 'native_login':
 				return (
-					"NEW_CREDENTIALS run: Create Account was already submitted and Workday is now on the native Sign In page. "
+					f"{prefix}: Create Account was already submitted and Workday is now on the native Sign In page. "
 					"This is the expected post-create step. Do NOT click Create Account again. "
 					"Use the same email/password to sign in once."
 				)
@@ -442,13 +459,13 @@ class DefaultActionWatchdog(BaseWatchdog):
 				state.get('confirmPasswordVisible') or state.get('createAccountSignals') or state.get('startDialogSignals')
 			):
 				return (
-					"NEW_CREDENTIALS run: do not click Sign In while Create Account or the start dialog is still active. "
+					f"{prefix}: do not click Sign In while Create Account or the start dialog is still active. "
 					"Sign In is allowed only after Create Account fails with an explicit account-already-exists signal."
 				)
 
 			return None
 		except Exception as e:
-			self.logger.debug(f'Generated-auth click guard skipped due to error: {e}')
+			self.logger.debug(f'Create-account-first auth click guard skipped due to error: {e}')
 			return None
 
 	async def _inspect_generated_auth_state(self, page) -> dict:
@@ -493,10 +510,10 @@ class DefaultActionWatchdog(BaseWatchdog):
 		)
 		return state if isinstance(state, dict) else {}
 
-	async def _mark_generated_create_account_attempt(self, element_node: EnhancedDOMTreeNode) -> None:
-		"""Remember that a generated-credential run has already submitted Create Account."""
+	async def _mark_create_account_first_attempt(self, element_node: EnhancedDOMTreeNode) -> None:
+		"""Remember that a create-account-first run has already submitted Create Account."""
 		try:
-			if os.getenv('GH_CREDENTIAL_SOURCE', '').strip().lower() != 'generated':
+			if not self._is_create_account_first_run():
 				return
 
 			attrs = element_node.attributes or {}
@@ -523,10 +540,11 @@ class DefaultActionWatchdog(BaseWatchdog):
 			if state.get('authState') != 'still_create_account':
 				return
 
+			setattr(self.browser_session, '_gh_create_account_first_attempted', True)
 			setattr(self.browser_session, '_gh_generated_create_account_attempted', True)
-			self.logger.info('Generated-auth guard: marked Create Account as already submitted for this session')
+			self.logger.info('Create-account-first guard: marked Create Account as already submitted for this session')
 		except Exception as e:
-			self.logger.debug(f'Generated-auth create-account marker skipped due to error: {e}')
+			self.logger.debug(f'Create-account-first create-account marker skipped due to error: {e}')
 
 	async def on_ClickCoordinateEvent(self, event: ClickCoordinateEvent) -> dict | None:
 		"""Handle click at coordinates with CDP. Automatically waits for file downloads if triggered."""

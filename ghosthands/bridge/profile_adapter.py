@@ -2,18 +2,18 @@
 
 Converts camelCase profile keys from the Desktop app (TypeScript conventions)
 to the snake_case format expected by DomHand and the rest of the Python
-codebase, and fills in default values that the Desktop bridge omits.
+codebase, and fills in only structural defaults that the Desktop bridge omits.
+Survey-backed answers must flow from the saved profile; they are not invented
+here.
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
-# Defaults matching resume_loader.PROFILE_DEFAULTS — duplicated here to avoid
-# importing the integrations package (which pulls in asyncpg/database).
+# Structural defaults duplicated here to avoid importing the integrations
+# package (which pulls in asyncpg/database). These are safe shape defaults, not
+# survey-backed answers.
 DOMHAND_PROFILE_DEFAULTS: dict[str, Any] = {
     "phone_device_type": "Mobile",
     "phone_country_code": "+1",
@@ -22,27 +22,10 @@ DOMHAND_PROFILE_DEFAULTS: dict[str, Any] = {
         "city": "",
         "state": "",
         "zip": "",
+        "county": "",
         "country": "United States of America",
     },
-    "work_authorization": "Yes",
-    "visa_sponsorship": "No",
-    "veteran_status": "I am not a protected veteran",
-    "disability_status": "No, I Don't Have A Disability",
-    "gender": "Male",
-    "race_ethnicity": "Asian (Not Hispanic or Latino)",
 }
-
-# Demographic / sensitive fields that warrant a user-visible warning when
-# defaults are applied.  Non-sensitive fields like phone_device_type and
-# address are intentionally excluded.
-SENSITIVE_DEFAULT_FIELDS: frozenset[str] = frozenset({
-    "gender",
-    "race_ethnicity",
-    "veteran_status",
-    "disability_status",
-    "work_authorization",
-    "visa_sponsorship",
-})
 
 
 CAMEL_TO_SNAKE_SCALAR: dict[str, str] = {
@@ -67,6 +50,10 @@ CAMEL_TO_SNAKE_SCALAR: dict[str, str] = {
     "howDidYouHear": "how_did_you_hear",
     "availabilityWindow": "availability_window",
     "noticePeriod": "notice_period",
+    "currentSchoolYear": "current_school_year",
+    "graduationDate": "graduation_date",
+    "degreeSeeking": "degree_seeking",
+    "certificationsLicenses": "certifications_licenses",
 }
 
 CAMEL_TO_SNAKE_NESTED: dict[str, str] = {
@@ -100,6 +87,12 @@ def camel_to_snake_profile(profile: dict[str, Any]) -> dict[str, Any]:
     if "zipCode" in out and "postal_code" not in out:
         out["postal_code"] = out["zipCode"]
 
+    # Runtime-learned registry payloads used by the desktop claim path
+    if "learnedQuestionAliases" in out and "learned_question_aliases" not in out:
+        out["learned_question_aliases"] = out["learnedQuestionAliases"]
+    if "learnedInteractionRecipes" in out and "learned_interaction_recipes" not in out:
+        out["learned_interaction_recipes"] = out["learnedInteractionRecipes"]
+
     # ── Nested arrays: education / experience ────────────────────
     for array_key in ("education", "experience"):
         items = out.get(array_key)
@@ -121,7 +114,7 @@ def camel_to_snake_profile(profile: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_profile_defaults(profile: dict[str, Any]) -> dict[str, Any]:
-    """Add DomHand-expected default fields that the Desktop bridge omits.
+    """Add DomHand-expected structural fields that the Desktop bridge omits.
 
     When the Desktop app passes a raw ``UserProfile`` via ``--profile`` or
     ``GH_USER_PROFILE_TEXT``, it may be missing fields that the old
@@ -129,36 +122,21 @@ def normalize_profile_defaults(profile: dict[str, Any]) -> dict[str, Any]:
     DomHand's ``_parse_profile_evidence`` and ``_known_profile_value``
     rely on these fields being present in the profile.
 
-    This function fills in missing keys with sensible defaults, matching
-    the ``PROFILE_DEFAULTS`` from ``resume_loader``.  Existing values in
-    the profile are never overwritten.
-
-    If any *sensitive* demographic fields (gender, race_ethnicity,
-    veteran_status, disability_status, work_authorization, visa_sponsorship)
-    receive defaults, a warning status event is emitted via the JSONL
-    protocol so the Desktop app can surface it to the user.
+    This function only fills non-sensitive structural defaults needed for
+    consistent downstream parsing. Existing values in the profile are never
+    overwritten, and missing survey-backed answers remain missing so
+    propagation bugs stay visible.
     """
     defaults = DOMHAND_PROFILE_DEFAULTS
     normalized = dict(profile)
-
-    # Track which sensitive fields had defaults applied
-    defaulted_sensitive: list[str] = []
 
     # ── Scalar defaults ──────────────────────────────────────────
     for key in (
         "phone_device_type",
         "phone_country_code",
-        "work_authorization",
-        "visa_sponsorship",
-        "veteran_status",
-        "disability_status",
-        "gender",
-        "race_ethnicity",
     ):
         if key not in normalized or normalized[key] is None or normalized[key] == "":
             normalized[key] = defaults[key]
-            if key in SENSITIVE_DEFAULT_FIELDS:
-                defaulted_sensitive.append(key)
 
     # ── Address defaults (merge, don't overwrite) ────────────────
     default_address = defaults["address"]
@@ -174,22 +152,5 @@ def normalize_profile_defaults(profile: dict[str, Any]) -> dict[str, Any]:
         normalized["address"] = merged
     # If address is a string (e.g. "San Francisco, CA"), leave it as-is —
     # _format_profile_summary handles string addresses fine.
-
-    # ── Emit warning for defaulted sensitive fields ──────────────
-    if defaulted_sensitive:
-        field_list = ", ".join(defaulted_sensitive)
-        msg = (
-            f"Using default answers for: {field_list} "
-            f"— verify before submitting"
-        )
-        logger.warning("demographic_defaults_applied", extra={"fields": defaulted_sensitive})
-        try:
-            from ghosthands.output.jsonl import emit_status
-
-            emit_status(msg)
-        except Exception:
-            # If JSONL emitter is not available (e.g. running outside
-            # Desktop bridge context), the warning is still logged above.
-            pass
 
     return normalized

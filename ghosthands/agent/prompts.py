@@ -30,8 +30,6 @@ GENERIC_FORM_STRATEGIES = (
     "- If the page shows BOTH an 'Easy Apply' and a longer apply button\n"
     "  ('I'm interested', 'Apply', etc.), ALWAYS prefer 'Easy Apply'.\n"
     "- NEVER choose external apply paths (LinkedIn, Indeed, Google, etc.).\n"
-    "- If a start dialog offers a same-site 'Autofill with Resume' or\n"
-    "  'Apply with Resume' option, prefer that path.\n"
     "\n"
     "SHADOW DOM / CUSTOM WIDGETS:\n"
     "- Some platforms use shadow DOM with custom elements. If domhand_fill\n"
@@ -81,31 +79,27 @@ PLATFORM_HINTS: dict[str, str] = {
     "workday": (
         "Detected platform: Workday. Expect multi-step sections, shadow DOM "
         "with data-automation-id selectors, segmented date fields (MM/DD/YYYY "
-        "typed as continuous digits), and 'Select One' dropdown buttons."
+        "typed as continuous digits), and 'Select One' dropdown buttons. "
+        "If a same-site start dialog offers 'Autofill with Resume' or "
+        "'Apply with Resume', prefer that path."
     ),
     "greenhouse": (
-        "Detected platform: Greenhouse. Expect a single-page application flow "
-        "with resume upload near the top."
+        "Detected platform: Greenhouse. Expect a single-page application flow with resume upload near the top."
     ),
-    "lever": (
-        "Detected platform: Lever. Expect a single long page with all fields "
-        "visible. Scrolling may be needed."
-    ),
+    "lever": ("Detected platform: Lever. Expect a single long page with all fields visible. Scrolling may be needed."),
     "smartrecruiters": (
         "Detected platform: SmartRecruiters. Expect shadow DOM custom elements, "
         "possible split across apply/login/review steps, and custom dropdown "
         "widgets that require click-to-open + search + click-to-select."
     ),
     "generic": (
-        "Platform not recognized. Apply generic strategies. Be conservative "
-        "and watch for custom widget patterns."
+        "Platform not recognized. Apply generic strategies. Be conservative and watch for custom widget patterns."
     ),
 }
 
 # Legacy compatibility — keep the old dict structure for any external callers
 PLATFORM_GUARDRAILS: dict[str, str] = {
-    platform: f"{PLATFORM_HINTS.get(platform, '')}\n\n{GENERIC_FORM_STRATEGIES}"
-    for platform in PLATFORM_HINTS
+    platform: f"{PLATFORM_HINTS.get(platform, '')}\n\n{GENERIC_FORM_STRATEGIES}" for platform in PLATFORM_HINTS
 }
 
 
@@ -268,6 +262,8 @@ def _format_profile_summary(resume_profile: dict) -> str:
         lines.append(f"State: {state}")
     if postal := resume_profile.get("postal_code"):
         lines.append(f"Postal code: {postal}")
+    if county := resume_profile.get("county"):
+        lines.append(f"County: {county}")
     if country := resume_profile.get("country"):
         lines.append(f"Country: {country}")
     if phone_type := resume_profile.get("phone_type") or resume_profile.get("phone_device_type"):
@@ -365,9 +361,7 @@ def _format_profile_summary(resume_profile: dict) -> str:
     languages = resume_profile.get("languages", [])
     if languages:
         lang_strs = [
-            f"{lang.get('language', '')} ({lang.get('proficiency', '')})"
-            for lang in languages
-            if lang.get("language")
+            f"{lang.get('language', '')} ({lang.get('proficiency', '')})" for lang in languages if lang.get("language")
         ]
         if lang_strs:
             lines.append(f"Languages: {', '.join(lang_strs)}")
@@ -413,7 +407,11 @@ def _format_profile_summary(resume_profile: dict) -> str:
 
     # ── Open-ended answers ───────────────────────────────────────
     for key, val in resume_profile.items():
-        if (key.startswith("what_") or key.startswith("why_") or key.startswith("how_")) and isinstance(val, str) and val.strip():
+        if (
+            (key.startswith("what_") or key.startswith("why_") or key.startswith("how_"))
+            and isinstance(val, str)
+            and val.strip()
+        ):
             label = key.replace("_", " ").capitalize()
             lines.append(f"{label}: {val}")
 
@@ -477,20 +475,35 @@ def build_system_prompt(
         "   prompts, promo dialogs, and interstitial overlays before you",
         "   keep filling the form. Prefer this over blind Escape or",
         "   coordinate clicks when the page is blocked by a popup.",
-        "4. domhand_select — Selects dropdown/radio/checkbox options by",
-        "   label matching.  Use when domhand_fill reports unresolved",
-        "   select/radio/checkbox fields.",
-        "5. domhand_upload — Uploads the applicant's resume file.  Use",
+        "4. domhand_interact_control — Resolves one exact non-text",
+        "   control by question label and desired value. Use this first",
+        "   for stubborn radios, checkboxes, toggles, button groups, and",
+        "   exact known select blockers after domhand_fill.",
+        "5. domhand_select — Selects dropdown options using",
+        "   platform-aware discovery. Use this for complex custom",
+        "   dropdown/combobox widgets that domhand_fill could not settle.",
+        "6. domhand_upload — Uploads the applicant's resume file.  Use",
         "   when you see a file-upload input.",
-        "6. Generic browser-use actions (click, input_text, etc.) — Use",
+        "7. Generic browser-use actions (click, input_text, etc.) — Use",
         "   ONLY as a fallback when DomHand actions fail, e.g. due to",
         "   shadow DOM, custom widgets, or iframes that DomHand cannot",
         "   reach.",
+        "8. Vision/screenshot-based reasoning — Use only as a bounded last",
+        "   fallback for the exact stuck field after DOM/manual actions fail.",
         "",
         "After calling domhand_fill, inspect its result to see which fields",
         "were filled and which remain unresolved.  Handle unresolved fields",
-        "individually with domhand_select, generic input, or by skipping",
+        "individually with domhand_interact_control for exact boolean/select",
+        "blockers, domhand_select for dropdown widgets, generic input, or by skipping",
         "ONLY optional fields the applicant profile does not cover.",
+        "When more than one blocker remains, resolve EXACTLY ONE field at a",
+        "time. Finish that field, verify its error cleared, then reassess",
+        "before touching the next blocker.",
+        "Prefer simpler radio/checkbox blockers before complex searchable",
+        "dropdowns when you have multiple unresolved fields.",
+        "If the same exact field has already failed twice with DOM/manual",
+        "actions, take ONE screenshot/vision retry on that field, then",
+        "return to DOM/manual actions.",
         "If an optional field is visible AND the applicant profile provides",
         "a value (address, website, referral source, LinkedIn, etc.), you",
         "SHOULD make a best-effort attempt to fill it only when the",
@@ -528,6 +541,11 @@ def build_system_prompt(
         "- Avoid HITL for standardized dropdown/radio screening fields unless",
         "  the field is truly substantive and no safe profile/default answer",
         "  exists after closest-option matching.",
+        "- After any screenshot/vision fallback, immediately return to DOM",
+        "  actions on that same field. Do NOT stay in screenshot-driven",
+        "  reasoning loops.",
+        "- At most ONE screenshot/vision retry per exact field before moving",
+        "  back to DOM/manual actions or reporting a blocker.",
         "- If a popup, modal, newsletter prompt, promo interstitial, or",
         "  dimmed overlay is blocking the form, call domhand_close_popup",
         "  FIRST. Do NOT start with blind coordinate clicks while a DOM",
@@ -631,7 +649,8 @@ def build_system_prompt(
         "  done(success=False, text='blocker: position closed')",
         "- Missing user-provided application data is NOT a blocker.",
         "  If a required field needs an answer that is not in the profile or",
-        "  QA bank, call domhand_request_user_input instead of done(...).",
+        "  QA bank, keep using DomHand best-effort recovery instead of treating",
+        "  it as a blocker or pausing for HITL.",
         "Do NOT retry blockers.  Report them and stop.",
         "</blocker_handling>",
         "",
@@ -688,17 +707,29 @@ def build_system_prompt(
         "  3. Review domhand_fill output for unresolved fields. If",
         "     domhand_assess_state reports unresolved_required_fields, call",
         "     domhand_fill AGAIN with target_section set to the reported",
-        "     current_section and focus_fields set to those exact unresolved",
-        "     labels before falling back to manual clicks. If the unresolved",
-        "     field belongs to a repeater entry, preserve the same",
-        "     heading_boundary instead of broadening to the whole section.",
+        "     current_section and focus_fields set to ONE exact unresolved",
+        "     label at a time before falling back to manual clicks. If the",
+        "     unresolved field belongs to a repeater entry, preserve the",
+        "     same heading_boundary instead of broadening to the whole",
+        "     section. Reassess after each single-field retry before moving",
+        "     to the next blocker.",
         "  4. Only after that targeted domhand_fill attempt should you use",
-        "     domhand_select, dropdown_options/select_dropdown, or generic",
-        "     DOM actions. Do this for required",
+        "     domhand_interact_control for exact radio/checkbox/toggle/button",
+        "     blockers, domhand_select for dropdown widgets,",
+        "     dropdown_options/select_dropdown, or generic DOM actions. Do",
+        "     this one blocker at a time for required",
         "     fields, and for optional fields only when the applicant",
         "     profile maps to that field with high confidence.",
+        "  4c. After EVERY blocker-level domhand_interact_control,",
+        "      domhand_select, or targeted manual click/input used to recover",
+        "      a required field, IMMEDIATELY call domhand_assess_state before",
+        "      doing any unrelated action. Do not assume the page context",
+        "      updated correctly until reassessment confirms it.",
         "  4a. Do NOT jump straight to vision/screenshot fallback while",
         "      DOM/manual takeover options are still available.",
+        "  4b. If the same exact blocker still fails after two DOM/manual",
+        "      attempts, take ONE screenshot/vision retry for that blocker,",
+        "      then go back to DOM/manual actions.",
         "  5. Check for agreement checkboxes and click any that are unchecked.",
         "  6. Before scrolling away or clicking 'Next' / 'Continue' /",
         "     'Save & Continue', call domhand_assess_state again and follow",
@@ -716,15 +747,19 @@ def build_system_prompt(
         "",
         "<transition_waiting>",
         "If the page looks blank, partially rendered, or still loading after",
-        "you click a start/continue button, WAIT 5-10 seconds before doing",
-        "anything else.",
+        "you click a start/continue button, use SHORT waits first (2-3 seconds).",
+        "If the page is still blank/loading after two short waits and there are",
+        "still no form elements, call refresh() ONCE, then wait 2-3 seconds and",
+        "reassess the current page.",
         "While the page is settling, do NOT click header/nav controls such as",
         "'Sign In', 'Careers Home', or other fallback navigation buttons.",
         "A blank/loading transition is not evidence that the flow requires",
         "switching from Create Account to Sign In.",
+        "Refresh is allowed only as a blank-page recovery step; it is not",
+        "permission to restart the auth flow or click a different auth path.",
         "Never use navigate() to return to the original job URL as recovery",
         "after you have already clicked into the application flow. Waiting",
-        "is the default recovery, not restarting.",
+        "and one refresh are the default recovery, not restarting.",
         "</transition_waiting>",
         "",
         # ── Repeater sections (Work Experience, Education, etc.) ──
@@ -782,13 +817,18 @@ def build_system_prompt(
         "  as 'LinkedIn'. Only the final leaf clears the validation error.",
         "- After clicking an option, verify the field text changed or the",
         "  validation error cleared before clicking Save/Continue.",
+        "- Do NOT resolve a source/referral dropdown in the same recovery",
+        "  batch as a radio button or any other unrelated field.",
+        "- If the same exact dropdown or radio field still fails after two",
+        "  DOM/manual attempts, take ONE screenshot/vision retry on that",
+        "  field before continuing.",
         "- Do NOT click a dropdown option and then Save/Continue in the same",
         "  action batch. After any option click, WAIT briefly and re-evaluate",
         "  before the next click.",
         "- NEVER click Save/Continue immediately after the first dropdown",
         "  click when the widget still looks open or the field still looks",
         "  empty.",
-        "- If domhand_fill and domhand_select both fail, try the existing DOM",
+        "- If domhand_fill plus domhand_interact_control/domhand_select both fail, try the existing DOM",
         "  interaction tools first: dropdown_options, select_dropdown, click,",
         "  input_text, Enter, Tab, and focused retry actions.",
         "- Only use vision/screenshot as a last automated fallback after the",
@@ -839,17 +879,31 @@ def build_task_prompt(
         "   auto-fills many fields and shortens the application.\n"
         "2. Then call domhand_fill to fill remaining visible form fields.\n"
         "3. After domhand_fill completes, review its output to see which fields were filled and which failed.\n"
-        "4. Immediately call domhand_assess_state. If unresolved fields remain, call domhand_fill again with "
-        "target_section=current_section and focus_fields set to those exact unresolved labels. Preserve "
-        "heading_boundary when you are inside a repeater entry.\n"
-        "5. For fields still unresolved after the targeted domhand_fill retry, use existing DOM/manual tools first: "
-        "domhand_select, dropdown_options/select_dropdown, click, input_text, Enter, Tab, scroll, and focus actions.\n"
-        "6. Only use vision/screenshot-style fallback after those DOM/manual actions fail for that exact field.\n"
-        f"7. For other file uploads, use domhand_upload or upload_file action with path: {resume_path}\n"
-        "8. After all fields on the current page are filled, click Next/Continue/Save to advance.\n"
-        "9. On each new page, repeat from step 1 (check for Easy Apply / resume upload first).\n"
-        "10. Prefer short waits: use wait(seconds=2) or wait(seconds=3) for auth transitions, resume-processing, "
+        "4. Immediately call domhand_assess_state. If unresolved fields remain, resolve them ONE FIELD AT A TIME: "
+        "call domhand_fill again with target_section=current_section and focus_fields set to a single exact "
+        "unresolved label. Preserve heading_boundary when you are inside a repeater entry, and reassess after "
+        "each single-field retry before touching the next blocker.\n"
+        "5. For fields still unresolved after the targeted domhand_fill retry, use DomHand control tools first: "
+        "domhand_interact_control for radios/checkboxes/toggles/button groups and domhand_select for dropdowns. "
+        "After EACH blocker-level DomHand or targeted manual recovery action, immediately call domhand_assess_state to refresh the current context. "
+        "Only then use dropdown_options/select_dropdown, click, input_text, Enter, Tab, scroll, and focus actions. "
+        "Keep these manual recoveries to ONE FIELD AT A TIME. Do NOT combine a referral/source widget with a radio "
+        "button or another blocker in the same action batch.\n"
+        "6. If the same exact field still fails after two DOM/manual attempts, take ONE screenshot/vision retry on "
+        "that blocker. Do not use screenshot earlier, and do not keep using screenshot repeatedly.\n"
+        "7. After that screenshot/vision retry, go back to concrete DOM/manual actions instead of staying in visual "
+        "reasoning.\n"
+        f"8. For other file uploads, use domhand_upload or upload_file action with path: {resume_path}\n"
+        "9. After all fields on the current page are filled, click Next/Continue/Save to advance.\n"
+        "10. On each new page, repeat from step 1 (check for Easy Apply / resume upload first).\n"
+        "11. Prefer short waits: use wait(seconds=2) or wait(seconds=3) for auth transitions, resume-processing, "
         "and SPA loading. Only use wait(seconds=5) if two shorter waits still leave the page blank/loading.\n"
+        "12. If the page is still blank/loading after two short waits and there are still no form elements, "
+        "call refresh() ONCE, then wait 2-3 seconds and reassess. Do NOT click Sign In/Create Account just "
+        "because the page is blank.\n"
+        "13. For salary/compensation fields, ONLY use the exact saved profile answer already provided by DomHand "
+        "or the open-question modal. NEVER improvise with generic text like 'Competitive', 'Negotiable', or "
+        "'Flexible'. If the exact saved value is not available, stop for HITL/blocker instead of guessing.\n"
         "\n"
         "Other rules:\n"
     )
@@ -949,6 +1003,7 @@ def build_task_prompt(
                 "  After clicking Create Account, wait 3 seconds before deciding the outcome.\n"
                 "  CRITICAL AUTH RULES:\n"
                 "  - Create Account: attempt EXACTLY ONCE. If it fails, report blocker immediately.\n"
+                "  - NEVER click Sign In proactively from the start dialog, header, or a blank/loading auth transition.\n"
                 "  - If Create Account submission lands on the native Sign In page (email + password, no confirm-password field), "
                 "treat that as the expected next step. Use the SAME email/password to sign in ONCE. Do NOT click Create Account again.\n"
                 "  - Sign In after account creation: attempt EXACTLY ONCE. If it fails, immediately report "

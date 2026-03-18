@@ -21,7 +21,7 @@ from ghosthands.actions.views import (
     DomHandClosePopupParams,
     DomHandExpandParams,
     DomHandFillParams,
-    DomHandRequestUserInputParams,
+    DomHandInteractControlParams,
     DomHandSelectParams,
     DomHandUploadParams,
 )
@@ -48,7 +48,7 @@ def register_domhand_actions(tools: "Tools") -> None:
     from ghosthands.actions.domhand_close_popup import domhand_close_popup
     from ghosthands.actions.domhand_expand import domhand_expand
     from ghosthands.actions.domhand_fill import domhand_fill
-    from ghosthands.actions.domhand_request_user_input import domhand_request_user_input
+    from ghosthands.actions.domhand_interact_control import domhand_interact_control
     from ghosthands.actions.domhand_select import domhand_select
     from ghosthands.actions.domhand_upload import domhand_upload
 
@@ -57,7 +57,7 @@ def register_domhand_actions(tools: "Tools") -> None:
             tools.action(description=description, param_model=param_model)(func)
         except Exception as exc:
             logger.warning(
-                "domhand.action_registration_failed",
+                f"domhand.action_registration_failed action={func.__name__} error={exc}",
                 extra={"action": func.__name__, "error": str(exc)},
             )
 
@@ -127,6 +127,18 @@ def register_domhand_actions(tools: "Tools") -> None:
         func=domhand_select,
     )
 
+    _register_action(
+        description=(
+            "Interact with one exact non-text control by field label and desired value. "
+            "Use this for stubborn radios, checkboxes, toggles, button groups, and selects "
+            "when domhand_fill did not clear a required blocker. Resolves the real control "
+            "by question label, applies the desired option/value, verifies the committed state, "
+            "and captures diagnostics if the control still does not stick."
+        ),
+        param_model=DomHandInteractControlParams,
+        func=domhand_interact_control,
+    )
+
     # ── domhand_upload: File upload ───────────────────────────
     # Handles resume and cover letter uploads via file input elements.
     _register_action(
@@ -181,22 +193,10 @@ def register_domhand_actions(tools: "Tools") -> None:
         func=domhand_expand,
     )
 
-    _register_action(
-        description=(
-            "Pause the current run and ask the user for one missing required answer. "
-            "Use this when you discover a required field that cannot be answered from "
-            "the profile or QA bank, but it is not a true blocker like CAPTCHA or "
-            "access denied. After the user answers and resumes, this action returns "
-            "the answer so you can continue filling the field."
-        ),
-        param_model=DomHandRequestUserInputParams,
-        func=domhand_request_user_input,
-    )
-
     # Log what was registered
     registered = [name for name in tools.registry.registry.actions if name.startswith("domhand_")]
     logger.info(
-        "domhand.actions_registered",
+        f"domhand.actions_registered count={len(registered)} actions={registered}",
         extra={"count": len(registered), "actions": registered},
     )
 

@@ -53,8 +53,6 @@ from ghosthands.bridge.profile_adapter import (
     normalize_profile_defaults,
 )
 from ghosthands.bridge.protocol import (
-    get_field_answer,
-    is_hitl_available,
     listen_for_cancel,
     reset_hitl_state,
     wait_for_review_command,
@@ -76,6 +74,19 @@ logger = structlog.get_logger()
 # Pre-step budget guard: estimated cost of one agent step in USD.
 # If remaining budget is less than this, the agent stops before the next step.
 _STEP_COST_ESTIMATE = 0.10
+
+
+def _profile_debug_enabled() -> bool:
+    return os.getenv("GH_DEBUG_PROFILE_PASS_THROUGH") == "1"
+
+
+def _profile_debug_preview(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "EMPTY"
+    if len(text) <= 96:
+        return text
+    return f"{text[:93]}..."
 
 
 async def _stabilize_account_created_marker(
@@ -121,6 +132,7 @@ async def _stabilize_account_created_marker(
         return "pending_verification", note, "auth_marker_pending_post_auth_confirmation"
 
     return marker_status, marker_note, marker_evidence
+
 
 # ── Argument parsing ──────────────────────────────────────────────────
 
@@ -566,9 +578,7 @@ def _classify_runtime_error(exc: BaseException, *, proxy_mode: bool) -> _Runtime
             keep_browser_open=True,
         )
 
-    if 401 in status_codes and any(
-        keyword in combined_text for keyword in ("expired", "revoked", "grant")
-    ):
+    if 401 in status_codes and any(keyword in combined_text for keyword in ("expired", "revoked", "grant")):
         return _RuntimeErrorSignal(
             code="GRANT_EXPIRED",
             message="Your automation session expired. Please try again.",
@@ -632,9 +642,7 @@ async def _collect_open_question_issues_from_browser(browser: Any) -> list[_Open
                         visible_error=str(issue.get("visible_error") or "").strip() or None,
                         widget_kind=str(issue.get("widget_kind") or "").strip() or None,
                         options=tuple(
-                            str(option).strip()
-                            for option in (issue.get("options") or [])
-                            if str(option).strip()
+                            str(option).strip() for option in (issue.get("options") or []) if str(option).strip()
                         ),
                     )
                 )
@@ -657,7 +665,7 @@ def _issues_from_blocker_text(blocker: str) -> list[_OpenQuestionIssue]:
     ]
 
 
-def _auto_answer_open_question_issues(
+async def _auto_answer_open_question_issues(
     issues: list[_OpenQuestionIssue],
     profile: dict[str, Any] | None,
 ) -> tuple[dict[str, str], list[_OpenQuestionIssue]]:
@@ -683,10 +691,12 @@ def _auto_answer_open_question_issues(
         _default_screening_answer,
         _find_best_profile_answer,
         _known_profile_value,
+        _semantic_profile_value_for_field,
         _normalize_match_label,
         _parse_profile_evidence,
     )
     from ghosthands.actions.views import FormField
+    from ghosthands.runtime_learning import confirm_learned_question_alias
 
     evidence = _parse_profile_evidence(json.dumps(profile))
     answer_map = _build_profile_answer_map(profile, evidence)
@@ -716,6 +726,12 @@ def _auto_answer_open_question_issues(
                 choices=list(issue.options),
             )
             answer = _default_screening_answer(synthetic_field, profile)
+            if not answer:
+                answer = await _semantic_profile_value_for_field(
+                    synthetic_field,
+                    evidence,
+                    profile,
+                )
 
         if not answer and issue.field_type == "select":
             answer = _AUTHORITATIVE_SELECT_DEFAULTS.get(norm)
@@ -726,6 +742,7 @@ def _auto_answer_open_question_issues(
 
         cleaned = str(answer).strip() if answer is not None else ""
         if cleaned:
+            confirm_learned_question_alias(label)
             resolved[issue.field_label] = cleaned
         else:
             unresolved.append(issue)
@@ -737,7 +754,7 @@ async def _infer_open_question_answers_with_domhand(
     issues: list[_OpenQuestionIssue],
     profile: dict[str, Any] | None,
 ) -> tuple[dict[str, str], list[_OpenQuestionIssue]]:
-    """Use DomHand's LLM-backed field inference for structured fields before HITL."""
+    """Use DomHand's LLM-backed field inference for open questions before HITL."""
     if not issues:
         return {}, issues
     if not isinstance(profile, dict):
@@ -746,20 +763,11 @@ async def _infer_open_question_answers_with_domhand(
     from ghosthands.actions.domhand_fill import infer_answers_for_fields
     from ghosthands.actions.views import FormField
 
-    structured_types = {
-        "select",
-        "radio",
-        "radio-group",
-        "button-group",
-        "checkbox-group",
-        "search",
-    }
-
     synthetic_fields: list[FormField] = []
     issue_by_field_id: dict[str, _OpenQuestionIssue] = {}
     unresolved: list[_OpenQuestionIssue] = []
     for index, issue in enumerate(issues, start=1):
-        if issue.field_type not in structured_types and not issue.options:
+        if issue.field_type == "file":
             unresolved.append(issue)
             continue
         field_id = issue.field_id or f"open-question-{index}"
@@ -814,68 +822,30 @@ async def _request_open_question_answers(
     if not issues:
         issues = _issues_from_blocker_text(blocker)
 
-    auto_answers, unresolved_issues = _auto_answer_open_question_issues(issues, profile)
+    auto_answers, unresolved_issues = await _auto_answer_open_question_issues(issues, profile)
     llm_answers: dict[str, str] = {}
     if unresolved_issues:
         llm_answers, unresolved_issues = await _infer_open_question_answers_with_domhand(unresolved_issues, profile)
         auto_answers.update(llm_answers)
-    issues = unresolved_issues
-
-    @dataclass
-    class _ListenerState:
-        stopped: bool = False
-
-    @dataclass
-    class _ListenerAgent:
-        state: _ListenerState
-
-    cancel_requested = asyncio.Event()
-    listener_agent = _ListenerAgent(state=_ListenerState())
-    listener_task = asyncio.create_task(listen_for_cancel(listener_agent, cancel_requested))
-    answers: dict[str, str] = dict(auto_answers)
-    try:
-        if auto_answers:
-            emit_event(
-                "status",
-                message=f"Using saved profile defaults for {len(auto_answers)} field(s) before asking for help",
-            )
-        if llm_answers:
-            emit_event(
-                "status",
-                message=f"DomHand inferred {len(llm_answers)} additional field answer(s) before asking for help",
-            )
-        for issue in issues:
-            emit_event(
-                "field_needs_input",
-                question_key=issue.field_id or issue.field_label,
-                field_label=issue.field_label,
-                field_id=issue.field_id,
-                field_type=issue.field_type,
-                question_text=issue.question_text or issue.field_label,
-                section=issue.section or "",
-                section_path=issue.section_path or issue.section or "",
-                current_value=issue.current_value or "",
-                visible_error=issue.visible_error or "",
-                widget_kind=issue.widget_kind or "",
-                form_context=issue.visible_error or issue.widget_kind or "",
-                options=list(issue.options),
-                source="cli_blocker_recovery",
-            )
-            answer = await get_field_answer(
-                issue.field_id or issue.field_label,
-                timeout=timeout_seconds,
-                field_label=issue.field_label,
-            )
-            if cancel_requested.is_set():
-                return {}, True
-            if answer:
-                answers[issue.field_label] = answer
-        return answers, False
-    finally:
-        listener_agent.state.stopped = True
-        listener_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await listener_task
+    if auto_answers:
+        emit_event(
+            "status",
+            message=f"Using saved profile defaults for {len(auto_answers)} field(s) before continuing locally",
+        )
+    if llm_answers:
+        emit_event(
+            "status",
+            message=f"DomHand inferred {len(llm_answers)} additional field answer(s) before continuing locally",
+        )
+    if unresolved_issues:
+        emit_event(
+            "status",
+            message=(
+                "Open-question HITL is disabled for apply flows; leaving "
+                f"{len(unresolved_issues)} field(s) for continued best-effort recovery"
+            ),
+        )
+    return dict(auto_answers), False
 
 
 def _build_hitl_recovery_task(base_task: str, answers: dict[str, str]) -> str:
@@ -993,12 +963,41 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     # -- Convert camelCase keys from Desktop bridge to snake_case ----------
     profile = camel_to_snake_profile(profile)
 
+    from ghosthands.runtime_learning import reset_runtime_learning_state
+
+    reset_runtime_learning_state()
+
     # -- Extract embedded credentials before they leak into env/profile ----
     # We pop them so they don't end up in GH_USER_PROFILE_TEXT env var.
     embedded_credentials = profile.pop("credentials", None)
 
     # -- Normalize profile defaults for DomHand ----------------------------
     profile = normalize_profile_defaults(profile)
+    if _profile_debug_enabled():
+        logger.info(
+            "cli.profile_bridge_summary",
+            extra={
+                "address": _profile_debug_preview(profile.get("address")),
+                "city": _profile_debug_preview(profile.get("city")),
+                "state": _profile_debug_preview(profile.get("state")),
+                "postal_code": _profile_debug_preview(profile.get("postal_code") or profile.get("zip")),
+                "county": _profile_debug_preview(profile.get("county")),
+                "linkedin": _profile_debug_preview(profile.get("linkedin") or profile.get("linkedin_url")),
+                "work_authorization": _profile_debug_preview(profile.get("work_authorization")),
+                "visa_sponsorship": _profile_debug_preview(profile.get("visa_sponsorship")),
+                "salary_expectation": _profile_debug_preview(profile.get("salary_expectation")),
+                "english_proficiency": _profile_debug_preview(profile.get("english_proficiency")),
+                "spoken_languages": _profile_debug_preview(profile.get("spoken_languages")),
+                "how_did_you_hear": _profile_debug_preview(profile.get("how_did_you_hear")),
+                "learned_question_aliases": len(
+                    profile.get("learnedQuestionAliases") or profile.get("learned_question_aliases") or []
+                ),
+                "learned_interaction_recipes": len(
+                    profile.get("learnedInteractionRecipes") or profile.get("learned_interaction_recipes") or []
+                ),
+                "answer_bank_count": len(profile.get("answerBank") or profile.get("answer_bank") or []),
+            },
+        )
     _emit_phase_if_changed("Starting application")
 
     # -- Set env vars -------------------------------------------------------
@@ -1154,10 +1153,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             and app_settings
             and (
                 app_settings.credential_source == "generated"
-                or (
-                    app_settings.credential_source == "user"
-                    and app_settings.credential_intent == "create_account"
-                )
+                or (app_settings.credential_source == "user" and app_settings.credential_intent == "create_account")
             )
             and app_settings.email
             and app_settings.password
@@ -1230,15 +1226,12 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                         platform = url
                         try:
                             from urllib.parse import urlparse
+
                             hostname = (urlparse(url).hostname or "").lower()
                         except Exception:
                             hostname = ""
 
-                        if (
-                            "myworkdayjobs.com" in hostname
-                            or "myworkday.com" in hostname
-                            or "workday.com" in hostname
-                        ):
+                        if "myworkdayjobs.com" in hostname or "myworkday.com" in hostname or "workday.com" in hostname:
                             platform = "workday"
                         elif "greenhouse.io" in hostname:
                             platform = "greenhouse"
@@ -1289,6 +1282,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
         # -- Create agent ---------------------------------------------------
         available_files = [resume_path] if resume_path else []
+
         async def _run_agent_once(current_task: str) -> tuple[Any, bool]:
             agent = Agent(
                 task=current_task,
@@ -1298,7 +1292,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 extend_system_message=system_ext or None,
                 sensitive_data=sensitive_data,
                 available_file_paths=available_files or None,
-                use_vision=True,
+                use_vision="auto",
                 max_actions_per_step=5,
                 calculate_cost=True,
                 use_judge=False,
@@ -1339,7 +1333,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 break
 
             blocker_candidate = final_result if "blocker:" in final_result.lower() else ""
-            if not blocker_candidate or not is_hitl_available() or _looks_like_terminal_blocker(blocker_candidate):
+            if not blocker_candidate or _looks_like_terminal_blocker(blocker_candidate):
                 break
 
             browser_issues = await _collect_open_question_issues_from_browser(browser)
@@ -1377,6 +1371,22 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         filled_count, failed_count = get_field_counts()
 
         if cancelled:
+            from ghosthands.runtime_learning import export_runtime_learning_payload
+
+            runtime_learning_payload = export_runtime_learning_payload()
+            if _profile_debug_enabled():
+                logger.info(
+                    "cli.runtime_learning_export",
+                    extra={
+                        "learned_question_aliases": len(
+                            runtime_learning_payload.get("learned_question_aliases") or []
+                        ),
+                        "learned_interaction_recipes": len(
+                            runtime_learning_payload.get("learned_interaction_recipes") or []
+                        ),
+                        "cancelled": True,
+                    },
+                )
             emit_done(
                 success=False,
                 message="Job cancelled by user",
@@ -1392,6 +1402,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                     "blocker": None,
                     "platform": platform,
                     "cancelled": True,
+                    **runtime_learning_payload,
                 },
             )
             await _cleanup_browser(
@@ -1416,6 +1427,23 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             "blocker": blocker,
             "platform": platform,
         }
+        from ghosthands.runtime_learning import export_runtime_learning_payload
+
+        runtime_learning_payload = export_runtime_learning_payload()
+        if _profile_debug_enabled():
+            logger.info(
+                "cli.runtime_learning_export",
+                extra={
+                    "learned_question_aliases": len(
+                        runtime_learning_payload.get("learned_question_aliases") or []
+                    ),
+                    "learned_interaction_recipes": len(
+                        runtime_learning_payload.get("learned_interaction_recipes") or []
+                    ),
+                    "cancelled": False,
+                },
+            )
+        result_data.update(runtime_learning_payload)
 
         if success:
             # I-02/U-01: emit status (not done) before review so the terminal
@@ -1617,7 +1645,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         extend_system_message=system_ext or None,
         sensitive_data=sensitive_data,
         available_file_paths=available_files or None,
-        use_vision=True,
+        use_vision="auto",
         max_actions_per_step=5,
         calculate_cost=True,
         use_judge=False,

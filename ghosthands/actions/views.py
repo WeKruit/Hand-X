@@ -94,6 +94,21 @@ class DomHandSelectParams(BaseModel):
     value: str = Field(description="Value or text to select")
 
 
+class DomHandInteractControlParams(BaseModel):
+    """Interact with a specific non-text control by field label and desired value."""
+
+    field_label: str = Field(description="Exact or near-exact question/field label to target")
+    desired_value: str = Field(description="Desired option/value, e.g. 'No', 'LinkedIn', 'United States'")
+    target_section: str | None = Field(
+        default=None,
+        description="Optional section name used to narrow field matching before interaction.",
+    )
+    heading_boundary: str | None = Field(
+        default=None,
+        description="Optional repeater heading boundary to keep control interaction scoped to one entry.",
+    )
+
+
 class DomHandUploadParams(BaseModel):
     """Upload a file (resume, cover letter) to a file input."""
 

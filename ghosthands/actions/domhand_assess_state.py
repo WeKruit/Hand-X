@@ -2,20 +2,23 @@
 
 import json
 import logging
+import os
 import re
 from typing import Any
 
 from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
 from ghosthands.actions.domhand_fill import (
-    _EXTRACT_BUTTON_GROUPS_JS,
-    _EXTRACT_FIELDS_JS,
     _build_inject_helpers_js,
+    _filter_fields_for_scope,
+    extract_visible_form_fields,
     _field_has_validation_error,
     _is_navigation_field,
     _preferred_field_label,
     _read_binary_state,
+    _read_field_value,
     _read_group_selection,
+    _section_matches_scope,
 )
 from ghosthands.actions.views import (
     ApplicationFieldIssue,
@@ -28,6 +31,29 @@ from ghosthands.actions.views import (
 from ghosthands.platforms import detect_platform_from_signals, get_config_by_name
 
 logger = logging.getLogger(__name__)
+
+
+def _assess_debug_enabled() -> bool:
+    return os.getenv("GH_DEBUG_PROFILE_PASS_THROUGH") == "1"
+
+
+def _field_log_snapshot(fields: list[FormField], target_section: str | None = None) -> list[dict[str, Any]]:
+    """Return a compact snapshot of extracted fields for diagnostics."""
+    scoped = _filter_fields_for_scope(fields, target_section=target_section)
+    snapshot: list[dict[str, Any]] = []
+    for field in scoped[:20]:
+        snapshot.append(
+            {
+                "field_id": field.field_id,
+                "label": _preferred_field_label(field),
+                "field_type": field.field_type,
+                "section": field.section,
+                "required": field.required,
+                "current_value": field.current_value,
+                "choices": (field.options or field.choices or [])[:6],
+            }
+        )
+    return snapshot
 
 
 _FIELD_LAYOUT_JS = r"""(fieldIds) => {
@@ -60,6 +86,7 @@ _FIELD_CONTEXT_JS = r"""(ffId) => {
 		return rect.width > 0 && rect.height > 0;
 	};
 	const norm = (text) => (text || '').replace(/\s+/g, ' ').trim();
+	const looksLikeErrorText = (text) => /(?:error|required|invalid|must|please|select|enter|choose|provide|complete)/i.test(text || '');
 	const gather = [];
 	const seen = new Set();
 	const push = (node) => {
@@ -85,7 +112,7 @@ _FIELD_CONTEXT_JS = r"""(ffId) => {
 		for (const err of direct) {
 			if (!visible(err)) continue;
 			const text = norm(err.innerText || err.getAttribute('aria-label') || err.getAttribute('data-error') || '');
-			if (text) {
+			if (text && looksLikeErrorText(text)) {
 				errorText = text;
 				break;
 			}
@@ -119,7 +146,13 @@ _SCAN_PAGE_STATE_JS = r"""() => {
 		return rect.width > 0 && rect.height > 0;
 	};
 	const norm = (text) => (text || '').replace(/\s+/g, ' ').trim();
+	const looksLikeErrorText = (text) => /(?:error|required|invalid|must|please|select|enter|choose|provide|complete)/i.test(text || '');
 	const bodyText = norm(document.body ? document.body.innerText : '');
+	const headingTexts = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"]'))
+		.filter((el) => visible(el))
+		.map((el) => norm(el.innerText || el.getAttribute('aria-label') || ''))
+		.filter((text) => Boolean(text))
+		.slice(0, 8);
 	const buttonTexts = [];
 	const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], a, [role="button"]'))
 		.filter((el) => visible(el))
@@ -157,11 +190,12 @@ _SCAN_PAGE_STATE_JS = r"""() => {
 	))
 		.filter((el) => visible(el))
 		.map((el) => norm(el.innerText || el.getAttribute('aria-label') || el.getAttribute('data-error') || ''))
-		.filter(Boolean)
+		.filter((text) => Boolean(text) && looksLikeErrorText(text))
 		.slice(0, 12);
 
 	return JSON.stringify({
 		body_text: bodyText,
+		heading_texts: headingTexts,
 		button_texts: buttonTexts,
 		submit_visible: submitButtons.length > 0,
 		submit_disabled: submitButtons.length > 0 && submitButtons.every((item) => item.disabled),
@@ -259,6 +293,47 @@ def _widget_kind_for_field(field: FormField, browser_context: dict[str, Any] | N
     return "text_input" if field.is_native else "custom_widget"
 
 
+def _is_noise_visible_error(text: str, unresolved_required: list[ApplicationFieldIssue]) -> bool:
+    normalized = normalize_name(text)
+    if not normalized:
+        return True
+    if len(normalized.split()) <= 3:
+        option_words: set[str] = set()
+        for issue in unresolved_required:
+            for option in issue.options:
+                option_words.update(normalize_name(option).split())
+        if option_words and set(normalized.split()).issubset(option_words):
+            return True
+    return False
+
+
+def _clean_visible_errors(
+    visible_errors: list[str],
+    unresolved_required: list[ApplicationFieldIssue],
+) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw_text in visible_errors:
+        candidate = " ".join(str(raw_text or "").split()).strip()
+        if not candidate:
+            continue
+        for issue in unresolved_required:
+            option_suffix = " ".join(option for option in issue.options if option).strip()
+            if option_suffix and candidate.endswith(option_suffix):
+                candidate = candidate[: -len(option_suffix)].strip(" :-")
+            visible_error = str(issue.visible_error or "").strip()
+            if visible_error and candidate.endswith(visible_error):
+                prefix = candidate[: -len(visible_error)].strip(" :-")
+                if prefix and normalize_name(prefix) == normalize_name(issue.name):
+                    candidate = visible_error
+        normalized = normalize_name(candidate)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        cleaned.append(candidate)
+    return cleaned
+
+
 def _classify_terminal_state(
     platform: str,
     has_editable_fields: bool,
@@ -304,11 +379,33 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
 
     await page.evaluate(_build_inject_helpers_js())
 
-    raw_fields_json = await page.evaluate(_EXTRACT_FIELDS_JS)
-    raw_fields = json.loads(raw_fields_json) if isinstance(raw_fields_json, str) else raw_fields_json or []
-    button_groups_json = await page.evaluate(_EXTRACT_BUTTON_GROUPS_JS)
-    button_groups = json.loads(button_groups_json) if isinstance(button_groups_json, str) else button_groups_json or []
-    fields = _group_form_fields(raw_fields, button_groups)
+    fields = await extract_visible_form_fields(page)
+    logger.info(
+        "domhand.assess_state.extracted "
+        f"target_section={params.target_section or ''!r} "
+        f"field_count={len(fields)} "
+        f"required_field_count={sum(1 for field in fields if field.required)} "
+        f"snapshot={json.dumps(_field_log_snapshot(fields, params.target_section), ensure_ascii=True)}"
+    )
+    if _assess_debug_enabled():
+        logger.info(
+            "domhand.assess_state.fields",
+            extra={
+                "target_section": params.target_section,
+                "fields": [
+                    {
+                        "field_id": field.field_id,
+                        "label": _preferred_field_label(field),
+                        "field_type": field.field_type,
+                        "section": field.section,
+                        "required": field.required,
+                        "current_value": field.current_value,
+                        "choices": (field.options or field.choices or [])[:6],
+                    }
+                    for field in fields[:30]
+                ],
+            },
+        )
 
     page_scan_raw = await page.evaluate(_SCAN_PAGE_STATE_JS)
     page_scan = json.loads(page_scan_raw) if isinstance(page_scan_raw, str) else page_scan_raw or {}
@@ -326,15 +423,14 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         markers=page_scan.get("markers") or [],
     )
 
+    scoped_fields = _filter_fields_for_scope(fields, target_section=params.target_section)
     unresolved_required: list[ApplicationFieldIssue] = []
     unresolved_optional: list[ApplicationFieldIssue] = []
     sections_in_view: list[str] = []
     field_context_by_id: dict[str, dict[str, Any]] = {}
 
-    for field in fields:
+    for field in scoped_fields:
         if field.field_type == "file" or _is_navigation_field(field):
-            continue
-        if params.target_section and normalize_name(params.target_section) not in normalize_name(field.section or ""):
             continue
 
         field_layout = layout.get(field.field_id, {})
@@ -354,6 +450,10 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
 
         if field.field_type in {"radio-group", "button-group"} and not field.current_value:
             field.current_value = await _read_group_selection(page, field.field_id)
+        elif field.field_type == "select":
+            observed_value = await _read_field_value(page, field.field_id)
+            if observed_value or not field.current_value:
+                field.current_value = observed_value or field.current_value
         elif field.field_type in {"checkbox", "toggle"} and not field.current_value:
             binary_state = await _read_binary_state(page, field.field_id)
             field.current_value = "checked" if binary_state else ""
@@ -414,7 +514,18 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
     ):
         scroll_bias = "up"
 
-    current_section = params.target_section or ""
+    target_section_has_live_match = bool(
+        params.target_section
+        and any(_section_matches_scope(field.section, params.target_section) for field in fields)
+    )
+    heading_texts = [
+        str(text).strip()
+        for text in (page_scan.get("heading_texts") or [])
+        if str(text).strip()
+    ]
+    current_section = params.target_section if target_section_has_live_match else ""
+    if not current_section and heading_texts:
+        current_section = heading_texts[0]
     if not current_section:
         for issue in unresolved_required:
             if issue.section and issue.relative_position == "in_view":
@@ -428,7 +539,12 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
     if not current_section and sections_in_view:
         current_section = sections_in_view[0]
 
-    visible_errors = [text for text in (page_scan.get("error_texts") or []) if text][:8]
+    visible_errors = [
+        text
+        for text in (page_scan.get("error_texts") or [])
+        if text and not _is_noise_visible_error(text, unresolved_required)
+    ][:8]
+    visible_errors = _clean_visible_errors(visible_errors, unresolved_required)
     has_editable_fields = any(field.field_type != "file" and not _is_navigation_field(field) for field in fields)
     terminal_state = _classify_terminal_state(
         platform_hint,
@@ -451,6 +567,16 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         submit_disabled=bool(page_scan.get("submit_disabled")),
         advance_visible=bool(page_scan.get("advance_visible")),
         platform_hint=platform_hint,
+    )
+    logger.info(
+        "domhand.assess_state.summary "
+        f"target_section={params.target_section or ''!r} "
+        f"current_section={application_state.current_section!r} "
+        f"terminal_state={application_state.terminal_state} "
+        f"unresolved_required_count={len(application_state.unresolved_required_fields)} "
+        f"unresolved_required_fields={json.dumps([{'field_id': issue.field_id, 'label': issue.name, 'field_type': issue.field_type, 'section': issue.section, 'reason': issue.reason, 'current_value': issue.current_value, 'visible_error': issue.visible_error, 'widget_kind': issue.widget_kind} for issue in application_state.unresolved_required_fields[:10]], ensure_ascii=True)} "
+        f"visible_errors={json.dumps(application_state.visible_errors[:8], ensure_ascii=True)} "
+        f"snapshot={json.dumps(_field_log_snapshot(fields, params.target_section), ensure_ascii=True)}"
     )
 
     summary_lines = [

@@ -194,7 +194,7 @@ class TestProfileWithAllFieldsPopulated:
 
 
 class TestProfileWithMinimalFields:
-    """Only firstName, lastName, email. Verify all DomHand defaults are filled."""
+    """Only firstName, lastName, email. Verify only structural defaults are filled."""
 
     def test_defaults_applied(self):
         profile: dict[str, Any] = {
@@ -208,15 +208,15 @@ class TestProfileWithMinimalFields:
         assert result["last_name"] == "Imal"
         assert result["email"] == "min@imal.com"
 
-        # All DomHand defaults must be present
+        # Structural defaults must be present
         assert result["phone_device_type"] == DOMHAND_PROFILE_DEFAULTS["phone_device_type"]
         assert result["phone_country_code"] == DOMHAND_PROFILE_DEFAULTS["phone_country_code"]
-        assert result["work_authorization"] == DOMHAND_PROFILE_DEFAULTS["work_authorization"]
-        assert result["visa_sponsorship"] == DOMHAND_PROFILE_DEFAULTS["visa_sponsorship"]
-        assert result["veteran_status"] == DOMHAND_PROFILE_DEFAULTS["veteran_status"]
-        assert result["disability_status"] == DOMHAND_PROFILE_DEFAULTS["disability_status"]
-        assert result["gender"] == DOMHAND_PROFILE_DEFAULTS["gender"]
-        assert result["race_ethnicity"] == DOMHAND_PROFILE_DEFAULTS["race_ethnicity"]
+        assert "work_authorization" not in result
+        assert "visa_sponsorship" not in result
+        assert "veteran_status" not in result
+        assert "disability_status" not in result
+        assert "gender" not in result
+        assert "race_ethnicity" not in result
 
         # Address should be the full default dict
         assert isinstance(result["address"], dict)
@@ -357,9 +357,9 @@ class TestProfileStringAddressPreserved:
         result = _full_pipeline(profile)
 
         assert result["address"] == "NYC, NY 10001"
-        # Scalar defaults still applied
+        # Structural defaults still applied
         assert result["phone_device_type"] == "Mobile"
-        assert result["work_authorization"] == "Yes"
+        assert "work_authorization" not in result
 
 
 class TestProfilePreservesUnknownFields:
@@ -434,7 +434,7 @@ class TestZipCodeMapsToBothKeys:
 
 
 class TestEmptyStringFieldsGetDefaults:
-    """Profile has fields set to empty string. Verify they get defaults."""
+    """Profile has fields set to empty string. Verify only structural defaults are filled."""
 
     def test_empty_strings_replaced(self):
         profile: dict[str, Any] = {
@@ -454,12 +454,12 @@ class TestEmptyStringFieldsGetDefaults:
 
         assert result["phone_device_type"] == DOMHAND_PROFILE_DEFAULTS["phone_device_type"]
         assert result["phone_country_code"] == DOMHAND_PROFILE_DEFAULTS["phone_country_code"]
-        assert result["work_authorization"] == DOMHAND_PROFILE_DEFAULTS["work_authorization"]
-        assert result["visa_sponsorship"] == DOMHAND_PROFILE_DEFAULTS["visa_sponsorship"]
-        assert result["veteran_status"] == DOMHAND_PROFILE_DEFAULTS["veteran_status"]
-        assert result["disability_status"] == DOMHAND_PROFILE_DEFAULTS["disability_status"]
-        assert result["gender"] == DOMHAND_PROFILE_DEFAULTS["gender"]
-        assert result["race_ethnicity"] == DOMHAND_PROFILE_DEFAULTS["race_ethnicity"]
+        assert result["work_authorization"] == ""
+        assert result["visa_sponsorship"] == ""
+        assert result["veteran_status"] == ""
+        assert result["disability_status"] == ""
+        assert result["gender"] == ""
+        assert result["race_ethnicity"] == ""
 
     def test_empty_string_address_gets_defaults(self):
         profile: dict[str, Any] = {
@@ -475,7 +475,7 @@ class TestEmptyStringFieldsGetDefaults:
 
 
 class TestNoneFieldsGetDefaults:
-    """Profile has fields set to None. Verify they get defaults."""
+    """Profile has fields set to None. Verify only structural defaults are filled."""
 
     def test_none_values_replaced(self):
         profile: dict[str, Any] = {
@@ -495,12 +495,12 @@ class TestNoneFieldsGetDefaults:
 
         assert result["phone_device_type"] == DOMHAND_PROFILE_DEFAULTS["phone_device_type"]
         assert result["phone_country_code"] == DOMHAND_PROFILE_DEFAULTS["phone_country_code"]
-        assert result["work_authorization"] == DOMHAND_PROFILE_DEFAULTS["work_authorization"]
-        assert result["visa_sponsorship"] == DOMHAND_PROFILE_DEFAULTS["visa_sponsorship"]
-        assert result["veteran_status"] == DOMHAND_PROFILE_DEFAULTS["veteran_status"]
-        assert result["disability_status"] == DOMHAND_PROFILE_DEFAULTS["disability_status"]
-        assert result["gender"] == DOMHAND_PROFILE_DEFAULTS["gender"]
-        assert result["race_ethnicity"] == DOMHAND_PROFILE_DEFAULTS["race_ethnicity"]
+        assert result["work_authorization"] is None
+        assert result["visa_sponsorship"] is None
+        assert result["veteran_status"] is None
+        assert result["disability_status"] is None
+        assert result["gender"] is None
+        assert result["race_ethnicity"] is None
 
     def test_none_address_gets_defaults(self):
         profile: dict[str, Any] = {
@@ -520,7 +520,7 @@ class TestProfilePipelineMatchesDesktopContract:
     field that DomHand's ``_parse_profile_evidence`` and
     ``_known_profile_value`` expect."""
 
-    # Fields the pipeline guarantees via camelCase mapping + defaults.
+    # Fields the pipeline guarantees via camelCase mapping + structural defaults.
     # Note: "linkedin" and "zip" only appear when the Desktop app sends
     # "linkedIn" / "zipCode" — they are NOT defaults.
     DOMHAND_GUARANTEED_FIELDS: ClassVar[set[str]] = {
@@ -530,12 +530,6 @@ class TestProfilePipelineMatchesDesktopContract:
         "phone",
         "phone_device_type",
         "phone_country_code",
-        "work_authorization",
-        "visa_sponsorship",
-        "veteran_status",
-        "disability_status",
-        "gender",
-        "race_ethnicity",
     }
 
     # Additional fields present only when the Desktop app provides them
@@ -543,6 +537,12 @@ class TestProfilePipelineMatchesDesktopContract:
         "linkedin",
         "zip",
         "postal_code",
+        "work_authorization",
+        "visa_sponsorship",
+        "veteran_status",
+        "disability_status",
+        "gender",
+        "race_ethnicity",
     }
 
     DOMHAND_ALL_FIELDS: ClassVar[set[str]] = DOMHAND_GUARANTEED_FIELDS | DOMHAND_OPTIONAL_FIELDS
@@ -564,8 +564,8 @@ class TestProfilePipelineMatchesDesktopContract:
 
     def test_minimal_profile_has_all_guaranteed_fields(self):
         """Even a minimal profile should have all guaranteed fields after
-        the pipeline fills in defaults.  Optional fields (linkedin, zip)
-        only appear when the Desktop app provides them."""
+        the pipeline fills in structural defaults. Optional fields only appear
+        when the Desktop app provides them."""
         minimal: dict[str, Any] = {
             "firstName": "Min",
             "lastName": "Test",
@@ -580,6 +580,8 @@ class TestProfilePipelineMatchesDesktopContract:
         # Optional fields should NOT be present if not provided
         assert "linkedin" not in result
         assert "zip" not in result
+        assert "work_authorization" not in result
+        assert "gender" not in result
 
     def test_education_entries_have_snake_case_keys(self):
         result = _full_pipeline(REAL_DESKTOP_PROFILE)

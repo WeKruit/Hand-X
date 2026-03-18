@@ -801,10 +801,10 @@ class TestProfileLoadingEnvFallback:
 
 class TestNormalizeProfileDefaults:
     """normalize_profile_defaults must add DomHand-expected fields with
-    sensible defaults when they are missing from a raw Desktop bridge profile."""
+    structural defaults when they are missing from a raw Desktop bridge profile."""
 
     def test_adds_all_scalar_defaults_when_missing(self):
-        """A bare-minimum profile should gain all required scalar defaults."""
+        """A bare-minimum profile should gain only structural defaults."""
         from ghosthands.cli import normalize_profile_defaults
 
         raw = {"first_name": "Jane", "last_name": "Doe", "email": "jane@example.com"}
@@ -812,12 +812,12 @@ class TestNormalizeProfileDefaults:
 
         assert result["phone_device_type"] == "Mobile"
         assert result["phone_country_code"] == "+1"
-        assert result["work_authorization"] == "Yes"
-        assert result["visa_sponsorship"] == "No"
-        assert result["veteran_status"] == "I am not a protected veteran"
-        assert result["disability_status"] == "No, I Don't Have A Disability"
-        assert result["gender"] == "Male"
-        assert result["race_ethnicity"] == "Asian (Not Hispanic or Latino)"
+        assert "work_authorization" not in result
+        assert "visa_sponsorship" not in result
+        assert "veteran_status" not in result
+        assert "disability_status" not in result
+        assert "gender" not in result
+        assert "race_ethnicity" not in result
 
     def test_preserves_existing_values(self):
         """Existing non-empty values must NOT be overwritten by defaults."""
@@ -834,9 +834,9 @@ class TestNormalizeProfileDefaults:
         assert result["work_authorization"] == "No"
         assert result["gender"] == "Female"
         assert result["veteran_status"] == "I am a protected veteran"
-        # Defaults still applied for missing fields
+        # Only structural defaults are still applied for missing fields
         assert result["phone_device_type"] == "Mobile"
-        assert result["disability_status"] == "No, I Don't Have A Disability"
+        assert "disability_status" not in result
 
     def test_adds_default_address_when_missing(self):
         """When address is absent, a full default address dict should be added."""
@@ -877,24 +877,26 @@ class TestNormalizeProfileDefaults:
         assert result["address"] == "San Francisco, CA"
 
     def test_replaces_empty_string_values_with_defaults(self):
-        """Empty-string values should be treated as missing and get defaults."""
+        """Sensitive empty-string values should not be fabricated."""
         from ghosthands.cli import normalize_profile_defaults
 
         raw = {"work_authorization": "", "gender": ""}
         result = normalize_profile_defaults(raw)
 
-        assert result["work_authorization"] == "Yes"
-        assert result["gender"] == "Male"
+        assert result["work_authorization"] == ""
+        assert result["gender"] == ""
+        assert result["phone_device_type"] == "Mobile"
 
     def test_replaces_none_values_with_defaults(self):
-        """None values should be treated as missing and get defaults."""
+        """Sensitive None values should remain unset rather than defaulted."""
         from ghosthands.cli import normalize_profile_defaults
 
         raw = {"work_authorization": None, "veteran_status": None}
         result = normalize_profile_defaults(raw)
 
-        assert result["work_authorization"] == "Yes"
-        assert result["veteran_status"] == "I am not a protected veteran"
+        assert result["work_authorization"] is None
+        assert result["veteran_status"] is None
+        assert result["phone_country_code"] == "+1"
 
     def test_does_not_mutate_input(self):
         """The original profile dict must not be modified."""
@@ -936,125 +938,35 @@ class TestNormalizeProfileDefaults:
         assert result["skills"] == ["Python", "TypeScript"]
 
 
-# ---------------------------------------------------------------------------
-# Test 6b — normalize_profile_defaults: demographic defaults warning (S-10)
-# ---------------------------------------------------------------------------
+class TestNormalizeProfileDefaultsWarningsRemoved:
+    """The Desktop bridge must not fabricate sensitive answers or emit warnings
+    about fabricated answers that no longer exist."""
 
-
-class TestNormalizeProfileDefaultsWarning:
-    """When sensitive demographic fields receive defaults, a warning status
-    event must be emitted via the JSONL protocol."""
-
-    def test_emits_warning_when_sensitive_fields_defaulted(self):
-        """Minimal profile missing all sensitive fields -> emit_status called."""
+    def test_missing_sensitive_fields_do_not_emit_status(self):
         from unittest.mock import patch
 
         from ghosthands.cli import normalize_profile_defaults
 
         raw = {"first_name": "Jane", "last_name": "Doe", "email": "jane@example.com"}
         with patch("ghosthands.output.jsonl.emit_status") as mock_emit:
-            normalize_profile_defaults(raw)
-
-        mock_emit.assert_called_once()
-        msg = mock_emit.call_args[0][0]
-        assert "gender" in msg
-        assert "race_ethnicity" in msg
-        assert "veteran_status" in msg
-        assert "disability_status" in msg
-        assert "work_authorization" in msg
-        assert "visa_sponsorship" in msg
-        assert "verify before submitting" in msg
-
-    def test_no_warning_when_all_sensitive_fields_provided(self):
-        """Profile with all sensitive fields filled -> no emit_status call."""
-        from unittest.mock import patch
-
-        from ghosthands.cli import normalize_profile_defaults
-
-        raw = {
-            "first_name": "Jane",
-            "gender": "Female",
-            "race_ethnicity": "White",
-            "veteran_status": "I am a protected veteran",
-            "disability_status": "Yes, I Have A Disability",
-            "work_authorization": "No",
-            "visa_sponsorship": "Yes",
-        }
-        with patch("ghosthands.output.jsonl.emit_status") as mock_emit:
-            normalize_profile_defaults(raw)
-
-        mock_emit.assert_not_called()
-
-    def test_warning_only_lists_missing_sensitive_fields(self):
-        """Profile with some sensitive fields -> warning only lists the missing ones."""
-        from unittest.mock import patch
-
-        from ghosthands.cli import normalize_profile_defaults
-
-        raw = {
-            "first_name": "Jane",
-            "gender": "Female",
-            "work_authorization": "Yes",
-            # Missing: race_ethnicity, veteran_status, disability_status, visa_sponsorship
-        }
-        with patch("ghosthands.output.jsonl.emit_status") as mock_emit:
-            normalize_profile_defaults(raw)
-
-        mock_emit.assert_called_once()
-        msg = mock_emit.call_args[0][0]
-        # Should NOT list provided fields
-        assert "gender" not in msg
-        assert "work_authorization" not in msg
-        # Should list missing sensitive fields
-        assert "race_ethnicity" in msg
-        assert "veteran_status" in msg
-        assert "disability_status" in msg
-        assert "visa_sponsorship" in msg
-
-    def test_warning_excludes_non_sensitive_defaults(self):
-        """Non-sensitive defaults (phone_device_type, phone_country_code)
-        must not appear in the warning message."""
-        from unittest.mock import patch
-
-        from ghosthands.cli import normalize_profile_defaults
-
-        raw = {
-            "first_name": "Jane",
-            # All sensitive fields provided
-            "gender": "Female",
-            "race_ethnicity": "White",
-            "veteran_status": "I am a protected veteran",
-            "disability_status": "Yes, I Have A Disability",
-            "work_authorization": "No",
-            "visa_sponsorship": "Yes",
-            # Non-sensitive fields missing — should NOT trigger warning
-        }
-        with patch("ghosthands.output.jsonl.emit_status") as mock_emit:
             result = normalize_profile_defaults(raw)
 
-        # Defaults were applied for non-sensitive fields
-        assert result["phone_device_type"] == "Mobile"
-        assert result["phone_country_code"] == "+1"
-        # But no warning emitted
         mock_emit.assert_not_called()
+        assert "gender" not in result
+        assert "work_authorization" not in result
 
-    def test_emit_failure_does_not_raise(self):
-        """If emit_status raises, the function must still return normally."""
+    def test_non_sensitive_defaults_still_apply_without_warning(self):
         from unittest.mock import patch
 
         from ghosthands.cli import normalize_profile_defaults
 
         raw = {"first_name": "Jane"}
-        with patch(
-            "ghosthands.output.jsonl.emit_status",
-            side_effect=RuntimeError("pipe broken"),
-        ):
-            # Should not raise
+        with patch("ghosthands.output.jsonl.emit_status") as mock_emit:
             result = normalize_profile_defaults(raw)
 
-        # Defaults still applied
-        assert result["gender"] == "Male"
-        assert result["race_ethnicity"] == "Asian (Not Hispanic or Latino)"
+        assert result["phone_device_type"] == "Mobile"
+        assert result["phone_country_code"] == "+1"
+        mock_emit.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1193,6 +1105,7 @@ class TestCamelToSnakeProfile:
             "lastName": "Doe",
             "linkedIn": "https://linkedin.com/in/jane",
             "zipCode": "94105",
+            "county": "San Francisco County",
             "workAuthorization": "Yes",
             "visaSponsorship": "No",
             "raceEthnicity": "Asian",
@@ -1208,6 +1121,7 @@ class TestCamelToSnakeProfile:
         assert result["linkedin"] == "https://linkedin.com/in/jane"
         assert result["zip"] == "94105"
         assert result["postal_code"] == "94105"
+        assert result["county"] == "San Francisco County"
         assert result["work_authorization"] == "Yes"
         assert result["visa_sponsorship"] == "No"
         assert result["race_ethnicity"] == "Asian"

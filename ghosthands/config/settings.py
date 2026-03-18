@@ -34,6 +34,10 @@ class Settings(BaseSettings):
         "gemini-3-flash-preview",
         description="Cheap model for DomHand answer generation",
     )
+    semantic_match_model: str = Field(
+        "",
+        description="Optional cheap text model for classification-only semantic matching. Defaults to domhand_model.",
+    )
 
     # --- LLM Proxy (VALET) ---
     llm_proxy_url: str = Field(

@@ -85,6 +85,71 @@ def _copy_language_list(value: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _score_profile_date(value: Any) -> int:
+    text = _as_text(value)
+    if not text:
+        return 0
+    parts = text.split("-")
+    try:
+        year = int(parts[0])
+    except (TypeError, ValueError):
+        return 0
+    month = 1
+    day = 1
+    if len(parts) > 1:
+        try:
+            month = int(parts[1])
+        except (TypeError, ValueError):
+            month = 1
+    if len(parts) > 2:
+        try:
+            day = int(parts[2])
+        except (TypeError, ValueError):
+            day = 1
+    return (year * 10_000) + (month * 100) + day
+
+
+def _latest_education_entry(education: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not education:
+        return None
+    ranked = sorted(
+        education,
+        key=lambda entry: _score_profile_date(entry.get("end_date") or entry.get("graduation_date") or entry.get("start_date")),
+        reverse=True,
+    )
+    return ranked[0] if ranked else None
+
+
+def _format_graduation_date(value: Any) -> str | None:
+    text = _as_text(value)
+    if not text:
+        return None
+    parts = text.split("-")
+    if len(parts) < 2:
+        return text
+    try:
+        month_index = int(parts[1])
+    except (TypeError, ValueError):
+        return text
+    if month_index < 1 or month_index > 12:
+        return text
+    month_labels = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ]
+    return f"{month_labels[month_index - 1]} {parts[0]}"
+
+
 def build_canonical_profile(
     profile_data: dict[str, Any] | None,
     evidence: dict[str, str | None] | None = None,
@@ -136,6 +201,7 @@ def build_canonical_profile(
     register_profile_alias("city", ("city",), ("address", "city"))
     register_profile_alias("state", ("state",), ("province",), ("address", "state"))
     register_profile_alias("postal_code", ("postal_code",), ("zip",), ("zip_code",), ("address", "zip"))
+    register_profile_alias("county", ("county",), ("address", "county"))
     register_profile_alias("country", ("country",), ("address", "country"))
     register_profile_alias("phone_device_type", ("phone_device_type",), ("phone_type",))
     register_profile_alias("phone_country_code", ("phone_country_code",))
@@ -148,6 +214,10 @@ def build_canonical_profile(
     register_profile_alias("availability_window", ("availability_window",), ("available_start_date",))
     register_profile_alias("notice_period", ("notice_period",))
     register_profile_alias("salary_expectation", ("salary_expectation",))
+    register_profile_alias("current_school_year", ("current_school_year",), ("currentSchoolYear",))
+    register_profile_alias("graduation_date", ("graduation_date",), ("graduationDate",))
+    register_profile_alias("degree_seeking", ("degree_seeking",), ("degreeSeeking",))
+    register_profile_alias("certifications_licenses", ("certifications_licenses",), ("certificationsLicenses",))
     register_profile_alias("spoken_languages", ("spoken_languages",))
     register_profile_alias("english_proficiency", ("english_proficiency",))
     register_profile_alias("country_of_residence", ("country_of_residence",))
@@ -187,6 +257,32 @@ def build_canonical_profile(
                     )
                     break
 
+    latest_education = _latest_education_entry(canonical.education)
+    if latest_education:
+        if "degree_seeking" not in canonical.values:
+            register(
+                "degree_seeking",
+                latest_education.get("degree"),
+                source_path="education.latest.degree",
+                provenance="derived",
+            )
+        if "graduation_date" not in canonical.values:
+            register(
+                "graduation_date",
+                _format_graduation_date(
+                    latest_education.get("graduation_date") or latest_education.get("end_date")
+                ),
+                source_path="education.latest.graduation_date",
+                provenance="derived",
+            )
+        if "field_of_study" not in canonical.values:
+            register(
+                "field_of_study",
+                latest_education.get("field_of_study") or latest_education.get("field"),
+                source_path="education.latest.field_of_study",
+                provenance="derived",
+            )
+
     for key, source_key in {
         "first_name": "first_name",
         "last_name": "last_name",
@@ -197,6 +293,7 @@ def build_canonical_profile(
         "city": "city",
         "state": "state",
         "postal_code": "zip",
+        "county": "county",
         "country": "country",
         "phone_device_type": "phone_device_type",
         "phone_country_code": "phone_country_code",
@@ -209,6 +306,11 @@ def build_canonical_profile(
         "availability_window": "availability_window",
         "notice_period": "notice_period",
         "salary_expectation": "salary_expectation",
+        "current_school_year": "current_school_year",
+        "graduation_date": "graduation_date",
+        "degree_seeking": "degree_seeking",
+        "certifications_licenses": "certifications_licenses",
+        "field_of_study": "field_of_study",
         "spoken_languages": "spoken_languages",
         "english_proficiency": "english_proficiency",
         "country_of_residence": "country_of_residence",

@@ -432,7 +432,7 @@ CRITICAL — Action Order:
 2. After navigating to the page, your FIRST action MUST be domhand_fill. It fills ALL visible form fields in one call via DOM manipulation. Do NOT use click or input actions before trying domhand_fill.
 3. Immediately call domhand_assess_state to classify the page, unresolved required fields, and scroll direction.
 4. After domhand_fill completes, review its output to see which fields were filled and which failed.
-5. For failed dropdowns/selects, use domhand_select. Retry failed fields even if they are optional when the applicant profile provides a value (address, website, referral source, LinkedIn, etc.).
+5. For failed interactive controls, use DomHand before raw clicks: use domhand_interact_control for radios/checkboxes/toggles/button groups and domhand_select for dropdowns/selects. Retry failed fields even if they are optional when the applicant profile provides a value (address, website, referral source, LinkedIn, etc.). After EACH blocker-level domhand_interact_control, domhand_select, or targeted manual click/input used to recover that field, immediately call domhand_assess_state again before any unrelated action.
    For optional fields, only retry when the applicant profile clearly maps to that field with high confidence. If the optional match is ambiguous, leave it blank.
 6. For file uploads (resume), use domhand_upload or upload_file action.
 7. Only use generic browser-use actions (click, input) as a LAST RESORT for fields DomHand could not handle.
