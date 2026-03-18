@@ -1,20 +1,8 @@
-"""DomHand Click Button — robust button clicking for React-heavy ATS sites.
+"""DomHand Click Button — multi-strategy fallback for stubborn submit controls.
 
-browser-use's default click uses CDP Input.dispatchMouseEvent which works for most
-elements but can fail on React form-submission buttons (Workday, etc.) that require
-a specific event sequence or check form validation state.
-
-This action:
-1. Finds the button via JS (text match, aria-label, data-automation-id)
-2. Clicks it using multiple strategies:
-   - JS full event sequence (focus → mousedown → mouseup → click)
-   - CSS selector + browser-use Element.click() (CDP coordinates)
-   - Direct form.submit()
-   - Keyboard Enter on focused button (for React forms)
-3. Verifies the page transitioned (URL change or DOM mutation)
-
-Use this for auth buttons (Create Account, Sign In) or form submission
-buttons that the regular click action doesn't trigger.
+This action finds a button-like control by label, tries several click/submit
+strategies, and reports useful diagnostics if nothing changes. It is a
+fallback/inspection helper, not a separate trusted-input path.
 """
 
 import asyncio
@@ -26,6 +14,14 @@ from pydantic import BaseModel, Field
 from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
 from ghosthands.actions._highlight import highlight_element
+from ghosthands.button_attempts import (
+    annotate_button_descriptor,
+    assess_button_outcome,
+    build_button_descriptor,
+    capture_button_state,
+    emit_button_no_transition_event,
+    format_button_no_transition_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +62,7 @@ _FIND_AND_CLICK_JS = r"""(label, shouldClick) => {
 
 	function isVisible(el) {
 		if (!el) return false;
+		if (el.getAttribute && el.getAttribute('aria-hidden') === 'true') return false;
 		if (ff && ff.isVisible && !ff.isVisible(el)) return false;
 		var rect = el.getBoundingClientRect();
 		if (rect.width === 0 || rect.height === 0) return false;
@@ -76,6 +73,29 @@ _FIND_AND_CLICK_JS = r"""(label, shouldClick) => {
 
 	function normalize(text) {
 		return (text || '').replace(/\s+/g, ' ').trim();
+	}
+
+	function isTopmostHitTarget(el) {
+		if (!el) return false;
+		try {
+			var rect = el.getBoundingClientRect();
+			var x = rect.left + rect.width / 2;
+			var y = rect.top + rect.height / 2;
+			var root = el.getRootNode ? el.getRootNode() : document;
+			var hit = null;
+
+			if (root && root.elementFromPoint) {
+				hit = root.elementFromPoint(x, y);
+			}
+			if (!hit && document.elementFromPoint) {
+				hit = document.elementFromPoint(x, y);
+			}
+			if (!hit) return false;
+			if (hit === el) return true;
+			if (el.contains && el.contains(hit)) return true;
+			if (hit.contains && hit.contains(el)) return true;
+		} catch (e) {}
+		return false;
 	}
 
 	function getButtonText(el) {
@@ -175,6 +195,7 @@ _FIND_AND_CLICK_JS = r"""(label, shouldClick) => {
 		var ariaSelected = btn.getAttribute('aria-selected');
 		var formStats = getContainerStats(form, activeEl);
 		var dialogStats = getContainerStats(dialog, activeEl);
+		var topmostHitTarget = isTopmostHitTarget(btn);
 
 		results.buttons.push({
 			text: displayText.substring(0, 100),
@@ -216,6 +237,8 @@ _FIND_AND_CLICK_JS = r"""(label, shouldClick) => {
 			score += 55;
 		}
 
+		if (topmostHitTarget) score += 40;
+		else score -= 30;
 		if (dialog) score += 35;
 		if (form) score += 25;
 		if (formStats.passwordInputs > 0) score += 45;
@@ -251,6 +274,7 @@ _FIND_AND_CLICK_JS = r"""(label, shouldClick) => {
 			inHeader: inHeader,
 			inTablist: inTablist,
 			inShadowRoot: inShadowRoot,
+			topmostHitTarget: topmostHitTarget,
 			formStats: formStats,
 			selector: buildSelector(btn, automationId),
 			scope: (dialog ? 'dialog' : 'page') + (form ? '>form' : ''),
@@ -274,6 +298,7 @@ _FIND_AND_CLICK_JS = r"""(label, shouldClick) => {
 			score: candidate.score,
 			scope: candidate.scope,
 			inShadowRoot: candidate.inShadowRoot,
+			topmostHitTarget: candidate.topmostHitTarget,
 			filledInputs: candidate.formStats.filledInputs,
 			hasPasswordField: candidate.formStats.passwordInputs > 0,
 			hasActiveInput: candidate.formStats.hasActive,
@@ -537,11 +562,7 @@ class DomHandClickButtonParams(BaseModel):
 
 
 async def domhand_click_button(params: DomHandClickButtonParams, browser_session: BrowserSession) -> ActionResult:
-    """Click a button using multiple strategies: JS event dispatch, CDP Element.click(), form.submit().
-
-    Designed for React-based sites (Workday, etc.) where browser-use's standard
-    click via CDP mouse events may not trigger form submission handlers.
-    """
+    """Try several button-activation strategies and report what happened."""
     page = await browser_session.get_current_page()
     if not page:
         return ActionResult(error="No active page found")
@@ -568,6 +589,32 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
     except Exception:
         fingerprint_before = {}
 
+    before_snapshot = await capture_button_state(browser_session, page=page)
+    descriptor = annotate_button_descriptor(
+        build_button_descriptor(label, source="domhand_click_button"),
+        before_snapshot,
+    )
+    if descriptor.get("critical"):
+        logger.info(
+            "button_attempt",
+            extra={
+                "label": descriptor.get("label"),
+                "kind": descriptor.get("kind"),
+                "click_method": "domhand_click_button",
+                "auth_state_before": before_snapshot.get("auth_state"),
+                "url_before": before_snapshot.get("url"),
+            },
+        )
+        if descriptor.get("kind") == "auth_submit":
+            logger.info(
+                "auth_state_before",
+                extra={
+                    "label": descriptor.get("label"),
+                    "auth_state": before_snapshot.get("auth_state"),
+                    "url": before_snapshot.get("url"),
+                },
+            )
+
     def _candidate_log_payload(result: dict) -> dict:
         return {
             "label": label,
@@ -576,6 +623,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
             "score": result.get("score"),
             "scope": result.get("scope"),
             "in_shadow_root": result.get("inShadowRoot"),
+            "topmost_hit_target": result.get("topmostHitTarget"),
             "selector": result.get("selector"),
             "top_candidates": result.get("topCandidates", [])[:5],
         }
@@ -624,6 +672,14 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
         if result.get("found") and result.get("clicked"):
             await asyncio.sleep(1.5)
             url_after, fingerprint_after, state_changed = await _capture_transition_state()
+            button_outcome = await assess_button_outcome(
+                browser_session,
+                descriptor,
+                before_snapshot,
+                click_method=result.get("clicked", "unknown"),
+                page=page,
+                capture_visual=False,
+            )
 
             method = result.get("clicked", "unknown")
             logger.info(
@@ -637,16 +693,37 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                     "fingerprint_after": fingerprint_after,
                 },
             )
+            if descriptor.get("kind") == "auth_submit":
+                logger.info(
+                    "auth_state_after",
+                    extra={
+                        "label": descriptor.get("label"),
+                        "auth_state": button_outcome.get("auth_state_after"),
+                        "url": button_outcome.get("url_after"),
+                    },
+                )
+                logger.info(
+                    "auth_submit_result",
+                    extra={
+                        "label": descriptor.get("label"),
+                        "click_method": method,
+                        "auth_state_before": button_outcome.get("auth_state_before"),
+                        "auth_state_after": button_outcome.get("auth_state_after"),
+                        "meaningful_change": button_outcome.get("meaningful_change"),
+                    },
+                )
 
             if url_before != url_after:
                 return ActionResult(
                     extracted_content=f"DomHand click: clicked '{label}' via JS event sequence. Page navigated to {url_after}.",
                     include_in_memory=True,
+                    metadata={"button_attempt": button_outcome},
                 )
             if state_changed:
                 return ActionResult(
                     extracted_content=f"DomHand click: clicked '{label}' via JS event sequence. Page content changed (same-page transition). Check if auth succeeded.",
                     include_in_memory=True,
+                    metadata={"button_attempt": button_outcome},
                 )
 
     except Exception as e:
@@ -662,6 +739,14 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                 await elements[0].click()
                 await asyncio.sleep(1.0)
                 url_after, fingerprint_after, state_changed = await _capture_transition_state()
+                button_outcome = await assess_button_outcome(
+                    browser_session,
+                    descriptor,
+                    before_snapshot,
+                    click_method="cdp_click",
+                    page=page,
+                    capture_visual=False,
+                )
 
                 logger.info(
                     "domhand_click_button.cdp_click",
@@ -673,16 +758,37 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                         "fingerprint_after": fingerprint_after,
                     },
                 )
+                if descriptor.get("kind") == "auth_submit":
+                    logger.info(
+                        "auth_state_after",
+                        extra={
+                            "label": descriptor.get("label"),
+                            "auth_state": button_outcome.get("auth_state_after"),
+                            "url": button_outcome.get("url_after"),
+                        },
+                    )
+                    logger.info(
+                        "auth_submit_result",
+                        extra={
+                            "label": descriptor.get("label"),
+                            "click_method": "cdp_click",
+                            "auth_state_before": button_outcome.get("auth_state_before"),
+                            "auth_state_after": button_outcome.get("auth_state_after"),
+                            "meaningful_change": button_outcome.get("meaningful_change"),
+                        },
+                    )
 
                 if url_before != url_after:
                     return ActionResult(
                         extracted_content=f"DomHand click: clicked '{label}' via CDP Element.click(). Page navigated to {url_after}.",
                         include_in_memory=True,
+                        metadata={"button_attempt": button_outcome},
                     )
                 if state_changed:
                     return ActionResult(
                         extracted_content=f"DomHand click: clicked '{label}' via CDP Element.click(). Page content changed (same-page transition). Check if auth succeeded.",
                         include_in_memory=True,
+                        metadata={"button_attempt": button_outcome},
                     )
         except Exception as e:
             logger.debug(f"CDP Element click failed for '{label}': {e}")
@@ -696,6 +802,14 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
             if submit_result.get("submitted") or submit_result.get("clicked"):
                 await asyncio.sleep(1.5)
                 url_after, fingerprint_after, state_changed = await _capture_transition_state()
+                button_outcome = await assess_button_outcome(
+                    browser_session,
+                    descriptor,
+                    before_snapshot,
+                    click_method=str(submit_result.get("method") or "form_submit"),
+                    page=page,
+                    capture_visual=False,
+                )
 
                 logger.info(
                     "domhand_click_button.form_submit",
@@ -707,16 +821,37 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                         "fingerprint_after": fingerprint_after,
                     },
                 )
+                if descriptor.get("kind") == "auth_submit":
+                    logger.info(
+                        "auth_state_after",
+                        extra={
+                            "label": descriptor.get("label"),
+                            "auth_state": button_outcome.get("auth_state_after"),
+                            "url": button_outcome.get("url_after"),
+                        },
+                    )
+                    logger.info(
+                        "auth_submit_result",
+                        extra={
+                            "label": descriptor.get("label"),
+                            "click_method": submit_result.get("method"),
+                            "auth_state_before": button_outcome.get("auth_state_before"),
+                            "auth_state_after": button_outcome.get("auth_state_after"),
+                            "meaningful_change": button_outcome.get("meaningful_change"),
+                        },
+                    )
 
                 if url_before != url_after:
                     return ActionResult(
                         extracted_content=f"DomHand click: submitted form for '{label}'. Page navigated to {url_after}.",
                         include_in_memory=True,
+                        metadata={"button_attempt": button_outcome},
                     )
                 if state_changed:
                     return ActionResult(
                         extracted_content=f"DomHand click: submitted form for '{label}'. Page content changed (same-page transition). Check if auth succeeded.",
                         include_in_memory=True,
+                        metadata={"button_attempt": button_outcome},
                     )
         except Exception as e:
             logger.debug(f"Form submit failed for '{label}': {e}")
@@ -732,6 +867,14 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                 await page.keyboard.press("Enter")
                 await asyncio.sleep(1.5)
                 url_after, fingerprint_after, state_changed = await _capture_transition_state()
+                button_outcome = await assess_button_outcome(
+                    browser_session,
+                    descriptor,
+                    before_snapshot,
+                    click_method="enter_key",
+                    page=page,
+                    capture_visual=False,
+                )
 
                 logger.info(
                     "domhand_click_button.enter_key",
@@ -742,16 +885,37 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                         "fingerprint_after": fingerprint_after,
                     },
                 )
+                if descriptor.get("kind") == "auth_submit":
+                    logger.info(
+                        "auth_state_after",
+                        extra={
+                            "label": descriptor.get("label"),
+                            "auth_state": button_outcome.get("auth_state_after"),
+                            "url": button_outcome.get("url_after"),
+                        },
+                    )
+                    logger.info(
+                        "auth_submit_result",
+                        extra={
+                            "label": descriptor.get("label"),
+                            "click_method": "enter_key",
+                            "auth_state_before": button_outcome.get("auth_state_before"),
+                            "auth_state_after": button_outcome.get("auth_state_after"),
+                            "meaningful_change": button_outcome.get("meaningful_change"),
+                        },
+                    )
 
                 if url_before != url_after:
                     return ActionResult(
                         extracted_content=f"DomHand click: pressed Enter on '{label}'. Page navigated to {url_after}.",
                         include_in_memory=True,
+                        metadata={"button_attempt": button_outcome},
                     )
                 if state_changed:
                     return ActionResult(
                         extracted_content=f"DomHand click: pressed Enter on '{label}'. Page content changed (same-page transition). Check if auth succeeded.",
                         include_in_memory=True,
+                        metadata={"button_attempt": button_outcome},
                     )
         except Exception as e:
             logger.debug(f"Enter key failed for '{label}': {e}")
@@ -765,6 +929,14 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
         pass
 
     if result.get("found"):
+        button_outcome = await assess_button_outcome(
+            browser_session,
+            descriptor,
+            before_snapshot,
+            click_method=str(result.get("clicked") or "domhand_click_button"),
+            page=page,
+            capture_visual=True,
+        )
         # Button found and clicked, but page didn't transition
         hidden_errors = diagnostics.get("hiddenErrors", [])
         checkboxes = diagnostics.get("checkboxes", [])
@@ -836,7 +1008,8 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
         detail_parts.append(
             f"Chosen candidate: text='{result.get('text', '')}', scope={result.get('scope')}, "
             f"match={result.get('matchKind')}, score={result.get('score')}, "
-            f"in_shadow_root={result.get('inShadowRoot')}."
+            f"in_shadow_root={result.get('inShadowRoot')}, "
+            f"topmost_hit_target={result.get('topmostHitTarget')}."
         )
 
         alternatives = [c.get("text", "")[:60] for c in result.get("topCandidates", [])[1:4] if c.get("text")]
@@ -880,9 +1053,17 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                 "Possible causes: the site blocks automated clicks, or a "
                 "required field is missing. Check for error messages."
             )
+        if button_outcome.get("screenshot_path"):
+            detail_parts.append(
+                f"Visual re-check screenshot captured: {button_outcome['screenshot_path']}. "
+                "Use the screenshot as ground truth before any retry."
+            )
+        detail_parts.append(
+            format_button_no_transition_message(button_outcome)
+        )
 
         logger.warning(
-            "domhand_click_button.no_transition",
+            "button_no_transition",
             extra={
                 "label": label,
                 "chosen_candidate": _candidate_log_payload(result),
@@ -890,12 +1071,47 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                 "checkboxes": checkboxes,
                 "forms": forms,
                 "auth_inputs": auth_inputs,
+                "button_attempt": button_outcome,
             },
         )
+        if descriptor.get("kind") == "auth_submit":
+            logger.info(
+                "auth_state_after",
+                extra={
+                    "label": descriptor.get("label"),
+                    "auth_state": button_outcome.get("auth_state_after"),
+                    "url": button_outcome.get("url_after"),
+                },
+            )
+            logger.info(
+                "auth_submit_result",
+                extra={
+                    "label": descriptor.get("label"),
+                    "click_method": result.get("clicked") or "domhand_click_button",
+                    "auth_state_before": button_outcome.get("auth_state_before"),
+                    "auth_state_after": button_outcome.get("auth_state_after"),
+                    "meaningful_change": button_outcome.get("meaningful_change"),
+                },
+            )
+        logger.warning(
+            "button_failure",
+            extra={
+                "label": descriptor.get("label"),
+                "kind": descriptor.get("kind"),
+                "click_method": result.get("clicked") or "domhand_click_button",
+                "screenshot_path": button_outcome.get("screenshot_path"),
+            },
+        )
+        emit_button_no_transition_event(button_outcome)
 
         return ActionResult(
             extracted_content="\n".join(detail_parts),
             include_in_memory=True,
+            metadata={
+                "button_attempt": button_outcome,
+                "include_screenshot": bool(button_outcome.get("screenshot_path")),
+            },
+            attachments=[button_outcome["screenshot_path"]] if button_outcome.get("screenshot_path") else None,
         )
 
     # Button not found at all

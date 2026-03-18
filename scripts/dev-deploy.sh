@@ -38,6 +38,7 @@ fi
 # ---------- Paths ----------
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+VENV_PYTHON="$REPO_ROOT/.venv/bin/python"
 
 # Desktop app userData path
 case "$PLATFORM" in
@@ -89,25 +90,31 @@ if [ "$SKIP_BUILD" = false ]; then
     exit 1
   fi
 
-  # Activate venv if not already
-  if [ -z "${VIRTUAL_ENV:-}" ]; then
-    source .venv/bin/activate
+  if [ ! -x "$VENV_PYTHON" ]; then
+    echo "No venv python found at $VENV_PYTHON"
+    exit 1
   fi
 
   # Install PyInstaller if missing
-  if ! python -c "import PyInstaller" 2>/dev/null; then
+  if ! "$VENV_PYTHON" -c "import PyInstaller" 2>/dev/null; then
     echo "Installing PyInstaller..."
-    pip install pyinstaller==6.13.0
+    uv pip install --python "$VENV_PYTHON" pyinstaller==6.13.0
   fi
 
   # Skip browser download — Desktop manages browsers separately
   export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
+  # PyInstaller caches compiled stdlib/modules in build/work. If the last build
+  # used a different Python version, stale bytecode can produce "bad magic
+  # number" failures at runtime. Clean first for deterministic builds.
+  rm -rf "build/work" "build/dist"
+
   # Build
-  pyinstaller build/hand-x.spec \
+  "$VENV_PYTHON" -m PyInstaller build/hand-x.spec \
     --distpath "build/dist" \
     --workpath "build/work" \
     --noconfirm \
+    --clean \
     --log-level WARN
 
   # Copy to platform-specific name (use cat to avoid inheriting macOS provenance xattrs)
@@ -177,11 +184,25 @@ echo ""
 echo "Installing to Desktop app binary location..."
 mkdir -p "$BIN_DIR"
 
-# Compute SHA-256
-if command -v shasum &>/dev/null; then
-  SHA256=$(shasum -a 256 "$BUILD_BINARY" | awk '{print $1}')
-elif command -v sha256sum &>/dev/null; then
-  SHA256=$(sha256sum "$BUILD_BINARY" | awk '{print $1}')
+# Compute SHA-256 without relying on locale-sensitive perl-backed tools.
+SHA_PYTHON="$VENV_PYTHON"
+if [ ! -x "$SHA_PYTHON" ]; then
+  SHA_PYTHON="$(command -v python3 || command -v python || true)"
+fi
+
+if [ -n "$SHA_PYTHON" ]; then
+  SHA256=$("$SHA_PYTHON" - <<'PY' "$BUILD_BINARY"
+import hashlib
+import sys
+
+path = sys.argv[1]
+h = hashlib.sha256()
+with open(path, "rb") as f:
+    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+        h.update(chunk)
+print(h.hexdigest())
+PY
+)
 else
   SHA256="0000000000000000000000000000000000000000000000000000000000000000"
 fi

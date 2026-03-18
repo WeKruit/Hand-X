@@ -164,6 +164,18 @@ WORKDAY_GUARDRAILS: list[str] = [
         "page."
     ),
     (
+        "If this run is using NEW credentials, never click a Workday 'Sign In' "
+        "button just because it is visible in the header, nav, or a loading "
+        "transition. Stay on Create Account unless Workday explicitly says the "
+        "account already exists."
+    ),
+    (
+        "If Create Account submits successfully and Workday lands on the native "
+        "Sign In page, treat that as the expected next step after registration. "
+        "Do NOT click Create Account again. Sign in once with the same email "
+        "and password."
+    ),
+    (
         "Avoid the 'Apply Manually' link on job listing pages — it leads to a "
         "different, often broken flow. Click the main 'Apply' button instead."
     ),

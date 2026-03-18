@@ -234,6 +234,7 @@ class TestEmitAccountCreated:
         events = _capture_jsonl_output(emit_account_created, "workday", "user@test.com", "pass123")
         assert len(events) == 1
         assert events[0]["event"] == "account_created"
+        assert events[0]["credentialStatus"] == "pending_verification"
 
     def test_includes_all_fields(self):
         from ghosthands.output.jsonl import emit_account_created
@@ -265,6 +266,152 @@ class TestEmitAccountCreated:
 
         events = _capture_jsonl_output(emit_account_created, "greenhouse", "user@test.com", "pass")
         assert "url" not in events[0]
+
+
+class TestOpenQuestionAutoAnswering:
+    def test_recovers_language_rubric_from_profile_before_hitl(self):
+        from ghosthands.cli import _OpenQuestionIssue, _auto_answer_open_question_issues
+
+        profile = {
+            "spoken_languages": "English (Native / bilingual)",
+            "english_proficiency": "Native / bilingual",
+            "how_did_you_hear": "LinkedIn",
+        }
+        issues = [
+            _OpenQuestionIssue(field_label="Comprehension", field_type="select", section="Languages"),
+            _OpenQuestionIssue(field_label="Overall", field_type="select", section="Languages"),
+            _OpenQuestionIssue(field_label="Reading", field_type="select", section="Languages"),
+            _OpenQuestionIssue(field_label="Speaking", field_type="select", section="Languages"),
+            _OpenQuestionIssue(field_label="Writing", field_type="select", section="Languages"),
+        ]
+
+        resolved, unresolved = _auto_answer_open_question_issues(issues, profile)
+
+        assert unresolved == []
+        assert resolved == {
+            "Comprehension": "Native / bilingual",
+            "Overall": "Native / bilingual",
+            "Reading": "Native / bilingual",
+            "Speaking": "Native / bilingual",
+            "Writing": "Native / bilingual",
+        }
+
+    def test_preserves_unknown_issues_for_real_hitl(self):
+        from ghosthands.cli import _OpenQuestionIssue, _auto_answer_open_question_issues
+
+        issues = [
+            _OpenQuestionIssue(field_label="Why do you want this job?", field_type="textarea"),
+        ]
+
+        resolved, unresolved = _auto_answer_open_question_issues(issues, {})
+
+        assert resolved == {}
+        assert len(unresolved) == 1
+        assert unresolved[0].field_label == "Why do you want this job?"
+
+    def test_recovers_compensation_open_question_from_profile(self):
+        from ghosthands.cli import _OpenQuestionIssue, _auto_answer_open_question_issues
+
+        profile = {
+            "salary_expectation": "$90,000-$120,000 base (flexible)",
+        }
+        issues = [
+            _OpenQuestionIssue(
+                field_label="Expectations on Compensation - Please state your expectations of total compensation for this position.(Please list a value and/or range)*",
+                field_type="textarea",
+                section="My Information",
+            ),
+        ]
+
+        resolved, unresolved = _auto_answer_open_question_issues(issues, profile)
+
+        assert unresolved == []
+        assert resolved == {
+            "Expectations on Compensation - Please state your expectations of total compensation for this position.(Please list a value and/or range)*":
+                "$90,000-$120,000 base (flexible)"
+        }
+
+    def test_defaults_previous_employment_questions_to_no(self):
+        from ghosthands.cli import _OpenQuestionIssue, _auto_answer_open_question_issues
+
+        issues = [
+            _OpenQuestionIssue(
+                field_label="Have you previously worked for this organization?",
+                field_type="select",
+                section="My Information",
+            ),
+        ]
+
+        resolved, unresolved = _auto_answer_open_question_issues(issues, {})
+
+        assert unresolved == []
+        assert resolved == {
+            "Have you previously worked for this organization?": "No",
+        }
+
+    @pytest.mark.asyncio
+    async def test_llm_recovery_uses_visible_options_before_hitl(self, monkeypatch):
+        from ghosthands.cli import _OpenQuestionIssue, _infer_open_question_answers_with_domhand
+
+        async def _fake_infer(fields, *, profile_text=None, profile_data=None):
+            assert len(fields) == 1
+            assert fields[0].options == ["Beginner", "Intermediate", "Expert"]
+            return {fields[0].field_id: "Expert"}
+
+        monkeypatch.setattr(
+            "ghosthands.actions.domhand_fill.infer_answers_for_fields",
+            _fake_infer,
+        )
+
+        issues = [
+            _OpenQuestionIssue(
+                field_label="Overall language ability",
+                field_type="select",
+                section="Languages",
+                options=("Beginner", "Intermediate", "Expert"),
+            ),
+        ]
+        profile = {
+            "spoken_languages": "English (Native / bilingual)",
+            "english_proficiency": "Native / bilingual",
+        }
+
+        resolved, unresolved = await _infer_open_question_answers_with_domhand(issues, profile)
+
+        assert unresolved == []
+        assert resolved == {
+            "Overall language ability": "Expert",
+        }
+
+    @pytest.mark.asyncio
+    async def test_llm_recovery_does_not_try_open_ended_textareas(self, monkeypatch):
+        from ghosthands.cli import _OpenQuestionIssue, _infer_open_question_answers_with_domhand
+
+        called = False
+
+        async def _fake_infer(fields, *, profile_text=None, profile_data=None):
+            nonlocal called
+            called = True
+            return {}
+
+        monkeypatch.setattr(
+            "ghosthands.actions.domhand_fill.infer_answers_for_fields",
+            _fake_infer,
+        )
+
+        issues = [
+            _OpenQuestionIssue(
+                field_label="Why do you want this job?",
+                field_type="textarea",
+                section="Questions",
+            ),
+        ]
+
+        resolved, unresolved = await _infer_open_question_answers_with_domhand(issues, {})
+
+        assert called is False
+        assert resolved == {}
+        assert [issue.field_label for issue in unresolved] == ["Why do you want this job?"]
 
 
 # ---------------------------------------------------------------------------
@@ -654,10 +801,10 @@ class TestProfileLoadingEnvFallback:
 
 class TestNormalizeProfileDefaults:
     """normalize_profile_defaults must add DomHand-expected fields with
-    sensible defaults when they are missing from a raw Desktop bridge profile."""
+    structural defaults when they are missing from a raw Desktop bridge profile."""
 
     def test_adds_all_scalar_defaults_when_missing(self):
-        """A bare-minimum profile should gain all required scalar defaults."""
+        """A bare-minimum profile should gain only structural defaults."""
         from ghosthands.cli import normalize_profile_defaults
 
         raw = {"first_name": "Jane", "last_name": "Doe", "email": "jane@example.com"}
@@ -665,12 +812,12 @@ class TestNormalizeProfileDefaults:
 
         assert result["phone_device_type"] == "Mobile"
         assert result["phone_country_code"] == "+1"
-        assert result["work_authorization"] == "Yes"
-        assert result["visa_sponsorship"] == "No"
-        assert result["veteran_status"] == "I am not a protected veteran"
-        assert result["disability_status"] == "No, I Don't Have A Disability"
-        assert result["gender"] == "Male"
-        assert result["race_ethnicity"] == "Asian (Not Hispanic or Latino)"
+        assert "work_authorization" not in result
+        assert "visa_sponsorship" not in result
+        assert "veteran_status" not in result
+        assert "disability_status" not in result
+        assert "gender" not in result
+        assert "race_ethnicity" not in result
 
     def test_preserves_existing_values(self):
         """Existing non-empty values must NOT be overwritten by defaults."""
@@ -687,9 +834,9 @@ class TestNormalizeProfileDefaults:
         assert result["work_authorization"] == "No"
         assert result["gender"] == "Female"
         assert result["veteran_status"] == "I am a protected veteran"
-        # Defaults still applied for missing fields
+        # Only structural defaults are still applied for missing fields
         assert result["phone_device_type"] == "Mobile"
-        assert result["disability_status"] == "No, I Don't Have A Disability"
+        assert "disability_status" not in result
 
     def test_adds_default_address_when_missing(self):
         """When address is absent, a full default address dict should be added."""
@@ -730,24 +877,26 @@ class TestNormalizeProfileDefaults:
         assert result["address"] == "San Francisco, CA"
 
     def test_replaces_empty_string_values_with_defaults(self):
-        """Empty-string values should be treated as missing and get defaults."""
+        """Sensitive empty-string values should not be fabricated."""
         from ghosthands.cli import normalize_profile_defaults
 
         raw = {"work_authorization": "", "gender": ""}
         result = normalize_profile_defaults(raw)
 
-        assert result["work_authorization"] == "Yes"
-        assert result["gender"] == "Male"
+        assert result["work_authorization"] == ""
+        assert result["gender"] == ""
+        assert result["phone_device_type"] == "Mobile"
 
     def test_replaces_none_values_with_defaults(self):
-        """None values should be treated as missing and get defaults."""
+        """Sensitive None values should remain unset rather than defaulted."""
         from ghosthands.cli import normalize_profile_defaults
 
         raw = {"work_authorization": None, "veteran_status": None}
         result = normalize_profile_defaults(raw)
 
-        assert result["work_authorization"] == "Yes"
-        assert result["veteran_status"] == "I am not a protected veteran"
+        assert result["work_authorization"] is None
+        assert result["veteran_status"] is None
+        assert result["phone_country_code"] == "+1"
 
     def test_does_not_mutate_input(self):
         """The original profile dict must not be modified."""
@@ -789,125 +938,35 @@ class TestNormalizeProfileDefaults:
         assert result["skills"] == ["Python", "TypeScript"]
 
 
-# ---------------------------------------------------------------------------
-# Test 6b — normalize_profile_defaults: demographic defaults warning (S-10)
-# ---------------------------------------------------------------------------
+class TestNormalizeProfileDefaultsWarningsRemoved:
+    """The Desktop bridge must not fabricate sensitive answers or emit warnings
+    about fabricated answers that no longer exist."""
 
-
-class TestNormalizeProfileDefaultsWarning:
-    """When sensitive demographic fields receive defaults, a warning status
-    event must be emitted via the JSONL protocol."""
-
-    def test_emits_warning_when_sensitive_fields_defaulted(self):
-        """Minimal profile missing all sensitive fields -> emit_status called."""
+    def test_missing_sensitive_fields_do_not_emit_status(self):
         from unittest.mock import patch
 
         from ghosthands.cli import normalize_profile_defaults
 
         raw = {"first_name": "Jane", "last_name": "Doe", "email": "jane@example.com"}
         with patch("ghosthands.output.jsonl.emit_status") as mock_emit:
-            normalize_profile_defaults(raw)
-
-        mock_emit.assert_called_once()
-        msg = mock_emit.call_args[0][0]
-        assert "gender" in msg
-        assert "race_ethnicity" in msg
-        assert "veteran_status" in msg
-        assert "disability_status" in msg
-        assert "work_authorization" in msg
-        assert "visa_sponsorship" in msg
-        assert "verify before submitting" in msg
-
-    def test_no_warning_when_all_sensitive_fields_provided(self):
-        """Profile with all sensitive fields filled -> no emit_status call."""
-        from unittest.mock import patch
-
-        from ghosthands.cli import normalize_profile_defaults
-
-        raw = {
-            "first_name": "Jane",
-            "gender": "Female",
-            "race_ethnicity": "White",
-            "veteran_status": "I am a protected veteran",
-            "disability_status": "Yes, I Have A Disability",
-            "work_authorization": "No",
-            "visa_sponsorship": "Yes",
-        }
-        with patch("ghosthands.output.jsonl.emit_status") as mock_emit:
-            normalize_profile_defaults(raw)
-
-        mock_emit.assert_not_called()
-
-    def test_warning_only_lists_missing_sensitive_fields(self):
-        """Profile with some sensitive fields -> warning only lists the missing ones."""
-        from unittest.mock import patch
-
-        from ghosthands.cli import normalize_profile_defaults
-
-        raw = {
-            "first_name": "Jane",
-            "gender": "Female",
-            "work_authorization": "Yes",
-            # Missing: race_ethnicity, veteran_status, disability_status, visa_sponsorship
-        }
-        with patch("ghosthands.output.jsonl.emit_status") as mock_emit:
-            normalize_profile_defaults(raw)
-
-        mock_emit.assert_called_once()
-        msg = mock_emit.call_args[0][0]
-        # Should NOT list provided fields
-        assert "gender" not in msg
-        assert "work_authorization" not in msg
-        # Should list missing sensitive fields
-        assert "race_ethnicity" in msg
-        assert "veteran_status" in msg
-        assert "disability_status" in msg
-        assert "visa_sponsorship" in msg
-
-    def test_warning_excludes_non_sensitive_defaults(self):
-        """Non-sensitive defaults (phone_device_type, phone_country_code)
-        must not appear in the warning message."""
-        from unittest.mock import patch
-
-        from ghosthands.cli import normalize_profile_defaults
-
-        raw = {
-            "first_name": "Jane",
-            # All sensitive fields provided
-            "gender": "Female",
-            "race_ethnicity": "White",
-            "veteran_status": "I am a protected veteran",
-            "disability_status": "Yes, I Have A Disability",
-            "work_authorization": "No",
-            "visa_sponsorship": "Yes",
-            # Non-sensitive fields missing — should NOT trigger warning
-        }
-        with patch("ghosthands.output.jsonl.emit_status") as mock_emit:
             result = normalize_profile_defaults(raw)
 
-        # Defaults were applied for non-sensitive fields
-        assert result["phone_device_type"] == "Mobile"
-        assert result["phone_country_code"] == "+1"
-        # But no warning emitted
         mock_emit.assert_not_called()
+        assert "gender" not in result
+        assert "work_authorization" not in result
 
-    def test_emit_failure_does_not_raise(self):
-        """If emit_status raises, the function must still return normally."""
+    def test_non_sensitive_defaults_still_apply_without_warning(self):
         from unittest.mock import patch
 
         from ghosthands.cli import normalize_profile_defaults
 
         raw = {"first_name": "Jane"}
-        with patch(
-            "ghosthands.output.jsonl.emit_status",
-            side_effect=RuntimeError("pipe broken"),
-        ):
-            # Should not raise
+        with patch("ghosthands.output.jsonl.emit_status") as mock_emit:
             result = normalize_profile_defaults(raw)
 
-        # Defaults still applied
-        assert result["gender"] == "Male"
-        assert result["race_ethnicity"] == "Asian (Not Hispanic or Latino)"
+        assert result["phone_device_type"] == "Mobile"
+        assert result["phone_country_code"] == "+1"
+        mock_emit.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -989,7 +1048,7 @@ class TestGetFieldCounts:
 class TestAccountCreatedEmission:
     """account_created is emitted by cli.py's _on_step_end when the agent's
     evaluation indicates that an account was successfully created and
-    credential_source is 'generated'.
+    the runtime is in a create-account credential mode.
 
     The emit_account_created function exists in the JSONL module and is
     imported by cli.py for this purpose.
@@ -1019,6 +1078,16 @@ class TestAccountCreatedEmission:
         # The function is now used in _on_step_end for account creation detection
         assert "emit_account_created" in source
 
+    def test_cli_supports_user_create_account_emission(self):
+        """User-provided create-account credentials should also trigger
+        account_created emission logic, not just generated passwords."""
+        from pathlib import Path
+
+        cli_path = Path(__file__).resolve().parents[2] / "ghosthands" / "cli.py"
+        source = cli_path.read_text(encoding="utf-8")
+        assert 'credential_source == "user"' in source
+        assert 'credential_intent == "create_account"' in source
+
 
 # ---------------------------------------------------------------------------
 # Test 9 — _camel_to_snake_profile
@@ -1036,6 +1105,7 @@ class TestCamelToSnakeProfile:
             "lastName": "Doe",
             "linkedIn": "https://linkedin.com/in/jane",
             "zipCode": "94105",
+            "county": "San Francisco County",
             "workAuthorization": "Yes",
             "visaSponsorship": "No",
             "raceEthnicity": "Asian",
@@ -1051,6 +1121,7 @@ class TestCamelToSnakeProfile:
         assert result["linkedin"] == "https://linkedin.com/in/jane"
         assert result["zip"] == "94105"
         assert result["postal_code"] == "94105"
+        assert result["county"] == "San Francisco County"
         assert result["work_authorization"] == "Yes"
         assert result["visa_sponsorship"] == "No"
         assert result["race_ethnicity"] == "Asian"
@@ -1696,7 +1767,7 @@ class TestWaitForReviewCommand:
             ),
             patch(
                 "ghosthands.bridge.protocol._time.monotonic",
-                side_effect=[0.0, 1501.0, 1800.0],
+                side_effect=[0.0, 23 * 60 * 60 + 1.0, 24 * 60 * 60 + 1.0],
             ),
             patch("ghosthands.output.jsonl.emit_status") as emit_status,
             patch("ghosthands.output.jsonl.emit_error") as emit_error,
@@ -1705,11 +1776,11 @@ class TestWaitForReviewCommand:
 
         assert result == "timeout"
         emit_status.assert_any_call(
-            "Your review session will expire in 5 minutes. Please submit or cancel soon.",
+            "Your review session will expire in about 1 hour. Please submit or cancel soon.",
             job_id="j1",
         )
         emit_error.assert_called_once_with(
-            "Review timed out after 30 minutes",
+            "Review session expired — please submit or cancel your application",
             fatal=True,
             job_id="j1",
         )
