@@ -142,6 +142,96 @@ def test_sanitize_normal_values_unchanged():
 
 
 # ---------------------------------------------------------------------------
+# Resolution provenance
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_known_profile_value_marks_profile_backed():
+    """Deterministic profile-backed answers should not be flagged as guesses."""
+    from ghosthands.actions.domhand_fill import _resolve_known_profile_value_for_field
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="school-year",
+        name="Please tell us your current year in school",
+        raw_label="Please tell us your current year in school",
+        field_type="textarea",
+        required=True,
+    )
+
+    resolved = _resolve_known_profile_value_for_field(
+        field,
+        {"current_school_year": "Junior"},
+        {"currentSchoolYear": "Junior"},
+    )
+
+    assert resolved is not None
+    assert resolved.value == "Junior"
+    assert resolved.answer_mode == "profile_backed"
+    assert resolved.source == "dom"
+
+
+def test_resolve_llm_answer_marks_best_effort_guess():
+    """LLM-only fallback answers should be marked as best-effort guesses."""
+    from ghosthands.actions.domhand_fill import _resolve_llm_answer_for_field
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="essay",
+        name="What makes you a strong candidate?",
+        raw_label="What makes you a strong candidate?",
+        field_type="textarea",
+        required=True,
+    )
+
+    resolved = _resolve_llm_answer_for_field(
+        field,
+        {"What makes you a strong candidate?": "I learn quickly and ship reliably."},
+        {},
+        {},
+    )
+
+    assert resolved is not None
+    assert resolved.value == "I learn quickly and ship reliably."
+    assert resolved.answer_mode == "best_effort_guess"
+    assert resolved.source == "llm"
+
+
+def test_resolve_llm_answer_uses_deterministic_default_for_certifications():
+    """Certifications/licenses should default to literal None without guess provenance."""
+    from ghosthands.actions.domhand_fill import _resolve_llm_answer_for_field
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="certs",
+        name="Please list any relevant certifications or licenses.*",
+        raw_label="Please list any relevant certifications or licenses.*",
+        field_type="textarea",
+        required=True,
+    )
+
+    resolved = _resolve_llm_answer_for_field(field, {}, {}, {})
+
+    assert resolved is not None
+    assert resolved.value == "None"
+    assert resolved.answer_mode is None
+    assert resolved.source == "dom"
+
+
+def test_recovery_task_no_longer_uses_hitl_wording():
+    """Recovered local answers should not be described as HITL/user input."""
+    from ghosthands.cli import _build_recovery_task
+
+    task = _build_recovery_task(
+        "Fill the application",
+        {"Estimated graduation date": "December 202X"},
+    )
+
+    assert "RECOVERED ANSWERS JUST PROVIDED" in task
+    assert "HITL ANSWERS JUST PROVIDED" not in task
+
+
+# ---------------------------------------------------------------------------
 # Search term generation (drives _fill_searchable_dropdown retry logic)
 # ---------------------------------------------------------------------------
 
@@ -216,7 +306,7 @@ def test_auth_override_matches_email_and_password_fields():
 
 
 def test_build_task_prompt_uses_browser_use_for_auth_pages():
-    """Auth instructions should use browser-use input actions, not domhand_fill."""
+    """Auth instructions should use browser-use inputs plus domhand_click_button for submit."""
     from ghosthands.agent.prompts import build_task_prompt
 
     prompt = build_task_prompt(
@@ -228,8 +318,7 @@ def test_build_task_prompt_uses_browser_use_for_auth_pages():
 
     assert "NOT domhand_fill" in prompt
     assert "browser-use input" in prompt
-    assert "standard click action" in prompt
-    assert "domhand_click_button" not in prompt
+    assert "domhand_click_button" in prompt
     assert (
         "Sign In is allowed ONLY after Create Account fails with an explicit 'account already exists' signal." in prompt
     )
@@ -298,8 +387,26 @@ def test_build_task_prompt_user_create_account():
     assert "go DIRECTLY to Create Account first" in prompt
     assert "Use the SAME email/password to sign in ONCE" in prompt
     assert "NEVER click Sign In proactively from the start dialog" in prompt
+    assert "AUTH_RESULT=ACCOUNT_CREATED_ACTIVE" in prompt
+    assert "Do NOT click Create Account again" in prompt
+    assert "submit Create Account using domhand_click_button" in prompt
     assert "call refresh() ONCE" in prompt
     assert "take ONE screenshot/vision retry on that blocker" in prompt
+
+
+def test_build_task_prompt_replaces_old_hitl_salary_instruction():
+    from ghosthands.agent.prompts import build_task_prompt
+
+    prompt = build_task_prompt(
+        "https://example.wd1.myworkdayjobs.com/en-US/job/123/apply",
+        "/tmp/resume.pdf",
+        {"email": "user@example.com", "password": "Secret!123"},
+        credential_source="user",
+        credential_intent="create_account",
+    )
+
+    assert "stop for HITL/blocker instead of guessing" not in prompt
+    assert "leave it for review in the final report instead of stopping for HITL" in prompt
 
 
 def test_build_task_prompt_requires_single_field_recovery():

@@ -455,12 +455,31 @@ class DefaultActionWatchdog(BaseWatchdog):
 					"Use the same email/password to sign in once."
 				)
 
+			if create_attempted and is_create_account_target:
+				return (
+					f"{prefix}: Create Account was already submitted once for this run. "
+					"Do NOT click Create Account again. Wait for the page to settle, inspect inline errors, "
+					"or report a blocker from the current state."
+				)
+
 			if is_sign_in_target and (
 				state.get('confirmPasswordVisible') or state.get('createAccountSignals') or state.get('startDialogSignals')
 			):
 				return (
 					f"{prefix}: do not click Sign In while Create Account or the start dialog is still active. "
 					"Sign In is allowed only after Create Account fails with an explicit account-already-exists signal."
+				)
+
+			if (
+				is_sign_in_target
+				and not create_attempted
+				and state.get('authState') == 'unknown_pending'
+				and state.get('signInSignals')
+			):
+				return (
+					f"{prefix}: do not click Sign In just to reach or search for Create Account. "
+					"Stay on the current auth entry page, look for a Create Account control first, and only use "
+					"Sign In after an explicit account-already-exists signal."
 				)
 
 			return None

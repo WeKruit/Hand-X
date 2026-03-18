@@ -23,6 +23,7 @@ job application form filling.  It:
 """
 
 import asyncio
+from dataclasses import dataclass
 import inspect
 import json
 import logging
@@ -65,6 +66,15 @@ logger = logging.getLogger(__name__)
 # When set, called with each FillFieldResult as it is created.
 # Signature: (result: FillFieldResult, round_num: int) -> None
 _on_field_result: Any = None  # Callable[[FillFieldResult, int], None] | None
+
+
+@dataclass(frozen=True)
+class ResolvedFieldValue:
+    value: str
+    source: str
+    answer_mode: str | None
+    confidence: float
+    state: str = "filled"
 
 # ── Constants ────────────────────────────────────────────────────────
 
@@ -3740,6 +3750,154 @@ def _known_profile_value_for_field(
     return fallback
 
 
+def _resolved_field_value(
+    value: str,
+    *,
+    source: str,
+    answer_mode: str | None,
+    confidence: float,
+    state: str = "filled",
+) -> ResolvedFieldValue:
+    return ResolvedFieldValue(
+        value=value,
+        source=source,
+        answer_mode=answer_mode,
+        confidence=max(0.0, min(confidence, 1.0)),
+        state=state,
+    )
+
+
+def _default_answer_mode_for_field(field: FormField, value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    norm = _normalize_match_label(field.name or "")
+    if field.required and norm in _EEO_DECLINE_DEFAULTS and text == _EEO_DECLINE_DEFAULTS[norm]:
+        return "default_decline"
+    return None
+
+
+def _match_confidence_score(confidence: str | None) -> float:
+    return {
+        "exact": 0.95,
+        "strong": 0.85,
+        "medium": 0.72,
+        "weak": 0.58,
+    }.get((confidence or "").strip().lower(), 0.55)
+
+
+def _resolve_known_profile_value_for_field(
+    field: FormField,
+    evidence: dict[str, str | None],
+    profile_data: dict[str, Any] | None = None,
+    minimum_confidence: str = "medium",
+) -> ResolvedFieldValue | None:
+    field_label = _preferred_field_label(field)
+    profile_answer_map = _build_profile_answer_map(profile_data or {}, evidence)
+    for label in _field_label_candidates(field):
+        confidence = _label_match_confidence(label, label)
+        value = _find_best_profile_answer(label, profile_answer_map, minimum_confidence=minimum_confidence)
+        if value:
+            coerced = _coerce_answer_to_field(field, value)
+            if not coerced:
+                continue
+            _trace_profile_resolution(
+                "domhand.profile_answer_map_match",
+                field_label=field_label,
+                source_label=label,
+                minimum_confidence=minimum_confidence,
+                raw_value=_profile_debug_preview(value),
+                coerced_value=_profile_debug_preview(coerced),
+            )
+            return _resolved_field_value(
+                coerced,
+                source="dom",
+                answer_mode="profile_backed",
+                confidence=_match_confidence_score(confidence),
+            )
+    if _MATCH_CONFIDENCE_RANKS.get(minimum_confidence, 0) >= _MATCH_CONFIDENCE_RANKS["strong"]:
+        _trace_profile_resolution(
+            "domhand.profile_lookup_miss",
+            field_label=field_label,
+            minimum_confidence=minimum_confidence,
+            reason="strong_match_required",
+        )
+        return None
+    for label in _field_label_candidates(field):
+        value = _known_profile_value(label, evidence)
+        if value:
+            coerced = _coerce_answer_to_field(field, value)
+            if not coerced:
+                continue
+            _trace_profile_resolution(
+                "domhand.profile_keyword_match",
+                field_label=field_label,
+                source_label=label,
+                raw_value=_profile_debug_preview(value),
+                coerced_value=_profile_debug_preview(coerced),
+            )
+            return _resolved_field_value(
+                coerced,
+                source="dom",
+                answer_mode="profile_backed",
+                confidence=0.82,
+            )
+
+    raw_bank = (profile_data or {}).get("answerBank") or (profile_data or {}).get("answer_bank")
+    if isinstance(raw_bank, list) and raw_bank:
+        capped = _cap_qa_entries(list(raw_bank))
+        for label in _field_label_candidates(field):
+            qa_val = _match_qa_answer(label, capped)
+            if qa_val:
+                coerced = _coerce_answer_to_field(field, qa_val)
+                if not coerced:
+                    continue
+                _trace_profile_resolution(
+                    "domhand.profile_answer_bank_match",
+                    field_label=field_label,
+                    source_label=label,
+                    raw_value=_profile_debug_preview(qa_val),
+                    coerced_value=_profile_debug_preview(coerced),
+                    answer_bank_count=len(capped),
+                )
+                return _resolved_field_value(
+                    coerced,
+                    source="dom",
+                    answer_mode="profile_backed",
+                    confidence=0.8,
+                )
+
+    default_answer = _default_screening_answer(field, profile_data or {})
+    if default_answer:
+        _trace_profile_resolution(
+            "domhand.profile_default_answer",
+            field_label=field_label,
+            raw_value=_profile_debug_preview(default_answer),
+        )
+        return _resolved_field_value(
+            default_answer,
+            source="dom",
+            answer_mode=_default_answer_mode_for_field(field, default_answer),
+            confidence=0.68,
+        )
+
+    fallback = _coerce_answer_to_field(field, _known_profile_value(field.name, evidence))
+    _trace_profile_resolution(
+        "domhand.profile_fallback_lookup",
+        field_label=field_label,
+        raw_value=_profile_debug_preview(_known_profile_value(field.name, evidence)),
+        coerced_value=_profile_debug_preview(fallback),
+    )
+    if not fallback:
+        return None
+    return _resolved_field_value(
+        fallback,
+        source="dom",
+        answer_mode="profile_backed",
+        confidence=0.75,
+    )
+
+
 def _default_value(field: FormField) -> str:
     """Fallback values allowed by strict-provenance policy only."""
     name_lower = normalize_name(field.name or "")
@@ -3756,6 +3914,117 @@ def _default_value(field: FormField) -> str:
             return "None"
 
     return ""
+
+
+def _resolve_llm_answer_for_field(
+    field: FormField,
+    answers: dict[str, str],
+    evidence: dict[str, str | None],
+    profile_data: dict[str, Any] | None = None,
+) -> ResolvedFieldValue | None:
+    label_candidates = _field_label_candidates(field) or [field.name]
+    candidate_norms = [_normalize_match_label(label) for label in label_candidates if _normalize_match_label(label)]
+    minimum_confidence = "medium" if field.required else "strong"
+
+    if field.field_type == "select":
+        for norm_name in candidate_norms:
+            if norm_name in _AUTHORITATIVE_SELECT_KEYS:
+                for ck in _AUTHORITATIVE_SELECT_KEYS[norm_name]:
+                    if ck in answers:
+                        coerced = _coerce_answer_to_field(field, answers[ck])
+                        if coerced:
+                            return _resolved_field_value(
+                                coerced,
+                                source="llm",
+                                answer_mode="best_effort_guess",
+                                confidence=0.64,
+                            )
+                    for key, val in answers.items():
+                        if normalize_name(key) == normalize_name(ck):
+                            coerced = _coerce_answer_to_field(field, val)
+                            if coerced:
+                                return _resolved_field_value(
+                                    coerced,
+                                    source="llm",
+                                    answer_mode="best_effort_guess",
+                                    confidence=0.6,
+                                )
+                if norm_name in _AUTHORITATIVE_SELECT_DEFAULTS:
+                    default_value = _AUTHORITATIVE_SELECT_DEFAULTS[norm_name]
+                    return _resolved_field_value(
+                        default_value,
+                        source="dom",
+                        answer_mode=_default_answer_mode_for_field(field, default_value),
+                        confidence=0.66,
+                    )
+
+    best_resolution: ResolvedFieldValue | None = None
+    best_rank = 0
+    for key, val in answers.items():
+        for candidate in label_candidates:
+            confidence = _label_match_confidence(candidate, key)
+            if not _meets_match_confidence(confidence, minimum_confidence):
+                continue
+            rank = _MATCH_CONFIDENCE_RANKS.get(confidence or "", 0)
+            if rank <= best_rank:
+                continue
+            coerced = _coerce_answer_to_field(field, val)
+            if not coerced:
+                continue
+            best_rank = rank
+            best_resolution = _resolved_field_value(
+                coerced,
+                source="llm",
+                answer_mode="best_effort_guess",
+                confidence=_match_confidence_score(confidence),
+            )
+            if rank == _MATCH_CONFIDENCE_RANKS["exact"]:
+                return best_resolution
+
+    if best_resolution is not None:
+        return best_resolution
+
+    for norm_name in candidate_norms:
+        if norm_name in _AUTHORITATIVE_SELECT_DEFAULTS:
+            default_value = _AUTHORITATIVE_SELECT_DEFAULTS[norm_name]
+            return _resolved_field_value(
+                default_value,
+                source="dom",
+                answer_mode=_default_answer_mode_for_field(field, default_value),
+                confidence=0.66,
+            )
+
+    if field.field_type in {"text", "textarea", "search"}:
+        for norm_name in candidate_norms:
+            if norm_name in _AUTHORITATIVE_TEXT_DEFAULTS:
+                default_value = _AUTHORITATIVE_TEXT_DEFAULTS[norm_name]
+                return _resolved_field_value(
+                    default_value,
+                    source="dom",
+                    answer_mode=_default_answer_mode_for_field(field, default_value),
+                    confidence=0.66,
+                )
+
+    if field.required:
+        for norm_name in candidate_norms:
+            if norm_name in _EEO_DECLINE_DEFAULTS:
+                default_value = _EEO_DECLINE_DEFAULTS[norm_name]
+                return _resolved_field_value(
+                    default_value,
+                    source="dom",
+                    answer_mode="default_decline",
+                    confidence=0.72,
+                )
+
+    default_value = _default_value(field)
+    if not default_value:
+        return None
+    return _resolved_field_value(
+        default_value,
+        source="dom",
+        answer_mode=_default_answer_mode_for_field(field, default_value),
+        confidence=0.65,
+    )
 
 
 def _is_explicit_false(val: str | None) -> bool:
@@ -4455,6 +4724,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 
         needs_llm: list[FormField] = []
         direct_fills: dict[str, str] = {}
+        resolved_values: dict[str, ResolvedFieldValue] = {}
         for f in fillable_fields:
             if f.current_value and not is_placeholder_value(f.current_value):
                 fields_seen.add(get_stable_field_key(f))
@@ -4462,6 +4732,12 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             auth_val = _known_auth_override_for_field(f, auth_overrides)
             if auth_val:
                 direct_fills[f.field_id] = auth_val
+                resolved_values[f.field_id] = _resolved_field_value(
+                    auth_val,
+                    source="dom",
+                    answer_mode="profile_backed",
+                    confidence=1.0,
+                )
                 continue
             if auth_overrides and _is_auth_like_field(f):
                 fr = FillFieldResult(
@@ -4474,6 +4750,9 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     required=f.required,
                     control_kind=f.field_type,
                     section=f.section or "",
+                    source="dom",
+                    confidence=1.0,
+                    state="failed",
                     failure_reason="auth_override_missing",
                     takeover_suggestion=(
                         "Retry domhand_fill with use_auth_credentials=true or use a targeted "
@@ -4484,22 +4763,43 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 if _on_field_result:
                     _on_field_result(fr, round_num)
                 continue
-            profile_val = _known_entry_value_for_field(f, entry_data) or _known_profile_value_for_field(
+            entry_val = _known_entry_value_for_field(f, entry_data)
+            if entry_val:
+                coerced_entry_val = _coerce_answer_to_field(f, entry_val)
+                if coerced_entry_val:
+                    direct_fills[f.field_id] = coerced_entry_val
+                    resolved_values[f.field_id] = _resolved_field_value(
+                        coerced_entry_val,
+                        source="dom",
+                        answer_mode="profile_backed",
+                        confidence=0.98,
+                    )
+                    continue
+            known_resolution = _resolve_known_profile_value_for_field(
                 f,
                 evidence,
                 profile_data,
                 minimum_confidence="medium" if f.required else "strong",
             )
-            if not profile_val:
-                profile_val = await _semantic_profile_value_for_field(
-                    f,
-                    evidence,
-                    profile_data,
+            if known_resolution:
+                direct_fills[f.field_id] = known_resolution.value
+                resolved_values[f.field_id] = known_resolution
+                continue
+            semantic_profile_val = await _semantic_profile_value_for_field(
+                f,
+                evidence,
+                profile_data,
+            )
+            if semantic_profile_val:
+                direct_fills[f.field_id] = semantic_profile_val
+                resolved_values[f.field_id] = _resolved_field_value(
+                    semantic_profile_val,
+                    source="dom",
+                    answer_mode="profile_backed",
+                    confidence=0.78,
                 )
-            if profile_val:
-                direct_fills[f.field_id] = profile_val
-            else:
-                needs_llm.append(f)
+                continue
+            needs_llm.append(f)
 
         answers: dict[str, str] = {}
         if needs_llm:
@@ -4522,6 +4822,15 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         for f in fillable_fields:
             if f.field_id in direct_fills:
                 value = direct_fills[f.field_id]
+                resolved_value = resolved_values.get(
+                    f.field_id,
+                    _resolved_field_value(
+                        value,
+                        source="dom",
+                        answer_mode="profile_backed",
+                        confidence=0.95,
+                    ),
+                )
                 if await _field_already_matches(page, f, value):
                     success = True
                 else:
@@ -4536,6 +4845,10 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     required=f.required,
                     control_kind=f.field_type,
                     section=f.section or "",
+                    source=resolved_value.source,
+                    answer_mode=resolved_value.answer_mode,
+                    confidence=resolved_value.confidence,
+                    state=resolved_value.state if success else "failed",
                     failure_reason=None if success else "dom_fill_failed",
                     takeover_suggestion=_takeover_suggestion_for_field(
                         f,
@@ -4554,18 +4867,16 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 round_failed += 0 if success else 1
 
         for f in needs_llm:
-            matched_answer = _match_answer(f, answers, evidence, profile_data)
-            if not matched_answer:
-                matched_answer = _default_value(f)
-            # Strip out any N/A-like placeholders the LLM generated
-            if matched_answer and re.match(
-                r"^(n/?a|na|none|not applicable|unknown|placeholder)$", matched_answer.strip(), re.IGNORECASE
+            resolved_value = _resolve_llm_answer_for_field(f, answers, evidence, profile_data)
+            if resolved_value and re.match(
+                r"^(n/?a|na|none|not applicable|unknown|placeholder)$",
+                resolved_value.value.strip(),
+                re.IGNORECASE,
             ):
-                matched_answer = ""
-            # Legacy marker cleanup for no-HITL apply flows.
-            if matched_answer and "[NEEDS_USER_INPUT]" in matched_answer:
-                matched_answer = ""
-            if not matched_answer:
+                resolved_value = None
+            if resolved_value and "[NEEDS_USER_INPUT]" in resolved_value.value:
+                resolved_value = None
+            if not resolved_value or not resolved_value.value:
                 key = get_stable_field_key(f)
                 error_msg = "No confident profile match for this field"
                 if f.required:
@@ -4579,6 +4890,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     required=f.required,
                     control_kind=f.field_type,
                     section=f.section or "",
+                    state="failed",
                     failure_reason="missing_profile_data" if not f.required else "required_missing_profile_data",
                     takeover_suggestion=_takeover_suggestion_for_field(
                         f,
@@ -4593,6 +4905,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 fields_seen.add(key)
                 fields_skipped.add(key)
                 continue
+            matched_answer = resolved_value.value
             if await _field_already_matches(page, f, matched_answer):
                 success = True
             else:
@@ -4607,6 +4920,10 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 required=f.required,
                 control_kind=f.field_type,
                 section=f.section or "",
+                source=resolved_value.source,
+                answer_mode=resolved_value.answer_mode,
+                confidence=resolved_value.confidence,
+                state=resolved_value.state if success else "failed",
                 failure_reason=None if success else "dom_fill_failed",
                 takeover_suggestion=_takeover_suggestion_for_field(
                     f,
@@ -4633,6 +4950,9 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
     failed_count = sum(1 for r in all_results if not r.success and r.actor == "dom")
     skipped_count = sum(1 for r in all_results if r.actor == "skipped")
     unfilled_count = sum(1 for r in all_results if r.actor == "unfilled")
+    best_effort_results = [
+        r for r in all_results if r.success and r.answer_mode == "best_effort_guess" and r.value_set
+    ]
     required_skipped = [
         f'  - "{r.name}" (REQUIRED — needs attention)'
         for r in all_results
@@ -4661,12 +4981,31 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
     if failed_descriptions:
         summary_lines.append("Failed fields (retry even if optional when profile data exists):")
         summary_lines.extend(failed_descriptions[:20])
+    if best_effort_results:
+        summary_lines.append("Best-effort guesses used (review these answers before submit):")
+        summary_lines.extend(
+            [
+                f'  - "{r.name}"'
+                + (f" [{r.section}]" if r.section else "")
+                for r in best_effort_results[:20]
+            ]
+        )
 
     structured_summary = {
         "filled_count": filled_count,
         "dom_failure_count": failed_count,
         "skipped_count": skipped_count,
         "unfilled_count": unfilled_count,
+        "best_effort_guess_count": len(best_effort_results),
+        "best_effort_guess_fields": [
+            {
+                "field_id": r.field_id,
+                "prompt_text": r.name,
+                "section_label": r.section or None,
+                "required": r.required,
+            }
+            for r in best_effort_results
+        ],
         "unresolved_required_fields": [
             {
                 "field_id": r.field_id,

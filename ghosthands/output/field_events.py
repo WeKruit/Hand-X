@@ -50,6 +50,7 @@ _installed = False
 
 # Track cumulative fill counts across rounds (module-level for external access)
 _counts: dict[str, int] = {"filled": 0, "total": 0, "last_round": 0}
+_filled_records: list[dict[str, object]] = []
 
 
 def get_field_counts() -> tuple[int, int]:
@@ -63,6 +64,13 @@ def get_field_counts() -> tuple[int, int]:
     filled = _counts.get("filled", 0)
     total = _counts.get("total", 0)
     return (filled, total - filled)
+
+
+def get_filled_field_records() -> list[dict[str, object]]:
+    """Return successful filled-field records captured during this run."""
+    if not _installed:
+        return []
+    return list(_filled_records)
 
 
 def install_jsonl_callback() -> None:
@@ -98,10 +106,32 @@ def install_jsonl_callback() -> None:
 
             if result.success:
                 _counts["filled"] += 1
+                record = {
+                    "field": result.name,
+                    "field_id": result.field_id,
+                    "value": _redact_if_sensitive(result.name, result.value_set or ""),
+                    "method": "domhand",
+                    "question_type": result.control_kind,
+                    "source": result.source,
+                    "answer_mode": result.answer_mode,
+                    "confidence": result.confidence,
+                    "required": result.required,
+                    "section_label": result.section or None,
+                    "state": result.state or "filled",
+                }
+                _filled_records.append(record)
                 emit_field_filled(
-                    field=result.name,
-                    value=_redact_if_sensitive(result.name, result.value_set or ""),
+                    field=record["field"],
+                    value=record["value"],
                     method="domhand",
+                    field_id=result.field_id,
+                    question_type=result.control_kind,
+                    source=result.source,
+                    answer_mode=result.answer_mode,
+                    confidence=result.confidence,
+                    required=result.required,
+                    section_label=result.section or None,
+                    state=result.state or "filled",
                 )
                 if _counts["filled"] > 0 and _counts["filled"] % 5 == 0:
                     emit_phase(f"Filling form fields ({_counts['filled']} completed)")

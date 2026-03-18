@@ -129,9 +129,30 @@ def emit_field_filled(
     value: str,
     *,
     method: str = "domhand",
+    field_id: str | None = None,
+    question_type: str | None = None,
+    source: str | None = None,
+    answer_mode: str | None = None,
+    confidence: float | None = None,
+    required: bool | None = None,
+    section_label: str | None = None,
+    state: str | None = None,
 ) -> None:
     """Emit after a form field is successfully filled."""
-    emit_event("field_filled", field=field, value=value, method=method)
+    emit_event(
+        "field_filled",
+        field=field,
+        value=value,
+        method=method,
+        field_id=field_id,
+        question_type=question_type,
+        source=source,
+        answer_mode=answer_mode,
+        confidence=confidence,
+        required=required,
+        section_label=section_label,
+        state=state,
+    )
 
 
 def emit_field_failed(
@@ -218,7 +239,7 @@ def emit_account_created(
     password: str,
     *,
     domain: str | None = None,
-    credential_status: str = "active",
+    credential_status: str = "pending_verification",
     note: str | None = None,
     evidence: str | None = None,
     url: str = "",

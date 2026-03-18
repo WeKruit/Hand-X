@@ -411,6 +411,48 @@ def _log_auth_debug_credentials(
     )
 
 
+def _infer_account_created_marker_from_text(
+    combined_text: str,
+) -> tuple[str | None, str | None, str | None]:
+    """Infer a conservative account-created marker from agent memory/eval text.
+
+    Only explicit AUTH_RESULT markers or concrete verification-language heuristics
+    should emit account-created events. Generic phrases like "new account" or
+    "create account" are too weak and cause false positives while the agent is
+    merely navigating to the registration form.
+    """
+    combined = (combined_text or "").lower()
+
+    if "auth_result=account_created_pending_verification" in combined:
+        return (
+            "pending_verification",
+            "Account likely exists, but email verification is still required.",
+            "auth_marker_pending_verification",
+        )
+    if "auth_result=account_created_active" in combined:
+        return (
+            "active",
+            "Account creation succeeded and the run moved past the auth wall.",
+            "auth_marker_active",
+        )
+
+    verification_signals = (
+        "email verification required",
+        "verify your account",
+        "check your inbox",
+        "confirm your email",
+        "verification email",
+    )
+    if any(signal in combined for signal in verification_signals):
+        return (
+            "pending_verification",
+            "Account likely exists, but email verification is still required.",
+            "heuristic_pending_verification",
+        )
+
+    return None, None, None
+
+
 def _warn_if_proxy_overrides_direct_keys(
     args: argparse.Namespace,
     app_settings,
@@ -848,16 +890,48 @@ async def _request_open_question_answers(
     return dict(auto_answers), False
 
 
-def _build_hitl_recovery_task(base_task: str, answers: dict[str, str]) -> str:
+def _build_recovery_task(base_task: str, answers: dict[str, str]) -> str:
     answer_lines = "\n".join(f"- {label}: {value}" for label, value in answers.items())
     return (
         f"{base_task}\n\n"
-        "HITL ANSWERS JUST PROVIDED:\n"
+        "RECOVERED ANSWERS JUST PROVIDED:\n"
         f"{answer_lines}\n"
         "Continue from the CURRENT page in the EXISTING browser session.\n"
         "Use these answers immediately to finish the blocked required fields.\n"
         "Do NOT restart the application or navigate back to the job posting unless the page is irrecoverably broken."
     )
+
+
+def _extract_best_effort_guess_summary(
+    filled_field_records: list[dict[str, Any]] | None,
+) -> tuple[int, list[dict[str, Any]]]:
+    if not isinstance(filled_field_records, list):
+        return 0, []
+
+    guessed_fields: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for record in filled_field_records:
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("answer_mode") or "").strip() != "best_effort_guess":
+            continue
+        prompt_text = str(record.get("field") or record.get("prompt_text") or "").strip()
+        if not prompt_text:
+            continue
+        section_label = str(record.get("section_label") or "").strip()
+        dedupe_key = (prompt_text, section_label)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        guessed_fields.append(
+            {
+                "promptText": prompt_text,
+                "sectionLabel": section_label or None,
+                "required": record.get("required") is True,
+            }
+        )
+
+    return len(guessed_fields), guessed_fields
 
 
 def _handle_review_result(
@@ -1164,54 +1238,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 memory = (last.model_output.current_state.memory or "").lower()
                 eval_text = (last.model_output.current_state.evaluation_previous_goal or "").lower()
                 combined = memory + " " + eval_text
-                marker_status: str | None = None
-                marker_note: str | None = None
-                marker_evidence: str | None = None
-
-                if "auth_result=account_created_pending_verification" in combined:
-                    marker_status = "pending_verification"
-                    marker_note = "Account likely exists, but email verification is still required."
-                    marker_evidence = "auth_marker_pending_verification"
-                elif "auth_result=account_created_active" in combined:
-                    marker_status = "active"
-                    marker_note = "Account creation succeeded and the run moved past the auth wall."
-                    marker_evidence = "auth_marker_active"
-
-                _acct_signals = (
-                    "account created",
-                    "account creation was successful",
-                    "created account",
-                    "registration complete",
-                    "signed up successfully",
-                    "sign up was successful",
-                    "successfully registered",
-                    "successfully created",
-                    "new account",
-                )
-                _verification_signals = (
-                    "email verification required",
-                    "verify your account",
-                    "check your inbox",
-                    "confirm your email",
-                    "verification email",
-                )
-
-                if marker_status is None and any(s in combined for s in _verification_signals):
-                    marker_status = "pending_verification"
-                    marker_note = "Account likely exists, but email verification is still required."
-                    marker_evidence = "heuristic_pending_verification"
-
-                if marker_status is None and any(s in combined for s in _acct_signals):
-                    # Default to pending_verification for heuristic detection.
-                    # Only the explicit AUTH_RESULT=ACCOUNT_CREATED_ACTIVE marker
-                    # (set by the agent after confirming the page moved past auth)
-                    # should produce "active" status. Heuristic signals like
-                    # "account created" in eval text are not strong enough — the
-                    # Create Account button may have been clicked but the page
-                    # may not have actually transitioned.
-                    marker_status = "pending_verification"
-                    marker_note = "Account creation signals detected but page transition not confirmed."
-                    marker_evidence = "heuristic_account_created"
+                marker_status, marker_note, marker_evidence = _infer_account_created_marker_from_text(combined)
 
                 if marker_status:
                     try:
@@ -1354,8 +1381,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 break
 
             hitl_answers.update(recovered_answers)
-            hitl_recovery_task = _build_hitl_recovery_task(task, hitl_answers)
-            emit_status("Received user input — resuming application", job_id=job_id)
+            hitl_recovery_task = _build_recovery_task(task, hitl_answers)
+            emit_status("Recovered additional answers — resuming application", job_id=job_id)
 
         # Final cost event
         if history and history.usage:
@@ -1365,10 +1392,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 completion_tokens=history.usage.total_completion_tokens or 0,
             )
 
-        # Get real field counts from DomHand callback
-        from ghosthands.output.field_events import get_field_counts
+        # Get real field counts and successful field provenance from DomHand callback
+        from ghosthands.output.field_events import get_field_counts, get_filled_field_records
 
         filled_count, failed_count = get_field_counts()
+        filled_field_records = get_filled_field_records()
+        best_effort_guess_count, best_effort_guess_fields = _extract_best_effort_guess_summary(
+            filled_field_records
+        )
 
         if cancelled:
             from ghosthands.runtime_learning import export_runtime_learning_payload
@@ -1402,6 +1433,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                     "blocker": None,
                     "platform": platform,
                     "cancelled": True,
+                    "best_effort_guess_count": best_effort_guess_count,
+                    "best_effort_guess_fields": best_effort_guess_fields,
                     **runtime_learning_payload,
                 },
             )
@@ -1426,6 +1459,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             "finalResult": final_result,
             "blocker": blocker,
             "platform": platform,
+            "best_effort_guess_count": best_effort_guess_count,
+            "best_effort_guess_fields": best_effort_guess_fields,
         }
         from ghosthands.runtime_learning import export_runtime_learning_payload
 

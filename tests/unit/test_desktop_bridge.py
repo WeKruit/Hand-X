@@ -258,6 +258,27 @@ class TestEmitAccountCreated:
         assert e["password_provided"] is True
         assert e["credentialStatus"] == "pending_verification"
         assert e["note"] == "Check your inbox to verify the account."
+
+
+class TestAccountCreatedMarkerInference:
+    def test_ignores_generic_new_account_planning_language(self):
+        from ghosthands.cli import _infer_account_created_marker_from_text
+
+        marker = _infer_account_created_marker_from_text(
+            "need to create a new account using provided credentials"
+        )
+
+        assert marker == (None, None, None)
+
+    def test_honors_explicit_pending_verification_marker(self):
+        from ghosthands.cli import _infer_account_created_marker_from_text
+
+        marker = _infer_account_created_marker_from_text(
+            "AUTH_RESULT=ACCOUNT_CREATED_PENDING_VERIFICATION"
+        )
+
+        assert marker[0] == "pending_verification"
+        assert marker[2] == "auth_marker_pending_verification"
         assert e["evidence"] == "auth_marker_pending_verification"
         assert e["url"] == "https://workday.com"
 

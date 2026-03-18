@@ -42,6 +42,10 @@ class FillFieldResult(BaseModel):
     required: bool = False
     control_kind: str = ""
     section: str = ""
+    source: str | None = None
+    answer_mode: str | None = None
+    confidence: float | None = None
+    state: str | None = None
     failure_reason: str | None = None
     takeover_suggestion: str | None = None
 
