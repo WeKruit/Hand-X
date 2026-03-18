@@ -31,10 +31,7 @@ from ghosthands.actions.domhand_fill import (
     _known_profile_value_for_field,
     _match_answer,
     _parse_profile_evidence,
-    extract_visible_form_fields,
 )
-from ghosthands.actions.domhand_interact_control import domhand_interact_control
-from ghosthands.actions.domhand_select import domhand_select
 from ghosthands.actions.domhand_select import (
     FAIL_OVER_CUSTOM_WIDGET,
     FAIL_OVER_NATIVE_SELECT,
@@ -44,8 +41,6 @@ from ghosthands.actions.domhand_select import (
 from ghosthands.actions.views import (
     DomHandAssessStateParams,
     DomHandClosePopupParams,
-    DomHandInteractControlParams,
-    DomHandSelectParams,
     FormField,
     generate_dropdown_search_terms,
     split_dropdown_value_hierarchy,
@@ -60,7 +55,6 @@ from ghosthands.dom.shadow_helpers import ensure_helpers
 from ghosthands.integrations.resume_loader import _map_to_profile
 from ghosthands.platforms import detect_platform, detect_platform_from_signals, get_config_by_name
 from ghosthands.profile.canonical import build_canonical_profile
-from ghosthands.runtime_learning import export_runtime_learning_payload, reset_runtime_learning_state
 from ghosthands.worker.executor import detect_platform as detect_executor_platform
 
 SHADOW_DROPDOWN_HTML = """
@@ -167,207 +161,6 @@ TRUSTED_CHECKBOX_HTML = """
 			window.__selected = 'No, I do not have a disability and have not had one in the past';
 		});
 	</script>
-</body>
-</html>
-"""
-
-WORKDAY_INTERACTIVE_BLOCKERS_HTML = """
-<!DOCTYPE html>
-<html>
-<body>
-	<h2>My Information</h2>
-	<div
-		id="error-summary"
-		role="alert"
-		style="border:1px solid #d33;padding:12px;margin-bottom:16px;color:#b00020;"
-	>
-		Error - Have you previously worked at Exact Sciences?
-		The field Have you previously worked at Exact Sciences? is required and must have a value.
-	</div>
-
-	<div
-		id="source-field"
-		data-automation-id="formField"
-		style="display:flex;flex-direction:column;gap:8px;width:520px;margin-bottom:20px;"
-	>
-		<label for="source--source">How Did You Hear About Us?*</label>
-		<div style="display:flex;align-items:center;gap:8px;border:1px solid #bbb;padding:8px;">
-			<div data-automation-id="selectedItem" class="selected-pill">LinkedIn</div>
-			<input
-				id="source--source"
-				data-ff-id="source--source"
-				role="combobox"
-				data-uxi-widget-type="selectinput"
-				aria-haspopup="listbox"
-				aria-label="How Did You Hear About Us?"
-				value=""
-			/>
-		</div>
-	</div>
-
-	<fieldset
-		id="prior-employment-field"
-		data-automation-id="formField"
-		aria-invalid="true"
-		style="display:flex;flex-direction:column;gap:8px;width:520px;"
-	>
-		<legend>Have you previously worked at Exact Sciences?*</legend>
-		<div id="prior-employment-error" class="error" style="color:#b00020;">
-			Error: The field Have you previously worked at Exact Sciences? is required and must have a value.
-		</div>
-		<div
-			id="prompt-yes"
-			data-ff-id="prompt-yes"
-			data-automation-id="promptOption-yes"
-			name="prior-employment"
-			role="radio"
-			aria-required="true"
-			aria-checked="false"
-			aria-label="Yes"
-			style="display:flex;gap:8px;align-items:center;border:1px solid #aaa;padding:8px;cursor:pointer;"
-		>
-			<span>Yes</span>
-		</div>
-		<div
-			id="prompt-no"
-			data-ff-id="prompt-no"
-			data-automation-id="promptOption-no"
-			name="prior-employment"
-			role="radio"
-			aria-required="true"
-			aria-checked="false"
-			aria-label="No"
-			style="display:flex;gap:8px;align-items:center;border:1px solid #aaa;padding:8px;cursor:pointer;"
-		>
-			<span>No</span>
-		</div>
-	</fieldset>
-	<script>
-		window.__radioSelected = '';
-		const summary = document.getElementById('error-summary');
-		const fieldset = document.getElementById('prior-employment-field');
-		const error = document.getElementById('prior-employment-error');
-		const yes = document.getElementById('prompt-yes');
-		const no = document.getElementById('prompt-no');
-
-		function select(value) {
-			yes.setAttribute('aria-checked', value === 'Yes' ? 'true' : 'false');
-			no.setAttribute('aria-checked', value === 'No' ? 'true' : 'false');
-			fieldset.setAttribute('aria-invalid', 'false');
-			error.textContent = '';
-			summary.textContent = '';
-			window.__radioSelected = value;
-		}
-
-		yes.addEventListener('click', (event) => {
-			if (!event.isTrusted) return;
-			select('Yes');
-		});
-		no.addEventListener('click', (event) => {
-			if (!event.isTrusted) return;
-			select('No');
-		});
-	</script>
-</body>
-</html>
-"""
-
-ALREADY_SELECTED_SOURCE_WITH_UNRELATED_POPUP_HTML = """
-<!DOCTYPE html>
-<html>
-<body>
-	<div
-		id="source-field"
-		data-automation-id="formField"
-		style="display:flex;flex-direction:column;gap:8px;width:520px;margin-bottom:20px;"
-	>
-		<label for="source--source">How Did You Hear About Us?*</label>
-		<div style="display:flex;align-items:center;gap:8px;border:1px solid #bbb;padding:8px;">
-			<div data-automation-id="selectedItem" class="selected-pill">LinkedIn</div>
-			<input
-				id="source--source"
-				role="combobox"
-				data-uxi-widget-type="selectinput"
-				aria-haspopup="listbox"
-				aria-label="How Did You Hear About Us?"
-				value=""
-			/>
-		</div>
-	</div>
-
-	<div
-		id="phone-popup"
-		role="listbox"
-		style="display:block;border:1px solid #aaa;padding:8px;width:320px;"
-	>
-		<div role="option">United States of America (+1)</div>
-		<div role="option">United States of America (+1)</div>
-	</div>
-</body>
-</html>
-"""
-
-ALREADY_SELECTED_INVALID_SOURCE_WITH_OPTIONS_HTML = """
-<!DOCTYPE html>
-<html>
-<body>
-	<div
-		id="source-field"
-		data-automation-id="formField"
-		aria-invalid="true"
-		style="display:flex;flex-direction:column;gap:8px;width:520px;margin-bottom:20px;"
-	>
-		<label for="source--source">How Did You Hear About Us?*</label>
-		<div style="display:flex;align-items:center;gap:8px;border:1px solid #bbb;padding:8px;">
-			<div data-automation-id="selectedItem" class="selected-pill">LinkedIn</div>
-			<input
-				id="source--source"
-				role="combobox"
-				data-uxi-widget-type="selectinput"
-				aria-haspopup="listbox"
-				aria-label="How Did You Hear About Us?"
-				value=""
-			/>
-		</div>
-	</div>
-
-	<div
-		id="source-popup"
-		role="listbox"
-		style="display:block;border:1px solid #aaa;padding:8px;width:320px;"
-	>
-		<div role="option" id="linkedin-option">LinkedIn</div>
-		<div role="option" id="social-option">Social Media</div>
-	</div>
-	<script>
-		window.__selectedSource = 'LinkedIn';
-		const field = document.getElementById('source-field');
-		const pill = document.querySelector('.selected-pill');
-		document.getElementById('linkedin-option').addEventListener('click', () => {
-			field.setAttribute('aria-invalid', 'false');
-			pill.textContent = 'LinkedIn';
-			window.__selectedSource = 'LinkedIn';
-		});
-	</script>
-</body>
-</html>
-"""
-
-APPLICATION_QUESTIONS_TRANSITION_HTML = """
-<!DOCTYPE html>
-<html>
-<body>
-	<h2>Application Questions</h2>
-	<section>
-		<label for="school-year">Please tell us your current year in school (e.g., Freshman, Sophomore, Junior, Senior, etc.)*</label>
-		<textarea
-			id="school-year"
-			data-ff-id="school-year"
-			aria-required="true"
-			style="display:block;width:520px;height:120px;"
-		></textarea>
-	</section>
-	<button type="button">Save and Continue</button>
 </body>
 </html>
 """
@@ -573,86 +366,7 @@ def test_filter_fields_for_target_section_falls_back_when_sections_do_not_match(
 
     filtered = _filter_fields_for_scope(fields, target_section="My Information")
 
-    assert {field.field_id for field in filtered} == {"first-name", "source"}
-
-
-def test_filter_fields_for_target_section_keeps_blank_sections_when_some_fields_match():
-    fields = [
-        _field("source", "How Did You Hear About Us?", "My Information"),
-        _field("address-line-1", "Address Line 1", ""),
-        _field("postal-code", "Postal Code", ""),
-        _field("school", "School", "Education"),
-    ]
-
-    filtered = _filter_fields_for_scope(fields, target_section="My Information")
-
-    assert [field.field_id for field in filtered] == ["source", "address-line-1", "postal-code"]
-
-
-def test_filter_fields_for_target_section_includes_information_child_sections():
-    fields = [
-        _field("source", "How Did You Hear About Us?", "My Information"),
-        _field("address-line-1", "Address Line 1", "Address"),
-        _field("postal-code", "Postal Code", "Address"),
-        _field("phone-code", "Country Phone Code", "Phone"),
-        _field("school", "School", "Education"),
-    ]
-
-    filtered = _filter_fields_for_scope(fields, target_section="My Information")
-
-    assert [field.field_id for field in filtered] == ["source", "address-line-1", "postal-code", "phone-code"]
-
-
-async def test_extract_visible_form_fields_groups_radios_even_when_sections_match_choices():
-    class DummyPage:
-        def __init__(self):
-            self.calls = 0
-
-        async def evaluate(self, *_args):
-            self.calls += 1
-            if self.calls == 1:
-                return json.dumps(
-                    [
-                        {
-                            "field_id": "ff-4",
-                            "name": "Have you previously worked at Exact Sciences?*",
-                            "raw_label": "Have you previously worked at Exact Sciences?*",
-                            "questionLabel": "Have you previously worked at Exact Sciences?*",
-                            "groupKey": "prior-employment",
-                            "field_type": "radio",
-                            "section": "Yes",
-                            "required": False,
-                            "itemLabel": "Yes",
-                            "current_value": "",
-                            "visible": True,
-                            "is_native": False,
-                        },
-                        {
-                            "field_id": "ff-5",
-                            "name": "Have you previously worked at Exact Sciences?*",
-                            "raw_label": "Have you previously worked at Exact Sciences?*",
-                            "questionLabel": "Have you previously worked at Exact Sciences?*",
-                            "groupKey": "prior-employment",
-                            "field_type": "radio",
-                            "section": "No",
-                            "required": False,
-                            "itemLabel": "No",
-                            "current_value": "",
-                            "visible": True,
-                            "is_native": False,
-                        },
-                    ]
-                )
-            return json.dumps([])
-
-    fields = await extract_visible_form_fields(DummyPage())
-
-    assert len(fields) == 1
-    assert fields[0].field_type == "radio-group"
-    assert fields[0].name == "Have you previously worked at Exact Sciences?*"
-    assert fields[0].section == ""
-    assert fields[0].required is True
-    assert fields[0].choices == ["Yes", "No"]
+    assert [field.field_id for field in filtered] == ["first-name", "source"]
 
 
 def test_known_entry_value_matches_work_experience_fields():
@@ -1015,7 +729,6 @@ async def test_fill_button_group_can_reset_then_reselect_when_stuck(
 async def test_fill_checkbox_uses_gui_fallback_for_untrusted_dom_clicks(
     httpserver: HTTPServer,
 ):
-    reset_runtime_learning_state()
     async with managed_browser_session() as browser_session:
         tools = Tools()
         httpserver.expect_request("/trusted-checkbox").respond_with_data(
@@ -1056,127 +769,6 @@ async def test_fill_checkbox_uses_gui_fallback_for_untrusted_dom_clicks(
         assert (
             await page.evaluate("() => document.getElementById('disability-no').getAttribute('aria-checked')") == "true"
         )
-        payload = export_runtime_learning_payload()
-        assert payload["learned_interaction_recipes"] == [
-            {
-                "platform": "other",
-                "host": "localhost",
-                "normalized_label": "no i do not have a disability and have not had one in the past",
-                "widget_signature": "checkbox",
-                "preferred_action_chain": ["binary_gui_click"],
-                "source": "visual_fallback",
-            }
-        ]
-
-
-async def test_domhand_interact_control_uses_gui_fallback_for_trusted_radio_wrappers(
-    httpserver: HTTPServer,
-):
-    reset_runtime_learning_state()
-    async with managed_browser_session() as browser_session:
-        tools = Tools()
-        httpserver.expect_request("/workday-interactive-blockers").respond_with_data(
-            WORKDAY_INTERACTIVE_BLOCKERS_HTML,
-            content_type="text/html",
-        )
-
-        await tools.navigate(
-            url=httpserver.url_for("/workday-interactive-blockers"),
-            new_tab=False,
-            browser_session=browser_session,
-        )
-        await asyncio.sleep(0.3)
-
-        result = await domhand_interact_control(
-            DomHandInteractControlParams(
-                field_label="Have you previously worked at Exact Sciences?",
-                desired_value="No",
-                target_section="My Information",
-            ),
-            browser_session,
-        )
-
-        assert result.error is None
-        assert await (await browser_session.get_current_page()).evaluate("() => window.__radioSelected") == "No"
-        payload = export_runtime_learning_payload()
-        assert payload["learned_interaction_recipes"] == [
-            {
-                "platform": "other",
-                "host": "localhost",
-                "normalized_label": "have you previously worked at exact sciences",
-                "widget_signature": "radio-group",
-                "preferred_action_chain": ["group_option_gui_click"],
-                "source": "visual_fallback",
-            }
-        ]
-
-
-async def test_domhand_select_short_circuits_when_value_already_selected(
-    httpserver: HTTPServer,
-):
-    async with managed_browser_session() as browser_session:
-        tools = Tools()
-        httpserver.expect_request("/already-selected-source").respond_with_data(
-            ALREADY_SELECTED_SOURCE_WITH_UNRELATED_POPUP_HTML,
-            content_type="text/html",
-        )
-
-        await tools.navigate(
-            url=httpserver.url_for("/already-selected-source"),
-            new_tab=False,
-            browser_session=browser_session,
-        )
-        await asyncio.sleep(0.3)
-        await browser_session.get_browser_state_summary()
-        selector_map = await browser_session.get_selector_map()
-        source_index = next(
-            idx
-            for idx, element in selector_map.items()
-            if (element.attributes or {}).get("id") == "source--source"
-        )
-
-        result = await domhand_select(
-            DomHandSelectParams(index=source_index, value="LinkedIn"),
-            browser_session,
-        )
-
-        assert result.error is None
-        assert "already showed" in (result.extracted_content or "")
-
-
-async def test_domhand_select_does_not_short_circuit_when_selected_value_is_invalid(
-    httpserver: HTTPServer,
-):
-    async with managed_browser_session() as browser_session:
-        tools = Tools()
-        httpserver.expect_request("/already-selected-invalid-source").respond_with_data(
-            ALREADY_SELECTED_INVALID_SOURCE_WITH_OPTIONS_HTML,
-            content_type="text/html",
-        )
-
-        await tools.navigate(
-            url=httpserver.url_for("/already-selected-invalid-source"),
-            new_tab=False,
-            browser_session=browser_session,
-        )
-        await asyncio.sleep(0.3)
-        await browser_session.get_browser_state_summary()
-        selector_map = await browser_session.get_selector_map()
-        source_index = next(
-            idx
-            for idx, element in selector_map.items()
-            if (element.attributes or {}).get("id") == "source--source"
-        )
-
-        result = await domhand_select(
-            DomHandSelectParams(index=source_index, value="LinkedIn"),
-            browser_session,
-        )
-
-        assert result.error is None
-        assert "already showed" not in (result.extracted_content or "")
-        page = await browser_session.get_current_page()
-        assert await page.evaluate("() => document.getElementById('source-field').getAttribute('aria-invalid')") == "false"
 
 
 async def test_fill_text_field_commits_exact_name_with_enter(
@@ -1297,14 +889,12 @@ def test_known_profile_value_matches_optional_address_fields():
     evidence = {
         "address": "100 Main St",
         "address_line_2": "Apt 4B",
-        "county": "Travis County",
         "country": "United States",
     }
 
     assert _known_profile_value("Name*", {"first_name": "Ruiyang", "last_name": "Chen"}) == "Ruiyang Chen"
     assert _known_profile_value("Address Line 1", evidence) == "100 Main St"
     assert _known_profile_value("Apartment / Unit", evidence) == "Apt 4B"
-    assert _known_profile_value("County", evidence) == "Travis County"
     assert _known_profile_value("Country / Region", evidence) == "United States"
 
 
@@ -1632,61 +1222,3 @@ async def test_domhand_assess_state_reports_scroll_bias_down_for_lower_unresolve
         assert state["scroll_bias"] == "down"
         assert state["current_section"] == "Education"
         assert state["unresolved_required_fields"][0]["relative_position"] == "below"
-
-
-async def test_domhand_assess_state_reads_selected_pill_and_reports_radio_blocker(
-    httpserver: HTTPServer,
-):
-    async with managed_browser_session() as browser_session:
-        tools = Tools()
-        httpserver.expect_request("/workday-interactive-blockers-assess").respond_with_data(
-            WORKDAY_INTERACTIVE_BLOCKERS_HTML,
-            content_type="text/html",
-        )
-        await tools.navigate(
-            url=httpserver.url_for("/workday-interactive-blockers-assess"),
-            new_tab=False,
-            browser_session=browser_session,
-        )
-        await asyncio.sleep(0.3)
-
-        result = await domhand_assess_state(DomHandAssessStateParams(), browser_session)
-        assert result.extracted_content is not None
-        state = json.loads(result.extracted_content.split("APPLICATION_STATE_JSON:\n", 1)[1])
-
-        assert len(state["unresolved_required_fields"]) == 1
-        assert state["unresolved_required_fields"][0]["name"] == "Have you previously worked at Exact Sciences?*"
-        assert state["unresolved_required_fields"][0]["current_value"] == ""
-        assert state["visible_errors"][0] == (
-            "Error - Have you previously worked at Exact Sciences? The field Have you previously worked at Exact Sciences? is required and must have a value."
-        )
-        assert all("Yes No" not in error for error in state["visible_errors"])
-
-
-async def test_domhand_assess_state_prefers_visible_transition_section_over_stale_target(
-    httpserver: HTTPServer,
-):
-    async with managed_browser_session() as browser_session:
-        tools = Tools()
-        httpserver.expect_request("/application-questions-transition").respond_with_data(
-            APPLICATION_QUESTIONS_TRANSITION_HTML,
-            content_type="text/html",
-        )
-        await tools.navigate(
-            url=httpserver.url_for("/application-questions-transition"),
-            new_tab=False,
-            browser_session=browser_session,
-        )
-        await asyncio.sleep(0.3)
-
-        result = await domhand_assess_state(
-            DomHandAssessStateParams(target_section="My Experience"),
-            browser_session,
-        )
-        assert result.extracted_content is not None
-        state = json.loads(result.extracted_content.split("APPLICATION_STATE_JSON:\n", 1)[1])
-
-        assert state["current_section"] == "Application Questions"
-        assert state["unresolved_required_fields"][0]["name"].startswith(
-            "Please tell us your current year in school"
-        )

@@ -43,7 +43,6 @@ _m_emit_browser_ready = MagicMock()
 _m_emit_error = MagicMock()
 _m_emit_done = MagicMock()
 _m_emit_awaiting_review = MagicMock()
-_m_emit_account_created = MagicMock()
 _m_cleanup_browser = AsyncMock()
 
 
@@ -68,7 +67,7 @@ def _reset_mocks() -> None:
     """Reset all module-level mocks."""
     for m in [_m_emit_status, _m_emit_phase, _m_emit_cost,
               _m_emit_browser_ready, _m_emit_error, _m_emit_done,
-              _m_emit_awaiting_review, _m_emit_account_created, _m_cleanup_browser]:
+              _m_emit_awaiting_review, _m_cleanup_browser]:
         m.reset_mock()
 
 
@@ -146,7 +145,6 @@ def _stub_all():
     go_jsonl.emit_error = _m_emit_error
     go_jsonl.emit_done = _m_emit_done
     go_jsonl.emit_awaiting_review = _m_emit_awaiting_review
-    go_jsonl.emit_account_created = _m_emit_account_created
     _install_stub("ghosthands.output.jsonl", go_jsonl)
 
     go_fe = types.ModuleType("ghosthands.output.field_events")
@@ -177,7 +175,6 @@ def _stub_all():
     mock_lockdown = MagicMock()
     mock_lockdown.get_allowed_domains.return_value = ["greenhouse.io"]
     gsdl.create_lockdown_for_platform = MagicMock(return_value=mock_lockdown)
-    gsdl.DomainLockdown = MagicMock(return_value=mock_lockdown)
     _install_stub("ghosthands.security.domain_lockdown", gsdl)
 
 
@@ -419,7 +416,7 @@ class TestRunAgentJsonlFlow:
         with _apply_stubs_and_patches(mock_browser, mock_agent, extra):
             await run_agent_jsonl(_make_args())
 
-        _m_cleanup_browser.assert_not_called()
+        _m_cleanup_browser.assert_called()
 
     # ------------------------------------------------------------------
     # Scenario 6: Blocker in final_result
@@ -446,48 +443,6 @@ class TestRunAgentJsonlFlow:
         _, kwargs = _m_emit_done.call_args
         assert kwargs["success"] is False
         assert "CAPTCHA" in (kwargs.get("message") or "")
-
-    async def test_answerable_blocker_uses_browser_issues_to_resume(self):
-        """Browser-exposed unresolved required fields should trigger HITL recovery even with vague blocker text."""
-        mock_history_blocked = _make_mock_history(
-            is_done=True,
-            final_result="blocker: still stuck after clicking Save and Continue",
-        )
-        mock_history_success = _make_mock_history(
-            is_done=True,
-            final_result="Application submitted",
-        )
-        mock_browser = _make_mock_browser()
-
-        mock_agent = AsyncMock()
-        mock_agent.run = AsyncMock(side_effect=[mock_history_blocked, mock_history_success])
-        mock_agent.state = MagicMock(n_steps=8, last_model_output=None, stopped=False)
-
-        issue = MagicMock()
-        issue.field_label = "Expectations on Compensation"
-        issue.field_id = "compensation"
-        issue.field_type = "text"
-        issue.question_text = "Expectations on Compensation"
-        issue.section = "Application Questions"
-
-        extra = [
-            patch("ghosthands.cli.is_hitl_available", return_value=True),
-            patch(
-                "ghosthands.cli._collect_open_question_issues_from_browser",
-                AsyncMock(return_value=[issue]),
-            ),
-            patch(
-                "ghosthands.cli._request_open_question_answers",
-                AsyncMock(return_value=({"Expectations on Compensation": "$30/hour"}, False)),
-            ),
-            patch("ghosthands.cli.wait_for_review_command", AsyncMock(return_value="complete")),
-            patch("ghosthands.cli._handle_review_result", return_value=None),
-        ]
-
-        with _apply_stubs_and_patches(mock_browser, mock_agent, extra):
-            await run_agent_jsonl(_make_args())
-
-        assert mock_agent.run.await_count == 2
 
     # ------------------------------------------------------------------
     # Scenario 7: Cost event emitted

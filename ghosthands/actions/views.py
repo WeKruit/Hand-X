@@ -61,14 +61,6 @@ class DomHandFillParams(BaseModel):
             "the second work experience entry without touching others."
         ),
     )
-    focus_fields: list[str] | None = Field(
-        None,
-        description=(
-            "Optional list of specific field labels to focus on within the current section. "
-            "Use this after domhand_assess_state identifies unresolved fields so DomHand can "
-            "target those exact blockers instead of refilling the whole page subsection."
-        ),
-    )
     entry_data: dict | None = Field(
         None,
         description=(
@@ -92,21 +84,6 @@ class DomHandSelectParams(BaseModel):
 
     index: int = Field(description="Element index of the dropdown trigger")
     value: str = Field(description="Value or text to select")
-
-
-class DomHandInteractControlParams(BaseModel):
-    """Interact with a specific non-text control by field label and desired value."""
-
-    field_label: str = Field(description="Exact or near-exact question/field label to target")
-    desired_value: str = Field(description="Desired option/value, e.g. 'No', 'LinkedIn', 'United States'")
-    target_section: str | None = Field(
-        default=None,
-        description="Optional section name used to narrow field matching before interaction.",
-    )
-    heading_boundary: str | None = Field(
-        default=None,
-        description="Optional repeater heading boundary to keep control interaction scoped to one entry.",
-    )
 
 
 class DomHandUploadParams(BaseModel):
@@ -141,16 +118,10 @@ class ApplicationFieldIssue(BaseModel):
     name: str
     field_type: str
     section: str = ""
-    section_path: str = ""
     required: bool = False
     reason: str = ""
     relative_position: RelativePosition = "unknown"
     takeover_suggestion: str | None = None
-    question_text: str | None = None
-    current_value: str = ""
-    visible_error: str | None = None
-    widget_kind: str | None = None
-    options: list[str] = Field(default_factory=list)
 
 
 class ApplicationState(BaseModel):
@@ -188,36 +159,6 @@ class DomHandClosePopupParams(BaseModel):
             "Optional text hint from the popup body, title, or close control. "
             'Examples: "cookies", "not ready to apply", "newsletter", "close".'
         ),
-    )
-
-
-class DomHandRequestUserInputParams(BaseModel):
-    """Pause for a user-provided answer for one required field."""
-
-    field_label: str = Field(description="Human-readable label for the missing required field")
-    field_id: str | None = Field(
-        default=None,
-        description="Stable DOM field identifier when available",
-    )
-    field_type: str = Field(
-        default="text",
-        description="Field type: text, textarea, select, radio, checkbox, number, date, etc.",
-    )
-    question_text: str | None = Field(
-        default=None,
-        description="Exact question text to show the user",
-    )
-    section: str | None = Field(
-        default=None,
-        description="Form section this field belongs to",
-    )
-    options: list[str] = Field(
-        default_factory=list,
-        description="Available options for select/radio/checkbox style fields",
-    )
-    timeout_seconds: int | None = Field(
-        default=None,
-        description="Optional override for how long to wait before giving up",
     )
 
 

@@ -21,7 +21,6 @@ from ghosthands.actions.views import (
     DomHandClosePopupParams,
     DomHandExpandParams,
     DomHandFillParams,
-    DomHandInteractControlParams,
     DomHandSelectParams,
     DomHandUploadParams,
 )
@@ -48,7 +47,6 @@ def register_domhand_actions(tools: "Tools") -> None:
     from ghosthands.actions.domhand_close_popup import domhand_close_popup
     from ghosthands.actions.domhand_expand import domhand_expand
     from ghosthands.actions.domhand_fill import domhand_fill
-    from ghosthands.actions.domhand_interact_control import domhand_interact_control
     from ghosthands.actions.domhand_select import domhand_select
     from ghosthands.actions.domhand_upload import domhand_upload
 
@@ -57,7 +55,7 @@ def register_domhand_actions(tools: "Tools") -> None:
             tools.action(description=description, param_model=param_model)(func)
         except Exception as exc:
             logger.warning(
-                f"domhand.action_registration_failed action={func.__name__} error={exc}",
+                "domhand.action_registration_failed",
                 extra={"action": func.__name__, "error": str(exc)},
             )
 
@@ -81,7 +79,7 @@ def register_domhand_actions(tools: "Tools") -> None:
             "Extracts fields, generates answers from user profile via a single LLM call, "
             "and fills each field via DOM. Handles text inputs, selects, checkboxes, "
             "textareas, and radio buttons. Supports scoped repeater fills via "
-            "target_section, heading_boundary, focus_fields, and entry_data. Use this as the FIRST "
+            "target_section, heading_boundary, and entry_data. Use this as the FIRST "
             "approach for any APPLICATION FORM page. Do NOT use on auth/login pages — "
             "use standard browser-use input actions for email/password fields instead. "
             "Only fall back to individual input/click actions "
@@ -127,18 +125,6 @@ def register_domhand_actions(tools: "Tools") -> None:
         func=domhand_select,
     )
 
-    _register_action(
-        description=(
-            "Interact with one exact non-text control by field label and desired value. "
-            "Use this for stubborn radios, checkboxes, toggles, button groups, and selects "
-            "when domhand_fill did not clear a required blocker. Resolves the real control "
-            "by question label, applies the desired option/value, verifies the committed state, "
-            "and captures diagnostics if the control still does not stick."
-        ),
-        param_model=DomHandInteractControlParams,
-        func=domhand_interact_control,
-    )
-
     # ── domhand_upload: File upload ───────────────────────────
     # Handles resume and cover letter uploads via file input elements.
     _register_action(
@@ -166,15 +152,17 @@ def register_domhand_actions(tools: "Tools") -> None:
         func=domhand_check_agreement,
     )
 
-    # ── domhand_click_button: Multi-strategy button fallback ───
-    # Diagnostic/fallback helper for button-like controls that need
-    # extra candidate selection or submission heuristics.
+    # ── domhand_click_button: Trusted-event button click ──────
+    # Uses Playwright's native click() instead of CDP mouse events.
+    # Critical for React-based sites like Workday where buttons check
+    # event.isTrusted and ignore CDP-dispatched untrusted events.
     _register_action(
         description=(
-            "Try multiple strategies to activate a button-like control and report "
-            "what changed. Use this as a fallback when the normal click action "
-            "cannot find or activate the intended button, or when you need richer "
-            "diagnostics about why a submit control did not advance."
+            "Click a button using Playwright trusted events. Use this for buttons "
+            "that do not respond to regular click actions (e.g., Create Account, "
+            "Sign In on Workday). Regular clicks use CDP mouse events which are "
+            "untrusted — this action uses Playwright native click which produces "
+            "trusted events that React/Workday form handlers require."
         ),
         param_model=DomHandClickButtonParams,
         func=domhand_click_button,
@@ -196,7 +184,7 @@ def register_domhand_actions(tools: "Tools") -> None:
     # Log what was registered
     registered = [name for name in tools.registry.registry.actions if name.startswith("domhand_")]
     logger.info(
-        f"domhand.actions_registered count={len(registered)} actions={registered}",
+        "domhand.actions_registered",
         extra={"count": len(registered), "actions": registered},
     )
 

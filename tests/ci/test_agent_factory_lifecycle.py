@@ -15,10 +15,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+
 # ---------------------------------------------------------------------------
 # Module-level setup: stub heavy dependencies not available in the test env
 # ---------------------------------------------------------------------------
-
 
 def _stub_heavy_deps():
     """Install lightweight stubs for packages missing in the CI/test environment.
@@ -71,6 +71,7 @@ def _stub_heavy_deps():
 _stub_heavy_deps()
 
 from ghosthands.agent.factory import create_job_agent, run_job_agent  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -287,7 +288,7 @@ async def test_create_job_agent_no_credentials_means_no_sensitive_data(
 @patch("ghosthands.llm.client.get_chat_model")
 @patch("ghosthands.agent.factory.build_system_prompt", return_value="mock system prompt")
 async def test_create_job_agent_sets_vision_and_thinking(mock_prompt, mock_get_model, mock_llm, sample_profile):
-    """BASELINE: Agent is created with use_vision='auto', use_thinking=True, use_judge=False."""
+    """BASELINE: Agent is created with use_vision=True, use_thinking=True, use_judge=False."""
     mock_get_model.return_value = mock_llm
 
     agent = await create_job_agent(
@@ -296,7 +297,7 @@ async def test_create_job_agent_sets_vision_and_thinking(mock_prompt, mock_get_m
     )
 
     # BASELINE: these flags are hardcoded in factory.py
-    assert agent.settings.use_vision == "auto"
+    assert agent.settings.use_vision is True
     assert agent.settings.use_judge is False
 
 

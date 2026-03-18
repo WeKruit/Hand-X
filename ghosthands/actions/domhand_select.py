@@ -18,7 +18,6 @@ and CDP backend_node_id resolution — never data-highlight-index attributes.
 import asyncio
 import json
 import logging
-import os
 from typing import Any
 
 from browser_use.agent.views import ActionResult
@@ -42,10 +41,6 @@ FAIL_OVER_NATIVE_SELECT = "[FAIL-OVER:NATIVE_SELECT]"
 FAIL_OVER_CUSTOM_WIDGET = "[FAIL-OVER:CUSTOM_WIDGET]"
 
 
-def _profile_debug_enabled() -> bool:
-    return os.getenv("GH_DEBUG_PROFILE_PASS_THROUGH") == "1"
-
-
 # ── CDP-based JavaScript helpers ─────────────────────────────────────
 # These JS functions operate on a node passed directly via Runtime.callFunctionOn
 # (i.e., `this` is the DOM element). They never use data-highlight-index.
@@ -53,18 +48,6 @@ def _profile_debug_enabled() -> bool:
 _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 	const el = this;
 	const tag = el.tagName.toLowerCase();
-	const visible = (node) => {
-		if (!node) return false;
-		const style = window.getComputedStyle(node);
-		if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
-		const rect = node.getBoundingClientRect();
-		return rect.width > 0 && rect.height > 0;
-	};
-	const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
-	const visibleText = (node) => {
-		if (!visible(node)) return '';
-		return clean(node.textContent || node.getAttribute('aria-label') || '');
-	};
 
 	// Helper: use __ff.queryAll for cross-shadow-root traversal, fallback to document
 	const qAll = (sel) => (window.__ff && window.__ff.queryAll)
@@ -73,13 +56,6 @@ _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 	const qById = (id) => (window.__ff && window.__ff.getByDomId)
 		? window.__ff.getByDomId(id)
 		: document.getElementById(id);
-	const hasInvalidState = (node) => {
-		if (!node) return false;
-		const wrapper = node.closest('[aria-invalid], [data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field, fieldset, [role="group"], [role="radiogroup"]') || node.parentElement || node;
-		if (node.getAttribute && node.getAttribute('aria-invalid') === 'true') return true;
-		if (wrapper && wrapper.getAttribute && wrapper.getAttribute('aria-invalid') === 'true') return true;
-		return !!(wrapper && wrapper.querySelector && wrapper.querySelector('[aria-invalid="true"]'));
-	};
 
 	// Case 1: Native <select>
 	if (tag === 'select') {
@@ -121,76 +97,27 @@ _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 	// Case 3: Workday-style custom dropdowns (data-uxi-widget-type)
 	const widgetType = el.getAttribute('data-uxi-widget-type');
 	if (widgetType === 'selectinput' || el.getAttribute('role') === 'combobox') {
-		const currentValue = (() => {
-			let value = clean(el.value || '');
-			if (value) return value;
-			const wrapper = el.closest('[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field') || el.parentElement || el;
-			const tokenSelectors = [
-				'[data-automation-id*="selected"]',
-				'[data-automation-id*="Selected"]',
-				'[data-automation-id*="token"]',
-				'[class*="token"]',
-				'[class*="pill"]',
-				'[class*="chip"]',
-				'[class*="tag"]'
-			];
-			for (const selector of tokenSelectors) {
-				for (const node of wrapper.querySelectorAll(selector)) {
-					const text = visibleText(node);
-					if (!text || /^(select one|choose one|required)$/i.test(text)) continue;
-					return text;
-				}
-			}
-			const wrapperText = visibleText(wrapper);
-			if (wrapperText && wrapperText.length <= 120 && !/^(select one|choose one|required)$/i.test(wrapperText)) {
-				return wrapperText;
-			}
-			return '';
-		})();
-		if (currentValue && !hasInvalidState(el)) {
-			return JSON.stringify({
-				type: 'custom_popup',
-				options: [],
-				currentValue: currentValue,
-			});
-		}
-		const anchorRect = (el.closest('[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field') || el.parentElement || el).getBoundingClientRect();
 		const popups = qAll(
 			'[role="listbox"], [role="menu"], [class*="popup"], [class*="dropdown-menu"], [class*="options-list"]'
 		);
-		const scoredPopups = [];
 		for (const popup of popups) {
-			if (!visible(popup)) continue;
 			const rect = popup.getBoundingClientRect();
-			const overlapX = Math.max(0, Math.min(rect.right, anchorRect.right) - Math.max(rect.left, anchorRect.left));
-			const distanceY = Math.min(
-				Math.abs(rect.top - anchorRect.bottom),
-				Math.abs(anchorRect.top - rect.bottom)
-			);
-			let score = 0;
-			if (listboxId && popup.id === listboxId) score += 100;
-			if (overlapX > 0) score += 20;
-			if (distanceY < 120) score += 10;
-			score -= Math.floor(distanceY / 10);
-			scoredPopups.push({ popup, score });
-		}
-		scoredPopups.sort((a, b) => b.score - a.score);
-		for (const entry of scoredPopups) {
-			const popup = entry.popup;
-			const options = Array.from(
-				popup.querySelectorAll('[role="option"], li, [class*="option"], [data-value]')
-			).filter(visible).map((o, i) => ({
-				text: clean(o.textContent),
-				value: o.getAttribute('data-value') || clean(o.textContent),
-				index: i,
-				selected: o.getAttribute('aria-selected') === 'true',
-			})).filter((option) => option.text);
-			if (options.length > 0) {
-				return JSON.stringify({
-					type: 'custom_popup',
-					options: options,
-					currentValue: currentValue,
-				});
+			if (rect.width > 0 && rect.height > 0) {
+				const options = Array.from(
+					popup.querySelectorAll('[role="option"], li, [class*="option"], [data-value]')
+				).map((o, i) => ({
+					text: o.textContent.trim(),
+					value: o.getAttribute('data-value') || o.textContent.trim(),
+					index: i,
+					selected: o.getAttribute('aria-selected') === 'true',
+				}));
+				if (options.length > 0) {
+					return JSON.stringify({
+						type: 'custom_popup',
+						options: options,
+						currentValue: el.value || (el.textContent ? el.textContent.trim() : ''),
+					});
+				}
 			}
 		}
 	}
@@ -232,7 +159,7 @@ _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 }"""
 
 # Click an option by its text content within any visible listbox/popup on the page
-_CLICK_OPTION_JS = r"""(targetText) => {
+_CLICK_OPTION_JS = r"""function(targetText) {
 	const lowerTarget = targetText.toLowerCase().trim();
 
 	// Helper: use __ff.queryAll for cross-shadow-root traversal, fallback to document
@@ -341,112 +268,9 @@ _VERIFY_SELECTION_ON_NODE_JS = r"""function() {
 		return JSON.stringify({value: sel ? sel.text.trim() : ''});
 	}
 
-	const visibleText = (node) => {
-		if (!node) return '';
-		const style = window.getComputedStyle(node);
-		if (!style || style.visibility === 'hidden' || style.display === 'none') return '';
-		const rect = node.getBoundingClientRect();
-		if (!rect || rect.width === 0 || rect.height === 0) return '';
-		return (node.textContent || '').replace(/\s+/g, ' ').trim();
-	};
-
-	let value = el.value || '';
-	if (!value && (el.getAttribute('role') === 'combobox' || el.getAttribute('data-uxi-widget-type') === 'selectinput' || el.getAttribute('aria-haspopup') === 'listbox')) {
-		const wrapper = el.closest('[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field') || el.parentElement || el;
-		const tokenSelectors = [
-			'[data-automation-id*="selected"]',
-			'[data-automation-id*="Selected"]',
-			'[data-automation-id*="token"]',
-			'[class*="token"]',
-			'[class*="pill"]',
-			'[class*="chip"]',
-			'[class*="tag"]'
-		];
-		for (const selector of tokenSelectors) {
-			const nodes = wrapper.querySelectorAll(selector);
-			for (const node of nodes) {
-				const text = visibleText(node);
-				if (!text || /^(select one|choose one|required)$/i.test(text)) continue;
-				value = text;
-				break;
-			}
-			if (value) break;
-		}
-		if (!value) {
-			const wrapperText = visibleText(wrapper);
-			if (wrapperText && wrapperText.length <= 120 && !/^(select one|choose one|required)$/i.test(wrapperText)) {
-				value = wrapperText;
-			}
-		}
-	}
-	if (!value) {
-		value = el.getAttribute('aria-label') || '';
-	}
-	if (!value && el.textContent) {
-		value = el.textContent.trim();
-	}
+	// For ARIA/custom: check aria-label, value, or text content
+	const value = el.value || el.getAttribute('aria-label') || (el.textContent ? el.textContent.trim() : '');
 	return JSON.stringify({value: value});
-}"""
-
-_READ_LABEL_CONTEXT_ON_NODE_JS = r"""function() {
-	const el = this;
-	const clean = (value) => (value || "").replace(/\s+/g, " ").trim();
-	let label = clean(el.getAttribute("aria-label"));
-
-	if (!label) {
-		const labelledBy = el.getAttribute("aria-labelledby");
-		if (labelledBy) {
-			const parts = labelledBy.split(/\s+/).filter(Boolean);
-			const texts = parts.map((id) => {
-				const target = document.getElementById(id);
-				return target ? clean(target.textContent) : "";
-			}).filter(Boolean);
-			if (texts.length > 0) {
-				label = texts.join(" ");
-			}
-		}
-	}
-
-	if (!label && el.id) {
-		const escaped = window.CSS && window.CSS.escape ? window.CSS.escape(el.id) : el.id;
-		const externalLabel = document.querySelector(`label[for="${escaped}"]`);
-		if (externalLabel) {
-			label = clean(externalLabel.textContent);
-		}
-	}
-
-	if (!label) {
-		const ancestorLabel = el.closest("label");
-		if (ancestorLabel) {
-			label = clean(ancestorLabel.textContent);
-		}
-	}
-
-	if (!label) {
-		const wrapper = el.closest("fieldset,[role='group'],[data-automation-id='formField']");
-		if (wrapper) {
-			const labelNode = wrapper.querySelector(
-				"legend,[data-automation-id='fieldLabel'],label,[aria-label]"
-			);
-			if (labelNode) {
-				label = clean(labelNode.textContent || labelNode.getAttribute("aria-label"));
-			}
-		}
-	}
-
-	const wrapper = el.closest("[aria-invalid],[data-automation-id='formField'],[data-automation-id*='formField'],.form-group,.field,fieldset,[role='group'],[role='radiogroup']") || el.parentElement || el;
-	const invalid = Boolean(
-		(el.getAttribute && el.getAttribute("aria-invalid") === "true")
-		|| (wrapper && wrapper.getAttribute && wrapper.getAttribute("aria-invalid") === "true")
-		|| (wrapper && wrapper.querySelector && wrapper.querySelector('[aria-invalid="true"]'))
-	);
-
-	return JSON.stringify({
-		label: label,
-		tag: el.tagName ? el.tagName.toLowerCase() : "",
-		widgetType: el.getAttribute("data-uxi-widget-type") || "",
-		invalid: invalid,
-	});
 }"""
 
 
@@ -670,18 +494,6 @@ async def _read_current_selection(
     return verify.get("value", "") if isinstance(verify, dict) else ""
 
 
-async def _read_field_context(
-    browser_session: BrowserSession,
-    node: EnhancedDOMTreeNode,
-) -> dict[str, Any]:
-    """Read a best-effort label and widget context for the dropdown trigger."""
-    try:
-        context = await _call_function_on_node(browser_session, node, _READ_LABEL_CONTEXT_ON_NODE_JS)
-    except Exception:
-        return {"label": "", "tag": "", "widgetType": ""}
-    return context if isinstance(context, dict) else {"label": "", "tag": "", "widgetType": ""}
-
-
 async def _confirm_selection(
     page: Any,
     browser_session: BrowserSession,
@@ -711,16 +523,6 @@ async def _confirm_selection(
         if retry.get("success"):
             last_clicked = retry.get("clicked", last_clicked)
     current = await _read_current_selection(browser_session, node)
-    if _profile_debug_enabled():
-        logger.info(
-            "domhand.select_confirmed",
-            extra={
-                "expected_value": expected,
-                "clicked_text": clicked_text,
-                "current_value": current,
-                "dropdown_type": dropdown_type,
-            },
-        )
     return current, last_clicked
 
 
@@ -775,51 +577,6 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
 
     dropdown_type = discovery.get("type", "unknown") if isinstance(discovery, dict) else "unknown"
     options = discovery.get("options", []) if isinstance(discovery, dict) else []
-    field_context = await _read_field_context(browser_session, node)
-    field_label = str(field_context.get("label") or "").strip()
-    widget_signature = (
-        str(field_context.get("widgetType") or "").strip()
-        or dropdown_type
-        or ("native_select" if is_native_select else "custom_widget")
-    )
-    field_invalid = bool(field_context.get("invalid"))
-    used_action_chain: list[str] = []
-    matched_text = params.value
-    current_before = await _read_current_selection(browser_session, node)
-    logger.info(
-        "domhand.select.start "
-        f"index={params.index} "
-        f"requested_value={params.value!r} "
-        f"field_label={field_label!r} "
-        f"dropdown_type={dropdown_type!r} "
-        f"widget_signature={widget_signature!r} "
-        f"option_count={len(options)} "
-        f"field_invalid={field_invalid} "
-        f"current_value_before={current_before!r}"
-    )
-    if _selection_matches_value(current_before, params.value) and not field_invalid:
-        logger.info(
-            "domhand.select.already_selected "
-            f"index={params.index} "
-            f"requested_value={params.value!r} "
-            f"field_label={field_label!r} "
-            f"current_value_before={current_before!r}"
-        )
-        return ActionResult(
-            extracted_content=(
-                f'Dropdown "{field_label or params.index}" already showed "{current_before}". '
-                "Immediately call domhand_assess_state for this blocker."
-            ),
-            include_extracted_content_only_once=False,
-        )
-    if _selection_matches_value(current_before, params.value) and field_invalid:
-        logger.info(
-            "domhand.select.already_selected_invalid "
-            f"index={params.index} "
-            f"requested_value={params.value!r} "
-            f"field_label={field_label!r} "
-            f"current_value_before={current_before!r}"
-        )
 
     # ── Step 3b: If no options found, click to open and re-discover ──
     # React-select dropdowns often need TWO clicks: first to focus, second to open.
@@ -855,16 +612,6 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             logger.debug(f"GetDropdownOptionsEvent failed: {e}")
 
     if not options:
-        logger.warning(
-            "domhand.select.no_options "
-            f"index={params.index} "
-            f"requested_value={params.value!r} "
-            f"field_label={field_label!r} "
-            f"dropdown_type={dropdown_type!r} "
-            f"widget_signature={widget_signature!r} "
-            f"field_invalid={field_invalid} "
-            f"current_value_before={current_before!r}"
-        )
         return ActionResult(
             error=_build_failover_message(
                 widget_kind,
@@ -873,89 +620,18 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             ),
         )
 
-    page_url = ""
-    try:
-        page_url = await browser_session.get_current_page_url()
-    except Exception:
-        page_url = ""
-
-    try:
-        from ghosthands.actions.domhand_fill import _get_profile_data
-        from ghosthands.runtime_learning import (
-            detect_host_from_url,
-            detect_platform_from_url,
-            get_interaction_recipe,
-        )
-
-        profile_data = _get_profile_data()
-        recipe = get_interaction_recipe(
-            platform=detect_platform_from_url(page_url),
-            host=detect_host_from_url(page_url),
-            label=field_label,
-            widget_signature=widget_signature,
-            profile_data=profile_data,
-        )
-    except Exception:
-        recipe = None
-        profile_data = None
-
-    if recipe is not None and not is_native_select:
-        if _profile_debug_enabled():
-            logger.info(
-                "domhand.select_recipe_loaded",
-                extra={
-                    "field_label": field_label,
-                    "widget_signature": widget_signature,
-                    "preferred_action_chain": recipe.preferred_action_chain,
-                    "page_url": page_url,
-                },
-            )
-        if "hierarchy_search" in recipe.preferred_action_chain:
-            result = await _search_and_click_dropdown_path(page, params.value)
-            if result.get("success"):
-                matched_text = result.get("clicked", params.value)
-                used_action_chain = ["hierarchy_search"]
-        elif "typed_search" in recipe.preferred_action_chain:
-            result = await _search_and_click_dropdown_option(page, params.value)
-            if result.get("success"):
-                matched_text = result.get("clicked", params.value)
-                used_action_chain = ["typed_search"]
-        elif "page_js_click" in recipe.preferred_action_chain:
-            result = await _click_option_via_page_js(page, params.value, dropdown_type)
-            if result.get("success"):
-                matched_text = result.get("clicked", params.value)
-                used_action_chain = ["page_js_click"]
-        else:
-            result = None
-    else:
-        result = None
-
     # ── Step 4: Match the target value ────────────────────────
     matched = _fuzzy_match_option(params.value, options)
+    result: dict[str, Any] | None = None
+    matched_text = params.value
 
-    if result is None and not matched:
+    if not matched:
         if dropdown_type != "native_select":
             result = await _search_and_click_dropdown_path(page, params.value)
             if result.get("success"):
                 matched_text = result.get("clicked", params.value)
-                used_action_chain = (
-                    ["hierarchy_search"]
-                    if len(split_dropdown_value_hierarchy(params.value)) > 1
-                    else ["typed_search"]
-                )
         if result is None or not result.get("success"):
             available_texts = [opt.get("text", "") for opt in options[:20]]
-            logger.warning(
-                "domhand.select.no_match "
-                f"index={params.index} "
-                f"requested_value={params.value!r} "
-                f"field_label={field_label!r} "
-                f"dropdown_type={dropdown_type!r} "
-                f"widget_signature={widget_signature!r} "
-                f"available_texts={available_texts} "
-                f"field_invalid={field_invalid} "
-                f"current_value_before={current_before!r}"
-            )
             return ActionResult(
                 error=_build_failover_message(
                     widget_kind,
@@ -980,25 +656,15 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             else:
                 # For custom dropdowns, try SelectDropdownOptionEvent first
                 try:
-                    if field_invalid:
-                        result = await _click_option_via_page_js(page, matched_text, dropdown_type)
-                        if result.get("success"):
-                            used_action_chain = ["page_js_click"]
+                    event = browser_session.event_bus.dispatch(SelectDropdownOptionEvent(node=node, text=matched_text))
+                    selection_data = await event.event_result(timeout=3.0, raise_if_none=False, raise_if_any=False)
+                    if selection_data and isinstance(selection_data, dict) and selection_data.get("success"):
+                        result = {"success": True, "clicked": selection_data.get("selected_text", matched_text)}
                     else:
-                        event = browser_session.event_bus.dispatch(SelectDropdownOptionEvent(node=node, text=matched_text))
-                        selection_data = await event.event_result(timeout=3.0, raise_if_none=False, raise_if_any=False)
-                        if selection_data and isinstance(selection_data, dict) and selection_data.get("success"):
-                            result = {"success": True, "clicked": selection_data.get("selected_text", matched_text)}
-                            used_action_chain = ["event_bus_select"]
-                        else:
-                            # Fallback: click the option via page-level JS
-                            result = await _click_option_via_page_js(page, matched_text, dropdown_type)
-                            if result.get("success"):
-                                used_action_chain = ["page_js_click"]
+                        # Fallback: click the option via page-level JS
+                        result = await _click_option_via_page_js(page, matched_text, dropdown_type)
                 except Exception:
                     result = await _click_option_via_page_js(page, matched_text, dropdown_type)
-                    if result.get("success"):
-                        used_action_chain = ["page_js_click"]
         except Exception as e:
             return ActionResult(error=f'Failed to select option "{matched_text}": {e}')
 
@@ -1019,94 +685,22 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
         params.value,
         clicked_text,
     )
-    post_context = await _read_field_context(browser_session, node)
-    post_invalid = bool(post_context.get("invalid"))
-    logger.info(
-        "domhand.select.observed "
-        f"index={params.index} "
-        f"requested_value={params.value!r} "
-        f"clicked_text={clicked_text!r} "
-        f"current_value={current!r} "
-        f"field_label={field_label!r} "
-        f"dropdown_type={dropdown_type!r} "
-        f"widget_signature={widget_signature!r} "
-        f"field_invalid_after={post_invalid} "
-        f"used_action_chain={used_action_chain}"
-    )
 
-    if not _selection_matches_value(current, params.value) or post_invalid:
-        logger.warning(
-            "domhand.select.failed "
-            f"index={params.index} "
-            f"requested_value={params.value!r} "
-            f"clicked_text={clicked_text!r} "
-            f"current_value={current!r} "
-            f"field_label={field_label!r} "
-            f"dropdown_type={dropdown_type!r} "
-            f"widget_signature={widget_signature!r} "
-            f"field_invalid_after={post_invalid} "
-            f"used_action_chain={used_action_chain}"
-        )
-        failure_reason = (
-            f'Selection for "{params.value}" still left the field invalid on element {params.index}.'
-            if post_invalid
-            else f'Selection for "{params.value}" was not confirmed on element {params.index}.'
-        )
+    if not _selection_matches_value(current, params.value):
         return ActionResult(
             error=_build_failover_message(
                 widget_kind,
                 params.index,
-                reason=failure_reason,
+                reason=f'Selection for "{params.value}" was not confirmed on element {params.index}.',
                 current_value=current,
             ),
         )
 
-    memory = f'Selected "{clicked_text}" for dropdown at index {params.index}. Immediately call domhand_assess_state for this blocker.'
+    memory = f'Selected "{clicked_text}" for dropdown at index {params.index}'
     if current and normalize_name(current) != normalize_name(clicked_text):
         memory += f' (showing: "{current}")'
 
     logger.info(f"DomHand select: {memory}")
-    if _profile_debug_enabled() and used_action_chain:
-        logger.info(
-            "domhand.select_recipe_applied",
-            extra={
-                "field_label": field_label,
-                "widget_signature": widget_signature,
-                "used_action_chain": used_action_chain,
-                "selected_value": current or clicked_text,
-                "page_url": page_url,
-            },
-        )
-
-    if not is_native_select and field_label and page_url and used_action_chain:
-        try:
-            from ghosthands.runtime_learning import (
-                detect_host_from_url,
-                detect_platform_from_url,
-                record_interaction_recipe,
-            )
-
-            record_interaction_recipe(
-                platform=detect_platform_from_url(page_url),
-                host=detect_host_from_url(page_url),
-                label=field_label,
-                widget_signature=widget_signature,
-                preferred_action_chain=used_action_chain,
-                source="visual_fallback",
-                profile_data=profile_data,
-            )
-            if _profile_debug_enabled():
-                logger.info(
-                    "domhand.select_recipe_recorded",
-                    extra={
-                        "field_label": field_label,
-                        "widget_signature": widget_signature,
-                        "used_action_chain": used_action_chain,
-                        "page_url": page_url,
-                    },
-                )
-        except Exception:
-            pass
 
     return ActionResult(
         extracted_content=memory,

@@ -28,31 +28,34 @@ echo "Python:   $(python3 --version 2>&1 || echo 'not found')"
 echo ""
 
 # ---------------------------------------------------------------------------
-# Resolve venv python explicitly so the build never drifts to conda/system Python.
+# Activate venv
 # ---------------------------------------------------------------------------
-if [[ -x "$ROOT/.venv/bin/python" ]]; then
-    VENV_PYTHON="$ROOT/.venv/bin/python"
-elif [[ -x "$ROOT/.venv/Scripts/python.exe" ]]; then
-    VENV_PYTHON="$ROOT/.venv/Scripts/python.exe"
+if [[ -f "$ROOT/.venv/bin/activate" ]]; then
+    # shellcheck disable=SC1091
+    source "$ROOT/.venv/bin/activate"
+elif [[ -f "$ROOT/.venv/Scripts/activate" ]]; then
+    # Windows Git Bash / MSYS2
+    # shellcheck disable=SC1091
+    source "$ROOT/.venv/Scripts/activate"
 else
     echo "ERROR: No virtual environment found at $ROOT/.venv/"
     echo "Run:  uv venv --python 3.12 && uv pip install -e '.[dev]'"
     exit 1
 fi
 
-echo "Using Python: $VENV_PYTHON"
-echo "Python version: $("$VENV_PYTHON" --version)"
+echo "Using Python: $(which python)"
+echo "Python version: $(python --version)"
 echo ""
 
 # ---------------------------------------------------------------------------
 # Install PyInstaller if needed
 # ---------------------------------------------------------------------------
-if ! "$VENV_PYTHON" -c "import PyInstaller" 2>/dev/null; then
+if ! python -c "import PyInstaller" 2>/dev/null; then
     echo "Installing PyInstaller..."
-    uv pip install --python "$VENV_PYTHON" pyinstaller==6.13.0 --quiet
+    pip install pyinstaller --quiet
 fi
 
-PYINSTALLER_VERSION=$("$VENV_PYTHON" -c "import PyInstaller; print(PyInstaller.__version__)")
+PYINSTALLER_VERSION=$(python -c "import PyInstaller; print(PyInstaller.__version__)")
 echo "PyInstaller: $PYINSTALLER_VERSION"
 echo ""
 
@@ -90,14 +93,10 @@ echo ""
 echo "Running PyInstaller..."
 cd "$ROOT"
 
-# Avoid stale work/dist artifacts across Python-version changes.
-rm -rf "build/work" "build/dist"
-
-"$VENV_PYTHON" -m PyInstaller build/hand-x.spec \
+pyinstaller build/hand-x.spec \
     --distpath "build/dist" \
     --workpath "build/work" \
     --noconfirm \
-    --clean \
     --log-level WARN
 
 # ---------------------------------------------------------------------------

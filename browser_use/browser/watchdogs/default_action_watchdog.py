@@ -347,15 +347,6 @@ class DefaultActionWatchdog(BaseWatchdog):
 			element_node = event.node
 			index_for_logging = element_node.backend_node_id or 'unknown'
 
-			# Guard create-account-first runs from drifting into Sign In while the
-			# page still clearly offers or expects Create Account.
-			auth_click_guard = await self._guard_create_account_first_auth_click(element_node)
-			if auth_click_guard:
-				self.logger.info(auth_click_guard)
-				return {'validation_error': auth_click_guard}
-
-			await self._mark_create_account_first_attempt(element_node)
-
 			# Check if element is a file input (should not be clicked)
 			if self.browser_session.is_file_input(element_node):
 				msg = f'Index {index_for_logging} - has an element which opens file upload dialog. To upload files please use a specific function to upload files'
@@ -394,157 +385,6 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 		except Exception:
 			raise
-
-	def _is_create_account_first_run(self) -> bool:
-		"""Return whether this auth flow must stay on Create Account until proven otherwise."""
-		source = os.getenv('GH_CREDENTIAL_SOURCE', '').strip().lower()
-		intent = os.getenv('GH_CREDENTIAL_INTENT', '').strip().lower()
-		return source == 'generated' or (source == 'user' and intent == 'create_account')
-
-	def _create_account_first_guard_prefix(self) -> str:
-		"""Return the user-facing prefix for create-account-first auth guard messages."""
-		source = os.getenv('GH_CREDENTIAL_SOURCE', '').strip().lower()
-		if source == 'generated':
-			return 'NEW_CREDENTIALS run'
-		return 'Create-account-first run'
-
-	async def _guard_create_account_first_auth_click(self, element_node: EnhancedDOMTreeNode) -> str | None:
-		"""Block premature Sign In clicks when the run is known to need account creation."""
-		try:
-			if not self._is_create_account_first_run():
-				return None
-
-			attrs = element_node.attributes or {}
-			label_parts = [
-				element_node.node_name or '',
-				attrs.get('id', ''),
-				attrs.get('name', ''),
-				attrs.get('data-automation-id', ''),
-				attrs.get('aria-label', ''),
-				attrs.get('title', ''),
-				attrs.get('value', ''),
-				element_node.get_all_children_text(max_depth=2),
-			]
-			label_text = ' '.join(part for part in label_parts if part).strip().lower()
-			label_text = label_text.replace('-', ' ').replace('_', ' ')
-			is_sign_in_target = 'sign in' in label_text or 'log in' in label_text or 'login' in label_text
-			is_create_account_target = (
-				'create account' in label_text or 'register' in label_text or 'sign up' in label_text
-			)
-			if not is_sign_in_target and not is_create_account_target:
-				return None
-
-			page = await self.browser_session.get_current_page()
-			if page is None:
-				return None
-
-			state = await self._inspect_generated_auth_state(page)
-
-			if state.get('accountExistsSignals'):
-				return None
-
-			create_attempted = bool(
-				getattr(self.browser_session, '_gh_create_account_first_attempted', False)
-				or getattr(self.browser_session, '_gh_generated_create_account_attempted', False)
-			)
-			prefix = self._create_account_first_guard_prefix()
-			if create_attempted and is_create_account_target and state.get('authState') == 'native_login':
-				return (
-					f"{prefix}: Create Account was already submitted and Workday is now on the native Sign In page. "
-					"This is the expected post-create step. Do NOT click Create Account again. "
-					"Use the same email/password to sign in once."
-				)
-
-			if is_sign_in_target and (
-				state.get('confirmPasswordVisible') or state.get('createAccountSignals') or state.get('startDialogSignals')
-			):
-				return (
-					f"{prefix}: do not click Sign In while Create Account or the start dialog is still active. "
-					"Sign In is allowed only after Create Account fails with an explicit account-already-exists signal."
-				)
-
-			return None
-		except Exception as e:
-			self.logger.debug(f'Create-account-first auth click guard skipped due to error: {e}')
-			return None
-
-	async def _inspect_generated_auth_state(self, page) -> dict:
-		"""Return lightweight auth-page signals used to guard generated auth flows."""
-		state = json.loads(
-			await page.evaluate(
-				r"""() => {
-					const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim().toLowerCase();
-					const allText = Array.from(
-						document.querySelectorAll('h1, h2, h3, button, a, [role="button"], label, p, span, div')
-					)
-						.map((el) => normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || ''))
-						.filter(Boolean);
-
-					const hasText = (patterns) => allText.some((text) => patterns.some((pattern) => pattern.test(text)));
-					const passwordCount = document.querySelectorAll('input[type="password"]').length;
-					const emailCount = document.querySelectorAll('input[type="email"], input[name*="email" i], input[id*="email" i]').length;
-					const confirmPasswordVisible =
-						passwordCount >= 2 ||
-						document.querySelector('[data-automation-id="verifyPassword"]') !== null;
-					const createAccountSignals = hasText([/\bcreate account\b/, /\bregister\b/, /\bsign up\b/]);
-					const signInSignals = hasText([/\bsign in\b/, /\blog in\b/, /\blogin\b/]);
-					let authState = 'unknown_pending';
-					if (confirmPasswordVisible) {
-						authState = 'still_create_account';
-					} else if (emailCount >= 1 && passwordCount >= 1 && signInSignals) {
-						authState = 'native_login';
-					} else if (createAccountSignals) {
-						authState = 'still_create_account';
-					}
-
-					return JSON.stringify({
-						authState,
-						confirmPasswordVisible,
-						createAccountSignals,
-						signInSignals,
-						startDialogSignals: hasText([/\bstart your application\b/, /\bautofill with resume\b/, /\bapply manually\b/, /\buse my last application\b/]),
-						accountExistsSignals: hasText([/\balready exists\b/, /\balready have an account\b/, /\balready registered\b/, /\baccount exists\b/]),
-					});
-				}"""
-			)
-		)
-		return state if isinstance(state, dict) else {}
-
-	async def _mark_create_account_first_attempt(self, element_node: EnhancedDOMTreeNode) -> None:
-		"""Remember that a create-account-first run has already submitted Create Account."""
-		try:
-			if not self._is_create_account_first_run():
-				return
-
-			attrs = element_node.attributes or {}
-			label_parts = [
-				element_node.node_name or '',
-				attrs.get('id', ''),
-				attrs.get('name', ''),
-				attrs.get('data-automation-id', ''),
-				attrs.get('aria-label', ''),
-				attrs.get('title', ''),
-				attrs.get('value', ''),
-				element_node.get_all_children_text(max_depth=2),
-			]
-			label_text = ' '.join(part for part in label_parts if part).strip().lower()
-			label_text = label_text.replace('-', ' ').replace('_', ' ')
-			if 'create account' not in label_text and 'register' not in label_text and 'sign up' not in label_text:
-				return
-
-			page = await self.browser_session.get_current_page()
-			if page is None:
-				return
-
-			state = await self._inspect_generated_auth_state(page)
-			if state.get('authState') != 'still_create_account':
-				return
-
-			setattr(self.browser_session, '_gh_create_account_first_attempted', True)
-			setattr(self.browser_session, '_gh_generated_create_account_attempted', True)
-			self.logger.info('Create-account-first guard: marked Create Account as already submitted for this session')
-		except Exception as e:
-			self.logger.debug(f'Create-account-first create-account marker skipped due to error: {e}')
 
 	async def on_ClickCoordinateEvent(self, event: ClickCoordinateEvent) -> dict | None:
 		"""Handle click at coordinates with CDP. Automatically waits for file downloads if triggered."""
@@ -852,26 +692,7 @@ class DefaultActionWatchdog(BaseWatchdog):
 			self.logger.debug(f'Occlusion check failed: {e}, assuming not occluded')
 			return False
 
-	async def _resolve_topmost_click_target(self, x: float, y: float, original_node) -> EnhancedDOMTreeNode | None:
-		"""Resolve the topmost DOM target at the click point when the original node is occluded."""
-		try:
-			topmost_node = await self.browser_session.get_dom_element_at_coordinates(int(x), int(y))
-			if topmost_node is None:
-				return None
-
-			if topmost_node.backend_node_id == original_node.backend_node_id:
-				return None
-
-			self.logger.debug(
-				f'Resolved topmost click target at ({int(x)}, {int(y)}): '
-				f'original={original_node.backend_node_id}, topmost={topmost_node.backend_node_id}'
-			)
-			return topmost_node
-		except Exception as e:
-			self.logger.debug(f'Failed to resolve topmost click target: {e}')
-			return None
-
-	async def _click_element_node_impl(self, element_node, *, _rerouted: bool = False) -> dict | None:
+	async def _click_element_node_impl(self, element_node) -> dict | None:
 		"""
 		Click an element using pure CDP with multiple fallback methods for getting element geometry.
 
@@ -1021,17 +842,6 @@ class DefaultActionWatchdog(BaseWatchdog):
 			is_occluded = await self._check_element_occlusion(backend_node_id, center_x, center_y, cdp_session)
 
 			if is_occluded:
-				rerouted_target = None
-				if not _rerouted:
-					rerouted_target = await self._resolve_topmost_click_target(center_x, center_y, element_node)
-
-				if rerouted_target is not None:
-					self.logger.debug(
-						f'🚫 Element {backend_node_id} is occluded, rerouting click to topmost target '
-						f'{rerouted_target.backend_node_id}'
-					)
-					return await self._click_element_node_impl(rerouted_target, _rerouted=True)
-
 				self.logger.debug('🚫 Element is occluded, falling back to JavaScript click')
 				try:
 					result = await cdp_session.cdp_client.send.DOM.resolveNode(

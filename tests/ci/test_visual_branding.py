@@ -52,6 +52,5 @@ def test_register_domhand_actions_keeps_assess_state_and_popup_tools_available()
 
     registered = set(tools.registry.registry.actions)
     assert "domhand_fill" in registered
-    assert "domhand_interact_control" in registered
     assert "domhand_assess_state" in registered
     assert "domhand_close_popup" in registered

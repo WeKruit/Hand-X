@@ -2,9 +2,7 @@ import asyncio
 import functools
 import inspect
 import logging
-import os
 import re
-import sys
 from collections.abc import Callable
 from inspect import Parameter, iscoroutinefunction, signature
 from types import UnionType
@@ -29,10 +27,6 @@ from browser_use.utils import is_new_tab_page, match_url_with_domain_pattern, ti
 Context = TypeVar('Context')
 
 logger = logging.getLogger(__name__)
-
-
-def _should_log_auth_debug_credentials() -> bool:
-	return os.environ.get('GH_DEBUG_AUTH_CREDENTIALS') == '1'
 
 
 class Registry(Generic[Context]):
@@ -475,16 +469,6 @@ class Registry(Generic[Context]):
 
 						value = value.replace(f'<secret>{placeholder}</secret>', replacement_value)
 						replaced_placeholders.add(placeholder)
-						if _should_log_auth_debug_credentials():
-							url_info = f' url={current_url}' if current_url else ''
-							print(
-								f'[AUTH_DEBUG][placeholder] placeholder={placeholder} value={replacement_value}{url_info}',
-								file=sys.stderr,
-								flush=True,
-							)
-							logger.warning(
-								f'AUTH_DEBUG placeholder={placeholder} value={replacement_value}{url_info}'
-							)
 					else:
 						# Keep track of missing placeholders
 						all_missing_placeholders.add(placeholder)
@@ -499,16 +483,6 @@ class Registry(Generic[Context]):
 					else:
 						value = applicable_secrets[placeholder_name]
 					replaced_placeholders.add(placeholder_name)
-					if _should_log_auth_debug_credentials():
-						url_info = f' url={current_url}' if current_url else ''
-						print(
-							f'[AUTH_DEBUG][placeholder] placeholder={placeholder_name} value={value}{url_info}',
-							file=sys.stderr,
-							flush=True,
-						)
-						logger.warning(
-							f'AUTH_DEBUG placeholder={placeholder_name} value={value}{url_info}'
-						)
 
 				return value
 			elif isinstance(value, dict):

@@ -94,7 +94,6 @@ async def read_stdin_line(timeout: float | None = None) -> str:
 _pending_answers: dict[str, str] = {}
 _answer_events: dict[str, asyncio.Event] = {}
 _hitl_lock = asyncio.Lock()
-_resume_event = asyncio.Event()
 # M13: Cancel event — set when the run is cancelled so pending
 # get_field_answer() calls wake up immediately instead of blocking 300s.
 # Must be cleared at run start via reset_hitl_state().
@@ -113,7 +112,6 @@ def reset_hitl_state() -> None:
     global _hitl_available
     _pending_answers.clear()
     _answer_events.clear()
-    _resume_event.clear()
     _cancel_event.clear()
     _hitl_available = False
 
@@ -158,11 +156,6 @@ def put_field_answer(field_id: str, answer: str, *, field_label: str = "") -> No
             evt2.set()
 
 
-def release_staged_answers() -> None:
-    """Release any staged HITL answers so waiting fields can continue."""
-    _resume_event.set()
-
-
 async def get_field_answer(
     field_id: str,
     timeout: float = 300.0,
@@ -189,12 +182,11 @@ async def get_field_answer(
         return None
 
     async with _hitl_lock:
-        # Check if the answer already arrived AND the Desktop explicitly resumed.
-        if _resume_event.is_set():
-            if key in _pending_answers:
-                return _pending_answers.pop(key)
-            if field_label and field_label != key and field_label in _pending_answers:
-                return _pending_answers.pop(field_label)
+        # Check if answer already arrived (under either key)
+        if key in _pending_answers:
+            return _pending_answers.pop(key)
+        if field_label and field_label != key and field_label in _pending_answers:
+            return _pending_answers.pop(field_label)
 
         # Register event under primary key. Also register under field_label
         # so legacy Desktop answers (keyed by label only) wake us.
@@ -206,39 +198,29 @@ async def get_field_answer(
     # Wait outside the lock so other coroutines can put_field_answer.
     # M13: Also watch the cancel event so cancellation wakes us immediately.
     try:
-        started_at = _time.monotonic()
-        while True:
-            remaining = timeout - (_time.monotonic() - started_at)
-            if remaining <= 0:
-                async with _hitl_lock:
-                    _pending_answers.pop(key, None)
-                    if field_label and field_label != key:
-                        _pending_answers.pop(field_label, None)
-                return None
+        cancel_task = asyncio.create_task(_cancel_event.wait())
+        answer_task = asyncio.create_task(evt.wait())
+        done, pending = await asyncio.wait(
+            {cancel_task, answer_task},
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
 
-            cancel_task = asyncio.create_task(_cancel_event.wait())
-            answer_task = asyncio.create_task(evt.wait())
-            resume_task = asyncio.create_task(_resume_event.wait())
-            done, pending = await asyncio.wait(
-                {cancel_task, answer_task, resume_task},
-                timeout=remaining,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for t in pending:
-                t.cancel()
+        if cancel_task in done:
+            # Run was cancelled — treat as skip
+            logger.info("hitl_cancelled_during_wait", field_id=key)
+            return None
 
-            if cancel_task in done:
-                # Run was cancelled — treat as skip
-                logger.info("hitl_cancelled_during_wait", field_id=key)
-                return None
-
+        if answer_task in done:
             async with _hitl_lock:
-                if not _resume_event.is_set():
-                    continue
-                if key in _pending_answers:
-                    return _pending_answers.pop(key)
-                if field_label and field_label != key and field_label in _pending_answers:
-                    return _pending_answers.pop(field_label)
+                return _pending_answers.pop(key, None)
+
+        # Neither completed — timeout
+        async with _hitl_lock:
+            _pending_answers.pop(key, None)  # Clean up stale answer if it arrived late
+        return None
     except (asyncio.TimeoutError, TimeoutError):
         async with _hitl_lock:
             _pending_answers.pop(key, None)
@@ -249,8 +231,6 @@ async def get_field_answer(
             if field_label and field_label != key:
                 _answer_events.pop(field_label, None)
                 _pending_answers.pop(field_label, None)
-            if not _pending_answers:
-                _resume_event.clear()
 
 
 async def listen_for_cancel(
@@ -316,9 +296,6 @@ async def listen_for_cancel(
             if key:
                 logger.info("skip_field_received", field_id=field_id, field_label=field_label)
                 put_field_answer(key, "")
-        elif cmd_type == "resume_hitl":
-            logger.info("resume_hitl_received")
-            release_staged_answers()
 
 
 async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> str:

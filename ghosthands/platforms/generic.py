@@ -89,8 +89,8 @@ GENERIC_GUARDRAILS: list[str] = [
 		"For OPTIONAL fields with no matching data, skip them. "
 		"For REQUIRED fields with no matching profile data: "
 		"if a neutral/decline option exists (e.g., 'Prefer not to say', 'N/A', 'Other'), select it. "
-		"If no neutral option, use the closest saved answer, structured profile data, deterministic default, "
-		"or a best-effort guess. NEVER enter '[NEEDS_USER_INPUT]'."
+		"If no neutral option, enter exactly: '[NEEDS_USER_INPUT]'. "
+		"NEVER fabricate answers for salary, start date, referral source, or other substantive fields."
 	),
 	(
 		"CUT-OFF DETECTION: Before answering any question near the bottom of "
