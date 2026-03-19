@@ -22,6 +22,7 @@ from ghosthands.actions.views import (
     DomHandExpandParams,
     DomHandFillParams,
     DomHandInteractControlParams,
+    DomHandRecordExpectedValueParams,
     DomHandSelectParams,
     DomHandUploadParams,
 )
@@ -49,6 +50,7 @@ def register_domhand_actions(tools: "Tools") -> None:
     from ghosthands.actions.domhand_expand import domhand_expand
     from ghosthands.actions.domhand_fill import domhand_fill
     from ghosthands.actions.domhand_interact_control import domhand_interact_control
+    from ghosthands.actions.domhand_record_expected_value import domhand_record_expected_value
     from ghosthands.actions.domhand_select import domhand_select
     from ghosthands.actions.domhand_upload import domhand_upload
 
@@ -137,6 +139,16 @@ def register_domhand_actions(tools: "Tools") -> None:
         ),
         param_model=DomHandInteractControlParams,
         func=domhand_interact_control,
+    )
+
+    _register_action(
+        description=(
+            "Record the expected visible value for one field after a raw manual recovery action. "
+            "Use this immediately after a fallback click/input/select that changed a specific field, "
+            "then call domhand_assess_state before any unrelated action."
+        ),
+        param_model=DomHandRecordExpectedValueParams,
+        func=domhand_record_expected_value,
     )
 
     # ── domhand_upload: File upload ───────────────────────────

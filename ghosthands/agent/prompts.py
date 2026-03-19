@@ -482,13 +482,16 @@ def build_system_prompt(
         "5. domhand_select — Selects dropdown options using",
         "   platform-aware discovery. Use this for complex custom",
         "   dropdown/combobox widgets that domhand_fill could not settle.",
-        "6. domhand_upload — Uploads the applicant's resume file.  Use",
+        "6. domhand_record_expected_value — After a raw manual click/input/",
+        "   select fallback changes one exact field, record the intended",
+        "   field/value here before reassessing the page.",
+        "7. domhand_upload — Uploads the applicant's resume file.  Use",
         "   when you see a file-upload input.",
-        "7. Generic browser-use actions (click, input_text, etc.) — Use",
+        "8. Generic browser-use actions (click, input_text, etc.) — Use",
         "   ONLY as a fallback when DomHand actions fail, e.g. due to",
         "   shadow DOM, custom widgets, or iframes that DomHand cannot",
         "   reach.",
-        "8. Vision/screenshot-based reasoning — Use only as a bounded last",
+        "9. Vision/screenshot-based reasoning — Use only as a bounded last",
         "   fallback for the exact stuck field after DOM/manual actions fail.",
         "",
         "After calling domhand_fill, inspect its result to see which fields",
@@ -501,6 +504,10 @@ def build_system_prompt(
         "before touching the next blocker.",
         "Prefer simpler radio/checkbox blockers before complex searchable",
         "dropdowns when you have multiple unresolved fields.",
+        'If a DomHand tool returns "domhand_retry_capped" for a field, do',
+        "NOT use any DomHand tool on that exact field again in this run.",
+        "Switch immediately to browser-use/manual or one screenshot/vision",
+        "fallback for that field.",
         "If the same exact field has already failed twice with DOM/manual",
         "actions, take ONE screenshot/vision retry on that field, then",
         "return to DOM/manual actions.",
@@ -617,14 +624,12 @@ def build_system_prompt(
         "  shorter/alternative term.",
         "",
         "STUBBORN CHECKBOX/TOGGLE RECOVERY:",
-        "- CRITICAL: If domhand_assess_state reports 0 unresolved required",
-        "  fields and 0 visible errors, TRUST THAT RESULT. Do NOT override",
-        "  it based on your visual evaluation of checkbox state. The DOM",
-        "  state assessment is more reliable than visual inspection.",
-        "  If assess_state says advanceable with 0 unresolved — ADVANCE.",
+        "- CRITICAL: Use domhand_assess_state.advance_allowed as the page",
+        "  gate. Do NOT advance just because a checkbox looks right or a",
+        "  Next/Continue button is visible.",
         "- If a checkbox or toggle does not stick after 2 click attempts,",
-        "  call domhand_assess_state IMMEDIATELY. If it reports 0 unresolved",
-        "  fields, the checkbox DID work — stop retrying and move on.",
+        "  call domhand_assess_state IMMEDIATELY. If it reports",
+        "  advance_allowed=true, stop retrying and move on.",
         "- If domhand_assess_state still shows unresolved fields after 2",
         "  checkbox click attempts, try these alternatives:",
         "  1. Click the <label> element associated with the checkbox.",
@@ -647,10 +652,9 @@ def build_system_prompt(
         "  done(success=False, text='blocker: access denied')",
         "- Application already submitted or position closed →",
         "  done(success=False, text='blocker: position closed')",
-        "- Missing user-provided application data is NOT a blocker.",
-        "  If a required field needs an answer that is not in the profile or",
-        "  QA bank, keep using DomHand best-effort recovery instead of treating",
-        "  it as a blocker or pausing for HITL.",
+        "- Missing structured applicant data for GPA, field of study, expected",
+        "  vs actual education dates, or language rubric fields is a user-data",
+        "  gap. Do NOT guess those answers.",
         "Do NOT retry blockers.  Report them and stop.",
         "</blocker_handling>",
         "",
@@ -720,10 +724,12 @@ def build_system_prompt(
         "     this one blocker at a time for required",
         "     fields, and for optional fields only when the applicant",
         "     profile maps to that field with high confidence.",
-        "  4c. After EVERY blocker-level domhand_interact_control,",
-        "      domhand_select, or targeted manual click/input used to recover",
-        "      a required field, IMMEDIATELY call domhand_assess_state before",
-        "      doing any unrelated action. Do not assume the page context",
+        "  4c. After EVERY blocker-level domhand_interact_control or",
+        "      domhand_select, IMMEDIATELY call domhand_assess_state before",
+        "      doing any unrelated action. After EVERY targeted manual",
+        "      click/input/select recovery, FIRST call",
+        "      domhand_record_expected_value for that exact field/value,",
+        "      THEN call domhand_assess_state. Do not assume the page context",
         "      updated correctly until reassessment confirms it.",
         "  4a. Do NOT jump straight to vision/screenshot fallback while",
         "      DOM/manual takeover options are still available.",
@@ -733,14 +739,14 @@ def build_system_prompt(
         "  5. Check for agreement checkboxes and click any that are unchecked.",
         "  6. Before scrolling away or clicking 'Next' / 'Continue' /",
         "     'Save & Continue', call domhand_assess_state again and follow",
-        "     its scroll_bias and completion-state result.",
-        "  7. Click 'Next' / 'Continue' / 'Save & Continue' to advance when",
-        "     domhand_assess_state still says the page is advanceable.",
+        "     its scroll_bias, unresolved fields, and advance_allowed result.",
+        "  7. Click 'Next' / 'Continue' / 'Save & Continue' ONLY when",
+        "     domhand_assess_state says advance_allowed=true.",
         "  8. On the new page, determine if it's an auth page or form page",
         "     and follow the appropriate sequence above.",
         "",
-        "CRITICAL: If the page is in `advanceable`, you MUST click",
-        "Next / Continue / Save & Continue to advance.",
+        "CRITICAL: If the page is in `advanceable` but advance_allowed=false,",
+        "you MUST NOT click Next / Continue / Save & Continue yet.",
         "Do NOT call done() while a real non-final advance step remains.",
         "Use the completion-state model below to decide when to advance versus when to stop.",
         "</multi_page_flow>",
@@ -882,25 +888,32 @@ def build_task_prompt(
         "4. Immediately call domhand_assess_state. If unresolved fields remain, resolve them ONE FIELD AT A TIME: "
         "call domhand_fill again with target_section=current_section and focus_fields set to a single exact "
         "unresolved label. Preserve heading_boundary when you are inside a repeater entry, and reassess after "
-        "each single-field retry before touching the next blocker.\n"
+        "each single-field retry before touching the next blocker. If the latest domhand_assess_state no longer "
+        "lists a field as unresolved/mismatched/unverified, do NOT retry that field again on the same page.\n"
         "5. For fields still unresolved after the targeted domhand_fill retry, use DomHand control tools first: "
         "domhand_interact_control for radios/checkboxes/toggles/button groups and domhand_select for dropdowns. "
-        "After EACH blocker-level DomHand or targeted manual recovery action, immediately call domhand_assess_state to refresh the current context. "
+        "When domhand_assess_state gives you a field_id/field_type for the blocker, pass that exact field_id to "
+        "domhand_interact_control or domhand_record_expected_value instead of relying on label-only matching. "
+        "After EACH blocker-level DomHand action, immediately call domhand_assess_state to refresh the current context. "
+        "After EACH targeted manual recovery action, first call domhand_record_expected_value for that exact field/value, then immediately call domhand_assess_state. "
         "Only then use dropdown_options/select_dropdown, click, input_text, Enter, Tab, scroll, and focus actions. "
         "Keep these manual recoveries to ONE FIELD AT A TIME. Do NOT combine a referral/source widget with a radio "
         "button or another blocker in the same action batch.\n"
+        '5b. If any DomHand tool returns "domhand_retry_capped", stop using DomHand on that exact field for the rest '
+        "of the run and switch immediately to browser-use/manual or one screenshot/vision fallback for that field.\n"
         "6. If the same exact field still fails after two DOM/manual attempts, take ONE screenshot/vision retry on "
         "that blocker. Do not use screenshot earlier, and do not keep using screenshot repeatedly.\n"
         "7. After that screenshot/vision retry, go back to concrete DOM/manual actions instead of staying in visual "
         "reasoning.\n"
         f"8. For other file uploads, use domhand_upload or upload_file action with path: {resume_path}\n"
-        "9. After all fields on the current page are filled, click Next/Continue/Save to advance.\n"
+        "9. After all fields on the current page are filled, click Next/Continue/Save ONLY when domhand_assess_state reports advance_allowed=true.\n"
         "10. On each new page, repeat from step 1 (check for Easy Apply / resume upload first).\n"
-        "11. Prefer short waits: use wait(seconds=2) or wait(seconds=3) for auth transitions, resume-processing, "
-        "and SPA loading. Only use wait(seconds=5) if two shorter waits still leave the page blank/loading.\n"
-        "12. If the page is still blank/loading after two short waits and there are still no form elements, "
-        "call refresh() ONCE, then wait 2-3 seconds and reassess. Do NOT click Sign In/Create Account just "
-        "because the page is blank.\n"
+        "11. Prefer short waits: use a short poll loop with wait(seconds=1) up to 3 times for auth transitions, "
+        "resume-processing, and SPA loading. Reassess after each short wait instead of doing one long blind wait.\n"
+        "12. If the page is still blank/loading after the short poll loop and there are still no form elements, "
+        "navigate back to the original job URL ONCE when the current page is blank or blocked; otherwise call "
+        "refresh() ONCE on the current allowed page, then wait 2-3 seconds and reassess. Do NOT click Sign In/"
+        "Create Account just because the page is blank.\n"
         "13. For salary/compensation fields, ONLY use the exact saved profile answer already provided by DomHand "
         "or recovered from the profile/answer-bank context. NEVER improvise with generic text like 'Competitive', "
         "'Negotiable', or 'Flexible'. If a deterministic answer is not available, use DomHand's final best-effort "
@@ -939,7 +952,8 @@ def build_task_prompt(
                 "On auth pages, go DIRECTLY to Create Account (not Sign In). "
                 "Fill email + password + confirm password using browser-use input actions (NOT domhand_fill), "
                 "check agreement using domhand_check_agreement, then submit Create Account using domhand_click_button.\n"
-                "  After clicking Create Account, wait 3 seconds before deciding the outcome.\n"
+                "  After clicking Create Account, use a short poll loop: wait 1 second, inspect the page, and repeat "
+                "up to 3 times before deciding the outcome.\n"
                 "  AUTH OUTCOME MARKERS:\n"
                 "  - If the account appears created and you move past the auth wall, include EXACTLY "
                 "`AUTH_RESULT=ACCOUNT_CREATED_ACTIVE` in your memory or evaluation.\n"

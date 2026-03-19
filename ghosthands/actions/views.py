@@ -48,6 +48,9 @@ class FillFieldResult(BaseModel):
     state: str | None = None
     failure_reason: str | None = None
     takeover_suggestion: str | None = None
+    binding_mode: str | None = None
+    binding_confidence: str | None = None
+    best_effort_guess: bool = False
 
 
 class DomHandFillParams(BaseModel):
@@ -103,6 +106,14 @@ class DomHandInteractControlParams(BaseModel):
 
     field_label: str = Field(description="Exact or near-exact question/field label to target")
     desired_value: str = Field(description="Desired option/value, e.g. 'No', 'LinkedIn', 'United States'")
+    field_id: str | None = Field(
+        default=None,
+        description="Optional exact field id from domhand_assess_state to target one blocker precisely.",
+    )
+    field_type: str | None = Field(
+        default=None,
+        description="Optional field type hint paired with field_id for repeated labels.",
+    )
     target_section: str | None = Field(
         default=None,
         description="Optional section name used to narrow field matching before interaction.",
@@ -110,6 +121,29 @@ class DomHandInteractControlParams(BaseModel):
     heading_boundary: str | None = Field(
         default=None,
         description="Optional repeater heading boundary to keep control interaction scoped to one entry.",
+    )
+
+
+class DomHandRecordExpectedValueParams(BaseModel):
+    """Record the intended value for one visible field after a raw manual recovery action."""
+
+    field_label: str = Field(description="Exact or near-exact field/question label to record")
+    expected_value: str = Field(description="Intended visible value after the manual recovery action")
+    target_section: str | None = Field(
+        default=None,
+        description="Optional section name used to narrow field matching before recording.",
+    )
+    heading_boundary: str | None = Field(
+        default=None,
+        description="Optional repeater heading boundary to keep field matching scoped to one entry.",
+    )
+    field_id: str | None = Field(
+        default=None,
+        description="Optional exact field id from a prior assessment to disambiguate repeated labels.",
+    )
+    field_type: str | None = Field(
+        default=None,
+        description="Optional field type hint to disambiguate repeated labels.",
     )
 
 
@@ -166,11 +200,15 @@ class ApplicationState(BaseModel):
     current_section: str = ""
     unresolved_required_fields: list[ApplicationFieldIssue] = Field(default_factory=list)
     unresolved_optional_fields: list[ApplicationFieldIssue] = Field(default_factory=list)
+    mismatched_fields: list[ApplicationFieldIssue] = Field(default_factory=list)
+    opaque_fields: list[ApplicationFieldIssue] = Field(default_factory=list)
+    unverified_fields: list[ApplicationFieldIssue] = Field(default_factory=list)
     visible_errors: list[str] = Field(default_factory=list)
     scroll_bias: ScrollBias = "none"
     submit_visible: bool = False
     submit_disabled: bool = False
     advance_visible: bool = False
+    advance_allowed: bool = False
     platform_hint: str | None = None
 
 
@@ -302,6 +340,9 @@ def get_stable_field_key(field: FormField) -> str:
     fp = normalize_name(field.field_fingerprint or "")
     if fp:
         return f"{normalize_name(field.field_type)}|{fp}"
+    field_id = normalize_name(field.field_id or "")
+    if field_id:
+        return f"{normalize_name(field.field_type)}|{field_id}"
     return "|".join(
         [
             normalize_name(field.field_type),

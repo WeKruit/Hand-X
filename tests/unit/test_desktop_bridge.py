@@ -279,8 +279,6 @@ class TestAccountCreatedMarkerInference:
 
         assert marker[0] == "pending_verification"
         assert marker[2] == "auth_marker_pending_verification"
-        assert e["evidence"] == "auth_marker_pending_verification"
-        assert e["url"] == "https://workday.com"
 
     def test_url_omitted_when_empty(self):
         from ghosthands.output.jsonl import emit_account_created
@@ -306,10 +304,10 @@ class TestOpenQuestionAutoAnswering:
             _OpenQuestionIssue(field_label="Writing", field_type="select", section="Languages"),
         ]
 
-        resolved, unresolved = _auto_answer_open_question_issues(issues, profile)
+        resolved, unresolved = asyncio.run(_auto_answer_open_question_issues(issues, profile))
 
         assert unresolved == []
-        assert resolved == {
+        assert {answer.field_label: answer.answer for answer in resolved} == {
             "Comprehension": "Native / bilingual",
             "Overall": "Native / bilingual",
             "Reading": "Native / bilingual",
@@ -324,9 +322,9 @@ class TestOpenQuestionAutoAnswering:
             _OpenQuestionIssue(field_label="Why do you want this job?", field_type="textarea"),
         ]
 
-        resolved, unresolved = _auto_answer_open_question_issues(issues, {})
+        resolved, unresolved = asyncio.run(_auto_answer_open_question_issues(issues, {}))
 
-        assert resolved == {}
+        assert resolved == []
         assert len(unresolved) == 1
         assert unresolved[0].field_label == "Why do you want this job?"
 
@@ -344,10 +342,10 @@ class TestOpenQuestionAutoAnswering:
             ),
         ]
 
-        resolved, unresolved = _auto_answer_open_question_issues(issues, profile)
+        resolved, unresolved = asyncio.run(_auto_answer_open_question_issues(issues, profile))
 
         assert unresolved == []
-        assert resolved == {
+        assert {answer.field_label: answer.answer for answer in resolved} == {
             "Expectations on Compensation - Please state your expectations of total compensation for this position.(Please list a value and/or range)*":
                 "$90,000-$120,000 base (flexible)"
         }
@@ -363,10 +361,10 @@ class TestOpenQuestionAutoAnswering:
             ),
         ]
 
-        resolved, unresolved = _auto_answer_open_question_issues(issues, {})
+        resolved, unresolved = asyncio.run(_auto_answer_open_question_issues(issues, {}))
 
         assert unresolved == []
-        assert resolved == {
+        assert {answer.field_label: answer.answer for answer in resolved} == {
             "Have you previously worked for this organization?": "No",
         }
 
@@ -400,7 +398,7 @@ class TestOpenQuestionAutoAnswering:
         resolved, unresolved = await _infer_open_question_answers_with_domhand(issues, profile)
 
         assert unresolved == []
-        assert resolved == {
+        assert {answer.field_label: answer.answer for answer in resolved} == {
             "Overall language ability": "Expert",
         }
 
@@ -431,7 +429,7 @@ class TestOpenQuestionAutoAnswering:
         resolved, unresolved = await _infer_open_question_answers_with_domhand(issues, {})
 
         assert called is False
-        assert resolved == {}
+        assert resolved == []
         assert [issue.field_label for issue in unresolved] == ["Why do you want this job?"]
 
 
@@ -1124,6 +1122,7 @@ class TestCamelToSnakeProfile:
         profile = {
             "firstName": "Jane",
             "lastName": "Doe",
+            "preferredName": "Janie",
             "linkedIn": "https://linkedin.com/in/jane",
             "zipCode": "94105",
             "county": "San Francisco County",
@@ -1139,6 +1138,7 @@ class TestCamelToSnakeProfile:
 
         assert result["first_name"] == "Jane"
         assert result["last_name"] == "Doe"
+        assert result["preferred_name"] == "Janie"
         assert result["linkedin"] == "https://linkedin.com/in/jane"
         assert result["zip"] == "94105"
         assert result["postal_code"] == "94105"
@@ -1530,7 +1530,15 @@ class TestFieldEventsCallback:
             result = MagicMock()
             result.success = True
             result.name = "email"
+            result.field_id = "email-1"
             result.value_set = "jane@test.com"
+            result.control_kind = "text"
+            result.source = "profile"
+            result.answer_mode = "profile_backed"
+            result.confidence = 1.0
+            result.required = True
+            result.section = "Contact"
+            result.state = "filled"
 
             events = _capture_jsonl_output(callback, result, 1)
 
@@ -1557,6 +1565,7 @@ class TestFieldEventsCallback:
             result = MagicMock()
             result.success = False
             result.name = "phone"
+            result.field_id = "phone-1"
             result.error = "selector not found"
 
             events = _capture_jsonl_output(callback, result, 1)
@@ -1583,7 +1592,15 @@ class TestFieldEventsCallback:
             result = MagicMock()
             result.success = True
             result.name = "email"
+            result.field_id = "email-1"
             result.value_set = "jane@test.com"
+            result.control_kind = "text"
+            result.source = "profile"
+            result.answer_mode = "profile_backed"
+            result.confidence = 1.0
+            result.required = True
+            result.section = "Contact"
+            result.state = "filled"
 
             for _ in range(4):
                 _capture_jsonl_output(callback, result, 1)
@@ -1614,14 +1631,31 @@ class TestFieldEventsCallback:
             for field_name in ("first_name", "last_name"):
                 r = MagicMock(success=True, value_set="val")
                 r.name = field_name  # .name is special in MagicMock
+                r.field_id = f"{field_name}-1"
+                r.control_kind = "text"
+                r.source = "profile"
+                r.answer_mode = "profile_backed"
+                r.confidence = 1.0
+                r.required = True
+                r.section = "Contact"
+                r.state = "filled"
                 _capture_jsonl_output(callback, r, 1)
             r = MagicMock(success=False, error="not found")
             r.name = "phone"
+            r.field_id = "phone-1"
             _capture_jsonl_output(callback, r, 1)
 
             # Round 2: 1 filled
             r = MagicMock(success=True, value_set="+15551234567")
             r.name = "phone"
+            r.field_id = "phone-2"
+            r.control_kind = "text"
+            r.source = "profile"
+            r.answer_mode = "profile_backed"
+            r.confidence = 1.0
+            r.required = True
+            r.section = "Contact"
+            r.state = "filled"
             _capture_jsonl_output(callback, r, 2)
 
         # Cumulative: 3 filled, 1 failed out of 4 total

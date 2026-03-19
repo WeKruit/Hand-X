@@ -40,11 +40,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Desktop app userData path
-case "$PLATFORM" in
-  darwin) APP_DATA="$HOME/Library/Application Support/GH-Desktop-App" ;;
-  linux)  APP_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/GH-Desktop-App" ;;
-  win)    APP_DATA="${APPDATA}/GH-Desktop-App" ;;
-esac
+if [ -n "${GH_DESKTOP_USER_DATA_PATH:-}" ]; then
+  APP_DATA="$GH_DESKTOP_USER_DATA_PATH"
+else
+  case "$PLATFORM" in
+    darwin) APP_DATA="$HOME/Library/Application Support/gh-desktop-app" ;;
+    linux)  APP_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/gh-desktop-app" ;;
+    win)    APP_DATA="${APPDATA}/gh-desktop-app" ;;
+  esac
+fi
 
 BIN_DIR="$APP_DATA/bin"
 BINARY_DEST="$BIN_DIR/$BINARY_NAME"
@@ -177,14 +181,14 @@ echo ""
 echo "Installing to Desktop app binary location..."
 mkdir -p "$BIN_DIR"
 
-# Compute SHA-256
-if command -v shasum &>/dev/null; then
-  SHA256=$(shasum -a 256 "$BUILD_BINARY" | awk '{print $1}')
-elif command -v sha256sum &>/dev/null; then
-  SHA256=$(sha256sum "$BUILD_BINARY" | awk '{print $1}')
-else
-  SHA256="0000000000000000000000000000000000000000000000000000000000000000"
-fi
+# Compute SHA-256 without depending on perl-based shasum (locale-sensitive on macOS)
+SHA256=$(
+  python - <<PY
+from hashlib import sha256
+from pathlib import Path
+print(sha256(Path(r"$BUILD_BINARY").read_bytes()).hexdigest())
+PY
+)
 
 # Copy binary (use cat to avoid inheriting macOS provenance/quarantine xattrs)
 cat "$BUILD_BINARY" > "$BINARY_DEST"
@@ -197,7 +201,12 @@ if [ "$PLATFORM" = "darwin" ]; then
 fi
 
 # Write version state (Desktop checks this)
-TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+TIMESTAMP=$(
+  python - <<'PY'
+from datetime import datetime, timezone
+print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+PY
+)
 cat > "$VERSION_STATE" <<EOF
 {
   "version": "$VERSION",

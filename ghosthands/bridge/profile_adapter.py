@@ -31,6 +31,7 @@ DOMHAND_PROFILE_DEFAULTS: dict[str, Any] = {
 CAMEL_TO_SNAKE_SCALAR: dict[str, str] = {
     "firstName": "first_name",
     "lastName": "last_name",
+    "preferredName": "preferred_name",
     "linkedIn": "linkedin",
     "zipCode": "zip",
     "workAuthorization": "work_authorization",

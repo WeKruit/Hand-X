@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 
 from cdp_use.cdp.input.commands import DispatchKeyEventParameters
 
@@ -354,6 +355,11 @@ class DefaultActionWatchdog(BaseWatchdog):
 				self.logger.info(auth_click_guard)
 				return {'validation_error': auth_click_guard}
 
+			advance_click_guard = await self._guard_advance_click_requires_assessment(element_node)
+			if advance_click_guard:
+				self.logger.info(advance_click_guard)
+				return {'validation_error': advance_click_guard}
+
 			await self._mark_create_account_first_attempt(element_node)
 
 			# Check if element is a file input (should not be clicked)
@@ -407,6 +413,65 @@ class DefaultActionWatchdog(BaseWatchdog):
 		if source == 'generated':
 			return 'NEW_CREDENTIALS run'
 		return 'Create-account-first run'
+
+	def _is_advance_navigation_target(self, element_node: EnhancedDOMTreeNode) -> bool:
+		"""Return True when the element looks like an intermediate advance CTA."""
+		attrs = element_node.attributes or {}
+		label_parts = [
+			element_node.node_name or '',
+			attrs.get('id', ''),
+			attrs.get('name', ''),
+			attrs.get('data-automation-id', ''),
+			attrs.get('aria-label', ''),
+			attrs.get('title', ''),
+			attrs.get('value', ''),
+			element_node.get_all_children_text(max_depth=2),
+		]
+		label_text = ' '.join(part for part in label_parts if part).strip().lower()
+		label_text = label_text.replace('-', ' ').replace('_', ' ')
+		if any(token in label_text for token in ('create account', 'sign in', 'log in', 'login', 'submit')):
+			return False
+		return bool(
+			'next' in label_text
+			or 'continue' in label_text
+			or 'save and continue' in label_text
+			or 'save & continue' in label_text
+			or re.search(r'\bsave\b', label_text)
+		)
+
+	async def _guard_advance_click_requires_assessment(self, element_node: EnhancedDOMTreeNode) -> str | None:
+		"""Block navigation clicks while the latest assessment still forbids advancing."""
+		if not self._is_advance_navigation_target(element_node):
+			return None
+
+		last_state = getattr(self.browser_session, '_gh_last_application_state', None)
+		if not isinstance(last_state, dict):
+			return None
+		if last_state.get('advance_allowed') is True:
+			return None
+
+		page = await self.browser_session.get_current_page()
+		if page is None:
+			return None
+
+		current_url = ''
+		try:
+			current_url = await page.get_url()
+		except Exception:
+			current_url = ''
+
+		if current_url and last_state.get('page_url') and current_url != last_state.get('page_url'):
+			return None
+
+		return (
+			'Latest domhand_assess_state still reports advance_allowed=false. '
+			f"Current section: {last_state.get('current_section') or '(unknown)'}. "
+			f"Unresolved required: {last_state.get('unresolved_required_count', 0)}, "
+			f"mismatches: {last_state.get('mismatched_count', 0)}, "
+			f"opaque: {last_state.get('opaque_count', 0)}, "
+			f"unverified: {last_state.get('unverified_count', 0)}. "
+			'Do not click Next / Continue / Save yet.'
+		)
 
 	async def _guard_create_account_first_auth_click(self, element_node: EnhancedDOMTreeNode) -> str | None:
 		"""Block premature Sign In clicks when the run is known to need account creation."""
@@ -591,6 +656,16 @@ class DefaultActionWatchdog(BaseWatchdog):
 				return await self._execute_click_with_download_detection(
 					self._click_on_coordinate(event.coordinate_x, event.coordinate_y, force=False)
 				)
+
+			auth_click_guard = await self._guard_create_account_first_auth_click(element_node)
+			if auth_click_guard:
+				self.logger.info(auth_click_guard)
+				return {'validation_error': auth_click_guard}
+
+			advance_click_guard = await self._guard_advance_click_requires_assessment(element_node)
+			if advance_click_guard:
+				self.logger.info(advance_click_guard)
+				return {'validation_error': advance_click_guard}
 
 			# Safety check: file input
 			if self.browser_session.is_file_input(element_node):

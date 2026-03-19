@@ -4,9 +4,12 @@ import pytest
 
 from ghosthands.actions.views import FormField
 from ghosthands.runtime_learning import (
+    build_page_context_key,
     export_runtime_learning_payload,
+    get_expected_field_value,
     get_interaction_recipe,
     get_learned_question_alias,
+    record_expected_field_value,
     record_interaction_recipe,
     reset_runtime_learning_state,
     stage_learned_question_alias,
@@ -124,3 +127,38 @@ async def test_semantic_profile_value_uses_learned_alias_without_llm():
     )
 
     assert answer == "Yes"
+
+
+def test_expected_field_values_are_isolated_by_page_context():
+    field = FormField(
+        field_id="field-1",
+        name="Language",
+        field_type="select",
+        required=True,
+    )
+    my_info_context = build_page_context_key(
+        url="https://example.wd1.myworkdayjobs.com/job",
+        page_marker="My Information",
+    )
+    questions_context = build_page_context_key(
+        url="https://example.wd1.myworkdayjobs.com/job",
+        page_marker="Application Questions",
+    )
+
+    record_expected_field_value(
+        host="example.wd1.myworkdayjobs.com",
+        page_context_key=my_info_context,
+        field_key="select|field-1",
+        field_label=field.name,
+        expected_value="English",
+        source="exact_profile",
+    )
+
+    assert (
+        get_expected_field_value(
+            host="example.wd1.myworkdayjobs.com",
+            page_context_key=questions_context,
+            field_key="select|field-1",
+        )
+        is None
+    )

@@ -486,7 +486,7 @@ async def _cleanup_browser(
     """
     if keep_browser_alive:
         logger.info("browser.cleanup_detaching_keep_alive")
-        await browser.stop()
+        await browser.detach_keep_alive()
         return
     if desktop_owns_browser:
         await browser.stop()
@@ -516,6 +516,66 @@ class _OpenQuestionIssue:
     visible_error: str | None = None
     widget_kind: str | None = None
     options: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _RecoveredFieldAnswer:
+    field_id: str
+    field_label: str
+    answer: str
+    question_text: str | None = None
+    section_path: str | None = None
+
+
+def _normalize_issue_text(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9\s]", " ", str(value or "").strip().lower()).strip()
+
+
+def _issue_recovery_key(issue: _OpenQuestionIssue, fallback_index: int) -> str:
+    return str(issue.field_id or "").strip() or f"open-question-{fallback_index}"
+
+
+def _issue_is_auth_like(issue: _OpenQuestionIssue) -> bool:
+    label = _normalize_issue_text(issue.question_text or issue.field_label)
+    if issue.field_type == "password":
+        return True
+    return any(token in label for token in ("email", "e mail", "username", "user name", "login", "password"))
+
+
+def _auth_override_answer_for_issue(issue: _OpenQuestionIssue) -> str:
+    email = (os.environ.get("GH_EMAIL") or "").strip()
+    password = (os.environ.get("GH_PASSWORD") or "").strip()
+    label = _normalize_issue_text(issue.question_text or issue.field_label)
+    if "password" in label:
+        return password
+    if any(token in label for token in ("email", "e mail", "username", "user name", "login")):
+        return email
+    return ""
+
+
+def _resolve_auth_recovery_answers(
+    issues: list[_OpenQuestionIssue],
+) -> tuple[list[_RecoveredFieldAnswer], list[_OpenQuestionIssue]]:
+    resolved: list[_RecoveredFieldAnswer] = []
+    unresolved: list[_OpenQuestionIssue] = []
+    for index, issue in enumerate(issues, start=1):
+        if not _issue_is_auth_like(issue):
+            unresolved.append(issue)
+            continue
+        answer = _auth_override_answer_for_issue(issue)
+        if not answer:
+            unresolved.append(issue)
+            continue
+        resolved.append(
+            _RecoveredFieldAnswer(
+                field_id=_issue_recovery_key(issue, index),
+                field_label=issue.field_label,
+                answer=answer,
+                question_text=issue.question_text,
+                section_path=issue.section_path or issue.section,
+            )
+        )
+    return resolved, unresolved
 
 
 _ANSWER_NEEDED_BLOCKER_PATTERNS = (
@@ -710,7 +770,7 @@ def _issues_from_blocker_text(blocker: str) -> list[_OpenQuestionIssue]:
 async def _auto_answer_open_question_issues(
     issues: list[_OpenQuestionIssue],
     profile: dict[str, Any] | None,
-) -> tuple[dict[str, str], list[_OpenQuestionIssue]]:
+) -> tuple[list[_RecoveredFieldAnswer], list[_OpenQuestionIssue]]:
     """Resolve open-question issues from saved profile/default evidence first.
 
     This runs before Desktop HITL is shown. It covers cases where the browser
@@ -719,11 +779,11 @@ async def _auto_answer_open_question_issues(
     phone type, or EEO decline defaults.
     """
     if not issues:
-        return {}, issues
+        return [], issues
     if profile is None:
         profile = {}
     if not isinstance(profile, dict):
-        return {}, issues
+        return [], issues
 
     from ghosthands.actions.domhand_fill import (
         _AUTHORITATIVE_SELECT_DEFAULTS,
@@ -742,10 +802,10 @@ async def _auto_answer_open_question_issues(
 
     evidence = _parse_profile_evidence(json.dumps(profile))
     answer_map = _build_profile_answer_map(profile, evidence)
-    resolved: dict[str, str] = {}
+    resolved: list[_RecoveredFieldAnswer] = []
     unresolved: list[_OpenQuestionIssue] = []
 
-    for issue in issues:
+    for index, issue in enumerate(issues, start=1):
         label = (issue.field_label or issue.question_text or "").strip()
         if not label:
             unresolved.append(issue)
@@ -785,7 +845,15 @@ async def _auto_answer_open_question_issues(
         cleaned = str(answer).strip() if answer is not None else ""
         if cleaned:
             confirm_learned_question_alias(label)
-            resolved[issue.field_label] = cleaned
+            resolved.append(
+                _RecoveredFieldAnswer(
+                    field_id=_issue_recovery_key(issue, index),
+                    field_label=issue.field_label,
+                    answer=cleaned,
+                    question_text=issue.question_text,
+                    section_path=issue.section_path or issue.section,
+                )
+            )
         else:
             unresolved.append(issue)
 
@@ -795,12 +863,12 @@ async def _auto_answer_open_question_issues(
 async def _infer_open_question_answers_with_domhand(
     issues: list[_OpenQuestionIssue],
     profile: dict[str, Any] | None,
-) -> tuple[dict[str, str], list[_OpenQuestionIssue]]:
+) -> tuple[list[_RecoveredFieldAnswer], list[_OpenQuestionIssue]]:
     """Use DomHand's LLM-backed field inference for open questions before HITL."""
     if not issues:
-        return {}, issues
+        return [], issues
     if not isinstance(profile, dict):
-        return {}, issues
+        return [], issues
 
     from ghosthands.actions.domhand_fill import infer_answers_for_fields
     from ghosthands.actions.views import FormField
@@ -810,6 +878,9 @@ async def _infer_open_question_answers_with_domhand(
     unresolved: list[_OpenQuestionIssue] = []
     for index, issue in enumerate(issues, start=1):
         if issue.field_type == "file":
+            unresolved.append(issue)
+            continue
+        if issue.field_type == "textarea" and not issue.options:
             unresolved.append(issue)
             continue
         field_id = issue.field_id or f"open-question-{index}"
@@ -829,7 +900,7 @@ async def _infer_open_question_answers_with_domhand(
         issue_by_field_id[field_id] = issue
 
     if not synthetic_fields:
-        return {}, unresolved
+        return [], unresolved
 
     inferred = await infer_answers_for_fields(
         synthetic_fields,
@@ -837,12 +908,20 @@ async def _infer_open_question_answers_with_domhand(
         profile_data=profile,
     )
 
-    resolved: dict[str, str] = {}
+    resolved: list[_RecoveredFieldAnswer] = []
     for field in synthetic_fields:
         issue = issue_by_field_id[field.field_id]
         answer = str(inferred.get(field.field_id) or "").strip()
         if answer:
-            resolved[issue.field_label] = answer
+            resolved.append(
+                _RecoveredFieldAnswer(
+                    field_id=field.field_id,
+                    field_label=issue.field_label,
+                    answer=answer,
+                    question_text=issue.question_text,
+                    section_path=issue.section_path or issue.section,
+                )
+            )
         else:
             unresolved.append(issue)
 
@@ -856,7 +935,7 @@ async def _request_open_question_answers(
     timeout_seconds: float,
     issues: list[_OpenQuestionIssue] | None = None,
     profile: dict[str, Any] | None = None,
-) -> tuple[dict[str, str], bool]:
+) -> tuple[list[_RecoveredFieldAnswer], bool]:
     from ghosthands.output.jsonl import emit_event
 
     if issues is None:
@@ -864,11 +943,19 @@ async def _request_open_question_answers(
     if not issues:
         issues = _issues_from_blocker_text(blocker)
 
-    auto_answers, unresolved_issues = await _auto_answer_open_question_issues(issues, profile)
-    llm_answers: dict[str, str] = {}
+    auth_answers, remaining_issues = _resolve_auth_recovery_answers(issues)
+    auto_answers, unresolved_issues = await _auto_answer_open_question_issues(remaining_issues, profile)
+    llm_answers: list[_RecoveredFieldAnswer] = []
     if unresolved_issues:
         llm_answers, unresolved_issues = await _infer_open_question_answers_with_domhand(unresolved_issues, profile)
-        auto_answers.update(llm_answers)
+    recovered_answers: dict[str, _RecoveredFieldAnswer] = {
+        answer.field_id: answer for answer in auth_answers + auto_answers + llm_answers
+    }
+    if auth_answers:
+        emit_event(
+            "status",
+            message=f"Using explicit auth override for {len(auth_answers)} auth field(s) before continuing locally",
+        )
     if auto_answers:
         emit_event(
             "status",
@@ -887,11 +974,16 @@ async def _request_open_question_answers(
                 f"{len(unresolved_issues)} field(s) for continued best-effort recovery"
             ),
         )
-    return dict(auto_answers), False
+    return list(recovered_answers.values()), False
 
 
-def _build_recovery_task(base_task: str, answers: dict[str, str]) -> str:
-    answer_lines = "\n".join(f"- {label}: {value}" for label, value in answers.items())
+def _build_recovery_task(base_task: str, answers: list[_RecoveredFieldAnswer]) -> str:
+    answer_lines = "\n".join(
+        f"- [field_id={answer.field_id}] {answer.field_label}"
+        + (f" [section={answer.section_path}]" if answer.section_path else "")
+        + f": {answer.answer}"
+        for answer in answers
+    )
     return (
         f"{base_task}\n\n"
         "RECOVERED ANSWERS JUST PROVIDED:\n"
@@ -1348,7 +1440,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         total_steps = 0
         cancelled = False
         hitl_recovery_task = task
-        hitl_answers: dict[str, str] = {}
+        hitl_answers: dict[str, _RecoveredFieldAnswer] = {}
         for _recovery_round in range(3):
             history, cancelled = await _run_agent_once(hitl_recovery_task)
             is_done = history.is_done()
@@ -1380,8 +1472,9 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             if not recovered_answers:
                 break
 
-            hitl_answers.update(recovered_answers)
-            hitl_recovery_task = _build_recovery_task(task, hitl_answers)
+            for answer in recovered_answers:
+                hitl_answers[answer.field_id] = answer
+            hitl_recovery_task = _build_recovery_task(task, list(hitl_answers.values()))
             emit_status("Recovered additional answers — resuming application", job_id=job_id)
 
         # Final cost event
@@ -1541,9 +1634,9 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 with contextlib.suppress(Exception):
                     if runtime_error.keep_browser_open and keep_worker_browser_alive:
                         logger.info("browser.cleanup_detaching_runtime_error_keep_alive")
-                        await browser.stop()
+                        await browser.detach_keep_alive()
                     elif runtime_error.keep_browser_open:
-                        await browser.stop()
+                        await browser.detach_keep_alive()
                     else:
                         await _cleanup_browser(
                             browser,

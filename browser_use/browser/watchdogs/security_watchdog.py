@@ -52,23 +52,22 @@ class SecurityWatchdog(BaseWatchdog):
 		# Check if the navigated URL is allowed (in case of redirects)
 		if not self._is_url_allowed(event.url):
 			self.logger.warning(f'⛔️ Navigation to non-allowed URL detected: {event.url}')
+			message = (
+				f'Navigation blocked to non-allowed URL: {event.url}'
+				if 'maintenance' not in event.url.lower()
+				else f'Navigation reached a maintenance/interstitial URL: {event.url}'
+			)
 
 			# Dispatch browser error
 			self.event_bus.dispatch(
 				BrowserErrorEvent(
 					error_type='NavigationBlocked',
-					message=f'Navigation blocked to non-allowed URL: {event.url} - redirecting to about:blank',
-					details={'url': event.url, 'target_id': event.target_id},
+					message=message,
+					details={'url': event.url, 'target_id': event.target_id, 'preserved_visible_page': True},
 				)
 			)
-			# Navigate to about:blank to keep session alive
-			# Agent will see the error and can continue with other tasks
-			try:
-				session = await self.browser_session.get_or_create_cdp_session(target_id=event.target_id)
-				await session.cdp_client.send.Page.navigate(params={'url': 'about:blank'}, session_id=session.session_id)
-				self.logger.info(f'⛔️ Navigated to about:blank after blocked URL: {event.url}')
-			except Exception as e:
-				self.logger.error(f'⛔️ Failed to navigate to about:blank after blocked redirect: {type(e).__name__} {e}')
+			# Preserve the visible blocker page instead of collapsing to about:blank.
+			return
 
 	async def on_TabCreatedEvent(self, event: TabCreatedEvent) -> None:
 		"""Check if new tab URL is allowed."""

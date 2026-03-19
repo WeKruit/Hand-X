@@ -15,18 +15,23 @@ from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
 
 from ghosthands.actions.domhand_fill import (
+    DOMHAND_RETRY_CAPPED,
     _build_inject_helpers_js,
+    _attempt_domhand_fill_with_retry_cap,
     _field_already_matches,
     _field_has_validation_error,
-    _fill_single_field,
-    _filter_fields_for_focus,
     _filter_fields_for_scope,
+    _resolve_focus_fields,
     _preferred_field_label,
+    _get_page_context_key,
+    _read_checkbox_group_value,
     _read_field_value,
     _read_group_selection,
+    _safe_page_url,
     extract_visible_form_fields,
 )
-from ghosthands.actions.views import DomHandInteractControlParams, FormField
+from ghosthands.actions.views import DomHandInteractControlParams, FormField, get_stable_field_key
+from ghosthands.runtime_learning import detect_host_from_url, record_expected_field_value
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +44,23 @@ _INTERACTIVE_FIELD_TYPES = {
     "checkbox",
     "toggle",
 }
+
+
+def _match_exact_control(
+    fields: list[FormField],
+    *,
+    field_id: str | None,
+    field_type: str | None,
+) -> FormField | None:
+    requested_id = str(field_id or "").strip()
+    requested_type = str(field_type or "").strip().lower()
+    for field in fields:
+        if requested_id and field.field_id != requested_id:
+            continue
+        if requested_type and field.field_type.lower() != requested_type:
+            continue
+        return field
+    return None
 
 
 def _control_debug_enabled() -> bool:
@@ -77,6 +99,8 @@ def _candidate_score(field: FormField, desired_value: str) -> tuple[int, int]:
 
 
 async def _read_control_value(page, field: FormField) -> str:
+    if field.field_type == "checkbox-group":
+        return await _read_checkbox_group_value(page, field)
     if field.field_type in {"radio-group", "radio", "button-group"}:
         return await _read_group_selection(page, field.field_id)
     return await _read_field_value(page, field.field_id)
@@ -124,6 +148,7 @@ async def domhand_interact_control(
         extracted_interactive_fields,
         target_section=params.target_section,
         heading_boundary=params.heading_boundary,
+        focus_fields=[params.field_label],
     )
     logger.info(
         "domhand.interact_control.candidates "
@@ -137,7 +162,33 @@ async def domhand_interact_control(
         f"scoped_candidates={_summarize_controls(interactive_fields)} "
         f"unscoped_candidates={_summarize_controls(extracted_interactive_fields)}"
     )
-    focused = _filter_fields_for_focus(interactive_fields, [params.field_label])
+    target = _match_exact_control(
+        interactive_fields,
+        field_id=params.field_id,
+        field_type=params.field_type,
+    )
+    if params.field_id and target is None:
+        return ActionResult(
+            error=(
+                f'No visible interactive control matched field_id="{params.field_id}"'
+                + (f' and field_type="{params.field_type}"' if params.field_type else "")
+                + ". Refusing to fall back to label-only matching."
+            ),
+        )
+    focus_selection = _resolve_focus_fields(interactive_fields, [params.field_label]) if target is None else None
+    focused = focus_selection.fields if focus_selection is not None else [target]
+
+    if focus_selection is not None and focus_selection.ambiguous_labels:
+        details = ", ".join(
+            f'{label}: {[f"{field.field_id} ({field.field_type})" for field in matches]}'
+            for label, matches in focus_selection.ambiguous_labels.items()
+        )
+        return ActionResult(
+            error=(
+                "Multiple visible interactive controls matched the requested label. "
+                f"Provide the exact field_id before retrying. {details}"
+            ),
+        )
 
     if not focused:
         available_labels = sorted({_preferred_field_label(field) for field in interactive_fields if _preferred_field_label(field)})
@@ -171,6 +222,11 @@ async def domhand_interact_control(
         key=lambda field: _candidate_score(field, params.desired_value),
         reverse=True,
     )[0]
+    page_host = detect_host_from_url(await _safe_page_url(page))
+    page_context_key = await _get_page_context_key(
+        page,
+        fallback_marker=params.target_section or params.heading_boundary,
+    )
 
     logger.info(
         "domhand.interact_control.start",
@@ -186,6 +242,14 @@ async def domhand_interact_control(
     if await _field_already_matches(page, target, params.desired_value):
         current_value = await _read_control_value(page, target)
         has_error = await _field_has_validation_error(page, target.field_id)
+        record_expected_field_value(
+            host=page_host,
+            page_context_key=page_context_key,
+            field_key=get_stable_field_key(target),
+            field_label=_preferred_field_label(target),
+            expected_value=params.desired_value,
+            source="derived_profile",
+        )
         logger.info(
             "domhand.interact_control.already_matched",
             extra={
@@ -205,11 +269,25 @@ async def domhand_interact_control(
             include_extracted_content_only_once=False,
         )
 
-    success = await _fill_single_field(page, target, params.desired_value)
+    success, failure_error, failure_reason = await _attempt_domhand_fill_with_retry_cap(
+        page,
+        host=page_host,
+        field=target,
+        desired_value=params.desired_value,
+        tool_name="domhand_interact_control",
+    )
     current_value = await _read_control_value(page, target)
     has_error = await _field_has_validation_error(page, target.field_id)
 
     if success and current_value:
+        record_expected_field_value(
+            host=page_host,
+            page_context_key=page_context_key,
+            field_key=get_stable_field_key(target),
+            field_label=_preferred_field_label(target),
+            expected_value=params.desired_value,
+            source="derived_profile",
+        )
         logger.info(
             "domhand.interact_control.result",
             extra={
@@ -242,10 +320,13 @@ async def domhand_interact_control(
         },
     )
     details = (
+        f'{failure_error or "Failed to confirm the requested value."} '
         f'Failed to confirm "{params.desired_value}" for "{_preferred_field_label(target)}". '
         f'Current value: "{current_value}". Field type: {target.field_type}. '
         f"Validation error present: {has_error}."
     )
     if screenshot_path:
         details += f" Screenshot captured: {screenshot_path}."
+    if failure_reason == DOMHAND_RETRY_CAPPED:
+        details += " Do not use DomHand on this field again in this run."
     return ActionResult(error=details)

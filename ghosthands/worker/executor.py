@@ -432,12 +432,12 @@ CRITICAL — Action Order:
 2. After navigating to the page, your FIRST action MUST be domhand_fill. It fills ALL visible form fields in one call via DOM manipulation. Do NOT use click or input actions before trying domhand_fill.
 3. Immediately call domhand_assess_state to classify the page, unresolved required fields, and scroll direction.
 4. After domhand_fill completes, review its output to see which fields were filled and which failed.
-5. For failed interactive controls, use DomHand before raw clicks: use domhand_interact_control for radios/checkboxes/toggles/button groups and domhand_select for dropdowns/selects. Retry failed fields even if they are optional when the applicant profile provides a value (address, website, referral source, LinkedIn, etc.). After EACH blocker-level domhand_interact_control, domhand_select, or targeted manual click/input used to recover that field, immediately call domhand_assess_state again before any unrelated action.
+5. For failed interactive controls, use DomHand before raw clicks: use domhand_interact_control for radios/checkboxes/toggles/button groups and domhand_select for dropdowns/selects. Retry failed fields even if they are optional when the applicant profile provides a value (address, website, referral source, LinkedIn, etc.). After EACH blocker-level domhand_interact_control or domhand_select, immediately call domhand_assess_state again before any unrelated action. After EACH targeted manual click/input/select used to recover that field, FIRST call domhand_record_expected_value for that exact field/value, THEN immediately call domhand_assess_state before any unrelated action.
    For optional fields, only retry when the applicant profile clearly maps to that field with high confidence. If the optional match is ambiguous, leave it blank.
 6. For file uploads (resume), use domhand_upload or upload_file action.
 7. Only use generic browser-use actions (click, input) as a LAST RESORT for fields DomHand could not handle.
 8. Before any large scroll or any Next/Continue/Save click, call domhand_assess_state again and follow its unresolved field list plus scroll_bias.
-9. After all fields on the current page are filled, click Next/Continue/Save to advance when the page is still in `advanceable`.
+9. After all fields on the current page are filled, click Next/Continue/Save to advance ONLY when domhand_assess_state reports `advance_allowed=true`.
 10. On each new page, call domhand_fill AGAIN as the first action.
 
 COMPLETION STATES:
@@ -455,6 +455,7 @@ Other rules:
 - Do NOT click a dropdown option and then Save/Continue in the same action batch. Wait briefly, verify the field settled, then continue.
 - If domhand_select returns {FAIL_OVER_NATIVE_SELECT}, do NOT click the native <select>. Use dropdown_options(index=...) to inspect the exact option text/value, then select_dropdown(index=..., text=...) with the exact text/value.
 - If domhand_select returns {FAIL_OVER_CUSTOM_WIDGET}, stop retrying domhand_select, open the widget manually, search if supported, and click the final leaf option.
+- If any DomHand tool returns "domhand_retry_capped", do NOT use a DomHand tool on that exact field again in this run. Switch immediately to browser-use/manual or one screenshot/vision fallback for that field.
 - For phone country code or phone type dropdowns, if the first term fails, try close variants like "United States +1", "United States", "+1", "USA", "US", "Mobile", and "Cell" before giving up.
 - For stubborn checkbox/radio/button controls, if the intended option still does not stick after 2 tries, stop blind retries: click the currently selected option once to clear/reset stale state, then click the intended option again and verify the visible state changed.
 - For text/date/search inputs that visibly contain the value but still show validation errors, focus the field and press Enter or Tab to commit it before moving on.

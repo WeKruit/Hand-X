@@ -47,15 +47,24 @@ from ghosthands.actions.views import (
 from ghosthands.bridge.profile_adapter import camel_to_snake_profile
 from ghosthands.profile.canonical import build_canonical_profile
 from ghosthands.runtime_learning import (
+    DOMHAND_RETRY_CAP,
     SemanticQuestionIntent,
+    build_page_context_key,
     cache_semantic_alias,
+    clear_domhand_failure,
     confirm_learned_question_alias,
     detect_host_from_url,
     detect_platform_from_url,
+    get_repeater_field_binding,
     get_learned_question_alias,
     get_interaction_recipe,
     get_cached_semantic_alias,
+    get_domhand_failure_count,
+    record_expected_field_value,
+    record_repeater_field_binding,
     has_cached_semantic_alias,
+    is_domhand_retry_capped,
+    record_domhand_failure,
     record_interaction_recipe,
     stage_learned_question_alias,
 )
@@ -75,6 +84,20 @@ class ResolvedFieldValue:
     answer_mode: str | None
     confidence: float
     state: str = "filled"
+
+
+@dataclass(frozen=True)
+class ResolvedFieldBinding:
+    entry_index: int
+    binding_mode: str
+    binding_confidence: str
+    best_effort_guess: bool = False
+
+
+@dataclass(frozen=True)
+class FocusFieldSelection:
+    fields: list[FormField]
+    ambiguous_labels: dict[str, list[FormField]]
 
 # ── Constants ────────────────────────────────────────────────────────
 
@@ -116,6 +139,26 @@ _OPAQUE_WIDGET_VALUE_RE = re.compile(
 _SELECT_PLACEHOLDER_FRAGMENT_RE = re.compile(r"\b(select one|choose one|please select)\b", re.IGNORECASE)
 _NAME_FRAGMENT_NO_GUESS_RE = re.compile(r"\b(suffix|preferred name|nickname)\b", re.IGNORECASE)
 _SKILL_FIELD_MAX_ITEMS = 10
+_MULTI_SELECT_CHECKBOX_PROMPT_RE = re.compile(
+    r"\b(select|check|choose|mark)\s+all\s+that\s+apply\b|\ball that apply\b",
+    re.IGNORECASE,
+)
+_EXCLUSIVE_CHOICE_CHECKBOX_PROMPT_RE = re.compile(
+    r"^(are|do|did|have|has|will|would|can|is|please\s+(select|choose|check)\s+one)\b",
+    re.IGNORECASE,
+)
+_EXCLUSIVE_CHOICE_OPTION_PREFIXES = (
+    "yes",
+    "no",
+    "i do not",
+    "prefer not",
+    "decline",
+)
+DOMHAND_RETRY_CAPPED = "domhand_retry_capped"
+DOMHAND_RETRY_CAPPED_ERROR = (
+    f"DomHand retry cap reached after {DOMHAND_RETRY_CAP} failed attempts. "
+    "Use browser-use or one screenshot/vision fallback for this exact field."
+)
 
 # Navigation-like button labels to skip when detecting button groups.
 _NAV_BUTTON_LABELS = frozenset(
@@ -251,6 +294,60 @@ def _profile_skill_values(profile_data: dict[str, Any] | None) -> list[str]:
     return ordered
 
 
+def _checkbox_group_mode(field: FormField) -> str:
+    """Classify grouped checkboxes conservatively to preserve current multi-select behavior."""
+    if field.field_type != "checkbox-group":
+        return "multi_select"
+
+    prompt = normalize_name(field.raw_label or field.name or "")
+    if _MULTI_SELECT_CHECKBOX_PROMPT_RE.search(prompt):
+        return "multi_select"
+
+    choices = [normalize_name(choice) for choice in field.choices if normalize_name(choice)]
+    if len(choices) < 2 or len(choices) > 4:
+        return "multi_select"
+
+    if all(any(choice.startswith(prefix) for prefix in _EXCLUSIVE_CHOICE_OPTION_PREFIXES) for choice in choices):
+        return "exclusive_choice"
+
+    if (
+        len(choices) == 2
+        and any(choice == "yes" or choice.startswith("yes ") for choice in choices)
+        and any(
+            choice == "no"
+            or choice.startswith("no ")
+            or choice.startswith("i do not ")
+            for choice in choices
+        )
+    ):
+        return "exclusive_choice"
+
+    if _EXCLUSIVE_CHOICE_CHECKBOX_PROMPT_RE.search(prompt) and all(len(choice.split()) <= 8 for choice in choices):
+        prefixed = [
+            any(choice.startswith(prefix) for prefix in _EXCLUSIVE_CHOICE_OPTION_PREFIXES)
+            for choice in choices
+        ]
+        if prefixed.count(True) >= 2:
+            return "exclusive_choice"
+
+    return "multi_select"
+
+
+def _checkbox_group_is_exclusive_choice(field: FormField) -> bool:
+    return _checkbox_group_mode(field) == "exclusive_choice"
+
+
+def _domhand_retry_field_identity(field: FormField) -> str:
+    return get_stable_field_key(field)
+
+
+def _domhand_retry_message(field: FormField) -> str:
+    return (
+        f'"{_preferred_field_label(field)}" hit the DomHand retry cap after '
+        f"{DOMHAND_RETRY_CAP} failed attempts. Use browser-use or one screenshot/vision fallback."
+    )
+
+
 def _should_trace_profile_label(label: str) -> bool:
     norm = normalize_name(label or "")
     return any(token in norm for token in _PROFILE_TRACE_LABEL_TOKENS)
@@ -279,6 +376,8 @@ async def _safe_page_url(page: Any) -> str:
         url_attr = getattr(page, "url", None)
         if callable(url_attr):
             value = url_attr()
+            if inspect.isawaitable(value):
+                value = await value
         else:
             value = url_attr
         if isinstance(value, str):
@@ -298,6 +397,95 @@ async def _safe_page_url(page: Any) -> str:
         pass
 
     return ""
+
+
+_PAGE_CONTEXT_SCAN_JS = r"""() => {
+	const visible = (el) => {
+		if (!el) return false;
+		const style = window.getComputedStyle(el);
+		if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+		const rect = el.getBoundingClientRect();
+		return rect.width > 0 && rect.height > 0;
+	};
+	const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim();
+	const allText = Array.from(document.querySelectorAll('h1, h2, h3, button, a, [role="button"], label, p, span, div'))
+		.filter((el) => visible(el))
+		.map((el) => normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || ''))
+		.filter(Boolean);
+	const hasText = (patterns) => allText.some((text) => patterns.some((pattern) => pattern.test(text.toLowerCase())));
+	const headingTexts = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"]'))
+		.filter((el) => visible(el))
+		.map((el) => normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || ''))
+		.filter(Boolean)
+		.slice(0, 5);
+	const passwordCount = document.querySelectorAll('input[type="password"]').length;
+	const emailCount = document.querySelectorAll('input[type="email"], input[name*="email" i], input[id*="email" i]').length;
+	const confirmPasswordVisible =
+		passwordCount >= 2 ||
+		document.querySelector('[data-automation-id="verifyPassword"]') !== null;
+	const createAccountSignals = hasText([/\bcreate account\b/, /\bregister\b/, /\bsign up\b/]);
+	const signInSignals = hasText([/\bsign in\b/, /\blog in\b/, /\blogin\b/]);
+	const startDialogSignals = hasText([/\bstart your application\b/, /\bautofill with resume\b/, /\bapply manually\b/, /\buse my last application\b/]);
+	let pageMarker = '';
+	if (confirmPasswordVisible || createAccountSignals) {
+		pageMarker = 'auth create account';
+	} else if (emailCount >= 1 && passwordCount >= 1 && signInSignals) {
+		pageMarker = 'auth native login';
+	} else if (startDialogSignals) {
+		pageMarker = 'auth entry';
+	} else if (headingTexts.length > 0) {
+		pageMarker = headingTexts[0];
+	}
+	return JSON.stringify({
+		page_marker: pageMarker,
+		heading_texts: headingTexts,
+	});
+}"""
+
+
+async def _read_page_context_snapshot(page: Any) -> dict[str, Any]:
+    """Return lightweight page-context signals for expected-value scoping."""
+    try:
+        raw = await page.evaluate(_PAGE_CONTEXT_SCAN_JS)
+    except Exception:
+        return {}
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _first_meaningful_section(fields: list[FormField] | None) -> str:
+    if not fields:
+        return ""
+    for field in fields:
+        section = str(field.section or "").strip()
+        if section and len(section) <= 80 and "?" not in section:
+            return section
+    return ""
+
+
+async def _get_page_context_key(
+    page: Any,
+    *,
+    fields: list[FormField] | None = None,
+    fallback_marker: str | None = None,
+) -> str:
+    """Build a stable page-context key shared by fill, recovery, and assessment."""
+    page_url = await _safe_page_url(page)
+    snapshot = await _read_page_context_snapshot(page)
+    marker = (
+        str(snapshot.get("page_marker") or "").strip()
+        or str(fallback_marker or "").strip()
+        or _first_meaningful_section(fields)
+    )
+    heading_texts = snapshot.get("heading_texts") or []
+    if not marker and heading_texts:
+        marker = str(heading_texts[0] or "").strip()
+    return build_page_context_key(url=page_url, page_marker=marker)
 
 
 # ── Q&A bank constants ───────────────────────────────────────────────
@@ -2195,6 +2383,7 @@ def _filter_fields_for_scope(
     fields: list[FormField],
     target_section: str | None = None,
     heading_boundary: str | None = None,
+    focus_fields: list[str] | None = None,
 ) -> list[FormField]:
     """Restrict fields to a section and/or repeater entry boundary."""
     filtered = fields
@@ -2204,6 +2393,17 @@ def _filter_fields_for_scope(
             if not heading_boundary:
                 blank_section_fields = [f for f in filtered if not normalize_name(f.section or "")]
                 if blank_section_fields:
+                    normalized_focus = [
+                        _normalize_match_label(label)
+                        for label in (focus_fields or [])
+                        if _normalize_match_label(label)
+                    ]
+                    if normalized_focus:
+                        blank_section_fields = [
+                            field
+                            for field in blank_section_fields
+                            if any(_field_matches_focus_label(field, focus_label) for focus_label in normalized_focus)
+                        ]
                     merged: list[FormField] = []
                     seen_ids: set[str] = set()
                     for field in [*section_filtered, *blank_section_fields]:
@@ -2235,36 +2435,111 @@ def _filter_fields_for_scope(
     return filtered
 
 
-def _filter_fields_for_focus(fields: list[FormField], focus_fields: list[str] | None = None) -> list[FormField]:
-    """Restrict fields to explicit blocker labels when the agent knows them."""
-    if not focus_fields:
-        return fields
+_FOCUS_BOOLEAN_FIELD_TYPES = {
+    "checkbox",
+    "checkbox-group",
+    "radio",
+    "radio-group",
+    "toggle",
+    "button-group",
+}
+_FOCUS_DATA_FIELD_TYPES = {
+    "text",
+    "textarea",
+    "email",
+    "password",
+    "tel",
+    "search",
+    "number",
+    "date",
+    "select",
+}
 
-    normalized_focus = [_normalize_match_label(label) for label in focus_fields if _normalize_match_label(label)]
-    if not normalized_focus:
+
+def _field_matches_focus_label(field: FormField, focus_label: str) -> bool:
+    labels = _field_label_candidates(field) or [field.name]
+    for candidate in labels:
+        confidence = _label_match_confidence(candidate, focus_label)
+        if _meets_match_confidence(confidence, "medium"):
+            return True
+        reverse_confidence = _label_match_confidence(focus_label, candidate)
+        if _meets_match_confidence(reverse_confidence, "medium"):
+            return True
+    return False
+
+
+def _focus_field_priority(field: FormField) -> int:
+    if field.field_type in _FOCUS_DATA_FIELD_TYPES:
+        return 30
+    if field.field_type in {"radio-group", "button-group"}:
+        return 20
+    if field.field_type in {"checkbox-group"}:
+        return 15
+    if field.field_type in _FOCUS_BOOLEAN_FIELD_TYPES:
+        return 10
+    return 5
+
+
+def _prune_focus_companion_controls(fields: list[FormField]) -> list[FormField]:
+    has_data_field = any(field.field_type in _FOCUS_DATA_FIELD_TYPES for field in fields)
+    if not has_data_field:
         return fields
+    pruned = [field for field in fields if field.field_type not in _FOCUS_BOOLEAN_FIELD_TYPES]
+    return pruned or fields
+
+
+def _resolve_focus_fields(
+    fields: list[FormField],
+    focus_fields: list[str] | None = None,
+) -> FocusFieldSelection:
+    if not focus_fields:
+        return FocusFieldSelection(fields=fields, ambiguous_labels={})
+
+    normalized_pairs = [
+        (label, _normalize_match_label(label))
+        for label in focus_fields
+        if _normalize_match_label(label)
+    ]
+    if not normalized_pairs:
+        return FocusFieldSelection(fields=fields, ambiguous_labels={})
 
     focused: list[FormField] = []
-    for field in fields:
-        labels = _field_label_candidates(field) or [field.name]
-        matched = False
-        for focus_label in normalized_focus:
-            for candidate in labels:
-                confidence = _label_match_confidence(candidate, focus_label)
-                if _meets_match_confidence(confidence, "medium"):
-                    matched = True
-                    break
-                reverse_confidence = _label_match_confidence(focus_label, candidate)
-                if _meets_match_confidence(reverse_confidence, "medium"):
-                    matched = True
-                    break
-            if matched:
-                break
-        if matched:
-            focused.append(field)
+    seen_ids: set[str] = set()
+    ambiguous_labels: dict[str, list[FormField]] = {}
 
-    if focused:
-        return focused
+    for original_label, normalized_label in normalized_pairs:
+        matches = [
+            field for field in fields if _field_matches_focus_label(field, normalized_label)
+        ]
+        if not matches:
+            continue
+        matches = _prune_focus_companion_controls(matches)
+        ranked = sorted(matches, key=_focus_field_priority, reverse=True)
+        if len(ranked) == 1:
+            if ranked[0].field_id not in seen_ids:
+                seen_ids.add(ranked[0].field_id)
+                focused.append(ranked[0])
+            continue
+
+        top_priority = _focus_field_priority(ranked[0])
+        top_matches = [field for field in ranked if _focus_field_priority(field) == top_priority]
+        if len(top_matches) > 1:
+            ambiguous_labels[original_label] = top_matches
+            continue
+
+        winner = top_matches[0]
+        if winner.field_id not in seen_ids:
+            seen_ids.add(winner.field_id)
+            focused.append(winner)
+
+    return FocusFieldSelection(fields=focused, ambiguous_labels=ambiguous_labels)
+
+
+def _filter_fields_for_focus(fields: list[FormField], focus_fields: list[str] | None = None) -> list[FormField]:
+    """Restrict fields to explicit blocker labels when the agent knows them."""
+    resolved = _resolve_focus_fields(fields, focus_fields)
+    if resolved.fields:
+        return resolved.fields
 
     logger.info(
         "DomHand focus mismatch: no fields matched focus_fields",
@@ -2284,6 +2559,43 @@ def _filter_fields_for_focus(fields: list[FormField], focus_fields: list[str] | 
         },
     )
     return []
+
+
+def _active_blocker_focus_fields(
+    browser_session: BrowserSession,
+    *,
+    fields: list[FormField],
+    page_context_key: str,
+    page_url: str,
+) -> list[FormField]:
+    last_state = getattr(browser_session, "_gh_last_application_state", None)
+    if not isinstance(last_state, dict):
+        return fields
+    if last_state.get("page_context_key") and last_state.get("page_context_key") != page_context_key:
+        return fields
+    if page_url and last_state.get("page_url") and last_state.get("page_url") != page_url:
+        return fields
+
+    blocker_ids = {
+        str(value).strip()
+        for value in (last_state.get("blocking_field_ids") or [])
+        if str(value).strip()
+    }
+    blocker_labels = {
+        normalize_name(str(value))
+        for value in (last_state.get("blocking_field_labels") or [])
+        if str(value).strip()
+    }
+    if not blocker_ids and not blocker_labels:
+        return fields
+
+    filtered = [
+        field
+        for field in fields
+        if field.field_id in blocker_ids
+        or normalize_name(_preferred_field_label(field)) in blocker_labels
+    ]
+    return filtered or []
 
 
 def _format_entry_profile_text(entry_data: dict[str, Any]) -> str:
@@ -2465,6 +2777,376 @@ def _known_entry_value_for_field(field: FormField, entry_data: dict[str, Any] | 
     return _coerce_answer_to_field(field, _known_entry_value(field.name, entry_data))
 
 
+def _field_section_name(field: FormField) -> str:
+    return normalize_name(field.section or "")
+
+
+def _is_structured_education_field(field: FormField) -> bool:
+    labels = [normalize_name(label) for label in _field_label_candidates(field)]
+    section_norm = _field_section_name(field)
+    if "education" not in section_norm and not any(token in section_norm for token in ("school", "university", "college")):
+        return False
+    return any(
+        any(token in label for token in (
+            "field of study",
+            "major",
+            "discipline",
+            "gpa",
+            "actual or expected",
+            "actual expected",
+            "expected or actual",
+            "from",
+            "from date",
+            "to",
+            "to date",
+            "start date",
+            "end date",
+            "graduation date",
+            "completion date",
+        ))
+        for label in labels
+    )
+
+
+def _language_entry_index_for_field(field: FormField) -> int | None:
+    section = field.section or ""
+    index = _parse_heading_index(section)
+    if index is not None:
+        return index - 1
+    return None
+
+
+def _field_binding_identity(field: FormField) -> str:
+    return str(field.field_id or get_stable_field_key(field)).strip()
+
+
+def _language_slot_name(field: FormField) -> str | None:
+    for label in _field_label_candidates(field):
+        name = normalize_name(label)
+        if not name:
+            continue
+        if name == "language" or "preferred language" in name:
+            return "language"
+        if "i am fluent in this language" in name or name == "fluent" or name == "is fluent":
+            return "is_fluent"
+        if "reading" in name or "writing" in name:
+            return "reading_writing"
+        if "speaking" in name or "listening" in name:
+            return "speaking_listening"
+        if "overall" in name or "language proficiency" in name:
+            return "overall_proficiency"
+    return None
+
+
+def _education_slot_name(field: FormField) -> str | None:
+    for label in _field_label_candidates(field):
+        name = normalize_name(label)
+        if not name:
+            continue
+        if any(token in name for token in ("school", "university", "college", "institution")):
+            return "school"
+        if "degree" in name:
+            return "degree"
+        if any(token in name for token in ("field of study", "major", "discipline")):
+            return "field_of_study"
+        if "gpa" in name:
+            return "gpa"
+        if any(token in name for token in ("actual or expected", "actual expected", "expected or actual")):
+            return "end_date_type"
+        if name in {"from", "from date"} or any(token in name for token in ("start date", "date from", "begin date")):
+            return "start_date"
+        if name in {"to", "to date"} or any(
+            token in name for token in ("end date", "date to", "graduation date", "completion date")
+        ):
+            return "end_date"
+    return None
+
+
+def _match_entry_by_slot_value(
+    *,
+    field: FormField,
+    slot_name: str,
+    entries: list[dict[str, Any]],
+    current_value: str,
+) -> int | None:
+    current_text = str(current_value or "").strip()
+    if not current_text:
+        return None
+    matched: list[int] = []
+    for index, entry in enumerate(entries):
+        if slot_name == "language":
+            expected = str(entry.get("language") or "").strip()
+        elif slot_name == "is_fluent":
+            bool_value = entry.get("isFluent")
+            if not isinstance(bool_value, bool):
+                bool_value = entry.get("is_fluent")
+            expected = "Yes" if bool_value is True else "No" if bool_value is False else ""
+        elif slot_name == "reading_writing":
+            expected = str(entry.get("readingWriting") or entry.get("reading_writing") or "").strip()
+        elif slot_name == "speaking_listening":
+            expected = str(entry.get("speakingListening") or entry.get("speaking_listening") or "").strip()
+        elif slot_name == "overall_proficiency":
+            expected = str(entry.get("overallProficiency") or entry.get("overall_proficiency") or "").strip()
+        elif slot_name == "school":
+            expected = str(entry.get("school") or "").strip()
+        elif slot_name == "degree":
+            expected = str(entry.get("degree") or "").strip()
+        elif slot_name == "field_of_study":
+            expected = str(entry.get("field_of_study") or entry.get("fieldOfStudy") or entry.get("field") or "").strip()
+        elif slot_name == "gpa":
+            expected = str(entry.get("gpa") or "").strip()
+        elif slot_name == "start_date":
+            expected = str(entry.get("start_date") or entry.get("startDate") or "").strip()
+        elif slot_name == "end_date":
+            expected = str(entry.get("end_date") or entry.get("endDate") or entry.get("graduation_date") or "").strip()
+        elif slot_name == "end_date_type":
+            expected = str(entry.get("end_date_type") or entry.get("endDateKind") or entry.get("endDateType") or "").strip()
+        else:
+            expected = ""
+        if expected and _field_value_matches_expected(current_text, expected):
+            matched.append(index)
+    return matched[0] if len(matched) == 1 else None
+
+
+def _row_order_binding_index(
+    *,
+    field: FormField,
+    visible_fields: list[FormField],
+    slot_name: str,
+    slot_resolver,
+) -> int | None:
+    occurrence = 0
+    target_id = field.field_id
+    target_section = normalize_name(field.section or "")
+    for candidate in visible_fields:
+        if slot_resolver(candidate) != slot_name:
+            continue
+        candidate_section = normalize_name(candidate.section or "")
+        if target_section and candidate_section and candidate_section != target_section:
+            continue
+        if candidate.field_id == target_id:
+            return occurrence
+        occurrence += 1
+    return None
+
+
+def _resolve_repeater_binding(
+    *,
+    host: str,
+    repeater_group: str,
+    field: FormField,
+    visible_fields: list[FormField],
+    entries: list[dict[str, Any]],
+    numeric_index: int | None,
+    slot_name: str | None,
+    current_value: str,
+    slot_resolver,
+) -> ResolvedFieldBinding | None:
+    if not entries:
+        return None
+    if len(entries) == 1:
+        return ResolvedFieldBinding(
+            entry_index=0,
+            binding_mode="exact",
+            binding_confidence="high",
+            best_effort_guess=False,
+        )
+
+    field_binding_key = _field_binding_identity(field)
+    cached = get_repeater_field_binding(
+        host=host,
+        repeater_group=repeater_group,
+        field_binding_key=field_binding_key,
+    )
+    if cached and 0 <= cached.entry_index < len(entries):
+        return ResolvedFieldBinding(
+            entry_index=cached.entry_index,
+            binding_mode=cached.binding_mode,
+            binding_confidence=cached.binding_confidence,
+            best_effort_guess=cached.best_effort_guess,
+        )
+
+    if numeric_index is not None and 0 <= numeric_index < len(entries):
+        binding = ResolvedFieldBinding(
+            entry_index=numeric_index,
+            binding_mode="exact",
+            binding_confidence="high",
+            best_effort_guess=False,
+        )
+        record_repeater_field_binding(
+            host=host,
+            repeater_group=repeater_group,
+            field_binding_key=field_binding_key,
+            entry_index=binding.entry_index,
+            binding_mode="exact",
+            binding_confidence="high",
+            best_effort_guess=False,
+        )
+        return binding
+
+    section_hint = normalize_name(field.section or "")
+    if section_hint:
+        section_matches: list[int] = []
+        for index, entry in enumerate(entries):
+            candidate_texts: list[str] = []
+            if repeater_group == "languages":
+                candidate_texts.append(str(entry.get("language") or "").strip())
+            elif repeater_group == "education":
+                candidate_texts.extend(
+                    [
+                        str(entry.get("school") or "").strip(),
+                        str(entry.get("degree") or "").strip(),
+                        str(entry.get("field_of_study") or entry.get("field") or "").strip(),
+                    ]
+                )
+            if any(
+                text and normalize_name(text) and normalize_name(text) in section_hint
+                for text in candidate_texts
+            ):
+                section_matches.append(index)
+        if len(section_matches) == 1:
+            binding = ResolvedFieldBinding(
+                entry_index=section_matches[0],
+                binding_mode="similarity",
+                binding_confidence="medium",
+                best_effort_guess=False,
+            )
+            record_repeater_field_binding(
+                host=host,
+                repeater_group=repeater_group,
+                field_binding_key=field_binding_key,
+                entry_index=binding.entry_index,
+                binding_mode="similarity",
+                binding_confidence="medium",
+                best_effort_guess=False,
+            )
+            return binding
+
+    if slot_name:
+        similarity_index = _match_entry_by_slot_value(
+            field=field,
+            slot_name=slot_name,
+            entries=entries,
+            current_value=current_value,
+        )
+        if similarity_index is not None:
+            binding = ResolvedFieldBinding(
+                entry_index=similarity_index,
+                binding_mode="similarity",
+                binding_confidence="medium",
+                best_effort_guess=False,
+            )
+            record_repeater_field_binding(
+                host=host,
+                repeater_group=repeater_group,
+                field_binding_key=field_binding_key,
+                entry_index=binding.entry_index,
+                binding_mode="similarity",
+                binding_confidence="medium",
+                best_effort_guess=False,
+            )
+            return binding
+
+        row_order_index = _row_order_binding_index(
+            field=field,
+            visible_fields=visible_fields,
+            slot_name=slot_name,
+            slot_resolver=slot_resolver,
+        )
+        if row_order_index is not None and 0 <= row_order_index < len(entries):
+            binding = ResolvedFieldBinding(
+                entry_index=row_order_index,
+                binding_mode="row_order",
+                binding_confidence="low",
+                best_effort_guess=True,
+            )
+            record_repeater_field_binding(
+                host=host,
+                repeater_group=repeater_group,
+                field_binding_key=field_binding_key,
+                entry_index=binding.entry_index,
+                binding_mode="row_order",
+                binding_confidence="low",
+                best_effort_guess=True,
+            )
+            return binding
+
+    return None
+
+
+def _structured_language_value_from_entry(field: FormField, entry: dict[str, Any]) -> str | None:
+    for label in _field_label_candidates(field):
+        name = normalize_name(label)
+        if not name:
+            continue
+        if name == "language" or "preferred language" in name:
+            return _coerce_answer_to_field(field, str(entry.get("language") or "").strip())
+        if "i am fluent in this language" in name or name == "fluent" or name == "is fluent":
+            if isinstance(entry.get("isFluent"), bool):
+                return _coerce_answer_to_field(field, "Yes" if bool(entry.get("isFluent")) else "No")
+            if isinstance(entry.get("is_fluent"), bool):
+                return _coerce_answer_to_field(field, "Yes" if bool(entry.get("is_fluent")) else "No")
+        if "reading" in name or "writing" in name:
+            return _coerce_answer_to_field(
+                field,
+                str(entry.get("readingWriting") or entry.get("reading_writing") or "").strip(),
+            )
+        if "speaking" in name or "listening" in name:
+            return _coerce_answer_to_field(
+                field,
+                str(entry.get("speakingListening") or entry.get("speaking_listening") or "").strip(),
+            )
+        if "overall" in name or "language proficiency" in name:
+            return _coerce_answer_to_field(
+                field,
+                str(entry.get("overallProficiency") or entry.get("overall_proficiency") or "").strip(),
+            )
+    return None
+
+
+def _resolve_structured_language_value(
+    field: FormField,
+    profile_data: dict[str, Any] | None,
+) -> str | None:
+    if not profile_data:
+        return None
+    raw_languages = profile_data.get("languages")
+    if not isinstance(raw_languages, list) or not raw_languages:
+        return None
+    index = _language_entry_index_for_field(field)
+    if index is None or not (0 <= index < len(raw_languages)):
+        return None
+    entry = raw_languages[index]
+    if not isinstance(entry, dict):
+        return None
+    return _structured_language_value_from_entry(field, entry)
+
+
+def _is_structured_language_field(field: FormField) -> bool:
+    section_norm = _field_section_name(field)
+    if "language" not in section_norm:
+        return False
+    labels = [normalize_name(label) for label in _field_label_candidates(field)]
+    return any(
+        any(token in label for token in (
+            "language",
+            "i am fluent in this language",
+            "reading",
+            "writing",
+            "speaking",
+            "listening",
+            "overall",
+            "language proficiency",
+        ))
+        for label in labels
+    )
+
+
+def _structured_field_missing_reason(field: FormField) -> str:
+    label = _preferred_field_label(field)
+    return f"Structured profile data is required for {label} and no exact value was available."
+
+
 def _parse_heading_index(scope: str | None) -> int | None:
     """Extract a 1-based repeater index from headings like 'Education 1'."""
     if not scope:
@@ -2491,7 +3173,6 @@ def _infer_entry_data_from_scope(
     if not scope_norm:
         return None
 
-    entry_index = (_parse_heading_index(heading_boundary or target_section) or 1) - 1
     if "education" in scope_norm:
         entries = profile_data.get("education")
     elif any(token in scope_norm for token in ("work experience", "experience", "employment")):
@@ -2499,7 +3180,16 @@ def _infer_entry_data_from_scope(
     else:
         return None
 
-    if not isinstance(entries, list) or not (0 <= entry_index < len(entries)):
+    if not isinstance(entries, list) or len(entries) == 0:
+        return None
+    indexed_heading = _parse_heading_index(heading_boundary or target_section)
+    if indexed_heading is not None:
+        entry_index = indexed_heading - 1
+    elif len(entries) == 1:
+        entry_index = 0
+    else:
+        return None
+    if not (0 <= entry_index < len(entries)):
         return None
     entry = entries[entry_index]
     return entry if isinstance(entry, dict) and entry else None
@@ -2681,22 +3371,11 @@ def _build_profile_answer_map(
         "Spoken languages",
         "Preferred spoken languages",
         "Preferred language",
-        "Language",
-        "Language proficiency",
     )
     add(
         canonical.get("english_proficiency"),
         "English proficiency",
-        "Overall",
-        "Reading",
-        "Writing",
-        "Speaking",
-        "Comprehension",
-        "Overall proficiency",
-        "Reading proficiency",
-        "Writing proficiency",
-        "Speaking proficiency",
-        "Comprehension proficiency",
+        "English language proficiency",
     )
     add(
         canonical.get("country_of_residence"),
@@ -3379,6 +4058,14 @@ async def _read_group_selection(page: Any, field_id: str) -> str:
     return ""
 
 
+async def _read_checkbox_group_value(page: Any, field: FormField) -> str:
+    """Read a grouped checkbox value without forcing exclusive-choice semantics globally."""
+    if _checkbox_group_is_exclusive_choice(field):
+        return await _read_group_selection(page, field.field_id)
+    state = await _read_binary_state(page, field.field_id)
+    return "checked" if state else ""
+
+
 async def _get_group_option_target(page: Any, field_id: str, text: str) -> dict[str, Any]:
     """Get clickable coordinates for a choice inside a custom group control."""
     try:
@@ -3641,15 +4328,104 @@ def _record_field_interaction_recipe(context: dict[str, Any] | None, action_chai
     )
 
 
+def _is_domhand_retry_capped_for_field(host: str, field: FormField, desired_value: str) -> bool:
+    return is_domhand_retry_capped(
+        host=host,
+        field_key=_domhand_retry_field_identity(field),
+        desired_value=desired_value,
+    )
+
+
+def _record_domhand_failure_for_field(host: str, field: FormField, desired_value: str, tool_name: str) -> tuple[int, bool]:
+    count = record_domhand_failure(
+        host=host,
+        field_key=_domhand_retry_field_identity(field),
+        desired_value=desired_value,
+    )
+    capped = count >= DOMHAND_RETRY_CAP
+    logger.info(
+        "domhand.field_retry_state",
+        extra={
+            "tool": tool_name,
+            "field_label": _preferred_field_label(field),
+            "field_key": _domhand_retry_field_identity(field),
+            "desired_value": desired_value,
+            "host": host,
+            "failure_count": count,
+            "retry_capped": capped,
+        },
+    )
+    return count, capped
+
+
+def _clear_domhand_failure_for_field(host: str, field: FormField, desired_value: str) -> None:
+    clear_domhand_failure(
+        host=host,
+        field_key=_domhand_retry_field_identity(field),
+        desired_value=desired_value,
+    )
+
+
+async def _attempt_domhand_fill_with_retry_cap(
+    page: Any,
+    *,
+    host: str,
+    field: FormField,
+    desired_value: str,
+    tool_name: str,
+) -> tuple[bool, str | None, str | None]:
+    """Attempt a DomHand field fill while enforcing the generic per-field retry cap."""
+    if await _field_already_matches(page, field, desired_value):
+        _clear_domhand_failure_for_field(host, field, desired_value)
+        return True, None, None
+
+    if _is_domhand_retry_capped_for_field(host, field, desired_value):
+        logger.info(
+            "domhand.field_retry_capped",
+            extra={
+                "tool": tool_name,
+                "field_label": _preferred_field_label(field),
+                "field_key": _domhand_retry_field_identity(field),
+                "desired_value": desired_value,
+                "host": host,
+                "failure_count": get_domhand_failure_count(
+                    host=host,
+                    field_key=_domhand_retry_field_identity(field),
+                    desired_value=desired_value,
+                ),
+            },
+        )
+        return False, _domhand_retry_message(field), DOMHAND_RETRY_CAPPED
+
+    success = await _fill_single_field(page, field, desired_value)
+    if success:
+        _clear_domhand_failure_for_field(host, field, desired_value)
+        return True, None, None
+
+    _, capped = _record_domhand_failure_for_field(host, field, desired_value, tool_name)
+    if capped:
+        return False, _domhand_retry_message(field), DOMHAND_RETRY_CAPPED
+    return False, "DOM fill failed", "dom_fill_failed"
+
+
 async def _field_already_matches(page: Any, field: FormField, value: str | None) -> bool:
     """Live DOM check to avoid re-filling a field that already settled correctly."""
     if not value:
         return False
+    if field.field_type == "checkbox-group":
+        if _checkbox_group_is_exclusive_choice(field):
+            current = await _read_group_selection(page, field.field_id)
+            return _field_value_matches_expected(current, value) and not await _field_has_validation_error(
+                page, field.field_id
+            )
+        desired_checked = not _is_explicit_false(value)
+        state = await _read_binary_state(page, field.field_id)
+        return state is desired_checked and not await _field_has_validation_error(page, field.field_id)
     if field.field_type in {"checkbox", "toggle"}:
         desired_checked = not _is_explicit_false(value)
         state = await _read_binary_state(page, field.field_id)
         return state is desired_checked and not await _field_has_validation_error(page, field.field_id)
-    if field.field_type in {"checkbox-group", "radio-group", "radio", "button-group"}:
+    if field.field_type in {"radio-group", "radio", "button-group"}:
         current = await _read_group_selection(page, field.field_id)
         return _field_value_matches_expected(current, value) and not await _field_has_validation_error(
             page, field.field_id
@@ -3771,22 +4547,10 @@ def _known_profile_value(
         return evidence.get("field_of_study")
     if "certification" in name or "relevant license" in name or ("licenses" in name and "relevant" in name):
         return evidence.get("certifications_licenses") or "None"
-    if any(
-        kw in name
-        for kw in (
-            "language",
-            "languages spoken",
-            "spoken languages",
-            "preferred language",
-            "language proficiency",
-            "reading",
-            "writing",
-            "speaking",
-            "comprehension",
-            "overall",
-        )
-    ):
-        return evidence.get("english_proficiency") or evidence.get("spoken_languages")
+    if any(kw in name for kw in ("languages spoken", "spoken languages", "preferred spoken languages")):
+        return evidence.get("spoken_languages")
+    if "english proficiency" in name:
+        return evidence.get("english_proficiency")
     if any(kw in name for kw in ("country of residence", "country/region", "country region", "country")):
         return evidence.get("country_of_residence") or evidence.get("country")
     if any(kw in name for kw in ("willing to relocate", "relocation")):
@@ -3971,7 +4735,7 @@ def _resolve_known_profile_value_for_field(
             )
             return _resolved_field_value(
                 coerced,
-                source="dom",
+                source="derived_profile",
                 answer_mode="profile_backed",
                 confidence=_match_confidence_score(confidence),
             )
@@ -3998,7 +4762,7 @@ def _resolve_known_profile_value_for_field(
             )
             return _resolved_field_value(
                 coerced,
-                source="dom",
+                source="derived_profile",
                 answer_mode="profile_backed",
                 confidence=0.82,
             )
@@ -4022,7 +4786,7 @@ def _resolve_known_profile_value_for_field(
                 )
                 return _resolved_field_value(
                     coerced,
-                    source="dom",
+                    source="derived_profile",
                     answer_mode="profile_backed",
                     confidence=0.8,
                 )
@@ -4342,11 +5106,11 @@ Rules:
 - Use the section, current field value, sibling field names, and listed options together to infer meaning for short or generic labels.
 - If a label is generic (for example "Overall", "Type", "Status", or "Source"), do NOT rely on label matching alone. Use section context plus the available options to choose the best answer.
 - For dropdowns WITHOUT listed options, provide the value from the profile if available. If the field name closely matches a profile entry, use that value.
-- For low-risk standardized screening fields, prefer a best-effort answer instead of "[NEEDS_USER_INPUT]". This includes referral/source fields, phone type, country/country of residence, work arrangement, relocation, language/rubric proficiency fields, and demographic/EEO fields.
+- For low-risk standardized screening fields, prefer a best-effort answer instead of "[NEEDS_USER_INPUT]". This includes referral/source fields, phone type, country/country of residence, work arrangement, relocation, and demographic/EEO fields.
 - For low-risk standardized screening dropdowns/radios, use the saved profile/default answer and choose the closest matching option text if the wording differs slightly.
 - For "How did you hear about us?" or similar source/referral fields: use the applicant profile value if available. If the profile has no source, default to "LinkedIn" (or the closest matching option like "Job Board", "Online Job Board", "Internet"). NEVER return "[NEEDS_USER_INPUT]" for referral source fields — they always have a safe default.
 - For "Phone Device Type" or similar phone type fields: default to "Mobile" if the profile has no phone type. NEVER return "[NEEDS_USER_INPUT]" for phone type fields.
-- For language proficiency rubrics like "Overall", "Reading", "Writing", "Speaking", and "Comprehension": use the applicant's saved English proficiency if present. If no explicit value is present, default to the closest option matching "Native / bilingual" or "Fluent". NEVER return "[NEEDS_USER_INPUT]" for these rubric fields.
+- For structured education fields (GPA, field of study, actual vs expected end date, scoped education start/end dates) and structured language fields ("Language", fluent, reading/writing, speaking/listening, overall proficiency), NEVER guess. Only answer when the exact structured profile value is present.
 - When the profile wording and the site wording differ, map to the semantically closest visible option instead of escalating. Example: "Native / bilingual" may map to the top proficiency tier such as "Expert", "Advanced", or "Fluent".
 - For work-setup/location preference fields, use the saved preferred work mode / preferred locations if present. If the field is broad and only asks for an arrangement, prefer the work-mode answer over escalating.
 - For relocation fields, use the applicant's saved relocation preference; default to "Yes" when the profile has no contrary preference.
@@ -4807,6 +5571,12 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         entry_data = _infer_entry_data_from_scope(profile_data, params.heading_boundary, params.target_section)
     profile_text = _format_entry_profile_text(entry_data) if entry_data else base_profile_text
     evidence = _parse_profile_evidence(profile_text)
+    page_url = await _safe_page_url(page)
+    page_host = detect_host_from_url(page_url)
+    page_context_key = await _get_page_context_key(
+        page,
+        fallback_marker=params.target_section or params.heading_boundary,
+    )
     all_results: list[FillFieldResult] = []
     total_step_cost = 0.0
     total_input_tokens = 0
@@ -4815,6 +5585,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
     model_name: str | None = None
     fields_seen: set[str] = set()
     fields_skipped: set[str] = set()  # Fields with no profile data — don't retry
+    fields_capped: set[str] = set()
 
     for round_num in range(1, MAX_FILL_ROUNDS + 1):
         logger.info(f"DomHand fill round {round_num}/{MAX_FILL_ROUNDS}")
@@ -4840,8 +5611,28 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             fields,
             target_section=params.target_section,
             heading_boundary=params.heading_boundary,
+            focus_fields=params.focus_fields,
         )
-        fields = _filter_fields_for_focus(fields, params.focus_fields)
+        focus_selection = _resolve_focus_fields(fields, params.focus_fields)
+        if params.focus_fields and focus_selection.ambiguous_labels:
+            details = ", ".join(
+                f'{label}: {[f"{field.field_id} ({field.field_type})" for field in matches]}'
+                for label, matches in focus_selection.ambiguous_labels.items()
+            )
+            return ActionResult(
+                error=(
+                    "Multiple visible fields matched the requested focus_fields. "
+                    f"Disambiguate with the exact blocker field_id before retrying. {details}"
+                ),
+            )
+        fields = focus_selection.fields if params.focus_fields else fields
+        if params.focus_fields:
+            fields = _active_blocker_focus_fields(
+                browser_session,
+                fields=fields,
+                page_context_key=page_context_key,
+                page_url=page_url,
+            )
 
         if params.heading_boundary and not fields:
             return ActionResult(
@@ -4853,8 +5644,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         if params.focus_fields and not fields:
             return ActionResult(
                 error=(
-                    "No visible fields matched the requested focus_fields. "
-                    "Use domhand_assess_state again and then fall back to domhand_select or targeted browser-use actions."
+                    "No visible blocker fields matched the requested focus_fields on the current page context. "
+                    "Use domhand_assess_state again before retrying another blocker."
                 ),
             )
 
@@ -4865,6 +5656,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             key = get_stable_field_key(f)
             if key in fields_skipped:
                 continue  # Already determined no profile data — don't retry
+            if key in fields_capped:
+                continue
             if key in fields_seen and f.current_value and not _is_effectively_unset_field_value(f.current_value):
                 continue
             if _is_navigation_field(f):
@@ -4891,6 +5684,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         needs_llm: list[FormField] = []
         direct_fills: dict[str, str] = {}
         resolved_values: dict[str, ResolvedFieldValue] = {}
+        resolved_bindings: dict[str, ResolvedFieldBinding] = {}
         for f in fillable_fields:
             if f.current_value and not _is_effectively_unset_field_value(f.current_value):
                 fields_seen.add(get_stable_field_key(f))
@@ -4900,7 +5694,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 direct_fills[f.field_id] = auth_val
                 resolved_values[f.field_id] = _resolved_field_value(
                     auth_val,
-                    source="dom",
+                    source="exact_profile",
                     answer_mode="profile_backed",
                     confidence=1.0,
                 )
@@ -4929,18 +5723,120 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 if _on_field_result:
                     _on_field_result(fr, round_num)
                 continue
+            structured_language_val = None
+            if _is_structured_language_field(f) and profile_data:
+                raw_languages = [
+                    entry
+                    for entry in (profile_data.get("languages") or [])
+                    if isinstance(entry, dict)
+                ]
+                structured_language_binding = _resolve_repeater_binding(
+                    host=page_host,
+                    repeater_group="languages",
+                    field=f,
+                    visible_fields=fillable_fields,
+                    entries=raw_languages,
+                    numeric_index=_language_entry_index_for_field(f),
+                    slot_name=_language_slot_name(f),
+                    current_value=f.current_value,
+                    slot_resolver=_language_slot_name,
+                )
+                if structured_language_binding:
+                    structured_language_val = _structured_language_value_from_entry(
+                        f,
+                        raw_languages[structured_language_binding.entry_index],
+                    )
+                    if structured_language_val:
+                        resolved_bindings[f.field_id] = structured_language_binding
+            if not structured_language_val:
+                structured_language_val = _resolve_structured_language_value(f, profile_data)
+            if structured_language_val:
+                direct_fills[f.field_id] = structured_language_val
+                resolved_values[f.field_id] = _resolved_field_value(
+                    structured_language_val,
+                    source="exact_profile",
+                    answer_mode="profile_backed",
+                    confidence=1.0,
+                )
+                continue
+            if _is_structured_language_field(f):
+                error_msg = _structured_field_missing_reason(f)
+                fr = FillFieldResult(
+                    field_id=f.field_id,
+                    name=_preferred_field_label(f),
+                    success=False,
+                    actor="skipped",
+                    error=error_msg if not f.required else f"REQUIRED — {error_msg}",
+                    required=f.required,
+                    control_kind=f.field_type,
+                    section=f.section or "",
+                    state="failed",
+                    failure_reason="missing_profile_data" if not f.required else "required_missing_profile_data",
+                    takeover_suggestion="Pause for user data instead of guessing this structured language field.",
+                )
+                all_results.append(fr)
+                if _on_field_result:
+                    _on_field_result(fr, round_num)
+                fields_seen.add(key)
+                fields_skipped.add(key)
+                continue
             entry_val = _known_entry_value_for_field(f, entry_data)
+            if not entry_val and _is_structured_education_field(f) and profile_data:
+                raw_education = [
+                    entry
+                    for entry in (profile_data.get("education") or [])
+                    if isinstance(entry, dict)
+                ]
+                structured_education_binding = _resolve_repeater_binding(
+                    host=page_host,
+                    repeater_group="education",
+                    field=f,
+                    visible_fields=fillable_fields,
+                    entries=raw_education,
+                    numeric_index=(_parse_heading_index(f.section) - 1) if _parse_heading_index(f.section) is not None else None,
+                    slot_name=_education_slot_name(f),
+                    current_value=f.current_value,
+                    slot_resolver=_education_slot_name,
+                )
+                if structured_education_binding:
+                    entry_val = _known_entry_value_for_field(
+                        f,
+                        raw_education[structured_education_binding.entry_index],
+                    )
+                    if entry_val:
+                        resolved_bindings[f.field_id] = structured_education_binding
             if entry_val:
                 coerced_entry_val = _coerce_answer_to_field(f, entry_val)
                 if coerced_entry_val:
                     direct_fills[f.field_id] = coerced_entry_val
                     resolved_values[f.field_id] = _resolved_field_value(
                         coerced_entry_val,
-                        source="dom",
+                        source="exact_profile",
                         answer_mode="profile_backed",
-                        confidence=0.98,
+                        confidence=0.99,
                     )
                     continue
+            if _is_structured_education_field(f):
+                error_msg = _structured_field_missing_reason(f)
+                fr = FillFieldResult(
+                    field_id=f.field_id,
+                    name=_preferred_field_label(f),
+                    success=False,
+                    actor="skipped",
+                    error=error_msg if not f.required else f"REQUIRED — {error_msg}",
+                    required=f.required,
+                    control_kind=f.field_type,
+                    section=f.section or "",
+                    state="failed",
+                    failure_reason="missing_profile_data" if not f.required else "required_missing_profile_data",
+                    takeover_suggestion="Pause for user data instead of guessing this structured education field.",
+                )
+                all_results.append(fr)
+                if _on_field_result:
+                    _on_field_result(fr, round_num)
+                fields_seen.add(key)
+                fields_skipped.add(key)
+                continue
             known_resolution = _resolve_known_profile_value_for_field(
                 f,
                 evidence,
@@ -4960,7 +5856,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 direct_fills[f.field_id] = semantic_profile_val
                 resolved_values[f.field_id] = _resolved_field_value(
                     semantic_profile_val,
-                    source="dom",
+                    source="derived_profile",
                     answer_mode="profile_backed",
                     confidence=0.78,
                 )
@@ -4986,6 +5882,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         round_failed = 0
 
         for f in fillable_fields:
+            key = get_stable_field_key(f)
             if f.field_id in direct_fills:
                 value = direct_fills[f.field_id]
                 resolved_value = resolved_values.get(
@@ -4997,17 +5894,20 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         confidence=0.95,
                     ),
                 )
-                if await _field_already_matches(page, f, value):
-                    success = True
-                else:
-                    success = await _fill_single_field(page, f, value)
+                success, field_error, failure_reason = await _attempt_domhand_fill_with_retry_cap(
+                    page,
+                    host=page_host,
+                    field=f,
+                    desired_value=value,
+                    tool_name="domhand_fill",
+                )
                 fr = FillFieldResult(
                     field_id=f.field_id,
                     name=_preferred_field_label(f),
                     success=success,
                     actor="dom",
                     value_set=value if success else None,
-                    error=None if success else "DOM fill failed",
+                    error=None if success else field_error,
                     required=f.required,
                     control_kind=f.field_type,
                     section=f.section or "",
@@ -5015,24 +5915,38 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     answer_mode=resolved_value.answer_mode,
                     confidence=resolved_value.confidence,
                     state=resolved_value.state if success else "failed",
-                    failure_reason=None if success else "dom_fill_failed",
+                    failure_reason=None if success else failure_reason,
                     takeover_suggestion=_takeover_suggestion_for_field(
                         f,
                         success,
                         "dom",
-                        None if success else "DOM fill failed",
+                        None if success else field_error,
                     ),
+                    binding_mode=resolved_bindings.get(f.field_id).binding_mode if resolved_bindings.get(f.field_id) else None,
+                    binding_confidence=resolved_bindings.get(f.field_id).binding_confidence if resolved_bindings.get(f.field_id) else None,
+                    best_effort_guess=resolved_bindings.get(f.field_id).best_effort_guess if resolved_bindings.get(f.field_id) else False,
                 )
                 if success:
                     confirm_learned_question_alias(_preferred_field_label(f))
+                    record_expected_field_value(
+                        host=page_host,
+                        page_context_key=page_context_key,
+                        field_key=key,
+                        field_label=_preferred_field_label(f),
+                        expected_value=value,
+                        source="exact_profile" if resolved_value.source == "exact_profile" else "derived_profile",
+                    )
+                elif failure_reason == DOMHAND_RETRY_CAPPED:
+                    fields_capped.add(key)
                 all_results.append(fr)
                 if _on_field_result:
                     _on_field_result(fr, round_num)
-                fields_seen.add(get_stable_field_key(f))
+                fields_seen.add(key)
                 round_filled += 1 if success else 0
                 round_failed += 0 if success else 1
 
         for f in needs_llm:
+            key = get_stable_field_key(f)
             resolved_value = _resolve_llm_answer_for_field(f, answers, evidence, profile_data)
             if resolved_value and re.match(
                 r"^(n/?a|na|none|not applicable|unknown|placeholder)$",
@@ -5043,7 +5957,6 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             if resolved_value and "[NEEDS_USER_INPUT]" in resolved_value.value:
                 resolved_value = None
             if not resolved_value or not resolved_value.value:
-                key = get_stable_field_key(f)
                 error_msg = "No confident profile match for this field"
                 if f.required:
                     error_msg = "REQUIRED — could not fill automatically"
@@ -5072,17 +5985,20 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 fields_skipped.add(key)
                 continue
             matched_answer = resolved_value.value
-            if await _field_already_matches(page, f, matched_answer):
-                success = True
-            else:
-                success = await _fill_single_field(page, f, matched_answer)
+            success, field_error, failure_reason = await _attempt_domhand_fill_with_retry_cap(
+                page,
+                host=page_host,
+                field=f,
+                desired_value=matched_answer,
+                tool_name="domhand_fill",
+            )
             fr = FillFieldResult(
                 field_id=f.field_id,
                 name=_preferred_field_label(f),
                 success=success,
                 actor="dom",
                 value_set=matched_answer if success else None,
-                error=None if success else "DOM fill failed",
+                error=None if success else field_error,
                 required=f.required,
                 control_kind=f.field_type,
                 section=f.section or "",
@@ -5090,20 +6006,33 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 answer_mode=resolved_value.answer_mode,
                 confidence=resolved_value.confidence,
                 state=resolved_value.state if success else "failed",
-                failure_reason=None if success else "dom_fill_failed",
+                failure_reason=None if success else failure_reason,
                 takeover_suggestion=_takeover_suggestion_for_field(
                     f,
                     success,
                     "dom",
-                    None if success else "DOM fill failed",
+                    None if success else field_error,
                 ),
+                binding_mode=resolved_bindings.get(f.field_id).binding_mode if resolved_bindings.get(f.field_id) else None,
+                binding_confidence=resolved_bindings.get(f.field_id).binding_confidence if resolved_bindings.get(f.field_id) else None,
+                best_effort_guess=resolved_bindings.get(f.field_id).best_effort_guess if resolved_bindings.get(f.field_id) else False,
             )
             if success:
                 confirm_learned_question_alias(_preferred_field_label(f))
+                record_expected_field_value(
+                    host=page_host,
+                    page_context_key=page_context_key,
+                    field_key=key,
+                    field_label=_preferred_field_label(f),
+                    expected_value=matched_answer,
+                    source="exact_profile" if resolved_value.source == "exact_profile" else "derived_profile",
+                )
+            elif failure_reason == DOMHAND_RETRY_CAPPED:
+                fields_capped.add(key)
             all_results.append(fr)
             if _on_field_result:
                 _on_field_result(fr, round_num)
-            fields_seen.add(get_stable_field_key(f))
+            fields_seen.add(key)
             round_filled += 1 if success else 0
             round_failed += 0 if success else 1
 
@@ -5118,6 +6047,9 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
     unfilled_count = sum(1 for r in all_results if r.actor == "unfilled")
     best_effort_results = [
         r for r in all_results if r.success and r.answer_mode == "best_effort_guess" and r.value_set
+    ]
+    best_effort_binding_results = [
+        r for r in all_results if r.success and r.best_effort_guess
     ]
     required_skipped = [
         f'  - "{r.name}" (REQUIRED — needs attention)'
@@ -5156,6 +6088,16 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 for r in best_effort_results[:20]
             ]
         )
+    if best_effort_binding_results:
+        summary_lines.append("Best-effort repeater bindings used (review these answers before submit):")
+        summary_lines.extend(
+            [
+                f'  - "{r.name}"'
+                + (f" [{r.section}]" if r.section else "")
+                + (f" via {r.binding_mode}" if r.binding_mode else "")
+                for r in best_effort_binding_results[:20]
+            ]
+        )
 
     structured_summary = {
         "filled_count": filled_count,
@@ -5163,6 +6105,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         "skipped_count": skipped_count,
         "unfilled_count": unfilled_count,
         "best_effort_guess_count": len(best_effort_results),
+        "best_effort_binding_count": len(best_effort_binding_results),
         "best_effort_guess_fields": [
             {
                 "field_id": r.field_id,
@@ -5171,6 +6114,17 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 "required": r.required,
             }
             for r in best_effort_results
+        ],
+        "best_effort_binding_fields": [
+            {
+                "field_id": r.field_id,
+                "prompt_text": r.name,
+                "section_label": r.section or None,
+                "binding_mode": r.binding_mode,
+                "binding_confidence": r.binding_confidence,
+                "best_effort_guess": r.best_effort_guess,
+            }
+            for r in best_effort_binding_results
         ],
         "unresolved_required_fields": [
             {
@@ -5852,6 +6806,60 @@ async def _fill_button_group(page: Any, field: FormField, value: str, tag: str) 
 
 
 async def _fill_checkbox_group(page: Any, field: FormField, value: str, tag: str) -> bool:
+    if not _checkbox_group_is_exclusive_choice(field):
+        if _is_explicit_false(value):
+            logger.debug(f"check {tag} -> skip (answer=unchecked)")
+            return True
+        recipe_context = await _load_field_interaction_recipe(page, field)
+        recipe = recipe_context.get("recipe") if recipe_context else None
+        if recipe is not None:
+            if "binary_refresh" in recipe.preferred_action_chain:
+                if await _refresh_binary_field(page, field, tag, True) and not await _field_has_validation_error(
+                    page,
+                    field.field_id,
+                ):
+                    _trace_profile_resolution(
+                        "domhand.field_recipe_applied",
+                        field_label=_preferred_field_label(field),
+                        widget_signature=field.field_type,
+                        preferred_action_chain="binary_refresh,binary_gui_click",
+                    )
+                    return True
+            if "binary_gui_click" in recipe.preferred_action_chain:
+                if await _click_binary_with_gui(page, field, tag, True) and not await _field_has_validation_error(
+                    page,
+                    field.field_id,
+                ):
+                    _trace_profile_resolution(
+                        "domhand.field_recipe_applied",
+                        field_label=_preferred_field_label(field),
+                        widget_signature=field.field_type,
+                        preferred_action_chain="binary_gui_click",
+                    )
+                    return True
+        try:
+            result_json = await page.evaluate(_CLICK_CHECKBOX_GROUP_JS, field.field_id)
+            result = json.loads(result_json)
+            if result.get("clicked"):
+                current = await _read_binary_state(page, field.field_id)
+                if result.get("alreadyChecked") and not await _field_has_validation_error(page, field.field_id):
+                    logger.debug(f"skip {tag} (already checked)")
+                    return True
+                if current is True and not await _field_has_validation_error(page, field.field_id):
+                    logger.debug(f"check {tag} -> first")
+                    return True
+                if current is True and await _field_has_validation_error(page, field.field_id):
+                    if await _refresh_binary_field(page, field, tag, True):
+                        _record_field_interaction_recipe(recipe_context, ["binary_refresh", "binary_gui_click"])
+                        return True
+                if await _click_binary_with_gui(page, field, tag, True):
+                    _record_field_interaction_recipe(recipe_context, ["binary_gui_click"])
+                    return True
+        except Exception:
+            pass
+        logger.debug(f"skip {tag} (checkbox-group)")
+        return False
+
     choice = value or (field.choices[0] if field.choices else "")
     if not choice:
         logger.debug(f"skip {tag} (checkbox-group, no answer)")
@@ -5892,7 +6900,7 @@ async def _fill_checkbox_group(page: Any, field: FormField, value: str, tag: str
             if _field_value_matches_expected(current, choice) and not await _field_has_validation_error(
                 page, field.field_id
             ):
-                logger.debug(f'checkbox-group {tag} -> "{choice}"')
+                logger.debug(f'exclusive-checkbox-group {tag} -> "{choice}"')
                 return True
     except Exception:
         pass
@@ -5911,7 +6919,7 @@ async def _fill_checkbox_group(page: Any, field: FormField, value: str, tag: str
                 ["group_option_reset", "group_option_gui_click"],
             )
             return True
-    logger.debug(f"skip {tag} (checkbox-group)")
+    logger.debug(f"skip {tag} (exclusive checkbox-group)")
     return False
 
 

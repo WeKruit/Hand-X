@@ -53,6 +53,29 @@ class LearnedInteractionRecipe(BaseModel):
     source: str = "visual_fallback"
 
 
+class ExpectedFieldValue(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    host: str
+    page_context_key: str
+    field_key: str
+    field_label: str
+    expected_value: str
+    source: Literal["exact_profile", "derived_profile", "manual_recovery"]
+
+
+class RepeaterFieldBinding(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    host: str
+    repeater_group: str
+    field_binding_key: str
+    entry_index: int
+    binding_mode: Literal["exact", "similarity", "row_order", "manual_recovery"]
+    binding_confidence: Literal["high", "medium", "low"]
+    best_effort_guess: bool = False
+
+
 _loaded = False
 _loaded_aliases: dict[str, LearnedQuestionAlias] = {}
 _pending_aliases: dict[str, LearnedQuestionAlias] = {}
@@ -60,6 +83,13 @@ _confirmed_aliases: dict[str, LearnedQuestionAlias] = {}
 _loaded_recipes: dict[tuple[str, str, str, str], LearnedInteractionRecipe] = {}
 _confirmed_recipes: dict[tuple[str, str, str, str], LearnedInteractionRecipe] = {}
 _semantic_cache: dict[str, LearnedQuestionAlias | None] = {}
+_domhand_failure_counts: dict[tuple[str, str, str], int] = {}
+_domhand_retry_capped: set[tuple[str, str, str]] = set()
+_expected_field_values: dict[tuple[str, str, str], ExpectedFieldValue] = {}
+_repeater_field_bindings: dict[tuple[str, str, str], RepeaterFieldBinding] = {}
+_active_page_context_by_host: dict[str, str] = {}
+
+DOMHAND_RETRY_CAP = 2
 
 
 def reset_runtime_learning_state() -> None:
@@ -72,6 +102,11 @@ def reset_runtime_learning_state() -> None:
     _loaded_recipes.clear()
     _confirmed_recipes.clear()
     _semantic_cache.clear()
+    _domhand_failure_counts.clear()
+    _domhand_retry_capped.clear()
+    _expected_field_values.clear()
+    _repeater_field_bindings.clear()
+    _active_page_context_by_host.clear()
 
 
 def normalize_runtime_label(text: str | None) -> str:
@@ -108,6 +143,224 @@ def detect_host_from_url(url: str | None) -> str:
         return urlparse(url).hostname.lower() if urlparse(url).hostname else ""
     except Exception:
         return ""
+
+
+def build_domhand_retry_key(
+    *,
+    host: str,
+    field_key: str,
+    desired_value: str,
+) -> tuple[str, str, str] | None:
+    """Build a stable per-run retry key for a DomHand field/value pair."""
+    normalized_field_key = normalize_runtime_label(field_key)
+    normalized_value = normalize_runtime_label(desired_value)
+    normalized_host = str(host or "").strip().lower()
+    if not normalized_field_key or not normalized_value:
+        return None
+    return (normalized_host, normalized_field_key, normalized_value)
+
+
+def build_expected_field_key(
+    *,
+    host: str,
+    page_context_key: str,
+    field_key: str,
+) -> tuple[str, str, str] | None:
+    normalized_field_key = normalize_runtime_label(field_key)
+    normalized_host = str(host or "").strip().lower()
+    normalized_page_context = normalize_runtime_label(page_context_key)
+    if not normalized_field_key or not normalized_page_context:
+        return None
+    return (normalized_host, normalized_page_context, normalized_field_key)
+
+
+def build_page_context_key(*, url: str | None, page_marker: str | None) -> str:
+    """Build a stable page-scoped context key for expected-value tracking."""
+    normalized_marker = normalize_runtime_label(page_marker)
+    path = ""
+    if url:
+        try:
+            parsed = urlparse(url)
+            path = normalize_runtime_label(parsed.path or "/")
+        except Exception:
+            path = ""
+    if not path:
+        path = "root"
+    if not normalized_marker:
+        normalized_marker = "page"
+    return f"{path}::{normalized_marker}"
+
+
+def activate_page_context(*, host: str, page_context_key: str) -> None:
+    """Switch expected-value tracking to the current page context for a host."""
+    normalized_host = str(host or "").strip().lower()
+    normalized_page_context = normalize_runtime_label(page_context_key)
+    if not normalized_host or not normalized_page_context:
+        return
+
+    previous = _active_page_context_by_host.get(normalized_host)
+    if previous == normalized_page_context:
+        return
+
+    _active_page_context_by_host[normalized_host] = normalized_page_context
+    stale_keys = [
+        key
+        for key in _expected_field_values
+        if key[0] == normalized_host and key[1] != normalized_page_context
+    ]
+    for key in stale_keys:
+        _expected_field_values.pop(key, None)
+
+
+def build_repeater_field_binding_key(
+    *,
+    host: str,
+    repeater_group: str,
+    field_binding_key: str,
+) -> tuple[str, str, str] | None:
+    normalized_host = str(host or "").strip().lower()
+    normalized_group = normalize_runtime_label(repeater_group)
+    normalized_key = normalize_runtime_label(field_binding_key)
+    if not normalized_group or not normalized_key:
+        return None
+    return (normalized_host, normalized_group, normalized_key)
+
+
+def record_expected_field_value(
+    *,
+    host: str,
+    page_context_key: str,
+    field_key: str,
+    field_label: str,
+    expected_value: str,
+    source: Literal["exact_profile", "derived_profile", "manual_recovery"],
+) -> None:
+    activate_page_context(host=host, page_context_key=page_context_key)
+    key = build_expected_field_key(host=host, page_context_key=page_context_key, field_key=field_key)
+    normalized_expected = str(expected_value or "").strip()
+    if key is None or not normalized_expected:
+        return
+    _expected_field_values[key] = ExpectedFieldValue(
+        host=key[0],
+        page_context_key=key[1],
+        field_key=key[2],
+        field_label=str(field_label or "").strip(),
+        expected_value=normalized_expected,
+        source=source,
+    )
+
+
+def get_expected_field_value(
+    *,
+    host: str,
+    page_context_key: str,
+    field_key: str,
+) -> ExpectedFieldValue | None:
+    activate_page_context(host=host, page_context_key=page_context_key)
+    key = build_expected_field_key(host=host, page_context_key=page_context_key, field_key=field_key)
+    if key is None:
+        return None
+    return _expected_field_values.get(key)
+
+
+def record_repeater_field_binding(
+    *,
+    host: str,
+    repeater_group: str,
+    field_binding_key: str,
+    entry_index: int,
+    binding_mode: Literal["exact", "similarity", "row_order", "manual_recovery"],
+    binding_confidence: Literal["high", "medium", "low"],
+    best_effort_guess: bool = False,
+) -> None:
+    key = build_repeater_field_binding_key(
+        host=host,
+        repeater_group=repeater_group,
+        field_binding_key=field_binding_key,
+    )
+    if key is None or entry_index < 0:
+        return
+    _repeater_field_bindings[key] = RepeaterFieldBinding(
+        host=key[0],
+        repeater_group=key[1],
+        field_binding_key=key[2],
+        entry_index=entry_index,
+        binding_mode=binding_mode,
+        binding_confidence=binding_confidence,
+        best_effort_guess=best_effort_guess,
+    )
+
+
+def get_repeater_field_binding(
+    *,
+    host: str,
+    repeater_group: str,
+    field_binding_key: str,
+) -> RepeaterFieldBinding | None:
+    key = build_repeater_field_binding_key(
+        host=host,
+        repeater_group=repeater_group,
+        field_binding_key=field_binding_key,
+    )
+    if key is None:
+        return None
+    return _repeater_field_bindings.get(key)
+
+
+def get_domhand_failure_count(
+    *,
+    host: str,
+    field_key: str,
+    desired_value: str,
+) -> int:
+    """Return the in-run DomHand failure count for a field/value pair."""
+    key = build_domhand_retry_key(host=host, field_key=field_key, desired_value=desired_value)
+    if key is None:
+        return 0
+    return _domhand_failure_counts.get(key, 0)
+
+
+def is_domhand_retry_capped(
+    *,
+    host: str,
+    field_key: str,
+    desired_value: str,
+) -> bool:
+    """Return True when DomHand should stop touching this field/value in the current run."""
+    key = build_domhand_retry_key(host=host, field_key=field_key, desired_value=desired_value)
+    if key is None:
+        return False
+    return key in _domhand_retry_capped
+
+
+def record_domhand_failure(
+    *,
+    host: str,
+    field_key: str,
+    desired_value: str,
+) -> int:
+    """Increment the in-run DomHand failure count and cap when the threshold is reached."""
+    key = build_domhand_retry_key(host=host, field_key=field_key, desired_value=desired_value)
+    if key is None:
+        return 0
+    count = _domhand_failure_counts.get(key, 0) + 1
+    _domhand_failure_counts[key] = count
+    if count >= DOMHAND_RETRY_CAP:
+        _domhand_retry_capped.add(key)
+    return count
+
+
+def clear_domhand_failure(
+    *,
+    host: str,
+    field_key: str,
+    desired_value: str,
+) -> None:
+    """Clear an in-run DomHand failure count unless the field/value is already capped."""
+    key = build_domhand_retry_key(host=host, field_key=field_key, desired_value=desired_value)
+    if key is None or key in _domhand_retry_capped:
+        return
+    _domhand_failure_counts.pop(key, None)
 
 
 def _alias_from_raw(raw: Any) -> LearnedQuestionAlias | None:

@@ -36,11 +36,22 @@ from ghosthands.actions.views import (
     normalize_name,
     split_dropdown_value_hierarchy,
 )
+from ghosthands.runtime_learning import (
+    DOMHAND_RETRY_CAP,
+    clear_domhand_failure,
+    detect_host_from_url,
+    get_domhand_failure_count,
+    is_domhand_retry_capped,
+    record_expected_field_value,
+    record_domhand_failure,
+)
+from ghosthands.actions.domhand_fill import _get_page_context_key
 
 logger = logging.getLogger(__name__)
 
 FAIL_OVER_NATIVE_SELECT = "[FAIL-OVER:NATIVE_SELECT]"
 FAIL_OVER_CUSTOM_WIDGET = "[FAIL-OVER:CUSTOM_WIDGET]"
+DOMHAND_RETRY_CAPPED = "domhand_retry_capped"
 
 
 def _profile_debug_enabled() -> bool:
@@ -734,6 +745,63 @@ def _build_failover_message(
     return " ".join(parts)
 
 
+def _domhand_select_retry_field_key(field_label: str, widget_signature: str, index: int) -> str:
+    return "|".join(
+        [
+            "select",
+            normalize_name(widget_signature or "select"),
+            normalize_name(field_label or str(index)),
+        ]
+    )
+
+
+def _record_select_failure(host: str, field_key: str, desired_value: str) -> tuple[int, bool]:
+    count = record_domhand_failure(host=host, field_key=field_key, desired_value=desired_value)
+    capped = count >= DOMHAND_RETRY_CAP
+    logger.info(
+        "domhand.select.retry_state",
+        extra={
+            "field_key": field_key,
+            "desired_value": desired_value,
+            "host": host,
+            "failure_count": count,
+            "retry_capped": capped,
+        },
+    )
+    return count, capped
+
+
+def _select_failover_or_retry_cap_message(
+    *,
+    widget_kind: str,
+    index: int,
+    host: str,
+    field_key: str,
+    desired_value: str,
+    reason: str,
+    available_texts: list[str] | None = None,
+    current_value: str | None = None,
+) -> str:
+    if is_domhand_retry_capped(host=host, field_key=field_key, desired_value=desired_value):
+        count = get_domhand_failure_count(host=host, field_key=field_key, desired_value=desired_value)
+        return _build_failover_message(
+            widget_kind,
+            index,
+            reason=(
+                f"domhand_retry_capped: DomHand retry cap reached after {count or DOMHAND_RETRY_CAP} failed attempts. "
+                "Do not use domhand_select on this field again in this run."
+            ),
+            current_value=current_value,
+        )
+    return _build_failover_message(
+        widget_kind,
+        index,
+        reason=reason,
+        available_texts=available_texts,
+        current_value=current_value,
+    )
+
+
 async def _read_current_selection(
     browser_session: BrowserSession,
     node: EnhancedDOMTreeNode,
@@ -858,10 +926,17 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
         or dropdown_type
         or ("native_select" if is_native_select else "custom_widget")
     )
+    field_key = _domhand_select_retry_field_key(field_label, widget_signature, params.index)
     field_invalid = bool(field_context.get("invalid"))
     used_action_chain: list[str] = []
     matched_text = params.value
     current_before = await _read_current_selection(browser_session, node)
+    page_url = ""
+    try:
+        page_url = await browser_session.get_current_page_url()
+    except Exception:
+        page_url = ""
+    page_host = detect_host_from_url(page_url)
     logger.info(
         "domhand.select.start "
         f"index={params.index} "
@@ -874,6 +949,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
         f"current_value_before={current_before!r}"
     )
     if _selection_matches_value(current_before, params.value) and not field_invalid:
+        clear_domhand_failure(host=page_host, field_key=field_key, desired_value=params.value)
         logger.info(
             "domhand.select.already_selected "
             f"index={params.index} "
@@ -930,6 +1006,34 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
         except Exception as e:
             logger.debug(f"GetDropdownOptionsEvent failed: {e}")
 
+    if is_domhand_retry_capped(host=page_host, field_key=field_key, desired_value=params.value):
+        logger.info(
+            "domhand.select.retry_capped",
+            extra={
+                "index": params.index,
+                "field_label": field_label,
+                "field_key": field_key,
+                "desired_value": params.value,
+                "host": page_host,
+                "failure_count": get_domhand_failure_count(
+                    host=page_host,
+                    field_key=field_key,
+                    desired_value=params.value,
+                ),
+            },
+        )
+        return ActionResult(
+            error=_select_failover_or_retry_cap_message(
+                widget_kind=widget_kind,
+                index=params.index,
+                host=page_host,
+                field_key=field_key,
+                desired_value=params.value,
+                reason=f"domhand_select cannot handle element {params.index}.",
+                current_value=current_before,
+            ),
+        )
+
     if not options:
         logger.warning(
             "domhand.select.no_options "
@@ -941,27 +1045,21 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             f"field_invalid={field_invalid} "
             f"current_value_before={current_before!r}"
         )
+        _record_select_failure(page_host, field_key, params.value)
         return ActionResult(
-            error=_build_failover_message(
-                widget_kind,
-                params.index,
+            error=_select_failover_or_retry_cap_message(
+                widget_kind=widget_kind,
+                index=params.index,
+                host=page_host,
+                field_key=field_key,
+                desired_value=params.value,
                 reason=f"domhand_select cannot handle element {params.index}.",
             ),
         )
 
-    page_url = ""
-    try:
-        page_url = await browser_session.get_current_page_url()
-    except Exception:
-        page_url = ""
-
     try:
         from ghosthands.actions.domhand_fill import _get_profile_data
-        from ghosthands.runtime_learning import (
-            detect_host_from_url,
-            detect_platform_from_url,
-            get_interaction_recipe,
-        )
+        from ghosthands.runtime_learning import detect_platform_from_url, get_interaction_recipe
 
         profile_data = _get_profile_data()
         recipe = get_interaction_recipe(
@@ -1032,10 +1130,14 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                 f"field_invalid={field_invalid} "
                 f"current_value_before={current_before!r}"
             )
+            _record_select_failure(page_host, field_key, params.value)
             return ActionResult(
-                error=_build_failover_message(
-                    widget_kind,
-                    params.index,
+                error=_select_failover_or_retry_cap_message(
+                    widget_kind=widget_kind,
+                    index=params.index,
+                    host=page_host,
+                    field_key=field_key,
+                    desired_value=params.value,
                     reason=f'No match for "{params.value}" in element {params.index}.',
                     available_texts=available_texts,
                 ),
@@ -1079,9 +1181,19 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             return ActionResult(error=f'Failed to select option "{matched_text}": {e}')
 
     if isinstance(result, dict) and not result.get("success"):
+        _record_select_failure(page_host, field_key, params.value)
         available = result.get("available", [])
         return ActionResult(
-            error=f'Failed to select "{matched_text}": {result.get("error", "unknown")}. Available: {available}',
+            error=_select_failover_or_retry_cap_message(
+                widget_kind=widget_kind,
+                index=params.index,
+                host=page_host,
+                field_key=field_key,
+                desired_value=params.value,
+                reason=f'Failed to select "{matched_text}": {result.get("error", "unknown")}.',
+                available_texts=available,
+                current_value=current_before,
+            ),
         )
 
     clicked_text = result.get("clicked", matched_text) if isinstance(result, dict) else matched_text
@@ -1128,15 +1240,29 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             if post_invalid
             else f'Selection for "{params.value}" was not confirmed on element {params.index}.'
         )
+        _record_select_failure(page_host, field_key, params.value)
         return ActionResult(
-            error=_build_failover_message(
-                widget_kind,
-                params.index,
+            error=_select_failover_or_retry_cap_message(
+                widget_kind=widget_kind,
+                index=params.index,
+                host=page_host,
+                field_key=field_key,
+                desired_value=params.value,
                 reason=failure_reason,
                 current_value=current,
             ),
         )
 
+    clear_domhand_failure(host=page_host, field_key=field_key, desired_value=params.value)
+    page_context_key = await _get_page_context_key(page)
+    record_expected_field_value(
+        host=page_host,
+        page_context_key=page_context_key,
+        field_key=field_key,
+        field_label=field_label or field_key,
+        expected_value=params.value,
+        source="derived_profile",
+    )
     memory = f'Selected "{clicked_text}" for dropdown at index {params.index}. Immediately call domhand_assess_state for this blocker.'
     if current and normalize_name(current) != normalize_name(clicked_text):
         memory += f' (showing: "{current}")'
@@ -1157,7 +1283,6 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
     if not is_native_select and field_label and page_url and used_action_chain:
         try:
             from ghosthands.runtime_learning import (
-                detect_host_from_url,
                 detect_platform_from_url,
                 record_interaction_recipe,
             )

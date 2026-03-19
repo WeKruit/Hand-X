@@ -1,4 +1,6 @@
 from browser_use.browser import BrowserProfile, BrowserSession
+import pytest
+from unittest.mock import MagicMock
 
 
 class TestUrlAllowlistSecurity:
@@ -117,6 +119,28 @@ class TestUrlAllowlistSecurity:
 		assert watchdog._is_url_allowed('https://notawiki.com') is False
 		assert watchdog._is_url_allowed('https://havewikipages.org') is False
 		assert watchdog._is_url_allowed('https://my-wiki-site.com') is False
+
+	@pytest.mark.asyncio
+	async def test_blocked_redirect_preserves_visible_page_instead_of_blank(self):
+		from bubus import EventBus
+
+		from browser_use.browser.events import NavigationCompleteEvent
+		from browser_use.browser.watchdogs.security_watchdog import SecurityWatchdog
+
+		browser_profile = BrowserProfile(allowed_domains=['arlo.wd12.myworkdayjobs.com'], headless=True, user_data_dir=None)
+		browser_session = BrowserSession(browser_profile=browser_profile)
+		event_bus = EventBus()
+		event_bus.dispatch = MagicMock()
+		watchdog = SecurityWatchdog(browser_session=browser_session, event_bus=event_bus)
+
+		await watchdog.on_NavigationCompleteEvent(
+			NavigationCompleteEvent(
+				target_id='target-1',
+				url='https://community.workday.com/maintenance-page',
+			)
+		)
+
+		assert event_bus.dispatch.call_count == 1
 
 		# Verify that '*google.com' doesn't match domains that have 'google' in the middle
 		assert watchdog._is_url_allowed('https://mygoogle.company.com') is False

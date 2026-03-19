@@ -1,5 +1,6 @@
 """Runtime application-state assessment for browser-use job-application flows."""
 
+import asyncio
 import json
 import logging
 import os
@@ -9,29 +10,221 @@ from typing import Any
 from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
 from ghosthands.actions.domhand_fill import (
+    _OPAQUE_WIDGET_VALUE_RE,
     _build_inject_helpers_js,
     _filter_fields_for_scope,
     extract_visible_form_fields,
     _field_has_validation_error,
+    _field_value_matches_expected,
     _is_effectively_unset_field_value,
     _is_navigation_field,
     _preferred_field_label,
+    _read_checkbox_group_value,
     _read_binary_state,
     _read_field_value,
     _read_group_selection,
+    _safe_page_url,
     _section_matches_scope,
+    _get_page_context_key,
 )
 from ghosthands.actions.views import (
     ApplicationFieldIssue,
     ApplicationState,
     DomHandAssessStateParams,
     FormField,
+    get_stable_field_key,
     is_placeholder_value,
     normalize_name,
 )
 from ghosthands.platforms import detect_platform_from_signals, get_config_by_name
+from ghosthands.runtime_learning import detect_host_from_url, get_expected_field_value
 
 logger = logging.getLogger(__name__)
+
+
+def _verification_attempt_count() -> int:
+    effort = os.getenv("GH_VERIFICATION_EFFORT", "medium").strip().lower()
+    if effort == "low":
+        return 1
+    if effort == "high":
+        return 3
+    return 2
+
+
+def _field_current_value_is_opaque(field: FormField) -> bool:
+    value = str(field.current_value or "").strip()
+    if not value:
+        return False
+    if field.field_type == "select" and _OPAQUE_WIDGET_VALUE_RE.match(value):
+        return True
+    return bool(is_placeholder_value(value))
+
+
+_SEMANTIC_VERIFICATION_HINTS = (
+    "why",
+    "want to work",
+    "want this job",
+    "desired start date",
+    "start date",
+    "notice",
+    "relocation",
+    "salary",
+    "compensation",
+    "how did you hear",
+    "hear about us",
+    "location to which you are willing to relocate",
+)
+
+_STRICT_VERIFICATION_HINTS = (
+    "legal name",
+    "first name",
+    "last name",
+    "email",
+    "password",
+    "address",
+    "city",
+    "state",
+    "postal code",
+    "zip",
+    "phone",
+    "school",
+    "university",
+    "degree",
+    "graduation",
+    "country",
+    "visa",
+    "sponsorship",
+    "authorized to work",
+    "legally permitted to work",
+)
+
+_COMPANION_BOOLEAN_FIELD_TYPES = {
+    "checkbox",
+    "checkbox-group",
+    "radio",
+    "radio-group",
+    "toggle",
+    "button-group",
+}
+
+
+def _field_uses_semantic_verification(field: FormField) -> bool:
+    if field.field_type not in {"text", "textarea"}:
+        return False
+    label = normalize_name(field.raw_label or _preferred_field_label(field) or "")
+    if not label:
+        return False
+    if any(token in label for token in _STRICT_VERIFICATION_HINTS):
+        return False
+    return field.field_type == "textarea" or any(token in label for token in _SEMANTIC_VERIFICATION_HINTS)
+
+
+def _field_companion_identity(field: FormField) -> tuple[str, str] | None:
+    label = normalize_name(field.raw_label or _preferred_field_label(field) or "")
+    if not label:
+        return None
+    return (normalize_name(field.section or ""), label)
+
+
+def _companion_duplicate_field_ids(fields: list[FormField]) -> set[str]:
+    groups: dict[tuple[str, str], list[FormField]] = {}
+    for field in fields:
+        identity = _field_companion_identity(field)
+        if identity is None:
+            continue
+        groups.setdefault(identity, []).append(field)
+
+    duplicate_ids: set[str] = set()
+    for group in groups.values():
+        has_data_field = any(field.field_type not in _COMPANION_BOOLEAN_FIELD_TYPES for field in group)
+        if not has_data_field:
+            continue
+        for field in group:
+            if field.field_type in _COMPANION_BOOLEAN_FIELD_TYPES:
+                duplicate_ids.add(field.field_id)
+    return duplicate_ids
+
+
+def _semantic_tokens(text: str) -> set[str]:
+    stop_words = {
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "be",
+        "for",
+        "from",
+        "i",
+        "in",
+        "is",
+        "my",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "with",
+    }
+    return {
+        token
+        for token in normalize_name(text).split()
+        if len(token) > 2 and token not in stop_words
+    }
+
+
+def _semantic_text_values_match(current: str, expected: str) -> bool:
+    if _field_value_matches_expected(current, expected):
+        return True
+
+    current_numbers = [int(match) for match in re.findall(r"\d+", current or "")]
+    expected_numbers = [int(match) for match in re.findall(r"\d+", expected or "")]
+    if current_numbers and expected_numbers:
+        if set(current_numbers) & set(expected_numbers):
+            return True
+        if len(expected_numbers) >= 2:
+            low = min(expected_numbers[0], expected_numbers[1])
+            high = max(expected_numbers[0], expected_numbers[1])
+            if any(low <= number <= high for number in current_numbers):
+                return True
+
+    current_tokens = _semantic_tokens(current)
+    expected_tokens = _semantic_tokens(expected)
+    if current_tokens and expected_tokens:
+        overlap = current_tokens & expected_tokens
+        smaller = min(len(current_tokens), len(expected_tokens))
+        if overlap and (len(overlap) >= min(2, smaller) or (len(overlap) / max(smaller, 1)) >= 0.5):
+            return True
+    return False
+
+
+def _verification_issue_for_field(
+    field: FormField,
+    *,
+    reason: str,
+    relative_position: str,
+    expected_value: str,
+) -> ApplicationFieldIssue:
+    return ApplicationFieldIssue(
+        field_id=field.field_id,
+        name=_preferred_field_label(field),
+        field_type=field.field_type,
+        section=field.section or "",
+        section_path=field.section or "",
+        required=field.required,
+        reason=reason,
+        relative_position=relative_position,  # type: ignore[arg-type]
+        takeover_suggestion="browser_use_takeover",
+        question_text=(field.raw_label or _preferred_field_label(field) or "").strip() or None,
+        current_value=(field.current_value or "").strip(),
+        visible_error=f"Expected value: {expected_value}",
+        widget_kind=None,
+        options=[
+            str(option).strip()
+            for option in (field.options or field.choices or [])
+            if str(option).strip()
+        ],
+    )
 
 
 def _assess_debug_enabled() -> bool:
@@ -430,7 +623,8 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
 
     button_texts = page_scan.get("button_texts", [])
     body_text = page_scan.get("body_text", "")
-    current_url = await page.evaluate("() => window.location.href")
+    current_url = await _safe_page_url(page)
+    page_host = detect_host_from_url(current_url)
     platform_hint = detect_platform_from_signals(
         str(current_url or ""),
         page_text=" ".join(filter(None, [body_text, " ".join(button_texts)])),
@@ -438,13 +632,20 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
     )
 
     scoped_fields = _filter_fields_for_scope(fields, target_section=params.target_section)
+    companion_duplicate_ids = _companion_duplicate_field_ids(scoped_fields)
     unresolved_required: list[ApplicationFieldIssue] = []
     unresolved_optional: list[ApplicationFieldIssue] = []
+    mismatched_fields: list[ApplicationFieldIssue] = []
+    opaque_fields: list[ApplicationFieldIssue] = []
+    unverified_fields: list[ApplicationFieldIssue] = []
     sections_in_view: list[str] = []
     field_context_by_id: dict[str, dict[str, Any]] = {}
+    verification_attempts = _verification_attempt_count()
 
     for field in scoped_fields:
         if field.field_type == "file" or _is_navigation_field(field):
+            continue
+        if field.field_id in companion_duplicate_ids:
             continue
 
         field_layout = layout.get(field.field_id, {})
@@ -462,7 +663,9 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         if _is_meaningful_section_label(field.section, _preferred_field_label(field)) and relative_position == "in_view":
             sections_in_view.append(field.section)
 
-        if field.field_type in {"radio-group", "button-group", "checkbox-group"} and not field.current_value:
+        if field.field_type == "checkbox-group" and not field.current_value:
+            field.current_value = await _read_checkbox_group_value(page, field)
+        elif field.field_type in {"radio-group", "button-group"} and not field.current_value:
             field.current_value = await _read_group_selection(page, field.field_id)
         elif field.field_type == "select":
             observed_value = await _read_field_value(page, field.field_id)
@@ -471,6 +674,10 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         elif field.field_type in {"checkbox", "toggle"} and not field.current_value:
             binary_state = await _read_binary_state(page, field.field_id)
             field.current_value = "checked" if binary_state else ""
+        else:
+            observed_value = await _read_field_value(page, field.field_id)
+            if observed_value or not field.current_value:
+                field.current_value = observed_value or field.current_value
 
         has_error = await _field_has_validation_error(page, field.field_id)
         if field.field_id not in field_context_by_id:
@@ -515,6 +722,105 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             unresolved_required.append(issue)
         else:
             unresolved_optional.append(issue)
+
+    verification_failures: tuple[list[ApplicationFieldIssue], list[ApplicationFieldIssue], list[ApplicationFieldIssue]] = (
+        [],
+        [],
+        [],
+    )
+    page_context_key = await _get_page_context_key(page, fields=fields, fallback_marker=params.target_section)
+    verification_companion_duplicate_ids = _companion_duplicate_field_ids(fields)
+    verification_scoped_fields = [
+        field
+        for field in fields
+        if field.field_type != "file"
+        and not _is_navigation_field(field)
+        and field.field_id not in verification_companion_duplicate_ids
+    ]
+    for attempt_index in range(verification_attempts):
+        mismatched_attempt: list[ApplicationFieldIssue] = []
+        opaque_attempt: list[ApplicationFieldIssue] = []
+        unverified_attempt: list[ApplicationFieldIssue] = []
+        for field in verification_scoped_fields:
+            field_key = get_stable_field_key(field)
+            expected = get_expected_field_value(
+                host=page_host,
+                page_context_key=page_context_key,
+                field_key=field_key,
+            )
+            if not expected:
+                continue
+            field_layout = layout.get(field.field_id, {})
+            relative_position = "unknown"
+            if field_layout:
+                if bool(field_layout.get("in_view")):
+                    relative_position = "in_view"
+                elif float(field_layout.get("bottom", 0)) < 0:
+                    relative_position = "above"
+                elif float(field_layout.get("top", 0)) > 0:
+                    relative_position = "below"
+
+            if field.field_type == "checkbox-group":
+                field.current_value = await _read_checkbox_group_value(page, field)
+            elif field.field_type in {"radio-group", "button-group"}:
+                field.current_value = await _read_group_selection(page, field.field_id)
+            elif field.field_type == "select":
+                field.current_value = await _read_field_value(page, field.field_id)
+            elif field.field_type in {"checkbox", "toggle"}:
+                binary_state = await _read_binary_state(page, field.field_id)
+                field.current_value = "checked" if binary_state else ""
+            else:
+                observed_value = await _read_field_value(page, field.field_id)
+                if observed_value or not field.current_value:
+                    field.current_value = observed_value or field.current_value
+
+            if not str(field.current_value or "").strip():
+                unverified_attempt.append(
+                    _verification_issue_for_field(
+                        field,
+                        reason="unverified_value",
+                        relative_position=relative_position,
+                        expected_value=expected.expected_value,
+                    ),
+                )
+                continue
+
+            if _field_current_value_is_opaque(field):
+                opaque_attempt.append(
+                    _verification_issue_for_field(
+                        field,
+                        reason="opaque_value",
+                        relative_position=relative_position,
+                        expected_value=expected.expected_value,
+                    ),
+                )
+                continue
+
+            if _field_uses_semantic_verification(field):
+                has_error = await _field_has_validation_error(page, field.field_id)
+                if not has_error and (
+                    field.field_type == "textarea"
+                    or _semantic_text_values_match(field.current_value, expected.expected_value)
+                ):
+                    continue
+
+            if not _field_value_matches_expected(field.current_value, expected.expected_value):
+                mismatched_attempt.append(
+                    _verification_issue_for_field(
+                        field,
+                        reason="mismatched_value",
+                        relative_position=relative_position,
+                        expected_value=expected.expected_value,
+                    ),
+                )
+
+        verification_failures = (mismatched_attempt, opaque_attempt, unverified_attempt)
+        if not mismatched_attempt and not opaque_attempt and not unverified_attempt:
+            break
+        if attempt_index < verification_attempts - 1:
+            await asyncio.sleep(0.2)
+
+    mismatched_fields, opaque_fields, unverified_fields = verification_failures
 
     scroll_bias = "none"
     if any(issue.relative_position == "in_view" for issue in unresolved_required):
@@ -575,12 +881,61 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         current_section=current_section,
         unresolved_required_fields=unresolved_required,
         unresolved_optional_fields=unresolved_optional,
+        mismatched_fields=mismatched_fields,
+        opaque_fields=opaque_fields,
+        unverified_fields=unverified_fields,
         visible_errors=visible_errors,
         scroll_bias=scroll_bias,
         submit_visible=bool(page_scan.get("submit_visible")),
         submit_disabled=bool(page_scan.get("submit_disabled")),
         advance_visible=bool(page_scan.get("advance_visible")),
+        advance_allowed=(
+            not unresolved_required
+            and not visible_errors
+            and not mismatched_fields
+            and not opaque_fields
+            and not unverified_fields
+        ),
         platform_hint=platform_hint,
+    )
+    setattr(
+        browser_session,
+        "_gh_last_application_state",
+        {
+            "page_context_key": page_context_key,
+            "page_url": current_url,
+            "current_section": application_state.current_section,
+            "advance_allowed": application_state.advance_allowed,
+            "advance_visible": application_state.advance_visible,
+            "unresolved_required_count": len(application_state.unresolved_required_fields),
+            "mismatched_count": len(application_state.mismatched_fields),
+            "opaque_count": len(application_state.opaque_fields),
+            "unverified_count": len(application_state.unverified_fields),
+            "blocking_field_ids": sorted(
+                {
+                    issue.field_id
+                    for issue in (
+                        application_state.unresolved_required_fields
+                        + application_state.mismatched_fields
+                        + application_state.opaque_fields
+                        + application_state.unverified_fields
+                    )
+                    if issue.field_id
+                }
+            ),
+            "blocking_field_labels": sorted(
+                {
+                    normalize_name(issue.name)
+                    for issue in (
+                        application_state.unresolved_required_fields
+                        + application_state.mismatched_fields
+                        + application_state.opaque_fields
+                        + application_state.unverified_fields
+                    )
+                    if issue.name
+                }
+            ),
+        },
     )
     logger.info(
         "domhand.assess_state.summary "
@@ -588,6 +943,9 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         f"current_section={application_state.current_section!r} "
         f"terminal_state={application_state.terminal_state} "
         f"unresolved_required_count={len(application_state.unresolved_required_fields)} "
+        f"mismatched_count={len(application_state.mismatched_fields)} "
+        f"opaque_count={len(application_state.opaque_fields)} "
+        f"unverified_count={len(application_state.unverified_fields)} "
         f"unresolved_required_fields={json.dumps([{'field_id': issue.field_id, 'label': issue.name, 'field_type': issue.field_type, 'section': issue.section, 'reason': issue.reason, 'current_value': issue.current_value, 'visible_error': issue.visible_error, 'widget_kind': issue.widget_kind} for issue in application_state.unresolved_required_fields[:10]], ensure_ascii=True)} "
         f"visible_errors={json.dumps(application_state.visible_errors[:8], ensure_ascii=True)} "
         f"snapshot={json.dumps(_field_log_snapshot(fields, params.target_section), ensure_ascii=True)}"
@@ -597,8 +955,12 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         f"Application state: {application_state.terminal_state}",
         f"Current section: {application_state.current_section or '(unknown)'}",
         f"Unresolved required fields: {len(application_state.unresolved_required_fields)}",
+        f"Mismatched fields: {len(application_state.mismatched_fields)}",
+        f"Opaque fields: {len(application_state.opaque_fields)}",
+        f"Unverified fields: {len(application_state.unverified_fields)}",
         f"Visible errors: {len(application_state.visible_errors)}",
         f"Scroll bias: {application_state.scroll_bias}",
+        f"Advance allowed: {'Yes' if application_state.advance_allowed else 'No'}",
     ]
     if application_state.platform_hint:
         summary_lines.append(f"Platform hint: {application_state.platform_hint}")

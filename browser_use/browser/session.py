@@ -543,6 +543,7 @@ class BrowserSession(BaseModel):
 	_reconnect_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 	_reconnect_task: asyncio.Task | None = PrivateAttr(default=None)
 	_intentional_stop: bool = PrivateAttr(default=False)
+	_detaching_keep_alive: bool = PrivateAttr(default=False)
 
 	_logger: Any = PrivateAttr(default=None)
 
@@ -721,6 +722,30 @@ class BrowserSession(BaseModel):
 		await self.reset()
 		# Create fresh event bus
 		self.event_bus = EventBus()
+
+	async def detach_keep_alive(self) -> None:
+		"""Detach from a keep-alive browser without resetting session-owned tab state.
+
+		Used by Desktop/local-worker runs that want the browser and current tab to
+		remain exactly as-is after the subprocess exits.
+		"""
+		self._intentional_stop = True
+		self._detaching_keep_alive = True
+		self.logger.debug('🔌 detach_keep_alive() called - disconnecting CDP without session reset')
+
+		try:
+			from browser_use.browser.events import SaveStorageStateEvent
+
+			save_event = self.event_bus.dispatch(SaveStorageStateEvent())
+			await save_event
+		except Exception:
+			self.logger.debug('detach_keep_alive storage save skipped', exc_info=True)
+
+		try:
+			if self._cdp_client_root is not None:
+				await self._cdp_client_root.stop()
+		except Exception:
+			self.logger.debug('detach_keep_alive cdp stop skipped', exc_info=True)
 
 	@observe_debug(ignore_input=True, ignore_output=True, name='browser_start_event_handler')
 	async def on_BrowserStartEvent(self, event: BrowserStartEvent) -> dict[str, str]:

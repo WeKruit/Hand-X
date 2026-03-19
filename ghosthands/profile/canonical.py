@@ -28,6 +28,7 @@ class CanonicalProfile(BaseModel):
     values: dict[str, CanonicalValue] = Field(default_factory=dict)
     education: list[dict[str, Any]] = Field(default_factory=list)
     experience: list[dict[str, Any]] = Field(default_factory=list)
+    languages: list[dict[str, Any]] = Field(default_factory=list)
 
     def get(self, key: str, *, allow_policy: bool = False) -> str | None:
         entry = self.values.get(key)
@@ -76,11 +77,19 @@ def _copy_language_list(value: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         language = _as_text(item.get("language"))
-        proficiency = _as_text(item.get("proficiency"))
+        overall_proficiency = _as_text(
+            item.get("overallProficiency") or item.get("overall_proficiency") or item.get("proficiency")
+        )
+        reading_writing = _as_text(item.get("readingWriting") or item.get("reading_writing"))
+        speaking_listening = _as_text(item.get("speakingListening") or item.get("speaking_listening"))
+        is_fluent_raw = item.get("isFluent", item.get("is_fluent"))
         if language:
             out.append({
                 "language": language,
-                "proficiency": proficiency or "",
+                "overall_proficiency": overall_proficiency or "",
+                "reading_writing": reading_writing or "",
+                "speaking_listening": speaking_listening or "",
+                "is_fluent": bool(is_fluent_raw) if isinstance(is_fluent_raw, bool) else None,
             })
     return out
 
@@ -161,6 +170,7 @@ def build_canonical_profile(
     canonical = CanonicalProfile(
         education=_copy_profile_list(profile.get("education")),
         experience=_copy_profile_list(profile.get("experience")),
+        languages=_copy_language_list(profile.get("languages")),
     )
 
     def register(
@@ -232,14 +242,14 @@ def build_canonical_profile(
     register_profile_alias("authorized_to_work", ("authorized_to_work",), ("US_citizen",))
     register_profile_alias("sponsorship_needed", ("sponsorship_needed",), ("visa_sponsorship",))
 
-    language_entries = _copy_language_list(profile.get("languages"))
+    language_entries = canonical.languages
     if language_entries:
         if "spoken_languages" not in canonical.values:
             register(
                 "spoken_languages",
                 ", ".join(
-                    f"{entry['language']} ({entry['proficiency']})".strip()
-                    if entry.get("proficiency")
+                    f"{entry['language']} ({entry['overall_proficiency']})".strip()
+                    if entry.get("overall_proficiency")
                     else entry["language"]
                     for entry in language_entries
                 ),
@@ -248,10 +258,10 @@ def build_canonical_profile(
             )
         if "english_proficiency" not in canonical.values:
             for entry in language_entries:
-                if entry.get("language", "").strip().lower() == "english" and entry.get("proficiency"):
+                if entry.get("language", "").strip().lower() == "english" and entry.get("overall_proficiency"):
                     register(
                         "english_proficiency",
-                        entry["proficiency"],
+                        entry["overall_proficiency"],
                         source_path="languages.english.proficiency",
                         provenance="derived",
                     )
