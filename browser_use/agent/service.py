@@ -81,6 +81,7 @@ from browser_use.utils import (
 	time_execution_async,
 	time_execution_sync,
 )
+from ghosthands.step_trace import get_blocker_attempt_state, publish_browser_session_trace
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,169 @@ def _truncate_log_text(text: str | None, limit: int | None = None) -> str:
 	if len(clean) <= limit:
 		return clean
 	return clean[: limit - 1].rstrip() + '…'
+
+
+def _normalize_blocker_text(text: str | None) -> str:
+	"""Normalize field labels for blocker-controller comparisons."""
+	if not text:
+		return ''
+	return re.sub(r'\s+', ' ', str(text).replace('*', ' ')).strip().lower()
+
+
+def _extract_action_name_params(action: Any) -> tuple[str, dict[str, Any]]:
+	"""Return the action name and params dict from a browser-use action model."""
+	action_data = action.model_dump(exclude_unset=True) if hasattr(action, 'model_dump') else {}
+	if not isinstance(action_data, dict) or not action_data:
+		return 'unknown', {}
+	action_name = next(iter(action_data.keys()), 'unknown')
+	params = action_data.get(action_name, {})
+	return action_name, params if isinstance(params, dict) else {}
+
+
+def _blocker_field_family(field_type: str | None) -> str:
+	normalized = _normalize_blocker_text(field_type)
+	if normalized in {'select', 'combobox', 'listbox'}:
+		return 'select'
+	if normalized in {'checkbox', 'checkbox group', 'radio', 'radio group', 'toggle', 'button group'}:
+		return 'binary'
+	if normalized in {'text', 'email', 'tel', 'url', 'number', 'search', 'textarea', 'date'}:
+		return 'text'
+	return normalized or 'unknown'
+
+
+def _action_targets_single_blocker(action_name: str, params: dict[str, Any], blocker: dict[str, Any]) -> bool:
+	"""Return True when an action explicitly targets the current single blocker."""
+	blocker_id = str(blocker.get('field_id') or '').strip()
+	blocker_label = _normalize_blocker_text(blocker.get('field_label') or '')
+	blocker_family = _blocker_field_family(blocker.get('field_type'))
+	param_field_id = str(params.get('field_id') or '').strip()
+	param_label = _normalize_blocker_text(params.get('field_label') or params.get('name') or '')
+	if action_name == 'domhand_assess_state':
+		return True
+	if action_name == 'domhand_interact_control':
+		return bool(
+			(param_field_id and blocker_id and param_field_id == blocker_id)
+			or (param_label and blocker_label and param_label == blocker_label)
+		)
+	if action_name == 'domhand_record_expected_value':
+		return bool(
+			(param_field_id and blocker_id and param_field_id == blocker_id)
+			or (param_label and blocker_label and param_label == blocker_label)
+		)
+	if action_name == 'domhand_fill':
+		focus_fields = params.get('focus_fields') or []
+		normalized_focus = {_normalize_blocker_text(label) for label in focus_fields if str(label).strip()}
+		return bool(blocker_label and blocker_label in normalized_focus)
+	if action_name == 'domhand_select':
+		if blocker_family != 'select':
+			return False
+		if param_field_id:
+			return bool(blocker_id and param_field_id == blocker_id)
+		if param_label:
+			return bool(blocker_label and param_label == blocker_label)
+		return True
+	return False
+
+
+def _classify_blocker_strategy(action_name: str, params: dict[str, Any]) -> str:
+	"""Collapse action variants into strategy labels for blocker no-state-change control."""
+	if action_name in {'domhand_fill', 'domhand_select', 'domhand_interact_control', 'domhand_record_expected_value'}:
+		return action_name
+	if action_name in {'click', 'input', 'send_keys'}:
+		return f'manual_{action_name}'
+	return action_name
+
+
+def _blocker_guard_decision(
+	last_state: dict[str, Any] | None,
+	actions: list[dict[str, Any]],
+	attempt_state: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+	"""Return a blocker-guard rejection when the next actions drift from the active blocker set."""
+	if not isinstance(last_state, dict):
+		return None
+	blocker_keys = [str(value).strip() for value in (last_state.get('blocking_field_keys') or []) if str(value).strip()]
+	if not blocker_keys:
+		return None
+	attempt_state = attempt_state or {}
+	single_blocker = last_state.get('single_active_blocker')
+	if isinstance(single_blocker, dict):
+		blocker_key = str(single_blocker.get('field_key') or '').strip()
+		blocker_change = str((last_state.get('blocking_field_state_changes') or {}).get(blocker_key) or '').strip()
+		last_attempt = attempt_state.get(blocker_key, {})
+		for action in actions:
+			action_name = str(action.get('action') or 'unknown')
+			params = action.get('params') if isinstance(action.get('params'), dict) else {}
+			if action_name == 'domhand_assess_state':
+				continue
+			if not _action_targets_single_blocker(action_name, params, single_blocker):
+				return {
+					"reason": "unrelated_action_with_single_blocker",
+					"blocker_key": blocker_key,
+					"blocker": single_blocker,
+					"strategy": _classify_blocker_strategy(action_name, params),
+					"message": (
+						f'Latest domhand_assess_state reports a single active blocker: '
+						f'"{single_blocker.get("field_label") or single_blocker.get("field_id")}". '
+						'Do not target unrelated fields before this blocker is cleared or reassessed.'
+					),
+					"recommended_next_action": (
+						"use domhand_interact_control with the exact field_id/field_type for binary controls, "
+						"use domhand_select for select blockers, or call domhand_assess_state again"
+					),
+				}
+			current_strategy = _classify_blocker_strategy(action_name, params)
+			if blocker_change == 'no_state_change' and last_attempt.get('last_attempt_strategy') == current_strategy:
+				return {
+					"reason": "same_strategy_no_state_change",
+					"blocker_key": blocker_key,
+					"blocker": single_blocker,
+					"strategy": current_strategy,
+					"message": (
+						f'The blocker "{single_blocker.get("field_label") or single_blocker.get("field_id")}" '
+						'has not changed since the last assessment. '
+						f'Do not retry the same strategy "{current_strategy}" again.'
+					),
+					"recommended_next_action": last_attempt.get('recommended_next_action')
+					or 'change recovery strategy for the same blocker, then reassess immediately',
+				}
+			return None
+		return None
+
+	blocker_set = set(blocker_keys)
+	blocker_labels = {
+		_normalize_blocker_text(label)
+		for label in (last_state.get('blocking_field_labels') or [])
+		if str(label).strip()
+	}
+	for action in actions:
+		action_name = str(action.get('action') or 'unknown')
+		params = action.get('params') if isinstance(action.get('params'), dict) else {}
+		if action_name not in {'domhand_fill', 'domhand_interact_control', 'domhand_record_expected_value', 'domhand_select'}:
+			continue
+		param_field_id = str(params.get('field_id') or '').strip()
+		param_label = _normalize_blocker_text(params.get('field_label') or params.get('name') or '')
+		focus_fields = params.get('focus_fields') or []
+		normalized_focus = {_normalize_blocker_text(label) for label in focus_fields if str(label).strip()}
+		if param_field_id and param_field_id not in blocker_set:
+			return {
+				"reason": "explicit_non_blocker_target",
+				"strategy": _classify_blocker_strategy(action_name, params),
+				"message": "The planned action explicitly targets a field that is not in the latest blocker set.",
+			}
+		if param_label and param_label not in blocker_labels:
+			return {
+				"reason": "explicit_non_blocker_target",
+				"strategy": _classify_blocker_strategy(action_name, params),
+				"message": "The planned action explicitly targets a label that is not in the latest blocker set.",
+			}
+		if normalized_focus and normalized_focus.isdisjoint(blocker_labels):
+			return {
+				"reason": "explicit_non_blocker_target",
+				"strategy": _classify_blocker_strategy(action_name, params),
+				"message": "The planned focus_fields do not match the latest blocker set.",
+			}
+	return None
 
 
 def log_response(response: AgentOutput, registry=None, logger=None) -> None:
@@ -1207,6 +1371,47 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if self.state.last_model_output is None:
 			raise ValueError('No model output to execute actions from')
 
+		actions_data = []
+		for action in self.state.last_model_output.action:
+			action_name, params = _extract_action_name_params(action)
+			actions_data.append({"action": action_name, "params": params})
+		last_state = getattr(self.browser_session, '_gh_last_application_state', None) if self.browser_session else None
+		guard_decision = _blocker_guard_decision(
+			last_state,
+			actions_data,
+			get_blocker_attempt_state(self.browser_session),
+		)
+		if guard_decision is not None:
+			if self.browser_session:
+				await publish_browser_session_trace(
+					self.browser_session,
+					'blocker_guard_reject',
+					{
+						'step': self.state.n_steps,
+						'decision': guard_decision,
+						'actions': actions_data,
+					},
+				)
+			self.state.last_result = [
+				ActionResult(
+					error=guard_decision.get('message') or 'Active blocker guard rejected the planned action.',
+					extracted_content=(
+						(guard_decision.get('message') or 'Active blocker guard rejected the planned action.')
+						+ ' '
+						+ (guard_decision.get('recommended_next_action') or '')
+					).strip(),
+					metadata={
+						'blocker_guard': True,
+						'reason': guard_decision.get('reason'),
+						'strategy': guard_decision.get('strategy'),
+						'blocker': guard_decision.get('blocker'),
+						'actions': actions_data,
+						'recommended_next_action': guard_decision.get('recommended_next_action'),
+					},
+				)
+			]
+			return
+
 		result = await self.multi_act(self.state.last_model_output.action)
 		self.state.last_result = result
 
@@ -1492,6 +1697,29 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if not self.settings.loop_detection_enabled:
 			return
 		nudge = self.state.loop_detector.get_nudge_message()
+		if not nudge:
+			return
+		last_state = getattr(self.browser_session, '_gh_last_application_state', None) if self.browser_session else None
+		blocker_context = ''
+		if isinstance(last_state, dict):
+			blocker_keys = [
+				str(key).strip()
+				for key in (last_state.get('blocking_field_keys') or [])
+				if str(key).strip()
+			]
+			same_blocker_signature_count = int(last_state.get('same_blocker_signature_count') or 0)
+			if blocker_keys:
+				blocker_context = (
+					'\n\nLatest domhand_assess_state still has active blockers on this page. '
+					'Only target one current blocker next. Do not retry fields that are not in the latest blocker set.'
+				)
+				if same_blocker_signature_count >= 1:
+					blocker_context += (
+						' The blocker set has not changed since the last assessment. '
+						'Change strategy on one current blocker instead of refilling the same answer again.'
+					)
+		if blocker_context:
+			nudge += blocker_context
 		if nudge:
 			self.logger.info(
 				f'🔁 Loop detection nudge injected (repetition={self.state.loop_detector.max_repetition_count}, '

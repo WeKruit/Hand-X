@@ -1079,6 +1079,7 @@ async def test_domhand_interact_control_uses_gui_fallback_for_trusted_radio_wrap
             WORKDAY_INTERACTIVE_BLOCKERS_HTML,
             content_type="text/html",
         )
+        httpserver.expect_request("/favicon.ico").respond_with_data("", status=204)
 
         await tools.navigate(
             url=httpserver.url_for("/workday-interactive-blockers"),
@@ -1109,6 +1110,50 @@ async def test_domhand_interact_control_uses_gui_fallback_for_trusted_radio_wrap
                 "source": "visual_fallback",
             }
         ]
+
+
+async def test_domhand_interact_control_recovers_radio_above_viewport(
+    httpserver: HTTPServer,
+):
+    reset_runtime_learning_state()
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/workday-interactive-blockers-offscreen").respond_with_data(
+            WORKDAY_INTERACTIVE_BLOCKERS_HTML,
+            content_type="text/html",
+        )
+        httpserver.expect_request("/favicon.ico").respond_with_data("", status=204)
+
+        await tools.navigate(
+            url=httpserver.url_for("/workday-interactive-blockers-offscreen"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+
+        page = await browser_session.get_current_page()
+        await page.evaluate(
+            """() => {
+                const spacer = document.createElement('div');
+                spacer.style.height = '3200px';
+                spacer.id = 'bottom-spacer';
+                document.body.appendChild(spacer);
+                window.scrollTo(0, document.body.scrollHeight);
+            }"""
+        )
+        await asyncio.sleep(0.2)
+
+        result = await domhand_interact_control(
+            DomHandInteractControlParams(
+                field_label="Have you previously worked at Exact Sciences?",
+                desired_value="No",
+                target_section="My Information",
+            ),
+            browser_session,
+        )
+
+        assert result.error is None
+        assert await page.evaluate("() => window.__radioSelected") == "No"
 
 
 async def test_domhand_select_short_circuits_when_value_already_selected(

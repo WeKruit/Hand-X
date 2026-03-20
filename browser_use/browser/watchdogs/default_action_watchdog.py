@@ -447,7 +447,8 @@ class DefaultActionWatchdog(BaseWatchdog):
 		last_state = getattr(self.browser_session, '_gh_last_application_state', None)
 		if not isinstance(last_state, dict):
 			return None
-		if last_state.get('advance_allowed') is True:
+		optional_validation_count = int(last_state.get('optional_validation_count') or 0)
+		if last_state.get('advance_allowed') is True and optional_validation_count == 0:
 			return None
 
 		page = await self.browser_session.get_current_page()
@@ -464,9 +465,10 @@ class DefaultActionWatchdog(BaseWatchdog):
 			return None
 
 		return (
-			'Latest domhand_assess_state still reports advance_allowed=false. '
+			'Latest domhand_assess_state still reports unresolved blockers for advancement. '
 			f"Current section: {last_state.get('current_section') or '(unknown)'}. "
 			f"Unresolved required: {last_state.get('unresolved_required_count', 0)}, "
+			f"optional validation: {optional_validation_count}, "
 			f"mismatches: {last_state.get('mismatched_count', 0)}, "
 			f"opaque: {last_state.get('opaque_count', 0)}, "
 			f"unverified: {last_state.get('unverified_count', 0)}. "

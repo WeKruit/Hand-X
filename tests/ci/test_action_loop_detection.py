@@ -1,6 +1,7 @@
 """Tests for action loop detection — behavioral cycle breaking (PR #4)."""
 
 from browser_use.agent.service import Agent
+from browser_use.agent.service import _blocker_guard_decision
 from browser_use.agent.views import (
     ActionLoopDetector,
     PageFingerprint,
@@ -354,6 +355,113 @@ async def test_loop_nudge_injected_into_context():
     messages = _get_context_messages(agent)
     assert len(messages) == 1
     assert "repeated a similar action" in messages[0]
+
+
+async def test_loop_nudge_includes_latest_blocker_context():
+    """Loop nudges should include blocker-state guidance only when a real loop exists."""
+    from types import SimpleNamespace
+
+    llm = create_mock_llm()
+    agent = Agent(task="Test task", llm=llm)
+    agent.browser_session = SimpleNamespace(
+        id="test-browser-session",
+        agent_focus_target_id=None,
+        _gh_last_application_state={
+            "blocking_field_keys": ["text|salary", "select|relocation"],
+            "same_blocker_signature_count": 2,
+        }
+    )
+
+    for _ in range(5):
+        agent.state.loop_detector.record_action("input", {"index": 7, "text": "90000"})
+
+    agent._inject_loop_detection_nudge()
+
+    messages = _get_context_messages(agent)
+    assert len(messages) == 1
+    assert "Latest domhand_assess_state still has active blockers on this page" in messages[0]
+    assert "blocker set has not changed" in messages[0]
+
+
+async def test_blocker_state_does_not_inject_context_without_real_loop():
+    """Blocker-state should stay out of planner context when no loop was detected."""
+    from types import SimpleNamespace
+
+    llm = create_mock_llm()
+    agent = Agent(task="Test task", llm=llm)
+    agent.browser_session = SimpleNamespace(
+        id="test-browser-session",
+        agent_focus_target_id=None,
+        _gh_last_application_state={
+            "blocking_field_keys": ["text|salary"],
+            "same_blocker_signature_count": 2,
+        }
+    )
+
+    agent._inject_loop_detection_nudge()
+
+    assert _get_context_messages(agent) == []
+
+
+def test_blocker_guard_rejects_unrelated_action_when_single_blocker_active():
+    decision = _blocker_guard_decision(
+        {
+            "blocking_field_keys": ["radio-group|ff-3"],
+            "blocking_field_labels": [
+                "Have you previously been employed by Arlo Technologies Inc.? CURRENT EMPLOYEES: Please apply via your internal Workday account instead.*"
+            ],
+            "blocking_field_state_changes": {"radio-group|ff-3": "new"},
+            "single_active_blocker": {
+                "field_key": "radio-group|ff-3",
+                "field_id": "ff-3",
+                "field_label": "Have you previously been employed by Arlo Technologies Inc.? CURRENT EMPLOYEES: Please apply via your internal Workday account instead.*",
+                "field_type": "radio-group",
+                "reason": "required_missing_value",
+            },
+        },
+        [{"action": "domhand_select", "params": {"index": 3070, "value": "LinkedIn"}}],
+        {},
+    )
+
+    assert decision is not None
+    assert decision["reason"] == "unrelated_action_with_single_blocker"
+
+
+def test_blocker_guard_rejects_same_strategy_after_no_state_change():
+    decision = _blocker_guard_decision(
+        {
+            "blocking_field_keys": ["radio-group|ff-3"],
+            "blocking_field_labels": ["Have you previously been employed?"],
+            "blocking_field_state_changes": {"radio-group|ff-3": "no_state_change"},
+            "single_active_blocker": {
+                "field_key": "radio-group|ff-3",
+                "field_id": "ff-3",
+                "field_label": "Have you previously been employed?",
+                "field_type": "radio-group",
+                "reason": "required_missing_value",
+            },
+        },
+        [
+            {
+                "action": "domhand_interact_control",
+                "params": {
+                    "field_id": "ff-3",
+                    "field_type": "radio-group",
+                    "field_label": "Have you previously been employed?",
+                    "desired_value": "No",
+                },
+            }
+        ],
+        {
+            "radio-group|ff-3": {
+                "last_attempt_strategy": "domhand_interact_control",
+                "recommended_next_action": "change strategy",
+            }
+        },
+    )
+
+    assert decision is not None
+    assert decision["reason"] == "same_strategy_no_state_change"
 
 
 async def test_no_loop_nudge_when_disabled():

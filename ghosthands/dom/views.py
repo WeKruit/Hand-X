@@ -63,6 +63,16 @@ class FormField(BaseModel):
 	item_value: str = Field(default="", description="For checkbox/radio individual items — the item's value")
 	btn_ids: list[str] = Field(default_factory=list, description="For button groups — ff_ids of member buttons")
 	disabled: bool = Field(default=False)
+	widget_kind: str = Field(default="", description="Internal widget classification for special handling")
+	component_field_ids: list[str] = Field(
+		default_factory=list,
+		description="Internal child field ids for grouped widgets such as segmented date inputs",
+	)
+	has_calendar_trigger: bool = Field(
+		default=False,
+		description="True when the grouped widget exposes a visible calendar/date trigger affordance",
+	)
+	format_hint: str = Field(default="", description="Optional visible format/placeholder hint")
 
 
 class ValidationError(BaseModel):

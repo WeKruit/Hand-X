@@ -59,6 +59,13 @@ CAMEL_TO_SNAKE_SCALAR: dict[str, str] = {
 
 CAMEL_TO_SNAKE_NESTED: dict[str, str] = {
     "fieldOfStudy": "field_of_study",
+    "degreeType": "degree_type",
+    "majorName": "major_name",
+    "majorNames": "major_names",
+    "minorName": "minor_name",
+    "minorNames": "minor_names",
+    "honorsList": "honors_list",
+    "honoursList": "honours_list",
     "startDate": "start_date",
     "endDate": "end_date",
     "graduationDate": "graduation_date",

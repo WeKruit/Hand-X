@@ -120,5 +120,23 @@ class Settings(BaseSettings):
         description="Path to JSON resume for testing without DB",
     )
 
+    # --- Step tracing / replay ---
+    step_trace_enabled: bool = Field(
+        False,
+        description="Enable Redis Streams step tracing for agent replay/debugging",
+    )
+    step_trace_redis_url: str = Field(
+        "",
+        description="Redis URL for structured step trace publishing",
+    )
+    step_trace_maxlen: int = Field(
+        2000,
+        description="Approximate max stream length for per-job step trace streams",
+    )
+    step_trace_ttl_seconds: int = Field(
+        86_400,
+        description="TTL in seconds for per-job Redis step trace streams",
+    )
+
 
 settings = Settings()

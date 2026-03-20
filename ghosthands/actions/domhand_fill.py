@@ -45,6 +45,7 @@ from ghosthands.actions.views import (
     split_dropdown_value_hierarchy,
 )
 from ghosthands.bridge.profile_adapter import camel_to_snake_profile
+from ghosthands.dom.label_resolver import generate_field_fingerprint
 from ghosthands.profile.canonical import build_canonical_profile
 from ghosthands.runtime_learning import (
     DOMHAND_RETRY_CAP,
@@ -98,6 +99,48 @@ class ResolvedFieldBinding:
 class FocusFieldSelection:
     fields: list[FormField]
     ambiguous_labels: dict[str, list[FormField]]
+
+
+@dataclass
+class StructuredRepeaterDiagnostic:
+    repeater_group: str
+    field_id: str
+    field_label: str
+    section: str
+    slot_name: str | None = None
+    numeric_index: int | None = None
+    section_binding_reused: bool = False
+    binding_mode: str | None = None
+    binding_confidence: str | None = None
+    entry_index: int | None = None
+    current_value: str = ""
+    resolved_value_preview: str = "EMPTY"
+    resolved_source_key: str | None = None
+    failure_stage: str = ""
+
+
+def _field_name_attr_hint(raw_field: dict[str, Any]) -> str:
+    return str(
+        raw_field.get("name_attr")
+        or raw_field.get("groupKey")
+        or raw_field.get("questionLabel")
+        or raw_field.get("itemValue")
+        or ""
+    ).strip()
+
+
+def _ensure_field_fingerprint(field: FormField, *, name_attr_hint: str = "") -> FormField:
+    if str(field.field_fingerprint or "").strip():
+        return field
+    label = _preferred_field_label(field) or field.name or field.raw_label or field.field_id
+    field.field_fingerprint = generate_field_fingerprint(
+        field.field_type or "unknown",
+        label,
+        field.section or "",
+        name_attr_hint,
+    )
+    return field
+
 
 # ── Constants ────────────────────────────────────────────────────────
 
@@ -242,6 +285,126 @@ def _profile_debug_preview(value: Any) -> str:
     return f"{text[:93]}..."
 
 
+def _structured_repeater_debug_enabled() -> bool:
+    return _profile_debug_enabled()
+
+
+def _trace_structured_repeater_resolution(
+    field: FormField,
+    diagnostic: StructuredRepeaterDiagnostic | None,
+) -> None:
+    if not diagnostic or not _structured_repeater_debug_enabled():
+        return
+    logger.info(
+        "domhand.structured_repeater_resolution",
+        extra={
+            "repeater_group": diagnostic.repeater_group,
+            "field_id": diagnostic.field_id,
+            "field_label": diagnostic.field_label,
+            "section": diagnostic.section,
+            "slot_name": diagnostic.slot_name,
+            "numeric_index": diagnostic.numeric_index,
+            "section_binding_reused": diagnostic.section_binding_reused,
+            "binding_mode": diagnostic.binding_mode,
+            "binding_confidence": diagnostic.binding_confidence,
+            "entry_index": diagnostic.entry_index,
+            "current_value": _profile_debug_preview(diagnostic.current_value),
+            "resolved_value_preview": diagnostic.resolved_value_preview,
+            "resolved_source_key": diagnostic.resolved_source_key,
+            "failure_stage": diagnostic.failure_stage,
+            "field_type": field.field_type,
+        },
+    )
+
+
+def _structured_repeater_failure_reason(stage: str) -> str:
+    return {
+        "slot_unresolved": "structured_slot_unresolved",
+        "binding_unresolved": "structured_binding_unresolved",
+        "entry_value_missing": "structured_entry_value_missing",
+        "value_coercion_empty": "structured_value_coercion_empty",
+    }.get(stage, "missing_profile_data")
+
+
+def _structured_repeater_takeover_suggestion(repeater_group: str) -> str:
+    if repeater_group == "languages":
+        return "Pause for user data instead of guessing this structured language field."
+    if repeater_group == "education":
+        return "Pause for user data instead of guessing this structured education field."
+    return "Pause for user data instead of guessing this structured repeater field."
+
+
+def _structured_repeater_fill_result(
+    field: FormField,
+    diagnostic: StructuredRepeaterDiagnostic,
+) -> FillFieldResult:
+    error_msg = _structured_field_missing_reason(field)
+    return FillFieldResult(
+        field_id=field.field_id,
+        name=_preferred_field_label(field),
+        success=False,
+        actor="skipped",
+        error=error_msg if not field.required else f"REQUIRED — {error_msg}",
+        required=field.required,
+        control_kind=field.field_type,
+        section=field.section or "",
+        state="failed",
+        failure_reason=_structured_repeater_failure_reason(diagnostic.failure_stage),
+        takeover_suggestion=_structured_repeater_takeover_suggestion(diagnostic.repeater_group),
+        binding_mode=diagnostic.binding_mode,
+        binding_confidence=diagnostic.binding_confidence,
+        repeater_group=diagnostic.repeater_group,
+        slot_name=diagnostic.slot_name,
+        diagnostic_stage=diagnostic.failure_stage or None,
+    )
+
+
+def _fill_result_summary_entry(result: FillFieldResult) -> dict[str, Any]:
+    entry = {
+        "field_id": result.field_id,
+        "name": result.name,
+        "control_kind": result.control_kind,
+        "section": result.section,
+        "failure_reason": result.failure_reason,
+        "takeover_suggestion": result.takeover_suggestion,
+    }
+    if result.repeater_group:
+        entry["repeater_group"] = result.repeater_group
+    if result.slot_name:
+        entry["slot_name"] = result.slot_name
+    if result.diagnostic_stage:
+        entry["diagnostic_stage"] = result.diagnostic_stage
+    if result.binding_mode:
+        entry["binding_mode"] = result.binding_mode
+    if result.binding_confidence:
+        entry["binding_confidence"] = result.binding_confidence
+    return entry
+
+
+def _set_structured_repeater_binding(
+    diagnostic: StructuredRepeaterDiagnostic | None,
+    binding: ResolvedFieldBinding | None,
+) -> None:
+    if not diagnostic or not binding:
+        return
+    diagnostic.binding_mode = binding.binding_mode
+    diagnostic.binding_confidence = binding.binding_confidence
+    diagnostic.entry_index = binding.entry_index
+
+
+def _set_structured_repeater_resolved_value(
+    diagnostic: StructuredRepeaterDiagnostic | None,
+    value: str | None,
+    *,
+    source_key: str | None = None,
+) -> None:
+    if not diagnostic:
+        return
+    diagnostic.failure_stage = "resolved"
+    diagnostic.resolved_value_preview = _profile_debug_preview(value)
+    diagnostic.resolved_source_key = source_key
+
+
 def _looks_like_internal_widget_value(value: str | None) -> bool:
     text = " ".join(str(value or "").split()).strip()
     if not text:
@@ -271,6 +434,13 @@ def _is_non_guess_name_fragment(field_name: str | None) -> bool:
     if norm == "name":
         return True
     return False
+
+
+def _strip_required_marker(label: str | None) -> str:
+    text = str(label or "").strip()
+    if not text:
+        return ""
+    return re.sub(r"\s*[*\uFF0A]+\s*$", "", text).strip()
 
 
 def _profile_skill_values(profile_data: dict[str, Any] | None) -> list[str]:
@@ -313,19 +483,13 @@ def _checkbox_group_mode(field: FormField) -> str:
     if (
         len(choices) == 2
         and any(choice == "yes" or choice.startswith("yes ") for choice in choices)
-        and any(
-            choice == "no"
-            or choice.startswith("no ")
-            or choice.startswith("i do not ")
-            for choice in choices
-        )
+        and any(choice == "no" or choice.startswith("no ") or choice.startswith("i do not ") for choice in choices)
     ):
         return "exclusive_choice"
 
     if _EXCLUSIVE_CHOICE_CHECKBOX_PROMPT_RE.search(prompt) and all(len(choice.split()) <= 8 for choice in choices):
         prefixed = [
-            any(choice.startswith(prefix) for prefix in _EXCLUSIVE_CHOICE_OPTION_PREFIXES)
-            for choice in choices
+            any(choice.startswith(prefix) for prefix in _EXCLUSIVE_CHOICE_OPTION_PREFIXES) for choice in choices
         ]
         if prefixed.count(True) >= 2:
             return "exclusive_choice"
@@ -880,6 +1044,57 @@ _EXTRACT_FIELDS_JS = r"""() => {
 		return '';
 	};
 
+	var getFieldWrapperMeta = function(el) {
+		var wrapper = ff.closestCrossRoot(
+			el,
+			'[data-automation-id="formField"], [data-automation-id*="formField"], fieldset, .form-group, .field'
+		) || el.parentElement || el;
+		var cleanText = function(node) {
+			if (!node) return '';
+			var clone = node.cloneNode(true);
+			clone.querySelectorAll(
+				'input, textarea, select, button, [role="radio"], [role="checkbox"], [role="switch"], [role="textbox"], [role="combobox"], [class*="desc"], [class*="sub"], [class*="hint"], .option-desc, small'
+			).forEach(function(x) { x.remove(); });
+			return clone.textContent ? clone.textContent.replace(/\s+/g, ' ').trim() : '';
+		};
+		var label = '';
+		var candidates = [
+			wrapper.querySelector(':scope > legend'),
+			wrapper.querySelector(':scope > [data-automation-id="fieldLabel"]'),
+			wrapper.querySelector(':scope > [data-automation-id*="fieldLabel"]'),
+			wrapper.querySelector(':scope > label'),
+			wrapper.querySelector(':scope > [class*="question"]')
+		];
+		for (var i = 0; i < candidates.length; i++) {
+			var text = cleanText(candidates[i]);
+			if (!text) continue;
+			label = text;
+			break;
+		}
+		var hasCalendarTrigger = !!wrapper.querySelector(
+			'button[aria-label*="calendar" i], button[title*="calendar" i], [data-automation-id*="datePicker"], [data-automation-id*="dateIcon"], [data-automation-id*="dateTrigger"]'
+		);
+		var formatHint = '';
+		var placeholders = [];
+		var placeholderNodes = wrapper.querySelectorAll('input[placeholder]');
+		for (var j = 0; j < placeholderNodes.length; j++) {
+			var placeholder = (placeholderNodes[j].getAttribute('placeholder') || '').trim();
+			if (!placeholder) continue;
+			if (placeholders.indexOf(placeholder) === -1) placeholders.push(placeholder);
+		}
+		if (placeholders.length >= 2) {
+			formatHint = placeholders.join('/');
+		} else if (placeholders.length === 1) {
+			formatHint = placeholders[0];
+		}
+		return {
+			wrapperId: wrapper ? ff.tag(wrapper) : '',
+			wrapperLabel: label,
+			hasCalendarTrigger: hasCalendarTrigger,
+			formatHint: formatHint
+		};
+	};
+
 	ff.queryAll(ff.SELECTOR).forEach(function(el) {
 		if (seen.has(el)) return;
 		seen.add(el);
@@ -930,6 +1145,7 @@ _EXTRACT_FIELDS_JS = r"""() => {
 			name: ff.getAccessibleName(el),
 			field_type: type,
 			section: ff.getSection(el),
+			name_attr: el.getAttribute('name') || '',
 			required: el.required || el.getAttribute('aria-required') === 'true' || el.dataset.required === 'true' || el.dataset.ffRequired === 'true',
 			options: [],
 			choices: [],
@@ -1061,6 +1277,18 @@ _EXTRACT_FIELDS_JS = r"""() => {
 			entry.current_value = el.value || (el.textContent ? el.textContent.trim() : '') || '';
 		}
 
+		var wrapperMeta = getFieldWrapperMeta(el);
+		if (wrapperMeta.wrapperId) entry.wrapper_id = wrapperMeta.wrapperId;
+		if (wrapperMeta.wrapperLabel) entry.wrapper_label = wrapperMeta.wrapperLabel;
+		if (wrapperMeta.hasCalendarTrigger) entry.has_calendar_trigger = true;
+		if (wrapperMeta.formatHint) entry.format_hint = wrapperMeta.formatHint;
+		var labelNorm = (entry.name || '').replace(/\s+/g, ' ').trim().toLowerCase();
+		if ((type === 'number' || type === 'text' || type === 'date') && (labelNorm === 'month' || labelNorm === 'day' || labelNorm === 'year')) {
+			entry.date_component = labelNorm;
+			entry.date_group_key = wrapperMeta.wrapperId || wrapperMeta.wrapperLabel || entry.section || '';
+			if (wrapperMeta.wrapperLabel) entry.group_label = wrapperMeta.wrapperLabel;
+		}
+
 		out.push(entry);
 	});
 	return JSON.stringify(out);
@@ -1153,6 +1381,7 @@ _EXTRACT_BUTTON_GROUPS_JS = (
 			name: questionLabel.replace(/\*\s*$/, '').trim(),
 			field_type: 'button-group',
 			section: ff.getSection(container),
+			name_attr: container.getAttribute('name') || '',
 			required: false,
 			options: [],
 			choices: group.buttons.map(function(b) { return b.text; }),
@@ -1293,14 +1522,12 @@ _CLICK_RADIO_OPTION_JS = r"""(ffId, text) => {
 		var itemLower = itemText.toLowerCase();
 		if (itemLower === lower || itemLower.includes(lower) || lower.includes(itemLower)) {
 			var clickable = getClickable(item);
+			if (clickable && clickable.scrollIntoView) {
+				clickable.scrollIntoView({block: 'center', inline: 'center'});
+			}
 			clickable.click();
 			return JSON.stringify({clicked: true, text: itemText});
 		}
-	}
-	if (items.length > 0) {
-		var firstClickable = getClickable(items[0]);
-		firstClickable.click();
-		return JSON.stringify({clicked: true, text: getText(items[0]) || '(first)'});
 	}
 	return JSON.stringify({clicked: false, error: 'No matching radio option'});
 }"""
@@ -1472,8 +1699,14 @@ _GET_BINARY_CLICK_TARGET_JS = r"""(ffId) => {
 		control,
 		'label, [role="row"], [role="cell"], [role="button"], .checkbox-card, .checkbox-option, .radio-card, .radio-option, [data-automation-id*="checkbox"], [data-automation-id*="radio"], [data-automation-id*="promptOption"]'
 	) || control.parentElement || control;
+	if (target && target.scrollIntoView) {
+		target.scrollIntoView({block: 'center', inline: 'center'});
+	}
 	var rect = target && target.getBoundingClientRect ? target.getBoundingClientRect() : null;
 	if (!rect || rect.width === 0 || rect.height === 0) {
+		if (control && control.scrollIntoView) {
+			control.scrollIntoView({block: 'center', inline: 'center'});
+		}
 		rect = control && control.getBoundingClientRect ? control.getBoundingClientRect() : null;
 		target = control;
 	}
@@ -1589,6 +1822,9 @@ _GET_GROUP_OPTION_TARGET_JS = r"""(ffId, text) => {
 		else if (labelLower.includes(lower) || lower.includes(labelLower)) score = 2;
 		if (score === 0) continue;
 		var clickable = getClickable(node);
+		if (clickable && clickable.scrollIntoView) {
+			clickable.scrollIntoView({block: 'center', inline: 'center'});
+		}
 		var rect = clickable.getBoundingClientRect();
 		if (!rect || rect.width === 0 || rect.height === 0) continue;
 		if (!best || score > best.score) {
@@ -1797,6 +2033,44 @@ _DISMISS_DROPDOWN_JS = r"""() => {
 	return 'ok';
 }"""
 
+_CLICK_OTHER_TEXTLIKE_FIELD_JS = r"""(ffId) => {
+	var ff = window.__ff;
+	var current = ff ? ff.byId(ffId) : document.querySelector('[data-ff-id="' + ffId + '"]');
+	var isVisible = function(node) {
+		if (!node) return false;
+		var style = window.getComputedStyle(node);
+		if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+		var rect = node.getBoundingClientRect();
+		return !!rect && rect.width > 0 && rect.height > 0;
+	};
+	var sameFamily = function(a, b) {
+		if (!a || !b || !a.contains || !b.contains) return false;
+		return a === b || a.contains(b) || b.contains(a);
+	};
+	var selectors = [
+		'input:not([type="hidden"]):not([disabled])',
+		'textarea:not([disabled])',
+		'select:not([disabled])',
+		'[role="textbox"]',
+		'[role="combobox"]',
+		'[contenteditable="true"]'
+	].join(', ');
+	var nodes = ff && ff.queryAll ? ff.queryAll(selectors) : Array.from(document.querySelectorAll(selectors));
+	for (var i = 0; i < nodes.length; i++) {
+		var node = nodes[i];
+		if (!node || sameFamily(current, node) || !isVisible(node)) continue;
+		try {
+			if (node.scrollIntoView) node.scrollIntoView({block: 'center', inline: 'center'});
+			node.click();
+			return JSON.stringify({clicked: true, fieldId: node.getAttribute('data-ff-id') || ''});
+		} catch (e) {}
+	}
+	if (current && current.blur) current.blur();
+	document.body.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+	document.body.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+	return JSON.stringify({clicked: false});
+}"""
+
 _FOCUS_AND_CLEAR_JS = r"""(ffId) => {
 	var ff = window.__ff;
 	var el = ff ? ff.byId(ffId) : document.querySelector('[data-ff-id="' + ffId + '"]');
@@ -1812,6 +2086,94 @@ _FOCUS_FIELD_JS = r"""(ffId) => {
 	if (!el) return JSON.stringify({ok: false, error: 'not found'});
 	if (el.focus) el.focus();
 	return JSON.stringify({ok: true});
+}"""
+
+_CLICK_ALTERNATE_FIELD_JS = r"""(ffId) => {
+	var ff = window.__ff;
+	var current = ff ? ff.byId(ffId) : document.querySelector('[data-ff-id="' + ffId + '"]');
+	if (!current) return JSON.stringify({clicked: false, error: 'current_not_found'});
+	var isVisible = function(node) {
+		if (!node) return false;
+		var style = window.getComputedStyle(node);
+		if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+		var rect = node.getBoundingClientRect();
+		return !!rect && rect.width > 0 && rect.height > 0;
+	};
+	var candidates = ff ? ff.queryAll(ff.SELECTOR) : Array.from(document.querySelectorAll('[data-ff-id]'));
+	for (var i = 0; i < candidates.length; i++) {
+		var node = candidates[i];
+		if (!node || node === current) continue;
+		var nodeId = (node.getAttribute && node.getAttribute('data-ff-id')) || '';
+		if (nodeId && nodeId === ffId) continue;
+		if (!isVisible(node)) continue;
+		var clickable = (ff && ff.closestCrossRoot)
+			? ff.closestCrossRoot(node, 'input, textarea, select, button, [role="textbox"], [role="combobox"], [role="spinbutton"]')
+			: null;
+		if (!clickable) clickable = node;
+		if (!isVisible(clickable)) continue;
+		if (clickable.scrollIntoView) {
+			clickable.scrollIntoView({block: 'center', inline: 'center'});
+		}
+		if (clickable.click) clickable.click();
+		if (clickable.focus) clickable.focus();
+		return JSON.stringify({clicked: true, target_id: nodeId || '', target_tag: clickable.tagName || ''});
+	}
+	return JSON.stringify({clicked: false, error: 'no_alternate_visible_field'});
+}"""
+
+_OPEN_GROUPED_DATE_PICKER_JS = r"""(ffId) => {
+	var ff = window.__ff;
+	var container = ff ? ff.byId(ffId) : document.querySelector('[data-ff-id="' + ffId + '"]');
+	if (!container) return JSON.stringify({clicked: false, opened: false, error: 'container_not_found'});
+	var all = Array.from(container.querySelectorAll('button, [role="button"], [aria-haspopup]'));
+	var trigger = null;
+	for (var i = 0; i < all.length; i++) {
+		var node = all[i];
+		var text = ((node.getAttribute('aria-label') || '') + ' ' + (node.getAttribute('title') || '') + ' ' + (node.textContent || '')).toLowerCase();
+		if (text.indexOf('calendar') !== -1 || text.indexOf('date') !== -1) {
+			trigger = node;
+			break;
+		}
+	}
+	if (!trigger) {
+		trigger = container.querySelector('[data-automation-id*="datePicker"], [data-automation-id*="dateIcon"], [data-automation-id*="dateTrigger"]');
+	}
+	if (!trigger) return JSON.stringify({clicked: false, opened: false, error: 'trigger_not_found'});
+	if (trigger.scrollIntoView) trigger.scrollIntoView({block: 'center', inline: 'center'});
+	if (trigger.click) trigger.click();
+	var dialog = document.querySelector('[role="dialog"], [data-automation-id*="datePicker"], [data-automation-id*="calendar"], [class*="calendar"]');
+	return JSON.stringify({clicked: true, opened: !!dialog});
+}"""
+
+_SELECT_GROUPED_DATE_PICKER_VALUE_JS = r"""(monthName, dayValue, yearValue) => {
+	var dialogs = Array.from(document.querySelectorAll('[role="dialog"], [data-automation-id*="datePicker"], [data-automation-id*="calendar"], [class*="calendar"]'));
+	if (dialogs.length === 0) return JSON.stringify({selected: false, error: 'picker_not_open'});
+	var roots = dialogs;
+	var targetMonth = (monthName || '').toLowerCase();
+	var targetDay = String(dayValue || '').trim();
+	var targetYear = String(yearValue || '').trim();
+	var matches = function(text) {
+		var lower = (text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+		if (!lower) return false;
+		if (targetMonth && lower.indexOf(targetMonth) === -1) return false;
+		if (targetYear && lower.indexOf(targetYear) === -1) return false;
+		return lower.indexOf(' ' + targetDay + ' ') !== -1
+			|| lower.endsWith(' ' + targetDay)
+			|| lower.indexOf('/' + targetDay + '/') !== -1
+			|| lower.indexOf('-' + targetDay + '-') !== -1;
+	};
+	for (var i = 0; i < roots.length; i++) {
+		var nodes = roots[i].querySelectorAll('button, [role="button"], [role="gridcell"], [role="cell"], td, div');
+		for (var j = 0; j < nodes.length; j++) {
+			var node = nodes[j];
+			var text = (node.getAttribute && node.getAttribute('aria-label')) || node.textContent || '';
+			if (!matches(text)) continue;
+			if (node.scrollIntoView) node.scrollIntoView({block: 'center', inline: 'center'});
+			if (node.click) node.click();
+			return JSON.stringify({selected: true});
+		}
+	}
+	return JSON.stringify({selected: false, error: 'target_not_found'});
 }"""
 
 
@@ -1853,7 +2215,14 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
             return None
         ranked = sorted(
             entries,
-            key=lambda entry: _score_date(entry.get("endDate") or entry.get("end_date") or entry.get("graduationDate") or entry.get("graduation_date") or entry.get("startDate") or entry.get("start_date")),
+            key=lambda entry: _score_date(
+                entry.get("endDate")
+                or entry.get("end_date")
+                or entry.get("graduationDate")
+                or entry.get("graduation_date")
+                or entry.get("startDate")
+                or entry.get("start_date")
+            ),
             reverse=True,
         )
         return ranked[0] if ranked else None
@@ -1896,8 +2265,7 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
 
             def _read_text(*keys: str) -> str | None:
                 for key in keys:
-                    value = data.get(key)
-                    text = str(value or "").strip() if value is not None else ""
+                    text = _entry_text_value(data.get(key))
                     if text:
                         return text
                 return None
@@ -1924,21 +2292,44 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
                     zip_code = zip_code or (state_zip[1] if len(state_zip) > 1 else None)
 
             latest_education = _pick_latest_education_entry(data.get("education"))
-            latest_degree = (
-                str(
-                    (latest_education or {}).get("degree")
-                    or ""
-                ).strip()
-                or None
-            )
+            latest_degree = _entry_text_value((latest_education or {}).get("degree")) or None
+            latest_degree_type = _read_text("degree_type", "degreeType")
             latest_field_of_study = (
-                str(
+                _entry_text_value(
                     (latest_education or {}).get("field")
                     or (latest_education or {}).get("fieldOfStudy")
                     or (latest_education or {}).get("field_of_study")
+                    or (latest_education or {}).get("major")
+                    or (latest_education or {}).get("majors")
+                    or (latest_education or {}).get("majorName")
+                    or (latest_education or {}).get("majorNames")
+                    or (latest_education or {}).get("major_name")
+                    or (latest_education or {}).get("major_names")
+                    or (latest_education or {}).get("area_of_study")
+                    or (latest_education or {}).get("areaOfStudy")
+                    or (latest_education or {}).get("discipline")
                     or ""
-                ).strip()
+                )
                 or None
+            )
+            latest_minor = _entry_text_value(
+                (latest_education or {}).get("minor")
+                or (latest_education or {}).get("minors")
+                or (latest_education or {}).get("minorName")
+                or (latest_education or {}).get("minorNames")
+                or (latest_education or {}).get("minor_name")
+                or (latest_education or {}).get("minor_names")
+                or ""
+            )
+            latest_honors = _entry_text_value(
+                (latest_education or {}).get("honors")
+                or (latest_education or {}).get("honours")
+                or (latest_education or {}).get("honor")
+                or (latest_education or {}).get("honorsList")
+                or (latest_education or {}).get("honoursList")
+                or (latest_education or {}).get("honors_list")
+                or (latest_education or {}).get("honours_list")
+                or ""
             )
             latest_graduation_date = _format_graduation_date(
                 (latest_education or {}).get("graduationDate")
@@ -1996,8 +2387,11 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
                 "current_school_year": _read_text("current_school_year", "currentSchoolYear"),
                 "graduation_date": _read_text("graduation_date", "graduationDate") or latest_graduation_date,
                 "degree_seeking": _read_text("degree_seeking", "degreeSeeking") or latest_degree,
+                "degree_type": _read_text("degree_type", "degreeType") or latest_degree_type,
                 "certifications_licenses": _read_text("certifications_licenses", "certificationsLicenses"),
                 "field_of_study": latest_field_of_study,
+                "minor": latest_minor,
+                "honors": latest_honors,
                 "spoken_languages": _read_text("spoken_languages", "spokenLanguages"),
                 "english_proficiency": _read_text("english_proficiency", "englishProficiency"),
                 "languages": data.get("languages") if isinstance(data.get("languages"), list) else None,
@@ -2113,6 +2507,25 @@ def _normalize_yes_no_answer(answer: str | None) -> str | None:
     if re.search(r"\b(no|not|false|unchecked|decline|never|none)\b", norm):
         return "No"
     if re.search(r"\b(yes|true|checked|citizen|authorized|eligible|available)\b", norm):
+        return "Yes"
+    return None
+
+
+def _normalize_binary_match_value(value: str | None) -> str | None:
+    """Normalize strict binary control values to Yes/No for verification."""
+    if value in (None, ""):
+        return None
+    norm = normalize_name(value)
+    if not norm:
+        return None
+    if norm in {"yes", "y", "true", "checked", "on", "1"}:
+        return "Yes"
+    if norm in {"no", "n", "false", "unchecked", "off", "0"}:
+        return "No"
+
+    if re.search(r"\b(do not|dont|don t|disagree|decline|reject)\b", norm):
+        return "No"
+    if re.search(r"\b(acknowledge|agree|accept|consent|confirm)\b", norm):
         return "Yes"
     return None
 
@@ -2316,11 +2729,16 @@ def _field_label_candidates(field: FormField) -> list[str]:
     candidates: list[str] = []
     for label in (field.raw_label, field.name):
         cleaned = str(label or "").strip()
-        key = normalize_name(cleaned)
-        if not cleaned or not key or key in seen:
-            continue
-        seen.add(key)
-        candidates.append(cleaned)
+        variants = [cleaned]
+        stripped = _strip_required_marker(cleaned)
+        if stripped and stripped != cleaned:
+            variants.append(stripped)
+        for variant in variants:
+            key = normalize_name(variant)
+            if not variant or not key or key in seen:
+                continue
+            seen.add(key)
+            candidates.append(variant)
     return candidates
 
 
@@ -2342,6 +2760,13 @@ def _canonical_section_name(value: str | None) -> str:
         "professional experience": "experience",
         "my education": "education",
         "education history": "education",
+        "self identify": "self identify",
+        "self identification": "self identify",
+        "self-identification": "self identify",
+        "voluntary self identification": "self identify",
+        "voluntary self-identification": "self identify",
+        "voluntary self identification of disability": "self identify",
+        "voluntary self-identification of disability": "self identify",
     }
     return replacements.get(normalized, normalized)
 
@@ -2354,6 +2779,8 @@ _SECTION_SCOPE_CHILDREN: dict[str, set[str]] = {
     # Workday also nests address/phone/legal-name groups under the page-level
     # "My Information" step.
     "information": {"address", "phone", "legal name", "name", "contact", "contact information"},
+    # Workday keeps the terms acknowledgment under Voluntary Disclosures.
+    "voluntary disclosures": {"terms and conditions", "terms conditions"},
 }
 
 
@@ -2376,7 +2803,13 @@ def _section_matches_scope(section: str | None, scope: str | None) -> bool:
     scope_numbers = {token for token in scope_tokens if token.isdigit()}
     if section_numbers and scope_numbers and section_numbers != scope_numbers:
         return False
-    return bool(section_tokens & scope_tokens)
+    overlap = section_tokens & scope_tokens
+    if not overlap:
+        return False
+    smaller = min(len(section_tokens), len(scope_tokens))
+    if smaller <= 1:
+        return True
+    return len(overlap) >= 2
 
 
 def _filter_fields_for_scope(
@@ -2384,6 +2817,8 @@ def _filter_fields_for_scope(
     target_section: str | None = None,
     heading_boundary: str | None = None,
     focus_fields: list[str] | None = None,
+    *,
+    allow_all_visible_fallback: bool = True,
 ) -> list[FormField]:
     """Restrict fields to a section and/or repeater entry boundary."""
     filtered = fields
@@ -2394,9 +2829,7 @@ def _filter_fields_for_scope(
                 blank_section_fields = [f for f in filtered if not normalize_name(f.section or "")]
                 if blank_section_fields:
                     normalized_focus = [
-                        _normalize_match_label(label)
-                        for label in (focus_fields or [])
-                        if _normalize_match_label(label)
+                        _normalize_match_label(label) for label in (focus_fields or []) if _normalize_match_label(label)
                     ]
                     if normalized_focus:
                         blank_section_fields = [
@@ -2425,9 +2858,15 @@ def _filter_fields_for_scope(
                     filtered = section_filtered
             else:
                 filtered = section_filtered
-        elif not heading_boundary:
+        elif not heading_boundary and allow_all_visible_fallback:
             logger.info(
                 "DomHand scope fallback: no fields matched target section, using all visible fields",
+                extra={"target_section": target_section, "field_count": len(fields)},
+            )
+        elif not heading_boundary:
+            filtered = []
+            logger.info(
+                "DomHand scope found no live match for target section without fallback",
                 extra={"target_section": target_section, "field_count": len(fields)},
             )
     if heading_boundary:
@@ -2496,9 +2935,7 @@ def _resolve_focus_fields(
         return FocusFieldSelection(fields=fields, ambiguous_labels={})
 
     normalized_pairs = [
-        (label, _normalize_match_label(label))
-        for label in focus_fields
-        if _normalize_match_label(label)
+        (label, _normalize_match_label(label)) for label in focus_fields if _normalize_match_label(label)
     ]
     if not normalized_pairs:
         return FocusFieldSelection(fields=fields, ambiguous_labels={})
@@ -2508,9 +2945,7 @@ def _resolve_focus_fields(
     ambiguous_labels: dict[str, list[FormField]] = {}
 
     for original_label, normalized_label in normalized_pairs:
-        matches = [
-            field for field in fields if _field_matches_focus_label(field, normalized_label)
-        ]
+        matches = [field for field in fields if _field_matches_focus_label(field, normalized_label)]
         if not matches:
             continue
         matches = _prune_focus_companion_controls(matches)
@@ -2567,35 +3002,113 @@ def _active_blocker_focus_fields(
     fields: list[FormField],
     page_context_key: str,
     page_url: str,
-) -> list[FormField]:
+) -> tuple[list[FormField], bool]:
     last_state = getattr(browser_session, "_gh_last_application_state", None)
     if not isinstance(last_state, dict):
-        return fields
+        return fields, False
     if last_state.get("page_context_key") and last_state.get("page_context_key") != page_context_key:
-        return fields
+        return fields, False
     if page_url and last_state.get("page_url") and last_state.get("page_url") != page_url:
-        return fields
+        return fields, False
 
-    blocker_ids = {
-        str(value).strip()
-        for value in (last_state.get("blocking_field_ids") or [])
-        if str(value).strip()
-    }
+    blocker_ids = {str(value).strip() for value in (last_state.get("blocking_field_ids") or []) if str(value).strip()}
+    blocker_keys = {str(value).strip() for value in (last_state.get("blocking_field_keys") or []) if str(value).strip()}
     blocker_labels = {
-        normalize_name(str(value))
-        for value in (last_state.get("blocking_field_labels") or [])
-        if str(value).strip()
+        normalize_name(str(value)) for value in (last_state.get("blocking_field_labels") or []) if str(value).strip()
     }
-    if not blocker_ids and not blocker_labels:
-        return fields
+    if not blocker_ids and not blocker_keys and not blocker_labels:
+        return fields, False
 
     filtered = [
         field
         for field in fields
         if field.field_id in blocker_ids
+        or get_stable_field_key(field) in blocker_keys
         or normalize_name(_preferred_field_label(field)) in blocker_labels
     ]
-    return filtered or []
+    if not filtered:
+        return [], False
+
+    blocker_state_changes = {
+        str(key).strip(): str(value).strip()
+        for key, value in (last_state.get("blocking_field_state_changes") or {}).items()
+        if str(key).strip()
+    }
+    filtered_keys = [get_stable_field_key(field) for field in filtered]
+    all_no_state_change = bool(filtered_keys) and all(
+        blocker_state_changes.get(key) == "no_state_change" for key in filtered_keys
+    )
+    return filtered, all_no_state_change
+
+
+def _record_page_token_cost(
+    browser_session: BrowserSession,
+    *,
+    page_context_key: str,
+    target_section: str | None,
+    field_count: int,
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
+    if input_tokens <= 0 and output_tokens <= 0:
+        return
+    store = getattr(browser_session, "_gh_page_token_costs", None)
+    if not isinstance(store, dict):
+        store = {}
+    entry_key = page_context_key or (target_section or "(unknown)")
+    entry = store.get(entry_key)
+    if not isinstance(entry, dict):
+        entry = {
+            "calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+    entry["calls"] = int(entry.get("calls") or 0) + 1
+    entry["input_tokens"] = int(entry.get("input_tokens") or 0) + int(input_tokens)
+    entry["output_tokens"] = int(entry.get("output_tokens") or 0) + int(output_tokens)
+    entry["field_count"] = field_count
+    entry["target_section"] = target_section or ""
+    store[entry_key] = entry
+    setattr(browser_session, "_gh_page_token_costs", store)
+    logger.info(
+        "domhand.page_token_cost",
+        extra={
+            "page_context_key": page_context_key,
+            "target_section": target_section or "",
+            "field_count": field_count,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cumulative_calls": entry["calls"],
+            "cumulative_input_tokens": entry["input_tokens"],
+            "cumulative_output_tokens": entry["output_tokens"],
+        },
+    )
+
+
+def _log_loop_blocker_state(
+    browser_session: BrowserSession,
+    *,
+    fields: list[FormField],
+    chosen_next_strategy: str,
+) -> None:
+    last_state = getattr(browser_session, "_gh_last_application_state", None)
+    if not isinstance(last_state, dict):
+        return
+    same_blocker_signature_count = int(last_state.get("same_blocker_signature_count") or 0)
+    blocker_signature = str(last_state.get("blocking_signature") or "")
+    field_keys = [get_stable_field_key(field) for field in fields]
+    no_progress_counts = {key: same_blocker_signature_count + 1 for key in field_keys}
+    logger.info(
+        "domhand.loop_blocker_state",
+        extra={
+            "blocker_signature": blocker_signature,
+            "same_blocker_signature_count": same_blocker_signature_count,
+            "field_keys": field_keys,
+            "field_labels": [_preferred_field_label(field) for field in fields],
+            "field_no_progress_count": no_progress_counts,
+            "chosen_next_strategy": chosen_next_strategy,
+        },
+    )
 
 
 def _format_entry_profile_text(entry_data: dict[str, Any]) -> str:
@@ -2611,7 +3124,11 @@ def _format_entry_profile_text(entry_data: dict[str, Any]) -> str:
         ("location", "Location"),
         ("school", "School"),
         ("degree", "Degree"),
+        ("degree_type", "Degree Type"),
         ("field_of_study", "Field of Study"),
+        ("major", "Major"),
+        ("minor", "Minor"),
+        ("honors", "Honors"),
         ("gpa", "GPA"),
         ("start_date", "Start Date"),
         ("end_date", "End Date"),
@@ -2620,9 +3137,9 @@ def _format_entry_profile_text(entry_data: dict[str, Any]) -> str:
     ]
 
     for key, label in label_map:
-        value = entry_data.get(key)
+        value = _entry_text_value(entry_data.get(key))
         if key == "end_date" and value in (None, "", []):
-            value = entry_data.get("graduation_date")
+            value = _entry_text_value(entry_data.get("graduation_date"))
         if value in (None, "", []):
             continue
         used_keys.add(key)
@@ -2638,9 +3155,32 @@ def _format_entry_profile_text(entry_data: dict[str, Any]) -> str:
     for key, value in entry_data.items():
         if key in used_keys or value in (None, "", []):
             continue
-        lines.append(f"{key.replace('_', ' ').title()}: {value}")
+        text_value = _entry_text_value(value)
+        if text_value is None:
+            continue
+        lines.append(f"{key.replace('_', ' ').title()}: {text_value}")
 
     return "\n".join(lines) if lines else json.dumps(entry_data, indent=2, sort_keys=True)
+
+
+def _entry_text_value(value: Any) -> str | None:
+    """Return deterministic text for structured education/profile values."""
+    if value in (None, "", []):
+        return None
+    if isinstance(value, dict):
+        for key in ("name", "label", "value", "title"):
+            text = _entry_text_value(value.get(key))
+            if text:
+                return text
+        return None
+    if isinstance(value, set):
+        parts = sorted(part for part in (_entry_text_value(item) for item in value) if part)
+        return ", ".join(parts) if parts else None
+    if isinstance(value, (list, tuple)):
+        parts = [part for part in (_entry_text_value(item) for item in value) if part]
+        return ", ".join(parts) if parts else None
+    text = str(value).strip()
+    return text or None
 
 
 def _known_entry_value(field_name: str, entry_data: dict[str, Any] | None) -> str | None:
@@ -2654,20 +3194,76 @@ def _known_entry_value(field_name: str, entry_data: dict[str, Any] | None) -> st
 
     def _entry_string(key: str) -> str | None:
         value = entry_data.get(key)
-        if value in (None, "", []):
-            return None
-        return str(value).strip() or None
+        return _entry_text_value(value)
+
+    def _entry_string_from_aliases(*keys: str) -> str | None:
+        for key in keys:
+            value = _entry_string(key)
+            if value:
+                return value
+        return None
+
+    def _entry_month_year_value(
+        *,
+        direct_keys: tuple[str, ...],
+        pair_keys: tuple[tuple[str, str], ...],
+    ) -> str | None:
+        for key in direct_keys:
+            value = _entry_string(key)
+            if value:
+                return value
+        for year_key, month_key in pair_keys:
+            year = _entry_string(year_key)
+            month = _entry_string(month_key)
+            if not year:
+                continue
+            if not month:
+                return year
+            month_digits = re.sub(r"\D+", "", month)
+            if month_digits:
+                return f"{year}-{int(month_digits):02d}"
+            return year
+        return None
 
     if any(kw in name for kw in ("job title", "title", "position", "role title")):
         return _entry_string("title")
     if any(kw in name for kw in ("company", "employer", "organization")):
         return _entry_string("company")
     if any(kw in name for kw in ("school", "university", "college", "institution")):
-        return _entry_string("school")
+        return _entry_string_from_aliases("school", "institution")
+    if any(kw in name for kw in ("degree type", "type of degree", "degree level")):
+        return _entry_string_from_aliases("degree_type", "degreeType")
     if "degree" in name:
-        return _entry_string("degree")
-    if any(kw in name for kw in ("field of study", "major", "discipline")):
-        return _entry_string("field_of_study")
+        return _entry_string_from_aliases("degree", "degree_type", "degreeType")
+    if any(kw in name for kw in ("field of study", "major", "discipline", "area of study", "concentration")):
+        return _entry_string_from_aliases(
+            "field_of_study",
+            "fieldOfStudy",
+            "field",
+            "major",
+            "majors",
+            "majorName",
+            "majorNames",
+            "major_name",
+            "major_names",
+            "area_of_study",
+            "areaOfStudy",
+            "discipline",
+            "concentration",
+            "specialization",
+        )
+    if any(kw in name for kw in ("minor", "minor field", "minor subject")):
+        return _entry_string_from_aliases("minor", "minors", "minorName", "minorNames", "minor_name", "minor_names")
+    if any(kw in name for kw in ("honors", "honours", "honour", "honor")):
+        return _entry_string_from_aliases(
+            "honors",
+            "honours",
+            "honor",
+            "honorsList",
+            "honoursList",
+            "honors_list",
+            "honours_list",
+        )
     if "gpa" in name:
         return _entry_string("gpa")
     if any(kw in name for kw in ("location", "city")):
@@ -2680,15 +3276,33 @@ def _known_entry_value(field_name: str, entry_data: dict[str, Any] | None) -> st
             return None
         return "checked" if bool(current) else "unchecked"
     if any(kw in name for kw in ("actual or expected", "actual/expected", "expected or actual", "expected/actual")):
-        return _entry_string("end_date_type")
+        return _entry_string_from_aliases("end_date_type", "endDateType", "endDateKind")
     if name in {"from", "from date"} or any(
         kw in name for kw in ("start date", "from date", "date from", "begin date", "employment start")
     ):
-        return _entry_string("start_date")
+        return _entry_month_year_value(
+            direct_keys=("start_date", "startDate", "fromDate", "from_date"),
+            pair_keys=(
+                ("start_year", "start_month"),
+                ("startYear", "startMonth"),
+                ("from_year", "from_month"),
+                ("fromYear", "fromMonth"),
+            ),
+        )
     if name in {"to", "to date"} or any(
         kw in name for kw in ("end date", "to date", "date to", "graduation date", "completion date")
     ):
-        return _entry_string("end_date") or _entry_string("graduation_date")
+        return _entry_month_year_value(
+            direct_keys=("end_date", "endDate", "graduation_date", "graduationDate", "toDate", "to_date"),
+            pair_keys=(
+                ("end_year", "end_month"),
+                ("endYear", "endMonth"),
+                ("graduation_year", "graduation_month"),
+                ("graduationYear", "graduationMonth"),
+                ("to_year", "to_month"),
+                ("toYear", "toMonth"),
+            ),
+        ) or _entry_string_from_aliases("expectedGraduation", "expected_graduation")
     if any(
         kw in name
         for kw in (
@@ -2781,31 +3395,86 @@ def _field_section_name(field: FormField) -> str:
     return normalize_name(field.section or "")
 
 
+def _is_education_like_section(value: str | None) -> bool:
+    section_norm = normalize_name(value or "")
+    return "education" in section_norm or any(token in section_norm for token in ("school", "university", "college"))
+
+
 def _is_structured_education_field(field: FormField) -> bool:
     labels = [normalize_name(label) for label in _field_label_candidates(field)]
     section_norm = _field_section_name(field)
-    if "education" not in section_norm and not any(token in section_norm for token in ("school", "university", "college")):
+    if "education" not in section_norm and not any(
+        token in section_norm for token in ("school", "university", "college")
+    ):
         return False
+    if any(label in {"month", "year"} for label in labels):
+        return True
     return any(
-        any(token in label for token in (
-            "field of study",
-            "major",
-            "discipline",
-            "gpa",
-            "actual or expected",
-            "actual expected",
-            "expected or actual",
-            "from",
-            "from date",
-            "to",
-            "to date",
-            "start date",
-            "end date",
-            "graduation date",
-            "completion date",
-        ))
+        any(
+            token in label
+            for token in (
+                "field of study",
+                "major",
+                "minor",
+                "honor",
+                "honour",
+                "degree type",
+                "discipline",
+                "gpa",
+                "actual or expected",
+                "actual expected",
+                "expected or actual",
+                "from",
+                "from date",
+                "to",
+                "to date",
+                "start date",
+                "end date",
+                "graduation date",
+                "completion date",
+                "month",
+                "year",
+            )
+        )
         for label in labels
     )
+
+
+def _is_structured_education_candidate(field: FormField, visible_fields: list[FormField] | None = None) -> bool:
+    if _is_structured_education_field(field):
+        return True
+    slot_name = _education_slot_name(field, visible_fields)
+    if slot_name in {"field_of_study", "gpa", "end_date_type", "school", "degree", "degree_type", "minor", "honors"}:
+        return True
+    if slot_name not in {"start_date", "end_date"}:
+        return False
+    target_section = normalize_name(field.section or "")
+    sibling_candidates = [
+        candidate
+        for candidate in (visible_fields or [])
+        if candidate.field_id != field.field_id
+        and (
+            not target_section
+            or not normalize_name(candidate.section or "")
+            or normalize_name(candidate.section or "") == target_section
+        )
+    ]
+    for candidate in sibling_candidates:
+        if _is_structured_education_field(candidate):
+            return True
+        candidate_slot = _education_slot_name(candidate, visible_fields)
+        if candidate_slot in {
+            "school",
+            "degree",
+            "degree_type",
+            "field_of_study",
+            "minor",
+            "honors",
+            "gpa",
+            "end_date_type",
+        }:
+            return True
+    return False
 
 
 def _language_entry_index_for_field(field: FormField) -> int | None:
@@ -2838,17 +3507,23 @@ def _language_slot_name(field: FormField) -> str | None:
     return None
 
 
-def _education_slot_name(field: FormField) -> str | None:
+def _education_slot_name(field: FormField, visible_fields: list[FormField] | None = None) -> str | None:
     for label in _field_label_candidates(field):
         name = normalize_name(label)
         if not name:
             continue
         if any(token in name for token in ("school", "university", "college", "institution")):
             return "school"
+        if any(token in name for token in ("degree type", "type of degree", "degree level")):
+            return "degree_type"
         if "degree" in name:
             return "degree"
-        if any(token in name for token in ("field of study", "major", "discipline")):
+        if any(token in name for token in ("field of study", "major", "discipline", "area of study", "concentration")):
             return "field_of_study"
+        if any(token in name for token in ("minor", "minor field", "minor subject")):
+            return "minor"
+        if any(token in name for token in ("honors", "honours", "honour", "honor")):
+            return "honors"
         if "gpa" in name:
             return "gpa"
         if any(token in name for token in ("actual or expected", "actual expected", "expected or actual")):
@@ -2859,7 +3534,227 @@ def _education_slot_name(field: FormField) -> str | None:
             token in name for token in ("end date", "date to", "graduation date", "completion date")
         ):
             return "end_date"
+        if name in {"month", "year"} and visible_fields:
+            target_section = normalize_name(field.section or "")
+            generic_date_fields: list[FormField] = []
+            for candidate in visible_fields:
+                candidate_section = normalize_name(candidate.section or "")
+                if target_section and candidate_section and candidate_section != target_section:
+                    continue
+                candidate_labels = [normalize_name(text) for text in _field_label_candidates(candidate)]
+                if not any(text in {"month", "year"} for text in candidate_labels):
+                    continue
+                generic_date_fields.append(candidate)
+            for index, candidate in enumerate(generic_date_fields):
+                if candidate.field_id != field.field_id:
+                    continue
+                split_index = 1 if len(generic_date_fields) <= 2 else max(2, len(generic_date_fields) // 2)
+                return "start_date" if index < split_index else "end_date"
     return None
+
+
+def _extract_date_component(value: Any, component: str) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    if component == "year":
+        year_match = re.search(r"\b(19|20)\d{2}\b", text)
+        return year_match.group(0) if year_match else None
+
+    normalized = text.replace("/", "-").replace(".", "-")
+    parts = [part.strip() for part in normalized.split("-") if part.strip()]
+    if len(parts) >= 2 and re.fullmatch(r"\d{4}", parts[0]) and re.fullmatch(r"\d{1,2}", parts[1]):
+        return str(int(parts[1]))
+    if len(parts) >= 2 and re.fullmatch(r"\d{1,2}", parts[0]) and re.fullmatch(r"\d{4}", parts[1]):
+        return str(int(parts[0]))
+
+    month_names = {
+        "jan": 1,
+        "january": 1,
+        "feb": 2,
+        "february": 2,
+        "mar": 3,
+        "march": 3,
+        "apr": 4,
+        "april": 4,
+        "may": 5,
+        "jun": 6,
+        "june": 6,
+        "jul": 7,
+        "july": 7,
+        "aug": 8,
+        "august": 8,
+        "sep": 9,
+        "sept": 9,
+        "september": 9,
+        "oct": 10,
+        "october": 10,
+        "nov": 11,
+        "november": 11,
+        "dec": 12,
+        "december": 12,
+    }
+    lowered = normalize_name(text)
+    for token, month in month_names.items():
+        if token in lowered:
+            return str(month)
+    return None
+
+
+def _entry_text_and_source(entry: dict[str, Any], *keys: str) -> tuple[str | None, str | None]:
+    for key in keys:
+        value = entry.get(key)
+        text = _entry_text_value(value)
+        if text:
+            return text, key
+    return None, None
+
+
+def _entry_date_text_and_source(
+    entry: dict[str, Any],
+    *,
+    direct_keys: tuple[str, ...],
+    pair_keys: tuple[tuple[str, str], ...] = (),
+) -> tuple[str | None, str | None]:
+    for key in direct_keys:
+        value = entry.get(key)
+        if isinstance(value, dict):
+            year = str(value.get("year") or value.get("YYYY") or "").strip()
+            month = str(value.get("month") or value.get("MM") or "").strip()
+            if year and month:
+                month_digits = re.sub(r"\D+", "", month)
+                if month_digits:
+                    return f"{year}-{int(month_digits):02d}", key
+                return year, key
+            if year:
+                return year, key
+        if value in (None, "", []):
+            continue
+        text = str(value).strip()
+        if text:
+            return text, key
+
+    for year_key, month_key in pair_keys:
+        year = str(entry.get(year_key) or "").strip()
+        month = str(entry.get(month_key) or "").strip()
+        if not year:
+            continue
+        if not month:
+            return year, year_key
+        month_digits = re.sub(r"\D+", "", month)
+        if month_digits:
+            return f"{year}-{int(month_digits):02d}", f"{year_key}+{month_key}"
+        return year, year_key
+
+    return None, None
+
+
+def _structured_education_raw_value_from_entry(
+    field: FormField,
+    entry: dict[str, Any],
+    visible_fields: list[FormField] | None = None,
+) -> str | None:
+    value, _ = _structured_education_raw_value_and_source_from_entry(field, entry, visible_fields)
+    return value
+
+
+def _structured_education_raw_value_and_source_from_entry(
+    field: FormField,
+    entry: dict[str, Any],
+    visible_fields: list[FormField] | None = None,
+) -> tuple[str | None, str | None]:
+    slot_name = _education_slot_name(field, visible_fields)
+    if not slot_name:
+        return None, None
+
+    label_norm = normalize_name(_preferred_field_label(field))
+    if slot_name == "school":
+        return _entry_text_and_source(entry, "school", "institution")
+    if slot_name == "degree":
+        return _entry_text_and_source(entry, "degree", "degreeType", "degree_type")
+    if slot_name == "degree_type":
+        return _entry_text_and_source(entry, "degree_type", "degreeType")
+    if slot_name == "field_of_study":
+        return _entry_text_and_source(
+            entry,
+            "field_of_study",
+            "fieldOfStudy",
+            "field",
+            "major",
+            "majors",
+            "majorName",
+            "majorNames",
+            "major_name",
+            "major_names",
+            "area_of_study",
+            "areaOfStudy",
+            "discipline",
+            "concentration",
+            "specialization",
+        )
+    if slot_name == "minor":
+        return _entry_text_and_source(entry, "minor", "minors", "minorName", "minorNames", "minor_name", "minor_names")
+    if slot_name == "honors":
+        return _entry_text_and_source(
+            entry,
+            "honors",
+            "honours",
+            "honor",
+            "honorsList",
+            "honoursList",
+            "honors_list",
+            "honours_list",
+        )
+    if slot_name == "gpa":
+        return _entry_text_and_source(entry, "gpa")
+    if slot_name == "end_date_type":
+        return _entry_text_and_source(entry, "end_date_type", "endDateType", "endDateKind")
+
+    if slot_name == "start_date":
+        raw_value, source_key = _entry_date_text_and_source(
+            entry,
+            direct_keys=("start_date", "startDate", "fromDate", "from_date"),
+            pair_keys=(
+                ("start_year", "start_month"),
+                ("startYear", "startMonth"),
+                ("from_year", "from_month"),
+                ("fromYear", "fromMonth"),
+            ),
+        )
+    else:
+        raw_value, source_key = _entry_date_text_and_source(
+            entry,
+            direct_keys=("end_date", "endDate", "graduation_date", "graduationDate", "toDate", "to_date"),
+            pair_keys=(
+                ("end_year", "end_month"),
+                ("endYear", "endMonth"),
+                ("graduation_year", "graduation_month"),
+                ("graduationYear", "graduationMonth"),
+                ("to_year", "to_month"),
+                ("toYear", "toMonth"),
+            ),
+        )
+        if not raw_value:
+            raw_value, source_key = _entry_text_and_source(entry, "expectedGraduation", "expected_graduation")
+
+    if label_norm == "year":
+        return _extract_date_component(raw_value, "year"), source_key
+    if label_norm == "month":
+        return _extract_date_component(raw_value, "month"), source_key
+    text = str(raw_value or "").strip()
+    return (text or None), source_key
+
+
+def _structured_education_value_from_entry(
+    field: FormField,
+    entry: dict[str, Any],
+    visible_fields: list[FormField] | None = None,
+) -> str | None:
+    return _coerce_answer_to_field(
+        field,
+        _structured_education_raw_value_and_source_from_entry(field, entry, visible_fields)[0],
+    )
 
 
 def _match_entry_by_slot_value(
@@ -2890,17 +3785,86 @@ def _match_entry_by_slot_value(
         elif slot_name == "school":
             expected = str(entry.get("school") or "").strip()
         elif slot_name == "degree":
-            expected = str(entry.get("degree") or "").strip()
+            expected = _entry_text_value(entry.get("degree")) or ""
+        elif slot_name == "degree_type":
+            expected = _entry_text_value(entry.get("degree_type") or entry.get("degreeType")) or ""
         elif slot_name == "field_of_study":
-            expected = str(entry.get("field_of_study") or entry.get("fieldOfStudy") or entry.get("field") or "").strip()
+            expected = (
+                _entry_text_value(
+                    entry.get("field_of_study")
+                    or entry.get("fieldOfStudy")
+                    or entry.get("field")
+                    or entry.get("major")
+                    or entry.get("majors")
+                    or entry.get("majorName")
+                    or entry.get("majorNames")
+                    or entry.get("major_name")
+                    or entry.get("major_names")
+                    or entry.get("area_of_study")
+                    or entry.get("areaOfStudy")
+                    or entry.get("discipline")
+                    or entry.get("concentration")
+                )
+                or ""
+            )
+        elif slot_name == "minor":
+            expected = (
+                _entry_text_value(
+                    entry.get("minor")
+                    or entry.get("minors")
+                    or entry.get("minorName")
+                    or entry.get("minorNames")
+                    or entry.get("minor_name")
+                    or entry.get("minor_names")
+                )
+                or ""
+            )
+        elif slot_name == "honors":
+            expected = (
+                _entry_text_value(
+                    entry.get("honors")
+                    or entry.get("honours")
+                    or entry.get("honor")
+                    or entry.get("honorsList")
+                    or entry.get("honoursList")
+                    or entry.get("honors_list")
+                    or entry.get("honours_list")
+                )
+                or ""
+            )
         elif slot_name == "gpa":
-            expected = str(entry.get("gpa") or "").strip()
+            expected = _entry_text_value(entry.get("gpa")) or ""
         elif slot_name == "start_date":
-            expected = str(entry.get("start_date") or entry.get("startDate") or "").strip()
+            expected, _ = _entry_date_text_and_source(
+                entry,
+                direct_keys=("start_date", "startDate", "fromDate", "from_date"),
+                pair_keys=(
+                    ("start_year", "start_month"),
+                    ("startYear", "startMonth"),
+                    ("from_year", "from_month"),
+                    ("fromYear", "fromMonth"),
+                ),
+            )
+            expected = str(expected or "").strip()
         elif slot_name == "end_date":
-            expected = str(entry.get("end_date") or entry.get("endDate") or entry.get("graduation_date") or "").strip()
+            expected, _ = _entry_date_text_and_source(
+                entry,
+                direct_keys=("end_date", "endDate", "graduation_date", "graduationDate", "toDate", "to_date"),
+                pair_keys=(
+                    ("end_year", "end_month"),
+                    ("endYear", "endMonth"),
+                    ("graduation_year", "graduation_month"),
+                    ("graduationYear", "graduationMonth"),
+                    ("to_year", "to_month"),
+                    ("toYear", "toMonth"),
+                ),
+            )
+            if not expected:
+                expected = str(entry.get("expectedGraduation") or entry.get("expected_graduation") or "").strip()
         elif slot_name == "end_date_type":
-            expected = str(entry.get("end_date_type") or entry.get("endDateKind") or entry.get("endDateType") or "").strip()
+            expected = str(
+                entry.get("end_date_type") or entry.get("endDateKind") or entry.get("endDateType") or ""
+            ).strip()
         else:
             expected = ""
         if expected and _field_value_matches_expected(current_text, expected):
@@ -2994,15 +3958,41 @@ def _resolve_repeater_binding(
             elif repeater_group == "education":
                 candidate_texts.extend(
                     [
-                        str(entry.get("school") or "").strip(),
-                        str(entry.get("degree") or "").strip(),
-                        str(entry.get("field_of_study") or entry.get("field") or "").strip(),
+                        _entry_text_value(entry.get("school")) or "",
+                        _entry_text_value(entry.get("degree")) or "",
+                        _entry_text_value(
+                            entry.get("field_of_study")
+                            or entry.get("field")
+                            or entry.get("major")
+                            or entry.get("majors")
+                            or entry.get("majorName")
+                            or entry.get("majorNames")
+                            or entry.get("major_name")
+                            or entry.get("major_names")
+                        )
+                        or "",
+                        _entry_text_value(entry.get("degree_type") or entry.get("degreeType")) or "",
+                        _entry_text_value(
+                            entry.get("minor")
+                            or entry.get("minors")
+                            or entry.get("minorName")
+                            or entry.get("minor_name")
+                            or entry.get("minor_names")
+                        )
+                        or "",
+                        _entry_text_value(
+                            entry.get("honors")
+                            or entry.get("honours")
+                            or entry.get("honor")
+                            or entry.get("honorsList")
+                            or entry.get("honoursList")
+                            or entry.get("honors_list")
+                            or entry.get("honours_list")
+                        )
+                        or "",
                     ]
                 )
-            if any(
-                text and normalize_name(text) and normalize_name(text) in section_hint
-                for text in candidate_texts
-            ):
+            if any(text and normalize_name(text) and normalize_name(text) in section_hint for text in candidate_texts):
                 section_matches.append(index)
         if len(section_matches) == 1:
             binding = ResolvedFieldBinding(
@@ -3074,34 +4064,37 @@ def _resolve_repeater_binding(
     return None
 
 
-def _structured_language_value_from_entry(field: FormField, entry: dict[str, Any]) -> str | None:
+def _structured_language_raw_value_from_entry(field: FormField, entry: dict[str, Any]) -> str | None:
+    value, _ = _structured_language_raw_value_and_source_from_entry(field, entry)
+    return value
+
+
+def _structured_language_raw_value_and_source_from_entry(
+    field: FormField,
+    entry: dict[str, Any],
+) -> tuple[str | None, str | None]:
     for label in _field_label_candidates(field):
         name = normalize_name(label)
         if not name:
             continue
         if name == "language" or "preferred language" in name:
-            return _coerce_answer_to_field(field, str(entry.get("language") or "").strip())
+            return _entry_text_and_source(entry, "language")
         if "i am fluent in this language" in name or name == "fluent" or name == "is fluent":
             if isinstance(entry.get("isFluent"), bool):
-                return _coerce_answer_to_field(field, "Yes" if bool(entry.get("isFluent")) else "No")
+                return ("Yes" if bool(entry.get("isFluent")) else "No"), "isFluent"
             if isinstance(entry.get("is_fluent"), bool):
-                return _coerce_answer_to_field(field, "Yes" if bool(entry.get("is_fluent")) else "No")
+                return ("Yes" if bool(entry.get("is_fluent")) else "No"), "is_fluent"
         if "reading" in name or "writing" in name:
-            return _coerce_answer_to_field(
-                field,
-                str(entry.get("readingWriting") or entry.get("reading_writing") or "").strip(),
-            )
+            return _entry_text_and_source(entry, "readingWriting", "reading_writing")
         if "speaking" in name or "listening" in name:
-            return _coerce_answer_to_field(
-                field,
-                str(entry.get("speakingListening") or entry.get("speaking_listening") or "").strip(),
-            )
+            return _entry_text_and_source(entry, "speakingListening", "speaking_listening")
         if "overall" in name or "language proficiency" in name:
-            return _coerce_answer_to_field(
-                field,
-                str(entry.get("overallProficiency") or entry.get("overall_proficiency") or "").strip(),
-            )
-    return None
+            return _entry_text_and_source(entry, "overallProficiency", "overall_proficiency")
+    return None, None
+
+
+def _structured_language_value_from_entry(field: FormField, entry: dict[str, Any]) -> str | None:
+    return _coerce_answer_to_field(field, _structured_language_raw_value_and_source_from_entry(field, entry)[0])
 
 
 def _resolve_structured_language_value(
@@ -3128,16 +4121,19 @@ def _is_structured_language_field(field: FormField) -> bool:
         return False
     labels = [normalize_name(label) for label in _field_label_candidates(field)]
     return any(
-        any(token in label for token in (
-            "language",
-            "i am fluent in this language",
-            "reading",
-            "writing",
-            "speaking",
-            "listening",
-            "overall",
-            "language proficiency",
-        ))
+        any(
+            token in label
+            for token in (
+                "language",
+                "i am fluent in this language",
+                "reading",
+                "writing",
+                "speaking",
+                "listening",
+                "overall",
+                "language proficiency",
+            )
+        )
         for label in labels
     )
 
@@ -3193,6 +4189,126 @@ def _infer_entry_data_from_scope(
         return None
     entry = entries[entry_index]
     return entry if isinstance(entry, dict) and entry else None
+
+
+def _normalized_raw_date_component(raw_field: dict[str, Any]) -> str:
+    return normalize_name(raw_field.get("date_component") or "")
+
+
+def _clean_grouped_date_component(value: str | None, component: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    normalized = normalize_name(text)
+    if normalized in {component, "mm", "dd", "yyyy"}:
+        return ""
+    return text
+
+
+def _compose_grouped_date_value(month: str | None, day: str | None, year: str | None) -> str:
+    normalized_month = _clean_grouped_date_component(month, "month")
+    normalized_day = _clean_grouped_date_component(day, "day")
+    normalized_year = _clean_grouped_date_component(year, "year")
+    if not any((normalized_month, normalized_day, normalized_year)):
+        return ""
+    return "/".join(
+        [
+            normalized_month or "MM",
+            normalized_day or "DD",
+            normalized_year or "YYYY",
+        ]
+    )
+
+
+def _raw_grouped_date_fields(
+    raw_fields: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    groups: dict[str, dict[str, Any]] = {}
+    grouped_component_ids: set[str] = set()
+
+    for index, raw_field in enumerate(raw_fields):
+        component = _normalized_raw_date_component(raw_field)
+        if component not in {"month", "day", "year"}:
+            continue
+        group_key = str(raw_field.get("date_group_key") or "").strip()
+        if not group_key:
+            continue
+        group = groups.setdefault(
+            group_key,
+            {
+                "order": index,
+                "components": {},
+                "wrapper_id": str(raw_field.get("wrapper_id") or "").strip(),
+                "wrapper_label": str(raw_field.get("group_label") or raw_field.get("wrapper_label") or "").strip(),
+                "section": str(raw_field.get("section") or "").strip(),
+                "required": False,
+                "has_calendar_trigger": False,
+                "format_hint": str(raw_field.get("format_hint") or "").strip(),
+            },
+        )
+        group["components"][component] = raw_field
+        group["required"] = bool(group["required"] or raw_field.get("required"))
+        group["has_calendar_trigger"] = bool(group["has_calendar_trigger"] or raw_field.get("has_calendar_trigger"))
+        if not group["format_hint"] and raw_field.get("format_hint"):
+            group["format_hint"] = str(raw_field.get("format_hint") or "").strip()
+        if not group["wrapper_label"] and raw_field.get("wrapper_label"):
+            group["wrapper_label"] = str(raw_field.get("wrapper_label") or "").strip()
+        if not group["section"] and raw_field.get("section"):
+            group["section"] = str(raw_field.get("section") or "").strip()
+
+    grouped_fields: dict[str, dict[str, Any]] = {}
+    for group_key, group in groups.items():
+        components = group["components"]
+        if not {"month", "day", "year"} <= set(components):
+            continue
+        section_text = str(group.get("section") or "")
+        label_text = str(group.get("wrapper_label") or "")
+        if _is_education_like_section(section_text) or _is_education_like_section(label_text):
+            continue
+        month_field = components["month"]
+        day_field = components["day"]
+        year_field = components["year"]
+        field_id = str(group.get("wrapper_id") or month_field.get("field_id") or "").strip()
+        if not field_id:
+            continue
+        grouped_component_ids.update(
+            {
+                str(month_field.get("field_id") or "").strip(),
+                str(day_field.get("field_id") or "").strip(),
+                str(year_field.get("field_id") or "").strip(),
+            }
+        )
+        grouped_fields[group_key] = {
+            "field_id": field_id,
+            "name": label_text or "Date",
+            "field_type": "date",
+            "section": section_text,
+            "required": bool(group.get("required")) or "*" in (label_text or ""),
+            "options": [],
+            "choices": [],
+            "accept": None,
+            "is_native": False,
+            "is_multi_select": False,
+            "visible": True,
+            "raw_label": label_text or "Date",
+            "synthetic_label": bool(not label_text),
+            "field_fingerprint": None,
+            "current_value": _compose_grouped_date_value(
+                month_field.get("current_value"),
+                day_field.get("current_value"),
+                year_field.get("current_value"),
+            ),
+            "widget_kind": "grouped_date",
+            "component_field_ids": [
+                str(month_field.get("field_id") or "").strip(),
+                str(day_field.get("field_id") or "").strip(),
+                str(year_field.get("field_id") or "").strip(),
+            ],
+            "has_calendar_trigger": bool(group.get("has_calendar_trigger")),
+            "format_hint": str(group.get("format_hint") or "MM/DD/YYYY"),
+            "group_order": int(group.get("order") or 0),
+        }
+    return grouped_fields, grouped_component_ids
 
 
 def _get_nested_profile_value(profile_data: dict[str, Any], *paths: tuple[str, ...]) -> Any:
@@ -3302,14 +4418,30 @@ def _build_profile_answer_map(
         for label in labels:
             answer_map[label] = text
 
-    add(canonical.get("gender"), "Gender")
-    add(canonical.get("race_ethnicity"), "Race/Ethnicity", "Race", "Ethnicity")
-    add(canonical.get("veteran_status"), "Veteran Status", "Are you a protected veteran")
+    add(
+        canonical.get("gender"),
+        "Gender",
+        "Please select your gender.",
+    )
+    add(
+        canonical.get("race_ethnicity"),
+        "Race/Ethnicity",
+        "Race",
+        "Ethnicity",
+        "Please select the ethnicity (or ethnicities) which most accurately describe(s) how you identify yourself.",
+    )
+    add(
+        canonical.get("veteran_status"),
+        "Veteran Status",
+        "Are you a protected veteran",
+        "Please select the veteran status which most accurately describes your status.",
+    )
     add(
         canonical.get("disability_status"),
         "Disability",
         "Disability Status",
         "Please indicate if you have a disability",
+        "Please check one of the boxes below:",
     )
     add(canonical.get("country"), "Country", "Country/Territory", "Country/Region")
     add(canonical.get("phone_device_type"), "Phone Device Type", "Phone Type")
@@ -3320,6 +4452,7 @@ def _build_profile_answer_map(
         "Enter your name",
         "Your name",
         "Full name",
+        "Name",
         "Signature",
     )
     add(canonical.get("preferred_name"), "Preferred name", "Nickname")
@@ -3438,11 +4571,31 @@ def _build_profile_answer_map(
         "Degree pursuing",
     )
     add(
+        canonical.get("degree_type"),
+        "Degree Type",
+        "Type of Degree",
+        "Degree level",
+    )
+    add(
         canonical.get("field_of_study"),
         "Field of study",
         "Area of study",
         "Major",
+        "Majors",
+        "Major(s)",
         "Please list your area of study (major).",
+    )
+    add(
+        canonical.get("minor"),
+        "Minor",
+        "Minors",
+        "Minor(s)",
+    )
+    add(
+        canonical.get("honors"),
+        "Honors",
+        "Honours",
+        "Honors / Awards",
     )
     add(
         canonical.get("certifications_licenses", allow_policy=True) or "None",
@@ -3470,11 +4623,13 @@ def _build_profile_answer_map(
         "Sponsorship needed",
         "Require sponsorship",
         "Need sponsorship",
+        "Will you now or in the future require visa sponsorship by an employer?",
     )
     add(
         canonical.get("authorized_to_work"),
         "Authorized to work",
         "Legally authorized to work",
+        "Are you legally permitted to work in the country where this job is located?",
         "Are you legally authorized to work in the country in which this job is located?",
     )
 
@@ -3714,7 +4869,8 @@ def _default_screening_answer(field: FormField, profile_data: dict[str, Any]) ->
     if authorized_value is None:
         authorized_value = profile_data.get("US_citizen")
     if authorized_value is not None and any(
-        phrase in norm for phrase in ("authorized to work", "legally authorized", "eligible to work")
+        phrase in norm
+        for phrase in ("authorized to work", "legally authorized", "legally permitted to work", "eligible to work")
     ):
         return _coerce_answer_to_field(field, _normalize_bool_text(authorized_value))
 
@@ -3836,6 +4992,247 @@ def _available_semantic_intent_answers(
     return available
 
 
+def _field_option_norms(field: FormField) -> set[str]:
+    return {normalize_name(str(option)) for option in (field.options or field.choices or []) if str(option).strip()}
+
+
+_BOOLEAN_QUESTION_PREFIXES = (
+    "are you",
+    "do you",
+    "did you",
+    "have you",
+    "has the applicant",
+    "will you",
+    "would you",
+    "can you",
+    "is the applicant",
+)
+
+_DETAIL_CHILD_PROMPT_FRAGMENTS = (
+    "please specify",
+    "type of visa",
+    "what visa",
+    "which visa",
+    "location to which",
+    "where would you relocate",
+    "preferred location",
+    "which most accurately fits",
+    "answer below",
+    "choose the answer below",
+)
+
+
+def _field_widget_kind_for_debug(field: FormField) -> str:
+    if field.field_type == "select":
+        return "native_select" if field.is_native else "custom_widget"
+    if field.field_type in {"radio", "radio-group"}:
+        return "radio_group"
+    if field.field_type in {"checkbox", "checkbox-group"}:
+        return "checkbox_group"
+    if field.field_type == "button-group":
+        return "button_group"
+    if field.field_type == "textarea":
+        return "textarea"
+    return "text_input" if field.is_native else "custom_widget"
+
+
+def _label_starts_boolean_question(label: str) -> bool:
+    return any(label.startswith(prefix) for prefix in _BOOLEAN_QUESTION_PREFIXES)
+
+
+def _is_detail_child_prompt(label: str) -> bool:
+    return any(fragment in label for fragment in _DETAIL_CHILD_PROMPT_FRAGMENTS)
+
+
+def _is_employer_history_boolean_prompt(label: str) -> bool:
+    return _is_employer_history_screening_question(label)
+
+
+def _log_boolean_widget_classification(field: FormField, cluster: str | None, role: str | None) -> None:
+    if cluster not in {"relocation", "visa_sponsorship", "work_authorization", "employer_history"}:
+        return
+    logger.info(
+        "domhand.boolean_widget_classification",
+        extra={
+            "field_id": field.field_id,
+            "field_label": _preferred_field_label(field),
+            "field_type": field.field_type,
+            "widget_kind": _field_widget_kind_for_debug(field),
+            "visible_options_count": len(field.options or field.choices or []),
+            "cluster": cluster,
+            "inferred_role": role or "",
+        },
+    )
+
+
+def _field_conditional_cluster(field: FormField) -> tuple[str | None, str | None]:
+    label = normalize_name(_preferred_field_label(field))
+    option_norms = _field_option_norms(field)
+    is_binary = bool(option_norms & {"yes", "no"}) or field.field_type in {
+        "checkbox",
+        "checkbox-group",
+        "radio",
+        "radio-group",
+        "toggle",
+        "button-group",
+    }
+    question_stem = _label_starts_boolean_question(label)
+
+    if any(token in label for token in ("relocation", "relocate")):
+        if any(token in label for token in ("location to which", "where would you relocate", "preferred location")):
+            cluster, role = "relocation", "location_child"
+            _log_boolean_widget_classification(field, cluster, role)
+            return cluster, role
+        if is_binary or question_stem or any(token in label for token in ("willing to relocate", "open to relocation")):
+            cluster, role = "relocation", "boolean_parent"
+            _log_boolean_widget_classification(field, cluster, role)
+            return cluster, role
+        cluster, role = "relocation", "detail_child"
+        _log_boolean_widget_classification(field, cluster, role)
+        return cluster, role
+
+    if "visa" in label or "sponsorship" in label:
+        if _is_detail_child_prompt(label):
+            cluster, role = "visa_sponsorship", "detail_child"
+            _log_boolean_widget_classification(field, cluster, role)
+            return cluster, role
+        if (
+            is_binary
+            or question_stem
+            or any(token in label for token in ("require sponsorship", "need sponsorship", "visa sponsorship"))
+        ):
+            cluster, role = "visa_sponsorship", "boolean_parent"
+            _log_boolean_widget_classification(field, cluster, role)
+            return cluster, role
+        cluster, role = "visa_sponsorship", "detail_child"
+        _log_boolean_widget_classification(field, cluster, role)
+        return cluster, role
+
+    if any(token in label for token in ("authorized to work", "legally permitted to work")):
+        if _is_detail_child_prompt(label):
+            cluster, role = "work_authorization", "detail_child"
+            _log_boolean_widget_classification(field, cluster, role)
+            return cluster, role
+        if is_binary or question_stem:
+            cluster, role = "work_authorization", "boolean_parent"
+            _log_boolean_widget_classification(field, cluster, role)
+            return cluster, role
+        cluster, role = "work_authorization", "detail_child"
+        _log_boolean_widget_classification(field, cluster, role)
+        return cluster, role
+
+    if _is_employer_history_boolean_prompt(label):
+        cluster, role = "employer_history", "boolean_parent"
+        _log_boolean_widget_classification(field, cluster, role)
+        return cluster, role
+
+    if "salary" in label or "compensation" in label:
+        return "salary", "detail_child"
+    if "start date" in label or "availability" in label:
+        return "availability_window", "detail_child"
+    if "notice" in label:
+        return "notice_period", "detail_child"
+    if any(token in label for token in ("from date", "start date", "date from")) and "education" in normalize_name(
+        field.section or ""
+    ):
+        return "education_dates", "start_child"
+    if any(
+        token in label for token in ("to date", "end date", "graduation date", "completion date")
+    ) and "education" in normalize_name(field.section or ""):
+        return "education_dates", "end_child"
+    return None, None
+
+
+def _is_binary_value_text(value: str | None) -> bool:
+    if not value:
+        return False
+    normalized = _normalize_binary_match_value(value)
+    if normalized in {"Yes", "No"}:
+        return True
+    return normalize_name(value) in {"checked", "unchecked", "true", "false"}
+
+
+def _value_shape_is_compatible(field: FormField, value: str | None) -> bool:
+    if value in (None, ""):
+        return False
+
+    _, role = _field_conditional_cluster(field)
+    option_norms = _field_option_norms(field)
+    expects_binary = bool(option_norms & {"yes", "no"}) or role == "boolean_parent"
+    if expects_binary:
+        return _is_binary_value_text(value)
+
+    if role in {"location_child", "detail_child", "start_child", "end_child"} and _is_binary_value_text(value):
+        return False
+
+    if field.field_type in {"text", "textarea", "search"} and _is_binary_value_text(value):
+        label = normalize_name(_preferred_field_label(field))
+        if any(token in label for token in ("please specify", "location to which", "type of visa", "what visa")):
+            return False
+
+    return True
+
+
+def _log_answer_resolution(
+    field: FormField,
+    *,
+    source_candidate: str,
+    raw_answer: Any,
+    coerced_answer: str | None,
+    shape_compatible: bool,
+    rejection_reason: str | None,
+) -> None:
+    logger.info(
+        "domhand.answer_resolution",
+        extra={
+            "field_id": field.field_id,
+            "field_label": _preferred_field_label(field),
+            "field_type": field.field_type,
+            "widget_kind": _field_widget_kind_for_debug(field),
+            "source_candidate": source_candidate,
+            "raw_answer": _profile_debug_preview(raw_answer),
+            "coerced_answer": _profile_debug_preview(coerced_answer),
+            "shape_compatible": shape_compatible,
+            "rejection_reason": rejection_reason or "",
+        },
+    )
+
+
+def _coerce_answer_if_compatible(
+    field: FormField,
+    raw_answer: Any,
+    *,
+    source_candidate: str,
+) -> str | None:
+    coerced = _coerce_answer_to_field(field, raw_answer)
+    if not coerced:
+        _log_answer_resolution(
+            field,
+            source_candidate=source_candidate,
+            raw_answer=raw_answer,
+            coerced_answer=coerced,
+            shape_compatible=False,
+            rejection_reason="coercion_failed",
+        )
+        return None
+
+    compatible = _value_shape_is_compatible(field, coerced)
+    _log_answer_resolution(
+        field,
+        source_candidate=source_candidate,
+        raw_answer=raw_answer,
+        coerced_answer=coerced,
+        shape_compatible=compatible,
+        rejection_reason=None if compatible else "shape_incompatible",
+    )
+    return coerced if compatible else None
+
+
+def _is_required_custom_widget_boolean_select(field: FormField) -> bool:
+    _, role = _field_conditional_cluster(field)
+    return field.required and field.field_type == "select" and not field.is_native and role == "boolean_parent"
+
+
 async def _classify_known_intent_for_field(
     field: FormField,
     profile_data: dict[str, Any] | None,
@@ -3947,29 +5344,40 @@ async def _semantic_profile_value_for_field(
         if alias is None:
             continue
         answer = _resolve_semantic_intent_answer(field, alias.intent, profile_data, evidence)
-        if answer:
+        coerced = _coerce_answer_if_compatible(
+            field,
+            answer,
+            source_candidate="semantic",
+        )
+        if coerced:
             _trace_profile_resolution(
                 "domhand.profile_learned_alias_match",
                 field_label=_preferred_field_label(field),
                 source_label=label,
                 intent=alias.intent,
-                coerced_value=_profile_debug_preview(answer),
+                coerced_value=_profile_debug_preview(coerced),
             )
-            return answer
+            return coerced
 
     intent, confidence = await _classify_known_intent_for_field(field, profile_data, evidence)
     if intent is None:
         return None
     answer = _resolve_semantic_intent_answer(field, intent, profile_data, evidence)
-    if answer:
+    coerced = _coerce_answer_if_compatible(
+        field,
+        answer,
+        source_candidate="semantic",
+    )
+    if coerced:
         _trace_profile_resolution(
             "domhand.profile_semantic_intent_match",
             field_label=_preferred_field_label(field),
             intent=intent,
             confidence=confidence,
-            coerced_value=_profile_debug_preview(answer),
+            coerced_value=_profile_debug_preview(coerced),
         )
-    return answer
+        return coerced
+    return None
 
 
 def _parse_dropdown_click_result(raw_result: Any) -> dict[str, Any]:
@@ -3996,6 +5404,14 @@ def _field_value_matches_expected(current: str, expected: str) -> bool:
     expected_norm = normalize_name(expected_text)
     if not current_norm or not expected_norm:
         return False
+    current_binary = _normalize_binary_match_value(current_text)
+    expected_binary = _normalize_binary_match_value(expected_text)
+    if current_binary and expected_binary:
+        return current_binary == expected_binary
+    parsed_current_date = _parse_full_date_value(current_text)
+    parsed_expected_date = _parse_full_date_value(expected_text)
+    if parsed_current_date and parsed_expected_date and parsed_current_date == parsed_expected_date:
+        return True
     if expected_norm in current_norm or current_norm in expected_norm:
         return True
 
@@ -4033,7 +5449,7 @@ async def _wait_for_field_value(
     deadline = loop.time() + timeout
     last_value = ""
     while True:
-        current = await _read_field_value(page, field.field_id)
+        current = await _read_field_value_for_field(page, field)
         if current:
             last_value = current
         if _field_value_matches_expected(current, expected):
@@ -4151,12 +5567,154 @@ def _field_needs_enter_commit(field: FormField) -> bool:
     return label_norm == "name" and any(token in section_norm for token in ("self identify", "voluntary disclosure"))
 
 
+def _is_self_identify_date_field(field: FormField) -> bool:
+    label_norm = normalize_name(_preferred_field_label(field))
+    section_norm = normalize_name(field.section or "")
+    return label_norm == "date" and any(token in section_norm for token in ("self identify", "disability"))
+
+
+def _is_salary_like_field(field: FormField) -> bool:
+    label_norm = normalize_name(_preferred_field_label(field))
+    return any(token in label_norm for token in ("salary", "compensation", "pay expectation", "pay requirement"))
+
+
+def _field_needs_blur_revalidation(field: FormField) -> bool:
+    return _is_salary_like_field(field)
+
+
+def _coerce_salary_numeric_candidate(value: str) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    compact = text.replace(",", "")
+    k_match = re.search(r"(\d+(?:\.\d+)?)\s*[kK]\b", compact)
+    if k_match:
+        return str(int(float(k_match.group(1)) * 1000))
+    numeric_tokens = re.findall(r"\d+(?:\.\d+)?", compact)
+    if not numeric_tokens:
+        return None
+    for token in numeric_tokens:
+        whole = token.split(".", 1)[0]
+        if len(whole) >= 4:
+            return whole
+    return numeric_tokens[0].split(".", 1)[0]
+
+
+def _is_date_component_field(field: FormField) -> bool:
+    label_norm = normalize_name(_preferred_field_label(field))
+    return field.field_type in {"text", "number"} and label_norm in {"month", "day", "year"}
+
+
+def _is_grouped_date_field(field: FormField) -> bool:
+    return (
+        field.field_type == "date"
+        and (field.widget_kind or "") == "grouped_date"
+        and len(field.component_field_ids) >= 3
+    )
+
+
+def _parse_full_date_value(value: str | None) -> tuple[int, int, int] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = re.sub(r"[.\-]", "/", text)
+    parts = [part.strip() for part in normalized.split("/") if part.strip()]
+    if len(parts) != 3:
+        return None
+    try:
+        if len(parts[0]) == 4:
+            year = int(parts[0])
+            month = int(parts[1])
+            day = int(parts[2])
+        elif len(parts[2]) == 4:
+            month = int(parts[0])
+            day = int(parts[1])
+            year = int(parts[2])
+        else:
+            return None
+    except ValueError:
+        return None
+    if not (1 <= month <= 12 and 1 <= day <= 31 and 1900 <= year <= 9999):
+        return None
+    return (year, month, day)
+
+
+def _grouped_date_is_complete(value: str | None) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = normalize_name(text)
+    if any(token in normalized for token in {"mm", "dd", "yyyy", "month", "day", "year"}):
+        return False
+    return _parse_full_date_value(text) is not None
+
+
+def _field_has_effective_value(field: FormField) -> bool:
+    current_value = str(field.current_value or "").strip()
+    if not current_value or _is_effectively_unset_field_value(current_value):
+        return False
+    if _is_grouped_date_field(field):
+        return _grouped_date_is_complete(current_value)
+    return True
+
+
+async def _read_field_value_for_field(page: Any, field: FormField) -> str:
+    if not _is_grouped_date_field(field):
+        return await _read_field_value(page, field.field_id)
+    component_ids = list(field.component_field_ids)
+    if len(component_ids) < 3:
+        return await _read_field_value(page, field.field_id)
+    month_value = await _read_field_value(page, component_ids[0])
+    day_value = await _read_field_value(page, component_ids[1])
+    year_value = await _read_field_value(page, component_ids[2])
+    return _compose_grouped_date_value(month_value, day_value, year_value)
+
+
+def _text_fill_attempt_values(field: FormField, value: str) -> list[str]:
+    attempts = [str(value)]
+    if _is_date_component_field(field):
+        label_norm = normalize_name(_preferred_field_label(field))
+        digits = re.sub(r"\D", "", attempts[0])
+        if label_norm in {"month", "day"} and len(digits) == 1:
+            padded = digits.zfill(2)
+            if padded not in attempts:
+                attempts.append(padded)
+        if label_norm in {"month", "day"} and len(digits) == 2 and digits.startswith("0"):
+            unpadded = str(int(digits))
+            if unpadded not in attempts:
+                attempts.append(unpadded)
+    if _is_salary_like_field(field):
+        numeric_candidate = _coerce_salary_numeric_candidate(value)
+        if numeric_candidate and numeric_candidate not in attempts:
+            attempts.append(numeric_candidate)
+    return attempts
+
+
+async def _click_away_from_text_like_field(page: Any, field_id: str) -> bool:
+    try:
+        raw = await page.evaluate(_CLICK_OTHER_TEXTLIKE_FIELD_JS, field_id)
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        return bool(isinstance(parsed, dict) and parsed.get("clicked"))
+    except Exception:
+        try:
+            await page.evaluate(_DISMISS_DROPDOWN_JS)
+        except Exception:
+            return False
+        return False
+
+
 async def _confirm_text_like_value(page: Any, field: FormField, value: str, tag: str) -> bool:
     """Verify a text-like field and use a narrow commit sequence when needed."""
     current = await _wait_for_field_value(page, field, value, timeout=0.9, poll_interval=0.15)
     if not _field_value_matches_expected(current, value):
         return False
-    if not _field_needs_enter_commit(field) and not await _field_has_validation_error(page, field.field_id):
+    needs_enter_commit = _field_needs_enter_commit(field)
+    needs_blur_revalidation = _field_needs_blur_revalidation(field)
+    if (
+        not needs_enter_commit
+        and not needs_blur_revalidation
+        and not await _field_has_validation_error(page, field.field_id)
+    ):
         return True
     selector = f'[data-ff-id="{field.field_id}"]'
     try:
@@ -4165,18 +5723,28 @@ async def _confirm_text_like_value(page: Any, field: FormField, value: str, tag:
         locator = page.locator(selector).first
         await locator.click(timeout=500)
         await asyncio.sleep(0.05)
-        await locator.press("Enter")
-        await asyncio.sleep(0.15)
-        await locator.press("Tab")
-        await asyncio.sleep(0.1)
+        if needs_enter_commit:
+            await locator.press("Enter")
+            await asyncio.sleep(0.15)
+        if needs_blur_revalidation:
+            await page.evaluate(_DISMISS_DROPDOWN_JS)
+            await asyncio.sleep(0.15)
+        else:
+            await locator.press("Tab")
+            await asyncio.sleep(0.1)
     except Exception:
         try:
             await page.evaluate(_FOCUS_FIELD_JS, field.field_id)
             await asyncio.sleep(0.05)
-            await page.keyboard.press("Enter")
-            await asyncio.sleep(0.15)
-            await page.keyboard.press("Tab")
-            await asyncio.sleep(0.1)
+            if needs_enter_commit:
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(0.15)
+            if needs_blur_revalidation:
+                await page.evaluate(_DISMISS_DROPDOWN_JS)
+                await asyncio.sleep(0.15)
+            else:
+                await page.keyboard.press("Tab")
+                await asyncio.sleep(0.1)
         except Exception:
             return _field_value_matches_expected(current, value) and not await _field_has_validation_error(
                 page, field.field_id
@@ -4185,6 +5753,15 @@ async def _confirm_text_like_value(page: Any, field: FormField, value: str, tag:
     if _field_value_matches_expected(confirmed, value) and not await _field_has_validation_error(page, field.field_id):
         logger.debug(f"confirm {tag} -> enter/tab commit")
         return True
+    if _field_value_matches_expected(confirmed, value):
+        await _click_away_from_text_like_field(page, field.field_id)
+        await asyncio.sleep(0.15)
+        confirmed = await _wait_for_field_value(page, field, value, timeout=1.1, poll_interval=0.15)
+        if _field_value_matches_expected(confirmed, value) and not await _field_has_validation_error(
+            page, field.field_id
+        ):
+            logger.debug(f"confirm {tag} -> click-away commit")
+            return True
     return False
 
 
@@ -4336,7 +5913,9 @@ def _is_domhand_retry_capped_for_field(host: str, field: FormField, desired_valu
     )
 
 
-def _record_domhand_failure_for_field(host: str, field: FormField, desired_value: str, tool_name: str) -> tuple[int, bool]:
+def _record_domhand_failure_for_field(
+    host: str, field: FormField, desired_value: str, tool_name: str
+) -> tuple[int, bool]:
     count = record_domhand_failure(
         host=host,
         field_key=_domhand_retry_field_identity(field),
@@ -4430,8 +6009,101 @@ async def _field_already_matches(page: Any, field: FormField, value: str | None)
         return _field_value_matches_expected(current, value) and not await _field_has_validation_error(
             page, field.field_id
         )
-    current = await _read_field_value(page, field.field_id)
+    current = await _read_field_value_for_field(page, field)
     return _field_value_matches_expected(current, value) and not await _field_has_validation_error(page, field.field_id)
+
+
+async def _read_observed_field_value(page: Any, field: FormField) -> str:
+    """Read the visible value of a field using the correct control-specific path."""
+    if field.field_type == "checkbox-group":
+        if _checkbox_group_is_exclusive_choice(field):
+            return await _read_group_selection(page, field.field_id)
+        state = await _read_binary_state(page, field.field_id)
+        return "checked" if state else ""
+    if field.field_type in {"checkbox", "toggle"}:
+        state = await _read_binary_state(page, field.field_id)
+        return "checked" if state else ""
+    if field.field_type in {"radio-group", "radio", "button-group"}:
+        return await _read_group_selection(page, field.field_id)
+    return await _read_field_value_for_field(page, field)
+
+
+async def _record_expected_value_if_settled(
+    *,
+    page: Any,
+    host: str,
+    page_context_key: str,
+    field: FormField,
+    field_key: str,
+    expected_value: str,
+    source: str,
+    log_context: str,
+) -> bool:
+    """Persist an expected value only after the field visibly settled and validated."""
+    observed_value = await _read_observed_field_value(page, field)
+    has_validation_error = await _field_has_validation_error(page, field.field_id)
+    if not await _field_already_matches(page, field, expected_value):
+        logger.info(
+            f"{log_context}.skip_record_expected_value",
+            extra={
+                "field_id": field.field_id,
+                "field_key": field_key,
+                "field_label": _preferred_field_label(field),
+                "field_type": field.field_type,
+                "field_section": field.section or "",
+                "field_fingerprint": field.field_fingerprint or "",
+                "expected_value": expected_value,
+                "observed_value": observed_value,
+                "validation_cleared": not has_validation_error,
+                "reason": "value_not_settled",
+            },
+        )
+        return False
+    if has_validation_error:
+        logger.info(
+            f"{log_context}.skip_record_expected_value",
+            extra={
+                "field_id": field.field_id,
+                "field_key": field_key,
+                "field_label": _preferred_field_label(field),
+                "field_type": field.field_type,
+                "field_section": field.section or "",
+                "field_fingerprint": field.field_fingerprint or "",
+                "expected_value": expected_value,
+                "observed_value": observed_value,
+                "validation_cleared": False,
+                "reason": "validation_error",
+            },
+        )
+        return False
+
+    record_expected_field_value(
+        host=host,
+        page_context_key=page_context_key,
+        field_key=field_key,
+        field_label=_preferred_field_label(field),
+        field_type=field.field_type,
+        field_section=field.section or "",
+        field_fingerprint=field.field_fingerprint or "",
+        expected_value=expected_value,
+        source=source,
+    )
+    logger.info(
+        f"{log_context}.record_expected_value",
+        extra={
+            "field_id": field.field_id,
+            "field_key": field_key,
+            "field_label": _preferred_field_label(field),
+            "field_type": field.field_type,
+            "field_section": field.section or "",
+            "field_fingerprint": field.field_fingerprint or "",
+            "expected_value": expected_value,
+            "observed_value": observed_value,
+            "validation_cleared": True,
+            "source": source,
+        },
+    )
+    return True
 
 
 def _known_profile_value(
@@ -4529,7 +6201,10 @@ def _known_profile_value(
         kw in name for kw in ("how did you hear", "learn about us", "referral source", "source of referral", "source")
     ):
         return evidence.get("how_did_you_hear")
-    if any(kw in name for kw in ("work authorization", "authorized to work", "legally authorized")):
+    if any(
+        kw in name
+        for kw in ("work authorization", "authorized to work", "legally authorized", "legally permitted to work")
+    ):
         return evidence.get("work_authorization")
     if any(kw in name for kw in ("start date", "earliest start", "available date", "availability")):
         return evidence.get("availability_window") or evidence.get("available_start_date")
@@ -4622,6 +6297,14 @@ def _known_profile_value_for_field(
             reason="strong_match_required",
         )
         return None
+    if _is_structured_education_field(field):
+        _trace_profile_resolution(
+            "domhand.profile_lookup_miss",
+            field_label=field_label,
+            minimum_confidence=minimum_confidence,
+            reason="structured_education_exact_only",
+        )
+        return None
     for label in _field_label_candidates(field):
         value = _known_profile_value(label, evidence, profile_data)
         if value:
@@ -4691,6 +6374,32 @@ def _resolved_field_value(
     )
 
 
+def _resolved_field_value_if_compatible(
+    field: FormField,
+    value: str | None,
+    *,
+    source: str,
+    source_candidate: str | None = None,
+    answer_mode: str | None,
+    confidence: float,
+    state: str = "filled",
+) -> ResolvedFieldValue | None:
+    coerced = _coerce_answer_if_compatible(
+        field,
+        value,
+        source_candidate=source_candidate or source,
+    )
+    if not coerced:
+        return None
+    return _resolved_field_value(
+        coerced,
+        source=source,
+        answer_mode=answer_mode,
+        confidence=confidence,
+        state=state,
+    )
+
+
 def _default_answer_mode_for_field(field: FormField, value: str | None) -> str | None:
     text = str(value or "").strip()
     if not text:
@@ -4717,12 +6426,24 @@ def _resolve_known_profile_value_for_field(
     minimum_confidence: str = "medium",
 ) -> ResolvedFieldValue | None:
     field_label = _preferred_field_label(field)
+    if _is_structured_education_field(field):
+        _trace_profile_resolution(
+            "domhand.profile_lookup_miss",
+            field_label=field_label,
+            minimum_confidence=minimum_confidence,
+            reason="structured_education_exact_only",
+        )
+        return None
     profile_answer_map = _build_profile_answer_map(profile_data or {}, evidence)
     for label in _field_label_candidates(field):
         confidence = _label_match_confidence(label, label)
         value = _find_best_profile_answer(label, profile_answer_map, minimum_confidence=minimum_confidence)
         if value:
-            coerced = _coerce_answer_to_field(field, value)
+            coerced = _coerce_answer_if_compatible(
+                field,
+                value,
+                source_candidate="profile",
+            )
             if not coerced:
                 continue
             _trace_profile_resolution(
@@ -4750,7 +6471,11 @@ def _resolve_known_profile_value_for_field(
     for label in _field_label_candidates(field):
         value = _known_profile_value(label, evidence, profile_data)
         if value:
-            coerced = _coerce_answer_to_field(field, value)
+            coerced = _coerce_answer_if_compatible(
+                field,
+                value,
+                source_candidate="profile",
+            )
             if not coerced:
                 continue
             _trace_profile_resolution(
@@ -4773,7 +6498,11 @@ def _resolve_known_profile_value_for_field(
         for label in _field_label_candidates(field):
             qa_val = _match_qa_answer(label, capped)
             if qa_val:
-                coerced = _coerce_answer_to_field(field, qa_val)
+                coerced = _coerce_answer_if_compatible(
+                    field,
+                    qa_val,
+                    source_candidate="profile",
+                )
                 if not coerced:
                     continue
                 _trace_profile_resolution(
@@ -4798,14 +6527,20 @@ def _resolve_known_profile_value_for_field(
             field_label=field_label,
             raw_value=_profile_debug_preview(default_answer),
         )
-        return _resolved_field_value(
+        return _resolved_field_value_if_compatible(
+            field,
             default_answer,
             source="dom",
+            source_candidate="default",
             answer_mode=_default_answer_mode_for_field(field, default_answer),
             confidence=0.68,
         )
 
-    fallback = _coerce_answer_to_field(field, _known_profile_value(field.name, evidence, profile_data))
+    fallback = _coerce_answer_if_compatible(
+        field,
+        _known_profile_value(field.name, evidence, profile_data),
+        source_candidate="profile",
+    )
     _trace_profile_resolution(
         "domhand.profile_fallback_lookup",
         field_label=field_label,
@@ -4826,6 +6561,8 @@ def _default_value(field: FormField) -> str:
     """Fallback values allowed by strict-provenance policy only."""
     name_lower = normalize_name(field.name or "")
     if any(token in name_lower for token in ("signature date", "today", "current date")):
+        return date.today().isoformat()
+    if _is_self_identify_date_field(field):
         return date.today().isoformat()
 
     # EEO / demographic decline defaults — last resort for required fields
@@ -4859,7 +6596,11 @@ def _resolve_llm_answer_for_field(
             if norm_name in _AUTHORITATIVE_SELECT_KEYS:
                 for ck in _AUTHORITATIVE_SELECT_KEYS[norm_name]:
                     if ck in answers:
-                        coerced = _coerce_answer_to_field(field, answers[ck])
+                        coerced = _coerce_answer_if_compatible(
+                            field,
+                            answers[ck],
+                            source_candidate="llm",
+                        )
                         if coerced:
                             return _resolved_field_value(
                                 coerced,
@@ -4869,7 +6610,11 @@ def _resolve_llm_answer_for_field(
                             )
                     for key, val in answers.items():
                         if normalize_name(key) == normalize_name(ck):
-                            coerced = _coerce_answer_to_field(field, val)
+                            coerced = _coerce_answer_if_compatible(
+                                field,
+                                val,
+                                source_candidate="llm",
+                            )
                             if coerced:
                                 return _resolved_field_value(
                                     coerced,
@@ -4879,9 +6624,11 @@ def _resolve_llm_answer_for_field(
                                 )
                 if norm_name in _AUTHORITATIVE_SELECT_DEFAULTS:
                     default_value = _AUTHORITATIVE_SELECT_DEFAULTS[norm_name]
-                    return _resolved_field_value(
+                    return _resolved_field_value_if_compatible(
+                        field,
                         default_value,
                         source="dom",
+                        source_candidate="default",
                         answer_mode=_default_answer_mode_for_field(field, default_value),
                         confidence=0.66,
                     )
@@ -4896,7 +6643,11 @@ def _resolve_llm_answer_for_field(
             rank = _MATCH_CONFIDENCE_RANKS.get(confidence or "", 0)
             if rank <= best_rank:
                 continue
-            coerced = _coerce_answer_to_field(field, val)
+            coerced = _coerce_answer_if_compatible(
+                field,
+                val,
+                source_candidate="llm",
+            )
             if not coerced:
                 continue
             best_rank = rank
@@ -4915,9 +6666,11 @@ def _resolve_llm_answer_for_field(
     for norm_name in candidate_norms:
         if norm_name in _AUTHORITATIVE_SELECT_DEFAULTS:
             default_value = _AUTHORITATIVE_SELECT_DEFAULTS[norm_name]
-            return _resolved_field_value(
+            return _resolved_field_value_if_compatible(
+                field,
                 default_value,
                 source="dom",
+                source_candidate="default",
                 answer_mode=_default_answer_mode_for_field(field, default_value),
                 confidence=0.66,
             )
@@ -4926,9 +6679,11 @@ def _resolve_llm_answer_for_field(
         for norm_name in candidate_norms:
             if norm_name in _AUTHORITATIVE_TEXT_DEFAULTS:
                 default_value = _AUTHORITATIVE_TEXT_DEFAULTS[norm_name]
-                return _resolved_field_value(
+                return _resolved_field_value_if_compatible(
+                    field,
                     default_value,
                     source="dom",
+                    source_candidate="default",
                     answer_mode=_default_answer_mode_for_field(field, default_value),
                     confidence=0.66,
                 )
@@ -4937,9 +6692,11 @@ def _resolve_llm_answer_for_field(
         for norm_name in candidate_norms:
             if norm_name in _EEO_DECLINE_DEFAULTS:
                 default_value = _EEO_DECLINE_DEFAULTS[norm_name]
-                return _resolved_field_value(
+                return _resolved_field_value_if_compatible(
+                    field,
                     default_value,
                     source="dom",
+                    source_candidate="default",
                     answer_mode="default_decline",
                     confidence=0.72,
                 )
@@ -4947,9 +6704,11 @@ def _resolve_llm_answer_for_field(
     default_value = _default_value(field)
     if not default_value:
         return None
-    return _resolved_field_value(
+    return _resolved_field_value_if_compatible(
+        field,
         default_value,
         source="dom",
+        source_candidate="default",
         answer_mode=_default_answer_mode_for_field(field, default_value),
         confidence=0.65,
     )
@@ -5438,14 +7197,52 @@ async def extract_visible_form_fields(page: Any) -> list[FormField]:
     """Extract visible form fields and synthetic button groups using DomHand helpers."""
     raw_json = await page.evaluate(_EXTRACT_FIELDS_JS)
     raw_fields: list[dict[str, Any]] = json.loads(raw_json) if isinstance(raw_json, str) else raw_json or []
+    grouped_date_raw_fields, grouped_date_component_ids = _raw_grouped_date_fields(raw_fields)
+    raw_field_hints = {
+        str(raw.get("field_id", "")).strip(): _field_name_attr_hint(raw)
+        for raw in raw_fields
+        if str(raw.get("field_id", "")).strip()
+    }
+    for raw in grouped_date_raw_fields.values():
+        raw_field_hints[str(raw.get("field_id", "")).strip()] = str(
+            raw.get("name") or raw.get("raw_label") or raw.get("field_id") or ""
+        ).strip()
 
     fields: list[FormField] = []
     grouped_names: set[str] = set()
     seen_ids: set[str] = set()
+    emitted_grouped_date_keys: set[str] = set()
 
     for f_data in raw_fields:
         fid = f_data.get("field_id", "")
         if not fid or fid in seen_ids:
+            continue
+        date_group_key = str(f_data.get("date_group_key") or "").strip()
+        if date_group_key and date_group_key in grouped_date_raw_fields:
+            if date_group_key in emitted_grouped_date_keys:
+                seen_ids.add(fid)
+                continue
+            emitted_grouped_date_keys.add(date_group_key)
+            grouped_field = grouped_date_raw_fields[date_group_key]
+            seen_ids.update(
+                {
+                    str(component_id).strip()
+                    for component_id in grouped_field.get("component_field_ids", [])
+                    if str(component_id).strip()
+                }
+            )
+            grouped_field_id = str(grouped_field.get("field_id", "")).strip()
+            if grouped_field_id:
+                seen_ids.add(grouped_field_id)
+            fields.append(
+                _ensure_field_fingerprint(
+                    FormField.model_validate(grouped_field),
+                    name_attr_hint=raw_field_hints.get(grouped_field_id, ""),
+                )
+            )
+            continue
+        if fid in grouped_date_component_ids:
+            seen_ids.add(fid)
             continue
         ftype = f_data.get("field_type", "text")
         fname = f_data.get("name", "")
@@ -5472,12 +7269,7 @@ async def extract_visible_form_fields(page: Any) -> list[FormField]:
                     if s.get("current_value"):
                         selected_choice = s.get("itemLabel", s.get("name", "")) or ""
                         break
-                field_label = (
-                    f_data.get("questionLabel")
-                    or f_data.get("raw_label")
-                    or f_data.get("name")
-                    or fname
-                )
+                field_label = f_data.get("questionLabel") or f_data.get("raw_label") or f_data.get("name") or fname
                 choice_labels = [
                     str(s.get("itemLabel", s.get("name", "")) or "").strip()
                     for s in siblings
@@ -5501,18 +7293,21 @@ async def extract_visible_form_fields(page: Any) -> list[FormField]:
                 if not inferred_required and "*" in str(field_label or ""):
                     inferred_required = True
                 fields.append(
-                    FormField(
-                        field_id=fid,
-                        name=str(field_label or "").strip(),
-                        field_type=f"{ftype}-group",
-                        section=group_section,
-                        required=inferred_required,
-                        options=[],
-                        choices=choice_labels,
-                        is_native=False,
-                        visible=True,
-                        raw_label=str(field_label or "").strip() or None,
-                        current_value=selected_choice,
+                    _ensure_field_fingerprint(
+                        FormField(
+                            field_id=fid,
+                            name=str(field_label or "").strip(),
+                            field_type=f"{ftype}-group",
+                            section=group_section,
+                            required=inferred_required,
+                            options=[],
+                            choices=choice_labels,
+                            is_native=False,
+                            visible=True,
+                            raw_label=str(field_label or "").strip() or None,
+                            current_value=selected_choice,
+                        ),
+                        name_attr_hint=normalized_group_key,
                     )
                 )
             else:
@@ -5522,21 +7317,29 @@ async def extract_visible_form_fields(page: Any) -> list[FormField]:
                 if item_label and normalize_name(field_section) == normalize_name(item_label):
                     field_section = ""
                 fields.append(
-                    FormField(
-                        field_id=fid,
-                        name=str(field_label or "").strip(),
-                        field_type=ftype,
-                        section=field_section,
-                        required=bool(f_data.get("required", False)) or "*" in str(field_label or ""),
-                        is_native=False,
-                        visible=True,
-                        raw_label=str(field_label or "").strip() or None,
-                        current_value=f_data.get("current_value", ""),
+                    _ensure_field_fingerprint(
+                        FormField(
+                            field_id=fid,
+                            name=str(field_label or "").strip(),
+                            field_type=ftype,
+                            section=field_section,
+                            required=bool(f_data.get("required", False)) or "*" in str(field_label or ""),
+                            is_native=False,
+                            visible=True,
+                            raw_label=str(field_label or "").strip() or None,
+                            current_value=f_data.get("current_value", ""),
+                        ),
+                        name_attr_hint=_field_name_attr_hint(f_data),
                     )
                 )
         else:
             seen_ids.add(fid)
-            fields.append(FormField.model_validate(f_data))
+            fields.append(
+                _ensure_field_fingerprint(
+                    FormField.model_validate(f_data),
+                    name_attr_hint=_field_name_attr_hint(f_data),
+                )
+            )
 
     try:
         btn_json = await page.evaluate(_EXTRACT_BUTTON_GROUPS_JS)
@@ -5545,9 +7348,18 @@ async def extract_visible_form_fields(page: Any) -> list[FormField]:
             bg_id = bg.get("field_id", "")
             if bg_id and bg_id not in seen_ids:
                 seen_ids.add(bg_id)
-                fields.append(FormField.model_validate(bg))
+                raw_field_hints[str(bg_id).strip()] = _field_name_attr_hint(bg)
+                fields.append(
+                    _ensure_field_fingerprint(
+                        FormField.model_validate(bg),
+                        name_attr_hint=_field_name_attr_hint(bg),
+                    )
+                )
     except Exception as e:
         logger.debug(f"Button group extraction failed: {e}")
+
+    for field in fields:
+        _ensure_field_fingerprint(field, name_attr_hint=raw_field_hints.get(field.field_id, ""))
 
     return fields
 
@@ -5616,7 +7428,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         focus_selection = _resolve_focus_fields(fields, params.focus_fields)
         if params.focus_fields and focus_selection.ambiguous_labels:
             details = ", ".join(
-                f'{label}: {[f"{field.field_id} ({field.field_type})" for field in matches]}'
+                f"{label}: {[f'{field.field_id} ({field.field_type})' for field in matches]}"
                 for label, matches in focus_selection.ambiguous_labels.items()
             )
             return ActionResult(
@@ -5626,12 +7438,37 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 ),
             )
         fields = focus_selection.fields if params.focus_fields else fields
-        if params.focus_fields:
-            fields = _active_blocker_focus_fields(
-                browser_session,
-                fields=fields,
-                page_context_key=page_context_key,
-                page_url=page_url,
+        fields, blockers_unchanged = _active_blocker_focus_fields(
+            browser_session,
+            fields=fields,
+            page_context_key=page_context_key,
+            page_url=page_url,
+        )
+        if blockers_unchanged:
+            if fields:
+                chosen_next_strategy = (
+                    "direct_widget_interaction"
+                    if all(_is_required_custom_widget_boolean_select(field) for field in fields)
+                    else "change_strategy"
+                )
+                _log_loop_blocker_state(
+                    browser_session,
+                    fields=fields,
+                    chosen_next_strategy=chosen_next_strategy,
+                )
+            if fields and all(_is_required_custom_widget_boolean_select(field) for field in fields):
+                return ActionResult(
+                    error=(
+                        "Latest domhand_assess_state still shows the same required custom-widget boolean blocker(s) on this page context. "
+                        "Do NOT call domhand_fill again for these fields. Open one widget, click the visible Yes/No option directly, then reassess."
+                    ),
+                )
+            return ActionResult(
+                error=(
+                    "Latest domhand_assess_state shows the same blocker state on this page context. "
+                    "Do not retry domhand_fill on these blockers again. Switch to domhand_interact_control, "
+                    "domhand_select, or browser-use/manual for one current blocker."
+                ),
             )
 
         if params.heading_boundary and not fields:
@@ -5658,7 +7495,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 continue  # Already determined no profile data — don't retry
             if key in fields_capped:
                 continue
-            if key in fields_seen and f.current_value and not _is_effectively_unset_field_value(f.current_value):
+            if key in fields_seen and _field_has_effective_value(f):
                 continue
             if _is_navigation_field(f):
                 continue
@@ -5685,8 +7522,9 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         direct_fills: dict[str, str] = {}
         resolved_values: dict[str, ResolvedFieldValue] = {}
         resolved_bindings: dict[str, ResolvedFieldBinding] = {}
+        fillable_field_map = {field.field_id: field for field in fillable_fields}
         for f in fillable_fields:
-            if f.current_value and not _is_effectively_unset_field_value(f.current_value):
+            if _field_has_effective_value(f):
                 fields_seen.add(get_stable_field_key(f))
                 continue
             auth_val = _known_auth_override_for_field(f, auth_overrides)
@@ -5723,34 +7561,80 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 if _on_field_result:
                     _on_field_result(fr, round_num)
                 continue
+            is_structured_language = _is_structured_language_field(f)
+            structured_language_diag = (
+                StructuredRepeaterDiagnostic(
+                    repeater_group="languages",
+                    field_id=f.field_id,
+                    field_label=_preferred_field_label(f),
+                    section=f.section or "",
+                    slot_name=_language_slot_name(f),
+                    numeric_index=_language_entry_index_for_field(f),
+                    current_value=str(f.current_value or "").strip(),
+                )
+                if is_structured_language
+                else None
+            )
             structured_language_val = None
-            if _is_structured_language_field(f) and profile_data:
-                raw_languages = [
-                    entry
-                    for entry in (profile_data.get("languages") or [])
-                    if isinstance(entry, dict)
-                ]
+            if is_structured_language and profile_data:
+                raw_languages = [entry for entry in (profile_data.get("languages") or []) if isinstance(entry, dict)]
+                if structured_language_diag and not structured_language_diag.slot_name:
+                    structured_language_diag.failure_stage = "slot_unresolved"
                 structured_language_binding = _resolve_repeater_binding(
                     host=page_host,
                     repeater_group="languages",
                     field=f,
                     visible_fields=fillable_fields,
                     entries=raw_languages,
-                    numeric_index=_language_entry_index_for_field(f),
-                    slot_name=_language_slot_name(f),
+                    numeric_index=structured_language_diag.numeric_index
+                    if structured_language_diag
+                    else _language_entry_index_for_field(f),
+                    slot_name=structured_language_diag.slot_name
+                    if structured_language_diag
+                    else _language_slot_name(f),
                     current_value=f.current_value,
                     slot_resolver=_language_slot_name,
                 )
                 if structured_language_binding:
-                    structured_language_val = _structured_language_value_from_entry(
-                        f,
-                        raw_languages[structured_language_binding.entry_index],
+                    _set_structured_repeater_binding(structured_language_diag, structured_language_binding)
+                    raw_structured_language_val, raw_structured_language_source = (
+                        _structured_language_raw_value_and_source_from_entry(
+                            f,
+                            raw_languages[structured_language_binding.entry_index],
+                        )
                     )
+                    if raw_structured_language_val:
+                        structured_language_val = _coerce_answer_to_field(f, raw_structured_language_val)
+                        if structured_language_val:
+                            _set_structured_repeater_resolved_value(
+                                structured_language_diag,
+                                structured_language_val,
+                                source_key=raw_structured_language_source,
+                            )
+                        elif structured_language_diag:
+                            structured_language_diag.failure_stage = "value_coercion_empty"
+                    elif structured_language_diag:
+                        structured_language_diag.failure_stage = "entry_value_missing"
                     if structured_language_val:
                         resolved_bindings[f.field_id] = structured_language_binding
+                elif structured_language_diag:
+                    structured_language_diag.failure_stage = (
+                        "binding_unresolved" if len(raw_languages) > 1 else "entry_value_missing"
+                    )
             if not structured_language_val:
                 structured_language_val = _resolve_structured_language_value(f, profile_data)
+                if structured_language_val:
+                    _set_structured_repeater_resolved_value(
+                        structured_language_diag,
+                        structured_language_val,
+                        source_key="fallback_structured_language",
+                    )
+                elif structured_language_diag and not structured_language_diag.failure_stage:
+                    structured_language_diag.failure_stage = (
+                        "slot_unresolved" if not structured_language_diag.slot_name else "entry_value_missing"
+                    )
             if structured_language_val:
+                _trace_structured_repeater_resolution(f, structured_language_diag)
                 direct_fills[f.field_id] = structured_language_val
                 resolved_values[f.field_id] = _resolved_field_value(
                     structured_language_val,
@@ -5759,20 +7643,23 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     confidence=1.0,
                 )
                 continue
-            if _is_structured_language_field(f):
-                error_msg = _structured_field_missing_reason(f)
-                fr = FillFieldResult(
-                    field_id=f.field_id,
-                    name=_preferred_field_label(f),
-                    success=False,
-                    actor="skipped",
-                    error=error_msg if not f.required else f"REQUIRED — {error_msg}",
-                    required=f.required,
-                    control_kind=f.field_type,
-                    section=f.section or "",
-                    state="failed",
-                    failure_reason="missing_profile_data" if not f.required else "required_missing_profile_data",
-                    takeover_suggestion="Pause for user data instead of guessing this structured language field.",
+            if is_structured_language:
+                if structured_language_diag and not structured_language_diag.failure_stage:
+                    structured_language_diag.failure_stage = (
+                        "slot_unresolved" if not structured_language_diag.slot_name else "entry_value_missing"
+                    )
+                _trace_structured_repeater_resolution(f, structured_language_diag)
+                fr = _structured_repeater_fill_result(
+                    f,
+                    structured_language_diag
+                    or StructuredRepeaterDiagnostic(
+                        repeater_group="languages",
+                        field_id=f.field_id,
+                        field_label=_preferred_field_label(f),
+                        section=f.section or "",
+                        current_value=str(f.current_value or "").strip(),
+                        failure_stage="entry_value_missing",
+                    ),
                 )
                 all_results.append(fr)
                 if _on_field_result:
@@ -5781,33 +7668,100 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 fields_skipped.add(key)
                 continue
             entry_val = _known_entry_value_for_field(f, entry_data)
-            if not entry_val and _is_structured_education_field(f) and profile_data:
-                raw_education = [
-                    entry
-                    for entry in (profile_data.get("education") or [])
-                    if isinstance(entry, dict)
-                ]
-                structured_education_binding = _resolve_repeater_binding(
+            is_structured_education_candidate = _is_structured_education_candidate(f, fillable_fields)
+            structured_education_diag = (
+                StructuredRepeaterDiagnostic(
+                    repeater_group="education",
+                    field_id=f.field_id,
+                    field_label=_preferred_field_label(f),
+                    section=f.section or "",
+                    slot_name=_education_slot_name(f, fillable_fields),
+                    numeric_index=(_parse_heading_index(f.section) - 1)
+                    if _parse_heading_index(f.section) is not None
+                    else None,
+                    current_value=str(f.current_value or "").strip(),
+                )
+                if is_structured_education_candidate
+                else None
+            )
+            if structured_education_diag and entry_val:
+                _set_structured_repeater_resolved_value(structured_education_diag, entry_val)
+            if not entry_val and is_structured_education_candidate and profile_data:
+                raw_education = [entry for entry in (profile_data.get("education") or []) if isinstance(entry, dict)]
+                section_binding = next(
+                    (
+                        binding
+                        for bound_field_id, binding in resolved_bindings.items()
+                        if bound_field_id != f.field_id
+                        and bound_field_id in fillable_field_map
+                        and _is_structured_education_candidate(fillable_field_map[bound_field_id], fillable_fields)
+                        and normalize_name(fillable_field_map[bound_field_id].section or "")
+                        == normalize_name(f.section or "")
+                    ),
+                    None,
+                )
+                if structured_education_diag:
+                    structured_education_diag.section_binding_reused = section_binding is not None
+                    if not structured_education_diag.slot_name:
+                        structured_education_diag.failure_stage = "slot_unresolved"
+
+                def education_slot_resolver(candidate: FormField) -> str | None:
+                    return _education_slot_name(candidate, fillable_fields)
+
+                structured_education_binding = section_binding or _resolve_repeater_binding(
                     host=page_host,
                     repeater_group="education",
                     field=f,
                     visible_fields=fillable_fields,
                     entries=raw_education,
-                    numeric_index=(_parse_heading_index(f.section) - 1) if _parse_heading_index(f.section) is not None else None,
-                    slot_name=_education_slot_name(f),
+                    numeric_index=structured_education_diag.numeric_index
+                    if structured_education_diag
+                    else (_parse_heading_index(f.section) - 1)
+                    if _parse_heading_index(f.section) is not None
+                    else None,
+                    slot_name=structured_education_diag.slot_name
+                    if structured_education_diag
+                    else _education_slot_name(f, fillable_fields),
                     current_value=f.current_value,
-                    slot_resolver=_education_slot_name,
+                    slot_resolver=education_slot_resolver,
                 )
                 if structured_education_binding:
-                    entry_val = _known_entry_value_for_field(
-                        f,
-                        raw_education[structured_education_binding.entry_index],
+                    _set_structured_repeater_binding(structured_education_diag, structured_education_binding)
+                    raw_structured_education_val, raw_structured_education_source = (
+                        _structured_education_raw_value_and_source_from_entry(
+                            f,
+                            raw_education[structured_education_binding.entry_index],
+                            fillable_fields,
+                        )
                     )
+                    if raw_structured_education_val:
+                        entry_val = _coerce_answer_to_field(f, raw_structured_education_val)
+                        if entry_val:
+                            _set_structured_repeater_resolved_value(
+                                structured_education_diag,
+                                entry_val,
+                                source_key=raw_structured_education_source,
+                            )
+                        elif structured_education_diag:
+                            structured_education_diag.failure_stage = "value_coercion_empty"
+                    elif structured_education_diag:
+                        structured_education_diag.failure_stage = "entry_value_missing"
                     if entry_val:
                         resolved_bindings[f.field_id] = structured_education_binding
+                elif structured_education_diag:
+                    structured_education_diag.failure_stage = (
+                        "binding_unresolved" if len(raw_education) > 1 else "entry_value_missing"
+                    )
             if entry_val:
                 coerced_entry_val = _coerce_answer_to_field(f, entry_val)
                 if coerced_entry_val:
+                    if structured_education_diag and structured_education_diag.failure_stage != "resolved":
+                        _set_structured_repeater_resolved_value(
+                            structured_education_diag,
+                            coerced_entry_val,
+                            source_key=structured_education_diag.resolved_source_key,
+                        )
+                    _trace_structured_repeater_resolution(f, structured_education_diag)
                     direct_fills[f.field_id] = coerced_entry_val
                     resolved_values[f.field_id] = _resolved_field_value(
                         coerced_entry_val,
@@ -5816,20 +7770,25 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         confidence=0.99,
                     )
                     continue
-            if _is_structured_education_field(f):
-                error_msg = _structured_field_missing_reason(f)
-                fr = FillFieldResult(
-                    field_id=f.field_id,
-                    name=_preferred_field_label(f),
-                    success=False,
-                    actor="skipped",
-                    error=error_msg if not f.required else f"REQUIRED — {error_msg}",
-                    required=f.required,
-                    control_kind=f.field_type,
-                    section=f.section or "",
-                    state="failed",
-                    failure_reason="missing_profile_data" if not f.required else "required_missing_profile_data",
-                    takeover_suggestion="Pause for user data instead of guessing this structured education field.",
+                if structured_education_diag and not structured_education_diag.failure_stage:
+                    structured_education_diag.failure_stage = "value_coercion_empty"
+            if is_structured_education_candidate:
+                if structured_education_diag and not structured_education_diag.failure_stage:
+                    structured_education_diag.failure_stage = (
+                        "slot_unresolved" if not structured_education_diag.slot_name else "entry_value_missing"
+                    )
+                _trace_structured_repeater_resolution(f, structured_education_diag)
+                fr = _structured_repeater_fill_result(
+                    f,
+                    structured_education_diag
+                    or StructuredRepeaterDiagnostic(
+                        repeater_group="education",
+                        field_id=f.field_id,
+                        field_label=_preferred_field_label(f),
+                        section=f.section or "",
+                        current_value=str(f.current_value or "").strip(),
+                        failure_stage="entry_value_missing",
+                    ),
                 )
                 all_results.append(fr)
                 if _on_field_result:
@@ -5869,6 +7828,14 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 needs_llm,
                 profile_text,
                 profile_data=profile_data,
+            )
+            _record_page_token_cost(
+                browser_session,
+                page_context_key=page_context_key,
+                target_section=params.target_section,
+                field_count=len(needs_llm),
+                input_tokens=in_tok,
+                output_tokens=out_tok,
             )
             answers = llm_answers
             total_step_cost += step_cost
@@ -5922,19 +7889,27 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         "dom",
                         None if success else field_error,
                     ),
-                    binding_mode=resolved_bindings.get(f.field_id).binding_mode if resolved_bindings.get(f.field_id) else None,
-                    binding_confidence=resolved_bindings.get(f.field_id).binding_confidence if resolved_bindings.get(f.field_id) else None,
-                    best_effort_guess=resolved_bindings.get(f.field_id).best_effort_guess if resolved_bindings.get(f.field_id) else False,
+                    binding_mode=resolved_bindings.get(f.field_id).binding_mode
+                    if resolved_bindings.get(f.field_id)
+                    else None,
+                    binding_confidence=resolved_bindings.get(f.field_id).binding_confidence
+                    if resolved_bindings.get(f.field_id)
+                    else None,
+                    best_effort_guess=resolved_bindings.get(f.field_id).best_effort_guess
+                    if resolved_bindings.get(f.field_id)
+                    else False,
                 )
                 if success:
                     confirm_learned_question_alias(_preferred_field_label(f))
-                    record_expected_field_value(
+                    await _record_expected_value_if_settled(
+                        page=page,
                         host=page_host,
                         page_context_key=page_context_key,
+                        field=f,
                         field_key=key,
-                        field_label=_preferred_field_label(f),
                         expected_value=value,
                         source="exact_profile" if resolved_value.source == "exact_profile" else "derived_profile",
+                        log_context="domhand.fill",
                     )
                 elif failure_reason == DOMHAND_RETRY_CAPPED:
                     fields_capped.add(key)
@@ -6013,19 +7988,27 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     "dom",
                     None if success else field_error,
                 ),
-                binding_mode=resolved_bindings.get(f.field_id).binding_mode if resolved_bindings.get(f.field_id) else None,
-                binding_confidence=resolved_bindings.get(f.field_id).binding_confidence if resolved_bindings.get(f.field_id) else None,
-                best_effort_guess=resolved_bindings.get(f.field_id).best_effort_guess if resolved_bindings.get(f.field_id) else False,
+                binding_mode=resolved_bindings.get(f.field_id).binding_mode
+                if resolved_bindings.get(f.field_id)
+                else None,
+                binding_confidence=resolved_bindings.get(f.field_id).binding_confidence
+                if resolved_bindings.get(f.field_id)
+                else None,
+                best_effort_guess=resolved_bindings.get(f.field_id).best_effort_guess
+                if resolved_bindings.get(f.field_id)
+                else False,
             )
             if success:
                 confirm_learned_question_alias(_preferred_field_label(f))
-                record_expected_field_value(
+                await _record_expected_value_if_settled(
+                    page=page,
                     host=page_host,
                     page_context_key=page_context_key,
+                    field=f,
                     field_key=key,
-                    field_label=_preferred_field_label(f),
                     expected_value=matched_answer,
                     source="exact_profile" if resolved_value.source == "exact_profile" else "derived_profile",
+                    log_context="domhand.fill",
                 )
             elif failure_reason == DOMHAND_RETRY_CAPPED:
                 fields_capped.add(key)
@@ -6045,12 +8028,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
     failed_count = sum(1 for r in all_results if not r.success and r.actor == "dom")
     skipped_count = sum(1 for r in all_results if r.actor == "skipped")
     unfilled_count = sum(1 for r in all_results if r.actor == "unfilled")
-    best_effort_results = [
-        r for r in all_results if r.success and r.answer_mode == "best_effort_guess" and r.value_set
-    ]
-    best_effort_binding_results = [
-        r for r in all_results if r.success and r.best_effort_guess
-    ]
+    best_effort_results = [r for r in all_results if r.success and r.answer_mode == "best_effort_guess" and r.value_set]
+    best_effort_binding_results = [r for r in all_results if r.success and r.best_effort_guess]
     required_skipped = [
         f'  - "{r.name}" (REQUIRED — needs attention)'
         for r in all_results
@@ -6082,11 +8061,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
     if best_effort_results:
         summary_lines.append("Best-effort guesses used (review these answers before submit):")
         summary_lines.extend(
-            [
-                f'  - "{r.name}"'
-                + (f" [{r.section}]" if r.section else "")
-                for r in best_effort_results[:20]
-            ]
+            [f'  - "{r.name}"' + (f" [{r.section}]" if r.section else "") for r in best_effort_results[:20]]
         )
     if best_effort_binding_results:
         summary_lines.append("Best-effort repeater bindings used (review these answers before submit):")
@@ -6127,29 +8102,9 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             for r in best_effort_binding_results
         ],
         "unresolved_required_fields": [
-            {
-                "field_id": r.field_id,
-                "name": r.name,
-                "control_kind": r.control_kind,
-                "section": r.section,
-                "failure_reason": r.failure_reason,
-                "takeover_suggestion": r.takeover_suggestion,
-            }
-            for r in all_results
-            if not r.success and r.required
+            _fill_result_summary_entry(r) for r in all_results if not r.success and r.required
         ],
-        "failed_fields": [
-            {
-                "field_id": r.field_id,
-                "name": r.name,
-                "control_kind": r.control_kind,
-                "section": r.section,
-                "failure_reason": r.failure_reason,
-                "takeover_suggestion": r.takeover_suggestion,
-            }
-            for r in all_results
-            if not r.success
-        ],
+        "failed_fields": [_fill_result_summary_entry(r) for r in all_results if not r.success],
     }
     summary_lines.append("DOMHAND_FILL_JSON:")
     summary_lines.append(json.dumps(structured_summary, ensure_ascii=True))
@@ -6222,29 +8177,32 @@ async def _fill_text_field(page: Any, field: FormField, value: str, tag: str) ->
         logger.debug(f"skip {tag} (no value)")
         return False
 
-    if _field_needs_enter_commit(field) and await _fill_text_like_with_keyboard(page, field, value, tag):
-        logger.debug(f'fill {tag} = "{value[:80]}{"..." if len(value) > 80 else ""}" (keyboard-first)')
-        return True
-
-    try:
-        result_json = await page.evaluate(_FILL_FIELD_JS, ff_id, value, field.field_type)
-        result = json.loads(result_json) if isinstance(result_json, str) else result_json
-        if (
-            isinstance(result, dict)
-            and result.get("success")
-            and await _confirm_text_like_value(page, field, value, tag)
-        ):
-            logger.debug(f'fill {tag} = "{value[:80]}{"..." if len(value) > 80 else ""}"')
+    for attempt_value in _text_fill_attempt_values(field, value):
+        if _field_needs_enter_commit(field) and await _fill_text_like_with_keyboard(page, field, attempt_value, tag):
+            logger.debug(
+                f'fill {tag} = "{attempt_value[:80]}{"..." if len(attempt_value) > 80 else ""}" (keyboard-first)'
+            )
             return True
-    except Exception:
-        pass
 
-    try:
-        if await _fill_text_like_with_keyboard(page, field, value, tag):
-            logger.debug(f'fill {tag} = "{value[:80]}..." (keyboard)')
-            return True
-    except Exception:
-        pass
+        try:
+            result_json = await page.evaluate(_FILL_FIELD_JS, ff_id, attempt_value, field.field_type)
+            result = json.loads(result_json) if isinstance(result_json, str) else result_json
+            if (
+                isinstance(result, dict)
+                and result.get("success")
+                and await _confirm_text_like_value(page, field, attempt_value, tag)
+            ):
+                logger.debug(f'fill {tag} = "{attempt_value[:80]}{"..." if len(attempt_value) > 80 else ""}"')
+                return True
+        except Exception:
+            pass
+
+        try:
+            if await _fill_text_like_with_keyboard(page, field, attempt_value, tag):
+                logger.debug(f'fill {tag} = "{attempt_value[:80]}..." (keyboard)')
+                return True
+        except Exception:
+            pass
     logger.debug(f"skip {tag} (not fillable)")
     return False
 
@@ -6322,10 +8280,91 @@ async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag
     return False
 
 
+async def _open_grouped_date_picker(page: Any, field: FormField) -> bool:
+    if not _is_grouped_date_field(field) or not field.has_calendar_trigger:
+        return False
+    try:
+        raw = await page.evaluate(_OPEN_GROUPED_DATE_PICKER_JS, field.field_id)
+    except Exception:
+        return False
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return False
+    return bool(isinstance(parsed, dict) and parsed.get("clicked") and parsed.get("opened"))
+
+
+async def _select_grouped_date_from_picker(page: Any, field: FormField, year: int, month: int, day: int) -> bool:
+    if not _is_grouped_date_field(field):
+        return False
+    month_name = date(year, month, min(day, 28)).strftime("%B")
+    try:
+        raw = await page.evaluate(_SELECT_GROUPED_DATE_PICKER_VALUE_JS, month_name, str(day), str(year))
+    except Exception:
+        return False
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return False
+    return bool(isinstance(parsed, dict) and parsed.get("selected"))
+
+
+async def _fill_grouped_date_field(page: Any, field: FormField, value: str, tag: str) -> bool:
+    parsed = _parse_full_date_value(value)
+    if not parsed or not _is_grouped_date_field(field):
+        return False
+    year, month, day = parsed
+    if await _open_grouped_date_picker(page, field):
+        if await _select_grouped_date_from_picker(page, field, year, month, day):
+            expected_display = f"{month:02d}/{day:02d}/{year}"
+            if await _confirm_text_like_value(page, field, expected_display, tag):
+                logger.debug(f'fill {tag} = "{expected_display}" (picker)')
+                return True
+        try:
+            selector = f'[data-ff-id="{field.field_id}"]'
+            await page.press(selector, "Escape")
+            await asyncio.sleep(0.15)
+        except Exception:
+            pass
+
+    component_ids = list(field.component_field_ids)
+    component_values = [str(month).zfill(2), str(day).zfill(2), str(year)]
+    for component_id, component_value in zip(component_ids[:3], component_values, strict=False):
+        try:
+            result_json = await page.evaluate(_FILL_FIELD_JS, component_id, component_value, "text")
+            result = json.loads(result_json) if isinstance(result_json, str) else result_json
+            if not isinstance(result, dict) or not result.get("success"):
+                return False
+            await asyncio.sleep(0.08)
+        except Exception:
+            return False
+
+    expected_display = f"{month:02d}/{day:02d}/{year}"
+    last_component_id = component_ids[2]
+    try:
+        selector = f'[data-ff-id="{last_component_id}"]'
+        await page.press(selector, "Tab")
+        await asyncio.sleep(0.2)
+    except Exception:
+        pass
+    await _click_away_from_text_like_field(page, last_component_id)
+    await asyncio.sleep(0.15)
+    if await _confirm_text_like_value(page, field, expected_display, tag):
+        logger.debug(f'fill {tag} = "{expected_display}" (grouped)')
+        return True
+    return False
+
+
 async def _fill_date_field(page: Any, field: FormField, value: str, tag: str) -> bool:
     val = (value or "").strip()
     if not val:
         logger.debug(f"skip {tag} (date, no value)")
+        return False
+
+    if _is_grouped_date_field(field):
+        if await _fill_grouped_date_field(page, field, val, tag):
+            return True
+        logger.debug(f"skip {tag} (grouped date not fillable)")
         return False
 
     # Try multiple date format variations for resilience
@@ -6499,6 +8538,14 @@ async def _settle_dropdown_selection(page: Any, delay: float = 0.45) -> None:
     await asyncio.sleep(delay)
 
 
+async def _visible_field_id_snapshot(page: Any) -> set[str]:
+    try:
+        fields = await extract_visible_form_fields(page)
+    except Exception:
+        return set()
+    return {str(field.field_id).strip() for field in fields if str(field.field_id).strip()}
+
+
 async def _type_and_click_dropdown_option(page: Any, value: str, tag: str) -> dict[str, Any]:
     """Type search terms into an open dropdown and click the best visible match."""
     for idx, term in enumerate(generate_dropdown_search_terms(value)):
@@ -6528,6 +8575,12 @@ async def _type_and_click_dropdown_option(page: Any, value: str, tag: str) -> di
 
 async def _fill_custom_dropdown(page: Any, field: FormField, value: str, tag: str) -> bool:
     ff_id = field.field_id
+    pre_value = await _read_field_value_for_field(page, field)
+    visible_before = await _visible_field_id_snapshot(page)
+    open_succeeded = False
+    selection_stuck = False
+    post_value = pre_value
+    follow_up_appeared = False
     try:
         await page.evaluate(
             r"""(ffId) => {
@@ -6536,12 +8589,15 @@ async def _fill_custom_dropdown(page: Any, field: FormField, value: str, tag: st
 		}""",
             ff_id,
         )
+        open_succeeded = True
         await asyncio.sleep(0.6)
 
         clicked = await _click_dropdown_option(page, value)
         if clicked.get("clicked"):
             current = await _wait_for_field_value(page, field, value)
             if _field_value_matches_expected(current, value):
+                post_value = current
+                selection_stuck = True
                 logger.debug(f'select {tag} -> "{clicked.get("text", value)}"')
                 await _settle_dropdown_selection(page)
                 return True
@@ -6557,6 +8613,8 @@ async def _fill_custom_dropdown(page: Any, field: FormField, value: str, tag: st
                 await asyncio.sleep(0.8 if idx < len(segments) - 1 else 0.45)
             current = await _wait_for_field_value(page, field, value, timeout=2.8)
             if _field_value_matches_expected(current, value):
+                post_value = current
+                selection_stuck = True
                 logger.debug(f'select {tag} -> "{value}" (hierarchy)')
                 await _settle_dropdown_selection(page, delay=0.6)
                 return True
@@ -6565,6 +8623,8 @@ async def _fill_custom_dropdown(page: Any, field: FormField, value: str, tag: st
         if clicked.get("clicked"):
             current = await _wait_for_field_value(page, field, value)
             if _field_value_matches_expected(current, value):
+                post_value = current
+                selection_stuck = True
                 await _settle_dropdown_selection(page)
                 return True
 
@@ -6573,6 +8633,8 @@ async def _fill_custom_dropdown(page: Any, field: FormField, value: str, tag: st
         await page.press("Enter")
         current = await _wait_for_field_value(page, field, value, timeout=1.4)
         if _field_value_matches_expected(current, value):
+            post_value = current
+            selection_stuck = True
             logger.debug(f"select {tag} -> first option (keyboard)")
             await _settle_dropdown_selection(page)
             return True
@@ -6584,6 +8646,25 @@ async def _fill_custom_dropdown(page: Any, field: FormField, value: str, tag: st
             pass
         logger.debug(f"skip {tag} (custom dropdown failed: {str(e)[:60]})")
         return False
+    finally:
+        if not selection_stuck:
+            post_value = await _read_field_value_for_field(page, field)
+        visible_after = await _visible_field_id_snapshot(page)
+        follow_up_appeared = bool(visible_after - visible_before - {field.field_id})
+        logger.info(
+            "domhand.custom_widget_attempt",
+            extra={
+                "field_id": field.field_id,
+                "field_label": _preferred_field_label(field),
+                "desired_value": value,
+                "pre_value": pre_value,
+                "post_value": post_value,
+                "open_succeeded": open_succeeded,
+                "selection_stuck": selection_stuck,
+                "follow_up_appeared": follow_up_appeared,
+                "widget_kind": _field_widget_kind_for_debug(field),
+            },
+        )
 
 
 async def _fill_radio_group(page: Any, field: FormField, value: str, tag: str) -> bool:
@@ -6948,7 +9029,9 @@ async def _fill_checkbox(page: Any, field: FormField, value: str, tag: str) -> b
                 )
                 return True
         if "binary_gui_click" in recipe.preferred_action_chain:
-            if await _click_binary_with_gui(page, field, tag, desired_checked) and not await _field_has_validation_error(
+            if await _click_binary_with_gui(
+                page, field, tag, desired_checked
+            ) and not await _field_has_validation_error(
                 page,
                 field.field_id,
             ):

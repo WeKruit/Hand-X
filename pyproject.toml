@@ -38,6 +38,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "pyotp>=2.9",
     "requests>=2.32",
+    "redis>=5.2",
     "rich>=14.0",
     "typing-extensions>=4.15",
     "uuid7>=0.1",

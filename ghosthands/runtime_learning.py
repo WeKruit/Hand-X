@@ -60,6 +60,9 @@ class ExpectedFieldValue(BaseModel):
     page_context_key: str
     field_key: str
     field_label: str
+    field_type: str = ""
+    field_section: str = ""
+    field_fingerprint: str = ""
     expected_value: str
     source: Literal["exact_profile", "derived_profile", "manual_recovery"]
 
@@ -232,6 +235,9 @@ def record_expected_field_value(
     page_context_key: str,
     field_key: str,
     field_label: str,
+    field_type: str = "",
+    field_section: str = "",
+    field_fingerprint: str = "",
     expected_value: str,
     source: Literal["exact_profile", "derived_profile", "manual_recovery"],
 ) -> None:
@@ -245,6 +251,9 @@ def record_expected_field_value(
         page_context_key=key[1],
         field_key=key[2],
         field_label=str(field_label or "").strip(),
+        field_type=str(field_type or "").strip(),
+        field_section=str(field_section or "").strip(),
+        field_fingerprint=str(field_fingerprint or "").strip(),
         expected_value=normalized_expected,
         source=source,
     )

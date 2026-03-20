@@ -27,6 +27,11 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from browser_use.agent.service import Agent
 
+from ghosthands.step_trace import (
+    attach_step_trace_context,
+    publish_browser_session_trace,
+)
+
 logger = logging.getLogger(__name__)
 _SAME_TAB_GUARD_INSTALLED: set[int] = set()
 
@@ -157,6 +162,49 @@ def infer_phase_from_goal(goal: str | None) -> str | None:
     return None
 
 
+def _summarize_actions(agent: "Agent") -> list[dict[str, Any]]:
+    """Return the latest planned actions in a compact trace-friendly format."""
+    last_output = agent.state.last_model_output
+    if last_output is None:
+        return []
+    actions: list[dict[str, Any]] = []
+    for action in last_output.action:
+        action_data = action.model_dump(exclude_unset=True) if hasattr(action, "model_dump") else {}
+        if not isinstance(action_data, dict) or not action_data:
+            continue
+        action_name = next(iter(action_data.keys()), "unknown")
+        params = action_data.get(action_name, {})
+        actions.append(
+            {
+                "action": action_name,
+                "params": params if isinstance(params, dict) else {},
+            }
+        )
+    return actions
+
+
+def _summarize_results(agent: "Agent") -> list[dict[str, Any]]:
+    """Return the latest action results in a compact trace-friendly format."""
+    if not agent.history.history:
+        return []
+    last_entry = agent.history.history[-1]
+    if not last_entry.result:
+        return []
+    summaries: list[dict[str, Any]] = []
+    for result in last_entry.result:
+        metadata = result.metadata or {}
+        summaries.append(
+            {
+                "error": result.error,
+                "extracted_content": result.extracted_content,
+                "is_done": result.is_done,
+                "success": result.success,
+                "metadata": metadata,
+            }
+        )
+    return summaries
+
+
 class StepHooks:
     """Factory that produces bound ``on_step_start`` / ``on_step_end`` hooks.
 
@@ -204,7 +252,29 @@ class StepHooks:
             extra={"job_id": self.job_id, "step": step},
         )
 
+        browser_session = getattr(agent, "browser_session", None)
+        attach_step_trace_context(browser_session, job_id=self.job_id)
         await install_same_tab_guard(agent)
+
+        current_url = ""
+        if browser_session is not None:
+            try:
+                page = await browser_session.get_current_page()
+                if page is not None:
+                    current_url = await page.get_url()
+            except Exception:
+                current_url = ""
+        last_state = getattr(browser_session, "_gh_last_application_state", None)
+        trace_payload = {
+            "step": step,
+            "page_url": current_url,
+            "current_section": (last_state or {}).get("current_section", "") if isinstance(last_state, dict) else "",
+            "page_context_key": (last_state or {}).get("page_context_key", "") if isinstance(last_state, dict) else "",
+            "blocking_field_ids": (last_state or {}).get("blocking_field_ids", []) if isinstance(last_state, dict) else [],
+            "blocking_field_keys": (last_state or {}).get("blocking_field_keys", []) if isinstance(last_state, dict) else [],
+            "blocking_field_reasons": (last_state or {}).get("blocking_field_reasons", {}) if isinstance(last_state, dict) else {},
+        }
+        await publish_browser_session_trace(browser_session, "step_start", trace_payload)
 
         # If an external signal set the stopped flag, the agent loop will
         # honour it on the next iteration.  We don't need to do anything
@@ -229,6 +299,8 @@ class StepHooks:
         """
         step = agent.state.n_steps
         last_output = agent.state.last_model_output
+        browser_session = getattr(agent, "browser_session", None)
+        attach_step_trace_context(browser_session, job_id=self.job_id)
 
         # ── Cost tracking ──────────────────────────────────────────
         usage = agent.history.usage
@@ -310,12 +382,24 @@ class StepHooks:
 
         # ── Status update callback ─────────────────────────────────
         if self.on_status_update is not None:
+            last_state = getattr(browser_session, "_gh_last_application_state", None)
+            current_url = ""
+            if browser_session is not None:
+                try:
+                    page = await browser_session.get_current_page()
+                    if page is not None:
+                        current_url = await page.get_url()
+                except Exception:
+                    current_url = ""
             status: dict[str, Any] = {
                 "job_id": self.job_id,
                 "step": step,
                 "step_cost": round(step_cost, 6) if step_cost is not None else None,
                 "cost_usd": round(self._cumulative_cost, 6),
                 "is_done": agent.history.is_done(),
+                "page_url": current_url,
+                "actions": _summarize_actions(agent),
+                "results": _summarize_results(agent),
             }
             if usage is not None:
                 status["usage_input_tokens"] = usage_input_tokens
@@ -331,6 +415,12 @@ class StepHooks:
             if blocker_detected:
                 status["blocker"] = blocker_detected
             if last_output is not None:
+                eval_text = last_output.current_state.evaluation_previous_goal
+                if eval_text:
+                    status["evaluation_previous_goal"] = eval_text
+                memory = last_output.current_state.memory
+                if memory:
+                    status["memory"] = memory
                 next_goal = last_output.next_goal
                 if next_goal:
                     status["next_goal"] = next_goal
@@ -338,6 +428,14 @@ class StepHooks:
                 if phase is not None and phase != self._last_phase:
                     status["phase"] = phase
                     self._last_phase = phase
+            if isinstance(last_state, dict):
+                status["current_section"] = last_state.get("current_section", "")
+                status["page_context_key"] = last_state.get("page_context_key", "")
+                status["blocking_field_ids"] = last_state.get("blocking_field_ids", [])
+                status["blocking_field_keys"] = last_state.get("blocking_field_keys", [])
+                status["blocking_field_reasons"] = last_state.get("blocking_field_reasons", {})
+                status["blocking_field_state_changes"] = last_state.get("blocking_field_state_changes", {})
+                status["single_active_blocker"] = last_state.get("single_active_blocker")
             try:
                 await self.on_status_update(status)
             except Exception:
@@ -345,6 +443,7 @@ class StepHooks:
                     "step.status_update_failed",
                     extra={"job_id": self.job_id, "step": step},
                 )
+            await publish_browser_session_trace(browser_session, "step_end", status)
 
         logger.debug(
             "step.end",

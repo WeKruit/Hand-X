@@ -288,6 +288,45 @@ class TestAccountCreatedMarkerInference:
 
 
 class TestOpenQuestionAutoAnswering:
+    @pytest.mark.asyncio
+    async def test_collect_open_question_issues_ignores_binary_blockers(self):
+        from ghosthands.cli import _collect_open_question_issues_from_browser
+
+        assess_result = types.SimpleNamespace(
+            extracted_content=(
+                "APPLICATION_STATE_JSON:\n"
+                + json.dumps(
+                    {
+                        "unresolved_required_fields": [
+                            {
+                                "field_id": "ff-radio",
+                                "name": "Have you previously worked here?",
+                                "field_type": "radio-group",
+                                "question_text": "Have you previously worked here?",
+                                "widget_kind": "radio",
+                                "options": ["Yes", "No"],
+                            },
+                            {
+                                "field_id": "ff-source",
+                                "name": "How Did You Hear About Us?",
+                                "field_type": "select",
+                                "question_text": "How Did You Hear About Us?",
+                                "options": ["LinkedIn", "Referral"],
+                            },
+                        ]
+                    }
+                )
+            )
+        )
+
+        with patch(
+            "ghosthands.actions.domhand_assess_state.domhand_assess_state",
+            AsyncMock(return_value=assess_result),
+        ):
+            issues = await _collect_open_question_issues_from_browser(AsyncMock())
+
+        assert [issue.field_id for issue in issues] == ["ff-source"]
+
     def test_recovers_language_rubric_from_profile_before_hitl(self):
         from ghosthands.cli import _OpenQuestionIssue, _auto_answer_open_question_issues
 
@@ -431,6 +470,39 @@ class TestOpenQuestionAutoAnswering:
         assert called is False
         assert resolved == []
         assert [issue.field_label for issue in unresolved] == ["Why do you want this job?"]
+
+    @pytest.mark.asyncio
+    async def test_llm_recovery_does_not_try_binary_controls(self, monkeypatch):
+        from ghosthands.cli import _OpenQuestionIssue, _infer_open_question_answers_with_domhand
+
+        called = False
+
+        async def _fake_infer(fields, *, profile_text=None, profile_data=None):
+            nonlocal called
+            called = True
+            return {field.field_id: "No" for field in fields}
+
+        monkeypatch.setattr(
+            "ghosthands.actions.domhand_fill.infer_answers_for_fields",
+            _fake_infer,
+        )
+
+        issues = [
+            _OpenQuestionIssue(
+                field_id="ff-4",
+                field_label="Have you previously been employed here?",
+                field_type="radio-group",
+                question_text="Have you previously been employed here?",
+                widget_kind="radio",
+                options=("Yes", "No"),
+            ),
+        ]
+
+        resolved, unresolved = await _infer_open_question_answers_with_domhand(issues, {})
+
+        assert called is False
+        assert resolved == []
+        assert [issue.field_id for issue in unresolved] == ["ff-4"]
 
 
 # ---------------------------------------------------------------------------

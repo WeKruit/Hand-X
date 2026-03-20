@@ -38,6 +38,34 @@ PROFILE_DEFAULTS: dict[str, Any] = {
 }
 
 
+def _text_value(value: Any) -> str | None:
+    """Return a deterministic text representation for resume fields."""
+    if value in (None, "", []):
+        return None
+    if isinstance(value, dict):
+        for key in ("name", "label", "value", "title"):
+            text = _text_value(value.get(key))
+            if text:
+                return text
+        return None
+    if isinstance(value, set):
+        parts = sorted(part for part in (_text_value(item) for item in value) if part)
+        return ", ".join(parts) if parts else None
+    if isinstance(value, (list, tuple)):
+        parts = [part for part in (_text_value(item) for item in value) if part]
+        return ", ".join(parts) if parts else None
+    text = str(value).strip()
+    return text or None
+
+
+def _education_text(edu: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        text = _text_value(edu.get(key))
+        if text:
+            return text
+    return ""
+
+
 # ── Public API ────────────────────────────────────────────────────────────
 
 
@@ -162,12 +190,54 @@ def _map_to_profile(
         "summary": data.get("summary") or "",
         "education": [
             {
-                "school": edu.get("school", ""),
-                "degree": edu.get("degree", ""),
-                "field_of_study": edu.get("fieldOfStudy") or "",
-                "gpa": edu.get("gpa"),
-                "start_date": edu.get("startDate") or "",
-                "end_date": edu.get("endDate") or edu.get("expectedGraduation") or "",
+                "school": _education_text(edu, "school", "institution"),
+                "degree": _education_text(edu, "degree"),
+                "degree_type": _education_text(edu, "degreeType", "degree_type"),
+                "field_of_study": _education_text(
+                    edu,
+                    "field_of_study",
+                    "fieldOfStudy",
+                    "field",
+                    "major",
+                    "majors",
+                    "majorName",
+                    "majorNames",
+                    "major_name",
+                    "major_names",
+                    "area_of_study",
+                    "areaOfStudy",
+                    "discipline",
+                ),
+                "major": _education_text(
+                    edu,
+                    "major",
+                    "majors",
+                    "majorName",
+                    "majorNames",
+                    "major_name",
+                    "major_names",
+                ),
+                "minor": _education_text(
+                    edu,
+                    "minor",
+                    "minors",
+                    "minorName",
+                    "minorNames",
+                    "minor_name",
+                    "minor_names",
+                ),
+                "honors": _education_text(
+                    edu,
+                    "honors",
+                    "honours",
+                    "honorsList",
+                    "honoursList",
+                    "honors_list",
+                    "honours_list",
+                ),
+                "gpa": _text_value(edu.get("gpa")),
+                "start_date": _education_text(edu, "startDate", "start_date"),
+                "end_date": _education_text(edu, "endDate", "expectedGraduation", "end_date"),
                 "end_date_type": (
                     "Actual" if edu.get("endDate") else "Expected" if edu.get("expectedGraduation") else ""
                 ),

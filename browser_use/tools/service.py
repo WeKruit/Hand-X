@@ -1562,9 +1562,30 @@ You will be given a query and the markdown of a webpage that has been filtered t
 				return ActionResult(extracted_content=msg)
 
 			# Dispatch GetDropdownOptionsEvent to the event handler
-
-			event = browser_session.event_bus.dispatch(GetDropdownOptionsEvent(node=node))
-			dropdown_data = await event.event_result(timeout=3.0, raise_if_none=True, raise_if_any=True)
+			try:
+				event = browser_session.event_bus.dispatch(GetDropdownOptionsEvent(node=node))
+				dropdown_data = await event.event_result(timeout=3.0, raise_if_none=True, raise_if_any=True)
+			except Exception as e:
+				tag_name = str(getattr(node, 'tag_name', '') or '').lower()
+				attrs = getattr(node, 'attributes', {}) or {}
+				role = str(attrs.get('role') or '').strip().lower() if isinstance(attrs, dict) else ''
+				if tag_name != 'select' and (tag_name == 'button' or role not in {'combobox', 'listbox', 'menu'}):
+					msg = (
+						f'Element index {params.index} is a button/custom widget, not an inspectable native dropdown. '
+						'Open it with click(index=...) and click the visible option directly. '
+						'Do not retry dropdown_options on this widget.'
+					)
+					logger.info(
+						'dropdown_options.custom_widget_unsupported',
+						extra={
+							'index': params.index,
+							'tag_name': tag_name,
+							'role': role,
+							'error': str(e),
+						},
+					)
+					return ActionResult(error=msg)
+				raise
 
 			if not dropdown_data:
 				raise ValueError('Failed to get dropdown options - no data returned')

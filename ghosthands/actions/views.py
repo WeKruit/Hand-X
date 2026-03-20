@@ -26,6 +26,16 @@ class FormField(BaseModel):
     synthetic_label: bool = Field(default=False, description="True if label was generated synthetically")
     field_fingerprint: str | None = Field(default=None, description="Stable fingerprint for identity tracking")
     current_value: str = Field(default="", description="Current value in the field")
+    widget_kind: str | None = Field(default=None, description="Internal widget classification for special handling")
+    component_field_ids: list[str] = Field(
+        default_factory=list,
+        description="Internal child field ids for grouped widgets such as segmented date inputs",
+    )
+    has_calendar_trigger: bool = Field(
+        default=False,
+        description="True when the grouped widget exposes a visible calendar/date trigger affordance",
+    )
+    format_hint: str | None = Field(default=None, description="Optional visible format/placeholder hint")
 
 
 class FillFieldResult(BaseModel):
@@ -51,6 +61,9 @@ class FillFieldResult(BaseModel):
     binding_mode: str | None = None
     binding_confidence: str | None = None
     best_effort_guess: bool = False
+    repeater_group: str | None = None
+    slot_name: str | None = None
+    diagnostic_stage: str | None = None
 
 
 class DomHandFillParams(BaseModel):
@@ -99,6 +112,18 @@ class DomHandSelectParams(BaseModel):
 
     index: int = Field(description="Element index of the dropdown trigger")
     value: str = Field(description="Value or text to select")
+    field_id: str | None = Field(
+        default=None,
+        description="Optional exact field id from domhand_assess_state for blocker-aware targeting.",
+    )
+    field_label: str | None = Field(
+        default=None,
+        description="Optional field label used for blocker-aware targeting and tracing.",
+    )
+    target_section: str | None = Field(
+        default=None,
+        description="Optional section name used for blocker-aware tracing.",
+    )
 
 
 class DomHandInteractControlParams(BaseModel):
@@ -208,6 +233,7 @@ class ApplicationState(BaseModel):
     submit_visible: bool = False
     submit_disabled: bool = False
     advance_visible: bool = False
+    advance_disabled: bool = False
     advance_allowed: bool = False
     platform_hint: str | None = None
 
@@ -269,7 +295,8 @@ _PLACEHOLDER_RE = re.compile(
     r"^(select\.{0,3}|select…|please\s+select(\s+one)?|select\s+(one|an?\s+option)"
     r"|choose\.{0,3}|choose…|please\s+choose(\s+one)?|choose\s+one|pick"
     r"|start\s+typing|enter\s+(your|an?)\s+\S+"
-    r"|type\s+here|--+\s*(select|choose)?\s*--*|—)$",
+    r"|type\s+here|--+\s*(select|choose)?\s*--*|—"
+    r"|no\s+response|no\s+answer|not\s+provided|not\s+specified|not\s+entered|not\s+supplied)$",
     re.IGNORECASE,
 )
 
@@ -340,13 +367,16 @@ def get_stable_field_key(field: FormField) -> str:
     fp = normalize_name(field.field_fingerprint or "")
     if fp:
         return f"{normalize_name(field.field_type)}|{fp}"
-    field_id = normalize_name(field.field_id or "")
-    if field_id:
-        return f"{normalize_name(field.field_type)}|{field_id}"
-    return "|".join(
+    semantic_key = "|".join(
         [
             normalize_name(field.field_type),
             normalize_name(field.section),
             normalize_name(field.name or field.raw_label or ""),
         ]
     )
+    if semantic_key.replace("|", "").strip():
+        return semantic_key
+    field_id = normalize_name(field.field_id or "")
+    if field_id:
+        return f"{normalize_name(field.field_type)}|{field_id}"
+    return normalize_name(field.field_type)

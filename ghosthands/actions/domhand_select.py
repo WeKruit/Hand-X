@@ -30,6 +30,7 @@ from browser_use.browser.events import (
     SelectDropdownOptionEvent,
 )
 from browser_use.dom.views import EnhancedDOMTreeNode
+from ghosthands.step_trace import publish_browser_session_trace, update_blocker_attempt_state
 from ghosthands.actions.views import (
     DomHandSelectParams,
     generate_dropdown_search_terms,
@@ -42,10 +43,9 @@ from ghosthands.runtime_learning import (
     detect_host_from_url,
     get_domhand_failure_count,
     is_domhand_retry_capped,
-    record_expected_field_value,
     record_domhand_failure,
 )
-from ghosthands.actions.domhand_fill import _get_page_context_key
+from ghosthands.actions.domhand_fill import _get_page_context_key, _record_expected_value_if_settled
 
 logger = logging.getLogger(__name__)
 
@@ -948,6 +948,20 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
         f"field_invalid={field_invalid} "
         f"current_value_before={current_before!r}"
     )
+    await publish_browser_session_trace(
+        browser_session,
+        "tool_attempt",
+        {
+            "tool": "domhand_select",
+            "index": params.index,
+            "field_id": params.field_id or "",
+            "field_label": params.field_label or field_label or "",
+            "target_section": params.target_section or "",
+            "desired_value": params.value,
+            "field_key": field_key,
+            "current_value_before": current_before,
+        },
+    )
     if _selection_matches_value(current_before, params.value) and not field_invalid:
         clear_domhand_failure(host=page_host, field_key=field_key, desired_value=params.value)
         logger.info(
@@ -963,6 +977,15 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                 "Immediately call domhand_assess_state for this blocker."
             ),
             include_extracted_content_only_once=False,
+            metadata={
+                "tool": "domhand_select",
+                "field_id": params.field_id,
+                "field_key": field_key,
+                "strategy": "already_selected",
+                "state_change": "unchanged",
+                "retry_capped": False,
+                "recommended_next_action": "call domhand_assess_state",
+            },
         )
     if _selection_matches_value(current_before, params.value) and field_invalid:
         logger.info(
@@ -1032,9 +1055,20 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                 reason=f"domhand_select cannot handle element {params.index}.",
                 current_value=current_before,
             ),
+            metadata={
+                "tool": "domhand_select",
+                "field_id": params.field_id,
+                "field_key": field_key,
+                "strategy": "domhand_select",
+                "state_change": "no_state_change",
+                "retry_capped": True,
+                "recommended_next_action": "change strategy for this blocker and reassess immediately",
+            },
         )
 
     if not options:
+        current = current_before
+        post_invalid = field_invalid
         logger.warning(
             "domhand.select.no_options "
             f"index={params.index} "
@@ -1046,6 +1080,37 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             f"current_value_before={current_before!r}"
         )
         _record_select_failure(page_host, field_key, params.value)
+        update_blocker_attempt_state(
+            browser_session,
+            field_key=field_key,
+            field_id=params.field_id or "",
+            strategy="domhand_select",
+            desired_value=params.value,
+            observed_value=current,
+            visible_error=str(post_invalid),
+            retry_capped=is_domhand_retry_capped(host=page_host, field_key=field_key, desired_value=params.value),
+            success=False,
+            state_change="no_state_change",
+            recommended_next_action="change strategy for this blocker and reassess immediately",
+        )
+        await publish_browser_session_trace(
+            browser_session,
+            "tool_result",
+            {
+                "tool": "domhand_select",
+                "index": params.index,
+                "field_id": params.field_id or "",
+                "field_label": params.field_label or field_label or "",
+                "field_key": field_key,
+                "desired_value": params.value,
+                "observed_value": current,
+                "visible_error": str(post_invalid),
+                "strategy": "domhand_select",
+                "retry_capped": is_domhand_retry_capped(host=page_host, field_key=field_key, desired_value=params.value),
+                "state_change": "no_state_change",
+                "recommended_next_action": "change strategy for this blocker and reassess immediately",
+            },
+        )
         return ActionResult(
             error=_select_failover_or_retry_cap_message(
                 widget_kind=widget_kind,
@@ -1251,23 +1316,65 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                 reason=failure_reason,
                 current_value=current,
             ),
+            metadata={
+                "tool": "domhand_select",
+                "field_id": params.field_id,
+                "field_key": field_key,
+                "strategy": "domhand_select",
+                "state_change": "no_state_change",
+                "retry_capped": is_domhand_retry_capped(host=page_host, field_key=field_key, desired_value=params.value),
+                "recommended_next_action": "change strategy for this blocker and reassess immediately",
+            },
         )
 
     clear_domhand_failure(host=page_host, field_key=field_key, desired_value=params.value)
     page_context_key = await _get_page_context_key(page)
-    record_expected_field_value(
+    await _record_expected_value_if_settled(
+        page=page,
         host=page_host,
         page_context_key=page_context_key,
+        field=field,
         field_key=field_key,
-        field_label=field_label or field_key,
         expected_value=params.value,
         source="derived_profile",
+        log_context="domhand.select",
+    )
+    update_blocker_attempt_state(
+        browser_session,
+        field_key=field_key,
+        field_id=params.field_id or "",
+        strategy="domhand_select",
+        desired_value=params.value,
+        observed_value=current,
+        visible_error="",
+        retry_capped=False,
+        success=True,
+        state_change="changed",
+        recommended_next_action="call domhand_assess_state",
     )
     memory = f'Selected "{clicked_text}" for dropdown at index {params.index}. Immediately call domhand_assess_state for this blocker.'
     if current and normalize_name(current) != normalize_name(clicked_text):
         memory += f' (showing: "{current}")'
 
     logger.info(f"DomHand select: {memory}")
+    await publish_browser_session_trace(
+        browser_session,
+        "tool_result",
+        {
+            "tool": "domhand_select",
+            "index": params.index,
+            "field_id": params.field_id or "",
+            "field_label": params.field_label or field_label or "",
+            "field_key": field_key,
+            "desired_value": params.value,
+            "observed_value": current,
+            "visible_error": "",
+            "strategy": "domhand_select",
+            "retry_capped": False,
+            "state_change": "changed",
+            "recommended_next_action": "call domhand_assess_state",
+        },
+    )
     if _profile_debug_enabled() and used_action_chain:
         logger.info(
             "domhand.select_recipe_applied",
@@ -1312,6 +1419,15 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
     return ActionResult(
         extracted_content=memory,
         include_extracted_content_only_once=False,
+        metadata={
+            "tool": "domhand_select",
+            "field_id": params.field_id,
+            "field_key": field_key,
+            "strategy": "domhand_select",
+            "state_change": "changed",
+            "retry_capped": False,
+            "recommended_next_action": "call domhand_assess_state",
+        },
     )
 
 

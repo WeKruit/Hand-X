@@ -102,6 +102,33 @@ class TestFullDesktopProfileRoundTrip:
         assert edu["fieldOfStudy"] == "Computer Science"
         assert edu["graduationDate"] == "2020-05"
 
+    def test_nested_education_converted_includes_structured_fields(self):
+        profile: dict[str, Any] = {
+            "firstName": "Eve",
+            "lastName": "Major",
+            "education": [
+                {
+                    "school": "Berkeley",
+                    "degree": "B.A.",
+                    "degreeType": "Undergraduate",
+                    "majorName": "Computer Science",
+                    "majorNames": ["Computer Science", "Mathematics"],
+                    "minorName": "Statistics",
+                    "minorNames": ["Statistics", "Philosophy"],
+                    "honorsList": ["Phi Beta Kappa", "Summa Cum Laude"],
+                },
+            ],
+        }
+        result = _full_pipeline(profile)
+
+        edu = result["education"][0]
+        assert edu["degree_type"] == "Undergraduate"
+        assert edu["major_name"] == "Computer Science"
+        assert edu["major_names"] == ["Computer Science", "Mathematics"]
+        assert edu["minor_name"] == "Statistics"
+        assert edu["minor_names"] == ["Statistics", "Philosophy"]
+        assert edu["honors_list"] == ["Phi Beta Kappa", "Summa Cum Laude"]
+
     def test_nested_experience_converted(self):
         result = _full_pipeline(REAL_DESKTOP_PROFILE)
 

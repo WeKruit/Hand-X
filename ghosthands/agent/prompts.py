@@ -504,10 +504,10 @@ def build_system_prompt(
         "before touching the next blocker.",
         "Prefer simpler radio/checkbox blockers before complex searchable",
         "dropdowns when you have multiple unresolved fields.",
-        'If a DomHand tool returns "domhand_retry_capped" for a field, do',
-        "NOT use any DomHand tool on that exact field again in this run.",
-        "Switch immediately to browser-use/manual or one screenshot/vision",
-        "fallback for that field.",
+        'If domhand_fill or domhand_select returns "domhand_retry_capped" for a field, do',
+        "NOT repeat that SAME DomHand strategy on that exact field/value pair in this run.",
+        "For radios, checkboxes, and button groups, switch to domhand_interact_control with the exact field_id/field_type",
+        "so it can use live exact-target recovery. After any recovery attempt, immediately reassess.",
         "If the same exact field has already failed twice with DOM/manual",
         "actions, take ONE screenshot/vision retry on that field, then",
         "return to DOM/manual actions.",
@@ -605,11 +605,13 @@ def build_system_prompt(
         "- Do NOT use domhand_fill for interactive date pickers (calendar",
         "  widgets, month/year selectors, date popovers). domhand_fill",
         "  cannot reliably interact with date picker UIs.",
-        "- Instead, use browser-use actions: click the date field, type",
-        "  the date string (e.g. '08/2024'), then click the matching",
-        "  calendar cell or press Enter/Tab to confirm.",
-        "- If a date picker opens a calendar grid, click the correct",
-        "  month/year cell directly.",
+        "- Prefer clicking a visible date icon, calendar button, or the",
+        "  picker affordance FIRST. If the picker opens, click the actual",
+        "  month/year/day cell directly.",
+        "- Only type the date string when there is no usable picker",
+        "  affordance or the picker interaction has already failed.",
+        "- After any typed date input, blur or Tab away so Workday",
+        "  re-validates the field before moving on.",
         "",
         "SEARCH / AUTOCOMPLETE RESILIENCE:",
         "- For ANY searchable field (country, city, location, job title,",
@@ -895,12 +897,13 @@ def build_task_prompt(
         "When domhand_assess_state gives you a field_id/field_type for the blocker, pass that exact field_id to "
         "domhand_interact_control or domhand_record_expected_value instead of relying on label-only matching. "
         "After EACH blocker-level DomHand action, immediately call domhand_assess_state to refresh the current context. "
-        "After EACH targeted manual recovery action, first call domhand_record_expected_value for that exact field/value, then immediately call domhand_assess_state. "
+        "After EACH targeted manual recovery action, first make sure the field visibly shows the value and its validation has cleared, then call domhand_record_expected_value for that exact field/value, then immediately call domhand_assess_state. "
         "Only then use dropdown_options/select_dropdown, click, input_text, Enter, Tab, scroll, and focus actions. "
         "Keep these manual recoveries to ONE FIELD AT A TIME. Do NOT combine a referral/source widget with a radio "
         "button or another blocker in the same action batch.\n"
-        '5b. If any DomHand tool returns "domhand_retry_capped", stop using DomHand on that exact field for the rest '
-        "of the run and switch immediately to browser-use/manual or one screenshot/vision fallback for that field.\n"
+        '5b. If domhand_fill or domhand_select returns "domhand_retry_capped", stop repeating that SAME DomHand '
+        'strategy on that exact field/value pair for the rest of the run. For radios/checkboxes/button groups, '
+        "switch to domhand_interact_control with the exact field_id/field_type so it can use live exact-target recovery, then reassess.\n"
         "6. If the same exact field still fails after two DOM/manual attempts, take ONE screenshot/vision retry on "
         "that blocker. Do not use screenshot earlier, and do not keep using screenshot repeatedly.\n"
         "7. After that screenshot/vision retry, go back to concrete DOM/manual actions instead of staying in visual "

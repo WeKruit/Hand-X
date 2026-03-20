@@ -84,14 +84,43 @@ def _copy_language_list(value: Any) -> list[dict[str, Any]]:
         speaking_listening = _as_text(item.get("speakingListening") or item.get("speaking_listening"))
         is_fluent_raw = item.get("isFluent", item.get("is_fluent"))
         if language:
-            out.append({
-                "language": language,
-                "overall_proficiency": overall_proficiency or "",
-                "reading_writing": reading_writing or "",
-                "speaking_listening": speaking_listening or "",
-                "is_fluent": bool(is_fluent_raw) if isinstance(is_fluent_raw, bool) else None,
-            })
+            out.append(
+                {
+                    "language": language,
+                    "overall_proficiency": overall_proficiency or "",
+                    "reading_writing": reading_writing or "",
+                    "speaking_listening": speaking_listening or "",
+                    "is_fluent": bool(is_fluent_raw) if isinstance(is_fluent_raw, bool) else None,
+                }
+            )
     return out
+
+
+def _text_value(value: Any) -> str | None:
+    if value in (None, "", []):
+        return None
+    if isinstance(value, dict):
+        for key in ("name", "label", "value", "title"):
+            text = _text_value(value.get(key))
+            if text:
+                return text
+        return None
+    if isinstance(value, set):
+        parts = sorted(part for part in (_text_value(item) for item in value) if part)
+        return ", ".join(parts) if parts else None
+    if isinstance(value, (list, tuple)):
+        parts = [part for part in (_text_value(item) for item in value) if part]
+        return ", ".join(parts) if parts else None
+    text = str(value).strip()
+    return text or None
+
+
+def _education_value(entry: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        text = _text_value(entry.get(key))
+        if text:
+            return text
+    return None
 
 
 def _score_profile_date(value: Any) -> int:
@@ -123,7 +152,9 @@ def _latest_education_entry(education: list[dict[str, Any]]) -> dict[str, Any] |
         return None
     ranked = sorted(
         education,
-        key=lambda entry: _score_profile_date(entry.get("end_date") or entry.get("graduation_date") or entry.get("start_date")),
+        key=lambda entry: _score_profile_date(
+            entry.get("end_date") or entry.get("graduation_date") or entry.get("start_date")
+        ),
         reverse=True,
     )
     return ranked[0] if ranked else None
@@ -227,6 +258,36 @@ def build_canonical_profile(
     register_profile_alias("current_school_year", ("current_school_year",), ("currentSchoolYear",))
     register_profile_alias("graduation_date", ("graduation_date",), ("graduationDate",))
     register_profile_alias("degree_seeking", ("degree_seeking",), ("degreeSeeking",))
+    register_profile_alias("degree_type", ("degree_type",), ("degreeType",))
+    register_profile_alias(
+        "field_of_study",
+        ("field_of_study",),
+        ("fieldOfStudy",),
+        ("major",),
+        ("majors",),
+        ("majorName",),
+        ("majorNames",),
+        ("major_name",),
+        ("major_names",),
+    )
+    register_profile_alias(
+        "minor",
+        ("minor",),
+        ("minors",),
+        ("minorName",),
+        ("minorNames",),
+        ("minor_name",),
+        ("minor_names",),
+    )
+    register_profile_alias(
+        "honors",
+        ("honors",),
+        ("honours",),
+        ("honorsList",),
+        ("honoursList",),
+        ("honors_list",),
+        ("honours_list",),
+    )
     register_profile_alias("certifications_licenses", ("certifications_licenses",), ("certificationsLicenses",))
     register_profile_alias("spoken_languages", ("spoken_languages",))
     register_profile_alias("english_proficiency", ("english_proficiency",))
@@ -272,24 +333,74 @@ def build_canonical_profile(
         if "degree_seeking" not in canonical.values:
             register(
                 "degree_seeking",
-                latest_education.get("degree"),
+                _education_value(latest_education, "degree"),
                 source_path="education.latest.degree",
+                provenance="derived",
+            )
+        if "degree_type" not in canonical.values:
+            register(
+                "degree_type",
+                _education_value(latest_education, "degree_type", "degreeType"),
+                source_path="education.latest.degree_type",
                 provenance="derived",
             )
         if "graduation_date" not in canonical.values:
             register(
                 "graduation_date",
-                _format_graduation_date(
-                    latest_education.get("graduation_date") or latest_education.get("end_date")
-                ),
+                _format_graduation_date(latest_education.get("graduation_date") or latest_education.get("end_date")),
                 source_path="education.latest.graduation_date",
                 provenance="derived",
             )
         if "field_of_study" not in canonical.values:
             register(
                 "field_of_study",
-                latest_education.get("field_of_study") or latest_education.get("field"),
+                _education_value(
+                    latest_education,
+                    "field_of_study",
+                    "fieldOfStudy",
+                    "field",
+                    "major",
+                    "majors",
+                    "majorName",
+                    "majorNames",
+                    "major_name",
+                    "major_names",
+                    "area_of_study",
+                    "areaOfStudy",
+                    "discipline",
+                ),
                 source_path="education.latest.field_of_study",
+                provenance="derived",
+            )
+        if "minor" not in canonical.values:
+            register(
+                "minor",
+                _education_value(
+                    latest_education,
+                    "minor",
+                    "minors",
+                    "minorName",
+                    "minorNames",
+                    "minor_name",
+                    "minor_names",
+                ),
+                source_path="education.latest.minor",
+                provenance="derived",
+            )
+        if "honors" not in canonical.values:
+            register(
+                "honors",
+                _education_value(
+                    latest_education,
+                    "honors",
+                    "honours",
+                    "honor",
+                    "honorsList",
+                    "honoursList",
+                    "honors_list",
+                    "honours_list",
+                ),
+                source_path="education.latest.honors",
                 provenance="derived",
             )
 

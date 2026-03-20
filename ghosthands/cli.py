@@ -536,10 +536,38 @@ def _issue_recovery_key(issue: _OpenQuestionIssue, fallback_index: int) -> str:
 
 
 def _issue_is_auth_like(issue: _OpenQuestionIssue) -> bool:
-    label = _normalize_issue_text(issue.question_text or issue.field_label)
+    label = _normalize_issue_text(issue.field_label or issue.question_text)
     if issue.field_type == "password":
         return True
     return any(token in label for token in ("email", "e mail", "username", "user name", "login", "password"))
+
+
+def _issue_supports_answer_recovery(issue: _OpenQuestionIssue) -> bool:
+    """Return True only for issues that should enter answer-recovery inference."""
+    if _issue_is_auth_like(issue):
+        return True
+
+    label = _normalize_issue_text(issue.field_label or issue.question_text)
+    field_type = str(issue.field_type or "").strip().lower()
+    widget_kind = str(issue.widget_kind or "").strip().lower()
+    if field_type in {
+        "radio-group",
+        "radio",
+        "button-group",
+        "checkbox-group",
+        "checkbox",
+        "toggle",
+        "file",
+        "password",
+    }:
+        return False
+    if widget_kind in {"radio", "checkbox", "toggle", "button-group"}:
+        return False
+    if label.startswith(("have you", "are you", "do you", "did you", "will you", "can you", "were you", "would you")):
+        return False
+    if field_type in {"select", "text", "textarea", "search", "date", "number", "email", "tel", "url"}:
+        return True
+    return bool(issue.options)
 
 
 def _auth_override_answer_for_issue(issue: _OpenQuestionIssue) -> str:
@@ -732,22 +760,22 @@ async def _collect_open_question_issues_from_browser(browser: Any) -> list[_Open
                 field_label = str(issue.get("name") or "").strip()
                 if not field_label:
                     continue
-                collected.append(
-                    _OpenQuestionIssue(
-                        field_label=field_label,
-                        field_id=str(issue.get("field_id") or "").strip() or None,
-                        field_type=str(issue.get("field_type") or "text").strip() or "text",
-                        question_text=str(issue.get("question_text") or field_label).strip() or field_label,
-                        section=str(issue.get("section") or "").strip() or None,
-                        section_path=str(issue.get("section_path") or issue.get("section") or "").strip() or None,
-                        current_value=str(issue.get("current_value") or "").strip() or None,
-                        visible_error=str(issue.get("visible_error") or "").strip() or None,
-                        widget_kind=str(issue.get("widget_kind") or "").strip() or None,
-                        options=tuple(
-                            str(option).strip() for option in (issue.get("options") or []) if str(option).strip()
-                        ),
-                    )
+                candidate = _OpenQuestionIssue(
+                    field_label=field_label,
+                    field_id=str(issue.get("field_id") or "").strip() or None,
+                    field_type=str(issue.get("field_type") or "text").strip() or "text",
+                    question_text=str(issue.get("question_text") or field_label).strip() or field_label,
+                    section=str(issue.get("section") or "").strip() or None,
+                    section_path=str(issue.get("section_path") or issue.get("section") or "").strip() or None,
+                    current_value=str(issue.get("current_value") or "").strip() or None,
+                    visible_error=str(issue.get("visible_error") or "").strip() or None,
+                    widget_kind=str(issue.get("widget_kind") or "").strip() or None,
+                    options=tuple(
+                        str(option).strip() for option in (issue.get("options") or []) if str(option).strip()
+                    ),
                 )
+                if _issue_supports_answer_recovery(candidate):
+                    collected.append(candidate)
             if collected:
                 return collected
     return []
@@ -806,6 +834,9 @@ async def _auto_answer_open_question_issues(
     unresolved: list[_OpenQuestionIssue] = []
 
     for index, issue in enumerate(issues, start=1):
+        if not _issue_supports_answer_recovery(issue):
+            unresolved.append(issue)
+            continue
         label = (issue.field_label or issue.question_text or "").strip()
         if not label:
             unresolved.append(issue)
@@ -877,6 +908,9 @@ async def _infer_open_question_answers_with_domhand(
     issue_by_field_id: dict[str, _OpenQuestionIssue] = {}
     unresolved: list[_OpenQuestionIssue] = []
     for index, issue in enumerate(issues, start=1):
+        if not _issue_supports_answer_recovery(issue):
+            unresolved.append(issue)
+            continue
         if issue.field_type == "file":
             unresolved.append(issue)
             continue
@@ -942,6 +976,9 @@ async def _request_open_question_answers(
         issues = await _collect_open_question_issues_from_browser(browser)
     if not issues:
         issues = _issues_from_blocker_text(blocker)
+    issues = [issue for issue in issues if _issue_supports_answer_recovery(issue)]
+    if not issues:
+        return [], False
 
     auth_answers, remaining_issues = _resolve_auth_recovery_answers(issues)
     auto_answers, unresolved_issues = await _auto_answer_open_question_issues(remaining_issues, profile)
