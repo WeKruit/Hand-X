@@ -179,8 +179,72 @@ async def test_create_job_agent_registers_workday_auth_domhand_tools(
         platform="workday",
     )
 
+    assert "domhand_fill_auth_fields" in agent.tools.registry.registry.actions
     assert "domhand_check_agreement" in agent.tools.registry.registry.actions
     assert "domhand_click_button" in agent.tools.registry.registry.actions
+    assert getattr(agent, "_gh_domhand_runtime_enabled", False) is True
+
+
+@patch("ghosthands.llm.client.get_chat_model")
+@patch("ghosthands.agent.factory.build_system_prompt", return_value="mock system prompt")
+async def test_create_job_agent_forces_domhand_runtime_for_workday_when_global_domhand_disabled(
+    mock_prompt, mock_get_model, mock_llm, sample_profile
+):
+    mock_get_model.return_value = mock_llm
+    from ghosthands.config.settings import settings
+
+    original_enable_domhand = settings.enable_domhand
+    settings.enable_domhand = False
+
+    try:
+        agent = await create_job_agent(
+            task="Apply to https://example.wd1.myworkdayjobs.com/en-US/job/123/apply",
+            resume_profile=sample_profile,
+            platform="workday",
+        )
+
+        assert getattr(agent, "_gh_domhand_runtime_enabled", False) is True
+        assert "domhand_fill" in agent.tools.registry.registry.actions
+    finally:
+        settings.enable_domhand = original_enable_domhand
+
+
+@patch("ghosthands.llm.client.get_chat_model")
+@patch("ghosthands.agent.factory.build_system_prompt", return_value="mock system prompt")
+async def test_create_job_agent_enables_coordinate_clicking_for_workday_gemini_3_flash(
+    mock_prompt, mock_get_model, mock_llm, sample_profile
+):
+    """Workday on gemini-3-flash-preview needs coordinate fallback for custom widgets."""
+    mock_llm.model = "gemini-3-flash-preview"
+    mock_llm.model_name = "gemini-3-flash-preview"
+    mock_get_model.return_value = mock_llm
+
+    agent = await create_job_agent(
+        task="Apply to https://example.wd1.myworkdayjobs.com/en-US/job/123/apply",
+        resume_profile=sample_profile,
+        platform="workday",
+    )
+
+    assert agent.tools._coordinate_clicking_enabled is True
+
+
+@patch("ghosthands.llm.client.get_chat_model")
+@patch("ghosthands.agent.factory.build_system_prompt", return_value="mock system prompt")
+async def test_create_job_agent_keeps_coordinate_clicking_disabled_for_non_workday_gemini_3_flash(
+    mock_prompt, mock_get_model, mock_llm, sample_profile
+):
+    """The Workday-specific coordinate fix should not change other platforms."""
+    mock_llm.model = "gemini-3-flash-preview"
+    mock_llm.model_name = "gemini-3-flash-preview"
+    mock_get_model.return_value = mock_llm
+
+    agent = await create_job_agent(
+        task="Apply to https://example.greenhouse.io/job/123/apply",
+        resume_profile=sample_profile,
+        platform="greenhouse",
+    )
+
+    assert agent.tools._coordinate_clicking_enabled is False
 
 
 @patch("ghosthands.llm.client.get_chat_model")

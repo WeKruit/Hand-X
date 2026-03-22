@@ -388,8 +388,11 @@ class StepHooks:
 
         try:
             from ghosthands.config.settings import settings as runtime_settings
+            domhand_runtime_enabled = bool(
+                runtime_settings.enable_domhand or getattr(agent, "_gh_domhand_runtime_enabled", False)
+            )
 
-            if runtime_settings.enable_domhand:
+            if domhand_runtime_enabled:
                 from ghosthands.cli import _apply_runtime_page_audit
 
                 await _apply_runtime_page_audit(agent, auto_domhand_prefill=True)

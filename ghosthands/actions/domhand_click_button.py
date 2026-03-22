@@ -20,6 +20,7 @@ buttons that the regular click action doesn't trigger.
 import asyncio
 import json
 import logging
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -525,6 +526,184 @@ _PAGE_STATE_JS = r"""() => {
 	return JSON.stringify(state);
 }"""
 
+_AUTH_TRANSITION_STATE_JS = r"""() => {
+	function normalize(text) {
+		return (text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+	}
+
+	const allText = Array.from(
+		document.querySelectorAll('h1, h2, h3, button, a, [role="button"], label, p, span, div')
+	)
+		.map((el) => normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || ''))
+		.filter(Boolean);
+
+	const hasText = (patterns) => allText.some((text) => patterns.some((pattern) => pattern.test(text)));
+	const passwordCount = document.querySelectorAll('input[type="password"]').length;
+	const emailCount = document.querySelectorAll('input[type="email"], input[name*="email" i], input[id*="email" i]').length;
+	const confirmPasswordVisible =
+		passwordCount >= 2 ||
+		document.querySelector('[data-automation-id="verifyPassword"]') !== null;
+	const createAccountSignals = hasText([/\bcreate account\b/, /\bregister\b/, /\bsign up\b/]);
+	const signInSignals = hasText([/\bsign in\b/, /\blog in\b/, /\blogin\b/]);
+	const verificationSignals = hasText([
+		/\bverify your account\b/,
+		/\bverification email\b/,
+		/\bconfirm your email\b/,
+		/\bcheck your inbox\b/,
+		/\bcheck your spam\b/,
+		/\bverify your email address\b/
+	]);
+	let authState = 'unknown_pending';
+	if (confirmPasswordVisible) {
+		authState = 'still_create_account';
+	} else if (emailCount >= 1 && passwordCount >= 1 && signInSignals) {
+		authState = 'native_login';
+	} else if (createAccountSignals) {
+		authState = 'still_create_account';
+	}
+
+	return JSON.stringify({
+		authState,
+		confirmPasswordVisible,
+		createAccountSignals,
+		signInSignals,
+		verificationSignals,
+		accountExistsSignals: hasText([/\balready exists\b/, /\balready have an account\b/, /\balready registered\b/, /\baccount exists\b/]),
+		authInputs: {
+			passwords: passwordCount,
+			emails: emailCount,
+		},
+	});
+}"""
+
+
+def _is_auth_button_label(label: str) -> bool:
+    normalized = (label or "").strip().lower()
+    return any(token in normalized for token in ("sign in", "log in", "login", "create account", "register", "sign up"))
+
+
+def _summarize_auth_failure_details(diagnostics: dict[str, Any]) -> str:
+    hidden_errors = [str((item or {}).get("text") or "").strip() for item in (diagnostics.get("hiddenErrors") or [])]
+    hidden_errors = [text for text in hidden_errors if text][:3]
+    invalid_forms = [form for form in (diagnostics.get("forms") or []) if isinstance(form, dict) and not form.get("valid")]
+    auth_inputs = diagnostics.get("authInputs") or {}
+
+    details: list[str] = []
+    if hidden_errors:
+        details.append(f"Visible/hidden errors: {hidden_errors}")
+    if invalid_forms:
+        invalid_fields: list[str] = []
+        for form in invalid_forms[:2]:
+            for field in (form.get("fields") or [])[:3]:
+                name = str((field or {}).get("name") or "?").strip()
+                message = str((field or {}).get("message") or "?").strip()
+                invalid_fields.append(f"{name}: {message}")
+        if invalid_fields:
+            details.append(f"Validation errors: {invalid_fields}")
+    if isinstance(auth_inputs, dict):
+        details.append(
+            f"Auth inputs still visible: emails={int(auth_inputs.get('emails') or 0)}, passwords={int(auth_inputs.get('passwords') or 0)}"
+        )
+    return " ".join(details).strip()
+
+
+def _auth_submit_preflight_error(label: str, diagnostics: dict[str, Any]) -> ActionResult | None:
+    if not _is_auth_button_label(label):
+        return None
+
+    forms = diagnostics.get("forms") or []
+    invalid_forms = [form for form in forms if isinstance(form, dict) and not form.get("valid")]
+    auth_inputs = diagnostics.get("authInputs") or {}
+    if not invalid_forms or not isinstance(auth_inputs, dict):
+        return None
+
+    auth_related_invalid = False
+    for form in invalid_forms:
+        for field in form.get("fields") or []:
+            name = str((field or {}).get("name") or "").strip().lower()
+            message = str((field or {}).get("message") or "").strip().lower()
+            if any(token in name for token in ("email", "password", "user")):
+                auth_related_invalid = True
+                break
+            if any(token in message for token in ("fill out", "required", "password", "email")):
+                auth_related_invalid = True
+                break
+        if auth_related_invalid:
+            break
+
+    if not auth_related_invalid:
+        return None
+
+    details = _summarize_auth_failure_details(diagnostics)
+    return ActionResult(
+        error=(
+            f"DomHand auth submit blocked: '{label}' would submit an incomplete auth form. "
+            f"{details} Use domhand_fill_auth_fields before domhand_click_button."
+        ).strip(),
+        include_in_memory=True,
+    )
+
+
+def _classify_auth_submit_outcome(
+    *,
+    label: str,
+    auth_state_after: dict[str, Any],
+    diagnostics: dict[str, Any],
+    url_changed: bool,
+    state_changed: bool,
+) -> ActionResult | None:
+    if not _is_auth_button_label(label):
+        return None
+
+    normalized = label.strip().lower()
+    auth_state = str(auth_state_after.get("authState") or "").strip()
+    verification = bool(auth_state_after.get("verificationSignals"))
+    details = _summarize_auth_failure_details(diagnostics)
+
+    if verification:
+        return ActionResult(
+            error=f"DomHand auth submit: '{label}' led to an email verification screen. {details}".strip(),
+        )
+
+    if "sign in" in normalized or "log in" in normalized or "login" in normalized:
+        if auth_state == "native_login":
+            return ActionResult(
+                error=f"DomHand auth submit: clicked '{label}' but the Sign In form is still visible. {details}".strip(),
+            )
+        if auth_state == "still_create_account":
+            return ActionResult(
+                error=(
+                    f"DomHand auth submit: clicked '{label}' but the page is still on Create Account. {details}"
+                ).strip(),
+            )
+        if url_changed or state_changed:
+            return ActionResult(
+                extracted_content=f"DomHand auth submit: clicked '{label}' and the auth wall appears cleared.",
+                include_in_memory=True,
+            )
+        return None
+
+    if "create account" in normalized or "register" in normalized or "sign up" in normalized:
+        if auth_state == "native_login":
+            return ActionResult(
+                extracted_content=(
+                    "DomHand auth submit: clicked 'Create Account' and Workday moved to the native Sign In page. "
+                    "This is the expected post-create step. Use domhand_fill_auth_fields, then "
+                    "domhand_click_button(button_label='Sign In') once."
+                ),
+                include_in_memory=True,
+            )
+        if auth_state == "still_create_account":
+            return ActionResult(
+                error=f"DomHand auth submit: clicked '{label}' but the Create Account form is still visible. {details}".strip(),
+            )
+        if url_changed or state_changed:
+            return ActionResult(
+                extracted_content=f"DomHand auth submit: clicked '{label}' and the auth wall appears cleared.",
+                include_in_memory=True,
+            )
+    return None
+
 
 class DomHandClickButtonParams(BaseModel):
     """Parameters for domhand_click_button action."""
@@ -609,8 +788,30 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
             if loop.time() >= deadline:
                 return url_after, fingerprint_after, state_changed
 
+    async def _read_post_click_diagnostics() -> tuple[dict[str, Any], dict[str, Any]]:
+        diagnostics: dict[str, Any] = {}
+        auth_state: dict[str, Any] = {}
+        try:
+            diagnostics = json.loads(await page.evaluate(_PAGE_STATE_JS))
+        except Exception:
+            diagnostics = {}
+        try:
+            auth_state = json.loads(await page.evaluate(_AUTH_TRANSITION_STATE_JS))
+        except Exception:
+            auth_state = {}
+        return diagnostics if isinstance(diagnostics, dict) else {}, auth_state if isinstance(auth_state, dict) else {}
+
     # ── Strategy 1: preview, highlight, then JS event sequence ────────────
     try:
+        preflight_diagnostics, _preflight_auth_state = await _read_post_click_diagnostics()
+        preflight_error = _auth_submit_preflight_error(label, preflight_diagnostics)
+        if preflight_error is not None:
+            logger.info(
+                "domhand_click_button.auth_preflight_blocked",
+                extra={"label": label, "diagnostics": preflight_diagnostics},
+            )
+            return preflight_error
+
         preview_json = await page.evaluate(_FIND_AND_CLICK_JS, label, False)
         preview_result = json.loads(preview_json)
 
@@ -637,6 +838,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
 
         if result.get("found") and result.get("clicked"):
             url_after, fingerprint_after, state_changed = await _wait_for_transition()
+            diagnostics, auth_state_after = await _read_post_click_diagnostics()
 
             method = result.get("clicked", "unknown")
             logger.info(
@@ -648,8 +850,19 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                     "url_changed": url_before != url_after,
                     "state_changed": state_changed,
                     "fingerprint_after": fingerprint_after,
+                    "auth_state_after": auth_state_after,
                 },
             )
+
+            auth_result = _classify_auth_submit_outcome(
+                label=label,
+                auth_state_after=auth_state_after,
+                diagnostics=diagnostics,
+                url_changed=url_before != url_after,
+                state_changed=state_changed,
+            )
+            if auth_result is not None:
+                return auth_result
 
             if url_before != url_after:
                 return ActionResult(
@@ -674,6 +887,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
             if elements:
                 await elements[0].click()
                 url_after, fingerprint_after, state_changed = await _wait_for_transition()
+                diagnostics, auth_state_after = await _read_post_click_diagnostics()
 
                 logger.info(
                     "domhand_click_button.cdp_click",
@@ -683,8 +897,19 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                         "url_changed": url_before != url_after,
                         "state_changed": state_changed,
                         "fingerprint_after": fingerprint_after,
+                        "auth_state_after": auth_state_after,
                     },
                 )
+
+                auth_result = _classify_auth_submit_outcome(
+                    label=label,
+                    auth_state_after=auth_state_after,
+                    diagnostics=diagnostics,
+                    url_changed=url_before != url_after,
+                    state_changed=state_changed,
+                )
+                if auth_result is not None:
+                    return auth_result
 
                 if url_before != url_after:
                     return ActionResult(
@@ -707,6 +932,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
 
             if submit_result.get("submitted") or submit_result.get("clicked"):
                 url_after, fingerprint_after, state_changed = await _wait_for_transition()
+                diagnostics, auth_state_after = await _read_post_click_diagnostics()
 
                 logger.info(
                     "domhand_click_button.form_submit",
@@ -716,8 +942,19 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                         "url_changed": url_before != url_after,
                         "state_changed": state_changed,
                         "fingerprint_after": fingerprint_after,
+                        "auth_state_after": auth_state_after,
                     },
                 )
+
+                auth_result = _classify_auth_submit_outcome(
+                    label=label,
+                    auth_state_after=auth_state_after,
+                    diagnostics=diagnostics,
+                    url_changed=url_before != url_after,
+                    state_changed=state_changed,
+                )
+                if auth_result is not None:
+                    return auth_result
 
                 if url_before != url_after:
                     return ActionResult(
@@ -742,6 +979,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
             if focus_result.get("focused"):
                 await page.keyboard.press("Enter")
                 url_after, fingerprint_after, state_changed = await _wait_for_transition()
+                diagnostics, auth_state_after = await _read_post_click_diagnostics()
 
                 logger.info(
                     "domhand_click_button.enter_key",
@@ -750,8 +988,19 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                         "url_changed": url_before != url_after,
                         "state_changed": state_changed,
                         "fingerprint_after": fingerprint_after,
+                        "auth_state_after": auth_state_after,
                     },
                 )
+
+                auth_result = _classify_auth_submit_outcome(
+                    label=label,
+                    auth_state_after=auth_state_after,
+                    diagnostics=diagnostics,
+                    url_changed=url_before != url_after,
+                    state_changed=state_changed,
+                )
+                if auth_result is not None:
+                    return auth_result
 
                 if url_before != url_after:
                     return ActionResult(

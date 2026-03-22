@@ -21,6 +21,14 @@ from ghosthands.config.settings import settings
 from ghosthands.step_trace import get_blocker_attempt_state, publish_browser_session_trace
 
 
+def _domhand_runtime_enabled(target: Any | None) -> bool:
+    if settings.enable_domhand:
+        return True
+    if target is None:
+        return False
+    return bool(getattr(target, "_gh_domhand_runtime_enabled", False))
+
+
 def _truncate_log_text(text: str | None, limit: int | None = None) -> str:
     if not text:
         return ""
@@ -224,39 +232,99 @@ def _dom_node_matches_blocker(node: Any, blocker: dict[str, Any]) -> bool:
     return False
 
 
-def _action_targets_single_blocker(action_name: str, params: dict[str, Any], blocker: dict[str, Any]) -> bool:
-    blocker_id = str(blocker.get("field_id") or "").strip()
-    blocker_label = _normalize_blocker_text(blocker.get("field_label") or blocker.get("question_text") or "")
-    blocker_family = _blocker_field_family(blocker.get("field_type"))
-    param_field_id = str(params.get("field_id") or "").strip()
-    param_label = _normalize_blocker_text(
-        params.get("field_label") or params.get("question_text") or params.get("name") or ""
-    )
-    if action_name == "domhand_assess_state":
-        return True
-    if action_name == "domhand_interact_control":
-        return bool(
-            (param_field_id and blocker_id and param_field_id == blocker_id)
-            or (param_label and blocker_label and param_label == blocker_label)
-        )
-    if action_name == "domhand_record_expected_value":
-        return bool(
-            (param_field_id and blocker_id and param_field_id == blocker_id)
-            or (param_label and blocker_label and param_label == blocker_label)
-        )
+def _blocker_label_candidates(blocker: dict[str, Any]) -> set[str]:
+    candidates = {
+        _normalize_blocker_text(blocker.get("field_label") or ""),
+        _normalize_blocker_text(blocker.get("question_text") or ""),
+        _normalize_blocker_text(blocker.get("field_id") or ""),
+    }
+    return {candidate for candidate in candidates if candidate}
+
+
+def _texts_overlap(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    return left == right or left in right or right in left
+
+
+def _normalized_action_labels(action_name: str, params: dict[str, Any]) -> set[str]:
+    labels: set[str] = set()
+    for key in ("field_label", "question_text", "name"):
+        normalized = _normalize_blocker_text(params.get(key) or "")
+        if normalized:
+            labels.add(normalized)
     if action_name == "domhand_fill":
-        focus_fields = params.get("focus_fields") or []
-        normalized_focus = {_normalize_blocker_text(label) for label in focus_fields if str(label).strip()}
-        return bool(blocker_label and blocker_label in normalized_focus)
+        for label in params.get("focus_fields") or []:
+            normalized = _normalize_blocker_text(label)
+            if normalized:
+                labels.add(normalized)
+    return labels
+
+
+def _normalized_action_section(params: dict[str, Any]) -> str:
+    return _normalize_blocker_text(params.get("target_section") or params.get("section") or "")
+
+
+def _normalized_blocker_section(blocker: dict[str, Any]) -> str:
+    return _normalize_blocker_text(blocker.get("field_section") or blocker.get("section") or "")
+
+
+def _action_targets_blocker_family(action_name: str, params: dict[str, Any], blocker: dict[str, Any]) -> bool:
+    blocker_family = _blocker_field_family(blocker.get("field_type"))
+    if action_name == "domhand_fill":
+        return blocker_family == "text"
     if action_name == "domhand_select":
-        if blocker_family != "select":
-            return False
-        if param_field_id:
-            return bool(blocker_id and param_field_id == blocker_id)
-        if param_label:
-            return bool(blocker_label and param_label == blocker_label)
+        return blocker_family == "select"
+    if action_name == "domhand_interact_control":
+        param_field_type = str(params.get("field_type") or "").strip()
+        if param_field_type:
+            return _blocker_field_family(param_field_type) == blocker_family
+        return blocker_family in {"binary", "select"}
+    if action_name == "domhand_record_expected_value":
         return True
     return False
+
+
+def _action_plausibly_targets_blocker(action_name: str, params: dict[str, Any], blocker: dict[str, Any]) -> bool:
+    if not _action_targets_blocker_family(action_name, params, blocker):
+        return False
+
+    blocker_id = str(blocker.get("field_id") or "").strip()
+    param_field_id = str(params.get("field_id") or "").strip()
+    if param_field_id and blocker_id and param_field_id == blocker_id:
+        return True
+
+    action_labels = _normalized_action_labels(action_name, params)
+    blocker_labels = _blocker_label_candidates(blocker)
+    if action_labels and blocker_labels:
+        for action_label in action_labels:
+            for blocker_label in blocker_labels:
+                if _texts_overlap(action_label, blocker_label):
+                    return True
+
+    action_section = _normalized_action_section(params)
+    blocker_section = _normalized_blocker_section(blocker)
+    if action_section and blocker_section and action_section == blocker_section:
+        return True
+
+    return False
+
+
+def _matching_active_blockers(action_name: str, params: dict[str, Any], last_state: dict[str, Any]) -> list[dict[str, Any]]:
+    blocker_states = last_state.get("blocking_field_states") or {}
+    if not isinstance(blocker_states, dict):
+        return []
+    return [
+        blocker
+        for blocker in blocker_states.values()
+        if isinstance(blocker, dict) and _action_plausibly_targets_blocker(action_name, params, blocker)
+    ]
+
+
+def _action_targets_single_blocker(action_name: str, params: dict[str, Any], blocker: dict[str, Any]) -> bool:
+    if action_name == "domhand_assess_state":
+        return True
+    return _action_plausibly_targets_blocker(action_name, params, blocker)
 
 
 def _classify_blocker_strategy(action_name: str, params: dict[str, Any]) -> str:
@@ -463,19 +531,20 @@ def _blocker_guard_decision(
         param_label = _normalize_blocker_text(params.get("field_label") or params.get("name") or "")
         focus_fields = params.get("focus_fields") or []
         normalized_focus = {_normalize_blocker_text(label) for label in focus_fields if str(label).strip()}
-        if param_field_id and param_field_id not in blocker_set:
+        matching_blockers = _matching_active_blockers(action_name, params, last_state)
+        if param_field_id and param_field_id not in blocker_set and not matching_blockers:
             return {
                 "reason": "explicit_non_blocker_target",
                 "strategy": _classify_blocker_strategy(action_name, params),
                 "message": "The planned action explicitly targets a field that is not in the latest blocker set.",
             }
-        if param_label and param_label not in blocker_labels:
+        if param_label and param_label not in blocker_labels and not matching_blockers:
             return {
                 "reason": "explicit_non_blocker_target",
                 "strategy": _classify_blocker_strategy(action_name, params),
                 "message": "The planned action explicitly targets a label that is not in the latest blocker set.",
             }
-        if normalized_focus and normalized_focus.isdisjoint(blocker_labels):
+        if normalized_focus and normalized_focus.isdisjoint(blocker_labels) and not matching_blockers:
             return {
                 "reason": "explicit_non_blocker_target",
                 "strategy": _classify_blocker_strategy(action_name, params),
@@ -581,7 +650,7 @@ class HandXAgent(Agent):
         return False
 
     async def _get_pending_manual_recovery(self) -> dict[str, Any] | None:
-        if settings.enable_domhand or self.browser_session is None:
+        if _domhand_runtime_enabled(self) or self.browser_session is None:
             return None
         pending = getattr(self.browser_session, "_gh_pending_manual_recovery", None)
         if not isinstance(pending, dict):
@@ -661,7 +730,7 @@ class HandXAgent(Agent):
         params: dict[str, Any],
         result: ActionResult,
     ) -> None:
-        if settings.enable_domhand or self.browser_session is None or result.error or result.is_done:
+        if _domhand_runtime_enabled(self) or self.browser_session is None or result.error or result.is_done:
             return
         metadata = result.metadata if isinstance(result.metadata, dict) else {}
         pending = getattr(self.browser_session, "_gh_pending_manual_recovery", None)
@@ -856,7 +925,7 @@ class HandXAgent(Agent):
         self.state.last_result = result
 
     async def _run_runtime_assess_state_followup(self, *, reason: str) -> ActionResult | None:
-        if not settings.enable_domhand:
+        if not _domhand_runtime_enabled(self):
             return None
         if self.browser_session is None:
             return None
@@ -901,7 +970,7 @@ class HandXAgent(Agent):
             return ActionResult(error=f"Runtime follow-up domhand_assess_state failed: {type(exc).__name__}: {exc}")
 
     async def _maybe_record_active_recovery_target(self, recovery_target: dict[str, Any]) -> ActionResult | None:
-        if not settings.enable_domhand:
+        if not _domhand_runtime_enabled(self):
             return None
         if self.browser_session is None:
             return None
@@ -957,7 +1026,7 @@ class HandXAgent(Agent):
         pre_action_url: str,
         pre_action_state: dict[str, Any] | None,
     ) -> list[ActionResult]:
-        if not settings.enable_domhand:
+        if not _domhand_runtime_enabled(self):
             return []
         if self.browser_session is None or result.error or result.is_done:
             return []

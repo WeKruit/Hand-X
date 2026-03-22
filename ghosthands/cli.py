@@ -1512,11 +1512,6 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     # -- DomHand actions ----------------------------------------------------
     excluded_actions = ["write_file", "replace_file", "evaluate", "read_file"]
     tools: HandXTools = HandXTools(exclude_actions=excluded_actions)
-    if app_settings.enable_domhand:
-        emit_status("DomHand runtime prefill enabled; using generic browser-use actions", job_id=job_id)
-    else:
-        emit_status("DomHand runtime prefill disabled; using generic browser-use actions", job_id=job_id)
-
     # -- Platform detection -------------------------------------------------
     platform = "generic"
     try:
@@ -1525,17 +1520,19 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         platform = detect_platform(args.job_url)
     except ImportError:
         pass
-    use_domhand_tools = bool(app_settings.enable_domhand or platform == "workday")
+    use_domhand_runtime = bool(app_settings.enable_domhand or platform == "workday")
+    if app_settings.enable_domhand:
+        emit_status("DomHand runtime prefill enabled; using generic browser-use actions", job_id=job_id)
+    elif platform == "workday":
+        emit_status("Workday platform policy: full DomHand runtime enabled", job_id=job_id)
+    else:
+        emit_status("DomHand runtime prefill disabled; using generic browser-use actions", job_id=job_id)
+    use_domhand_tools = use_domhand_runtime
     enable_auth_domhand_tools = bool(platform == "workday" and not use_domhand_tools)
     if use_domhand_tools:
         from ghosthands.actions import register_domhand_actions
 
         register_domhand_actions(tools)
-        if platform == "workday" and not app_settings.enable_domhand:
-            emit_status(
-                "Workday platform policy: DomHand action surface enabled with runtime prefill disabled",
-                job_id=job_id,
-            )
     elif enable_auth_domhand_tools:
         from ghosthands.actions import register_domhand_auth_actions
 
@@ -1546,7 +1543,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     try:
         from ghosthands.agent.prompts import build_system_prompt
 
-        system_ext = build_system_prompt(profile, platform, use_domhand=use_domhand_tools)
+        system_ext = build_system_prompt(profile, platform, use_domhand=use_domhand_runtime)
     except ImportError:
         pass
 
@@ -2054,11 +2051,6 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     # -- Agent-visible tools ------------------------------------------------
     excluded_actions = ["write_file", "replace_file", "evaluate", "read_file"]
     tools: HandXTools = HandXTools(exclude_actions=excluded_actions)
-    if app_settings.enable_domhand:
-        print("DomHand runtime prefill enabled; using generic browser-use actions")
-    else:
-        print("DomHand runtime prefill disabled; using generic browser-use actions")
-
     # -- Platform detection -------------------------------------------------
     platform = "generic"
     try:
@@ -2067,14 +2059,19 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         platform = detect_platform(args.job_url)
     except ImportError:
         pass
-    use_domhand_tools = bool(app_settings.enable_domhand or platform == "workday")
+    use_domhand_runtime = bool(app_settings.enable_domhand or platform == "workday")
+    if app_settings.enable_domhand:
+        print("DomHand runtime prefill enabled; using generic browser-use actions")
+    elif platform == "workday":
+        print("Workday platform policy: full DomHand runtime enabled")
+    else:
+        print("DomHand runtime prefill disabled; using generic browser-use actions")
+    use_domhand_tools = use_domhand_runtime
     enable_auth_domhand_tools = bool(platform == "workday" and not use_domhand_tools)
     if use_domhand_tools:
         from ghosthands.actions import register_domhand_actions
 
         register_domhand_actions(tools)
-        if platform == "workday" and not app_settings.enable_domhand:
-            print("Workday platform policy: DomHand action surface enabled with runtime prefill disabled")
     elif enable_auth_domhand_tools:
         from ghosthands.actions import register_domhand_auth_actions
 
@@ -2085,7 +2082,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     try:
         from ghosthands.agent.prompts import build_system_prompt
 
-        system_ext = build_system_prompt(profile, platform, use_domhand=use_domhand_tools)
+        system_ext = build_system_prompt(profile, platform, use_domhand=use_domhand_runtime)
     except ImportError:
         pass
 

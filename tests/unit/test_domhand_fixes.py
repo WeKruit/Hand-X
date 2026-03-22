@@ -817,6 +817,7 @@ def test_effectively_unset_field_value_rejects_opaque_widget_ids():
 
     assert _is_effectively_unset_field_value("05e15101582a10019dbe3ae8c5a80000") is True
     assert _is_effectively_unset_field_value("What degree are you seeking? Select One") is True
+    assert _is_effectively_unset_field_value("How Did You Hear About Us?*0 items selected") is True
     assert _is_effectively_unset_field_value(
         "{'street': '', 'city': '', 'state': '', 'zip': '', 'country': 'United States'}"
     ) is True
@@ -1006,6 +1007,8 @@ def test_build_task_prompt_user_existing_account():
 
     assert "USER-PROVIDED EXISTING ACCOUNT" in prompt
     assert "go DIRECTLY to Sign In" in prompt
+    assert "domhand_fill_auth_fields" in prompt
+    assert "submit Sign In using domhand_click_button" in prompt
     assert "NEVER attempt to create a new account" in prompt
 
 
@@ -1023,11 +1026,13 @@ def test_build_task_prompt_user_create_account():
 
     assert "USER-PROVIDED NEW ACCOUNT" in prompt
     assert "go DIRECTLY to Create Account first" in prompt
-    assert "Use the SAME email/password to sign in ONCE" in prompt
+    assert "Use domhand_fill_auth_fields, then domhand_click_button(button_label='Sign In') once." in prompt
     assert "NEVER click Sign In proactively from the start dialog" in prompt
     assert "AUTH_RESULT=ACCOUNT_CREATED_ACTIVE" in prompt
     assert "Do NOT click Create Account again" in prompt
     assert "submit Create Account using domhand_click_button" in prompt
+    assert "For exact non-text blockers reported by domhand_assess_state" in prompt
+    assert "go DIRECTLY to the matching DomHand control tool" in prompt
     assert "call refresh() ONCE" in prompt
     assert "take ONE screenshot/vision retry on that blocker" in prompt
 
@@ -3439,6 +3444,66 @@ async def test_assess_state_persists_recovery_target_with_question_text():
 
 
 @pytest.mark.asyncio
+async def test_assess_state_rereads_radio_group_when_extracted_value_is_stale():
+    from ghosthands.actions.domhand_assess_state import domhand_assess_state
+    from ghosthands.actions.views import DomHandAssessStateParams, FormField
+
+    field = FormField(
+        field_id="ff-6",
+        name="Have you previously been employed by Arlo Technologies Inc.? CURRENT EMPLOYEES: Please apply via your internal Workday account instead.*",
+        question_text="Have you previously been employed by Arlo Technologies Inc.?",
+        field_type="radio-group",
+        section="My Information",
+        required=True,
+        choices=["Yes", "No"],
+        current_value="Yes",
+    )
+
+    async def evaluate_side_effect(script, *args):
+        script_text = str(script)
+        if "summaryItems" in script_text:
+            return json.dumps(
+                {
+                    "button_texts": [],
+                    "body_text": "",
+                    "markers": [],
+                    "submit_visible": False,
+                    "submit_disabled": False,
+                    "advance_visible": False,
+                    "advance_disabled": False,
+                    "heading_texts": ["My Information"],
+                }
+            )
+        if "getBoundingClientRect" in script_text:
+            return json.dumps({"ff-6": {"top": 120, "bottom": 180, "in_view": True}})
+        if args and args[0] == "ff-6":
+            return json.dumps({})
+        return None
+
+    page = AsyncMock()
+    page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
+    page.get_url = AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job")
+    browser_session = AsyncMock()
+    browser_session.get_current_page = AsyncMock(return_value=page)
+
+    with (
+        patch("ghosthands.dom.shadow_helpers.ensure_helpers", AsyncMock(return_value=None)),
+        patch("ghosthands.actions.domhand_assess_state.extract_visible_form_fields", AsyncMock(return_value=[field])),
+        patch(
+            "ghosthands.actions.domhand_assess_state._safe_page_url",
+            AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job"),
+        ),
+        patch("ghosthands.actions.domhand_assess_state._field_has_validation_error", AsyncMock(return_value=False)),
+        patch("ghosthands.actions.domhand_assess_state._read_group_selection", AsyncMock(return_value="")),
+    ):
+        result = await domhand_assess_state(DomHandAssessStateParams(target_section="My Information"), browser_session)
+
+    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    assert payload["unresolved_required_fields"][0]["field_id"] == "ff-6"
+    assert browser_session._gh_last_application_state["single_active_blocker"]["field_id"] == "ff-6"
+
+
+@pytest.mark.asyncio
 async def test_assess_state_ignores_shape_incompatible_expected_value_for_conditional_detail_textarea():
     from ghosthands.actions.domhand_assess_state import domhand_assess_state
     from ghosthands.actions.views import DomHandAssessStateParams, FormField, get_stable_field_key
@@ -5106,6 +5171,87 @@ async def test_domhand_fill_blocks_repeated_broad_retry_on_same_page_context():
     assert "Initial broad domhand_fill already ran for this page context" in result.error
 
 
+def test_initial_bulk_fill_keeps_workday_source_widget_in_first_pass():
+    from ghosthands.actions.domhand_fill import _should_defer_field_in_initial_bulk_fill
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="ff-source",
+        name="How Did You Hear About Us?*",
+        question_text="How Did You Hear About Us?",
+        field_type="select",
+        section="My Information",
+        required=True,
+        is_native=False,
+    )
+
+    assert _should_defer_field_in_initial_bulk_fill(field) is False
+
+
+def test_initial_bulk_fill_keeps_workday_previous_employment_radio_in_first_pass():
+    from ghosthands.actions.domhand_fill import _should_defer_field_in_initial_bulk_fill
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="ff-previous-employment",
+        name="Have you previously been employed by Arlo Technologies Inc.? CURRENT EMPLOYEES: Please apply via your internal Workday account instead.*",
+        question_text="Have you previously been employed by Arlo Technologies Inc.?",
+        field_type="radio-group",
+        section="My Information",
+        required=True,
+        choices=["Yes", "No"],
+    )
+
+    assert _should_defer_field_in_initial_bulk_fill(field) is False
+
+
+def test_employer_history_detector_handles_company_names_with_technologies():
+    from ghosthands.actions.domhand_fill import _is_employer_history_screening_question
+    from ghosthands.actions.views import normalize_name
+
+    label = normalize_name(
+        "Have you previously been employed by Arlo Technologies Inc.? CURRENT EMPLOYEES: Please apply via your internal Workday account instead.*"
+    )
+
+    assert _is_employer_history_screening_question(label) is True
+
+
+def test_initial_bulk_fill_keeps_phone_device_type_in_first_pass():
+    from ghosthands.actions.domhand_fill import _should_defer_field_in_initial_bulk_fill
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="ff-phone-type",
+        name="Phone Device Type",
+        question_text="Phone Device Type",
+        field_type="select",
+        section="Contact Information",
+        required=True,
+        is_native=False,
+        options=["Mobile", "Home", "Work"],
+    )
+
+    assert _should_defer_field_in_initial_bulk_fill(field) is False
+
+
+def test_initial_bulk_fill_still_defers_generic_custom_selects():
+    from ghosthands.actions.domhand_fill import _should_defer_field_in_initial_bulk_fill
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="ff-generic-select",
+        name="Preferred pronouns",
+        question_text="Preferred pronouns",
+        field_type="select",
+        section="Profile",
+        required=False,
+        is_native=False,
+        options=["She/Her", "He/Him", "They/Them"],
+    )
+
+    assert _should_defer_field_in_initial_bulk_fill(field) is True
+
+
 def test_answer_resolution_logs_shape_incompatible_rejection():
     from ghosthands.actions.domhand_fill import _coerce_answer_if_compatible
     from ghosthands.actions.views import FormField
@@ -5153,6 +5299,209 @@ def test_record_page_token_cost_accumulates_per_page_context():
     assert totals["calls"] == 2
     assert totals["input_tokens"] == 150
     assert totals["output_tokens"] == 30
+
+
+def test_single_blocker_rejects_targeted_domhand_fill_for_radio_group():
+    from ghosthands.agent.handx_agent import _action_targets_single_blocker
+
+    blocker = {
+        "field_id": "ff-6",
+        "field_label": "Have you previously been employed?",
+        "question_text": "Have you previously been employed?",
+        "field_type": "radio-group",
+        "field_section": "My Information",
+    }
+
+    assert _action_targets_single_blocker(
+        "domhand_fill",
+        {"focus_fields": ["Have you previously been employed?"], "target_section": "My Information"},
+        blocker,
+    ) is False
+
+
+def test_single_blocker_rejects_targeted_domhand_fill_for_select():
+    from ghosthands.agent.handx_agent import _action_targets_single_blocker
+
+    blocker = {
+        "field_id": "ff-4",
+        "field_label": "How Did You Hear About Us?*",
+        "question_text": "How Did You Hear About Us?",
+        "field_type": "select",
+        "field_section": "My Information",
+    }
+
+    assert _action_targets_single_blocker(
+        "domhand_fill",
+        {"focus_fields": ["How Did You Hear About Us?*"], "target_section": "My Information"},
+        blocker,
+    ) is False
+
+
+def test_single_blocker_allows_targeted_domhand_fill_for_text():
+    from ghosthands.agent.handx_agent import _action_targets_single_blocker
+
+    blocker = {
+        "field_id": "ff-42",
+        "field_label": "Address Line 1*",
+        "question_text": "Address Line 1*",
+        "field_type": "text",
+        "field_section": "Address",
+    }
+
+    assert _action_targets_single_blocker(
+        "domhand_fill",
+        {"focus_fields": ["Address Line 1*"], "target_section": "Address"},
+        blocker,
+    ) is True
+
+
+def test_blocker_guard_allows_stale_field_id_when_label_and_section_still_match():
+    from ghosthands.agent.handx_agent import _blocker_guard_decision
+
+    last_state = {
+        "blocking_field_keys": ["radio-group|ff-6-new"],
+        "blocking_field_labels": ["Have you previously been employed by Arlo Technologies Inc.?"],
+        "blocking_field_states": {
+            "radio-group|ff-6-new": {
+                "field_id": "ff-6-new",
+                "field_label": "Have you previously been employed by Arlo Technologies Inc.?",
+                "question_text": "Have you previously been employed by Arlo Technologies Inc.?",
+                "field_type": "radio-group",
+                "field_section": "My Information",
+            }
+        },
+    }
+
+    decision = _blocker_guard_decision(
+        last_state,
+        [
+            {
+                "action": "domhand_interact_control",
+                "params": {
+                    "field_id": "ff-6-old",
+                    "field_label": "Have you previously been employed by Arlo Technologies Inc.?",
+                    "field_type": "radio-group",
+                    "target_section": "My Information",
+                    "desired_value": "No",
+                },
+            }
+        ],
+        {},
+    )
+
+    assert decision is None
+
+
+def test_classify_auth_submit_outcome_flags_sign_in_form_still_visible():
+    from ghosthands.actions.domhand_click_button import _classify_auth_submit_outcome
+
+    result = _classify_auth_submit_outcome(
+        label="Sign In",
+        auth_state_after={
+            "authState": "native_login",
+            "authInputs": {"emails": 1, "passwords": 1},
+        },
+        diagnostics={
+            "hiddenErrors": [{"text": "Error: Please enter your password"}],
+            "forms": [{"valid": False, "fields": [{"name": "password", "message": "Please fill out this field."}]}],
+            "authInputs": {"emails": 1, "passwords": 1},
+        },
+        url_changed=False,
+        state_changed=True,
+    )
+
+    assert result is not None
+    assert result.error is not None
+    assert "Sign In form is still visible" in result.error
+    assert "Please enter your password" in result.error
+
+
+def test_auth_submit_preflight_blocks_incomplete_sign_in_form():
+    from ghosthands.actions.domhand_click_button import _auth_submit_preflight_error
+
+    result = _auth_submit_preflight_error(
+        "Sign In",
+        {
+            "hiddenErrors": [{"text": "Error: Please enter your password"}],
+            "forms": [{"valid": False, "fields": [{"name": "password", "message": "Please fill out this field."}]}],
+            "authInputs": {"emails": 1, "passwords": 1},
+        },
+    )
+
+    assert result is not None
+    assert result.error is not None
+    assert "incomplete auth form" in result.error
+    assert "domhand_fill_auth_fields" in result.error
+
+
+def test_classify_auth_submit_outcome_marks_create_account_to_native_login_as_expected():
+    from ghosthands.actions.domhand_click_button import _classify_auth_submit_outcome
+
+    result = _classify_auth_submit_outcome(
+        label="Create Account",
+        auth_state_after={
+            "authState": "native_login",
+            "authInputs": {"emails": 1, "passwords": 1},
+        },
+        diagnostics={"hiddenErrors": [], "forms": [], "authInputs": {"emails": 1, "passwords": 1}},
+        url_changed=False,
+        state_changed=True,
+    )
+
+    assert result is not None
+    assert result.error is None
+    assert "expected post-create step" in (result.extracted_content or "")
+
+
+@pytest.mark.asyncio
+async def test_domhand_fill_auth_fields_commits_visible_auth_inputs_directly():
+    from ghosthands.actions.domhand_fill_auth_fields import DomHandFillAuthFieldsParams, domhand_fill_auth_fields
+
+    page = AsyncMock()
+    page.evaluate = AsyncMock(
+        return_value=json.dumps(
+            {
+                "detected": [{"kind": "email"}, {"kind": "password"}],
+                "filled": [{"kind": "email", "ok": True}, {"kind": "password", "ok": True}],
+                "emailDetected": True,
+                "passwordDetected": True,
+                "confirmPasswordDetected": False,
+                "emailFilled": True,
+                "passwordFilled": True,
+                "confirmPasswordFilled": False,
+            }
+        )
+    )
+    browser_session = AsyncMock()
+    browser_session.get_current_page = AsyncMock(return_value=page)
+
+    with (
+        patch.dict(os.environ, {"GH_EMAIL": "test@example.com", "GH_PASSWORD": "secret"}, clear=False),
+        patch("ghosthands.dom.shadow_helpers.ensure_helpers", AsyncMock(return_value=None)),
+    ):
+        result = await domhand_fill_auth_fields(DomHandFillAuthFieldsParams(), browser_session)
+
+    assert result.error is None
+    assert "committed email, password" in (result.extracted_content or "")
+
+
+@pytest.mark.asyncio
+async def test_domhand_fill_auth_fields_errors_when_no_auth_inputs_detected():
+    from ghosthands.actions.domhand_fill_auth_fields import DomHandFillAuthFieldsParams, domhand_fill_auth_fields
+
+    page = AsyncMock()
+    page.evaluate = AsyncMock(return_value=json.dumps({"detected": []}))
+    browser_session = AsyncMock()
+    browser_session.get_current_page = AsyncMock(return_value=page)
+
+    with (
+        patch.dict(os.environ, {"GH_EMAIL": "test@example.com", "GH_PASSWORD": "secret"}, clear=False),
+        patch("ghosthands.dom.shadow_helpers.ensure_helpers", AsyncMock(return_value=None)),
+    ):
+        result = await domhand_fill_auth_fields(DomHandFillAuthFieldsParams(), browser_session)
+
+    assert result.error is not None
+    assert "no visible auth fields" in result.error.lower()
 
 
 @pytest.mark.asyncio

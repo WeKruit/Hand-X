@@ -481,6 +481,7 @@ _OPAQUE_WIDGET_VALUE_RE = re.compile(
     re.IGNORECASE,
 )
 _SELECT_PLACEHOLDER_FRAGMENT_RE = re.compile(r"\b(select one|choose one|please select)\b", re.IGNORECASE)
+_EMPTY_MULTISELECT_FRAGMENT_RE = re.compile(r"\b(?:0|no)\s+items?\s+selected\b", re.IGNORECASE)
 _NAME_FRAGMENT_NO_GUESS_RE = re.compile(r"\b(suffix|preferred name|nickname)\b", re.IGNORECASE)
 _SKILL_FIELD_MAX_ITEMS = 10
 _MULTI_SELECT_CHECKBOX_PROMPT_RE = re.compile(
@@ -737,6 +738,8 @@ def _is_effectively_unset_field_value(value: str | None) -> bool:
     if _looks_like_internal_widget_value(text):
         return True
     if _SELECT_PLACEHOLDER_FRAGMENT_RE.search(text):
+        return True
+    if _EMPTY_MULTISELECT_FRAGMENT_RE.search(text):
         return True
     return False
 
@@ -2223,6 +2226,7 @@ _READ_FIELD_VALUE_JS = r"""(ffId) => {
 		if (!value) return true;
 		if (/^(select one|choose one|please select)$/i.test(value)) return true;
 		if (/\b(select one|choose one|please select)\b/i.test(value)) return true;
+		if (/\b(?:0|no)\s+items?\s+selected\b/i.test(value)) return true;
 		return looksLikeOpaqueValue(value);
 	};
 	var visibleText = function(node) {
@@ -5153,23 +5157,6 @@ def _is_employer_history_screening_question(norm: str) -> bool:
     if any(phrase in norm for phrase in direct_phrases):
         return True
 
-    if any(
-        token in norm
-        for token in (
-            "years",
-            "year",
-            "months",
-            "month",
-            "experience",
-            "experienced",
-            "skill",
-            "skills",
-            "technology",
-            "technologies",
-        )
-    ):
-        return False
-
     employer_question_prefixes = (
         "have you worked at ",
         "have you ever worked at ",
@@ -5188,7 +5175,26 @@ def _is_employer_history_screening_question(norm: str) -> bool:
         "are you a current or previous employee",
         "are you a former employee",
     )
-    return any(norm.startswith(prefix) for prefix in employer_question_prefixes)
+    if any(norm.startswith(prefix) for prefix in employer_question_prefixes):
+        return True
+
+    if any(
+        token in norm
+        for token in (
+            "years",
+            "year",
+            "months",
+            "month",
+            "experience",
+            "experienced",
+            "skill",
+            "skills",
+            "technology",
+            "technologies",
+        )
+    ):
+        return False
+    return False
 
 
 def _is_relative_employment_screening_question(norm: str) -> bool:
@@ -7424,7 +7430,37 @@ def _takeover_suggestion_for_field(field: FormField, success: bool, actor: str, 
 
 
 def _should_defer_field_in_initial_bulk_fill(field: FormField) -> bool:
-    """Keep the first broad pass fast by deferring hard interactive widgets."""
+    """Keep the first broad pass fast by deferring hard interactive widgets.
+
+    Workday has a small set of top-of-page widgets that are both deterministic
+    and usually block everything below them. Those should stay in the initial
+    broad pass so the agent does not waste steps drifting into lower fields.
+    """
+    signal_parts = [
+        str(field.question_text or "").strip(),
+        str(field.name or "").strip(),
+        str(field.raw_label or "").strip(),
+        str(field.section or "").strip(),
+    ]
+    signal_text = normalize_name(" ".join(part for part in signal_parts if part))
+
+    if signal_text:
+        if any(
+            token in signal_text
+            for token in (
+                "how did you hear",
+                "learn about us",
+                "referral source",
+                "source of referral",
+                "source of application",
+                "phone device type",
+                "phone type",
+            )
+        ):
+            return False
+        if _is_employer_history_screening_question(signal_text):
+            return False
+
     if field.field_type in _FOCUS_BOOLEAN_FIELD_TYPES:
         return True
     if field.field_type == "select" and not field.is_native:

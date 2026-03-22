@@ -120,6 +120,7 @@ def register_domhand_actions(tools: "Tools") -> None:
     from ghosthands.actions.domhand_close_popup import domhand_close_popup
     from ghosthands.actions.domhand_expand import domhand_expand
     from ghosthands.actions.domhand_fill import domhand_fill
+    from ghosthands.actions.domhand_fill_auth_fields import domhand_fill_auth_fields
     from ghosthands.actions.domhand_interact_control import domhand_interact_control
     from ghosthands.actions.domhand_record_expected_value import domhand_record_expected_value
     from ghosthands.actions.domhand_select import domhand_select
@@ -140,12 +141,24 @@ def register_domhand_actions(tools: "Tools") -> None:
             "textareas, and radio buttons. Supports scoped repeater fills via "
             "target_section, heading_boundary, focus_fields, and entry_data. Use this as the FIRST "
             "approach for any APPLICATION FORM page. Do NOT use on auth/login pages — "
-            "use standard browser-use input actions for email/password fields instead. "
+            "use domhand_fill_auth_fields for email/password fields instead. "
             "Only fall back to individual input/click actions "
             "for fields this cannot handle."
         ),
         param_model=DomHandFillParams,
         func=domhand_fill,
+    )
+
+    _register_action_best_effort(
+        tools,
+        description=(
+            "Fill visible auth fields on the current page using GH_EMAIL and GH_PASSWORD. "
+            "Targets only auth-like fields such as email, password, and confirm password. "
+            "Use this on Workday Create Account or Sign In pages before agreement checking "
+            "and before the final auth submit button."
+        ),
+        param_model=DomHandFillAuthFieldsParams,
+        func=domhand_fill_auth_fields,
     )
 
     _register_action_best_effort(

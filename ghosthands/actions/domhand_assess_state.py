@@ -935,9 +935,11 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         if _is_meaningful_section_label(field.section, _preferred_field_label(field)) and relative_position == "in_view":
             sections_in_view.append(field.section)
 
-        if field.field_type == "checkbox-group" and not field.current_value:
+        if field.field_type == "checkbox-group":
             field.current_value = await _read_checkbox_group_value(page, field)
-        elif field.field_type in {"radio-group", "button-group"} and not field.current_value:
+        elif field.field_type in {"radio-group", "button-group"}:
+            # Group-style widgets are prone to stale extracted values on Workday.
+            # Always re-read live selection state before deciding a blocker is clear.
             field.current_value = await _read_group_selection(page, field.field_id)
         elif field.field_type == "select":
             observed_value = (

@@ -105,6 +105,24 @@ def _warn_if_allowed_domains_miss_task_host(*, task: str, platform: str, allowed
     )
 
 
+def _should_enable_workday_coordinate_clicking(*, platform: str, llm: Any) -> bool:
+    """Enable coordinate clicks for the Workday/Gemini 3 combo that regressed locally.
+
+    browser_use still enables coordinate clicks for some models in the base Agent,
+    but ``gemini-3-flash-preview`` fell outside that detection. Workday relies on
+    coordinate fallback for radios, tokenized inputs, and custom list items, so we
+    opt the Hand-X adapter into that capability here without changing other platforms.
+    """
+    if str(platform or "").strip().lower() != "workday":
+        return False
+    model_name = str(getattr(llm, "model", "") or getattr(llm, "model_name", "") or "").lower()
+    return "gemini-3" in model_name
+
+
+def _domhand_runtime_enabled_for_platform(platform: str) -> bool:
+    return bool(settings.enable_domhand or str(platform or "").strip().lower() == "workday")
+
+
 async def create_job_agent(
     task: str,
     resume_profile: dict[str, Any],
@@ -181,9 +199,15 @@ async def create_job_agent(
     # ── Tools with DomHand actions ────────────────────────────────
     excluded_actions = ["write_file", "replace_file", "evaluate", "read_file"]
     tools: HandXTools = HandXTools(exclude_actions=excluded_actions)
-    use_domhand_tools = bool(settings.enable_domhand or platform == "workday")
+    if _should_enable_workday_coordinate_clicking(platform=platform, llm=llm):
+        tools.set_coordinate_clicking(True)
+        logger.info("agent.workday_coordinate_clicking_enabled")
+    use_domhand_runtime = _domhand_runtime_enabled_for_platform(platform)
+    use_domhand_tools = use_domhand_runtime
     if settings.enable_domhand:
         logger.info("agent.domhand_runtime_prefill_enabled")
+    elif str(platform or "").strip().lower() == "workday":
+        logger.info("agent.workday_domhand_runtime_forced")
     else:
         logger.info("agent.domhand_runtime_prefill_disabled")
     if use_domhand_tools:
@@ -197,7 +221,7 @@ async def create_job_agent(
     system_prompt = build_system_prompt(
         resume_profile,
         platform,
-        use_domhand=use_domhand_tools,
+        use_domhand=use_domhand_runtime,
     )
 
     # ── Browser profile with domain lockdown ──────────────────────
@@ -217,6 +241,10 @@ async def create_job_agent(
     sensitive_data: dict[str, str | dict[str, str]] | None = None
     if credentials:
         sensitive_data = {k: v for k, v in credentials.items()}
+
+    if browser_session is not None:
+        setattr(browser_session, "_gh_domhand_runtime_enabled", use_domhand_runtime)
+        setattr(browser_session, "_gh_platform", platform)
 
     # ── Assemble the agent ────────────────────────────────────────
     agent = HandXAgent(
@@ -240,6 +268,8 @@ async def create_job_agent(
         max_failures=5,
         use_thinking=True,
     )
+    setattr(agent, "_gh_domhand_runtime_enabled", use_domhand_runtime)
+    setattr(agent, "_gh_platform", platform)
 
     logger.info(
         "agent.created",
@@ -255,6 +285,7 @@ async def create_job_agent(
             "use_vision": "auto",
             "llm_proxy": bool(settings.llm_proxy_url),
             "domhand_enabled": settings.enable_domhand,
+            "domhand_runtime_enabled": use_domhand_runtime,
         },
     )
 

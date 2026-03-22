@@ -690,6 +690,10 @@ class Tools(Generic[Context]):
 				)
 				await event
 				input_metadata = await event.event_result(raise_if_any=True, raise_if_none=False)
+				# Give reactive forms a brief chance to commit and rerender before the
+				# next browser snapshot/eval step. Workday in particular often lags
+				# behind the raw input event by a tick.
+				await asyncio.sleep(0.3)
 
 				# Create message with sensitive data handling
 				if has_sensitive_data:
