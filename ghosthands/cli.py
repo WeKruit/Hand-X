@@ -200,6 +200,14 @@ def parse_args() -> argparse.Namespace:
         help="Connect to an existing browser via CDP URL instead of launching a new one (Desktop-owned browser mode)",
     )
 
+    # Testing-only: navigate to job URL and exit without running agent
+    parser.add_argument(
+        "--navigate-only",
+        action="store_true",
+        default=False,
+        help="Navigate to the job URL and exit immediately (no LLM agent, for multitab testing)",
+    )
+
     return parser.parse_args(argv)
 
 
@@ -1440,6 +1448,34 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 "Browser CDP URL unavailable — live review attachment disabled",
                 job_id=job_id,
             )
+
+        # -- Navigate-only mode (testing) -----------------------------------
+        if getattr(args, 'navigate_only', False):
+            emit_status("Navigate-only mode: opening job URL", job_id=job_id)
+            # Navigate the focused tab to the job URL
+            if browser.agent_focus_target_id:
+                session = await browser.get_or_create_cdp_session(
+                    browser.agent_focus_target_id, focus=True
+                )
+                await session.cdp_client.send.Page.navigate(
+                    params={'url': args.job_url},
+                    session_id=session.session_id,
+                )
+                # Wait for page to start loading
+                import asyncio as _asyncio
+                await _asyncio.sleep(3)
+            emit_status("Navigate-only mode: done", job_id=job_id)
+            from ghosthands.output.jsonl import emit_done
+            emit_done(
+                success=True,
+                message="Navigate-only: page loaded successfully",
+                job_id=job_id,
+                lease_id=os.environ.get("GH_LEASE_ID", ""),
+            )
+            # Detach keep-alive so Desktop retains the browser/tab
+            if hasattr(browser, 'detach_keep_alive'):
+                await browser.detach_keep_alive()
+            return
 
         # -- Create agent ---------------------------------------------------
         available_files = [resume_path] if resume_path else []
