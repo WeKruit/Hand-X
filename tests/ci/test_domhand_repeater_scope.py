@@ -655,6 +655,61 @@ async def test_extract_visible_form_fields_groups_radios_even_when_sections_matc
     assert fields[0].choices == ["Yes", "No"]
 
 
+async def test_extract_visible_form_fields_recovers_question_text_from_wrapper_for_lever_grouped_radios():
+    class DummyPage:
+        def __init__(self):
+            self.calls = 0
+            self.url = "https://jobs.lever.co/acme/123/apply"
+
+        async def evaluate(self, *_args):
+            self.calls += 1
+            if self.calls == 1:
+                return json.dumps(
+                    [
+                        {
+                            "field_id": "ff-24",
+                            "name": "",
+                            "raw_label": "",
+                            "question_text": "",
+                            "groupKey": "authorization",
+                            "field_type": "radio",
+                            "section": "Yes",
+                            "required": True,
+                            "itemLabel": "Yes",
+                            "wrapper_label": "Are you authorized to work in the United States?*",
+                            "current_value": "",
+                            "visible": True,
+                            "is_native": False,
+                        },
+                        {
+                            "field_id": "ff-25",
+                            "name": "",
+                            "raw_label": "",
+                            "question_text": "",
+                            "groupKey": "authorization",
+                            "field_type": "radio",
+                            "section": "No",
+                            "required": True,
+                            "itemLabel": "No",
+                            "wrapper_label": "Are you authorized to work in the United States?*",
+                            "current_value": "",
+                            "visible": True,
+                            "is_native": False,
+                        },
+                    ]
+                )
+            return json.dumps([])
+
+    fields = await extract_visible_form_fields(DummyPage())
+
+    assert len(fields) == 1
+    assert fields[0].field_type == "radio-group"
+    assert fields[0].name == "Are you authorized to work in the United States?*"
+    assert fields[0].question_text == "Are you authorized to work in the United States?*"
+    assert fields[0].raw_label == "Are you authorized to work in the United States?*"
+    assert fields[0].choices == ["Yes", "No"]
+
+
 def test_known_entry_value_matches_work_experience_fields():
     entry = {
         "title": "Staff Software Engineer",
@@ -777,6 +832,13 @@ def test_generic_prompt_does_not_include_workday_resume_apply_rule():
 
     assert "Autofill with Resume" not in prompt
     assert "Apply with Resume" not in prompt
+
+
+def test_generic_prompt_forbids_todo_file_tracking_during_apply_runs():
+    prompt = build_system_prompt({}, platform="generic")
+
+    assert "Do NOT create or maintain todo.md" in prompt
+    assert "Do not use write_file or" in prompt
 
 
 def test_smartrecruiters_platform_allows_single_page_presubmit():

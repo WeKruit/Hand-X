@@ -608,10 +608,6 @@ class SessionManager:
 			crashed_target_id: The target ID that was lost
 		"""
 		try:
-			if getattr(self.browser_session, '_detaching_keep_alive', False):
-				self.logger.debug('[SessionManager] Skipping focus recovery during keep-alive detach')
-				return
-
 			# Prevent concurrent recovery attempts
 			async with self._recovery_lock:
 				# Set recovery state INSIDE lock to prevent race conditions

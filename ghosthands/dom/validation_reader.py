@@ -86,7 +86,7 @@ def _get_stable_field_key(field: FormField) -> str:
 	return "|".join([
 		normalize_name(field.field_type),
 		normalize_name(field.section),
-		normalize_name(field.label or field.raw_label),
+		normalize_name(field.question_text or field.label or field.raw_label),
 	])
 
 

@@ -3,7 +3,7 @@
 Tests cover the main outcomes of execute_job:
 1. Success path  -> result written to DB, completion reported to VALET
 2. Failure path  -> agent fails, VALET notified with success=False
-3. Blocker path  -> HITL pause_job triggered (inside _run_agent)
+3. Blocker path  -> blocker metadata included in result (no HITL pause)
 4. Domain blocked -> early rejection
 5. Budget exceeded -> BudgetExceededError handled
 6. Unhandled exception -> _fail_job with internal_error
@@ -191,8 +191,7 @@ class TestExecuteJobFlow:
         # VALET report_completion should still be called
         mock_valet.report_completion.assert_called_once()
         completion_kwargs = mock_valet.report_completion.call_args.kwargs
-        assert completion_kwargs["success"] is True  # execute_job itself succeeded
-        # The result_data carries the agent's success=False
+        assert completion_kwargs["success"] is False  # success derived from agent result
         assert completion_kwargs["result"]["success"] is False
 
     # ------------------------------------------------------------------

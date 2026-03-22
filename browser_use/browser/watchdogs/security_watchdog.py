@@ -52,22 +52,24 @@ class SecurityWatchdog(BaseWatchdog):
 		# Check if the navigated URL is allowed (in case of redirects)
 		if not self._is_url_allowed(event.url):
 			self.logger.warning(f'⛔️ Navigation to non-allowed URL detected: {event.url}')
-			message = (
-				f'Navigation blocked to non-allowed URL: {event.url}'
-				if 'maintenance' not in event.url.lower()
-				else f'Navigation reached a maintenance/interstitial URL: {event.url}'
-			)
 
 			# Dispatch browser error
 			self.event_bus.dispatch(
 				BrowserErrorEvent(
 					error_type='NavigationBlocked',
-					message=message,
-					details={'url': event.url, 'target_id': event.target_id, 'preserved_visible_page': True},
+					message=f'Navigation blocked to non-allowed URL: {event.url} - redirecting to about:blank',
+					details={'url': event.url, 'target_id': event.target_id},
 				)
 			)
-			# Preserve the visible blocker page instead of collapsing to about:blank.
-			return
+			# Navigate to about:blank to keep session alive
+			# Agent will see the error and can continue with other tasks
+			try:
+				session = await self.browser_session.get_or_create_cdp_session(target_id=event.target_id)
+				await session.cdp_client.send.Page.navigate(params={'url': 'about:blank'}, session_id=session.session_id)
+				self.logger.info(f'⛔️ Navigated to about:blank after blocked URL: {event.url}')
+			except Exception as e:
+				pass
+				self.logger.error(f'⛔️ Failed to navigate to about:blank: {type(e).__name__} {e}')
 
 	async def on_TabCreatedEvent(self, event: TabCreatedEvent) -> None:
 		"""Check if new tab URL is allowed."""
@@ -177,22 +179,9 @@ class SecurityWatchdog(BaseWatchdog):
 			# Invalid URL
 			return False
 
-		# Allow blob: URLs (origin-bound, safe)
-		if parsed.scheme == 'blob':
+		# Allow data: and blob: URLs (they don't have hostnames)
+		if parsed.scheme in ['data', 'blob']:
 			return True
-
-		# Allow data: URLs only for known-safe MIME types (images, fonts, audio, video).
-		# Allowlist approach — blocks everything not explicitly safe, including
-		# image/svg+xml, application/xhtml+xml, text/xml which can contain scripts.
-		if parsed.scheme == 'data':
-			data_header = url.split(',', 1)[0].lower()
-			safe_prefixes = ('data:image/', 'data:font/', 'data:audio/', 'data:video/', 'data:application/font-', 'data:application/octet-stream')
-			# SVG can execute scripts — explicitly exclude even though it starts with image/
-			if 'image/svg' in data_header:
-				return False
-			if any(data_header.startswith(p) for p in safe_prefixes):
-				return True
-			return False
 
 		# Get the actual host (domain)
 		host = parsed.hostname

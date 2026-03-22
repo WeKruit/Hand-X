@@ -37,6 +37,7 @@ class FormField(BaseModel):
 	))
 	label: str = Field(description="Resolved accessible name (after label chain resolution)")
 	raw_label: str = Field(default="", description="Original label text before sanitization")
+	question_text: str = Field(default="", description="Recovered semantic prompt/question text")
 	name: str = Field(default="", description="HTML name attribute or accessible name")
 	value: str = Field(default="", description="Current value of the field")
 	placeholder: str = Field(default="", description="Placeholder text")

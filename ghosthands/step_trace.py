@@ -124,6 +124,14 @@ def update_blocker_attempt_state(
     attempts = getattr(browser_session, "_gh_blocker_attempt_state", None)
     if not isinstance(attempts, dict):
         attempts = {}
+    previous = attempts.get(field_key) if isinstance(attempts.get(field_key), dict) else {}
+    attempted_strategies = previous.get("attempted_strategies") or []
+    if not isinstance(attempted_strategies, list):
+        attempted_strategies = []
+    if state_change and state_change != "no_state_change":
+        attempted_strategies = []
+    if strategy and (not attempted_strategies or attempted_strategies[-1] != strategy):
+        attempted_strategies = [*attempted_strategies, strategy]
     attempts[field_key] = {
         "field_id": field_id,
         "last_attempt_strategy": strategy,
@@ -134,6 +142,7 @@ def update_blocker_attempt_state(
         "retry_capped": bool(retry_capped),
         "success": bool(success),
         "recommended_next_action": recommended_next_action,
+        "attempted_strategies": attempted_strategies,
         "updated_at": time.time(),
     }
     setattr(browser_session, "_gh_blocker_attempt_state", attempts)

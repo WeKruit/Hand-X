@@ -26,16 +26,83 @@ Usage::
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from browser_use import Agent, BrowserProfile
-from browser_use.tools.service import Tools
+from ghosthands.blockers import blocker_text_from_extracted, build_unresolved_blocker_payload
+from ghosthands.agent.handx_agent import HandXAgent
+from ghosthands.browser import HandXBrowserProfile, HandXTools
 from ghosthands.agent.hooks import StepHooks
 from ghosthands.agent.prompts import build_system_prompt
 from ghosthands.config.settings import settings
+from ghosthands.security.domain_lockdown import PLATFORM_ALLOWLISTS
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_task_url(task: str) -> str:
+    for token in str(task or "").split():
+        if token.startswith(("http://", "https://")):
+            return token.rstrip(').,]}>')
+    return ""
+
+
+def _browser_allowed_domain_matches(url: str, pattern: str) -> bool:
+    from fnmatch import fnmatch
+
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    scheme = (parsed.scheme or "").lower()
+    if not host or not pattern:
+        return False
+
+    normalized = pattern.strip().lower()
+    full_url_pattern = f"{scheme}://{host}"
+
+    if "*" in normalized:
+        if normalized.startswith("*."):
+            domain_part = normalized[2:]
+            return scheme in {"http", "https"} and (host == domain_part or host.endswith("." + domain_part))
+        if normalized.endswith("/*"):
+            return fnmatch(url, normalized)
+        return fnmatch(full_url_pattern if "://" in normalized else host, normalized)
+
+    if "://" in normalized:
+        return url.lower().startswith(normalized)
+
+    if host == normalized:
+        return True
+    return normalized.count(".") == 1 and host == f"www.{normalized}"
+
+
+def _warn_if_allowed_domains_miss_task_host(*, task: str, platform: str, allowed_domains: list[str], job_id: str) -> None:
+    job_url = _extract_task_url(task)
+    if not job_url:
+        return
+
+    host = (urlparse(job_url).hostname or "").lower()
+    if not host:
+        return
+
+    if any(_browser_allowed_domain_matches(job_url, domain) for domain in allowed_domains):
+        return
+
+    platform_domains = sorted(set(PLATFORM_ALLOWLISTS.get(platform.lower(), [])))
+    logger.warning(
+        "agent.allowed_domains_missing_target_host",
+        extra={
+            "job_id": job_id,
+            "platform": platform,
+            "job_url": job_url,
+            "host": host,
+            "allowed_domains": list(allowed_domains),
+            "platform_allowlist": platform_domains,
+            "covered_by_platform_allowlist": any(
+                host == domain.lower() or host.endswith("." + domain.lower()) for domain in platform_domains
+            ),
+        },
+    )
 
 
 async def create_job_agent(
@@ -49,7 +116,8 @@ async def create_job_agent(
     max_budget: float | None = None,
     on_status_update: Callable[..., Awaitable[None]] | None = None,
     allowed_domains: list[str] | None = None,
-) -> Agent:
+    browser_session: Any | None = None,
+) -> HandXAgent:
     """Create a browser-use Agent configured for job application automation.
 
     Parameters
@@ -98,6 +166,12 @@ async def create_job_agent(
         max_budget = settings.max_budget_per_job
     if allowed_domains is None:
         allowed_domains = settings.allowed_domains
+    _warn_if_allowed_domains_miss_task_host(
+        task=task,
+        platform=platform,
+        allowed_domains=allowed_domains,
+        job_id=job_id,
+    )
 
     # ── LLM ───────────────────────────────────────────────────────
     from ghosthands.llm.client import get_chat_model
@@ -105,27 +179,29 @@ async def create_job_agent(
     llm = get_chat_model()
 
     # ── Tools with DomHand actions ────────────────────────────────
-    tools: Tools = Tools()
-
-    # Register DomHand custom actions on the tools controller.
-    # The register function is defined in ghosthands/actions/ and uses
-    # the @tools.action decorator to add domhand_fill, domhand_select,
-    # domhand_upload, etc.
-    try:
+    excluded_actions = ["write_file", "replace_file", "evaluate", "read_file"]
+    tools: HandXTools = HandXTools(exclude_actions=excluded_actions)
+    use_domhand_tools = bool(settings.enable_domhand or platform == "workday")
+    if settings.enable_domhand:
+        logger.info("agent.domhand_runtime_prefill_enabled")
+    else:
+        logger.info("agent.domhand_runtime_prefill_disabled")
+    if use_domhand_tools:
         from ghosthands.actions import register_domhand_actions
 
         register_domhand_actions(tools)
-    except ImportError:
-        logger.warning(
-            "ghosthands.actions.register_domhand_actions not yet implemented; "
-            "agent will use generic browser-use actions only"
-        )
+        if platform == "workday" and not settings.enable_domhand:
+            logger.info("agent.workday_domhand_action_surface_enabled")
 
     # ── System prompt ─────────────────────────────────────────────
-    system_prompt = build_system_prompt(resume_profile, platform)
+    system_prompt = build_system_prompt(
+        resume_profile,
+        platform,
+        use_domhand=use_domhand_tools,
+    )
 
     # ── Browser profile with domain lockdown ──────────────────────
-    browser_profile = BrowserProfile(
+    browser_profile = HandXBrowserProfile(
         headless=headless,
         allowed_domains=allowed_domains,
         keep_alive=True,  # Keep browser open for user review / HITL
@@ -143,11 +219,12 @@ async def create_job_agent(
         sensitive_data = {k: v for k, v in credentials.items()}
 
     # ── Assemble the agent ────────────────────────────────────────
-    agent = Agent(
+    agent = HandXAgent(
         task=task,
         llm=llm,
         tools=tools,
         browser_profile=browser_profile,
+        browser_session=browser_session,
         extend_system_message=system_prompt,
         sensitive_data=sensitive_data,
         # Cost tracking — browser-use will populate history.usage
@@ -177,6 +254,7 @@ async def create_job_agent(
             "domain_count": len(allowed_domains),
             "use_vision": "auto",
             "llm_proxy": bool(settings.llm_proxy_url),
+            "domhand_enabled": settings.enable_domhand,
         },
     )
 
@@ -195,6 +273,7 @@ async def run_job_agent(
     on_status_update: Callable[..., Awaitable[None]] | None = None,
     allowed_domains: list[str] | None = None,
     keep_alive: bool = False,
+    browser_session: Any | None = None,
 ) -> dict[str, Any]:
     """Convenience wrapper: create an agent, run it, and return a result dict.
 
@@ -239,8 +318,10 @@ async def run_job_agent(
         max_budget=max_budget,
         on_status_update=on_status_update,
         allowed_domains=allowed_domains,
+        browser_session=browser_session,
     )
 
+    completed = False
     try:
         history = await agent.run(
             max_steps=max_steps,
@@ -261,20 +342,25 @@ async def run_job_agent(
                     success = result.success or False
                 if result.extracted_content:
                     extracted_text = result.extracted_content
-                    if "blocker:" in extracted_text.lower():
-                        blocker = extracted_text
+                    blocker = blocker_text_from_extracted(extracted_text) or blocker
 
+        unresolved_blocker = build_unresolved_blocker_payload(agent.browser_session, blocker)
+        if blocker is None and unresolved_blocker is not None:
+            blocker = str(unresolved_blocker.get("message") or "").strip() or None
+
+        completed = True
         return {
             "success": success,
             "steps": agent.state.n_steps,
             "cost_usd": round(hooks.cumulative_cost, 6),
             "extracted_text": extracted_text,
             "blocker": blocker,
+            "unresolved_blocker": unresolved_blocker,
         }
     finally:
         # Respect the keep_alive parameter for browser cleanup.
         # keep_alive=False (default, EC2 worker): kill the browser process.
-        # keep_alive=True (Desktop/HITL): stop event bus but leave browser open.
+        # keep_alive=True (Desktop): stop event bus but leave browser open.
         if agent.browser_session is not None:
             try:
                 if not keep_alive:

@@ -67,6 +67,7 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 # Suppress browser-use's own logging setup so we control stderr exclusively
 os.environ["BROWSER_USE_SETUP_LOGGING"] = "false"
 
+from ghosthands.blockers import blocker_text_from_extracted, build_unresolved_blocker_payload
 from ghosthands.agent.hooks import install_same_tab_guard
 
 logger = structlog.get_logger()
@@ -211,9 +212,21 @@ def _setup_logging() -> None:
     root = logging.getLogger()
     root.handlers.clear()
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter("%(levelname)s [%(name)s] %(message)s"))
+    compact_logs = os.environ.get("BROWSER_USE_COMPACT_LOGS", "false").lower()[:1] in "ty1"
+    if compact_logs:
+        handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    else:
+        handler.setFormatter(logging.Formatter("%(levelname)s [%(name)s] %(message)s"))
     root.addHandler(handler)
     root.setLevel(logging.INFO)
+    if compact_logs:
+        for noisy_logger in (
+            "httpx",
+            "google_genai.models",
+            "cdp_use.client",
+            "browser_use.telemetry.service",
+        ):
+            logging.getLogger(noisy_logger).setLevel(logging.WARNING)
     structlog.configure(
         cache_logger_on_first_use=True,
         logger_factory=structlog.stdlib.LoggerFactory(),
@@ -385,6 +398,50 @@ def _resolve_sensitive_data(
     return None
 
 
+def _resolve_effective_credential_provenance(
+    app_settings,
+    sensitive_data: dict[str, str] | None,
+    *,
+    platform: str,
+) -> tuple[str, str]:
+    """Return the credential provenance that should drive auth policy.
+
+    Desktop/worker runs often populate credential provenance explicitly.
+    Local CLI Workday tests commonly provide only GH_EMAIL/GH_PASSWORD; in that
+    case we want the existing create-account-first Workday logic to activate by
+    default unless the caller already supplied a more specific provenance.
+    """
+
+    source = str(getattr(app_settings, "credential_source", "") or "").strip()
+    intent = str(getattr(app_settings, "credential_intent", "") or "").strip()
+    if source or intent:
+        return source, intent
+
+    if (
+        platform == "workday"
+        and isinstance(sensitive_data, dict)
+        and str(sensitive_data.get("email") or "").strip()
+        and str(sensitive_data.get("password") or "").strip()
+    ):
+        return "user", "create_account"
+
+    return source, intent
+
+
+def _apply_effective_credential_provenance_env(source: str, intent: str) -> None:
+    """Mirror effective auth provenance into env vars for watchdog/runtime guards."""
+
+    if source:
+        os.environ["GH_CREDENTIAL_SOURCE"] = source
+    else:
+        os.environ.pop("GH_CREDENTIAL_SOURCE", None)
+
+    if intent:
+        os.environ["GH_CREDENTIAL_INTENT"] = intent
+    else:
+        os.environ.pop("GH_CREDENTIAL_INTENT", None)
+
+
 def _log_auth_debug_credentials(
     sensitive_data: dict[str, str] | None,
     *,
@@ -494,6 +551,33 @@ async def _cleanup_browser(
         await browser.kill()
 
 
+def _build_browser_profile(
+    *,
+    allowed_domains: list[str],
+    desktop_owns_browser: bool,
+    headless: bool,
+):
+    """Build a BrowserProfile with startup UX tuned for the launch mode."""
+    from ghosthands.browser import HandXBrowserProfile
+
+    if desktop_owns_browser:
+        return HandXBrowserProfile(
+            keep_alive=True,
+            allowed_domains=allowed_domains,
+            aboutblank_loading_logo_enabled=True,
+            aboutblank_loading_min_display_seconds=0.75,
+        )
+
+    return HandXBrowserProfile(
+        headless=headless,
+        keep_alive=True,
+        allowed_domains=allowed_domains,
+        aboutblank_loading_logo_enabled=True,
+        demo_mode=False,
+        interaction_highlight_color="rgb(37, 99, 235)",
+    )
+
+
 @dataclass(frozen=True)
 class _RuntimeErrorSignal:
     """User-facing error details for known proxy/runtime failures."""
@@ -563,7 +647,7 @@ def _issue_supports_answer_recovery(issue: _OpenQuestionIssue) -> bool:
         return False
     if widget_kind in {"radio", "checkbox", "toggle", "button-group"}:
         return False
-    if label.startswith(("have you", "are you", "do you", "did you", "will you", "can you", "were you", "would you")):
+    if label.startswith(("have you", "are you", "do you", "did you", "will you", "can you", "were you", "would you")) and field_type != "select":
         return False
     if field_type in {"select", "text", "textarea", "search", "date", "number", "email", "tel", "url"}:
         return True
@@ -743,6 +827,195 @@ def _extract_application_state_json(summary: str) -> dict[str, Any]:
     return {}
 
 
+def _build_runtime_page_audit_text(last_application_state: dict[str, Any] | None) -> str | None:
+    """Summarize the latest runtime page audit in generic no-DomHand terms.
+
+    This keeps the browser-use agent anchored to a real blocker list without
+    exposing DomHand as a callable tool in no-DomHand mode.
+    """
+    if not isinstance(last_application_state, dict):
+        return None
+
+    current_section = str(last_application_state.get("current_section") or "").strip() or "(unknown)"
+    unresolved_required = int(last_application_state.get("unresolved_required_count") or 0)
+    optional_validation = int(last_application_state.get("optional_validation_count") or 0)
+    mismatched = int(last_application_state.get("mismatched_count") or 0)
+    opaque = int(last_application_state.get("opaque_count") or 0)
+    unverified = int(last_application_state.get("unverified_count") or 0)
+    advance_allowed = bool(last_application_state.get("advance_allowed"))
+
+    labels = [
+        str(label).strip()
+        for label in (
+            last_application_state.get("blocking_field_labels_ordered")
+            or last_application_state.get("blocking_field_labels")
+            or []
+        )
+        if str(label).strip()
+    ]
+    if len(labels) > 4:
+        blocker_text = ", ".join(labels[:4]) + f" (+{len(labels) - 4} more)"
+    else:
+        blocker_text = ", ".join(labels)
+
+    summary = (
+        "RUNTIME_PAGE_AUDIT: "
+        f"section={current_section}; "
+        f"advance_allowed={advance_allowed}; "
+        f"unresolved_required={unresolved_required}; "
+        f"optional_validation={optional_validation}; "
+        f"mismatched={mismatched}; "
+        f"opaque={opaque}; "
+        f"unverified={unverified}."
+    )
+    if blocker_text:
+        summary += f" Active blockers: {blocker_text}."
+    focus_blocker = last_application_state.get("primary_active_blocker")
+    if not isinstance(focus_blocker, dict):
+        focus_blocker = last_application_state.get("single_active_blocker")
+    if isinstance(focus_blocker, dict):
+        focus_label = str(
+            focus_blocker.get("field_label")
+            or focus_blocker.get("question_text")
+            or focus_blocker.get("field_id")
+            or ""
+        ).strip()
+        if focus_label:
+            summary += f" Resolve this blocker next: {focus_label}."
+    return summary
+
+
+async def _run_quiet_domhand_assess_state(browser_session: Any) -> None:
+    from ghosthands.actions.domhand_assess_state import domhand_assess_state
+    from ghosthands.actions.views import DomHandAssessStateParams
+
+    assess_logger = logging.getLogger("ghosthands.actions.domhand_assess_state")
+    fill_logger = logging.getLogger("ghosthands.actions.domhand_fill")
+    previous_assess_level = assess_logger.level
+    previous_fill_level = fill_logger.level
+    assess_logger.setLevel(logging.ERROR)
+    fill_logger.setLevel(logging.ERROR)
+    try:
+        await domhand_assess_state(DomHandAssessStateParams(), browser_session)
+    finally:
+        assess_logger.setLevel(previous_assess_level)
+        fill_logger.setLevel(previous_fill_level)
+
+
+async def _run_quiet_domhand_fill(browser_session: Any) -> None:
+    from ghosthands.actions.domhand_fill import domhand_fill
+    from ghosthands.actions.views import DomHandFillParams
+
+    fill_logger = logging.getLogger("ghosthands.actions.domhand_fill")
+    assess_logger = logging.getLogger("ghosthands.actions.domhand_assess_state")
+    previous_fill_level = fill_logger.level
+    previous_assess_level = assess_logger.level
+    fill_logger.setLevel(logging.ERROR)
+    assess_logger.setLevel(logging.ERROR)
+    try:
+        await domhand_fill(DomHandFillParams(), browser_session)
+    finally:
+        fill_logger.setLevel(previous_fill_level)
+        assess_logger.setLevel(previous_assess_level)
+
+
+def _should_auto_domhand_prefill(browser_session: Any, last_application_state: dict[str, Any] | None) -> bool:
+    if not isinstance(last_application_state, dict):
+        return False
+
+    page_context_key = str(last_application_state.get("page_context_key") or "").strip()
+    page_url = str(last_application_state.get("page_url") or "").strip()
+    if not page_context_key:
+        return False
+
+    state_store = getattr(browser_session, "_gh_domhand_execution_state", None)
+    if not isinstance(state_store, dict):
+        return True
+
+    entry = state_store.get(page_context_key)
+    if not isinstance(entry, dict):
+        return True
+
+    stored_url = str(entry.get("page_url") or "").strip()
+    if stored_url and page_url and stored_url != page_url:
+        return True
+
+    return not bool(entry.get("initial_bulk_attempted"))
+
+
+async def _apply_runtime_page_audit(agent: Any, *, auto_domhand_prefill: bool) -> None:
+    """Refresh runtime page/blocker state after each generic browser-use step.
+
+    The agent always works in browser-use tool mode. When DomHand is enabled,
+    the runtime performs one silent bulk prefill per page before exposing the
+    blocker summary back to the agent as a generic runtime audit.
+    """
+    browser_session = getattr(agent, "browser_session", None)
+    history = getattr(agent, "history", None)
+    state = getattr(agent, "state", None)
+    if browser_session is None or history is None or not getattr(history, "history", None):
+        return
+
+    last_entry = history.history[-1]
+    if not getattr(last_entry, "result", None):
+        return
+    original_last_result = last_entry.result[-1]
+
+    try:
+        await _run_quiet_domhand_assess_state(browser_session)
+        last_application_state = getattr(browser_session, "_gh_last_application_state", None)
+        if auto_domhand_prefill and _should_auto_domhand_prefill(browser_session, last_application_state):
+            await _run_quiet_domhand_fill(browser_session)
+            await _run_quiet_domhand_assess_state(browser_session)
+    except Exception as exc:
+        logger.warning(
+            "cli.runtime_page_audit_failed",
+            extra={"error": f"{type(exc).__name__}: {exc}"},
+        )
+        return
+
+    from browser_use.agent.views import ActionResult
+
+    last_application_state = getattr(browser_session, "_gh_last_application_state", None)
+    audit_text = _build_runtime_page_audit_text(last_application_state)
+    if original_last_result.is_done is True:
+        unresolved_blocker = build_unresolved_blocker_payload(
+            browser_session,
+            fallback_state=last_application_state,
+        )
+        if unresolved_blocker is not None:
+            message = str(
+                unresolved_blocker.get("message")
+                or "blocker: unresolved required fields remain on the current page"
+            ).strip()
+            last_entry.result.append(
+                ActionResult(
+                    error=message,
+                    extracted_content=message,
+                    long_term_memory=message,
+                    include_extracted_content_only_once=True,
+                )
+            )
+            if state is not None:
+                state.last_result = last_entry.result
+        return
+
+    if audit_text:
+        last_entry.result.append(
+            ActionResult(
+                extracted_content=audit_text,
+                include_extracted_content_only_once=True,
+                metadata={"runtime_page_audit": True},
+            )
+        )
+        if state is not None:
+            state.last_result = last_entry.result
+
+
+async def _apply_no_domhand_runtime_page_audit(agent: Any) -> None:
+    return None
+
+
 async def _collect_open_question_issues_from_browser(browser: Any) -> list[_OpenQuestionIssue]:
     with contextlib.suppress(Exception):
         from ghosthands.actions.domhand_assess_state import domhand_assess_state
@@ -801,7 +1074,7 @@ async def _auto_answer_open_question_issues(
 ) -> tuple[list[_RecoveredFieldAnswer], list[_OpenQuestionIssue]]:
     """Resolve open-question issues from saved profile/default evidence first.
 
-    This runs before Desktop HITL is shown. It covers cases where the browser
+    This runs before the agent recovery loop. It covers cases where the browser
     reports unresolved required fields but the applicant profile already
     contains a safe answer, such as Workday language rubrics, referral source,
     phone type, or EEO decline defaults.
@@ -895,7 +1168,7 @@ async def _infer_open_question_answers_with_domhand(
     issues: list[_OpenQuestionIssue],
     profile: dict[str, Any] | None,
 ) -> tuple[list[_RecoveredFieldAnswer], list[_OpenQuestionIssue]]:
-    """Use DomHand's LLM-backed field inference for open questions before HITL."""
+    """Use DomHand's LLM-backed field inference for open questions."""
     if not issues:
         return [], issues
     if not isinstance(profile, dict):
@@ -1007,7 +1280,7 @@ async def _request_open_question_answers(
         emit_event(
             "status",
             message=(
-                "Open-question HITL is disabled for apply flows; leaving "
+                "Open-question auto-recovery did not resolve all fields; leaving "
                 f"{len(unresolved_issues)} field(s) for continued best-effort recovery"
             ),
         )
@@ -1057,6 +1330,12 @@ def _extract_best_effort_guess_summary(
                 "promptText": prompt_text,
                 "sectionLabel": section_label or None,
                 "required": record.get("required") is True,
+                "value": record.get("value"),
+                "answerMode": record.get("answer_mode"),
+                "confidence": record.get("confidence"),
+                "bindingConfidence": record.get("binding_confidence"),
+                "bestEffortGuess": record.get("best_effort_guess") is True
+                or str(record.get("answer_mode") or "").strip() == "best_effort_guess",
             }
         )
 
@@ -1212,7 +1491,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     field_events.install_jsonl_callback()
 
     # -- Import heavy deps after env setup ----------------------------------
-    from browser_use import Agent, BrowserProfile, BrowserSession, Tools
+    from ghosthands.agent.handx_agent import HandXAgent
+    from ghosthands.browser import HandXBrowserSession, HandXTools
 
     app_settings = _load_runtime_settings()
 
@@ -1230,14 +1510,12 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     llm = get_chat_model(model=args.model)
 
     # -- DomHand actions ----------------------------------------------------
-    tools: Tools = Tools()
-    try:
-        from ghosthands.actions import register_domhand_actions
-
-        register_domhand_actions(tools)
-        emit_status("DomHand actions registered", job_id=job_id)
-    except Exception as e:
-        emit_status(f"DomHand unavailable: {e}, using generic actions", job_id=job_id)
+    excluded_actions = ["write_file", "replace_file", "evaluate", "read_file"]
+    tools: HandXTools = HandXTools(exclude_actions=excluded_actions)
+    if app_settings.enable_domhand:
+        emit_status("DomHand runtime prefill enabled; using generic browser-use actions", job_id=job_id)
+    else:
+        emit_status("DomHand runtime prefill disabled; using generic browser-use actions", job_id=job_id)
 
     # -- Platform detection -------------------------------------------------
     platform = "generic"
@@ -1247,18 +1525,36 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         platform = detect_platform(args.job_url)
     except ImportError:
         pass
+    use_domhand_tools = bool(app_settings.enable_domhand or platform == "workday")
+    enable_auth_domhand_tools = bool(platform == "workday" and not use_domhand_tools)
+    if use_domhand_tools:
+        from ghosthands.actions import register_domhand_actions
+
+        register_domhand_actions(tools)
+        if platform == "workday" and not app_settings.enable_domhand:
+            emit_status(
+                "Workday platform policy: DomHand action surface enabled with runtime prefill disabled",
+                job_id=job_id,
+            )
+    elif enable_auth_domhand_tools:
+        from ghosthands.actions import register_domhand_auth_actions
+
+        register_domhand_auth_actions(tools)
 
     # -- System prompt ------------------------------------------------------
     system_ext = ""
     try:
         from ghosthands.agent.prompts import build_system_prompt
 
-        system_ext = build_system_prompt(profile, platform)
+        system_ext = build_system_prompt(profile, platform, use_domhand=use_domhand_tools)
     except ImportError:
         pass
 
     # -- Credentials --------------------------------------------------------
     sensitive_data = _resolve_sensitive_data(app_settings, embedded_credentials, platform=platform)
+    effective_credential_source = str(getattr(app_settings, "credential_source", "") or "").strip()
+    effective_credential_intent = str(getattr(app_settings, "credential_intent", "") or "").strip()
+    _apply_effective_credential_provenance_env(effective_credential_source, effective_credential_intent)
     _log_auth_debug_credentials(sensitive_data, platform=platform)
 
     # -- Domain lockdown ----------------------------------------------------
@@ -1270,24 +1566,26 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     # -- Browser ------------------------------------------------------------
     cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
+    target_id = os.environ.get("GH_TARGET_ID")
     desktop_owns_browser = cdp_url is not None
 
     if cdp_url:
         # Desktop-owned browser: connect to existing browser via CDP URL.
         # Do not launch a new browser; headless flag is irrelevant here.
-        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains)
-        browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
+        browser_profile = _build_browser_profile(
+            allowed_domains=allowed_domains,
+            desktop_owns_browser=True,
+            headless=args.headless,
+        )
+        browser = HandXBrowserSession(browser_profile=browser_profile, cdp_url=cdp_url, assigned_target_id=target_id)
         emit_status("Connecting to Desktop-owned browser via CDP", job_id=job_id)
     else:
-        browser_profile = BrowserProfile(
-            headless=args.headless,
-            keep_alive=True,
+        browser_profile = _build_browser_profile(
             allowed_domains=allowed_domains,
-            aboutblank_loading_logo_enabled=True,
-            demo_mode=False,
-            interaction_highlight_color="rgb(37, 99, 235)",
+            desktop_owns_browser=False,
+            headless=args.headless,
         )
-        browser = BrowserSession(browser_profile=browser_profile)
+        browser = HandXBrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
     from ghosthands.agent.prompts import build_task_prompt
@@ -1296,8 +1594,11 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         args.job_url,
         resume_path,
         sensitive_data,
-        credential_source=app_settings.credential_source,
-        credential_intent=app_settings.credential_intent,
+        platform=platform,
+        credential_source=effective_credential_source,
+        credential_intent=effective_credential_intent,
+        use_domhand=use_domhand_tools,
+        enable_auth_domhand_tools=enable_auth_domhand_tools,
     )
 
     emit_status(
@@ -1308,7 +1609,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     )
 
     # -- Step hooks for live JSONL events -----------------------------------
-    async def _on_step_start(ag: Agent) -> None:
+    async def _on_step_start(ag: HandXAgent) -> None:
         from ghosthands.agent.hooks import infer_phase_from_goal
 
         await install_same_tab_guard(ag)
@@ -1326,7 +1627,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             job_id=job_id,
         )
 
-    async def _on_step_end(ag: Agent) -> None:
+    async def _on_step_end(ag: HandXAgent) -> None:
         nonlocal account_created_emitted
 
         usage = ag.history.usage
@@ -1345,6 +1646,9 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         # Pre-step budget guard: stop if less than estimated step cost remaining
         if usage and usage.total_cost and (args.max_budget - usage.total_cost) < _STEP_COST_ESTIMATE:
             ag.state.stopped = True
+
+        if app_settings.enable_domhand:
+            await _apply_runtime_page_audit(ag, auto_domhand_prefill=True)
 
         # ── Account creation detection ──
         # Detect successful account creation from the agent's evaluation and
@@ -1427,8 +1731,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     # -- Run ----------------------------------------------------------------
     try:
         await browser.start()
+
+        # Tab confinement: focus assigned target after connecting
+        if target_id:
+            from browser_use.browser.events import SwitchTabEvent
+            await browser.event_bus.dispatch(SwitchTabEvent(target_id=target_id))
+
         if browser.cdp_url:
-            emit_browser_ready(browser.cdp_url)
+            emit_browser_ready(browser.cdp_url, target_id=target_id)
         else:
             logger.warning("cli.browser_ready_missing_cdp_url")
             emit_status(
@@ -1440,7 +1750,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         available_files = [resume_path] if resume_path else []
 
         async def _run_agent_once(current_task: str) -> tuple[Any, bool]:
-            agent = Agent(
+            agent = HandXAgent(
                 task=current_task,
                 llm=llm,
                 browser_session=browser,
@@ -1449,7 +1759,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 sensitive_data=sensitive_data,
                 available_file_paths=available_files or None,
                 use_vision="auto",
-                max_actions_per_step=5,
+                max_actions_per_step=app_settings.agent_max_actions_per_step,
                 calculate_cost=True,
                 use_judge=False,
             )
@@ -1476,10 +1786,10 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         total_cost = 0.0
         total_steps = 0
         cancelled = False
-        hitl_recovery_task = task
-        hitl_answers: dict[str, _RecoveredFieldAnswer] = {}
+        recovery_task = task
+        recovery_answers: dict[str, _RecoveredFieldAnswer] = {}
         for _recovery_round in range(3):
-            history, cancelled = await _run_agent_once(hitl_recovery_task)
+            history, cancelled = await _run_agent_once(recovery_task)
             is_done = history.is_done()
             final_result = history.final_result() or ""
             total_cost += history.usage.total_cost if history.usage else 0.0
@@ -1510,8 +1820,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 break
 
             for answer in recovered_answers:
-                hitl_answers[answer.field_id] = answer
-            hitl_recovery_task = _build_recovery_task(task, list(hitl_answers.values()))
+                recovery_answers[answer.field_id] = answer
+            recovery_task = _build_recovery_task(task, list(recovery_answers.values()))
             emit_status("Recovered additional answers — resuming application", job_id=job_id)
 
         # Final cost event
@@ -1577,10 +1887,17 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
         # Determine outcome
         success = is_done and bool(final_result)
-        blocker: str | None = None
-        if final_result and "blocker:" in final_result.lower():
-            blocker = final_result
+        blocker = blocker_text_from_extracted(final_result)
+        if blocker is not None:
             success = False
+        last_application_state = getattr(browser, "_gh_last_application_state", None)
+        unresolved_blocker = build_unresolved_blocker_payload(
+            browser,
+            blocker,
+            fallback_state=last_application_state,
+        )
+        if blocker is None and unresolved_blocker is not None:
+            blocker = str(unresolved_blocker.get("message") or "").strip() or None
 
         result_data = {
             "success": success,
@@ -1588,6 +1905,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             "costUsd": round(total_cost, 6),
             "finalResult": final_result,
             "blocker": blocker,
+            "unresolvedBlocker": unresolved_blocker,
             "platform": platform,
             "best_effort_guess_count": best_effort_guess_count,
             "best_effort_guess_fields": best_effort_guess_fields,
@@ -1625,6 +1943,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             emit_awaiting_review(
                 cdp_url=review_cdp_url,
                 page_url=review_page_url,
+                target_id=target_id,
             )
             review_result = await wait_for_review_command(browser, job_id, lease_id)
             exit_code = _handle_review_result(
@@ -1722,7 +2041,8 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     resume_path = _apply_runtime_env(args, profile)
 
     # -- Import after env setup ---------------------------------------------
-    from browser_use import Agent, BrowserProfile, BrowserSession, Tools
+    from ghosthands.agent.handx_agent import HandXAgent
+    from ghosthands.browser import HandXBrowserSession, HandXTools
 
     app_settings = _load_runtime_settings()
     _warn_if_proxy_overrides_direct_keys(args, app_settings)
@@ -1731,15 +2051,13 @@ async def run_agent_human(args: argparse.Namespace) -> None:
 
     llm = get_chat_model(model=args.model)
 
-    # -- DomHand actions ----------------------------------------------------
-    tools: Tools = Tools()
-    try:
-        from ghosthands.actions import register_domhand_actions
-
-        register_domhand_actions(tools)
-        print("DomHand actions registered")
-    except Exception as e:
-        print(f"DomHand unavailable: {e}")
+    # -- Agent-visible tools ------------------------------------------------
+    excluded_actions = ["write_file", "replace_file", "evaluate", "read_file"]
+    tools: HandXTools = HandXTools(exclude_actions=excluded_actions)
+    if app_settings.enable_domhand:
+        print("DomHand runtime prefill enabled; using generic browser-use actions")
+    else:
+        print("DomHand runtime prefill disabled; using generic browser-use actions")
 
     # -- Platform detection -------------------------------------------------
     platform = "generic"
@@ -1749,18 +2067,45 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         platform = detect_platform(args.job_url)
     except ImportError:
         pass
+    use_domhand_tools = bool(app_settings.enable_domhand or platform == "workday")
+    enable_auth_domhand_tools = bool(platform == "workday" and not use_domhand_tools)
+    if use_domhand_tools:
+        from ghosthands.actions import register_domhand_actions
+
+        register_domhand_actions(tools)
+        if platform == "workday" and not app_settings.enable_domhand:
+            print("Workday platform policy: DomHand action surface enabled with runtime prefill disabled")
+    elif enable_auth_domhand_tools:
+        from ghosthands.actions import register_domhand_auth_actions
+
+        register_domhand_auth_actions(tools)
 
     # -- System prompt ------------------------------------------------------
     system_ext = ""
     try:
         from ghosthands.agent.prompts import build_system_prompt
 
-        system_ext = build_system_prompt(profile, platform)
+        system_ext = build_system_prompt(profile, platform, use_domhand=use_domhand_tools)
     except ImportError:
         pass
 
     # -- Credentials --------------------------------------------------------
     sensitive_data = _resolve_sensitive_data(app_settings, embedded_credentials, platform=platform)
+    effective_credential_source, effective_credential_intent = _resolve_effective_credential_provenance(
+        app_settings,
+        sensitive_data,
+        platform=platform,
+    )
+    _apply_effective_credential_provenance_env(effective_credential_source, effective_credential_intent)
+    if (
+        platform == "workday"
+        and sensitive_data
+        and not str(getattr(app_settings, "credential_source", "") or "").strip()
+        and not str(getattr(app_settings, "credential_intent", "") or "").strip()
+        and effective_credential_source == "user"
+        and effective_credential_intent == "create_account"
+    ):
+        print("Workday local auth default: treating explicit credentials as create-account-first for this run")
     _log_auth_debug_credentials(sensitive_data, platform=platform)
 
     # -- Domain lockdown ----------------------------------------------------
@@ -1772,22 +2117,24 @@ async def run_agent_human(args: argparse.Namespace) -> None:
 
     # -- Browser ------------------------------------------------------------
     cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
+    target_id = os.environ.get("GH_TARGET_ID")
     desktop_owns_browser = cdp_url is not None
 
     if cdp_url:
-        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains)
-        browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
+        browser_profile = _build_browser_profile(
+            allowed_domains=allowed_domains,
+            desktop_owns_browser=True,
+            headless=args.headless,
+        )
+        browser = HandXBrowserSession(browser_profile=browser_profile, cdp_url=cdp_url, assigned_target_id=target_id)
         print(f"Connecting to Desktop-owned browser via CDP: {cdp_url}")
     else:
-        browser_profile = BrowserProfile(
-            headless=args.headless,
-            keep_alive=True,
+        browser_profile = _build_browser_profile(
             allowed_domains=allowed_domains,
-            aboutblank_loading_logo_enabled=True,
-            demo_mode=False,
-            interaction_highlight_color="rgb(37, 99, 235)",
+            desktop_owns_browser=False,
+            headless=args.headless,
         )
-        browser = BrowserSession(browser_profile=browser_profile)
+        browser = HandXBrowserSession(browser_profile=browser_profile)
 
     # -- Task prompt --------------------------------------------------------
     from ghosthands.agent.prompts import build_task_prompt
@@ -1796,13 +2143,16 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         args.job_url,
         resume_path,
         sensitive_data,
-        credential_source=app_settings.credential_source,
-        credential_intent=app_settings.credential_intent,
+        platform=platform,
+        credential_source=effective_credential_source,
+        credential_intent=effective_credential_intent,
+        use_domhand=use_domhand_tools,
+        enable_auth_domhand_tools=enable_auth_domhand_tools,
     )
 
     # -- Agent --------------------------------------------------------------
     available_files = [resume_path] if resume_path else []
-    agent = Agent(
+    agent = HandXAgent(
         task=task,
         llm=llm,
         browser_session=browser,
@@ -1811,10 +2161,14 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         sensitive_data=sensitive_data,
         available_file_paths=available_files or None,
         use_vision="auto",
-        max_actions_per_step=5,
+        max_actions_per_step=app_settings.agent_max_actions_per_step,
         calculate_cost=True,
         use_judge=False,
     )
+
+    async def _on_step_end_human(ag: HandXAgent) -> None:
+        if app_settings.enable_domhand:
+            await _apply_runtime_page_audit(ag, auto_domhand_prefill=True)
 
     print()
     print("=" * 60)
@@ -1830,7 +2184,15 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     print("=" * 60)
     print()
 
-    history = await agent.run(max_steps=args.max_steps)
+    # Ensure browser is started before tab confinement dispatch
+    await browser.start()
+
+    # Tab confinement: focus assigned target after connecting
+    if target_id:
+        from browser_use.browser.events import SwitchTabEvent
+        await browser.event_bus.dispatch(SwitchTabEvent(target_id=target_id))
+
+    history = await agent.run(max_steps=args.max_steps, on_step_end=_on_step_end_human)
 
     print()
     print("=" * 60)
@@ -1874,6 +2236,10 @@ def main() -> None:
     args = parse_args()
 
     is_jsonl = args.output_format == "jsonl"
+    if not is_jsonl:
+        os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
+        os.environ.setdefault("BROWSER_USE_VERSION_CHECK", "false")
+        os.environ.setdefault("BROWSER_USE_COMPACT_LOGS", "true")
 
     # Install stdout guard BEFORE any library imports in JSONL mode.
     # This saves the real stdout fd for JSONL and redirects sys.stdout

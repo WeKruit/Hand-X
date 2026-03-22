@@ -72,6 +72,61 @@ GENERIC_FORM_STRATEGIES = (
     "  blocker via done(success=False, text='blocker: CAPTCHA detected')."
 )
 
+GENERIC_FORM_STRATEGIES_NO_DOMHAND = (
+    "GENERAL APPROACH:\n"
+    "- Stay conservative. Prefer filling editable fields over navigation.\n"
+    "- Never press a button whose text implies final submission.\n"
+    "- Call done(success=True) on read-only review pages and confirmation pages.\n"
+    "\n"
+    "FORM FILLING:\n"
+    "- Use generic browser-use actions only.\n"
+    "- On each form page, first collect the currently visible required questions, their current values, and the widget types from the live interactive element list.\n"
+    "- Build a short blocker list for that page, then resolve EXACTLY ONE blocker at a time.\n"
+    "- Solve ONE visible blocker at a time instead of doing broad page rewrites.\n"
+    "- Use browser-use input actions for text fields.\n"
+    "- After typing into a text input, blur or click away and re-observe the page before deciding whether the value stuck or before moving to a different blocker.\n"
+    "- Use upload_file for resume and file inputs.\n"
+    "- For native <select> elements, inspect with dropdown_options then choose with select_dropdown.\n"
+    "- For custom dropdowns/comboboxes, including virtual-DOM and shadow-DOM widgets, open the exact widget, search if needed, click the exact final option, then STOP and verify it stuck.\n"
+    "- After each field-level fix, reevaluate the current page before touching a different blocker.\n"
+    "- Do NOT do top-to-bottom reverification loops when only one blocker remains.\n"
+    "\n"
+    "APPLY BUTTON PREFERENCE:\n"
+    "- If the page shows BOTH an 'Easy Apply' and a longer apply button\n"
+    "  ('I'm interested', 'Apply', etc.), ALWAYS prefer 'Easy Apply'.\n"
+    "- NEVER choose external apply paths (LinkedIn, Indeed, Google, etc.).\n"
+    "\n"
+    "ACCOUNT CREATION / SIGN-IN:\n"
+    "- Use browser-use input actions for email/password fields.\n"
+    "- Pick ONE path (Create Account OR Sign In) and commit.\n"
+    "- If a confirm-password field is visible, you are on Create Account.\n"
+    "- A standalone 'Sign In' button in a header, nav, or start dialog is NOT\n"
+    "  permission to switch auth paths. Treat it as navigation unless the page\n"
+    "  is clearly a Sign In form.\n"
+    "- NEVER use SSO/social login (Google, LinkedIn, Facebook, Apple).\n"
+    "- Always check for agreement checkboxes before clicking Create Account.\n"
+    "- If account creation fails, report as blocker.\n"
+    "- If a verification code is required, report as blocker.\n"
+    "- Sign In: attempt EXACTLY ONCE. If it fails, report as blocker immediately.\n"
+    "- If the page shows 'verify your account', 'verification email', 'confirm\n"
+    "  your email', 'check your inbox', report as blocker immediately.\n"
+    "- NEVER loop between Sign In and Create Account.\n"
+    "\n"
+    "MULTI-STEP FLOWS:\n"
+    "- Some platforms split applications across multiple pages/sections.\n"
+    "- After filling all visible blockers on a page, click Next/Continue/Save to advance.\n"
+    "- On each new page, inspect the newly visible blockers and continue one by one.\n"
+    "\n"
+    "DATE FIELDS:\n"
+    "- Some platforms use segmented date fields (click MM, type digits).\n"
+    "- Try typing the full date string first, then Tab to commit.\n"
+    "- If a calendar picker opens, press Escape to dismiss it, then Tab.\n"
+    "\n"
+    "CAPTCHA / BLOCKERS:\n"
+    "- Any CAPTCHA, turnstile, or verification wall must be reported as a\n"
+    "  blocker via done(success=False, text='blocker: CAPTCHA detected')."
+)
+
 # Platform hints — short context-setting lines injected when the platform
 # is detected from the URL. These are NOT instructions — just hints about
 # what to expect so the agent can apply the generic strategies above.
@@ -119,7 +174,7 @@ def _platform_allows_single_page_presubmit(platform: str) -> bool:
     return bool(get_config_by_name(platform).single_page_presubmit_allowed)
 
 
-def build_completion_detection_lines(platform: str) -> list[str]:
+def build_completion_detection_lines(platform: str, use_domhand: bool = True) -> list[str]:
     """Return reusable completion-state guidance for prompts and task text."""
     lines = [
         "Classify the current page into exactly one completion state before acting:",
@@ -128,8 +183,17 @@ def build_completion_detection_lines(platform: str) -> list[str]:
         f"- `{COMPLETION_STATE_CONFIRMATION}` — thank-you, submitted, or success page. Call done(success=True).",
     ]
     if _platform_allows_single_page_presubmit(platform):
+        presubmit_line = (
+            f"- `{COMPLETION_STATE_PRESUBMIT_SINGLE_PAGE}` — final submit-like CTA is visible, there is NO real 'Next' / "
+            "'Continue' / 'Save & Continue' step left, no visible required/error/invalid markers remain, the submit "
+            "control is not disabled for missing inputs"
+        )
+        if use_domhand:
+            presubmit_line += ", and no DomHand-required unresolved fields remain."
+        else:
+            presubmit_line += "."
         lines.append(
-            f"- `{COMPLETION_STATE_PRESUBMIT_SINGLE_PAGE}` — final submit-like CTA is visible, there is NO real 'Next' / 'Continue' / 'Save & Continue' step left, no visible required/error/invalid markers remain, the submit control is not disabled for missing inputs, and no DomHand-required unresolved fields remain. Call done(success=True) without clicking final submit."
+            f"{presubmit_line} Call done(success=True) without clicking final submit."
         )
         lines.append(
             "- On this platform, editable fields may still be visible in `presubmit_single_page`. Do NOT start a top-to-bottom re-verification loop once this state is reached."
@@ -141,9 +205,14 @@ def build_completion_detection_lines(platform: str) -> list[str]:
     lines.append(
         "- Once the page is in a terminal-state candidate (`review`, `confirmation`, or allowed `presubmit_single_page`), only do one of two things next: fix one concrete unresolved invalid/required field, or call done(success=True)."
     )
-    lines.append(
-        "- Use domhand_assess_state before any large scroll, before clicking Next/Continue/Save, and before calling done(). Follow its unresolved field list and scroll_bias instead of doing a full-page reverification loop."
-    )
+    if use_domhand:
+        lines.append(
+            "- Use domhand_assess_state before any large scroll, before clicking Next/Continue/Save, and before calling done(). Follow its unresolved field list and scroll_bias instead of doing a full-page reverification loop."
+        )
+    else:
+        lines.append(
+            "- Before any large scroll, before clicking Next/Continue/Save, and before calling done(), inspect the current page directly and keep working on one concrete visible blocker instead of doing a full-page reverification loop."
+        )
     return lines
 
 
@@ -225,6 +294,15 @@ def _format_profile_summary(resume_profile: dict) -> str:
         lines.append(f"Phone: {phone}")
 
     # ── Location (handle both formats) ───────────────────────────
+    address_value = resume_profile.get("address")
+    address_dict = address_value if isinstance(address_value, dict) else None
+    address_street = str((address_dict or {}).get("street") or "").strip()
+    address_city = str((address_dict or {}).get("city") or "").strip()
+    address_state = str((address_dict or {}).get("state") or "").strip()
+    address_postal = str((address_dict or {}).get("zip") or (address_dict or {}).get("postal_code") or "").strip()
+    address_county = str((address_dict or {}).get("county") or "").strip()
+    address_country = str((address_dict or {}).get("country") or "").strip()
+
     location = resume_profile.get("location")
     if not location:
         city = resume_profile.get("city", "")
@@ -252,19 +330,22 @@ def _format_profile_summary(resume_profile: dict) -> str:
         elif not isinstance(location, str):
             location = str(location)
         lines.append(f"Location: {location}")
-    if address := resume_profile.get("address"):
-        lines.append(f"Address: {address}")
+    if address_dict:
+        if address_street:
+            lines.append(f"Address line 1: {address_street}")
+    elif address_value:
+        lines.append(f"Address: {address_value}")
     if address2 := resume_profile.get("address_line_2"):
         lines.append(f"Address line 2: {address2}")
-    if city := resume_profile.get("city"):
+    if city := (resume_profile.get("city") or address_city):
         lines.append(f"City: {city}")
-    if state := resume_profile.get("state"):
+    if state := (resume_profile.get("state") or address_state):
         lines.append(f"State: {state}")
-    if postal := resume_profile.get("postal_code"):
+    if postal := (resume_profile.get("postal_code") or address_postal):
         lines.append(f"Postal code: {postal}")
-    if county := resume_profile.get("county"):
+    if county := (resume_profile.get("county") or address_county):
         lines.append(f"County: {county}")
-    if country := resume_profile.get("country"):
+    if country := (resume_profile.get("country") or address_country):
         lines.append(f"Country: {country}")
     if phone_type := resume_profile.get("phone_type") or resume_profile.get("phone_device_type"):
         lines.append(f"Phone type: {phone_type}")
@@ -421,9 +502,219 @@ def _format_profile_summary(resume_profile: dict) -> str:
     return "\n".join(lines)
 
 
+def _build_system_prompt_without_domhand(
+    resume_profile: dict,
+    platform: str,
+) -> str:
+    profile_summary = _format_profile_summary(resume_profile)
+    prompt_parts: list[str] = [
+        "<ghosthands_role>",
+        "You are a job application automation agent. Your job is to navigate",
+        "an ATS (Applicant Tracking System), fill out every form field, upload",
+        "the resume when prompted, and advance through each step of the",
+        "application flow — WITHOUT ever clicking the final submit button.",
+        "</ghosthands_role>",
+        "",
+        "<tool_mode>",
+        "Use only generic browser-use actions such as click, input/browser-use",
+        "input actions, upload_file, dropdown_options, select_dropdown, wait,",
+        "scroll, and done.",
+        "On each page, first collect the visible required questions and active widgets from the current interactive element list.",
+        "Then solve blockers ONE FIELD AT A TIME.",
+        "After each field-level change, re-evaluate the current page before touching a different blocker.",
+        "</tool_mode>",
+        "",
+        "<hard_rules>",
+        "- NEVER click any final 'Submit', 'Submit Application', 'Finish',",
+        "  or equivalent CTA. When you reach a review page or the next",
+        "  action would be final submission, call done(success=True).",
+        "- Leave optional fields empty when the applicant profile does not",
+        "  provide a value OR when the field-to-profile mapping is low",
+        "  confidence, except for low-risk standardized screening fields",
+        "  where saved defaults or closest-option matching are safe.",
+        "- NEVER invent fake personal information or placeholder data.",
+        "- Substantive applicant answers must stay grounded in the provided",
+        "  profile and the job context. You may derive bounded transforms",
+        "  such as annual-to-hourly compensation, hourly-to-annual",
+        "  compensation, short 'why this company/role' answers grounded in",
+        "  the applicant profile plus the job description, and equivalent",
+        "  closest-option selections. Do NOT invent fake personal history,",
+        "  fake addresses, fake employers, or fake education.",
+        "- If any visible required field remains blank, invalid, or unresolved,",
+        "  do NOT call done(success=True). Keep working on the blocker, or",
+        "  report done(success=False) if the required answer is genuinely",
+        "  missing from the applicant profile.",
+        "- For native dropdowns, use dropdown_options then select_dropdown.",
+        "- For custom dropdowns, click to open them, search if needed, click",
+        "  the exact final option, and verify the field visibly changed before",
+        "  continuing.",
+        "- After typing into a text field, prefer Tab, blur, or click-away so",
+        "  the browser commits validation before you decide the field failed.",
+        "- When the runtime page audit names a required blocker, resolve that",
+        "  blocker before touching later voluntary self-identification, EEO,",
+        "  or optional sections.",
+        "- Do NOT do full-page reverification loops when one blocker remains.",
+        "</hard_rules>",
+        "",
+        "<reasoning_style>",
+        *build_compact_reasoning_lines(),
+        "</reasoning_style>",
+        "",
+        "<completion_detection>",
+        *build_completion_detection_lines(platform, use_domhand=False),
+        "</completion_detection>",
+        "",
+        "<form_strategies>",
+        GENERIC_FORM_STRATEGIES_NO_DOMHAND,
+        "</form_strategies>",
+        "",
+        "<platform_hint>",
+        PLATFORM_HINTS.get(platform, PLATFORM_HINTS["generic"]),
+        "</platform_hint>",
+        "",
+        "<applicant_profile>",
+        profile_summary,
+        "</applicant_profile>",
+    ]
+    return "\n".join(prompt_parts)
+
+
+def _build_task_prompt_without_domhand(
+    job_url: str,
+    resume_path: str,
+    sensitive_data: dict | None,
+    platform: str = "generic",
+    credential_source: str = "",
+    credential_intent: str = "",
+    enable_auth_domhand_tools: bool = False,
+) -> str:
+    auth_domhand_allowed = enable_auth_domhand_tools and platform == "workday"
+    task = (
+        f"Go to {job_url} and fill out the job application form completely.\n"
+        "\n"
+        "CRITICAL -- Available Actions:\n"
+        "- Use generic browser-use actions only: click, input/browser-use input actions, upload_file, "
+        "dropdown_options, select_dropdown, wait, scroll, and done.\n"
+        "\n"
+        "CRITICAL -- Action Order:\n"
+        "1. After navigating to the page, LOOK for an 'Easy Apply' section or a resume upload area at the top of the form. "
+        "If present, upload the resume FIRST using upload_file with path: "
+        f"{resume_path}\n"
+        "2. On auth pages, use browser-use input actions for email/password fields and normal click actions for the "
+        "visible Sign In/Create Account submit control.\n"
+        "3. On form pages, first collect the visible required questions, current values, and widget types from the "
+        "current page state. Then solve ONE visible blocker at a time. Start with visible required text fields, then "
+        "native dropdowns, then custom widgets, then radios/checkboxes.\n"
+        "3a. When multiple visible required blockers are on screen, resolve the UPPERMOST unresolved blocker first in "
+        "visual page order. Do NOT skip an empty required field that appears above the current target just because a "
+        "lower field looks easier.\n"
+        "3b. Treat already autofilled fields as settled unless they are visibly invalid. While an earlier required field "
+        "is still empty, do NOT spend steps on lower prefilled resume/address/name fields.\n"
+        "4. After typing into a text field, Tab or click away and re-observe before deciding the value failed or before "
+        "moving to a different blocker.\n"
+        "5. For native dropdowns, ALWAYS inspect with dropdown_options before using select_dropdown.\n"
+        "6. For custom searchable widgets, including virtual-DOM/shadow-DOM widgets, click to open, type/search, click the exact final option, then STOP and "
+        "verify the field visibly changed before touching anything else.\n"
+        "7. After each field-level recovery, re-check the current page before moving to a different blocker. "
+        "Do NOT do full-page reverification loops.\n"
+        "7b. If the runtime page audit identifies a next required blocker, resolve that blocker before moving into later voluntary self-identification, EEO, or optional sections.\n"
+        "7c. After a committed field change, do one quick deterministic delta scan of the current section before moving on. Use that scan to detect newly revealed required questions, validation changes, and whether the blocker actually cleared. Do not use the LLM just to perform that delta scan.\n"
+        "8. Prefer short waits: use wait(seconds=1) up to 3 times for auth transitions, resume processing, and SPA loading.\n"
+        "9. If the page is blank/loading after the short poll loop, refresh() ONCE on the current allowed page, then wait 2-3 seconds and reassess.\n"
+        "10. For other file uploads, use upload_file with the same resume path when appropriate.\n"
+        "11. Do NOT click the final Submit button. Stop at the review page and use done(success=True) ONLY when no visible required field remains unresolved.\n"
+        "\n"
+        "Other rules:\n"
+    )
+    if auth_domhand_allowed:
+        task = task.replace(
+            "- Use generic browser-use actions only: click, input/browser-use input actions, upload_file, "
+            "dropdown_options, select_dropdown, wait, scroll, and done.\n",
+            "- Use generic browser-use actions only: click, input/browser-use input actions, upload_file, "
+            "dropdown_options, select_dropdown, wait, scroll, and done.\n"
+            "- On Workday auth pages only, you may also use domhand_fill_auth_fields, "
+            "domhand_check_agreement, and domhand_click_button.\n",
+        )
+        task = task.replace(
+            "2. On auth pages, use browser-use input actions for email/password fields and normal click actions for the "
+            "visible Sign In/Create Account submit control.\n",
+            "2. On auth pages, fill email/password/confirm-password first. "
+            "For Workday Create Account / Sign In pages, prefer domhand_fill_auth_fields for the auth fields, "
+            "domhand_check_agreement for terms boxes, and domhand_click_button for the final auth submit button "
+            "instead of raw repeated clicks.\n",
+        )
+    if sensitive_data:
+        verification_rule = (
+            "- VERIFICATION DETECTION: If after clicking Sign In or Create Account the page shows ANY text like "
+            "'Verify your account', 'verification email', 'confirm your email', 'check your inbox', 'check your spam', "
+            "'verify your email address', or any banner asking the user to verify/confirm via email, IMMEDIATELY report "
+            "done(success=False, text='blocker: email verification required — user must verify email then retry'). "
+            "Do NOT attempt to sign in again. Do NOT refresh. Do NOT wait.\n"
+        )
+        if credential_source == "stored" and credential_intent != "create_account":
+            task += (
+                "- STORED CREDENTIALS: We have a saved account for this platform from a previous application. "
+                "On auth pages, go DIRECTLY to Sign In — do NOT click Create Account. "
+                "Fill email + password using browser-use input actions, then submit the visible Sign In button with a normal click.\n"
+                "  After clicking Sign In, wait 3 seconds before deciding what happened.\n"
+                "  When sign-in succeeds, include EXACTLY `AUTH_RESULT=STORED_SIGN_IN_SUCCESS` in your memory or evaluation.\n"
+                "  CRITICAL AUTH RULES:\n"
+                "  - Sign In: attempt EXACTLY ONCE. If it fails for ANY reason, immediately report "
+                "done(success=False, text='blocker: sign-in failed — [describe the error]'). Do NOT retry.\n"
+                "  - NEVER attempt to create a new account with stored credentials.\n"
+            )
+            task += verification_rule
+        elif credential_source == "stored" and credential_intent == "create_account":
+            task += (
+                "- QUEUED CREATE ACCOUNT: This run is explicitly configured to create a new account for this job. "
+                "Do NOT switch to Sign In just because stored credentials exist for this tenant. "
+                "On auth pages, go DIRECTLY to Create Account first. "
+                "Fill email + password + confirm password using browser-use input actions, manually check any agreement checkbox, then click Create Account.\n"
+                "  After clicking Create Account, wait 3 seconds before deciding the outcome.\n"
+                "  If account creation succeeds and the flow asks you to sign in, use the SAME email/password to sign in ONCE.\n"
+                "  NEVER click Sign In proactively from the start dialog.\n"
+            )
+            task += verification_rule
+        elif credential_source == "await_verification":
+            task += (
+                "- ACCOUNT NEEDS VERIFICATION: Do NOT attempt to sign in or create an account. "
+                "Report blocker immediately.\n"
+            )
+        elif credential_source == "repair_credentials":
+            task += (
+                "- CREDENTIALS NEED REPAIR: Do NOT attempt to sign in or create an account. "
+                "Report blocker immediately.\n"
+            )
+        elif credential_source == "user" and credential_intent == "existing_account":
+            task += (
+                "- USER-PROVIDED EXISTING ACCOUNT: go DIRECTLY to Sign In, fill the provided credentials, and never attempt to create a new account.\n"
+            )
+            task += verification_rule
+        elif credential_source == "user" and credential_intent == "create_account":
+            task += (
+                "- USER-PROVIDED NEW ACCOUNT: go DIRECTLY to Create Account first. Fill the provided credentials, "
+                "manually check agreement if needed, click Create Account, then sign in ONCE only if the site explicitly requires it after account creation.\n"
+            )
+            if auth_domhand_allowed:
+                task += (
+                    "  On Workday auth pages, first use domhand_fill_auth_fields, then use domhand_check_agreement, "
+                    "then use domhand_click_button(button_label='Create Account') for the submit.\n"
+                    "  If Create Account lands on the native Sign In page, that is the expected next step. "
+                    "Do NOT click Create Account again. Use domhand_fill_auth_fields, then "
+                    "domhand_click_button(button_label='Sign In') once.\n"
+                )
+            task += verification_rule
+    task += (
+        "- If anything pops up blocking the form, close it and continue.\n"
+        "- For salary/compensation fields, prefer exact saved profile answers. If only an annual or hourly equivalent is available, derive the equivalent deterministically instead of stopping. Do not use generic text like 'Negotiable' unless the saved applicant profile already says that.\n"
+    )
+    return task
+
+
 def build_system_prompt(
     resume_profile: dict,
     platform: str = "generic",
+    use_domhand: bool = True,
 ) -> str:
     """Build the ``extend_system_message`` string for the browser-use Agent.
 
@@ -440,12 +731,17 @@ def build_system_prompt(
             ATS identifier used to select platform-specific guardrails.
             One of ``"workday"``, ``"greenhouse"``, ``"lever"``,
             ``"smartrecruiters"``, or ``"generic"`` (default).
+    use_domhand:
+            Whether DomHand tools are available for this run.
 
     Returns
     -------
     str
             The prompt extension string.
     """
+    if not use_domhand:
+        return _build_system_prompt_without_domhand(resume_profile, platform)
+
     profile_summary = _format_profile_summary(resume_profile)
 
     prompt_parts: list[str] = [
@@ -466,6 +762,9 @@ def build_system_prompt(
         "Action preference hierarchy (highest to lowest priority):",
         "1. domhand_fill — Fills ALL visible form fields in one call for",
         "   near-zero cost.  Try this FIRST whenever you see a form.",
+        "   The FIRST domhand_fill on a form page is the INITIAL BULK FILL",
+        "   pass: run it across the full visible form or visible subsection",
+        "   before switching to blocker-by-blocker recovery.",
         "2. domhand_assess_state — Classifies the page into advanceable,",
         "   review, confirmation, or presubmit_single_page and reports",
         "   unresolved required fields plus scroll bias. Use it before",
@@ -495,10 +794,17 @@ def build_system_prompt(
         "   fallback for the exact stuck field after DOM/manual actions fail.",
         "",
         "After calling domhand_fill, inspect its result to see which fields",
-        "were filled and which remain unresolved.  Handle unresolved fields",
-        "individually with domhand_interact_control for exact boolean/select",
-        "blockers, domhand_select for dropdown widgets, generic input, or by skipping",
-        "ONLY optional fields the applicant profile does not cover.",
+        "were filled and which remain unresolved. On the FIRST domhand_fill",
+        "call for a visible form page, let that INITIAL BULK FILL pass",
+        "saturate the full visible form state before you narrow to",
+        "focus_fields, domhand_interact_control, domhand_select, or generic",
+        "manual actions.",
+        "Only after that first bulk pass and a domhand_assess_state",
+        "reassessment should you switch into single-blocker recovery.",
+        "Handle unresolved fields individually with domhand_interact_control",
+        "for exact boolean/select blockers, domhand_select for dropdown",
+        "widgets, generic input, or by skipping ONLY optional fields the",
+        "applicant profile does not cover.",
         "When more than one blocker remains, resolve EXACTLY ONE field at a",
         "time. Finish that field, verify its error cleared, then reassess",
         "before touching the next blocker.",
@@ -532,10 +838,13 @@ def build_system_prompt(
         "  'Doe', 'John Doe', fake emails, or fake addresses. Use the exact",
         "  applicant identity from the profile. If it is missing, leave the",
         "  field unresolved and continue or report a blocker.",
-        "- Every substantive applicant answer must come from the provided",
-        "  profile. Do NOT infer missing salary, start date, work history,",
-        "  education history, essays, or personal identifiers from the page,",
-        "  job description, or model assumptions.",
+        "- Substantive applicant answers must stay grounded in the provided",
+        "  profile and the job context. You may derive bounded transforms",
+        "  such as annual-to-hourly compensation, hourly-to-annual",
+        "  compensation, short 'why this company/role' answers grounded in",
+        "  the applicant profile plus the job description, and equivalent",
+        "  closest-option selections. Do NOT invent fake personal history,",
+        "  fake addresses, fake employers, or fake education.",
         "- For low-risk standardized screening fields, make a best-effort",
         "  selection before escalating: use saved profile defaults, EEO",
         "  decline answers, referral source defaults, phone type defaults,",
@@ -559,6 +868,10 @@ def build_system_prompt(
         "  close path is still available.",
         "- After filling a step, look for 'Next', 'Continue', or",
         "  'Save & Continue' buttons and click them to advance.",
+        "- Do NOT create or maintain todo.md, notes, or any other filesystem",
+        "  checklist during application runs. Do not use write_file or",
+        "  replace_file for task tracking unless the user explicitly asked",
+        "  for a file artifact.",
         "- Prefer the smallest reversible action that advances the flow.",
         "- On long or single-page forms, keep working near the current",
         "  unresolved section and continue downward. Do NOT jump back to the",
@@ -708,9 +1021,13 @@ def build_system_prompt(
         "FORM PAGES (everything else):",
         "  1. Your FIRST action MUST be domhand_fill.  Do NOT use click or",
         "     input_text before trying domhand_fill.",
-        "  2. Immediately call domhand_assess_state to understand the active",
+        "  2. Treat that FIRST domhand_fill call as the INITIAL BULK FILL",
+        "     pass across the full visible form state. Do NOT narrow to",
+        "     focus_fields or use blocker-by-blocker/manual recovery before",
+        "     that first bulk pass completes.",
+        "  3. Immediately call domhand_assess_state to understand the active",
         "     section, unresolved required fields, and scroll direction.",
-        "  3. Review domhand_fill output for unresolved fields. If",
+        "  4. Review domhand_fill output for unresolved fields. If",
         "     domhand_assess_state reports unresolved_required_fields, call",
         "     domhand_fill AGAIN with target_section set to the reported",
         "     current_section and focus_fields set to ONE exact unresolved",
@@ -719,32 +1036,32 @@ def build_system_prompt(
         "     same heading_boundary instead of broadening to the whole",
         "     section. Reassess after each single-field retry before moving",
         "     to the next blocker.",
-        "  4. Only after that targeted domhand_fill attempt should you use",
+        "  5. Only after that targeted domhand_fill attempt should you use",
         "     domhand_interact_control for exact radio/checkbox/toggle/button",
         "     blockers, domhand_select for dropdown widgets,",
         "     dropdown_options/select_dropdown, or generic DOM actions. Do",
         "     this one blocker at a time for required",
         "     fields, and for optional fields only when the applicant",
         "     profile maps to that field with high confidence.",
-        "  4c. After EVERY blocker-level domhand_interact_control or",
+        "  5a. Do NOT jump straight to vision/screenshot fallback while",
+        "      DOM/manual takeover options are still available.",
+        "  5b. If the same exact blocker still fails after two DOM/manual",
+        "      attempts, take ONE screenshot/vision retry for that blocker,",
+        "      then go back to DOM/manual actions.",
+        "  5c. After EVERY blocker-level domhand_interact_control or",
         "      domhand_select, IMMEDIATELY call domhand_assess_state before",
         "      doing any unrelated action. After EVERY targeted manual",
         "      click/input/select recovery, FIRST call",
         "      domhand_record_expected_value for that exact field/value,",
         "      THEN call domhand_assess_state. Do not assume the page context",
         "      updated correctly until reassessment confirms it.",
-        "  4a. Do NOT jump straight to vision/screenshot fallback while",
-        "      DOM/manual takeover options are still available.",
-        "  4b. If the same exact blocker still fails after two DOM/manual",
-        "      attempts, take ONE screenshot/vision retry for that blocker,",
-        "      then go back to DOM/manual actions.",
-        "  5. Check for agreement checkboxes and click any that are unchecked.",
-        "  6. Before scrolling away or clicking 'Next' / 'Continue' /",
+        "  6. Check for agreement checkboxes and click any that are unchecked.",
+        "  7. Before scrolling away or clicking 'Next' / 'Continue' /",
         "     'Save & Continue', call domhand_assess_state again and follow",
         "     its scroll_bias, unresolved fields, and advance_allowed result.",
-        "  7. Click 'Next' / 'Continue' / 'Save & Continue' ONLY when",
+        "  8. Click 'Next' / 'Continue' / 'Save & Continue' ONLY when",
         "     domhand_assess_state says advance_allowed=true.",
-        "  8. On the new page, determine if it's an auth page or form page",
+        "  9. On the new page, determine if it's an auth page or form page",
         "     and follow the appropriate sequence above.",
         "",
         "CRITICAL: If the page is in `advanceable` but advance_allowed=false,",
@@ -872,10 +1189,24 @@ def build_task_prompt(
     job_url: str,
     resume_path: str,
     sensitive_data: dict | None,
+    platform: str = "generic",
     credential_source: str = "",
     credential_intent: str = "",
+    use_domhand: bool = True,
+    enable_auth_domhand_tools: bool = False,
 ) -> str:
     """Build the task prompt for the agent."""
+    if not use_domhand:
+        return _build_task_prompt_without_domhand(
+            job_url,
+            resume_path,
+            sensitive_data,
+            platform=platform,
+            credential_source=credential_source,
+            credential_intent=credential_intent,
+            enable_auth_domhand_tools=enable_auth_domhand_tools,
+        )
+
     task = (
         f"Go to {job_url} and fill out the job application form completely.\n"
         "\n"
@@ -885,8 +1216,11 @@ def build_task_prompt(
         f"   resume FIRST using domhand_upload with path: {resume_path}\n"
         "   Easy Apply with resume upload is ALWAYS the preferred path — it\n"
         "   auto-fills many fields and shortens the application.\n"
-        "2. Then call domhand_fill to fill remaining visible form fields.\n"
-        "3. After domhand_fill completes, review its output to see which fields were filled and which failed.\n"
+        "2. Then call domhand_fill to fill remaining visible form fields. Treat this FIRST domhand_fill call as the "
+        "INITIAL BULK FILL pass and run it across the full visible form state first.\n"
+        "3. After domhand_fill completes, review its output to see which fields were filled and which failed. Do NOT "
+        "narrow to focus_fields, switch to one-field recovery, or use domhand_interact_control/domhand_select/manual "
+        "click-input actions before this first bulk pass completes.\n"
         "4. Immediately call domhand_assess_state. If unresolved fields remain, resolve them ONE FIELD AT A TIME: "
         "call domhand_fill again with target_section=current_section and focus_fields set to a single exact "
         "unresolved label. Preserve heading_boundary when you are inside a repeater entry, and reassess after "
@@ -934,7 +1268,7 @@ def build_task_prompt(
             "done(success=False, text='blocker: email verification required — user must verify email then retry'). "
             "Do NOT attempt to sign in again. Do NOT refresh. Do NOT wait.\n"
         )
-        if credential_source == "stored":
+        if credential_source == "stored" and credential_intent != "create_account":
             task += (
                 "- STORED CREDENTIALS: We have a saved account for this platform from a previous application. "
                 "On auth pages, go DIRECTLY to Sign In — do NOT click Create Account. "
@@ -947,6 +1281,34 @@ def build_task_prompt(
                 "account not found, page reload, etc.), immediately report "
                 "done(success=False, text='blocker: sign-in failed — [describe the error]'). Do NOT retry.\n"
                 "  - NEVER attempt to create a new account with stored credentials.\n"
+            )
+            task += _verification_rule
+        elif credential_source == "stored" and credential_intent == "create_account":
+            task += (
+                "- QUEUED CREATE ACCOUNT: This run is explicitly configured to create a new account for this job. "
+                "Do NOT switch to Sign In just because stored credentials exist for this tenant. "
+                "On auth pages, go DIRECTLY to Create Account first. "
+                "Fill email + password + confirm password using browser-use input actions (NOT domhand_fill), "
+                "check agreement using domhand_check_agreement, then submit Create Account using domhand_click_button.\n"
+                "  After clicking Create Account, wait 3 seconds before deciding the outcome.\n"
+                "  AUTH OUTCOME MARKERS:\n"
+                "  - If the account appears created and you move past the auth wall, include EXACTLY "
+                "`AUTH_RESULT=ACCOUNT_CREATED_ACTIVE` in your memory or evaluation.\n"
+                "  - If Create Account leads to email verification / check inbox / confirm your email, include EXACTLY "
+                "`AUTH_RESULT=ACCOUNT_CREATED_PENDING_VERIFICATION` in your memory or evaluation BEFORE reporting the blocker.\n"
+                "  - If Create Account fails before the account exists, include EXACTLY "
+                "`AUTH_RESULT=ACCOUNT_CREATE_FAILED` in your memory or evaluation.\n"
+                "  - If the site says the account already exists, include EXACTLY "
+                "`AUTH_RESULT=ACCOUNT_ALREADY_EXISTS` in your memory or evaluation.\n"
+                "  CRITICAL AUTH RULES:\n"
+                "  - Create Account: attempt EXACTLY ONCE. If it fails, report blocker immediately.\n"
+                "  - NEVER click Sign In proactively from the start dialog, header, or a blank/loading auth transition.\n"
+                "  - If Create Account submission lands on the native Sign In page (email + password, no confirm-password field), "
+                "treat that as the expected next step. Use the SAME email/password to sign in ONCE. Do NOT click Create Account again.\n"
+                "  - Sign In after account creation: attempt EXACTLY ONCE. If it fails, immediately report "
+                "done(success=False, text='blocker: account created but sign-in failed — [describe the error]').\n"
+                "  - NEVER go back to Create Account after attempting Sign In.\n"
+                "  - NEVER loop between Sign In and Create Account.\n"
             )
             task += _verification_rule
         elif credential_source == "generated":
@@ -1054,6 +1416,8 @@ def build_task_prompt(
     else:
         task += "- If a login wall appears, report it as a blocker.\n"
     task += (
+        "- If visible required fields remain blank or unresolved and the applicant profile does not provide the needed answer, report "
+        "done(success=False, text='blocker: unresolved required fields remain — [list the missing fields]').\n"
         "- Do NOT click the final Submit button. Stop at the review page and use the done action.\n"
         "- If anything pops up blocking the form, close it and continue.\n"
     )

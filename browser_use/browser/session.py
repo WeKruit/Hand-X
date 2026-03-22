@@ -528,7 +528,6 @@ class BrowserSession(BaseModel):
 	_permissions_watchdog: Any | None = PrivateAttr(default=None)
 	_recording_watchdog: Any | None = PrivateAttr(default=None)
 	_captcha_watchdog: Any | None = PrivateAttr(default=None)
-	_stealth_watchdog: Any | None = PrivateAttr(default=None)
 	_watchdogs_attached: bool = PrivateAttr(default=False)
 
 	_cloud_browser_client: CloudBrowserClient = PrivateAttr(default_factory=lambda: CloudBrowserClient())
@@ -543,7 +542,6 @@ class BrowserSession(BaseModel):
 	_reconnect_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 	_reconnect_task: asyncio.Task | None = PrivateAttr(default=None)
 	_intentional_stop: bool = PrivateAttr(default=False)
-	_detaching_keep_alive: bool = PrivateAttr(default=False)
 
 	_logger: Any = PrivateAttr(default=None)
 
@@ -631,7 +629,6 @@ class BrowserSession(BaseModel):
 		self._permissions_watchdog = None
 		self._recording_watchdog = None
 		self._captcha_watchdog = None
-		self._stealth_watchdog = None
 		self._watchdogs_attached = False
 		if self._demo_mode:
 			self._demo_mode.reset()
@@ -722,30 +719,6 @@ class BrowserSession(BaseModel):
 		await self.reset()
 		# Create fresh event bus
 		self.event_bus = EventBus()
-
-	async def detach_keep_alive(self) -> None:
-		"""Detach from a keep-alive browser without resetting session-owned tab state.
-
-		Used by Desktop/local-worker runs that want the browser and current tab to
-		remain exactly as-is after the subprocess exits.
-		"""
-		self._intentional_stop = True
-		self._detaching_keep_alive = True
-		self.logger.debug('🔌 detach_keep_alive() called - disconnecting CDP without session reset')
-
-		try:
-			from browser_use.browser.events import SaveStorageStateEvent
-
-			save_event = self.event_bus.dispatch(SaveStorageStateEvent())
-			await save_event
-		except Exception:
-			self.logger.debug('detach_keep_alive storage save skipped', exc_info=True)
-
-		try:
-			if self._cdp_client_root is not None:
-				await self._cdp_client_root.stop()
-		except Exception:
-			self.logger.debug('detach_keep_alive cdp stop skipped', exc_info=True)
 
 	@observe_debug(ignore_input=True, ignore_output=True, name='browser_start_event_handler')
 	async def on_BrowserStartEvent(self, event: BrowserStartEvent) -> dict[str, str]:
@@ -929,16 +902,6 @@ class BrowserSession(BaseModel):
 
 			# Dispatch navigation started
 			await self.event_bus.dispatch(NavigationStartedEvent(target_id=target_id, url=event.url))
-
-			target_snapshot = self.session_manager.get_target(target_id)
-			if (
-				event.url != 'about:blank'
-				and target_snapshot
-				and target_snapshot.url == 'about:blank'
-				and self.browser_profile.aboutblank_loading_logo_enabled
-				and self.browser_profile.aboutblank_loading_min_display_seconds > 0
-			):
-				await asyncio.sleep(self.browser_profile.aboutblank_loading_min_display_seconds)
 
 			# Navigate to URL with proper lifecycle waiting
 			await self._navigate_and_wait(
@@ -1712,14 +1675,6 @@ class BrowserSession(BaseModel):
 			CaptchaWatchdog.model_rebuild()
 			self._captcha_watchdog = CaptchaWatchdog(event_bus=self.event_bus, browser_session=self)
 			self._captcha_watchdog.attach_to_session()
-
-		# Initialize StealthWatchdog (injects anti-detection JS on browser connection)
-		if self.browser_profile.stealth.enabled:
-			from browser_use.browser.watchdogs.stealth_watchdog import StealthWatchdog
-
-			StealthWatchdog.model_rebuild()
-			self._stealth_watchdog = StealthWatchdog(event_bus=self.event_bus, browser_session=self)
-			self._stealth_watchdog.attach_to_session()
 
 		# Mark watchdogs as attached to prevent duplicate attachment
 		self._watchdogs_attached = True
@@ -3299,7 +3254,10 @@ class BrowserSession(BaseModel):
 
 	async def _cdp_grant_permissions(self, permissions: list[str], origin: str | None = None) -> None:
 		"""Grant permissions using CDP Browser.grantPermissions."""
-		_ = permissions, origin
+		params = {'permissions': permissions}
+		# if origin:
+		# 	params['origin'] = origin
+		cdp_session = await self.get_or_create_cdp_session()
 		# await cdp_session.cdp_client.send.Browser.grantPermissions(params=params, session_id=cdp_session.session_id)
 		raise NotImplementedError('Not implemented yet')
 
@@ -3750,6 +3708,8 @@ class BrowserSession(BaseModel):
 
 			if target_id in target_sessions:
 				assert target_id is not None
+				# Use existing session
+				session_id = target_sessions[target_id]
 				# Return the client with session attached (don't change focus)
 				return await self.get_or_create_cdp_session(target_id, focus=False)
 

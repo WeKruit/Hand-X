@@ -46,6 +46,16 @@ def _redact_if_sensitive(label: str, value: str) -> str:
     return value
 
 
+def _optional_string_attr(result: object, attr_name: str) -> str | None:
+    value = getattr(result, attr_name, None)
+    return value if isinstance(value, str) and value else None
+
+
+def _optional_bool_attr(result: object, attr_name: str, *, default: bool = False) -> bool:
+    value = getattr(result, attr_name, default)
+    return value if isinstance(value, bool) else default
+
+
 _installed = False
 
 # Track cumulative fill counts across rounds (module-level for external access)
@@ -118,6 +128,8 @@ def install_jsonl_callback() -> None:
                     "required": result.required,
                     "section_label": result.section or None,
                     "state": result.state or "filled",
+                    "binding_confidence": _optional_string_attr(result, "binding_confidence"),
+                    "best_effort_guess": _optional_bool_attr(result, "best_effort_guess"),
                 }
                 _filled_records.append(record)
                 emit_field_filled(
@@ -132,6 +144,8 @@ def install_jsonl_callback() -> None:
                     required=result.required,
                     section_label=result.section or None,
                     state=result.state or "filled",
+                    binding_confidence=_optional_string_attr(result, "binding_confidence"),
+                    best_effort_guess=_optional_bool_attr(result, "best_effort_guess"),
                 )
                 if _counts["filled"] > 0 and _counts["filled"] % 5 == 0:
                     emit_phase(f"Filling form fields ({_counts['filled']} completed)")

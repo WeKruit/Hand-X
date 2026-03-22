@@ -18,15 +18,6 @@ CUSTOM_MODEL_PRICING: dict[str, dict[str, Any]] = {
 		'max_input_tokens': None,  # Not specified
 		'max_output_tokens': None,  # Not specified
 	},
-	'gemini-3-flash-preview': {
-		'input_cost_per_token': 0.15 / 1_000_000,
-		'output_cost_per_token': 0.60 / 1_000_000,
-		'cache_read_input_token_cost': 0.0375 / 1_000_000,
-		'cache_creation_input_token_cost': None,
-		'max_tokens': None,
-		'max_input_tokens': None,
-		'max_output_tokens': None,
-	},
 	'bu-2-0': {
 		'input_cost_per_token': 0.60 / 1_000_000,  # $0.60 per 1M tokens
 		'output_cost_per_token': 3.50 / 1_000_000,  # $3.50 per 1M tokens
@@ -38,15 +29,5 @@ CUSTOM_MODEL_PRICING: dict[str, dict[str, Any]] = {
 	},
 }
 CUSTOM_MODEL_PRICING['bu-latest'] = CUSTOM_MODEL_PRICING['bu-1-0']
-
-CUSTOM_MODEL_PRICING['gemini-3.1-flash-lite-preview'] = {
-	'input_cost_per_token': 0.075 / 1_000_000,  # Lite = ~half of Flash
-	'output_cost_per_token': 0.30 / 1_000_000,
-	'cache_read_input_token_cost': 0.01875 / 1_000_000,
-	'cache_creation_input_token_cost': None,
-	'max_tokens': None,
-	'max_input_tokens': 1_048_576,
-	'max_output_tokens': 65_536,
-}
 
 CUSTOM_MODEL_PRICING['smart'] = CUSTOM_MODEL_PRICING['bu-1-0']

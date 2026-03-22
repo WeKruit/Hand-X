@@ -23,16 +23,23 @@ class Settings(BaseSettings):
         alias="ANTHROPIC_API_KEY",
         description="Anthropic API key for agent + Haiku answer gen",
     )
-    openai_api_key: str = Field("", description="OpenAI API key (for browser-use if using GPT)")
+    openai_api_key: str = Field(
+        "",
+        description="Reserved for direct OpenAI compatibility; current Hand-X runtime standard is Gemini.",
+    )
     google_api_key: str = Field(
         "",
         alias="GOOGLE_API_KEY",
-        description="Google API key for Gemini models (agent model)",
+        description="Google API key for Gemini models used by the Hand-X runtime",
     )
-    agent_model: str = Field("gemini-3-flash-preview", description="Model for agent decisions")
+    agent_model: str = Field("gemini-3-flash-preview", description="Gemini model for agent decisions")
+    enable_domhand: bool = Field(
+        True,
+        description="Enable DomHand tool registration and DomHand-first prompting",
+    )
     domhand_model: str = Field(
         "gemini-3-flash-preview",
-        description="Cheap model for DomHand answer generation",
+        description="Gemini model for DomHand answer generation",
     )
     semantic_match_model: str = Field(
         "",
@@ -112,6 +119,9 @@ class Settings(BaseSettings):
     )
     cdp_url: str | None = Field(
         None, description="CDP URL of an existing browser to connect to (Desktop-owned browser mode)"
+    )
+    target_id: str | None = Field(
+        None, description="CDP target ID to confine this session to (Desktop-managed shared Chromium tab leasing)"
     )
 
     # --- Testing ---

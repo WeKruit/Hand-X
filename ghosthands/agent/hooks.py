@@ -142,6 +142,18 @@ PHASE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(r"additional.*question|supplemental.*question|extra.*question", re.IGNORECASE),
         "Answering additional questions",
     ),
+    (
+        re.compile(
+            r"fill.*remaining.*form|fill.*remaining.*field|fill.*application form|populate.*application form|"
+            r"fill the rest of the application",
+            re.IGNORECASE,
+        ),
+        "Filling application form",
+    ),
+    (
+        re.compile(r"assess.*state|reassess|review.*blocker|resolve.*blocker|unresolved required", re.IGNORECASE),
+        "Reviewing blockers",
+    ),
     (re.compile(r"review|submit", re.IGNORECASE), "Preparing to submit"),
     (re.compile(r"navigate|open.*application|go to .*application", re.IGNORECASE), "Navigating to application"),
 )
@@ -273,6 +285,7 @@ class StepHooks:
             "blocking_field_ids": (last_state or {}).get("blocking_field_ids", []) if isinstance(last_state, dict) else [],
             "blocking_field_keys": (last_state or {}).get("blocking_field_keys", []) if isinstance(last_state, dict) else [],
             "blocking_field_reasons": (last_state or {}).get("blocking_field_reasons", {}) if isinstance(last_state, dict) else {},
+            "recovery_target": (last_state or {}).get("recovery_target") if isinstance(last_state, dict) else None,
         }
         await publish_browser_session_trace(browser_session, "step_start", trace_payload)
 
@@ -373,6 +386,21 @@ class StepHooks:
             )
             agent.state.stopped = True
 
+        try:
+            from ghosthands.config.settings import settings as runtime_settings
+
+            if runtime_settings.enable_domhand:
+                from ghosthands.cli import _apply_runtime_page_audit
+
+                await _apply_runtime_page_audit(agent, auto_domhand_prefill=True)
+                last_entry = agent.history.history[-1] if agent.history.history else None
+        except Exception:
+            logger.debug(
+                "step.runtime_page_audit_failed",
+                extra={"job_id": self.job_id, "step": step},
+                exc_info=True,
+            )
+
         # ── Blocker detection from done text ───────────────────────
         blocker_detected: str | None = None
         if agent.history.is_done() and last_entry:
@@ -436,6 +464,7 @@ class StepHooks:
                 status["blocking_field_reasons"] = last_state.get("blocking_field_reasons", {})
                 status["blocking_field_state_changes"] = last_state.get("blocking_field_state_changes", {})
                 status["single_active_blocker"] = last_state.get("single_active_blocker")
+                status["recovery_target"] = last_state.get("recovery_target")
             try:
                 await self.on_status_update(status)
             except Exception:

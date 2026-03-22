@@ -71,6 +71,7 @@ def _stub_heavy_deps():
 _stub_heavy_deps()
 
 from ghosthands.agent.factory import create_job_agent, run_job_agent  # noqa: E402
+from ghosthands.agent.handx_agent import HandXAgent  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -161,6 +162,51 @@ async def test_create_job_agent_returns_agent(mock_prompt, mock_get_model, mock_
     from browser_use import Agent
 
     assert isinstance(agent, Agent)
+    assert isinstance(agent, HandXAgent)
+
+
+@patch("ghosthands.llm.client.get_chat_model")
+@patch("ghosthands.agent.factory.build_system_prompt", return_value="mock system prompt")
+async def test_create_job_agent_registers_workday_auth_domhand_tools(
+    mock_prompt, mock_get_model, mock_llm, sample_profile
+):
+    """Workday generic runs still need the narrow auth helpers for create-account/sign-in."""
+    mock_get_model.return_value = mock_llm
+
+    agent = await create_job_agent(
+        task="Apply to https://example.wd1.myworkdayjobs.com/en-US/job/123/apply",
+        resume_profile=sample_profile,
+        platform="workday",
+    )
+
+    assert "domhand_check_agreement" in agent.tools.registry.registry.actions
+    assert "domhand_click_button" in agent.tools.registry.registry.actions
+
+
+@patch("ghosthands.llm.client.get_chat_model")
+@patch("ghosthands.agent.factory.build_system_prompt", return_value="mock system prompt")
+async def test_create_job_agent_does_not_register_workday_auth_tools_for_non_workday(
+    mock_prompt, mock_get_model, mock_llm, sample_profile
+):
+    """When generic DomHand is off, non-Workday runs should not get Workday-only auth helpers."""
+    mock_get_model.return_value = mock_llm
+    from ghosthands.config.settings import settings
+
+    original_enable_domhand = settings.enable_domhand
+    settings.enable_domhand = False
+
+    try:
+        agent = await create_job_agent(
+            task="Apply to https://example.greenhouse.io/job/123/apply",
+            resume_profile=sample_profile,
+            platform="greenhouse",
+        )
+
+        assert "domhand_check_agreement" not in agent.tools.registry.registry.actions
+        assert "domhand_click_button" not in agent.tools.registry.registry.actions
+        assert "domhand_fill" not in agent.tools.registry.registry.actions
+    finally:
+        settings.enable_domhand = original_enable_domhand
 
 
 @patch("ghosthands.llm.client.get_chat_model")
@@ -246,6 +292,28 @@ async def test_create_job_agent_allowed_domains_defaults_to_settings(
 
     # BASELINE: defaults come from settings
     assert agent.browser_profile.allowed_domains == settings.allowed_domains
+
+
+@patch("ghosthands.llm.client.get_chat_model")
+@patch("ghosthands.agent.factory.build_system_prompt", return_value="mock system prompt")
+async def test_create_job_agent_warns_when_browser_allowlist_misses_target_host(
+    mock_prompt, mock_get_model, mock_llm, sample_profile
+):
+    mock_get_model.return_value = mock_llm
+
+    with patch("ghosthands.agent.factory.logger.warning") as warn_log:
+        await create_job_agent(
+            task="Apply to https://job-boards.greenhouse.io/acme/jobs/123",
+            resume_profile=sample_profile,
+            platform="greenhouse",
+            allowed_domains=["greenhouse.io", "boards.greenhouse.io"],
+        )
+
+    warn_log.assert_called_once()
+    assert warn_log.call_args.args[0] == "agent.allowed_domains_missing_target_host"
+    extra = warn_log.call_args.kwargs["extra"]
+    assert extra["host"] == "job-boards.greenhouse.io"
+    assert extra["covered_by_platform_allowlist"] is True
 
 
 @patch("ghosthands.llm.client.get_chat_model")
@@ -342,7 +410,7 @@ async def test_create_job_agent_extends_system_message(mock_prompt, mock_get_mod
     )
 
     # build_system_prompt was called with profile and platform
-    mock_prompt.assert_called_once_with(sample_profile, "workday")
+    mock_prompt.assert_called_once_with(sample_profile, "workday", use_domhand=True)
 
     # The extend_system_message is set on the agent
     assert agent.settings.extend_system_message == "mock system prompt"
@@ -543,6 +611,64 @@ async def test_run_job_agent_detects_blocker_in_result(mock_create, sample_profi
 
     assert result["blocker"] is not None
     assert "CAPTCHA" in result["blocker"]
+
+
+@patch("ghosthands.agent.factory.create_job_agent")
+async def test_run_job_agent_promotes_structured_unresolved_blocker_from_application_state(
+    mock_create, sample_profile
+):
+    """Structured blocker state should cross the factory boundary even without blocker text."""
+    mock_agent = AsyncMock()
+    mock_browser_session = AsyncMock()
+    mock_browser_session._gh_last_application_state = {
+        "page_context_key": "ctx-1",
+        "page_url": "https://example.com/apply",
+        "same_blocker_signature_count": 2,
+        "blocking_field_keys": ["radio-group|ff-38"],
+        "blocking_field_labels": ["Are you authorized to work in the US?"],
+        "single_active_blocker": {
+            "field_key": "radio-group|ff-38",
+            "field_id": "ff-38",
+            "field_label": "Are you authorized to work in the US?",
+            "field_type": "radio-group",
+            "reason": "required_missing_value",
+        },
+    }
+    mock_browser_session._gh_blocker_attempt_state = {
+        "radio-group|ff-38": {
+            "last_attempt_strategy": "manual_click",
+            "attempted_strategies": ["domhand_interact_control", "manual_click"],
+        }
+    }
+    mock_agent.browser_session = mock_browser_session
+
+    mock_result = MagicMock()
+    mock_result.is_done = False
+    mock_result.success = False
+    mock_result.extracted_content = "The page still has unresolved blockers."
+
+    mock_last_entry = MagicMock()
+    mock_last_entry.result = [mock_result]
+
+    mock_history = MagicMock()
+    mock_history.is_done.return_value = False
+    mock_history.history = [mock_last_entry]
+
+    mock_agent.run = AsyncMock(return_value=mock_history)
+    mock_agent.state = MagicMock()
+    mock_agent.state.n_steps = 7
+
+    mock_create.return_value = mock_agent
+
+    result = await run_job_agent(
+        task="Apply to https://example.com",
+        resume_profile=sample_profile,
+    )
+
+    assert result["success"] is False
+    assert result["unresolved_blocker"] is not None
+    assert result["unresolved_blocker"]["single_active_blocker"]["field_id"] == "ff-38"
+    assert "authorized to work" in (result["blocker"] or "").lower()
 
 
 @patch("ghosthands.agent.factory.create_job_agent")

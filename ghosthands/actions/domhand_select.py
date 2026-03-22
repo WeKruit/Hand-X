@@ -33,6 +33,7 @@ from browser_use.dom.views import EnhancedDOMTreeNode
 from ghosthands.step_trace import publish_browser_session_trace, update_blocker_attempt_state
 from ghosthands.actions.views import (
     DomHandSelectParams,
+    FormField,
     generate_dropdown_search_terms,
     normalize_name,
     split_dropdown_value_hierarchy,
@@ -1329,11 +1330,22 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
 
     clear_domhand_failure(host=page_host, field_key=field_key, desired_value=params.value)
     page_context_key = await _get_page_context_key(page)
+    target_field = FormField(
+        field_id=params.field_id or field_key or str(params.index),
+        name=field_label or params.field_label or "",
+        question_text=field_label or params.field_label or None,
+        field_type="select",
+        section=params.target_section or "",
+        options=[str(opt.get("text", "")).strip() for opt in options if str(opt.get("text", "")).strip()],
+        choices=[str(opt.get("text", "")).strip() for opt in options if str(opt.get("text", "")).strip()],
+        is_native=is_native_select,
+        widget_kind=widget_signature or None,
+    )
     await _record_expected_value_if_settled(
         page=page,
         host=page_host,
         page_context_key=page_context_key,
-        field=field,
+        field=target_field,
         field_key=field_key,
         expected_value=params.value,
         source="derived_profile",

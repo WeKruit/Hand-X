@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 from ghosthands.actions.domhand_check_agreement import DomHandCheckAgreementParams
 from ghosthands.actions.domhand_click_button import DomHandClickButtonParams
+from ghosthands.actions.domhand_fill_auth_fields import DomHandFillAuthFieldsParams
 from ghosthands.actions.views import (
     DomHandAssessStateParams,
     DomHandClosePopupParams,
@@ -28,6 +29,76 @@ from ghosthands.actions.views import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _enable_visual_cursor_best_effort() -> None:
+    """Enable the global visual cursor without failing action registration."""
+    try:
+        from ghosthands.visuals.patch import enable_visual_cursor
+
+        enable_visual_cursor()
+    except Exception as exc:
+        logger.warning("visual_cursor.enable_failed", extra={"error": str(exc)})
+
+
+def _register_action_best_effort(tools: "Tools", *, description: str, param_model, func) -> None:
+    try:
+        tools.action(description=description, param_model=param_model)(func)
+    except Exception as exc:
+        logger.warning(
+            f"domhand.action_registration_failed action={func.__name__} error={exc}",
+            extra={"action": func.__name__, "error": str(exc)},
+        )
+
+
+def register_domhand_auth_actions(tools: "Tools") -> None:
+    """Register only the auth-page DomHand helpers.
+
+    This exposes the narrow, tested Workday auth helpers without bringing the
+    full DomHand form-filling surface back into generic no-DomHand runs.
+    """
+
+    from ghosthands.actions.domhand_check_agreement import domhand_check_agreement
+    from ghosthands.actions.domhand_click_button import domhand_click_button
+    from ghosthands.actions.domhand_fill_auth_fields import domhand_fill_auth_fields
+
+    _enable_visual_cursor_best_effort()
+
+    _register_action_best_effort(
+        tools,
+        description=(
+            "Fill visible auth fields on the current page using GH_EMAIL and GH_PASSWORD. "
+            "Targets only auth-like fields such as email, password, and confirm password. "
+            "Use this on Workday Create Account or Sign In pages before agreement checking "
+            "and before the final auth submit button."
+        ),
+        param_model=DomHandFillAuthFieldsParams,
+        func=domhand_fill_auth_fields,
+    )
+
+    _register_action_best_effort(
+        tools,
+        description=(
+            "Check agreement/consent checkboxes on the current page. "
+            "Uses robust JavaScript to handle native inputs, ARIA role=checkbox, "
+            "and custom Workday-style checkbox widgets. Use this on Create Account "
+            "or Sign In pages to check the 'I agree' / privacy policy / terms checkbox."
+        ),
+        param_model=DomHandCheckAgreementParams,
+        func=domhand_check_agreement,
+    )
+
+    _register_action_best_effort(
+        tools,
+        description=(
+            "Try multiple strategies to activate a button-like auth control and report "
+            "what changed. Use this on Workday Create Account / Sign In submits where "
+            "a normal click may double-submit, hit a stale node, or miss a shadow-DOM "
+            "backed auth button."
+        ),
+        param_model=DomHandClickButtonParams,
+        func=domhand_click_button,
+    )
 
 
 def register_domhand_actions(tools: "Tools") -> None:
@@ -54,30 +125,14 @@ def register_domhand_actions(tools: "Tools") -> None:
     from ghosthands.actions.domhand_select import domhand_select
     from ghosthands.actions.domhand_upload import domhand_upload
 
-    def _register_action(*, description: str, param_model, func) -> None:
-        try:
-            tools.action(description=description, param_model=param_model)(func)
-        except Exception as exc:
-            logger.warning(
-                f"domhand.action_registration_failed action={func.__name__} error={exc}",
-                extra={"action": func.__name__, "error": str(exc)},
-            )
-
-    # ── Enable global visual cursor (patches Mouse + Element) ───
-    # Keep this independent from action registration so a single broken tool
-    # does not silently remove the visible cursor from the whole run.
-    try:
-        from ghosthands.visuals.patch import enable_visual_cursor
-
-        enable_visual_cursor()
-    except Exception as exc:
-        logger.warning("visual_cursor.enable_failed", extra={"error": str(exc)})
+    _enable_visual_cursor_best_effort()
 
     # ── domhand_fill: The core workhorse ──────────────────────
     # Extracts ALL visible form fields, generates answers via a single cheap
     # Haiku LLM call, and fills everything via Playwright DOM manipulation.
     # Handles ~80% of form filling at near-zero cost.
-    _register_action(
+    _register_action_best_effort(
+        tools,
         description=(
             "Fill all visible form fields at once using fast DOM manipulation. "
             "Extracts fields, generates answers from user profile via a single LLM call, "
@@ -93,7 +148,8 @@ def register_domhand_actions(tools: "Tools") -> None:
         func=domhand_fill,
     )
 
-    _register_action(
+    _register_action_best_effort(
+        tools,
         description=(
             "Assess the current application state before scrolling, advancing, or stopping. "
             "Classifies the page into advanceable/review/confirmation/presubmit_single_page, "
@@ -104,7 +160,8 @@ def register_domhand_actions(tools: "Tools") -> None:
         func=domhand_assess_state,
     )
 
-    _register_action(
+    _register_action_best_effort(
+        tools,
         description=(
             "Close a blocking popup, modal, or interstitial before continuing with the form. "
             'Use this for newsletter prompts, cookie-like overlays, "Not ready to apply" '
@@ -118,7 +175,8 @@ def register_domhand_actions(tools: "Tools") -> None:
     # ── domhand_select: Complex dropdown handler ──────────────
     # For dropdowns that domhand_fill cannot handle: custom widgets,
     # Workday portals with hierarchical dropdowns, combobox patterns.
-    _register_action(
+    _register_action_best_effort(
+        tools,
         description=(
             "Select a dropdown option using platform-aware discovery. "
             "Use this for complex custom dropdowns (Workday, combobox widgets) "
@@ -129,7 +187,8 @@ def register_domhand_actions(tools: "Tools") -> None:
         func=domhand_select,
     )
 
-    _register_action(
+    _register_action_best_effort(
+        tools,
         description=(
             "Interact with one exact non-text control by field label and desired value. "
             "Use this for stubborn radios, checkboxes, toggles, button groups, and selects "
@@ -141,7 +200,8 @@ def register_domhand_actions(tools: "Tools") -> None:
         func=domhand_interact_control,
     )
 
-    _register_action(
+    _register_action_best_effort(
+        tools,
         description=(
             "Record the expected visible value for one field after a raw manual recovery action. "
             "Use this immediately after a fallback click/input/select that changed a specific field, "
@@ -153,7 +213,8 @@ def register_domhand_actions(tools: "Tools") -> None:
 
     # ── domhand_upload: File upload ───────────────────────────
     # Handles resume and cover letter uploads via file input elements.
-    _register_action(
+    _register_action_best_effort(
+        tools,
         description=(
             "Upload a file (resume or cover letter) to a file input element. "
             "Automatically detects the file type from the input label, resolves "
@@ -166,7 +227,8 @@ def register_domhand_actions(tools: "Tools") -> None:
     # ── domhand_check_agreement: Auth page checkbox handler ───
     # Robust JS-based agreement checkbox checker that works on auth pages
     # where domhand_fill is intentionally skipped.
-    _register_action(
+    _register_action_best_effort(
+        tools,
         description=(
             "Check agreement/consent checkboxes on the current page. "
             "Uses robust JavaScript to handle native inputs, ARIA role=checkbox, "
@@ -181,7 +243,8 @@ def register_domhand_actions(tools: "Tools") -> None:
     # ── domhand_click_button: Multi-strategy button fallback ───
     # Diagnostic/fallback helper for button-like controls that need
     # extra candidate selection or submission heuristics.
-    _register_action(
+    _register_action_best_effort(
+        tools,
         description=(
             "Try multiple strategies to activate a button-like control and report "
             "what changed. Use this as a fallback when the normal click action "
@@ -195,7 +258,8 @@ def register_domhand_actions(tools: "Tools") -> None:
     # ── domhand_expand: Repeater expansion ────────────────────
     # Clicks "Add More" buttons to expand repeater sections like
     # Work Experience, Education, References.
-    _register_action(
+    _register_action_best_effort(
+        tools,
         description=(
             'Click "Add More" / "Add Another" buttons to expand repeater sections '
             "(e.g., Work Experience, Education). Finds the section, clicks the add "
@@ -214,5 +278,6 @@ def register_domhand_actions(tools: "Tools") -> None:
 
 
 __all__ = [
+    "register_domhand_auth_actions",
     "register_domhand_actions",
 ]

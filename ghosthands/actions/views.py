@@ -23,6 +23,10 @@ class FormField(BaseModel):
     is_multi_select: bool = Field(default=False, description="Whether multiple selections are allowed")
     visible: bool = Field(default=True, description="Whether the field is currently visible")
     raw_label: str | None = Field(default=None, description="Original label text before cleanup")
+    question_text: str | None = Field(
+        default=None,
+        description="Recovered semantic prompt/question text for grouped or weak-label controls",
+    )
     synthetic_label: bool = Field(default=False, description="True if label was generated synthetically")
     field_fingerprint: str | None = Field(default=None, description="Stable fingerprint for identity tracking")
     current_value: str = Field(default="", description="Current value in the field")
@@ -238,6 +242,26 @@ class ApplicationState(BaseModel):
     platform_hint: str | None = None
 
 
+class RecoveryTarget(BaseModel):
+    """Typed recovery target for one unresolved field."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    field_id: str
+    field_key: str
+    field_fingerprint: str | None = None
+    field_type: str
+    widget_kind: str | None = None
+    field_label: str = ""
+    question_text: str | None = None
+    section: str = ""
+    options: list[str] = Field(default_factory=list)
+    desired_value: str | None = None
+    allowed_action_family: str = ""
+    verification_mode: str = ""
+    attempted_strategies: list[str] = Field(default_factory=list)
+
+
 class DomHandAssessStateParams(BaseModel):
     """Assess current application state for scrolling, advancement, or stop decisions."""
 
@@ -311,6 +335,11 @@ def normalize_name(s: str) -> str:
     return re.sub(r"\s+", " ", s.replace("*", "").replace("_", " ")).strip().lower()
 
 
+def get_field_question_text(field: FormField) -> str:
+    """Return the best semantic question text for a field."""
+    return (field.question_text or field.raw_label or field.name or "").strip()
+
+
 def split_dropdown_value_hierarchy(value: str) -> list[str]:
     """Split hierarchical dropdown labels such as "Category > Option" into ordered segments."""
     raw = re.sub(r"\s+", " ", (value or "").strip())
@@ -371,7 +400,7 @@ def get_stable_field_key(field: FormField) -> str:
         [
             normalize_name(field.field_type),
             normalize_name(field.section),
-            normalize_name(field.name or field.raw_label or ""),
+            normalize_name(field.question_text or field.name or field.raw_label or ""),
         ]
     )
     if semantic_key.replace("|", "").strip():

@@ -11,7 +11,6 @@ from urllib.parse import urlparse
 from pydantic import AfterValidator, AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from browser_use.browser.cloud.views import CloudBrowserParams
-from browser_use.browser.stealth.config import StealthConfig
 from browser_use.config import CONFIG
 from browser_use.utils import _log_pretty_path, logger
 
@@ -23,11 +22,6 @@ def _get_enable_default_extensions_default() -> bool:
 		# If DISABLE_EXTENSIONS is truthy, return False (extensions disabled)
 		return env_val.lower() in ('0', 'false', 'no', 'off', '')
 	return True
-
-
-def _stealth_config_factory() -> StealthConfig:
-	"""Factory for the StealthConfig default."""
-	return StealthConfig()
 
 
 CHROME_DEBUG_PORT = 9242  # use a non-default port to avoid conflicts with other tools / devs using 9222
@@ -583,10 +577,6 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 
 	# custom options we provide that aren't native playwright kwargs
 	disable_security: bool = Field(default=False, description='Disable browser security features.')
-	engine: Literal['chromium', 'firefox', 'auto'] = Field(
-		default='chromium',
-		description="Browser engine to use. 'chromium' (default), 'firefox' for Camoufox, 'auto' for route-based selection.",
-	)
 	deterministic_rendering: bool = Field(default=False, description='Enable deterministic rendering flags.')
 	allowed_domains: list[str] | set[str] | None = Field(
 		default=None,
@@ -615,18 +605,6 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 	captcha_solver: bool = Field(
 		default=True,
 		description='Enable the captcha solver watchdog that listens for captcha events from the browser proxy. Automatically pauses agent steps while a CAPTCHA is being solved. Only active when the browser emits BrowserUse CDP events (e.g. Browser Use cloud browsers). Harmless when disabled or when events are not emitted.',
-	)
-	stealth: StealthConfig = Field(
-		default_factory=_stealth_config_factory,
-		description='Anti-detection stealth layer configuration. When enabled, injects JS patches to hide automation fingerprints (webdriver flag, plugins, WebGL, etc.).',
-	)
-	aboutblank_loading_logo_enabled: bool = Field(
-		default=True,
-		description='Show the Hand-X logo in the about:blank loading overlay.',
-	)
-	aboutblank_loading_min_display_seconds: float = Field(
-		default=2.0,
-		description='Minimum time to keep the Hand-X about:blank loading overlay visible before navigating away.',
 	)
 	demo_mode: bool = Field(
 		default=False,
@@ -678,7 +656,7 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 	)
 	paint_order_filtering: bool = Field(default=True, description='Enable paint order filtering. Slightly experimental.')
 	interaction_highlight_color: str = Field(
-		default='rgb(37, 99, 235)',
+		default='rgb(255, 127, 39)',
 		description='Color to use for highlighting elements during interactions (CSS color string).',
 	)
 	interaction_highlight_duration: float = Field(default=1.0, description='Duration in seconds to show interaction highlights.')

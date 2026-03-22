@@ -1,6 +1,7 @@
 """Tests for action loop detection — behavioral cycle breaking (PR #4)."""
 
 from browser_use.agent.service import Agent
+from browser_use.agent.service import _build_blocker_guard_action_result
 from browser_use.agent.service import _blocker_guard_decision
 from browser_use.agent.views import (
     ActionLoopDetector,
@@ -462,6 +463,201 @@ def test_blocker_guard_rejects_same_strategy_after_no_state_change():
 
     assert decision is not None
     assert decision["reason"] == "same_strategy_no_state_change"
+
+
+def test_blocker_guard_rejects_manual_click_before_domhand_binary_recovery():
+    decision = _blocker_guard_decision(
+        {
+            "blocking_field_keys": ["radio-group|ff-38"],
+            "blocking_field_labels": ["Are you authorized to work in the US?"],
+            "blocking_field_state_changes": {"radio-group|ff-38": "new"},
+            "single_active_blocker": {
+                "field_key": "radio-group|ff-38",
+                "field_id": "ff-38",
+                "field_label": "Are you authorized to work in the US?",
+                "field_type": "radio-group",
+                "reason": "required_missing_value",
+            },
+        },
+        [{"action": "click", "params": {"index": 412}}],
+        {},
+    )
+
+    assert decision is not None
+    assert decision["reason"] == "manual_recovery_before_domhand"
+
+
+def test_blocker_guard_allows_manual_click_recovery_after_domhand_binary_attempt():
+    decision = _blocker_guard_decision(
+        {
+            "blocking_field_keys": ["radio-group|ff-38"],
+            "blocking_field_labels": ["Are you authorized to work in the US?"],
+            "blocking_field_state_changes": {"radio-group|ff-38": "no_state_change"},
+            "single_active_blocker": {
+                "field_key": "radio-group|ff-38",
+                "field_id": "ff-38",
+                "field_label": "Are you authorized to work in the US?",
+                "field_type": "radio-group",
+                "reason": "required_missing_value",
+            },
+        },
+        [{"action": "click", "params": {"index": 412}}],
+        {
+            "radio-group|ff-38": {
+                "last_attempt_strategy": "domhand_interact_control",
+                "attempted_strategies": ["domhand_interact_control"],
+                "recommended_next_action": "switch to browser-use/manual recovery for this blocker",
+            }
+        },
+    )
+
+    assert decision is None
+
+
+def test_blocker_guard_rejects_multi_action_manual_batch_for_single_blocker():
+    decision = _blocker_guard_decision(
+        {
+            "blocking_field_keys": ["select|ff-15"],
+            "blocking_field_labels": ["Country*"],
+            "blocking_field_state_changes": {"select|ff-15": "no_state_change"},
+            "single_active_blocker": {
+                "field_key": "select|ff-15",
+                "field_id": "ff-15",
+                "field_label": "Country*",
+                "field_type": "select",
+                "reason": "required_missing_value",
+            },
+            "recovery_target": {
+                "field_id": "ff-15",
+                "field_label": "Country*",
+                "question_text": "Country*",
+            },
+        },
+        [
+            {"action": "input", "params": {"index": 15, "text": "United States"}},
+            {"action": "input", "params": {"index": 17, "text": "(424)-320-1960"}},
+            {"action": "wait", "params": {"seconds": 2}},
+        ],
+        {
+            "select|ff-15": {
+                "last_attempt_strategy": "domhand_select",
+                "attempted_strategies": ["domhand_select"],
+                "recommended_next_action": "switch to browser-use/manual recovery for this blocker",
+            }
+        },
+    )
+
+    assert decision is not None
+    assert decision["reason"] == "multi_action_single_blocker"
+
+
+def test_blocker_guard_steps_aside_after_recovery_ladder_exhausted():
+    """When multiple strategies have been tried with no state change, the guard
+    steps aside (returns None) so the agent can try freely."""
+    decision = _blocker_guard_decision(
+        {
+            "page_context_key": "ctx-1",
+            "page_url": "https://example.com/apply",
+            "same_blocker_signature_count": 2,
+            "blocking_field_keys": ["radio-group|ff-38"],
+            "blocking_field_labels": ["Are you authorized to work in the US?"],
+            "blocking_field_state_changes": {"radio-group|ff-38": "no_state_change"},
+            "single_active_blocker": {
+                "field_key": "radio-group|ff-38",
+                "field_id": "ff-38",
+                "field_label": "Are you authorized to work in the US?",
+                "field_type": "radio-group",
+                "reason": "required_missing_value",
+            },
+        },
+        [{"action": "domhand_assess_state", "params": {}}],
+        {
+            "radio-group|ff-38": {
+                "last_attempt_strategy": "manual_click",
+                "attempted_strategies": ["domhand_interact_control", "manual_click"],
+                "recommended_next_action": "request manual review",
+            }
+        },
+    )
+
+    assert decision is None
+
+
+def test_blocker_guard_action_result_is_a_soft_nudge_not_a_failure():
+    result = _build_blocker_guard_action_result(
+        {
+            "reason": "same_strategy_no_state_change",
+            "strategy": "domhand_interact_control",
+            "blocker": {"field_id": "ff-38"},
+            "recovery_target": {"field_id": "ff-38", "question_text": "Are you authorized to work in the US?"},
+            "actions": [{"action": "domhand_interact_control", "params": {"field_id": "ff-38"}}],
+            "message": "The blocker has not changed since the last assessment.",
+            "recommended_next_action": "switch to browser-use/manual recovery for this blocker",
+        }
+    )
+
+    assert result.error is None
+    assert result.include_extracted_content_only_once is True
+    assert result.metadata["blocker_guard"] is True
+    assert result.metadata["recovery_target"]["field_id"] == "ff-38"
+    assert "browser-use/manual recovery" in (result.extracted_content or "")
+
+
+def test_blocker_guard_uses_question_text_when_field_label_is_blank():
+    decision = _blocker_guard_decision(
+        {
+            "blocking_field_keys": ["radio-group|ff-38"],
+            "blocking_field_labels": ["Are you authorized to work in the US?"],
+            "blocking_field_state_changes": {"radio-group|ff-38": "new"},
+            "single_active_blocker": {
+                "field_key": "radio-group|ff-38",
+                "field_id": "ff-38",
+                "field_label": "",
+                "question_text": "Are you authorized to work in the US?",
+                "field_type": "radio-group",
+                "reason": "required_missing_value",
+            },
+            "recovery_target": {
+                "field_id": "ff-38",
+                "question_text": "Are you authorized to work in the US?",
+                "allowed_action_family": "binary",
+            },
+        },
+        [{"action": "domhand_select", "params": {"index": 3070, "value": "LinkedIn"}}],
+        {},
+    )
+
+    assert decision is not None
+    assert decision["reason"] == "unrelated_action_with_single_blocker"
+    assert decision["recovery_target"]["field_id"] == "ff-38"
+
+
+def test_blocker_guard_rejects_multi_action_manual_recovery_batches():
+    decision = _blocker_guard_decision(
+        {
+            "blocking_field_keys": ["select|ff-15", "text|ff-17"],
+            "blocking_field_labels": ["Country*", "Phone"],
+            "blocking_field_state_changes": {
+                "select|ff-15": "new",
+                "text|ff-17": "new",
+            },
+            "recovery_target": {
+                "field_id": "ff-15",
+                "field_label": "Country*",
+                "question_text": "Country*",
+                "allowed_action_family": "select",
+            },
+        },
+        [
+            {"action": "input", "params": {"index": 15, "text": "United States", "clear": True}},
+            {"action": "input", "params": {"index": 17, "text": "(424)-320-1960", "clear": True}},
+            {"action": "wait", "params": {"seconds": 2}},
+        ],
+        {},
+    )
+
+    assert decision is not None
+    assert decision["reason"] == "manual_multi_action_with_active_blockers"
 
 
 async def test_no_loop_nudge_when_disabled():

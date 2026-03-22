@@ -9,8 +9,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from browser_use.browser.events import AgentFocusChangedEvent
 from browser_use.browser.profile import BrowserProfile
-from browser_use.browser.session import BrowserSession
+from browser_use.browser.session import BrowserSession, Target
+
+
+class _FakeDispatchResult:
+	"""Awaitable stand-in for a bubbled event."""
+
+	def __await__(self):
+		return iter([])
+
+	async def event_result(self, *args, **kwargs):
+		return None
 
 
 def test_browser_profile_headers_attribute():
@@ -83,6 +94,65 @@ async def test_cdp_client_headers_passed_on_connect():
 			assert call_kwargs[0][0] == 'wss://remote-browser.example.com/cdp', 'CDP URL should be first arg'
 			assert call_kwargs[1].get('additional_headers') == test_headers, 'Headers should be passed as additional_headers'
 			assert call_kwargs[1].get('max_ws_frame_size') == 200 * 1024 * 1024, 'max_ws_frame_size should be set'
+
+
+@pytest.mark.asyncio
+async def test_connect_prefers_assigned_target_for_initial_focus():
+	"""Tab-confined sessions must attach to the Desktop-assigned target first."""
+	assigned = 'assigned-target-1234567890'
+	other = 'other-target-0987654321'
+	assigned_target = Target(target_id=assigned, target_type='page', url='https://assigned.example.com', title='Assigned')
+	other_target = Target(target_id=other, target_type='page', url='https://other.example.com', title='Other')
+
+	session = BrowserSession(cdp_url='wss://remote-browser.example.com/cdp', assigned_target_id=assigned)
+	session.event_bus.dispatch = MagicMock(side_effect=lambda _evt: _FakeDispatchResult())
+	session._setup_proxy_auth = AsyncMock()
+	session._attach_ws_drop_callback = MagicMock()
+
+	async def _fake_get_or_create_cdp_session(target_id: str, focus: bool = False):
+		if focus:
+			session.agent_focus_target_id = target_id
+		mock_session = MagicMock()
+		mock_session.session_id = f'session-{target_id}'
+		return mock_session
+
+	object.__setattr__(
+		session,
+		'get_or_create_cdp_session',
+		AsyncMock(side_effect=_fake_get_or_create_cdp_session),
+	)
+
+	with patch('browser_use.browser.session.CDPClient') as mock_cdp_client_class:
+		mock_cdp_client = AsyncMock()
+		mock_cdp_client_class.return_value = mock_cdp_client
+		mock_cdp_client.start = AsyncMock()
+		mock_cdp_client.stop = AsyncMock()
+		mock_cdp_client.send = MagicMock()
+		mock_cdp_client.send.Target = MagicMock()
+		mock_cdp_client.send.Target.setAutoAttach = AsyncMock()
+
+		with patch('browser_use.browser.session_manager.SessionManager') as mock_session_manager_class:
+			mock_session_manager = MagicMock()
+			mock_session_manager_class.return_value = mock_session_manager
+			mock_session_manager.start_monitoring = AsyncMock()
+			mock_session_manager.get_all_page_targets = MagicMock(return_value=[other_target, assigned_target])
+			mock_session_manager.get_target = MagicMock(
+				side_effect=lambda target_id: {
+					assigned: assigned_target,
+					other: other_target,
+				}.get(target_id)
+			)
+
+			await session.connect()
+
+			session.get_or_create_cdp_session.assert_awaited_with(assigned, focus=True)
+			focus_events = [
+				call.args[0]
+				for call in session.event_bus.dispatch.call_args_list
+				if isinstance(call.args[0], AgentFocusChangedEvent)
+			]
+			assert focus_events, 'expected an initial focus event to be dispatched'
+			assert focus_events[-1].target_id == assigned
 
 
 @pytest.mark.asyncio

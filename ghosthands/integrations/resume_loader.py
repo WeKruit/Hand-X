@@ -123,13 +123,19 @@ def load_resume_from_file(path: str) -> dict[str, Any]:
     """
     data = json.loads(Path(path).read_text(encoding="utf-8"))
 
-    # If the file contains VALET-format parsed_data, normalize it
-    if "fullName" in data or "workHistory" in data or "education" in data:
-        return _map_to_profile(data)
-
     # If it looks like it wraps parsed_data
     if "parsed_data" in data:
         return _map_to_profile(data["parsed_data"])
+
+    # Already-normalized profiles are used by local CLI and regression tests.
+    # Do not remap them back through the VALET parser just because they contain
+    # keys like "education".
+    if _looks_like_normalized_profile(data):
+        return data
+
+    # If the file contains VALET-format parsed_data, normalize it.
+    if _looks_like_valet_parsed_resume(data):
+        return _map_to_profile(data)
 
     # Assume it's already a normalized profile
     return data
@@ -329,3 +335,71 @@ def _parse_location(
         }
 
     return {**default_address, "city": location}
+
+
+def _looks_like_normalized_profile(data: dict[str, Any]) -> bool:
+    """Return True when a JSON blob already matches the flattened profile schema."""
+    normalized_markers = {
+        "first_name",
+        "last_name",
+        "full_name",
+        "preferred_name",
+        "phone_device_type",
+        "phone_country_code",
+        "current_company",
+        "current_title",
+        "linkedin_url",
+        "website_url",
+        "work_authorization",
+        "visa_sponsorship",
+        "race_ethnicity",
+        "veteran_status",
+        "disability_status",
+        "total_years_experience",
+    }
+    if any(marker in data for marker in normalized_markers):
+        return True
+
+    address = data.get("address")
+    if isinstance(address, dict) and any(key in address for key in ("street", "city", "state", "zip", "country")):
+        return True
+
+    experience = data.get("experience")
+    if isinstance(experience, list):
+        for entry in experience:
+            if isinstance(entry, dict) and any(
+                key in entry for key in ("start_date", "end_date", "currently_work_here")
+            ):
+                return True
+
+    education = data.get("education")
+    if isinstance(education, list):
+        for entry in education:
+            if isinstance(entry, dict) and any(
+                key in entry for key in ("start_date", "end_date", "currently_enrolled", "field_of_study")
+            ):
+                return True
+
+    return False
+
+
+def _looks_like_valet_parsed_resume(data: dict[str, Any]) -> bool:
+    """Return True when a JSON blob matches VALET's parsed resume schema."""
+    parsed_markers = {
+        "fullName",
+        "workHistory",
+        "websites",
+        "location",
+    }
+    if any(marker in data for marker in parsed_markers):
+        return True
+
+    education = data.get("education")
+    if isinstance(education, list):
+        for entry in education:
+            if isinstance(entry, dict) and any(
+                key in entry for key in ("degreeType", "fieldOfStudy", "graduationDate", "expectedGraduation")
+            ):
+                return True
+
+    return False

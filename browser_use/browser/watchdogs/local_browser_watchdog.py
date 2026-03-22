@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
-import subprocess as stdlib_subprocess
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -144,37 +143,11 @@ class LocalBrowserWatchdog(BaseWatchdog):
 				self.logger.debug(
 					f'[LocalBrowserWatchdog] 📂 user_data_dir={profile.user_data_dir}, profile_directory={profile.profile_directory}'
 				)
-				launch_kwargs: dict[str, Any] = {}
-				if profile.keep_alive:
-					# Keep-alive browsers should survive the Hand-X subprocess exiting so the
-					# desktop app can reconnect later through the CDP endpoint.
-					launch_kwargs.update(
-						{
-							'stdin': stdlib_subprocess.DEVNULL,
-							'stdout': stdlib_subprocess.DEVNULL,
-							'stderr': stdlib_subprocess.DEVNULL,
-						}
-					)
-					if os.name == 'nt':
-						creationflags = (
-							getattr(stdlib_subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
-							| getattr(stdlib_subprocess, 'DETACHED_PROCESS', 0)
-						)
-						if creationflags:
-							launch_kwargs['creationflags'] = creationflags
-					else:
-						launch_kwargs['start_new_session'] = True
-				else:
-					launch_kwargs.update(
-						{
-							'stdout': asyncio.subprocess.PIPE,
-							'stderr': asyncio.subprocess.PIPE,
-						}
-					)
 				subprocess = await asyncio.create_subprocess_exec(
 					browser_path,
 					*launch_args,
-					**launch_kwargs,
+					stdout=asyncio.subprocess.PIPE,
+					stderr=asyncio.subprocess.PIPE,
 				)
 				self.logger.debug(
 					f'[LocalBrowserWatchdog] 🎭 Browser running with browser_pid= {subprocess.pid} 🔗 listening on CDP port :{debug_port}'

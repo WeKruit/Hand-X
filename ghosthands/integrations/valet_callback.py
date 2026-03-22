@@ -140,6 +140,7 @@ class ValetClient:
 			"job_id": job_id,
 			"valet_task_id": valet_task_id,
 			"status": status,
+			"success": success,
 			"completed_at": datetime.now(timezone.utc).isoformat(),
 		}
 
@@ -152,6 +153,9 @@ class ValetClient:
 		else:
 			payload["error_code"] = result.get("error_code", "job_failed")
 			payload["error_message"] = result.get("error", str(result))
+			# Include result_data even on failure so VALET preserves
+			# field-fill metadata for partial completions.
+			payload["result_data"] = result
 
 		if cost:
 			payload["cost"] = cost

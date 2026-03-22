@@ -59,3 +59,42 @@ def test_load_resume_from_file_preserves_structured_education_fields(tmp_path):
     assert education["major"] == "Computer Science, Mathematics"
     assert education["minor"] == "Statistics, Philosophy"
     assert education["honors"] == "Phi Beta Kappa, Summa Cum Laude"
+
+
+def test_load_resume_from_file_preserves_already_normalized_profile(tmp_path):
+    from ghosthands.integrations.resume_loader import load_resume_from_file
+
+    payload = {
+        "first_name": "Ruiyang",
+        "last_name": "Chen",
+        "full_name": "Ruiyang Chen",
+        "email": "rc5663@nyu.edu",
+        "phone": "6466789391",
+        "address": {
+            "street": "",
+            "city": "New York",
+            "state": "NY",
+            "zip": "10003",
+            "country": "United States",
+        },
+        "education": [
+            {
+                "school": "New York University",
+                "degree": "Bachelor of Science",
+                "field_of_study": "Mathematics and Computer Science",
+                "start_date": "2024-09",
+                "end_date": "2027-05",
+            }
+        ],
+    }
+    path = tmp_path / "normalized-profile.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    profile = load_resume_from_file(str(path))
+
+    assert profile["first_name"] == "Ruiyang"
+    assert profile["last_name"] == "Chen"
+    assert profile["full_name"] == "Ruiyang Chen"
+    assert profile["address"]["city"] == "New York"
+    assert profile["address"]["state"] == "NY"
+    assert profile["address"]["zip"] == "10003"

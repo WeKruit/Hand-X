@@ -45,13 +45,14 @@ ghosthands/                 # GhostHands v2 application code
     settings.py             # Pydantic BaseSettings (all GH_ env vars)
     models.py               # LLM model catalog + cost estimation
   agent/                    # browser-use agent loop orchestration
+  browser/                  # Hand-X adapter layer over vendored browser_use
   actions/                  # @tools.action definitions for browser-use
   dom/                      # DomHand: DOM-first form filling logic
   platforms/                # ATS-specific guardrails (Workday, Greenhouse, Lever)
   worker/                   # Job polling, execution, lifecycle
   integrations/             # VALET API callbacks, external clients
   security/                 # Credential encryption, domain allowlisting
-browser_use/                # Upstream browser-use library (vendored/forked)
+browser_use/                # Upstream browser-use library, kept vendored-clean
 tests/
   unit/                     # Fast tests, no browser/DB
   integration/              # Tests with browser/DB fixtures
@@ -130,7 +131,18 @@ ruff format .
 - **browser-use `@tools.action` pattern** — custom actions registered on the agent's tool controller
 - **Cost tracking** — every LLM call tracked against per-job budget via `config/models.py`
 - **Security first** — credentials always encrypted at rest, domain allowlisting enforced before navigation
-- **browser-use in-tree** — the `browser_use/` directory is the upstream library, vendored for direct patching
+- **browser-use vendored clean** — keep `browser_use/` aligned with `upstream/stable`; Hand-X runtime behavior belongs in `ghosthands/agent/handx_agent.py`, `ghosthands/browser/`, and `ghosthands/browser/watchdogs/`
+
+## Vendor Boundary
+
+- `browser_use/` is vendored upstream code, not the place for Hand-X policy.
+- If Hand-X needs custom agent behavior, browser/session behavior, tool behavior, or watchdog behavior, implement it in the GhostHands adapter layer:
+  - `ghosthands.agent.handx_agent`
+  - `ghosthands.browser.HandXBrowserProfile`
+  - `ghosthands.browser.HandXBrowserSession`
+  - `ghosthands.browser.HandXTools`
+  - `ghosthands.browser.watchdogs.handx_*`
+- Upstream sync rule: prefer restoring or fetching vendor files rather than patching them. New Hand-X behavior should be appended via wrappers/subclasses, not by modifying vendored `browser_use` files.
 
 ## Git
 

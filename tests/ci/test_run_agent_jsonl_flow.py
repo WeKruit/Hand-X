@@ -39,11 +39,13 @@ _INSTALLED_STUBS: dict[str, types.ModuleType | None] = {}
 _m_emit_status = MagicMock()
 _m_emit_phase = MagicMock()
 _m_emit_cost = MagicMock()
+_m_emit_account_created = MagicMock()
 _m_emit_browser_ready = MagicMock()
 _m_emit_error = MagicMock()
 _m_emit_done = MagicMock()
 _m_emit_awaiting_review = MagicMock()
 _m_cleanup_browser = AsyncMock()
+_m_browser_profile = MagicMock()
 
 
 def _install_stub(name: str, mod: types.ModuleType) -> None:
@@ -65,9 +67,9 @@ def _restore_stubs() -> None:
 
 def _reset_mocks() -> None:
     """Reset all module-level mocks."""
-    for m in [_m_emit_status, _m_emit_phase, _m_emit_cost,
+    for m in [_m_emit_status, _m_emit_phase, _m_emit_cost, _m_emit_account_created,
               _m_emit_browser_ready, _m_emit_error, _m_emit_done,
-              _m_emit_awaiting_review, _m_cleanup_browser]:
+              _m_emit_awaiting_review, _m_cleanup_browser, _m_browser_profile]:
         m.reset_mock()
 
 
@@ -92,7 +94,7 @@ def _stub_all():
 
     bu = sys.modules["browser_use"]
     bu.Agent = MagicMock
-    bu.BrowserProfile = MagicMock
+    bu.BrowserProfile = _m_browser_profile
     bu.BrowserSession = MagicMock
     bu.Tools = MagicMock
 
@@ -120,6 +122,16 @@ def _stub_all():
     ga_factory = types.ModuleType("ghosthands.agent.factory")
     _install_stub("ghosthands.agent.factory", ga_factory)
 
+    ga_handx = types.ModuleType("ghosthands.agent.handx_agent")
+    ga_handx.HandXAgent = MagicMock
+    _install_stub("ghosthands.agent.handx_agent", ga_handx)
+
+    gb = types.ModuleType("ghosthands.browser")
+    gb.HandXBrowserProfile = _m_browser_profile
+    gb.HandXBrowserSession = MagicMock
+    gb.HandXTools = MagicMock
+    _install_stub("ghosthands.browser", gb)
+
     ga_hooks = types.ModuleType("ghosthands.agent.hooks")
     ga_hooks.install_same_tab_guard = AsyncMock()
     ga_hooks.infer_phase_from_goal = MagicMock(return_value=None)
@@ -141,6 +153,7 @@ def _stub_all():
     go_jsonl.emit_status = _m_emit_status
     go_jsonl.emit_phase = _m_emit_phase
     go_jsonl.emit_cost = _m_emit_cost
+    go_jsonl.emit_account_created = _m_emit_account_created
     go_jsonl.emit_browser_ready = _m_emit_browser_ready
     go_jsonl.emit_error = _m_emit_error
     go_jsonl.emit_done = _m_emit_done
@@ -150,6 +163,7 @@ def _stub_all():
     go_fe = types.ModuleType("ghosthands.output.field_events")
     go_fe.install_jsonl_callback = MagicMock()
     go_fe.get_field_counts = MagicMock(return_value=(10, 2))
+    go_fe.get_filled_field_records = MagicMock(return_value=[])
     _install_stub("ghosthands.output.field_events", go_fe)
     go.field_events = go_fe
 
@@ -172,9 +186,18 @@ def _stub_all():
     # ---- ghosthands.security.domain_lockdown ----
     _install_stub("ghosthands.security", types.ModuleType("ghosthands.security"))
     gsdl = types.ModuleType("ghosthands.security.domain_lockdown")
-    mock_lockdown = MagicMock()
-    mock_lockdown.get_allowed_domains.return_value = ["greenhouse.io"]
-    gsdl.create_lockdown_for_platform = MagicMock(return_value=mock_lockdown)
+    class _MockDomainLockdown:
+        def __init__(self, job_url: str, platform: str):
+            self.job_url = job_url
+            self.platform = platform
+
+        def freeze(self) -> None:
+            return None
+
+        def get_allowed_domains(self) -> list[str]:
+            return ["greenhouse.io"]
+
+    gsdl.DomainLockdown = _MockDomainLockdown
     _install_stub("ghosthands.security.domain_lockdown", gsdl)
 
 
@@ -239,7 +262,7 @@ def _make_mock_browser(*, cdp_url="ws://127.0.0.1:9222/devtools/browser/abc"):
 
 
 @contextlib.contextmanager
-def _apply_stubs_and_patches(mock_browser, mock_agent, extra_patches=None):
+def _apply_stubs_and_patches(mock_browser, mock_agent, extra_patches=None, settings_overrides=None):
     """Install stub modules and apply patches for a single test.
 
     Stubs are installed into sys.modules for the duration of the test,
@@ -252,6 +275,11 @@ def _apply_stubs_and_patches(mock_browser, mock_agent, extra_patches=None):
     mock_settings.job_id = ""
     mock_settings.lease_id = ""
     mock_settings.llm_proxy_url = None
+    mock_settings.enable_domhand = False
+    mock_settings.agent_max_actions_per_step = 1
+    if settings_overrides:
+        for key, value in settings_overrides.items():
+            setattr(mock_settings, key, value)
 
     patches = [
         patch("ghosthands.cli._load_profile", return_value={"name": "Test User", "email": "test@example.com"}),
@@ -261,10 +289,10 @@ def _apply_stubs_and_patches(mock_browser, mock_agent, extra_patches=None):
         patch("ghosthands.cli._resolve_sensitive_data", return_value=None),
         patch("ghosthands.cli._classify_runtime_error", return_value=None),
         patch("ghosthands.cli._cleanup_browser", _m_cleanup_browser),
-        patch("browser_use.Agent", return_value=mock_agent),
-        patch("browser_use.BrowserSession", return_value=mock_browser),
-        patch("browser_use.BrowserProfile", MagicMock()),
-        patch("browser_use.Tools", return_value=MagicMock()),
+        patch("ghosthands.agent.handx_agent.HandXAgent", return_value=mock_agent),
+        patch("ghosthands.browser.HandXBrowserSession", return_value=mock_browser),
+        patch("ghosthands.browser.HandXBrowserProfile", _m_browser_profile),
+        patch("ghosthands.browser.HandXTools", return_value=MagicMock()),
     ]
     if extra_patches:
         patches.extend(extra_patches)
@@ -312,8 +340,80 @@ class TestRunAgentJsonlFlow:
         with _apply_stubs_and_patches(mock_browser, mock_agent, extra):
             await run_agent_jsonl(_make_args())
 
+        assert _m_browser_profile.call_args is not None
+        assert _m_browser_profile.call_args.kwargs["aboutblank_loading_logo_enabled"] is True
+        assert "aboutblank_loading_min_display_seconds" not in _m_browser_profile.call_args.kwargs
         _m_emit_awaiting_review.assert_called_once()
         assert call_order.index("awaiting_review") < call_order.index("wait_for_review")
+
+    async def test_no_domhand_jsonl_uses_single_action_steps(self):
+        """No-DomHand JSONL runs should force one action per step."""
+        mock_history = _make_mock_history(is_done=True, final_result="Application submitted")
+        mock_browser = _make_mock_browser()
+
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(return_value=mock_history)
+        mock_agent.state = MagicMock(n_steps=5, last_model_output=None, stopped=False)
+        agent_ctor = MagicMock(return_value=mock_agent)
+
+        extra = [
+            patch("ghosthands.agent.handx_agent.HandXAgent", agent_ctor),
+            patch("ghosthands.cli.wait_for_review_command", AsyncMock(return_value="complete")),
+            patch("ghosthands.cli._handle_review_result", return_value=None),
+        ]
+
+        with _apply_stubs_and_patches(mock_browser, mock_agent, extra):
+            await run_agent_jsonl(_make_args())
+
+        agent_call = agent_ctor.call_args
+        assert agent_call is not None
+        assert agent_call.kwargs["max_actions_per_step"] == 1
+
+    async def test_domhand_jsonl_uses_configured_action_step_cap(self):
+        """DomHand-enabled JSONL runs should respect the configured action cap."""
+        mock_history = _make_mock_history(is_done=True, final_result="Application submitted")
+        mock_browser = _make_mock_browser()
+
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(return_value=mock_history)
+        mock_agent.state = MagicMock(n_steps=5, last_model_output=None, stopped=False)
+        agent_ctor = MagicMock(return_value=mock_agent)
+
+        extra = [
+            patch("ghosthands.agent.handx_agent.HandXAgent", agent_ctor),
+            patch("ghosthands.cli.wait_for_review_command", AsyncMock(return_value="complete")),
+            patch("ghosthands.cli._handle_review_result", return_value=None),
+        ]
+
+        with _apply_stubs_and_patches(
+            mock_browser,
+            mock_agent,
+            extra,
+            settings_overrides={"enable_domhand": True, "agent_max_actions_per_step": 1},
+        ):
+            await run_agent_jsonl(_make_args())
+
+        agent_call = agent_ctor.call_args
+        assert agent_call is not None
+        assert agent_call.kwargs["max_actions_per_step"] == 1
+
+    async def test_desktop_owned_browser_keeps_branded_loading_overlay(self):
+        """Desktop-owned CDP sessions should still show the branded loading shell briefly."""
+        mock_history = _make_mock_history(is_done=False, final_result=None)
+        mock_browser = _make_mock_browser(cdp_url="ws://127.0.0.1:9222/devtools/browser/desktop")
+
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(return_value=mock_history)
+        mock_agent.state = MagicMock(n_steps=1, last_model_output=None, stopped=False)
+
+        with _apply_stubs_and_patches(mock_browser, mock_agent), \
+             pytest.raises(SystemExit):
+            await run_agent_jsonl(_make_args(cdp_url="ws://127.0.0.1:9222/devtools/browser/desktop"))
+
+        assert _m_browser_profile.call_args is not None
+        assert _m_browser_profile.call_args.kwargs["keep_alive"] is True
+        assert _m_browser_profile.call_args.kwargs["aboutblank_loading_logo_enabled"] is True
+        assert _m_browser_profile.call_args.kwargs["aboutblank_loading_min_display_seconds"] == 0.75
 
     # ------------------------------------------------------------------
     # Scenario 2: Failure path
@@ -336,6 +436,37 @@ class TestRunAgentJsonlFlow:
         _m_emit_done.assert_called_once()
         _, kwargs = _m_emit_done.call_args
         assert kwargs["success"] is False
+        _m_cleanup_browser.assert_called_once()
+
+    async def test_unresolved_blocker_emits_failure_not_review(self):
+        """When blocker state remains active, emit done(success=False) — blockers are internal,
+        not user-facing review triggers."""
+        mock_history = _make_mock_history(is_done=False, final_result=None)
+        mock_browser = _make_mock_browser()
+        mock_browser._gh_last_application_state = {
+            "blocking_field_keys": ["radio-group|ff-38"],
+            "single_active_blocker": {
+                "field_key": "radio-group|ff-38",
+                "field_id": "ff-38",
+                "field_label": "Are you authorized to work in the US?",
+                "field_type": "radio-group",
+                "reason": "required_missing_value",
+            },
+        }
+
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(return_value=mock_history)
+        mock_agent.state = MagicMock(n_steps=10, last_model_output=None, stopped=False)
+
+        with _apply_stubs_and_patches(mock_browser, mock_agent), \
+             pytest.raises(SystemExit) as exc_info:
+            await run_agent_jsonl(_make_args())
+
+        assert exc_info.value.code == 1
+        _m_emit_done.assert_called_once()
+        _, kwargs = _m_emit_done.call_args
+        assert kwargs["success"] is False
+        _m_emit_awaiting_review.assert_not_called()
         _m_cleanup_browser.assert_called_once()
 
     # ------------------------------------------------------------------
@@ -416,14 +547,14 @@ class TestRunAgentJsonlFlow:
         with _apply_stubs_and_patches(mock_browser, mock_agent, extra):
             await run_agent_jsonl(_make_args())
 
-        _m_cleanup_browser.assert_called()
+        _m_cleanup_browser.assert_not_called()
 
     # ------------------------------------------------------------------
     # Scenario 6: Blocker in final_result
     # ------------------------------------------------------------------
 
-    async def test_blocker_in_result_marks_failure(self):
-        """When final_result contains 'blocker:', success=False."""
+    async def test_blocker_in_result_marks_failure_outside_desktop_review_mode(self):
+        """When final_result contains 'blocker:' outside desktop review mode, emit_done(success=False)."""
         mock_history = _make_mock_history(
             is_done=True,
             final_result="Blocker: CAPTCHA detected, cannot proceed",
@@ -436,7 +567,7 @@ class TestRunAgentJsonlFlow:
 
         with _apply_stubs_and_patches(mock_browser, mock_agent), \
              pytest.raises(SystemExit) as exc_info:
-            await run_agent_jsonl(_make_args())
+            await run_agent_jsonl(_make_args(output_format="text"))
 
         assert exc_info.value.code == 1
         _m_emit_done.assert_called_once()

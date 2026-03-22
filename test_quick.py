@@ -34,7 +34,7 @@ load_dotenv(ROOT / ".env")
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_imports():
-	"""Verify all 32 modules import."""
+	"""Verify all 31 modules import."""
 	failures = []
 	modules = [
 		"ghosthands.config.settings",
@@ -67,7 +67,6 @@ def test_imports():
 		"ghosthands.security.blocker_detector",
 		"ghosthands.security.domain_lockdown",
 		"ghosthands.worker.cost_tracker",
-		"ghosthands.worker.hitl",
 		"ghosthands.worker.executor",
 	]
 	for mod in modules:

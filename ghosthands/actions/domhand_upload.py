@@ -195,6 +195,20 @@ def _resolve_file_path(file_type: str) -> str | None:
 	return None
 
 
+def _file_path_env_diagnostics() -> dict[str, bool]:
+	return {
+		"resume_path_present": bool(os.environ.get("GH_RESUME_PATH", "").strip()),
+		"resume_path_exists": bool(os.environ.get("GH_RESUME_PATH", "").strip())
+		and Path(os.environ["GH_RESUME_PATH"]).is_file(),
+		"cover_letter_path_present": bool(os.environ.get("GH_COVER_LETTER_PATH", "").strip()),
+		"cover_letter_path_exists": bool(os.environ.get("GH_COVER_LETTER_PATH", "").strip())
+		and Path(os.environ["GH_COVER_LETTER_PATH"]).is_file(),
+		"generic_file_path_present": bool(os.environ.get("GH_FILE_PATH", "").strip()),
+		"generic_file_path_exists": bool(os.environ.get("GH_FILE_PATH", "").strip())
+		and Path(os.environ["GH_FILE_PATH"]).is_file(),
+	}
+
+
 # ── Core action function ─────────────────────────────────────────────
 
 async def domhand_upload(params: DomHandUploadParams, browser_session: BrowserSession) -> ActionResult:
@@ -261,6 +275,17 @@ async def domhand_upload(params: DomHandUploadParams, browser_session: BrowserSe
 	# ── Step 4: Resolve the file path ─────────────────────────
 	file_path = _resolve_file_path(effective_type)
 	if not file_path:
+		logger.warning(
+			"domhand.upload_missing_file_path",
+			extra={
+				"index": params.index,
+				"requested_type": params.file_type,
+				"detected_type": detected_type,
+				"effective_type": effective_type,
+				"label": label[:200],
+				**_file_path_env_diagnostics(),
+			},
+		)
 		return ActionResult(
 			error=f'No {effective_type} file path configured. '
 			f'Set GH_RESUME_PATH or GH_COVER_LETTER_PATH environment variable.',

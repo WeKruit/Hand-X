@@ -62,6 +62,10 @@ def get_anthropic_client() -> Any:
 def get_chat_model(model: str | None = None) -> Any:
 	"""Get a browser-use chat model for the agent loop.
 
+	Hand-X currently standardizes on Gemini for normal agent operation.
+	The direct OpenAI branch remains available for compatibility, but is not the
+	recommended/default runtime path.
+
 	When proxy is configured:
 	  - Gemini models → ``ChatGoogle`` with ``http_options.baseUrl`` pointed at VALET's
 	    ``/gemini`` passthrough route.  The SDK appends ``/v1beta/models/{model}:generateContent``
@@ -110,7 +114,7 @@ def get_chat_model(model: str | None = None) -> Any:
 			base_url=anthropic_proxy_url,
 		)
 
-	# Direct mode -- pick provider based on model name
+	# Direct mode -- default to Gemini; provider-specific branches remain for compatibility
 	if model.startswith("gpt-") or _is_openai_o_model(model):
 		from browser_use.llm.openai.chat import ChatOpenAI
 

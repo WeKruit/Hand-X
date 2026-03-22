@@ -10,6 +10,15 @@ source .venv/bin/activate
 uv sync
 ```
 
+- Treat `browser_use/` as a vendored upstream tree. Keep it clean against `upstream/stable` so upstream syncs stay mechanical and low-risk.
+- Hand-X-specific runtime policy must live in `ghosthands/` adapters, not in `browser_use/`. Current boundary:
+  - `ghosthands.agent.handx_agent`
+  - `ghosthands.browser.HandXBrowserProfile`
+  - `ghosthands.browser.HandXBrowserSession`
+  - `ghosthands.browser.HandXTools`
+  - `ghosthands.browser.watchdogs.handx_*`
+- If behavior needs to change for Hand-X, append it through the adapter layer or a new GhostHands wrapper/subclass. Do not reintroduce `ghosthands` logic into vendored `browser_use` files.
+
 - Do not replace model names. Users try new models which you will not know about yet.
 
 - Type-safe coding: Use Pydantic v2 models for all internal action schemas, task inputs/outputs, and tools I/O. This ensures robust validation and LLM-call integrity.

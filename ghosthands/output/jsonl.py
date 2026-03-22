@@ -64,6 +64,11 @@ _emit_lock = threading.Lock()
 _pipe_broken = False
 
 
+def is_jsonl_streaming_enabled() -> bool:
+    """Return whether JSONL streaming is active for the current process."""
+    return _jsonl_out is not None
+
+
 def emit_event(event_type: str, **kwargs: Any) -> None:
     """Emit a single JSONL event.
 
@@ -137,6 +142,8 @@ def emit_field_filled(
     required: bool | None = None,
     section_label: str | None = None,
     state: str | None = None,
+    binding_confidence: str | None = None,
+    best_effort_guess: bool | None = None,
 ) -> None:
     """Emit after a form field is successfully filled."""
     emit_event(
@@ -152,6 +159,8 @@ def emit_field_filled(
         required=required,
         section_label=section_label,
         state=state,
+        binding_confidence=binding_confidence,
+        best_effort_guess=best_effort_guess,
     )
 
 
@@ -228,9 +237,9 @@ def emit_cost(
     )
 
 
-def emit_browser_ready(cdp_url: str) -> None:
+def emit_browser_ready(cdp_url: str, target_id: str | None = None) -> None:
     """Emit browser_ready event with CDP WebSocket URL."""
-    emit_event("browser_ready", cdpUrl=cdp_url)
+    emit_event("browser_ready", cdpUrl=cdp_url, targetId=target_id)
 
 
 def emit_account_created(
@@ -271,9 +280,10 @@ def emit_awaiting_review(
     ),
     cdp_url: str | None = None,
     page_url: str | None = None,
+    target_id: str | None = None,
 ) -> None:
     """Emit awaiting_review event when browser is open for user review."""
-    emit_event("awaiting_review", message=message, cdpUrl=cdp_url, pageUrl=page_url)
+    emit_event("awaiting_review", message=message, cdpUrl=cdp_url, pageUrl=page_url, targetId=target_id)
 
 
 # ── Protocol handshake ───────────────────────────────────────────────

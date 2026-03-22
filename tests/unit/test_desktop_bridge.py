@@ -1441,6 +1441,36 @@ class TestCredentialExtraction:
         result = _resolve_sensitive_data(settings, embedded_credentials={})
         assert result == {"email": "env@test.com", "password": "envPass"}
 
+    def test_local_workday_cli_defaults_explicit_credentials_to_create_account(self):
+        """Local Workday CLI runs should activate create-account-first when provenance is blank."""
+        from ghosthands.cli import _resolve_effective_credential_provenance
+
+        settings = self._make_settings(email="env@test.com", password="envPass")
+        settings.credential_source = ""
+        settings.credential_intent = ""
+
+        result = _resolve_effective_credential_provenance(
+            settings,
+            {"email": "env@test.com", "password": "envPass"},
+            platform="workday",
+        )
+        assert result == ("user", "create_account")
+
+    def test_explicit_credential_provenance_is_not_overridden(self):
+        """Explicit credential intent must beat the local Workday default."""
+        from ghosthands.cli import _resolve_effective_credential_provenance
+
+        settings = self._make_settings(email="env@test.com", password="envPass")
+        settings.credential_source = "user"
+        settings.credential_intent = "existing_account"
+
+        result = _resolve_effective_credential_provenance(
+            settings,
+            {"email": "env@test.com", "password": "envPass"},
+            platform="workday",
+        )
+        assert result == ("user", "existing_account")
+
 
 # ---------------------------------------------------------------------------
 # Test 11 — Stdout guard mechanics
@@ -2051,6 +2081,8 @@ class TestGoalPhaseMapping:
             ("Fill work experience history section", "Filling work experience"),
             ("Complete personal information and contact info", "Filling personal information"),
             ("Answer additional questions about authorization", "Answering additional questions"),
+            ("Fill the remaining form fields using domhand_fill", "Filling application form"),
+            ("Assess the current state and resolve the next blocker", "Reviewing blockers"),
             ("Review the form and prepare to submit", "Preparing to submit"),
             ("Navigate to the application form", "Navigating to application"),
             ("Click the next button", None),
