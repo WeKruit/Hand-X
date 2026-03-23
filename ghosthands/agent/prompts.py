@@ -84,7 +84,9 @@ PLATFORM_HINTS: dict[str, str] = {
         "'Apply with Resume', prefer that path."
     ),
     "greenhouse": (
-        "Detected platform: Greenhouse. Expect a single-page application flow with resume upload near the top."
+        "Detected platform: Greenhouse. Expect a same-site start state first on some boards "
+        "('Apply for this job' and/or resume upload near the top), followed by a single-page "
+        "application form once the apply flow is revealed."
     ),
     "lever": ("Detected platform: Lever. Expect a single long page with all fields visible. Scrolling may be needed."),
     "smartrecruiters": (
@@ -613,6 +615,16 @@ def build_system_prompt(
         "- After any typed date input, blur or Tab away so Workday",
         "  re-validates the field before moving on.",
         "",
+        "READBACK VS ASSESS (custom dropdowns / react-select):",
+        "- domhand_assess_state uses DOM readback; custom selects often LOOK filled while",
+        "  readback stays empty (especially Greenhouse). Do not treat a long list of",
+        "  unresolved custom selects with empty current_value and NO visible_errors as",
+        "  proof the prefill failed — after domhand_fill + resume upload, prefer ONE",
+        "  reassess or generic input/click/select_dropdown on the specific visible gap.",
+        "- After TWO failed DomHand retries on the SAME field label, stop calling",
+        "  domhand_fill / domhand_select / domhand_interact_control for it; use standard",
+        "  browser-use tools instead.",
+        "",
         "SEARCH / AUTOCOMPLETE RESILIENCE:",
         "- For ANY searchable field (country, city, location, job title,",
         "  school, company, etc.), if the first search term does not",
@@ -874,6 +886,7 @@ def build_task_prompt(
     sensitive_data: dict | None,
     credential_source: str = "",
     credential_intent: str = "",
+    platform: str = "generic",
 ) -> str:
     """Build the task prompt for the agent."""
     task = (

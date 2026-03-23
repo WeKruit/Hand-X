@@ -293,9 +293,8 @@ def log_response(response: AgentOutput, registry=None, logger=None) -> None:
 			# No color for unknown/neutral
 			logger.info(f'  {emoji} Eval: {eval_goal}')
 
-	# Always log memory if present
 	if response.current_state.memory:
-		logger.info(f'  🧠 Memory: {_truncate_log_text(response.current_state.memory)}')
+		logger.debug(f'  🧠 Memory: {_truncate_log_text(response.current_state.memory)}')
 
 	# Only log next goal if it's not empty
 	next_goal = response.current_state.next_goal
@@ -807,7 +806,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			if (browser_session := getattr(self, 'browser_session', None)) and browser_session.agent_focus_target_id
 			else '--'
 		)
-		return logging.getLogger(f'browser_use.Agent🅰 {_task_id} ⇢ 🅑 {_browser_session_id} 🅣 {_current_target_id}')
+		return logging.getLogger(f'browser_use.Agent.{_task_id}')
 
 	@property
 	def browser_profile(self) -> BrowserProfile:

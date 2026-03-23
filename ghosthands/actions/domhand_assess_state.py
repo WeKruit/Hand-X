@@ -87,7 +87,6 @@ _STRICT_VERIFICATION_HINTS = (
     "password",
     "address",
     "city",
-    "state",
     "postal code",
     "zip",
     "phone",
@@ -101,6 +100,25 @@ _STRICT_VERIFICATION_HINTS = (
     "authorized to work",
     "legally permitted to work",
 )
+
+_STRICT_VERIFICATION_WORD_BOUNDARY_HINTS = (
+    "state",
+)
+
+
+def _label_has_strict_hint(label: str) -> bool:
+    """Check if a normalized label contains a strict verification hint.
+
+    Plain substring match for multi-word hints; word-boundary regex for
+    single-word hints that are ambiguous (e.g. 'state' should match
+    'state/province' but not 'please state your expectations').
+    """
+    if any(token in label for token in _STRICT_VERIFICATION_HINTS):
+        return True
+    for token in _STRICT_VERIFICATION_WORD_BOUNDARY_HINTS:
+        if re.search(rf"(?<!\w){re.escape(token)}(?!\w)", label):
+            return True
+    return False
 
 _COMPANION_BOOLEAN_FIELD_TYPES = {
     "checkbox",
@@ -118,7 +136,7 @@ def _field_uses_semantic_verification(field: FormField) -> bool:
     label = normalize_name(field.raw_label or _preferred_field_label(field) or "")
     if not label:
         return False
-    if any(token in label for token in _STRICT_VERIFICATION_HINTS):
+    if _label_has_strict_hint(label):
         return False
     return field.field_type == "textarea" or any(token in label for token in _SEMANTIC_VERIFICATION_HINTS)
 
@@ -588,6 +606,55 @@ def _field_is_empty(field: FormField) -> bool:
     return _is_effectively_unset_field_value(field.current_value)
 
 
+def _maybe_suppress_custom_select_readback_false_positives(
+    unresolved_required: list[ApplicationFieldIssue],
+    fields: list[FormField],
+    *,
+    page_host: str,
+    page_context_key: str,
+) -> list[ApplicationFieldIssue]:
+    """Remove custom-select \"empty\" blockers when DomHand recorded an expected or intended value.
+
+    React-select / Greenhouse often shows a selected pill while DOM readback still returns empty,
+    which spams false ``required_missing_value`` issues after a successful ``domhand_fill`` prefill
+    and steers the agent into useless DomHand retry loops. If we have a non-empty recorded value for
+    that stable field key (settled or ``domhand_unverified`` from a successful fill), treat the
+    blocker as readback noise and drop it.
+    """
+    if not unresolved_required:
+        return unresolved_required
+    field_by_id = {f.field_id: f for f in fields}
+    kept: list[ApplicationFieldIssue] = []
+    dropped = 0
+    for issue in unresolved_required:
+        field = field_by_id.get(issue.field_id)
+        if (
+            issue.reason == "required_missing_value"
+            and issue.field_type == "select"
+            and field is not None
+            and not field.is_native
+            and not (issue.visible_error or "").strip()
+            and not (issue.current_value or "").strip()
+        ):
+            fk = get_stable_field_key(field)
+            expected = get_expected_field_value(
+                host=page_host,
+                page_context_key=page_context_key,
+                field_key=fk,
+            )
+            ev = str(getattr(expected, "expected_value", None) or "").strip()
+            if expected is not None and ev:
+                dropped += 1
+                continue
+        kept.append(issue)
+    if dropped:
+        logger.info(
+            "domhand.assess_state.suppressed_readback_false_positives",
+            extra={"dropped": dropped, "host": page_host},
+        )
+    return kept
+
+
 def _widget_kind_for_field(field: FormField, browser_context: dict[str, Any] | None = None) -> str:
     if field.widget_kind:
         return field.widget_kind
@@ -702,11 +769,14 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         "domhand.assess_state.extracted "
         f"target_section={params.target_section or ''!r} "
         f"field_count={len(fields)} "
-        f"required_field_count={sum(1 for field in fields if field.required)} "
+        f"required_field_count={sum(1 for field in fields if field.required)}"
+    )
+    logger.debug(
+        "domhand.assess_state.extracted.snapshot "
         f"snapshot={json.dumps(_field_log_snapshot(fields, params.target_section), ensure_ascii=True)}"
     )
     if _assess_debug_enabled():
-        logger.info(
+        logger.debug(
             "domhand.assess_state.fields",
             extra={
                 "target_section": params.target_section,
@@ -864,12 +934,19 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         else:
             unresolved_optional.append(issue)
 
+    page_context_key = await _get_page_context_key(page, fields=fields, fallback_marker=params.target_section)
+    unresolved_required = _maybe_suppress_custom_select_readback_false_positives(
+        unresolved_required,
+        fields,
+        page_host=page_host,
+        page_context_key=page_context_key,
+    )
+
     verification_failures: tuple[list[ApplicationFieldIssue], list[ApplicationFieldIssue], list[ApplicationFieldIssue]] = (
         [],
         [],
         [],
     )
-    page_context_key = await _get_page_context_key(page, fields=fields, fallback_marker=params.target_section)
     verification_companion_duplicate_ids = _companion_duplicate_field_ids(fields)
     verification_scoped_fields = [
         field
@@ -1145,6 +1222,49 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         if previous_signature == blocker_signature and previous_state.get("page_context_key") == page_context_key
         else 0
     )
+
+    _STALE_MISMATCH_THRESHOLD = 3
+    only_soft_blockers = (
+        not unresolved_required
+        and not visible_errors
+        and not optional_validation_blockers
+    )
+    if (
+        same_blocker_signature_count >= _STALE_MISMATCH_THRESHOLD
+        and only_soft_blockers
+        and (mismatched_fields or opaque_fields or unverified_fields)
+    ):
+        stale_ids = [f.field_id for f in mismatched_fields + opaque_fields + unverified_fields]
+        logger.warning(
+            "domhand.assess_state.stale_blocker_override",
+            extra={
+                "same_blocker_signature_count": same_blocker_signature_count,
+                "cleared_field_ids": stale_ids,
+                "reason": "Blockers unchanged for multiple assessments; likely false positives. Allowing advancement.",
+            },
+        )
+        application_state = ApplicationState(
+            terminal_state=application_state.terminal_state,
+            current_section=application_state.current_section,
+            unresolved_required_fields=application_state.unresolved_required_fields,
+            unresolved_optional_fields=application_state.unresolved_optional_fields,
+            mismatched_fields=[],
+            opaque_fields=[],
+            unverified_fields=[],
+            visible_errors=application_state.visible_errors,
+            scroll_bias=application_state.scroll_bias,
+            submit_visible=application_state.submit_visible,
+            submit_disabled=application_state.submit_disabled,
+            advance_visible=application_state.advance_visible,
+            advance_disabled=application_state.advance_disabled,
+            advance_allowed=True,
+            platform_hint=application_state.platform_hint,
+        )
+        active_blocker_issues = []
+        blocker_states = {}
+        blocker_state_changes = {}
+        blocker_signature = "{}"
+
     setattr(
         browser_session,
         "_gh_last_application_state",
@@ -1240,7 +1360,10 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         f"mismatched_count={len(application_state.mismatched_fields)} "
         f"opaque_count={len(application_state.opaque_fields)} "
         f"unverified_count={len(application_state.unverified_fields)} "
-        f"same_blocker_signature_count={same_blocker_signature_count} "
+        f"same_blocker_signature_count={same_blocker_signature_count}"
+    )
+    logger.debug(
+        "domhand.assess_state.summary.details "
         f"unresolved_required_fields={json.dumps([{'field_id': issue.field_id, 'label': issue.name, 'field_type': issue.field_type, 'section': issue.section, 'reason': issue.reason, 'current_value': issue.current_value, 'visible_error': issue.visible_error, 'widget_kind': issue.widget_kind} for issue in application_state.unresolved_required_fields[:10]], ensure_ascii=True)} "
         f"optional_validation_fields={json.dumps([{'field_id': issue.field_id, 'label': issue.name, 'field_type': issue.field_type, 'section': issue.section, 'reason': issue.reason, 'current_value': issue.current_value, 'visible_error': issue.visible_error} for issue in optional_validation_blockers[:10]], ensure_ascii=True)} "
         f"visible_errors={json.dumps(application_state.visible_errors[:8], ensure_ascii=True)} "
@@ -1300,7 +1423,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
     summary_lines.append(application_state.model_dump_json())
     summary = "\n".join(summary_lines)
 
-    logger.info(summary)
+    logger.debug(summary)
     return ActionResult(
         extracted_content=summary,
         include_extracted_content_only_once=False,

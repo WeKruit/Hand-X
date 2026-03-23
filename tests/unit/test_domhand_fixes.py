@@ -145,6 +145,41 @@ def test_sanitize_normal_values_unchanged():
     assert result == "Jane"
 
 
+def test_sanitize_preserves_no_on_dlh_question_with_social_scientific_in_label():
+    """'Social Scientific Solutions' must not false-trigger social-handle stripping."""
+    from ghosthands.actions.domhand_fill import _sanitize_no_guess_answer
+
+    label = (
+        "Do you have any relatives that work for DLH or any of its subsidiaries "
+        "(Danya/IBA/Social Scientific Solutions, GRSi)?*"
+    )
+    result = _sanitize_no_guess_answer(
+        label,
+        True,
+        "No",
+        {},
+        field_type="select",
+        question_text=label,
+    )
+    assert result == "No"
+
+
+def test_sanitize_binary_select_survives_true_social_media_question_match():
+    """When the label genuinely matches the social regex, Yes/No screening still passes through."""
+    from ghosthands.actions.domhand_fill import _sanitize_no_guess_answer
+
+    label = "Do you have a social media account we may review?"
+    result = _sanitize_no_guess_answer(
+        label,
+        True,
+        "No",
+        {},
+        field_type="select",
+        question_text=label,
+    )
+    assert result == "No"
+
+
 def test_sanitize_does_not_guess_optional_suffix():
     """Optional legal-name fragments should stay blank unless explicitly saved."""
     from ghosthands.actions.domhand_fill import _sanitize_no_guess_answer
@@ -535,6 +570,38 @@ def test_resolve_llm_answer_marks_best_effort_guess():
     assert resolved.source == "llm"
 
 
+def test_parse_llm_json_skips_prefix_and_repairs_invalid_escapes():
+    """Gemini sometimes emits prefix text and invalid \\-sequences inside strings."""
+    from ghosthands.actions.domhand_fill import _parse_llm_json_answer_object
+
+    raw = """Here is JSON:
+{"Field 1": "Line with WHOOP\\ s bad escape", "Field 2": "ok"}
+trailing junk"""
+    out = _parse_llm_json_answer_object(raw)
+    assert out["Field 2"] == "ok"
+    assert "WHOOP" in out["Field 1"]
+
+
+def test_resolve_llm_answer_via_batch_key_when_dom_labels_empty():
+    """Lever-style extractions may leave name/raw_label empty; batch keys must still map."""
+    from ghosthands.actions.domhand_fill import _resolve_llm_answer_via_batch_key
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="ff-2",
+        name="",
+        raw_label=None,
+        field_type="text",
+        required=True,
+        section="Full name",
+    )
+    answers = {"Field 1": "Ada Lovelace"}
+    resolved = _resolve_llm_answer_via_batch_key(field, "Field 1", answers)
+    assert resolved is not None
+    assert resolved.value == "Ada Lovelace"
+    assert resolved.source == "llm"
+
+
 def test_resolve_llm_answer_does_not_guess_skills():
     """Skill fields should use saved profile skills only, never LLM guesses."""
     from ghosthands.actions.domhand_fill import _resolve_llm_answer_for_field
@@ -662,6 +729,16 @@ def test_search_terms_for_us_country_code():
     assert "United States +1" in terms
     assert "United States" in terms
     assert "US" in terms
+
+
+def test_search_terms_phone_number_skips_mobile_synonym_cluster():
+    """Do not add Mobile/Cell search terms when filling a numeric phone (avoids wrong input)."""
+    from ghosthands.actions.views import generate_dropdown_search_terms
+
+    terms = generate_dropdown_search_terms("(424) 320-1960")
+    assert "(424) 320-1960" in terms
+    assert "Mobile" not in terms
+    assert "Cell" not in terms
 
 
 def test_search_terms_empty_input():
@@ -830,7 +907,34 @@ def test_build_task_prompt_requires_single_field_recovery():
     assert "single exact unresolved label" in prompt
     assert "Do NOT combine a referral/source widget with a radio button" in prompt
     assert "same exact field still fails after two DOM/manual attempts" in prompt
-    assert "After EACH targeted manual recovery action, first call domhand_record_expected_value" in prompt
+    assert "After EACH targeted manual recovery action, first make sure the field visibly shows the value" in prompt
+    assert "then call domhand_record_expected_value" in prompt
+
+
+def test_build_task_prompt_greenhouse_handles_start_state_before_form():
+    from ghosthands.agent.prompts import build_task_prompt
+
+    prompt = build_task_prompt(
+        "https://job-boards.greenhouse.io/acme/jobs/123",
+        "/tmp/resume.pdf",
+        None,
+        platform="greenhouse",
+    )
+
+    assert "same-site 'Apply' / 'Apply for this job' button" in prompt
+    assert "If a resume upload field is visible, upload the resume FIRST" in prompt
+    assert "If the main editable application fields are not yet visible" in prompt
+    assert "Do NOT click 'Autofill with MyGreenhouse'" in prompt
+    assert "Do NOT try to upload the resume before filling fields" not in prompt
+
+
+def test_build_system_prompt_greenhouse_mentions_start_state():
+    from ghosthands.agent.prompts import build_system_prompt
+
+    prompt = build_system_prompt({}, platform="greenhouse")
+
+    assert "same-site start state first" in prompt
+    assert "single-page application form once the apply flow is revealed" in prompt
 
 
 def test_default_screening_answer_defaults_employer_history_questions_to_no():
@@ -1142,6 +1246,84 @@ def test_scope_only_keeps_blank_section_fields_when_they_are_targeted_blockers()
     )
 
     assert [field.field_id for field in filtered] == ["name"]
+
+
+def test_coerce_answer_to_field_keeps_text_when_options_are_dom_noise():
+    """Lever-style extractions may attach bogus option lists to plain text inputs."""
+    from ghosthands.actions.domhand_fill import _coerce_answer_to_field
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="ff-2",
+        name="",
+        raw_label=None,
+        field_type="text",
+        required=True,
+        options=["Select one", "Loading…", ""],
+    )
+    assert _coerce_answer_to_field(field, "Ada Lovelace") == "Ada Lovelace"
+
+
+def test_coerce_tel_rejects_mobile_line_type_even_when_mobile_is_an_option():
+    """Greenhouse <tel> can inherit react-select option noise; never coerce the number field to Mobile."""
+    from ghosthands.actions.domhand_fill import _coerce_answer_to_field
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="ff-phone",
+        name="Phone*",
+        field_type="tel",
+        required=True,
+        options=["Mobile", "Home", "Work"],
+    )
+    assert _coerce_answer_to_field(field, "Mobile") is None
+    assert _coerce_answer_to_field(field, "(424) 320-1960") == "(424) 320-1960"
+
+
+def test_coerce_binary_select_passes_through_when_only_junk_option():
+    """Greenhouse React-select often lists the question as the sole extracted 'option'."""
+    from ghosthands.actions.domhand_fill import _coerce_answer_to_field
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="ff-39",
+        name="Do you have any relatives that work for DLH or any of its subsidiaries (Danya/IBA/Social Scientific Solutions, GRSi)?*",
+        field_type="select",
+        required=True,
+        options=[
+            "Do you have any relatives that work for DLH or any of its subsidiaries (Danya/IBA/Social Scientific Solutions, GRSi)?*",
+        ],
+    )
+    assert _coerce_answer_to_field(field, "No") == "No"
+
+
+def test_coerce_binary_select_does_not_bypass_multi_option_lists():
+    from ghosthands.actions.domhand_fill import _coerce_answer_to_field
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="ff-6",
+        name="Country*",
+        field_type="select",
+        required=True,
+        options=["United States", "Canada", "Mexico"],
+    )
+    assert _coerce_answer_to_field(field, "No") is None
+
+
+def test_coerce_binary_select_does_not_bypass_single_real_option():
+    """One visible option that is not label-echo/placeholder still uses semantic matching only."""
+    from ghosthands.actions.domhand_fill import _coerce_answer_to_field
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="ff-g",
+        name="Gender (optional)",
+        field_type="select",
+        required=False,
+        options=["Male"],
+    )
+    assert _coerce_answer_to_field(field, "No") is None
 
 
 def test_coerce_answer_to_field_maps_semantic_proficiency_tier():
@@ -4087,6 +4269,18 @@ async def test_domhand_select_no_options_returns_failover_without_unboundlocaler
     assert "cannot access local variable 'current'" not in result.error
 
 
+def test_meaningful_dropdown_options_filters_react_select_placeholders():
+    from ghosthands.actions.domhand_select import _meaningful_dropdown_options, _needs_dropdown_open_trigger
+
+    noise = [{"text": "No options", "value": "No options"}]
+    assert _meaningful_dropdown_options(noise) == []
+    assert _needs_dropdown_open_trigger(False, "aria_listbox", noise) is True
+
+    real = [{"text": "No", "value": "no"}, {"text": "Yes", "value": "yes"}]
+    assert len(_meaningful_dropdown_options(real)) == 2
+    assert _needs_dropdown_open_trigger(False, "aria_listbox", real) is False
+
+
 def test_resolve_known_profile_value_for_field_accepts_boolean_sponsorship_answer_for_custom_widget_select():
     from ghosthands.actions.domhand_fill import _resolve_known_profile_value_for_field
     from ghosthands.actions.views import FormField
@@ -4320,3 +4514,80 @@ async def test_dropdown_options_returns_custom_widget_failover_message_for_butto
     assert result.error is not None
     assert "button/custom widget" in result.error
     assert "Do not retry dropdown_options" in result.error
+
+
+def test_maybe_suppress_custom_select_readback_drops_when_domhand_unverified_recorded():
+    from ghosthands.actions.domhand_assess_state import _maybe_suppress_custom_select_readback_false_positives
+    from ghosthands.actions.views import ApplicationFieldIssue, FormField, get_stable_field_key
+    from ghosthands.runtime_learning import record_expected_field_value, reset_runtime_learning_state
+
+    reset_runtime_learning_state()
+    field = FormField(
+        field_id="ff-6",
+        name="Country*",
+        field_type="select",
+        section="Country*",
+        required=True,
+        is_native=False,
+        current_value="",
+    )
+    fk = get_stable_field_key(field)
+    record_expected_field_value(
+        host="job-boards.greenhouse.io",
+        page_context_key="pc",
+        field_key=fk,
+        field_label="Country*",
+        field_type="select",
+        field_section="",
+        field_fingerprint="",
+        expected_value="United States",
+        source="domhand_unverified",
+    )
+    issue = ApplicationFieldIssue(
+        field_id="ff-6",
+        name="Country*",
+        field_type="select",
+        reason="required_missing_value",
+        current_value="",
+        visible_error=None,
+    )
+    kept = _maybe_suppress_custom_select_readback_false_positives(
+        [issue],
+        [field],
+        page_host="job-boards.greenhouse.io",
+        page_context_key="pc",
+    )
+    assert kept == []
+
+
+def test_maybe_suppress_custom_select_readback_keeps_without_recorded_expectation():
+    from ghosthands.actions.domhand_assess_state import _maybe_suppress_custom_select_readback_false_positives
+    from ghosthands.actions.views import ApplicationFieldIssue, FormField
+    from ghosthands.runtime_learning import reset_runtime_learning_state
+
+    reset_runtime_learning_state()
+    field = FormField(
+        field_id="ff-6",
+        name="Country*",
+        field_type="select",
+        section="Country*",
+        required=True,
+        is_native=False,
+        current_value="",
+    )
+    issue = ApplicationFieldIssue(
+        field_id="ff-6",
+        name="Country*",
+        field_type="select",
+        reason="required_missing_value",
+        current_value="",
+        visible_error=None,
+    )
+    kept = _maybe_suppress_custom_select_readback_false_positives(
+        [issue],
+        [field],
+        page_host="job-boards.greenhouse.io",
+        page_context_key="pc",
+    )
+    assert len(kept) == 1
+    assert kept[0].field_id == "ff-6"

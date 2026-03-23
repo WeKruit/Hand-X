@@ -1444,6 +1444,10 @@ def test_dropdown_selection_match_requires_final_visible_value():
     assert not _selection_matches_value("Select One", "LinkedIn")
     assert not _selection_matches_value("05e15101582a10019dbe3ae8c5a80000", "Yes")
     assert not _selection_matches_value("What degree are you seeking? Select One", "Bachelor's Degree")
+    # "no" must not match as substring of "not" (EEO / veteran text vs Yes/No dropdown).
+    assert not _selection_matches_value("I am not a protected veteran", "No")
+    assert _selection_matches_value("No", "No")
+    assert _selection_matches_value("No, I decline to answer", "No")
 
 
 def test_fill_dropdown_confirmation_requires_final_visible_value():
