@@ -81,7 +81,11 @@ PLATFORM_HINTS: dict[str, str] = {
         "with data-automation-id selectors, segmented date fields (MM/DD/YYYY "
         "typed as continuous digits), and 'Select One' dropdown buttons. "
         "If a same-site start dialog offers 'Autofill with Resume' or "
-        "'Apply with Resume', prefer that path."
+        "'Apply with Resume', prefer that path. "
+        "After that step, Workday often shows Create Account as the primary button "
+        "and 'Sign In' as a secondary link — for NEW credentials do NOT click Sign In "
+        "first to 'reach' auth; scroll or wait if the page is still loading, then "
+        "choose Create Account when creating a new applicant login."
     ),
     "greenhouse": (
         "Detected platform: Greenhouse. Expect a same-site start state first on some boards "
