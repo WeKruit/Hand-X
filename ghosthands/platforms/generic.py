@@ -156,6 +156,8 @@ GENERIC_ALLOWED_DOMAINS: list[str] = [
 	"accounts.google.com",
 	# Common company career page patterns
 	"careers.google.com",
+	# Oracle Cloud (Fusion / HCM candidate experience) — e.g. higher.gs.com → *.oraclecloud.com
+	"oraclecloud.com",
 ]
 
 
