@@ -1482,7 +1482,17 @@ _FILL_FIELD_JS = r"""(ffId, value, fieldType) => {
 		} else {
 			el.value = value;
 		}
-		el.dispatchEvent(new Event('input', {bubbles: true}));
+		// TEXTAREA: many ATS UIs (Workday/React) listen for InputEvent; a plain Event('input') can
+		// leave controlled state empty while the native value still displays.
+		if (el.tagName === 'TEXTAREA') {
+			try {
+				el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertFromPaste', data: String(value) }));
+			} catch (e) {
+				el.dispatchEvent(new Event('input', {bubbles: true}));
+			}
+		} else {
+			el.dispatchEvent(new Event('input', {bubbles: true}));
+		}
 		el.dispatchEvent(new Event('change', {bubbles: true}));
 		el.dispatchEvent(new Event('blur', {bubbles: true}));
 		return JSON.stringify({success: true});
@@ -2921,7 +2931,10 @@ _SECTION_SCOPE_CHILDREN: dict[str, set[str]] = {
     "experience": {"education", "languages", "language", "skills", "certifications"},
     # Workday also nests address/phone/legal-name groups under the page-level
     # "My Information" step.
-    "information": {"address", "phone", "legal name", "name", "contact", "contact information"},
+    "information": {
+        "address", "phone", "legal name", "name", "contact", "contact information",
+        "how did you hear", "referral source", "source",
+    },
     # Workday keeps the terms acknowledgment under Voluntary Disclosures.
     "voluntary disclosures": {"terms and conditions", "terms conditions"},
 }
@@ -7841,8 +7854,13 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         resolved_values: dict[str, ResolvedFieldValue] = {}
         resolved_bindings: dict[str, ResolvedFieldBinding] = {}
         fillable_field_map = {field.field_id: field for field in fillable_fields}
+        # When focus_fields is set, the agent explicitly targets these fields
+        # (usually because of a validation error despite the field appearing filled).
+        # Do NOT skip them — the value may be in the DOM but not registered by the
+        # ATS framework (e.g. Workday React state).
+        _force_refill = bool(params.focus_fields)
         for f in fillable_fields:
-            if _field_has_effective_value(f):
+            if _field_has_effective_value(f) and not _force_refill:
                 fields_seen.add(get_stable_field_key(f))
                 continue
             auth_val = _known_auth_override_for_field(f, auth_overrides)
@@ -8813,10 +8831,25 @@ async def _fill_textarea_field(page: Any, field: FormField, value: str, tag: str
     if not value:
         logger.debug(f"skip {tag} (no value)")
         return False
+
+    # Workday (and similar) often wrap compensation in a controlled textarea: DOM .value can
+    # look set while validation still sees empty unless we run the same commit path as text
+    # fields (blur / dismiss-overlay) and/or real Playwright typing.
+    salary_like = _is_salary_like_field(field)
+    if salary_like:
+        try:
+            if await _fill_text_like_with_keyboard(page, field, value, tag):
+                logger.debug(f'fill {tag} = "{value[:80]}..." (keyboard-first compensation textarea)')
+                return True
+        except Exception:
+            pass
+
     try:
         result_json = await page.evaluate(_FILL_FIELD_JS, field.field_id, value, "textarea")
         result = json.loads(result_json) if isinstance(result_json, str) else result_json
-        if isinstance(result, dict) and result.get("success"):
+        if isinstance(result, dict) and result.get("success") and await _confirm_text_like_value(
+            page, field, value, tag
+        ):
             logger.debug(f'fill {tag} = "{value[:80]}{"..." if len(value) > 80 else ""}"')
             return True
     except Exception:
@@ -8824,11 +8857,22 @@ async def _fill_textarea_field(page: Any, field: FormField, value: str, tag: str
     try:
         result_json = await page.evaluate(_FILL_CONTENTEDITABLE_JS, field.field_id, value)
         result = json.loads(result_json) if isinstance(result_json, str) else result_json
-        if isinstance(result, dict) and result.get("success"):
+        if isinstance(result, dict) and result.get("success") and await _confirm_text_like_value(
+            page, field, value, tag
+        ):
             logger.debug(f'fill {tag} = "{value[:80]}..." (contenteditable)')
             return True
     except Exception:
         pass
+
+    if not salary_like:
+        try:
+            if await _fill_text_like_with_keyboard(page, field, value, tag):
+                logger.debug(f'fill {tag} = "{value[:80]}..." (keyboard fallback textarea)')
+                return True
+        except Exception:
+            pass
+
     logger.debug(f"skip {tag} (textarea not fillable)")
     return False
 

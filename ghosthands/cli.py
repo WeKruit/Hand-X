@@ -1562,42 +1562,15 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         total_steps = 0
         cancelled = False
         hitl_recovery_task = task
-        hitl_answers: dict[str, _RecoveredFieldAnswer] = {}
-        for _recovery_round in range(3):
-            history, cancelled = await _run_agent_once(hitl_recovery_task)
-            is_done = history.is_done()
-            final_result = history.final_result() or ""
-            total_cost += history.usage.total_cost if history.usage else 0.0
-            total_steps += len(history.history) if history.history else 0
-
-            if cancelled:
-                break
-
-            blocker_candidate = final_result if "blocker:" in final_result.lower() else ""
-            if not blocker_candidate or _looks_like_terminal_blocker(blocker_candidate):
-                break
-
-            browser_issues = await _collect_open_question_issues_from_browser(browser)
-            if not browser_issues and not _looks_like_answer_needed_blocker(blocker_candidate):
-                break
-
-            recovered_answers, cancelled_during_recovery = await _request_open_question_answers(
-                browser,
-                blocker_candidate,
-                timeout_seconds=float(os.getenv("GH_OPEN_QUESTION_TIMEOUT_SECONDS", "5400")),
-                issues=browser_issues,
-                profile=profile,
-            )
-            if cancelled_during_recovery:
-                cancelled = True
-                break
-            if not recovered_answers:
-                break
-
-            for answer in recovered_answers:
-                hitl_answers[answer.field_id] = answer
-            hitl_recovery_task = _build_recovery_task(task, list(hitl_answers.values()))
-            emit_status("Recovered additional answers — resuming application", job_id=job_id)
+        # Single run — never restart the agent from scratch. Restarting loses all
+        # form progress (the new agent navigates back to the job URL). If the agent
+        # dies from consecutive failures, accept the result rather than wasting a
+        # second full run on the same stuck field.
+        history, cancelled = await _run_agent_once(hitl_recovery_task)
+        is_done = history.is_done()
+        final_result = history.final_result() or ""
+        total_cost += history.usage.total_cost if history.usage else 0.0
+        total_steps += len(history.history) if history.history else 0
 
         # Final cost event
         if history and history.usage:

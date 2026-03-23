@@ -843,13 +843,16 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         markers=page_scan.get("markers") or [],
     )
 
+    # Workday: strict scope so we can detect a stale planner step and realign to the visible heading.
+    # Greenhouse/Lever/generic: same behavior as domhand_fill — if target_section is job-title noise,
+    # fall back to all visible fields (allow_all_visible_fallback) instead of empty scope.
     scoped_fields = _filter_fields_for_scope(
         fields,
         target_section=params.target_section,
-        allow_all_visible_fallback=False,
+        allow_all_visible_fallback=platform_hint != "workday",
     )
     target_section_not_live = bool(params.target_section and not scoped_fields and fields)
-    if target_section_not_live:
+    if target_section_not_live and platform_hint == "workday":
         visible_sections = [
             section
             for section in dict.fromkeys(
@@ -868,9 +871,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             },
         )
         # Stale planner target while the DOM shows another section: assess fields that match the
-        # visible page heading, plus blank-section fields (often belong to the active block).
-        # If nothing aligns (unrelated section-only fields), keep scoped empty — do not spam
-        # blockers from a different Workday step.
+        # visible page heading. If nothing aligns (unrelated section-only fields), keep scoped empty.
         heading_texts_early = [
             str(text).strip()
             for text in (page_scan.get("heading_texts") or [])
@@ -896,14 +897,9 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             return bool(h_tokens & s_tokens)
 
         if planner_on_different_workday_step:
-            # e.g. planner still on My Information while the page shows My Experience + Languages:
-            # do not project subsection blockers into the wrong step's assess scope.
             aligned = []
         else:
             aligned = [f for f in fields if _field_aligns_with_visible_heading(f, primary_heading)]
-            # One field on the page but extraction attached a long label / noise as "section": still
-            # belongs to the visible step. Skip when section is a real subsection (e.g. Languages)
-            # that does not match the visible heading — avoids pulling blockers from another step.
             if not aligned and len(fields) == 1 and primary_heading:
                 lone = fields[0]
                 if not _is_meaningful_section_label(lone.section, _preferred_field_label(lone)):
