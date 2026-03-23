@@ -23,6 +23,8 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
+from ghosthands.platforms.generic import GENERIC_ALLOWED_DOMAINS
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,6 +81,8 @@ PLATFORM_ALLOWLISTS: dict[str, list[str]] = {
 		"amazon.com",
 		"www.amazon.com",
 	],
+	# Matches cli.py / detect_platform fallback — same broad allowlist as GENERIC_CONFIG
+	"generic": list(GENERIC_ALLOWED_DOMAINS),
 }
 
 
