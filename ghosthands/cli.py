@@ -778,7 +778,16 @@ async def _collect_open_question_issues_from_browser(browser: Any) -> list[_Open
 
         result = await domhand_assess_state(DomHandAssessStateParams(), browser)
         summary = result.extracted_content or ""
-        payload = _extract_application_state_json(summary)
+        payload: dict[str, Any] = {}
+        meta = getattr(result, "metadata", None) or {}
+        raw_state = meta.get("application_state_json")
+        if isinstance(raw_state, str) and raw_state.strip():
+            with contextlib.suppress(json.JSONDecodeError, TypeError):
+                parsed = json.loads(raw_state)
+                if isinstance(parsed, dict):
+                    payload = parsed
+        if not payload:
+            payload = _extract_application_state_json(summary)
         issues = payload.get("unresolved_required_fields")
         if isinstance(issues, list):
             collected: list[_OpenQuestionIssue] = []

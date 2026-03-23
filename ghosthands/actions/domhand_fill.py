@@ -390,6 +390,26 @@ def _fill_result_summary_entry(result: FillFieldResult) -> dict[str, Any]:
     return entry
 
 
+# Agent-facing fill summary: keep tool output small for planner token cost.
+_AGENT_FILL_NAME_MAX_LEN = 100
+_AGENT_FILL_SECTION_MAX_LEN = 80
+_AGENT_FILL_MAX_FAILED_FIELDS = 35
+
+
+def _truncate_agent_fill_text(text: str | None, max_len: int) -> str:
+    t = " ".join(str(text or "").split()).strip()
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1] + "…"
+
+
+def _fill_result_summary_entry_for_agent(result: FillFieldResult) -> dict[str, Any]:
+    entry = _fill_result_summary_entry(result)
+    entry["name"] = _truncate_agent_fill_text(entry.get("name"), _AGENT_FILL_NAME_MAX_LEN)
+    entry["section"] = _truncate_agent_fill_text(entry.get("section"), _AGENT_FILL_SECTION_MAX_LEN)
+    return entry
+
+
 def _set_structured_repeater_binding(
     diagnostic: StructuredRepeaterDiagnostic | None,
     binding: ResolvedFieldBinding | None,
@@ -8421,7 +8441,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             ]
         )
 
-    structured_summary = {
+    _failed_all = [r for r in all_results if not r.success]
+    structured_summary_full = {
         "filled_count": filled_count,
         "dom_failure_count": failed_count,
         "skipped_count": skipped_count,
@@ -8451,10 +8472,52 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         "unresolved_required_fields": [
             _fill_result_summary_entry(r) for r in all_results if not r.success and r.required
         ],
-        "failed_fields": [_fill_result_summary_entry(r) for r in all_results if not r.success],
+        "failed_fields": [_fill_result_summary_entry(r) for r in _failed_all],
     }
+    logger.debug(
+        "domhand.fill.full_structured_summary %s",
+        json.dumps(structured_summary_full, ensure_ascii=True),
+    )
+
+    _agent_failed = [_fill_result_summary_entry_for_agent(r) for r in _failed_all][: _AGENT_FILL_MAX_FAILED_FIELDS]
+    structured_summary_agent = {
+        "filled_count": filled_count,
+        "dom_failure_count": failed_count,
+        "skipped_count": skipped_count,
+        "unfilled_count": unfilled_count,
+        "best_effort_guess_count": len(best_effort_results),
+        "best_effort_binding_count": len(best_effort_binding_results),
+        "best_effort_guess_fields": [
+            {
+                "field_id": r.field_id,
+                "prompt_text": _truncate_agent_fill_text(r.name, _AGENT_FILL_NAME_MAX_LEN),
+                "section_label": _truncate_agent_fill_text(r.section, _AGENT_FILL_SECTION_MAX_LEN) or None,
+                "required": r.required,
+            }
+            for r in best_effort_results[:25]
+        ],
+        "best_effort_binding_fields": [
+            {
+                "field_id": r.field_id,
+                "prompt_text": _truncate_agent_fill_text(r.name, _AGENT_FILL_NAME_MAX_LEN),
+                "section_label": _truncate_agent_fill_text(r.section, _AGENT_FILL_SECTION_MAX_LEN) or None,
+                "binding_mode": r.binding_mode,
+                "binding_confidence": r.binding_confidence,
+                "best_effort_guess": r.best_effort_guess,
+            }
+            for r in best_effort_binding_results[:25]
+        ],
+        "unresolved_required_fields": [
+            _fill_result_summary_entry_for_agent(r) for r in all_results if not r.success and r.required
+        ][:25],
+        "failed_fields": _agent_failed,
+        "failed_fields_total": len(_failed_all),
+    }
+    if len(_failed_all) > _AGENT_FILL_MAX_FAILED_FIELDS:
+        structured_summary_agent["failed_fields_truncated"] = len(_failed_all) - _AGENT_FILL_MAX_FAILED_FIELDS
+
     summary_lines.append("DOMHAND_FILL_JSON:")
-    summary_lines.append(json.dumps(structured_summary, ensure_ascii=True))
+    summary_lines.append(json.dumps(structured_summary_agent, ensure_ascii=True))
 
     summary = "\n".join(summary_lines)
     logger.info(summary)

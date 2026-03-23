@@ -1888,7 +1888,7 @@ async def test_assess_state_blocks_advance_when_expected_answer_is_mismatched():
             browser_session,
         )
 
-    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["advance_allowed"] is False
     assert len(payload["mismatched_fields"]) == 1
     assert payload["mismatched_fields"][0]["name"] == "Language"
@@ -1964,7 +1964,7 @@ async def test_assess_state_marks_opaque_select_values_as_unverified_gate():
             browser_session,
         )
 
-    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["advance_allowed"] is False
     assert len(payload["opaque_fields"]) == 1
     assert payload["opaque_fields"][0]["name"] == "Language"
@@ -2021,7 +2021,7 @@ async def test_assess_state_treats_no_response_text_as_required_missing_value():
             browser_session,
         )
 
-    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["advance_allowed"] is False
     assert len(payload["unresolved_required_fields"]) == 1
     assert payload["unresolved_required_fields"][0]["name"] == "Field of Study"
@@ -2077,7 +2077,7 @@ async def test_assess_state_does_not_fallback_to_unrelated_sections_when_target_
             browser_session,
         )
 
-    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["current_section"] == "My Experience"
     assert payload["unresolved_required_fields"] == []
 
@@ -2122,7 +2122,7 @@ async def test_assess_state_blocks_advance_when_advance_control_is_disabled():
             browser_session,
         )
 
-    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["advance_visible"] is True
     assert payload["advance_disabled"] is True
     assert payload["advance_allowed"] is False
@@ -2203,7 +2203,7 @@ async def test_assess_state_reports_grouped_date_mismatch_at_logical_date_field(
             browser_session,
         )
 
-    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["advance_allowed"] is False
     assert len(payload["mismatched_fields"]) == 1
     assert payload["mismatched_fields"][0]["name"] == "Date"
@@ -2258,7 +2258,7 @@ async def test_assess_state_includes_terms_child_section_under_voluntary_disclos
             browser_session,
         )
 
-    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["advance_allowed"] is False
     assert len(payload["unresolved_required_fields"]) == 1
     assert payload["unresolved_required_fields"][0]["section"] == "Terms and Conditions"
@@ -2361,7 +2361,7 @@ async def test_assess_state_blocks_advance_for_expected_mismatch_outside_target_
             browser_session,
         )
 
-    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["advance_allowed"] is False
     assert len(payload["mismatched_fields"]) == 1
     assert payload["mismatched_fields"][0]["name"] == "Language"
@@ -2435,7 +2435,7 @@ async def test_assess_state_medium_effort_retries_without_name_error():
             browser_session,
         )
 
-    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["advance_allowed"] is False
     assert len(payload["mismatched_fields"]) == 1
     sleep_mock.assert_awaited()
@@ -2924,7 +2924,7 @@ async def test_assess_state_accepts_semantic_textarea_without_blocking_advance()
             browser_session,
         )
 
-    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["advance_allowed"] is True
     assert payload["mismatched_fields"] == []
 
@@ -3007,7 +3007,7 @@ async def test_assess_state_ignores_incompatible_expected_binding_for_relocation
             browser_session,
         )
 
-    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["unverified_fields"] == []
     assert payload["mismatched_fields"] == []
 
@@ -3063,7 +3063,7 @@ async def test_assess_state_caches_optional_validation_blockers():
             browser_session,
         )
 
-    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    payload = json.loads((result.metadata or {})["application_state_json"])
     assert len(payload["unresolved_optional_fields"]) == 1
     assert "Optional validation blockers: 1" in (result.extracted_content or "")
     assert payload["advance_allowed"] is False
@@ -3144,7 +3144,7 @@ async def test_assess_state_ignores_shape_incompatible_expected_value_for_condit
             browser_session,
         )
 
-    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["mismatched_fields"] == []
     assert payload["advance_allowed"] is True
 
@@ -3287,7 +3287,7 @@ async def test_assess_state_ignores_duplicate_boolean_companion_control_mismatch
             browser_session,
         )
 
-    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["mismatched_fields"] == []
     assert payload["unverified_fields"] == []
 
@@ -4152,7 +4152,7 @@ async def test_assess_state_treats_checked_terms_checkbox_as_matching_yes_expect
             browser_session,
         )
 
-    payload = json.loads((result.extracted_content or "").split("APPLICATION_STATE_JSON:\n", 1)[1])
+    payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["mismatched_fields"] == []
     assert payload["unresolved_required_fields"] == []
     assert payload["advance_allowed"] is True

@@ -768,6 +768,17 @@ def _selection_matches_value(current: str, expected: str) -> bool:
                 current_norm,
             )
         )
+    # Gender / short identity tokens: "male" must not match inside "female" (substring bug).
+    gender_or_identity_tokens = frozenset(
+        {"male", "female", "man", "woman", "non-binary", "nonbinary", "other"}
+    )
+    if expected_norm in gender_or_identity_tokens:
+        return bool(
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(expected_norm)}(?![a-z0-9])",
+                current_norm,
+            )
+        )
     if expected_norm and (expected_norm in current_norm or current_norm in expected_norm):
         return True
     segments = split_dropdown_value_hierarchy(expected)
@@ -775,6 +786,56 @@ def _selection_matches_value(current: str, expected: str) -> bool:
         return False
     final_segment = normalize_name(segments[-1])
     return bool(final_segment and final_segment in current_norm)
+
+
+def _label_suggests_referral_or_source(field_label: str, param_field_label: str) -> bool:
+    combined = normalize_name(f"{field_label} {param_field_label}")
+    needles = (
+        "how did you hear",
+        "how did you",
+        "referral",
+        "source",
+        "learned about",
+        "where did you hear",
+        "application source",
+        "hear about us",
+    )
+    return any(n in combined for n in needles)
+
+
+def _label_suggests_phone_country_field(field_label: str, param_field_label: str) -> bool:
+    combined = normalize_name(f"{field_label} {param_field_label}")
+    return any(
+        x in combined
+        for x in (
+            "phone",
+            "mobile",
+            "country code",
+            "calling code",
+            "dial code",
+            "telephone country",
+        )
+    )
+
+
+def _options_look_like_phone_country_menu(options: list[dict[str, Any]]) -> bool:
+    """True when visible options look like (+1) / country calling-code lists, not referral sources."""
+    if len(options) < 1:
+        return False
+    texts = [str(o.get("text") or "").strip() for o in options[:20] if isinstance(o, dict)]
+    texts = [t for t in texts if t]
+    if not texts:
+        return False
+    phoneish = 0
+    for t in texts:
+        tl = t.lower().replace(" ", "")
+        if re.search(r"\(\+\d", t) or re.search(r"\+\d{1,4}\b", t):
+            phoneish += 1
+        elif "unitedstates" in tl and "+1" in tl.replace(" ", ""):
+            phoneish += 1
+        elif re.search(r"\(\+1\)", t):
+            phoneish += 1
+    return phoneish >= max(1, (len(texts) + 1) // 2)
 
 
 def _failover_prefix(widget_kind: str) -> str:
@@ -1311,6 +1372,38 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
 
     # ── Step 4: Match the target value ────────────────────────
     match_options = _options_for_fuzzy_match(is_native_select, options)
+    if (
+        _options_look_like_phone_country_menu(match_options)
+        and _label_suggests_referral_or_source(field_label, params.field_label or "")
+        and not _label_suggests_phone_country_field(field_label, params.field_label or "")
+    ):
+        logger.warning(
+            "domhand.select.phone_country_menu_mismatch",
+            extra={
+                "index": params.index,
+                "field_label": field_label,
+                "param_field_label": params.field_label,
+                "requested_value": params.value,
+                "sample_options": [str(o.get("text") or "") for o in match_options[:5]],
+            },
+        )
+        return ActionResult(
+            error=(
+                "WRONG_DROPDOWN: Visible options look like phone country codes (+1 / country list), "
+                "not referral/source choices. You likely targeted the wrong control — find the real "
+                '"How did you hear about us?" (or similar) field, or open the correct dropdown.'
+            ),
+            metadata={
+                "tool": "domhand_select",
+                "field_id": params.field_id,
+                "field_key": field_key,
+                "strategy": "wrong_dropdown_phone_country",
+                "state_change": "no_state_change",
+                "retry_capped": False,
+                "recommended_next_action": "locate correct referral/source control; do not retry same index",
+            },
+        )
+
     matched = _fuzzy_match_option(params.value, match_options)
 
     if result is None and not matched:

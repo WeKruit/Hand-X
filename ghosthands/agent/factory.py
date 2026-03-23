@@ -152,6 +152,7 @@ async def create_job_agent(
         sensitive_data=sensitive_data,
         # Cost tracking — browser-use will populate history.usage
         calculate_cost=True,
+        max_history_items=settings.agent_max_history_items,
         # Keep screenshot-based visual fallback available for exact stuck-field
         # retries while still allowing the agent to request vision only when
         # needed.

@@ -87,6 +87,7 @@ def get_chat_model(model: str | None = None) -> Any:
 			)
 			return ChatGoogle(
 				model=model,
+				temperature=settings.llm_temperature,
 				api_key=settings.llm_runtime_grant or settings.google_api_key or "dummy",
 				http_options={"baseUrl": proxy_url + "/gemini"},
 			)
@@ -106,6 +107,7 @@ def get_chat_model(model: str | None = None) -> Any:
 		anthropic_proxy_url = _ensure_trailing_slash(proxy_url)
 		return ChatAnthropic(
 			model=model,
+			temperature=settings.llm_temperature,
 			api_key=settings.llm_runtime_grant or settings.anthropic_api_key or None,
 			base_url=anthropic_proxy_url,
 		)
@@ -114,17 +116,22 @@ def get_chat_model(model: str | None = None) -> Any:
 	if model.startswith("gpt-") or _is_openai_o_model(model):
 		from browser_use.llm.openai.chat import ChatOpenAI
 
-		return ChatOpenAI(model=model)
+		return ChatOpenAI(model=model, temperature=settings.llm_temperature)
 
 	if model.startswith("claude-"):
 		from browser_use.llm.anthropic.chat import ChatAnthropic
 
 		return ChatAnthropic(
 			model=model,
+			temperature=settings.llm_temperature,
 			api_key=settings.anthropic_api_key or None,
 		)
 
 	# Default: Google Gemini
 	from browser_use.llm.google.chat import ChatGoogle
 
-	return ChatGoogle(model=model, max_output_tokens=16384)
+	return ChatGoogle(
+		model=model,
+		temperature=settings.llm_temperature,
+		max_output_tokens=16384,
+	)

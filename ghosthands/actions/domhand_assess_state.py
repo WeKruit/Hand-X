@@ -11,24 +11,26 @@ from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
 from ghosthands.actions.domhand_fill import (
     _OPAQUE_WIDGET_VALUE_RE,
+    _SECTION_SCOPE_CHILDREN,
     _build_inject_helpers_js,
-    _filter_fields_for_scope,
-    extract_visible_form_fields,
+    _canonical_section_name,
     _field_has_validation_error,
     _field_value_matches_expected,
+    _filter_fields_for_scope,
+    _get_page_context_key,
+    _grouped_date_is_complete,
     _is_effectively_unset_field_value,
     _is_navigation_field,
     _preferred_field_label,
-    _read_checkbox_group_value,
     _read_binary_state,
+    _read_checkbox_group_value,
     _read_field_value,
     _read_field_value_for_field,
     _read_group_selection,
     _safe_page_url,
     _section_matches_scope,
-    _get_page_context_key,
-    _grouped_date_is_complete,
     _value_shape_is_compatible,
+    extract_visible_form_fields,
 )
 from ghosthands.actions.views import (
     ApplicationFieldIssue,
@@ -39,9 +41,9 @@ from ghosthands.actions.views import (
     is_placeholder_value,
     normalize_name,
 )
-from ghosthands.step_trace import publish_browser_session_trace
 from ghosthands.platforms import detect_platform_from_signals, get_config_by_name
 from ghosthands.runtime_learning import detect_host_from_url, get_expected_field_value
+from ghosthands.step_trace import publish_browser_session_trace
 
 logger = logging.getLogger(__name__)
 
@@ -386,6 +388,23 @@ def _is_meaningful_section_label(section: str | None, field_label: str | None = 
     return True
 
 
+# Top-level Workday steps that should not cross-pick fields when planner target ≠ visible heading.
+_WORKDAY_ROOT_STEP_KEYS = frozenset({"information", "experience"})
+
+
+def _workday_root_step_key(label: str | None) -> str | None:
+    """Return information|experience when label is that step or a known nested subsection."""
+    if not label:
+        return None
+    canon = _canonical_section_name(label)
+    if canon in _WORKDAY_ROOT_STEP_KEYS:
+        return canon
+    for parent, children in _SECTION_SCOPE_CHILDREN.items():
+        if parent in _WORKDAY_ROOT_STEP_KEYS and canon in children:
+            return parent
+    return None
+
+
 _FIELD_LAYOUT_JS = r"""(fieldIds) => {
 	const ff = window.__ff;
 	if (!ff) return JSON.stringify({});
@@ -623,6 +642,10 @@ def _maybe_suppress_custom_select_readback_false_positives(
     """
     if not unresolved_required:
         return unresolved_required
+    # Avoid cross-test pollution: runtime_learning keys use host; loopback shares keys across pytest cases.
+    host_l = (page_host or "").lower()
+    if not host_l or "localhost" in host_l or "127.0.0.1" in host_l:
+        return unresolved_required
     field_by_id = {f.field_id: f for f in fields}
     kept: list[ApplicationFieldIssue] = []
     dropped = 0
@@ -675,6 +698,14 @@ def _widget_kind_for_field(field: FormField, browser_context: dict[str, Any] | N
     if field.field_type in {"date"}:
         return "date_input"
     return "text_input" if field.is_native else "custom_widget"
+
+
+def _agent_display_truncate(text: str, max_len: int = 140) -> str:
+    """Shorten long labels for agent-facing tool text (token savings)."""
+    t = " ".join(str(text or "").split()).strip()
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1] + "…"
 
 
 def _is_noise_visible_error(text: str, unresolved_required: list[ApplicationFieldIssue]) -> bool:
@@ -817,7 +848,8 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         target_section=params.target_section,
         allow_all_visible_fallback=False,
     )
-    if params.target_section and not scoped_fields:
+    target_section_not_live = bool(params.target_section and not scoped_fields and fields)
+    if target_section_not_live:
         visible_sections = [
             section
             for section in dict.fromkeys(
@@ -835,6 +867,49 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                 "field_count": len(fields),
             },
         )
+        # Stale planner target while the DOM shows another section: assess fields that match the
+        # visible page heading, plus blank-section fields (often belong to the active block).
+        # If nothing aligns (unrelated section-only fields), keep scoped empty — do not spam
+        # blockers from a different Workday step.
+        heading_texts_early = [
+            str(text).strip()
+            for text in (page_scan.get("heading_texts") or [])
+            if str(text).strip()
+        ]
+        primary_heading = heading_texts_early[0] if heading_texts_early else ""
+        target_root = _workday_root_step_key(params.target_section)
+        heading_root = _workday_root_step_key(primary_heading)
+        planner_on_different_workday_step = bool(
+            target_root and heading_root and target_root != heading_root
+        )
+        _stop = frozenset({"my", "the", "a", "an", "of", "and", "or", "to", "for", "in", "on"})
+
+        def _field_aligns_with_visible_heading(field: FormField, heading: str) -> bool:
+            if not heading:
+                return False
+            if not normalize_name(field.section or ""):
+                return True
+            if _section_matches_scope(field.section, heading):
+                return True
+            h_tokens = {t for t in normalize_name(heading).split() if t and t not in _stop}
+            s_tokens = {t for t in normalize_name(field.section or "").split() if t and t not in _stop}
+            return bool(h_tokens & s_tokens)
+
+        if planner_on_different_workday_step:
+            # e.g. planner still on My Information while the page shows My Experience + Languages:
+            # do not project subsection blockers into the wrong step's assess scope.
+            aligned = []
+        else:
+            aligned = [f for f in fields if _field_aligns_with_visible_heading(f, primary_heading)]
+            # One field on the page but extraction attached a long label / noise as "section": still
+            # belongs to the visible step. Skip when section is a real subsection (e.g. Languages)
+            # that does not match the visible heading — avoids pulling blockers from another step.
+            if not aligned and len(fields) == 1 and primary_heading:
+                lone = fields[0]
+                if not _is_meaningful_section_label(lone.section, _preferred_field_label(lone)):
+                    aligned = [lone]
+        if aligned:
+            scoped_fields = list(aligned)
     companion_duplicate_ids = _companion_duplicate_field_ids(scoped_fields)
     unresolved_required: list[ApplicationFieldIssue] = []
     unresolved_optional: list[ApplicationFieldIssue] = []
@@ -1391,40 +1466,57 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         summary_lines.append("Required field issues:")
         for issue in application_state.unresolved_required_fields[:10]:
             location = issue.relative_position.replace("_", " ")
-            section = f" [{issue.section}]" if issue.section else ""
+            section = f" [{_agent_display_truncate(issue.section, 80)}]" if issue.section else ""
             extra = []
             if issue.current_value:
-                extra.append(f'current="{issue.current_value}"')
+                extra.append(f'current="{_agent_display_truncate(issue.current_value, 60)}"')
             if issue.visible_error:
-                extra.append(f'error="{issue.visible_error}"')
+                extra.append(f'error="{_agent_display_truncate(str(issue.visible_error), 80)}"')
             if issue.widget_kind:
                 extra.append(f"widget={issue.widget_kind}")
             extras = f" | {'; '.join(extra)}" if extra else ""
-            summary_lines.append(f"  - {issue.name}{section} ({issue.reason}, {location}){extras}")
+            summary_lines.append(
+                f"  - {_agent_display_truncate(issue.name)}{section} ({issue.reason}, {location}){extras}"
+            )
     if application_state.visible_errors:
         summary_lines.append("Visible errors:")
         for error_text in application_state.visible_errors[:6]:
-            summary_lines.append(f"  - {error_text}")
+            summary_lines.append(f"  - {_agent_display_truncate(error_text, 200)}")
     if optional_validation_blockers:
         summary_lines.append("Optional validation blockers:")
         for issue in optional_validation_blockers[:10]:
             location = issue.relative_position.replace("_", " ")
-            section_suffix = f" [{issue.section}]" if issue.section else ""
-            current_suffix = f' | current="{issue.current_value}"' if issue.current_value else ""
-            error_suffix = f'; error="{issue.visible_error}"' if issue.visible_error else ""
+            section_suffix = f" [{_agent_display_truncate(issue.section, 80)}]" if issue.section else ""
+            current_suffix = (
+                f' | current="{_agent_display_truncate(issue.current_value, 60)}"' if issue.current_value else ""
+            )
+            error_suffix = (
+                f'; error="{_agent_display_truncate(str(issue.visible_error), 80)}"' if issue.visible_error else ""
+            )
             summary_lines.append(
-                f"  - {issue.name}"
+                f"  - {_agent_display_truncate(issue.name)}"
                 f"{section_suffix}"
                 f" ({issue.reason}, {location})"
                 f"{current_suffix}"
                 f"{error_suffix}"
             )
-    summary_lines.append("APPLICATION_STATE_JSON:")
-    summary_lines.append(application_state.model_dump_json())
+    summary_lines.append(
+        "APPLICATION_STATE_JSON: omitted here to save tokens; full JSON is in debug log "
+        "domhand.assess_state.full_state_json"
+    )
     summary = "\n".join(summary_lines)
 
+    logger.debug(
+        "domhand.assess_state.full_state_json %s",
+        application_state.model_dump_json(),
+    )
     logger.debug(summary)
     return ActionResult(
         extracted_content=summary,
         include_extracted_content_only_once=False,
+        metadata={
+            "tool": "domhand_assess_state",
+            # Full state for tests / tooling; not intended for planner prompts (see extracted_content).
+            "application_state_json": application_state.model_dump_json(),
+        },
     )
