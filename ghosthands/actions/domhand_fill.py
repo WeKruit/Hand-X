@@ -23,17 +23,24 @@ job application form filling.  It:
 """
 
 import asyncio
-from dataclasses import dataclass
 import inspect
 import json
-import logging
 import os
 import re
+import time
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+import structlog
+
 from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
+from ghosthands.actions.combobox_toggle import (
+    CLICK_COMBOBOX_TOGGLE_BY_FFID_JS,
+    CLICK_INPUT_BY_FFID_JS,
+    combobox_toggle_clicked,
+)
 from ghosthands.actions.views import (
     DomHandFillParams,
     FillFieldResult,
@@ -56,21 +63,21 @@ from ghosthands.runtime_learning import (
     confirm_learned_question_alias,
     detect_host_from_url,
     detect_platform_from_url,
-    get_repeater_field_binding,
-    get_learned_question_alias,
-    get_interaction_recipe,
     get_cached_semantic_alias,
     get_domhand_failure_count,
-    record_expected_field_value,
-    record_repeater_field_binding,
+    get_interaction_recipe,
+    get_learned_question_alias,
+    get_repeater_field_binding,
     has_cached_semantic_alias,
     is_domhand_retry_capped,
     record_domhand_failure,
+    record_expected_field_value,
     record_interaction_recipe,
+    record_repeater_field_binding,
     stage_learned_question_alias,
 )
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # ── Field event callback (set by CLI for JSONL emission) ─────────────
 # When set, called with each FillFieldResult as it is created.
@@ -168,9 +175,11 @@ INTERACTIVE_SELECTOR = ", ".join(
 )
 
 # Regex for fields whose values should never be fabricated.
+# Note: avoid matching bare "social" — company names like "Social Scientific Solutions"
+# caused false positives and wiped legitimate Yes/No answers from screening dropdowns.
 _SOCIAL_OR_ID_NO_GUESS_RE = re.compile(
     r"\b(twitter|x(\.com)?\s*(handle|username|profile)?|github|gitlab|linkedin"
-    r"|instagram|tiktok|facebook|social\s*(media|profile)?|handle|username|user\s*name"
+    r"|instagram|tiktok|facebook|social\s+(media|network|profile)\b|handle|username|user\s*name"
     r"|passport|driver'?s?\s*license|license\s*number|national\s*id|id\s*number"
     r"|tax\s*id|itin|ein|ssn|social security)\b",
     re.IGNORECASE,
@@ -381,6 +390,26 @@ def _fill_result_summary_entry(result: FillFieldResult) -> dict[str, Any]:
     return entry
 
 
+# Agent-facing fill summary: keep tool output small for planner token cost.
+_AGENT_FILL_NAME_MAX_LEN = 100
+_AGENT_FILL_SECTION_MAX_LEN = 80
+_AGENT_FILL_MAX_FAILED_FIELDS = 35
+
+
+def _truncate_agent_fill_text(text: str | None, max_len: int) -> str:
+    t = " ".join(str(text or "").split()).strip()
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1] + "…"
+
+
+def _fill_result_summary_entry_for_agent(result: FillFieldResult) -> dict[str, Any]:
+    entry = _fill_result_summary_entry(result)
+    entry["name"] = _truncate_agent_fill_text(entry.get("name"), _AGENT_FILL_NAME_MAX_LEN)
+    entry["section"] = _truncate_agent_fill_text(entry.get("section"), _AGENT_FILL_SECTION_MAX_LEN)
+    return entry
+
+
 def _set_structured_repeater_binding(
     diagnostic: StructuredRepeaterDiagnostic | None,
     binding: ResolvedFieldBinding | None,
@@ -522,7 +551,7 @@ def _trace_profile_resolution(event: str, *, field_label: str, **extra: Any) -> 
         return
     if not _should_trace_profile_label(field_label):
         return
-    logger.info(
+    logger.debug(
         event,
         extra={
             "field_label": field_label,
@@ -1453,7 +1482,17 @@ _FILL_FIELD_JS = r"""(ffId, value, fieldType) => {
 		} else {
 			el.value = value;
 		}
-		el.dispatchEvent(new Event('input', {bubbles: true}));
+		// TEXTAREA: many ATS UIs (Workday/React) listen for InputEvent; a plain Event('input') can
+		// leave controlled state empty while the native value still displays.
+		if (el.tagName === 'TEXTAREA') {
+			try {
+				el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertFromPaste', data: String(value) }));
+			} catch (e) {
+				el.dispatchEvent(new Event('input', {bubbles: true}));
+			}
+		} else {
+			el.dispatchEvent(new Event('input', {bubbles: true}));
+		}
 		el.dispatchEvent(new Event('change', {bubbles: true}));
 		el.dispatchEvent(new Event('blur', {bubbles: true}));
 		return JSON.stringify({success: true});
@@ -2668,12 +2707,95 @@ def _coerce_proficiency_choice(choices: list[str], answer: str) -> str | None:
     return best_choice
 
 
+def _select_extractions_look_like_pre_open_noise(field: FormField, choices: list[str]) -> bool:
+    """True only when a single extracted option is clearly not a real multi-option menu yet.
+
+    All usual coercion paths (exact match, Yes/No option match, substring, word overlap) run
+    first; this is an **append-only** fallback for React-select / Greenhouse-style extractions
+    that list the question (or a placeholder) as the sole row before the menu opens.
+    """
+    if len(choices) != 1:
+        return False
+    only = (choices[0] or "").strip()
+    if not only:
+        return True
+    if is_placeholder_value(only):
+        return True
+    if _SELECT_PLACEHOLDER_FRAGMENT_RE.search(only):
+        return True
+    for cand in _field_label_candidates(field):
+        c_norm = normalize_name(cand)
+        o_norm = normalize_name(only)
+        if c_norm and o_norm and (c_norm == o_norm or c_norm in o_norm or o_norm in c_norm):
+            return True
+    return False
+
+
+_PHONE_LINE_TYPE_TOKENS_NORM: frozenset[str] = frozenset(
+    {
+        "mobile",
+        "home",
+        "work",
+        "cell",
+        "office",
+        "business",
+        "landline",
+        "fax",
+        "other",
+        "mobile phone",
+        "cell phone",
+        "home phone",
+        "work phone",
+    }
+)
+
+
+def _answer_is_phone_line_type_token(text: str) -> bool:
+    """True when the answer is only a phone *line/device* label, not a numeric phone number."""
+    t = normalize_name(text)
+    return bool(t and t in _PHONE_LINE_TYPE_TOKENS_NORM)
+
+
+def _field_accepts_phone_digits_not_line_type(field: FormField) -> bool:
+    """True for <tel> and plain phone-number text fields — not device-type / country-code pickers."""
+    if field.field_type == "tel":
+        return True
+    if field.field_type not in {"text", "search"}:
+        return False
+    lab = normalize_name(" ".join(_field_label_candidates(field)))
+    if any(
+        p in lab
+        for p in (
+            "phone device",
+            "phone type",
+            "device type",
+            "line type",
+            "method of contact",
+        )
+    ):
+        return False
+    if "country" in lab and "phone" in lab:
+        return False
+    return bool(
+        "phone" in lab
+        or "mobile number" in lab
+        or "cell number" in lab
+        or "telephone number" in lab
+        or "contact number" in lab
+    )
+
+
 def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
     """Map a profile answer onto the closest available field option when present."""
     if answer in (None, ""):
         return None
     text = str(answer).strip()
     if not text:
+        return None
+
+    # LLM/prompt often says default *device type* to "Mobile"; that must never become the <tel> value.
+    # Also react-select noise lists include "Mobile" as an option — do not snap the number field to it.
+    if _field_accepts_phone_digits_not_line_type(field) and _answer_is_phone_line_type_token(text):
         return None
 
     choices = [str(choice).strip() for choice in (field.options or field.choices or []) if str(choice).strip()]
@@ -2720,6 +2842,37 @@ def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
 
     if best_choice and best_score > 0:
         return best_choice
+
+    # Lever / modern ATS UIs often attach noisy option lists to plain inputs (placeholders,
+    # autocomplete shards, etc.). For free-text controls, keep the model/profile answer.
+    if field.field_type in {
+        "text",
+        "email",
+        "tel",
+        "url",
+        "number",
+        "password",
+        "search",
+        "textarea",
+        "date",
+    }:
+        return text
+
+    # Radio / checkbox groups: Yes/No passes through — DOM fill can click the right control.
+    if field.field_type in {"radio-group", "radio", "checkbox-group", "checkbox", "toggle"} and _is_binary_value_text(
+        text
+    ):
+        return text
+
+    # Custom/React <select>: append-only fallback when extraction is pre-open noise (never for
+    # a real single-option or multi-option semantic list — those are handled above).
+    if (
+        field.field_type == "select"
+        and _is_binary_value_text(text)
+        and _select_extractions_look_like_pre_open_noise(field, choices)
+    ):
+        return text
+
     return None
 
 
@@ -2778,7 +2931,10 @@ _SECTION_SCOPE_CHILDREN: dict[str, set[str]] = {
     "experience": {"education", "languages", "language", "skills", "certifications"},
     # Workday also nests address/phone/legal-name groups under the page-level
     # "My Information" step.
-    "information": {"address", "phone", "legal name", "name", "contact", "contact information"},
+    "information": {
+        "address", "phone", "legal name", "name", "contact", "contact information",
+        "how did you hear", "referral source", "source",
+    },
     # Workday keeps the terms acknowledgment under Voluntary Disclosures.
     "voluntary disclosures": {"terms and conditions", "terms conditions"},
 }
@@ -2845,7 +3001,7 @@ def _filter_fields_for_scope(
                         seen_ids.add(field.field_id)
                         merged.append(field)
                     filtered = merged
-                    logger.info(
+                    logger.debug(
                         "DomHand scope kept blank-section fields with matching target section",
                         extra={
                             "target_section": target_section,
@@ -2865,7 +3021,7 @@ def _filter_fields_for_scope(
             )
         elif not heading_boundary:
             filtered = []
-            logger.info(
+            logger.debug(
                 "DomHand scope found no live match for target section without fallback",
                 extra={"target_section": target_section, "field_count": len(fields)},
             )
@@ -3069,8 +3225,8 @@ def _record_page_token_cost(
     entry["field_count"] = field_count
     entry["target_section"] = target_section or ""
     store[entry_key] = entry
-    setattr(browser_session, "_gh_page_token_costs", store)
-    logger.info(
+    browser_session._gh_page_token_costs = store
+    logger.debug(
         "domhand.page_token_cost",
         extra={
             "page_context_key": page_context_key,
@@ -4418,6 +4574,19 @@ def _build_profile_answer_map(
         for label in labels:
             answer_map[label] = text
 
+    first_initial = (canonical.get("first_name") or "")[:1].upper()
+    last_initial = (canonical.get("last_name") or "")[:1].upper()
+    initials = f"{first_initial}{last_initial}".strip()
+    if initials:
+        add(
+            initials,
+            "Include your initials",
+            "Your initials",
+            "Enter your initials",
+            "Type your initials",
+            "Initials",
+        )
+
     add(
         canonical.get("gender"),
         "Gender",
@@ -4544,8 +4713,20 @@ def _build_profile_answer_map(
         "Expected salary range",
         "Expected compensation",
         "Compensation expectation",
+        "Expectations on Compensation",
+        "Total compensation",
+        "Salary expectation",
+        "Salary",
+        "Compensation",
+        "Desired salary",
+        "Desired compensation",
+        "Compensation range",
+        "Salary range",
+        "Pay expectation",
+        "Salary requirement",
         "Hourly compensation requirements",
         "Hourly compensation",
+        "Hourly rate expectation",
     )
     add(
         canonical.get("current_school_year"),
@@ -5051,7 +5232,7 @@ def _is_employer_history_boolean_prompt(label: str) -> bool:
 def _log_boolean_widget_classification(field: FormField, cluster: str | None, role: str | None) -> None:
     if cluster not in {"relocation", "visa_sponsorship", "work_authorization", "employer_history"}:
         return
-    logger.info(
+    logger.debug(
         "domhand.boolean_widget_classification",
         extra={
             "field_id": field.field_id,
@@ -5182,7 +5363,7 @@ def _log_answer_resolution(
     shape_compatible: bool,
     rejection_reason: str | None,
 ) -> None:
-    logger.info(
+    logger.debug(
         "domhand.answer_resolution",
         extra={
             "field_id": field.field_id,
@@ -6043,7 +6224,7 @@ async def _record_expected_value_if_settled(
     observed_value = await _read_observed_field_value(page, field)
     has_validation_error = await _field_has_validation_error(page, field.field_id)
     if not await _field_already_matches(page, field, expected_value):
-        logger.info(
+        logger.debug(
             f"{log_context}.skip_record_expected_value",
             extra={
                 "field_id": field.field_id,
@@ -6060,7 +6241,7 @@ async def _record_expected_value_if_settled(
         )
         return False
     if has_validation_error:
-        logger.info(
+        logger.debug(
             f"{log_context}.skip_record_expected_value",
             extra={
                 "field_id": field.field_id,
@@ -6088,7 +6269,7 @@ async def _record_expected_value_if_settled(
         expected_value=expected_value,
         source=source,
     )
-    logger.info(
+    logger.debug(
         f"{log_context}.record_expected_value",
         extra={
             "field_id": field.field_id,
@@ -6104,6 +6285,38 @@ async def _record_expected_value_if_settled(
         },
     )
     return True
+
+
+def _record_unverified_custom_select_intent(
+    *,
+    host: str,
+    page_context_key: str,
+    field: FormField,
+    field_key: str,
+    intended_value: str,
+) -> None:
+    """Persist intended value when DomHand reports fill success but settle verification never passed.
+
+    Custom selects (e.g. react-select on Greenhouse) often keep empty DOM readback while the UI
+    shows a chip. ``domhand_assess_state`` uses this alongside ``get_expected_field_value`` to drop
+    false ``required_missing_value`` blockers after prefill.
+    """
+    intended = str(intended_value or "").strip()
+    if not intended:
+        return
+    if field.field_type != "select" or field.is_native:
+        return
+    record_expected_field_value(
+        host=host,
+        page_context_key=page_context_key,
+        field_key=field_key,
+        field_label=_preferred_field_label(field),
+        field_type=field.field_type,
+        field_section=field.section or "",
+        field_fingerprint=field.field_fingerprint or "",
+        expected_value=intended,
+        source="domhand_unverified",
+    )
 
 
 def _known_profile_value(
@@ -6196,6 +6409,36 @@ def _known_profile_value(
         return evidence.get("portfolio")
     if "twitter" in name or "x handle" in name:
         return evidence.get("twitter")
+    # Initials fields (textareas asking for user's initials as consent)
+    # must be handled BEFORE the generic consent block so they return the
+    # actual initials rather than "checked".
+    if any(
+        kw in name for kw in ("include your initials", "your initials", "enter your initials", "type your initials")
+    ):
+        first = (evidence.get("first_name") or "")[:1].upper()
+        last = (evidence.get("last_name") or "")[:1].upper()
+        initials = f"{first}{last}".strip()
+        return initials or "checked"
+    # Consent / agreement fields must be checked BEFORE work-auth keywords
+    # because labels like "I understand ... authorized to work ... initials"
+    # contain both consent phrases and auth phrases.
+    if any(
+        kw in name
+        for kw in (
+            "i agree",
+            "i accept",
+            "i understand",
+            "i acknowledge",
+            "i consent",
+            "i certify",
+            "privacy policy",
+            "terms of service",
+            "terms and conditions",
+            "candidate consent",
+            "agree to",
+        )
+    ):
+        return "checked"
     # Workday-specific field matching
     if any(
         kw in name for kw in ("how did you hear", "learn about us", "referral source", "source of referral", "source")
@@ -6246,24 +6489,6 @@ def _known_profile_value(
         )
     ):
         return evidence.get("preferred_work_mode") or evidence.get("preferred_locations")
-    # Auto-check agreement/consent checkboxes — always agree on behalf of applicant
-    if any(
-        kw in name
-        for kw in (
-            "i agree",
-            "i accept",
-            "i understand",
-            "i acknowledge",
-            "i consent",
-            "i certify",
-            "privacy policy",
-            "terms of service",
-            "terms and conditions",
-            "candidate consent",
-            "agree to",
-        )
-    ):
-        return "checked"
     return None
 
 
@@ -6799,6 +7024,10 @@ def _sanitize_no_guess_answer(
         r"^(n/a|na|none|unknown|not applicable|prefer not|decline)", proposed, re.IGNORECASE
     ):
         return ""
+    # Append-only: identity regex matched but this is a Yes/No screening select — not a fabricated
+    # handle/ID. (Regex tightening handles most false positives; this covers remaining edge cases.)
+    if field_type == "select" and _is_binary_value_text(proposed):
+        return proposed
     return ""
 
 
@@ -6813,6 +7042,96 @@ def _disambiguated_field_names(fields: list[FormField]) -> list[str]:
         name_counts[norm] = count
         disambiguated_names.append(f"{base_name} #{count}" if count > 1 else base_name)
     return disambiguated_names
+
+
+def _repair_invalid_json_string_escapes(blob: str) -> str:
+    """Drop invalid \\ escapes inside JSON strings (models often emit e.g. WHOOP\\ s)."""
+    out: list[str] = []
+    i = 0
+    in_str = False
+    while i < len(blob):
+        c = blob[i]
+        if not in_str:
+            if c == '"':
+                in_str = True
+            out.append(c)
+            i += 1
+            continue
+        if c == "\\" and i + 1 < len(blob):
+            nxt = blob[i + 1]
+            if nxt in '\\"/bfnrt':
+                out.extend((c, nxt))
+                i += 2
+                continue
+            if nxt == "u" and i + 6 <= len(blob):
+                hx = blob[i + 2 : i + 6]
+                if len(hx) == 4 and all(h in "0123456789abcdefABCDEF" for h in hx):
+                    out.append(blob[i : i + 6])
+                    i += 6
+                    continue
+            i += 1
+            if i < len(blob):
+                out.append(blob[i])
+                i += 1
+            continue
+        if c == '"':
+            in_str = False
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _parse_llm_json_answer_object(text: str) -> dict[str, Any]:
+    """Parse DomHand batch JSON: strip fences, skip prefix junk, tolerate bad string escapes."""
+    cleaned = re.sub(r"^```(?:json)?\s*\n?", "", text, flags=re.MULTILINE)
+    cleaned = re.sub(r"\n?```\s*$", "", cleaned, flags=re.MULTILINE).strip()
+    blobs: list[str] = [cleaned]
+    repaired = _repair_invalid_json_string_escapes(cleaned)
+    if repaired != cleaned:
+        blobs.append(repaired)
+    decoder = json.JSONDecoder()
+    last_err: json.JSONDecodeError | None = None
+    for blob in blobs:
+        start = blob.find("{")
+        if start < 0:
+            continue
+        try:
+            obj, _ = decoder.raw_decode(blob, start)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError as e:
+            last_err = e
+    if last_err is not None:
+        raise last_err
+    raise json.JSONDecodeError("No JSON object in model response", cleaned, 0)
+
+
+def _resolve_llm_answer_via_batch_key(
+    field: FormField,
+    batch_key: str,
+    answers: dict[str, str],
+) -> ResolvedFieldValue | None:
+    """When the model used the batch key (e.g. Field 1), map directly — label matching fails if DOM labels are empty."""
+    if batch_key not in answers:
+        return None
+    raw = answers[batch_key]
+    if raw is None:
+        return None
+    if isinstance(raw, str) and not raw.strip():
+        return None
+    coerced = _coerce_answer_if_compatible(
+        field,
+        raw,
+        source_candidate="llm",
+    )
+    if not coerced:
+        return None
+    return _resolved_field_value(
+        coerced,
+        source="llm",
+        answer_mode="best_effort_guess",
+        confidence=0.92,
+    )
 
 
 async def _generate_answers(
@@ -6869,6 +7188,7 @@ Rules:
 - For low-risk standardized screening dropdowns/radios, use the saved profile/default answer and choose the closest matching option text if the wording differs slightly.
 - For "How did you hear about us?" or similar source/referral fields: use the applicant profile value if available. If the profile has no source, default to "LinkedIn" (or the closest matching option like "Job Board", "Online Job Board", "Internet"). NEVER return "[NEEDS_USER_INPUT]" for referral source fields — they always have a safe default.
 - For "Phone Device Type" or similar phone type fields: default to "Mobile" if the profile has no phone type. NEVER return "[NEEDS_USER_INPUT]" for phone type fields.
+- For the main "Phone" / "Phone number" / "<tel>" field: put the applicant's actual phone number digits (from the profile). NEVER use "Mobile", "Home", "Work", or "Cell" there — those belong only on explicit phone *type* / *device* questions, not the number box.
 - For structured education fields (GPA, field of study, actual vs expected end date, scoped education start/end dates) and structured language fields ("Language", fluent, reading/writing, speaking/listening, overall proficiency), NEVER guess. Only answer when the exact structured profile value is present.
 - When the profile wording and the site wording differ, map to the semantically closest visible option instead of escalating. Example: "Native / bilingual" may map to the top proficiency tier such as "Expert", "Advanced", or "Fluent".
 - For work-setup/location preference fields, use the saved preferred work mode / preferred locations if present. If the field is broad and only asks for an arrangement, prefer the work-mode answer over escalating.
@@ -6886,6 +7206,7 @@ Rules:
 - Use the EXACT field names shown above (including any "#N" suffix) as JSON keys.
 - Only include fields you have a real answer for. For REQUIRED fields you must provide your best answer and never emit "[NEEDS_USER_INPUT]".
 - Respond with ONLY a valid JSON object. No explanation, no markdown fences.
+- Inside JSON strings use valid JSON only: for apostrophes use a straight quote ' with NO backslash. Never write backslash-space (e.g. WHOOP\\ s) — that breaks JSON.
 
 Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because..."}}"""
 
@@ -6908,11 +7229,9 @@ Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because.
             step_cost = 0.0
         if response.stop_reason == "max_tokens":
             logger.warning("LLM response was truncated (hit max_tokens).")
-        logger.info(f"LLM answer response: {text[:200]}{'...' if len(text) > 200 else ''}")
+        logger.warning(f"LLM answer response: {text[:500]}{'...' if len(text) > 500 else ''}")
 
-        cleaned = re.sub(r"^```(?:json)?\s*\n?", "", text, flags=re.MULTILINE)
-        cleaned = re.sub(r"\n?```\s*$", "", cleaned, flags=re.MULTILINE).strip()
-        parsed: dict[str, Any] = json.loads(cleaned)
+        parsed: dict[str, Any] = _parse_llm_json_answer_object(text)
 
         for k, v in list(parsed.items()):
             if isinstance(v, list):
@@ -6922,6 +7241,7 @@ Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because.
 
         _replace_placeholder_answers(parsed, fields, disambiguated_names)
 
+        pre_sanitize_keys = set(parsed.keys())
         for i, field in enumerate(fields):
             key = disambiguated_names[i]
             if key in parsed and isinstance(parsed[key], str):
@@ -6933,6 +7253,17 @@ Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because.
                     field_type=field.field_type,
                     question_text=field.raw_label or field.name,
                 )
+
+        empty_after_sanitize = [k for k, v in parsed.items() if not v]
+        missing_keys = [disambiguated_names[i] for i in range(len(fields)) if disambiguated_names[i] not in parsed]
+        if empty_after_sanitize or missing_keys:
+            logger.warning(
+                "domhand.llm_answer_quality",
+                total_fields=len(fields),
+                llm_returned_keys=len(pre_sanitize_keys),
+                empty_after_sanitize=empty_after_sanitize[:10],
+                missing_from_llm=missing_keys[:10],
+            )
 
         return parsed, input_tokens, output_tokens, step_cost, model_id
     except json.JSONDecodeError:
@@ -7523,8 +7854,13 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         resolved_values: dict[str, ResolvedFieldValue] = {}
         resolved_bindings: dict[str, ResolvedFieldBinding] = {}
         fillable_field_map = {field.field_id: field for field in fillable_fields}
+        # When focus_fields is set, the agent explicitly targets these fields
+        # (usually because of a validation error despite the field appearing filled).
+        # Do NOT skip them — the value may be in the DOM but not registered by the
+        # ATS framework (e.g. Workday React state).
+        _force_refill = bool(params.focus_fields)
         for f in fillable_fields:
-            if _field_has_effective_value(f):
+            if _field_has_effective_value(f) and not _force_refill:
                 fields_seen.add(get_stable_field_key(f))
                 continue
             auth_val = _known_auth_override_for_field(f, auth_overrides)
@@ -7845,6 +8181,18 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             if llm_model_name:
                 model_name = llm_model_name
 
+        _llm_keys = list(answers.keys())[:20] if answers else []
+        _llm_sample = (
+            {k: (v[:60] if isinstance(v, str) else v) for k, v in list(answers.items())[:5]} if answers else {}
+        )
+        logger.warning(
+            "domhand.fill_round_triage",
+            direct_fills=len(direct_fills),
+            needs_llm=len(needs_llm),
+            llm_answer_keys=_llm_keys,
+            llm_answer_sample=_llm_sample,
+        )
+
         round_filled = 0
         round_failed = 0
 
@@ -7901,7 +8249,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 )
                 if success:
                     confirm_learned_question_alias(_preferred_field_label(f))
-                    await _record_expected_value_if_settled(
+                    settled = await _record_expected_value_if_settled(
                         page=page,
                         host=page_host,
                         page_context_key=page_context_key,
@@ -7911,6 +8259,14 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         source="exact_profile" if resolved_value.source == "exact_profile" else "derived_profile",
                         log_context="domhand.fill",
                     )
+                    if not settled:
+                        _record_unverified_custom_select_intent(
+                            host=page_host,
+                            page_context_key=page_context_key,
+                            field=f,
+                            field_key=key,
+                            intended_value=value,
+                        )
                 elif failure_reason == DOMHAND_RETRY_CAPPED:
                     fields_capped.add(key)
                 all_results.append(fr)
@@ -7920,18 +8276,39 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 round_filled += 1 if success else 0
                 round_failed += 0 if success else 1
 
-        for f in needs_llm:
+        _needs_llm_keys = _disambiguated_field_names(needs_llm)
+        for _nli, f in enumerate(needs_llm):
             key = get_stable_field_key(f)
-            resolved_value = _resolve_llm_answer_for_field(f, answers, evidence, profile_data)
+            batch_llm_key = _needs_llm_keys[_nli]
+            resolved_value = _resolve_llm_answer_via_batch_key(f, batch_llm_key, answers)
+            if resolved_value is None:
+                resolved_value = _resolve_llm_answer_for_field(f, answers, evidence, profile_data)
+            _rejection_reason = ""
             if resolved_value and re.match(
                 r"^(n/?a|na|none|not applicable|unknown|placeholder)$",
                 resolved_value.value.strip(),
                 re.IGNORECASE,
             ):
+                _rejection_reason = f"na_filter:{resolved_value.value[:40]}"
                 resolved_value = None
             if resolved_value and "[NEEDS_USER_INPUT]" in resolved_value.value:
+                _rejection_reason = "needs_user_input"
                 resolved_value = None
             if not resolved_value or not resolved_value.value:
+                if not _rejection_reason:
+                    _rejection_reason = "resolve_returned_none"
+                _label_cands = _field_label_candidates(f)
+                logger.warning(
+                    "domhand.fill_field_skipped",
+                    label=_preferred_field_label(f),
+                    name=f.name,
+                    field_type=f.field_type,
+                    required=f.required,
+                    candidates=_label_cands,
+                    rejection=_rejection_reason,
+                    is_non_guess=any(_is_non_guess_name_fragment(l) for l in _label_cands),
+                    is_skill_like=_is_skill_like(f.name),
+                )
                 error_msg = "No confident profile match for this field"
                 if f.required:
                     error_msg = "REQUIRED — could not fill automatically"
@@ -8000,7 +8377,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             )
             if success:
                 confirm_learned_question_alias(_preferred_field_label(f))
-                await _record_expected_value_if_settled(
+                settled = await _record_expected_value_if_settled(
                     page=page,
                     host=page_host,
                     page_context_key=page_context_key,
@@ -8010,6 +8387,14 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     source="exact_profile" if resolved_value.source == "exact_profile" else "derived_profile",
                     log_context="domhand.fill",
                 )
+                if not settled:
+                    _record_unverified_custom_select_intent(
+                        host=page_host,
+                        page_context_key=page_context_key,
+                        field=f,
+                        field_key=key,
+                        intended_value=matched_answer,
+                    )
             elif failure_reason == DOMHAND_RETRY_CAPPED:
                 fields_capped.add(key)
             all_results.append(fr)
@@ -8074,7 +8459,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             ]
         )
 
-    structured_summary = {
+    _failed_all = [r for r in all_results if not r.success]
+    structured_summary_full = {
         "filled_count": filled_count,
         "dom_failure_count": failed_count,
         "skipped_count": skipped_count,
@@ -8104,10 +8490,52 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         "unresolved_required_fields": [
             _fill_result_summary_entry(r) for r in all_results if not r.success and r.required
         ],
-        "failed_fields": [_fill_result_summary_entry(r) for r in all_results if not r.success],
+        "failed_fields": [_fill_result_summary_entry(r) for r in _failed_all],
     }
+    logger.debug(
+        "domhand.fill.full_structured_summary %s",
+        json.dumps(structured_summary_full, ensure_ascii=True),
+    )
+
+    _agent_failed = [_fill_result_summary_entry_for_agent(r) for r in _failed_all][: _AGENT_FILL_MAX_FAILED_FIELDS]
+    structured_summary_agent = {
+        "filled_count": filled_count,
+        "dom_failure_count": failed_count,
+        "skipped_count": skipped_count,
+        "unfilled_count": unfilled_count,
+        "best_effort_guess_count": len(best_effort_results),
+        "best_effort_binding_count": len(best_effort_binding_results),
+        "best_effort_guess_fields": [
+            {
+                "field_id": r.field_id,
+                "prompt_text": _truncate_agent_fill_text(r.name, _AGENT_FILL_NAME_MAX_LEN),
+                "section_label": _truncate_agent_fill_text(r.section, _AGENT_FILL_SECTION_MAX_LEN) or None,
+                "required": r.required,
+            }
+            for r in best_effort_results[:25]
+        ],
+        "best_effort_binding_fields": [
+            {
+                "field_id": r.field_id,
+                "prompt_text": _truncate_agent_fill_text(r.name, _AGENT_FILL_NAME_MAX_LEN),
+                "section_label": _truncate_agent_fill_text(r.section, _AGENT_FILL_SECTION_MAX_LEN) or None,
+                "binding_mode": r.binding_mode,
+                "binding_confidence": r.binding_confidence,
+                "best_effort_guess": r.best_effort_guess,
+            }
+            for r in best_effort_binding_results[:25]
+        ],
+        "unresolved_required_fields": [
+            _fill_result_summary_entry_for_agent(r) for r in all_results if not r.success and r.required
+        ][:25],
+        "failed_fields": _agent_failed,
+        "failed_fields_total": len(_failed_all),
+    }
+    if len(_failed_all) > _AGENT_FILL_MAX_FAILED_FIELDS:
+        structured_summary_agent["failed_fields_truncated"] = len(_failed_all) - _AGENT_FILL_MAX_FAILED_FIELDS
+
     summary_lines.append("DOMHAND_FILL_JSON:")
-    summary_lines.append(json.dumps(structured_summary, ensure_ascii=True))
+    summary_lines.append(json.dumps(structured_summary_agent, ensure_ascii=True))
 
     summary = "\n".join(summary_lines)
     logger.info(summary)
@@ -8220,14 +8648,7 @@ async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag
 
     for term_idx, search_term in enumerate(search_terms):
         try:
-            await page.evaluate(
-                r"""(ffId) => {
-				var el = window.__ff ? window.__ff.byId(ffId) : null;
-				if (el) el.click();
-				return 'ok';
-			}""",
-                ff_id,
-            )
+            await _try_open_combobox_menu(page, ff_id, tag=tag)
             await asyncio.sleep(0.4)
 
             await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
@@ -8241,24 +8662,13 @@ async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag
 			}""",
                 ff_id,
             )
-            # Wait longer on first attempt, shorter on retries
-            await asyncio.sleep(2.0 if term_idx == 0 else 1.5)
-
-            clicked_json = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, value)
-            clicked = json.loads(clicked_json)
+            # Options often load after debounce/network — poll instead of a single long sleep.
+            poll_budget = 2.85 if term_idx == 0 else 2.2
+            clicked = await _poll_click_dropdown_option(page, value, search_term, max_wait_s=poll_budget)
             if clicked.get("clicked"):
                 logger.debug(f'search-select {tag} -> "{clicked.get("text", value)}" (term: "{search_term}")')
                 await _settle_dropdown_selection(page)
                 return True
-
-            # Also try clicking by the search term itself (may differ from value)
-            if search_term != value:
-                clicked_json = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, search_term)
-                clicked = json.loads(clicked_json)
-                if clicked.get("clicked"):
-                    logger.debug(f'search-select {tag} -> "{clicked.get("text", search_term)}" (alt term)')
-                    await _settle_dropdown_selection(page)
-                    return True
 
             if term_idx < len(search_terms) - 1:
                 logger.debug(f'search-select {tag}: "{search_term}" no match, trying next term')
@@ -8421,10 +8831,25 @@ async def _fill_textarea_field(page: Any, field: FormField, value: str, tag: str
     if not value:
         logger.debug(f"skip {tag} (no value)")
         return False
+
+    # Workday (and similar) often wrap compensation in a controlled textarea: DOM .value can
+    # look set while validation still sees empty unless we run the same commit path as text
+    # fields (blur / dismiss-overlay) and/or real Playwright typing.
+    salary_like = _is_salary_like_field(field)
+    if salary_like:
+        try:
+            if await _fill_text_like_with_keyboard(page, field, value, tag):
+                logger.debug(f'fill {tag} = "{value[:80]}..." (keyboard-first compensation textarea)')
+                return True
+        except Exception:
+            pass
+
     try:
         result_json = await page.evaluate(_FILL_FIELD_JS, field.field_id, value, "textarea")
         result = json.loads(result_json) if isinstance(result_json, str) else result_json
-        if isinstance(result, dict) and result.get("success"):
+        if isinstance(result, dict) and result.get("success") and await _confirm_text_like_value(
+            page, field, value, tag
+        ):
             logger.debug(f'fill {tag} = "{value[:80]}{"..." if len(value) > 80 else ""}"')
             return True
     except Exception:
@@ -8432,11 +8857,22 @@ async def _fill_textarea_field(page: Any, field: FormField, value: str, tag: str
     try:
         result_json = await page.evaluate(_FILL_CONTENTEDITABLE_JS, field.field_id, value)
         result = json.loads(result_json) if isinstance(result_json, str) else result_json
-        if isinstance(result, dict) and result.get("success"):
+        if isinstance(result, dict) and result.get("success") and await _confirm_text_like_value(
+            page, field, value, tag
+        ):
             logger.debug(f'fill {tag} = "{value[:80]}..." (contenteditable)')
             return True
     except Exception:
         pass
+
+    if not salary_like:
+        try:
+            if await _fill_text_like_with_keyboard(page, field, value, tag):
+                logger.debug(f'fill {tag} = "{value[:80]}..." (keyboard fallback textarea)')
+                return True
+        except Exception:
+            pass
+
     logger.debug(f"skip {tag} (textarea not fillable)")
     return False
 
@@ -8480,16 +8916,25 @@ async def _fill_multi_select(page: Any, field: FormField, values: list[str], tag
         picked_count = 0
         for val in values:
             await page.evaluate(_FILL_FIELD_JS, ff_id, val, "text")
-            await asyncio.sleep(0.3)
             try:
-                clicked_json = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, val)
-                clicked = json.loads(clicked_json)
-                if clicked.get("clicked"):
-                    picked_count += 1
-                    await asyncio.sleep(0.2)
-                    continue
+                await page.evaluate(
+                    r"""(ffId) => {
+					var el = window.__ff ? window.__ff.byId(ffId) : null;
+					if (el) {
+						el.dispatchEvent(new Event('input', {bubbles: true}));
+						el.dispatchEvent(new Event('keyup', {bubbles: true}));
+					}
+					return 'ok';
+				}""",
+                    ff_id,
+                )
             except Exception:
                 pass
+            clicked = await _poll_click_dropdown_option(page, val, max_wait_s=2.4)
+            if clicked.get("clicked"):
+                picked_count += 1
+                await asyncio.sleep(0.2)
+                continue
             await page.press("Enter")
             await asyncio.sleep(0.3)
             picked_count += 1
@@ -8513,6 +8958,46 @@ async def _click_dropdown_option(page: Any, text: str) -> dict[str, Any]:
     except Exception:
         return {"clicked": False}
     return _parse_dropdown_click_result(raw_result)
+
+
+async def _poll_click_dropdown_option(
+    page: Any,
+    *match_texts: str,
+    max_wait_s: float = 2.75,
+    interval_s: float = 0.12,
+) -> dict[str, Any]:
+    """Poll for visible ``role=option`` rows after typing — async lists (e.g. Greenhouse country).
+
+    Append-only: does not change matching rules in ``_CLICK_DROPDOWN_OPTION_JS``; only retries
+    until options appear or ``max_wait_s`` elapses.
+    """
+    texts = [m for m in match_texts if m and str(m).strip()]
+    if not texts:
+        return {"clicked": False}
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
+        for mt in texts:
+            result = await _click_dropdown_option(page, mt)
+            if result.get("clicked"):
+                return result
+        await asyncio.sleep(interval_s)
+    return {"clicked": False}
+
+
+async def _try_open_combobox_menu(page: Any, ff_id: str, *, tag: str) -> None:
+    """Open react-select / combobox: prefer chevron / Toggle flyout; fall back to input click."""
+    try:
+        raw = await page.evaluate(CLICK_COMBOBOX_TOGGLE_BY_FFID_JS, ff_id)
+        if combobox_toggle_clicked(raw):
+            logger.debug("domhand.combobox_open", field_id=ff_id, tag=tag, via="toggle")
+            return
+    except Exception:
+        pass
+    try:
+        await page.evaluate(CLICK_INPUT_BY_FFID_JS, ff_id)
+        logger.debug("domhand.combobox_open", field_id=ff_id, tag=tag, via="input_click")
+    except Exception:
+        pass
 
 
 async def _clear_dropdown_search(page: Any) -> None:
@@ -8553,20 +9038,15 @@ async def _type_and_click_dropdown_option(page: Any, value: str, tag: str) -> di
             if idx > 0:
                 await _clear_dropdown_search(page)
             await page.keyboard.type(term, delay=45)
-            await asyncio.sleep(0.3)
-            clicked = await _click_dropdown_option(page, value)
+            clicked = await _poll_click_dropdown_option(page, value, term, max_wait_s=2.85)
             if clicked.get("clicked"):
                 logger.debug(f'select {tag} -> "{clicked.get("text", value)}" (typed search)')
                 return clicked
             await page.keyboard.press("Enter")
-            await asyncio.sleep(1.1)
-            clicked = await _click_dropdown_option(page, value)
+            await asyncio.sleep(0.35)
+            clicked = await _poll_click_dropdown_option(page, value, term, max_wait_s=1.2)
             if clicked.get("clicked"):
-                logger.debug(f'select {tag} -> "{clicked.get("text", value)}" (typed search)')
-                return clicked
-            clicked = await _click_dropdown_option(page, term)
-            if clicked.get("clicked"):
-                logger.debug(f'select {tag} -> "{clicked.get("text", term)}" (typed search)')
+                logger.debug(f'select {tag} -> "{clicked.get("text", value)}" (typed search, enter)')
                 return clicked
         except Exception as e:
             logger.debug(f'dropdown search {tag} term "{term}" failed: {str(e)[:60]}')
@@ -8582,13 +9062,7 @@ async def _fill_custom_dropdown(page: Any, field: FormField, value: str, tag: st
     post_value = pre_value
     follow_up_appeared = False
     try:
-        await page.evaluate(
-            r"""(ffId) => {
-			var ff = window.__ff; var el = ff ? ff.byId(ffId) : null;
-			if (el) el.click(); return 'ok';
-		}""",
-            ff_id,
-        )
+        await _try_open_combobox_menu(page, ff_id, tag=tag)
         open_succeeded = True
         await asyncio.sleep(0.6)
 
@@ -8651,7 +9125,7 @@ async def _fill_custom_dropdown(page: Any, field: FormField, value: str, tag: st
             post_value = await _read_field_value_for_field(page, field)
         visible_after = await _visible_field_id_snapshot(page)
         follow_up_appeared = bool(visible_after - visible_before - {field.field_id})
-        logger.info(
+        logger.debug(
             "domhand.custom_widget_attempt",
             extra={
                 "field_id": field.field_id,

@@ -16,6 +16,7 @@ and CDP backend_node_id resolution — never data-highlight-index attributes.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -30,9 +31,11 @@ from browser_use.browser.events import (
     SelectDropdownOptionEvent,
 )
 from browser_use.dom.views import EnhancedDOMTreeNode
-from ghosthands.step_trace import publish_browser_session_trace, update_blocker_attempt_state
+from ghosthands.actions.combobox_toggle import CLICK_COMBOBOX_TOGGLE_ON_NODE_JS, combobox_toggle_clicked
+from ghosthands.actions.domhand_fill import _get_page_context_key, _record_expected_value_if_settled
 from ghosthands.actions.views import (
     DomHandSelectParams,
+    FormField,
     generate_dropdown_search_terms,
     normalize_name,
     split_dropdown_value_hierarchy,
@@ -45,7 +48,7 @@ from ghosthands.runtime_learning import (
     is_domhand_retry_capped,
     record_domhand_failure,
 )
-from ghosthands.actions.domhand_fill import _get_page_context_key, _record_expected_value_if_settled
+from ghosthands.step_trace import publish_browser_session_trace, update_blocker_attempt_state
 
 logger = logging.getLogger(__name__)
 
@@ -569,6 +572,15 @@ async def _call_function_on_node(
     return raw_value
 
 
+async def _try_click_combobox_toggle(browser_session: BrowserSession, node: EnhancedDOMTreeNode) -> bool:
+    """Click react-select chevron / Toggle flyout when present (additive open path)."""
+    try:
+        raw = await _call_function_on_node(browser_session, node, CLICK_COMBOBOX_TOGGLE_ON_NODE_JS)
+        return combobox_toggle_clicked(raw)
+    except Exception:
+        return False
+
+
 # ── Fuzzy matching helper ────────────────────────────────────────────
 
 
@@ -611,17 +623,75 @@ def _fuzzy_match_option(
     return None
 
 
+# React-select / async combobox often reports placeholder rows like "No options" before the menu
+# is focused or before options load. Treat those as "no real options yet" so we always click-open
+# and poll (see Step 3b in domhand_select).
+_PLACEHOLDER_EXACT = frozenset(
+    {
+        "no options",
+        "no option",
+        "no results",
+        "no results found",
+        "loading",
+        "loading...",
+        "search...",
+        "select...",
+        "choose...",
+        "select one",
+        "choose one",
+    }
+)
+
+
+def _is_placeholder_option_text(primary: str) -> bool:
+    low = re.sub(r"\s+", " ", primary).strip().lower()
+    if not low:
+        return True
+    if low in _PLACEHOLDER_EXACT:
+        return True
+    if low.startswith("type to search"):
+        return True
+    return bool(re.match(r"^select\s*\.+\s*$", low) or re.match(r"^loading\.+$", low))
+
+
+def _meaningful_dropdown_options(options: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Filter discovery noise so 'No options' / loading rows don't skip the open+wait loop."""
+    if not options:
+        return []
+    out: list[dict[str, Any]] = []
+    for opt in options:
+        text = (opt.get("text") or "").strip()
+        value = (opt.get("value") or "").strip()
+        primary = text or value
+        if _is_placeholder_option_text(primary):
+            continue
+        out.append(opt)
+    return out
+
+
+def _needs_dropdown_open_trigger(is_native: bool, dropdown_type: str, options: list[dict[str, Any]]) -> bool:
+    """Whether to click the trigger and wait before matching (React-select, closed listbox, etc.)."""
+    if is_native:
+        return False
+    if dropdown_type == "unknown":
+        return True
+    return not _meaningful_dropdown_options(options)
+
+
+def _options_for_fuzzy_match(is_native: bool, options: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if is_native:
+        return options
+    meaningful = _meaningful_dropdown_options(options)
+    return meaningful if meaningful else options
+
+
 async def _clear_dropdown_search(page: Any) -> None:
     """Clear the current typed query for an open searchable dropdown."""
     for shortcut in ("Meta+A", "Control+A"):
-        try:
+        with contextlib.suppress(Exception):
             await page.keyboard.press(shortcut)
-        except Exception:
-            pass
-    try:
+    with contextlib.suppress(Exception):
         await page.keyboard.press("Backspace")
-    except Exception:
-        pass
     await asyncio.sleep(0.15)
 
 
@@ -690,6 +760,25 @@ def _selection_matches_value(current: str, expected: str) -> bool:
     expected_norm = normalize_name(expected or "")
     if _is_effectively_unset_select_value(current):
         return False
+    # Binary Yes/No: substring match is unsafe — "no" appears inside "not", "none", "know", etc.
+    if expected_norm in {"yes", "no"}:
+        return bool(
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(expected_norm)}(?![a-z0-9])",
+                current_norm,
+            )
+        )
+    # Gender / short identity tokens: "male" must not match inside "female" (substring bug).
+    gender_or_identity_tokens = frozenset(
+        {"male", "female", "man", "woman", "non-binary", "nonbinary", "other"}
+    )
+    if expected_norm in gender_or_identity_tokens:
+        return bool(
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(expected_norm)}(?![a-z0-9])",
+                current_norm,
+            )
+        )
     if expected_norm and (expected_norm in current_norm or current_norm in expected_norm):
         return True
     segments = split_dropdown_value_hierarchy(expected)
@@ -697,6 +786,56 @@ def _selection_matches_value(current: str, expected: str) -> bool:
         return False
     final_segment = normalize_name(segments[-1])
     return bool(final_segment and final_segment in current_norm)
+
+
+def _label_suggests_referral_or_source(field_label: str, param_field_label: str) -> bool:
+    combined = normalize_name(f"{field_label} {param_field_label}")
+    needles = (
+        "how did you hear",
+        "how did you",
+        "referral",
+        "source",
+        "learned about",
+        "where did you hear",
+        "application source",
+        "hear about us",
+    )
+    return any(n in combined for n in needles)
+
+
+def _label_suggests_phone_country_field(field_label: str, param_field_label: str) -> bool:
+    combined = normalize_name(f"{field_label} {param_field_label}")
+    return any(
+        x in combined
+        for x in (
+            "phone",
+            "mobile",
+            "country code",
+            "calling code",
+            "dial code",
+            "telephone country",
+        )
+    )
+
+
+def _options_look_like_phone_country_menu(options: list[dict[str, Any]]) -> bool:
+    """True when visible options look like (+1) / country calling-code lists, not referral sources."""
+    if len(options) < 1:
+        return False
+    texts = [str(o.get("text") or "").strip() for o in options[:20] if isinstance(o, dict)]
+    texts = [t for t in texts if t]
+    if not texts:
+        return False
+    phoneish = 0
+    for t in texts:
+        tl = t.lower().replace(" ", "")
+        if re.search(r"\(\+\d", t) or re.search(r"\+\d{1,4}\b", t):
+            phoneish += 1
+        elif "unitedstates" in tl and "+1" in tl.replace(" ", ""):
+            phoneish += 1
+        elif re.search(r"\(\+1\)", t):
+            phoneish += 1
+    return phoneish >= max(1, (len(texts) + 1) // 2)
 
 
 def _failover_prefix(widget_kind: str) -> str:
@@ -996,25 +1135,85 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             f"current_value_before={current_before!r}"
         )
 
-    # ── Step 3b: If no options found, click to open and re-discover ──
-    # React-select dropdowns often need TWO clicks: first to focus, second to open.
-    if not options or dropdown_type == "unknown":
-        for click_attempt in range(4):
-            try:
-                event = browser_session.event_bus.dispatch(ClickElementEvent(node=node))
-                await event
-                await event.event_result(raise_if_any=True, raise_if_none=False)
-                await asyncio.sleep(0.5)  # Wait for dropdown animation
+    # Closed Workday-style combobox: discovery returns custom_popup + [] options + currentValue from
+    # the visible token, while _read_current_selection can still be empty. Skip open-loop churn.
+    discovery_value = str(discovery.get("currentValue") or "").strip() if isinstance(discovery, dict) else ""
+    if (
+        not field_invalid
+        and discovery_value
+        and dropdown_type == "custom_popup"
+        and not _meaningful_dropdown_options(options)
+        and _selection_matches_value(discovery_value, params.value)
+    ):
+        clear_domhand_failure(host=page_host, field_key=field_key, desired_value=params.value)
+        logger.info(
+            "domhand.select.already_selected_discovery "
+            f"index={params.index} "
+            f"requested_value={params.value!r} "
+            f"discovery_value={discovery_value!r} "
+            f"current_value_before={current_before!r}"
+        )
+        return ActionResult(
+            extracted_content=(
+                f'Dropdown "{field_label or params.index}" already showed "{discovery_value}" '
+                "(from discovery). Immediately call domhand_assess_state for this blocker."
+            ),
+            include_extracted_content_only_once=False,
+            metadata={
+                "tool": "domhand_select",
+                "field_id": params.field_id,
+                "field_key": field_key,
+                "strategy": "already_selected",
+                "state_change": "unchanged",
+                "retry_capped": False,
+                "recommended_next_action": "call domhand_assess_state",
+            },
+        )
 
-                # Re-discover after clicking
-                discovery = await _call_function_on_node(browser_session, node, _DISCOVER_OPTIONS_ON_NODE_JS)
-                dropdown_type = discovery.get("type", "unknown") if isinstance(discovery, dict) else "unknown"
-                options = discovery.get("options", []) if isinstance(discovery, dict) else []
-                if options:
-                    break  # Got options, no need for second click
+    # ── Step 3b: Click to open, then poll until real options appear ──
+    # React-select / combobox: options are often absent or only "No options" until the menu opens.
+    if _needs_dropdown_open_trigger(is_native_select, dropdown_type, options):
+        for click_attempt in range(3):
+            try:
+                toggled = False
+                if not is_native_select:
+                    toggled = await _try_click_combobox_toggle(browser_session, node)
+                    if toggled:
+                        logger.debug(
+                            "domhand.select.open_via_toggle",
+                            extra={"index": params.index, "attempt": click_attempt + 1},
+                        )
+                if not toggled:
+                    event = browser_session.event_bus.dispatch(ClickElementEvent(node=node))
+                    await event
+                    await event.event_result(raise_if_any=True, raise_if_none=False)
+                # Poll: listbox paint + async options (React-select); cap ~1.5s per click wave.
+                for _tick in range(10):
+                    await asyncio.sleep(0.15)
+                    try:
+                        discovery = await _call_function_on_node(browser_session, node, _DISCOVER_OPTIONS_ON_NODE_JS)
+                        dropdown_type = discovery.get("type", "unknown") if isinstance(discovery, dict) else "unknown"
+                        options = discovery.get("options", []) if isinstance(discovery, dict) else []
+                    except Exception:
+                        pass
+                    if is_native_select and options:
+                        break
+                    if _meaningful_dropdown_options(options):
+                        break
+                if is_native_select and options:
+                    break
+                if _meaningful_dropdown_options(options):
+                    break
             except Exception as e:
                 logger.warning(f"Failed to click dropdown trigger (attempt {click_attempt + 1}): {e}")
                 break
+        logger.info(
+            "domhand.select.after_open "
+            f"index={params.index} "
+            f"dropdown_type={dropdown_type!r} "
+            f"raw_option_count={len(options)} "
+            f"meaningful_option_count={len(_meaningful_dropdown_options(options))}"
+        )
 
     # ── Step 3c: If still no options, try GetDropdownOptionsEvent ──
     if not options:
@@ -1106,7 +1305,9 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                 "observed_value": current,
                 "visible_error": str(post_invalid),
                 "strategy": "domhand_select",
-                "retry_capped": is_domhand_retry_capped(host=page_host, field_key=field_key, desired_value=params.value),
+                "retry_capped": is_domhand_retry_capped(
+                    host=page_host, field_key=field_key, desired_value=params.value
+                ),
                 "state_change": "no_state_change",
                 "recommended_next_action": "change strategy for this blocker and reassess immediately",
             },
@@ -1170,7 +1371,40 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
         result = None
 
     # ── Step 4: Match the target value ────────────────────────
-    matched = _fuzzy_match_option(params.value, options)
+    match_options = _options_for_fuzzy_match(is_native_select, options)
+    if (
+        _options_look_like_phone_country_menu(match_options)
+        and _label_suggests_referral_or_source(field_label, params.field_label or "")
+        and not _label_suggests_phone_country_field(field_label, params.field_label or "")
+    ):
+        logger.warning(
+            "domhand.select.phone_country_menu_mismatch",
+            extra={
+                "index": params.index,
+                "field_label": field_label,
+                "param_field_label": params.field_label,
+                "requested_value": params.value,
+                "sample_options": [str(o.get("text") or "") for o in match_options[:5]],
+            },
+        )
+        return ActionResult(
+            error=(
+                "WRONG_DROPDOWN: Visible options look like phone country codes (+1 / country list), "
+                "not referral/source choices. You likely targeted the wrong control — find the real "
+                '"How did you hear about us?" (or similar) field, or open the correct dropdown.'
+            ),
+            metadata={
+                "tool": "domhand_select",
+                "field_id": params.field_id,
+                "field_key": field_key,
+                "strategy": "wrong_dropdown_phone_country",
+                "state_change": "no_state_change",
+                "retry_capped": False,
+                "recommended_next_action": "locate correct referral/source control; do not retry same index",
+            },
+        )
+
+    matched = _fuzzy_match_option(params.value, match_options)
 
     if result is None and not matched:
         if dropdown_type != "native_select":
@@ -1178,12 +1412,10 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             if result.get("success"):
                 matched_text = result.get("clicked", params.value)
                 used_action_chain = (
-                    ["hierarchy_search"]
-                    if len(split_dropdown_value_hierarchy(params.value)) > 1
-                    else ["typed_search"]
+                    ["hierarchy_search"] if len(split_dropdown_value_hierarchy(params.value)) > 1 else ["typed_search"]
                 )
         if result is None or not result.get("success"):
-            available_texts = [opt.get("text", "") for opt in options[:20]]
+            available_texts = [opt.get("text", "") for opt in match_options[:20]]
             logger.warning(
                 "domhand.select.no_match "
                 f"index={params.index} "
@@ -1228,7 +1460,9 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                         if result.get("success"):
                             used_action_chain = ["page_js_click"]
                     else:
-                        event = browser_session.event_bus.dispatch(SelectDropdownOptionEvent(node=node, text=matched_text))
+                        event = browser_session.event_bus.dispatch(
+                            SelectDropdownOptionEvent(node=node, text=matched_text)
+                        )
                         selection_data = await event.event_result(timeout=3.0, raise_if_none=False, raise_if_any=False)
                         if selection_data and isinstance(selection_data, dict) and selection_data.get("success"):
                             result = {"success": True, "clicked": selection_data.get("selected_text", matched_text)}
@@ -1322,18 +1556,27 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                 "field_key": field_key,
                 "strategy": "domhand_select",
                 "state_change": "no_state_change",
-                "retry_capped": is_domhand_retry_capped(host=page_host, field_key=field_key, desired_value=params.value),
+                "retry_capped": is_domhand_retry_capped(
+                    host=page_host, field_key=field_key, desired_value=params.value
+                ),
                 "recommended_next_action": "change strategy for this blocker and reassess immediately",
             },
         )
 
     clear_domhand_failure(host=page_host, field_key=field_key, desired_value=params.value)
     page_context_key = await _get_page_context_key(page)
+    settled_field = FormField(
+        field_id=params.field_id or f"domhand-select-{params.index}",
+        name=(params.field_label or field_label or f"dropdown[{params.index}]"),
+        field_type="select",
+        section=params.target_section or "",
+        is_native=is_native_select,
+    )
     await _record_expected_value_if_settled(
         page=page,
         host=page_host,
         page_context_key=page_context_key,
-        field=field,
+        field=settled_field,
         field_key=field_key,
         expected_value=params.value,
         source="derived_profile",

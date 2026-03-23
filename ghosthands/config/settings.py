@@ -34,6 +34,11 @@ class Settings(BaseSettings):
         "gemini-3-flash-preview",
         description="Cheap model for DomHand answer generation",
     )
+    llm_temperature: float = Field(
+        0.0,
+        description="Sampling temperature for planner + DomHand (via get_chat_model). "
+        "0 maximizes reproducibility; raise if a provider/model rejects low temperature.",
+    )
     semantic_match_model: str = Field(
         "",
         description="Optional cheap text model for classification-only semantic matching. Defaults to domhand_model.",
@@ -109,6 +114,10 @@ class Settings(BaseSettings):
     agent_max_actions_per_step: int = Field(
         1,
         description="Maximum browser-use actions to execute in a single agent step",
+    )
+    agent_max_history_items: int | None = Field(
+        28,
+        description="Cap LLM conversation history items (None = keep all). Lowers cost on long Workday runs.",
     )
     cdp_url: str | None = Field(
         None, description="CDP URL of an existing browser to connect to (Desktop-owned browser mode)"

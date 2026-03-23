@@ -81,10 +81,16 @@ PLATFORM_HINTS: dict[str, str] = {
         "with data-automation-id selectors, segmented date fields (MM/DD/YYYY "
         "typed as continuous digits), and 'Select One' dropdown buttons. "
         "If a same-site start dialog offers 'Autofill with Resume' or "
-        "'Apply with Resume', prefer that path."
+        "'Apply with Resume', prefer that path. "
+        "After that step, Workday often shows Create Account as the primary button "
+        "and 'Sign In' as a secondary link — for NEW credentials do NOT click Sign In "
+        "first to 'reach' auth; scroll or wait if the page is still loading, then "
+        "choose Create Account when creating a new applicant login."
     ),
     "greenhouse": (
-        "Detected platform: Greenhouse. Expect a single-page application flow with resume upload near the top."
+        "Detected platform: Greenhouse. Expect a same-site start state first on some boards "
+        "('Apply for this job' and/or resume upload near the top), followed by a single-page "
+        "application form once the apply flow is revealed."
     ),
     "lever": ("Detected platform: Lever. Expect a single long page with all fields visible. Scrolling may be needed."),
     "smartrecruiters": (
@@ -598,6 +604,12 @@ def build_system_prompt(
         "- For text/date/search fields that visibly contain the value but",
         "  still show validation errors, focus the field and press Enter",
         "  or Tab to commit the value before continuing.",
+        "- Workday compensation/salary EXPECTATIONS textareas: if ONLY that field",
+        "  stays red 'required' while text is visible, this is usually a commit/state",
+        "  issue on one control — NOT a reason to refresh the whole application.",
+        "  Call domhand_assess_state, then domhand_fill AGAIN with target_section",
+        "  set to current_section and focus_fields set to that ONE label (exact",
+        "  unresolved name). Avoid full-page refresh as the first recovery.",
         "- Safe to batch in one step: multiple text input fills, or",
         "  filling text + clicking a non-dropdown checkbox.",
         "",
@@ -612,6 +624,16 @@ def build_system_prompt(
         "  affordance or the picker interaction has already failed.",
         "- After any typed date input, blur or Tab away so Workday",
         "  re-validates the field before moving on.",
+        "",
+        "READBACK VS ASSESS (custom dropdowns / react-select):",
+        "- domhand_assess_state uses DOM readback; custom selects often LOOK filled while",
+        "  readback stays empty (especially Greenhouse). Do not treat a long list of",
+        "  unresolved custom selects with empty current_value and NO visible_errors as",
+        "  proof the prefill failed — after domhand_fill + resume upload, prefer ONE",
+        "  reassess or generic input/click/select_dropdown on the specific visible gap.",
+        "- After TWO failed DomHand retries on the SAME field label, stop calling",
+        "  domhand_fill / domhand_select / domhand_interact_control for it; use standard",
+        "  browser-use tools instead.",
         "",
         "SEARCH / AUTOCOMPLETE RESILIENCE:",
         "- For ANY searchable field (country, city, location, job title,",
@@ -815,14 +837,18 @@ def build_system_prompt(
         "- If a category is selected and a second list appears, keep going",
         "  until you click the final leaf option.  Do NOT navigate away",
         "  after the first click in a multi-layer dropdown.",
-        "- Source/referral fields such as 'How Did You Hear About Us?' are",
-        "  dropdowns even when they look like text inputs. Typing a value or",
-        "  clicking a parent category is NOT enough; you must click the final",
-        "  leaf option that matches the applicant profile value.",
-        "- Example: if the applicant profile says LinkedIn and the first menu",
-        "  shows a parent option like 'Job Board/Social Media Web Site', click",
-        "  that parent, WAIT for the next menu, then click the final leaf such",
-        "  as 'LinkedIn'. Only the final leaf clears the validation error.",
+        "- Source/referral fields ('How Did You Hear About Us?') are low-",
+        "  priority — any reasonable answer is fine. Do NOT loop on this field.",
+        "  These are often multi-layer dropdowns: click a parent category,",
+        "  WAIT for sub-options, then click a leaf. Only the leaf clears",
+        "  the validation error.",
+        "- ACCEPTABLE ANSWERS (in preference order): 'LinkedIn', 'Job Board',",
+        "  'Social Media', 'Company Careers Page', 'Website', 'Online',",
+        "  'Internet', 'Other'. If the first parent you try (e.g. 'Social",
+        "  Media') has no matching leaf, pick ANY leaf under it — or press",
+        "  Escape and try the next parent. After TWO parent attempts without",
+        "  a match, just select 'Other' or whatever parent accepts as final.",
+        "  Do NOT spend more than 3 actions total on this field.",
         "- After clicking an option, verify the field text changed or the",
         "  validation error cleared before clicking Save/Continue.",
         "- Do NOT resolve a source/referral dropdown in the same recovery",
@@ -874,6 +900,7 @@ def build_task_prompt(
     sensitive_data: dict | None,
     credential_source: str = "",
     credential_intent: str = "",
+    platform: str = "generic",
 ) -> str:
     """Build the task prompt for the agent."""
     task = (

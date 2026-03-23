@@ -64,7 +64,12 @@ class ExpectedFieldValue(BaseModel):
     field_section: str = ""
     field_fingerprint: str = ""
     expected_value: str
-    source: Literal["exact_profile", "derived_profile", "manual_recovery"]
+    source: Literal[
+        "exact_profile",
+        "derived_profile",
+        "manual_recovery",
+        "domhand_unverified",
+    ]
 
 
 class RepeaterFieldBinding(BaseModel):
@@ -239,7 +244,12 @@ def record_expected_field_value(
     field_section: str = "",
     field_fingerprint: str = "",
     expected_value: str,
-    source: Literal["exact_profile", "derived_profile", "manual_recovery"],
+    source: Literal[
+        "exact_profile",
+        "derived_profile",
+        "manual_recovery",
+        "domhand_unverified",
+    ],
 ) -> None:
     activate_page_context(host=host, page_context_key=page_context_key)
     key = build_expected_field_key(host=host, page_context_key=page_context_key, field_key=field_key)
