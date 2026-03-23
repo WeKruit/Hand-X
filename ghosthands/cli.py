@@ -206,14 +206,42 @@ def parse_args() -> argparse.Namespace:
 # ── Logging setup ─────────────────────────────────────────────────────
 
 
+class _CompactFormatter(logging.Formatter):
+    """Shorten noisy logger names while keeping everything else intact."""
+
+    _REWRITES = {
+        "Agent": "Agent",
+        "BrowserSession": "Session",
+        "tools": "tools",
+        "dom": "dom",
+    }
+
+    def format(self, record: logging.LogRecord) -> str:
+        name = record.name
+        if isinstance(name, str) and name.startswith("browser_use."):
+            for fragment, short in self._REWRITES.items():
+                if fragment in name:
+                    record.name = short
+                    break
+            else:
+                parts = name.split(".")
+                if len(parts) >= 2:
+                    record.name = parts[-1]
+        return super().format(record)
+
+
 def _setup_logging() -> None:
     """Route ALL logging to stderr so stdout stays clean."""
     root = logging.getLogger()
     root.handlers.clear()
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter("%(levelname)s [%(name)s] %(message)s"))
+    handler.setFormatter(_CompactFormatter("%(levelname)s [%(name)s] %(message)s"))
     root.addHandler(handler)
     root.setLevel(logging.INFO)
+
+    for noisy in ("google_genai.models", "google_genai", "httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     structlog.configure(
         cache_logger_on_first_use=True,
         logger_factory=structlog.stdlib.LoggerFactory(),
@@ -750,7 +778,16 @@ async def _collect_open_question_issues_from_browser(browser: Any) -> list[_Open
 
         result = await domhand_assess_state(DomHandAssessStateParams(), browser)
         summary = result.extracted_content or ""
-        payload = _extract_application_state_json(summary)
+        payload: dict[str, Any] = {}
+        meta = getattr(result, "metadata", None) or {}
+        raw_state = meta.get("application_state_json")
+        if isinstance(raw_state, str) and raw_state.strip():
+            with contextlib.suppress(json.JSONDecodeError, TypeError):
+                parsed = json.loads(raw_state)
+                if isinstance(parsed, dict):
+                    payload = parsed
+        if not payload:
+            payload = _extract_application_state_json(summary)
         issues = payload.get("unresolved_required_fields")
         if isinstance(issues, list):
             collected: list[_OpenQuestionIssue] = []
@@ -1212,6 +1249,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     field_events.install_jsonl_callback()
 
     # -- Import heavy deps after env setup ----------------------------------
+    logger.warning("startup.importing_browser_use")
     from browser_use import Agent, BrowserProfile, BrowserSession, Tools
 
     app_settings = _load_runtime_settings()
@@ -1225,9 +1263,11 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     _warn_if_proxy_overrides_direct_keys(args, app_settings)
 
+    logger.warning("startup.creating_llm_client", model=args.model)
     from ghosthands.llm.client import get_chat_model
 
     llm = get_chat_model(model=args.model)
+    logger.warning("startup.llm_client_ready", model_type=type(llm).__name__)
 
     # -- DomHand actions ----------------------------------------------------
     tools: Tools = Tools()
@@ -1245,6 +1285,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         from ghosthands.platforms import detect_platform
 
         platform = detect_platform(args.job_url)
+        logger.warning("startup.platform_detected", platform=platform)
     except ImportError:
         pass
 
@@ -1298,6 +1339,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         sensitive_data,
         credential_source=app_settings.credential_source,
         credential_intent=app_settings.credential_intent,
+        platform=platform,
     )
 
     emit_status(
@@ -1308,7 +1350,10 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     )
 
     # -- Step hooks for live JSONL events -----------------------------------
+    _prefill_done = False
+
     async def _on_step_start(ag: Agent) -> None:
+        nonlocal _prefill_done
         from ghosthands.agent.hooks import infer_phase_from_goal
 
         await install_same_tab_guard(ag)
@@ -1319,12 +1364,39 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         phase = infer_phase_from_goal(goal)
         if phase:
             _emit_phase_if_changed(phase, detail=goal or None)
+        logger.warning("agent.step", step=step, phase=phase or "unknown", goal=goal[:120] if goal else "")
         emit_status(
             phase or goal or f"Step {step}...",
             step=step,
             max_steps=args.max_steps,
             job_id=job_id,
         )
+
+        # Auto-prefill: on step 1 for non-Workday platforms, call domhand_fill
+        # before the LLM sees the page. DomHand already handles Greenhouse/Lever
+        # forms; this ensures it runs immediately instead of waiting for the LLM
+        # to decide (which can hang on large pages).
+        if step == 1 and not _prefill_done and platform not in ("workday",):
+            _prefill_done = True
+            try:
+                from ghosthands.actions.domhand_fill import domhand_fill as _domhand_fill
+                from ghosthands.actions.views import DomHandFillParams
+
+                _emit_phase_if_changed("Auto-filling form fields")
+                result = await _domhand_fill(DomHandFillParams(), ag.browser_session)
+                if result and not result.error:
+                    ag.state.last_result = [result]
+                    logger.warning(
+                        "auto_prefill.completed",
+                        has_content=bool(result.extracted_content),
+                    )
+                else:
+                    logger.warning(
+                        "auto_prefill.no_fields",
+                        error=result.error if result else "no result",
+                    )
+            except Exception as exc:
+                logger.warning("auto_prefill.failed", error=str(exc))
 
     async def _on_step_end(ag: Agent) -> None:
         nonlocal account_created_emitted
@@ -1426,7 +1498,19 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     # -- Run ----------------------------------------------------------------
     try:
-        await browser.start()
+        logger.warning(
+            "startup.launching_browser",
+            headless=args.headless,
+            cdp_url=bool(cdp_url),
+            platform=platform,
+        )
+        try:
+            await asyncio.wait_for(browser.start(), timeout=60)
+        except asyncio.TimeoutError:
+            logger.error("startup.browser_launch_timeout", timeout_seconds=60)
+            emit_error("Browser failed to start within 60 seconds", fatal=True, job_id=job_id)
+            sys.exit(1)
+        logger.warning("startup.browser_ready", cdp_url=bool(browser.cdp_url))
         if browser.cdp_url:
             emit_browser_ready(browser.cdp_url)
         else:
@@ -1459,6 +1543,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             cancel_task = asyncio.create_task(listen_for_cancel(agent, cancel_requested))
             try:
                 _emit_phase_if_changed("Navigating to application")
+                logger.warning("startup.agent_run_starting", max_steps=args.max_steps)
                 history = await agent.run(
                     max_steps=args.max_steps,
                     on_step_start=_on_step_start,
@@ -1477,42 +1562,15 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         total_steps = 0
         cancelled = False
         hitl_recovery_task = task
-        hitl_answers: dict[str, _RecoveredFieldAnswer] = {}
-        for _recovery_round in range(3):
-            history, cancelled = await _run_agent_once(hitl_recovery_task)
-            is_done = history.is_done()
-            final_result = history.final_result() or ""
-            total_cost += history.usage.total_cost if history.usage else 0.0
-            total_steps += len(history.history) if history.history else 0
-
-            if cancelled:
-                break
-
-            blocker_candidate = final_result if "blocker:" in final_result.lower() else ""
-            if not blocker_candidate or _looks_like_terminal_blocker(blocker_candidate):
-                break
-
-            browser_issues = await _collect_open_question_issues_from_browser(browser)
-            if not browser_issues and not _looks_like_answer_needed_blocker(blocker_candidate):
-                break
-
-            recovered_answers, cancelled_during_recovery = await _request_open_question_answers(
-                browser,
-                blocker_candidate,
-                timeout_seconds=float(os.getenv("GH_OPEN_QUESTION_TIMEOUT_SECONDS", "5400")),
-                issues=browser_issues,
-                profile=profile,
-            )
-            if cancelled_during_recovery:
-                cancelled = True
-                break
-            if not recovered_answers:
-                break
-
-            for answer in recovered_answers:
-                hitl_answers[answer.field_id] = answer
-            hitl_recovery_task = _build_recovery_task(task, list(hitl_answers.values()))
-            emit_status("Recovered additional answers — resuming application", job_id=job_id)
+        # Single run — never restart the agent from scratch. Restarting loses all
+        # form progress (the new agent navigates back to the job URL). If the agent
+        # dies from consecutive failures, accept the result rather than wasting a
+        # second full run on the same stuck field.
+        history, cancelled = await _run_agent_once(hitl_recovery_task)
+        is_done = history.is_done()
+        final_result = history.final_result() or ""
+        total_cost += history.usage.total_cost if history.usage else 0.0
+        total_steps += len(history.history) if history.history else 0
 
         # Final cost event
         if history and history.usage:
@@ -1798,6 +1856,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         sensitive_data,
         credential_source=app_settings.credential_source,
         credential_intent=app_settings.credential_intent,
+        platform=platform,
     )
 
     # -- Agent --------------------------------------------------------------

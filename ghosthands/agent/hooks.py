@@ -359,6 +359,9 @@ class StepHooks:
                 if has_llm_calls:
                     step_llm_calls = step_llm_call_total
 
+        # Planner cost from browser-use TokenCost (LiteLLM pricing) + DomHand tool LLM
+        # from ActionResult.metadata step_cost (ghosthands.config.models.estimate_cost).
+        # Totals are estimates; reconcile with provider/VALET billing separately.
         self._cumulative_cost = browser_use_cost + self._metadata_cost_total
 
         if self._cumulative_cost >= self.max_budget:

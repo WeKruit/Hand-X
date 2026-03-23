@@ -1444,6 +1444,26 @@ def test_dropdown_selection_match_requires_final_visible_value():
     assert not _selection_matches_value("Select One", "LinkedIn")
     assert not _selection_matches_value("05e15101582a10019dbe3ae8c5a80000", "Yes")
     assert not _selection_matches_value("What degree are you seeking? Select One", "Bachelor's Degree")
+    # "no" must not match as substring of "not" (EEO / veteran text vs Yes/No dropdown).
+    assert not _selection_matches_value("I am not a protected veteran", "No")
+    assert _selection_matches_value("No", "No")
+    assert _selection_matches_value("No, I decline to answer", "No")
+    # "male" must not match as substring of "female" (Workday gender widget readback).
+    assert not _selection_matches_value("Female", "Male")
+    assert _selection_matches_value("Male", "Male")
+    assert _selection_matches_value("Female", "Female")
+
+
+def test_options_look_like_phone_country_menu_for_referral_guard():
+    from ghosthands.actions.domhand_select import (
+        _label_suggests_referral_or_source,
+        _options_look_like_phone_country_menu,
+    )
+
+    opts = [{"text": "United States of America (+1)"}, {"text": "United Kingdom (+44)"}]
+    assert _options_look_like_phone_country_menu(opts)
+    assert _label_suggests_referral_or_source("How Did You Hear About Us?", "")
+    assert not _options_look_like_phone_country_menu([{"text": "LinkedIn"}, {"text": "Referral"}])
 
 
 def test_fill_dropdown_confirmation_requires_final_visible_value():
@@ -1574,7 +1594,7 @@ async def test_domhand_assess_state_detects_greenhouse_presubmit_single_page(
         result = await domhand_assess_state(DomHandAssessStateParams(), browser_session)
         assert result.error is None
         assert result.extracted_content is not None
-        state_json = result.extracted_content.split("APPLICATION_STATE_JSON:\n", 1)[1]
+        state_json = (result.metadata or {})["application_state_json"]
         state = json.loads(state_json)
 
         assert state["terminal_state"] == "presubmit_single_page"
@@ -1600,7 +1620,7 @@ async def test_domhand_assess_state_ignores_social_or_later_continue_buttons_on_
 
         result = await domhand_assess_state(DomHandAssessStateParams(), browser_session)
         assert result.extracted_content is not None
-        state = json.loads(result.extracted_content.split("APPLICATION_STATE_JSON:\n", 1)[1])
+        state = json.loads((result.metadata or {})["application_state_json"])
 
         assert state["advance_visible"] is False
         assert state["terminal_state"] == "presubmit_single_page"
@@ -1624,7 +1644,7 @@ async def test_domhand_assess_state_requires_fix_when_submit_blocked(
 
         result = await domhand_assess_state(DomHandAssessStateParams(), browser_session)
         assert result.extracted_content is not None
-        state = json.loads(result.extracted_content.split("APPLICATION_STATE_JSON:\n", 1)[1])
+        state = json.loads((result.metadata or {})["application_state_json"])
 
         assert state["terminal_state"] == "advanceable"
         assert state["submit_disabled"] is True
@@ -1650,7 +1670,7 @@ async def test_domhand_assess_state_keeps_multi_step_pages_advanceable(
 
         result = await domhand_assess_state(DomHandAssessStateParams(), browser_session)
         assert result.extracted_content is not None
-        state = json.loads(result.extracted_content.split("APPLICATION_STATE_JSON:\n", 1)[1])
+        state = json.loads((result.metadata or {})["application_state_json"])
 
         assert state["terminal_state"] == "advanceable"
         assert state["advance_visible"] is True
@@ -1674,7 +1694,7 @@ async def test_domhand_assess_state_reports_scroll_bias_down_for_lower_unresolve
 
         result = await domhand_assess_state(DomHandAssessStateParams(), browser_session)
         assert result.extracted_content is not None
-        state = json.loads(result.extracted_content.split("APPLICATION_STATE_JSON:\n", 1)[1])
+        state = json.loads((result.metadata or {})["application_state_json"])
 
         assert state["scroll_bias"] == "down"
         assert state["current_section"] == "Education"
@@ -1699,7 +1719,7 @@ async def test_domhand_assess_state_reads_selected_pill_and_reports_radio_blocke
 
         result = await domhand_assess_state(DomHandAssessStateParams(), browser_session)
         assert result.extracted_content is not None
-        state = json.loads(result.extracted_content.split("APPLICATION_STATE_JSON:\n", 1)[1])
+        state = json.loads((result.metadata or {})["application_state_json"])
 
         assert len(state["unresolved_required_fields"]) == 1
         assert state["unresolved_required_fields"][0]["name"] == "Have you previously worked at Exact Sciences?*"
@@ -1731,7 +1751,7 @@ async def test_domhand_assess_state_prefers_visible_transition_section_over_stal
             browser_session,
         )
         assert result.extracted_content is not None
-        state = json.loads(result.extracted_content.split("APPLICATION_STATE_JSON:\n", 1)[1])
+        state = json.loads((result.metadata or {})["application_state_json"])
 
         assert state["current_section"] == "Application Questions"
         assert state["unresolved_required_fields"][0]["name"].startswith(

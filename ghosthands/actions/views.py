@@ -329,10 +329,14 @@ def generate_dropdown_search_terms(value: str) -> list[str]:
     seen: set[str] = set()
     terms: list[str] = []
     stop_words = {"of", "and", "in", "the", "a", "an", "for", "to", "with", "or", "at", "by"}
-    synonym_clusters = [
+    # Do not expand the Mobile/Cell cluster when the value is clearly a phone *number* — typing
+    # "Mobile" into the number input is a common failure mode for react-select phone widgets.
+    digit_count = sum(1 for ch in raw if ch.isdigit())
+    synonym_clusters: list[list[str]] = [
         ["United States +1", "United States", "USA", "US", "+1"],
-        ["Mobile", "Mobile phone", "Cell", "Cell phone"],
     ]
+    if digit_count < 7:
+        synonym_clusters.append(["Mobile", "Mobile phone", "Cell", "Cell phone"])
 
     def add(term: str) -> None:
         cleaned = re.sub(r"\s+", " ", term.strip())
