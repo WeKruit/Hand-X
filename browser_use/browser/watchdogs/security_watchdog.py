@@ -91,21 +91,9 @@ class SecurityWatchdog(BaseWatchdog):
 				self.logger.error(f'⛔️ Failed to close new tab with non-allowed URL: {type(e).__name__} {e}')
 
 	def _is_root_domain(self, domain: str) -> bool:
-		"""Check if a domain is a root domain (no subdomain present).
-
-		Simple heuristic: only add www for domains with exactly 1 dot (domain.tld).
-		For complex cases like country TLDs or subdomains, users should configure explicitly.
-
-		Args:
-			domain: The domain to check
-
-		Returns:
-			True if it's a simple root domain, False otherwise
-		"""
-		# Skip if it contains wildcards or protocol
+		"""True for simple registrable names like example.com (one dot); used for prohibited-domain www matching only."""
 		if '*' in domain or '://' in domain:
 			return False
-
 		return domain.count('.') == 1
 
 	def _log_glob_warning(self) -> None:
@@ -237,14 +225,29 @@ class SecurityWatchdog(BaseWatchdog):
 			else:
 				# Slow path: O(n) pattern matching for lists
 				for pattern in prohibited_domains:
-					if self._is_url_match(url, host, parsed.scheme, pattern):
+					if self._is_url_match(
+						url, host, parsed.scheme, pattern, subdomain_suffix_for_plain_domain=False
+					):
 						return False
 				return True
 
 		return True
 
-	def _is_url_match(self, url: str, host: str, scheme: str, pattern: str) -> bool:
-		"""Check if a URL matches a pattern."""
+	def _is_url_match(
+		self,
+		url: str,
+		host: str,
+		scheme: str,
+		pattern: str,
+		*,
+		subdomain_suffix_for_plain_domain: bool = True,
+	) -> bool:
+		"""Check if a URL matches a pattern.
+
+		Allowlists use subdomain_suffix_for_plain_domain=True so ``oraclecloud.com`` matches
+		``hdpc.fa.us2.oraclecloud.com`` (same as Hand-X DomainLockdown). Prohibited lists use
+		False so blocking ``example.com`` does not block ``mail.example.com`` unless a glob is used.
+		"""
 
 		# Full URL for matching (scheme + host)
 		full_url_pattern = f'{scheme}://{host}'
@@ -280,11 +283,14 @@ class SecurityWatchdog(BaseWatchdog):
 				if url.startswith(pattern):
 					return True
 			else:
-				# Domain-only pattern (case-insensitive comparison)
-				if host.lower() == pattern.lower():
-					return True
-				# If pattern is a root domain, also check www subdomain
-				if self._is_root_domain(pattern) and host.lower() == f'www.{pattern.lower()}':
-					return True
+				hl, pl = host.lower(), pattern.lower()
+				if subdomain_suffix_for_plain_domain:
+					if hl == pl or hl.endswith('.' + pl):
+						return True
+				else:
+					if hl == pl:
+						return True
+					if self._is_root_domain(pattern) and hl == f'www.{pl}':
+						return True
 
 		return False

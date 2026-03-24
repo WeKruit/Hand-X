@@ -11,8 +11,10 @@ Flow:
 5. Click the matching option
 6. Verify the selection stuck
 
-All DOM element lookups use browser-use's selector map (get_element_by_index)
-and CDP backend_node_id resolution — never data-highlight-index attributes.
+Trigger discovery uses browser-use's selector map (get_element_by_index) plus
+CDP ``Runtime.callFunctionOn`` on the indexed node. Option picking prefers
+Playwright locators (full user-gesture pipeline), then page-level JS click
+fallbacks that include Oracle-style ``role=gridcell`` list rows.
 """
 
 import asyncio
@@ -117,7 +119,7 @@ _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 		const listbox = qById(listboxId);
 		if (listbox) {
 			const options = Array.from(
-				listbox.querySelectorAll('[role="option"], li, [class*="option"], [data-value]')
+				listbox.querySelectorAll('[role="option"], [role="gridcell"], [role="listitem"], li, [class*="option"], [data-value]')
 			).map((o, i) => ({
 				text: o.textContent.trim(),
 				value: o.getAttribute('data-value') || o.getAttribute('value') || o.textContent.trim(),
@@ -193,7 +195,7 @@ _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 		for (const entry of scoredPopups) {
 			const popup = entry.popup;
 			const options = Array.from(
-				popup.querySelectorAll('[role="option"], li, [class*="option"], [data-value]')
+				popup.querySelectorAll('[role="option"], [role="gridcell"], [role="listitem"], li, [class*="option"], [data-value]')
 			).filter(visible).map((o, i) => ({
 				text: clean(o.textContent),
 				value: o.getAttribute('data-value') || clean(o.textContent),
@@ -218,7 +220,7 @@ _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 		const rect = lb.getBoundingClientRect();
 		if (rect.width > 0 && rect.height > 0) {
 			const options = Array.from(
-				lb.querySelectorAll('[role="option"], [role="menuitem"], li')
+				lb.querySelectorAll('[role="option"], [role="menuitem"], [role="gridcell"], [role="listitem"], li')
 			).filter(o => {
 				const r = o.getBoundingClientRect();
 				return r.width > 0 && r.height > 0;
@@ -257,7 +259,7 @@ _CLICK_OPTION_JS = r"""(targetText) => {
 
 	// Collect all visible option-like elements (across shadow roots)
 	const selectors = [
-		'[role="option"]', '[role="menuitem"]',
+		'[role="option"]', '[role="menuitem"]', '[role="gridcell"]', '[role="listitem"]',
 		'li', '[class*="option"]', '[data-value]',
 	];
 	const candidates = [];
@@ -379,20 +381,46 @@ _VERIFY_SELECTION_ON_NODE_JS = r"""function() {
 		return (node.textContent || '').replace(/\s+/g, ' ').trim();
 	};
 
-	const isSelectLike = el.getAttribute('role') === 'combobox'
+	let comboHost = null;
+	let walk = el;
+	for (let depth = 0; depth < 8 && walk; depth++) {
+		if (walk.getAttribute && walk.getAttribute('role') === 'combobox') {
+			comboHost = walk;
+			break;
+		}
+		walk = walk.parentElement;
+	}
+	if (comboHost === el) {
+		comboHost = null;
+	}
+	let isSelectLike = el.getAttribute('role') === 'combobox'
 		|| el.getAttribute('data-uxi-widget-type') === 'selectinput'
-		|| el.getAttribute('aria-haspopup') === 'listbox';
+		|| el.getAttribute('aria-haspopup') === 'listbox'
+		|| el.getAttribute('aria-haspopup') === 'grid';
+	if (!isSelectLike && comboHost) {
+		isSelectLike = true;
+	}
 
 	let value = '';
 	if (!isSelectLike && typeof el.value === 'string' && el.value.trim()) {
 		value = el.value.trim();
 	}
 	if (!value && isSelectLike) {
+		const fieldAnchor = comboHost || el;
 		const ownText = visibleText(el);
 		if (ownText && !isUnsetLike(ownText)) {
 			value = ownText;
 		}
-		const wrapper = el.closest('[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field') || el.parentElement || el;
+		const wrapper =
+			fieldAnchor.closest('.input-field-container')
+			|| fieldAnchor.closest('.cx-select-container')
+			|| fieldAnchor.closest('.input-row__control-container')
+			|| fieldAnchor.closest('.input-row')
+			|| fieldAnchor.closest(
+				'[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field'
+			)
+			|| fieldAnchor.parentElement
+			|| fieldAnchor;
 		const tokenSelectors = [
 			'[data-automation-id*="selected"]',
 			'[data-automation-id*="Selected"]',
@@ -411,6 +439,34 @@ _VERIFY_SELECTION_ON_NODE_JS = r"""function() {
 				break;
 			}
 			if (value) break;
+		}
+		if (!value) {
+			const scanTargets = [];
+			const addT = (n) => {
+				if (n && !scanTargets.includes(n)) scanTargets.push(n);
+			};
+			addT(fieldAnchor);
+			addT(wrapper);
+			const jetSel = [
+				'[class*="oj-text-field-middle"]',
+				'[class*="TextFieldMiddle"]',
+				'[class*="oj-text-field-container"]',
+				'[class*="oj-text-field"]',
+				'[role="textbox"][aria-readonly="true"]'
+			];
+			for (const st of scanTargets) {
+				if (!st || !st.querySelectorAll) continue;
+				for (const sel of jetSel) {
+					for (const hit of st.querySelectorAll(sel)) {
+						const tx = visibleText(hit);
+						if (!tx || isUnsetLike(tx) || /^required$/i.test(tx) || tx.length > 120) continue;
+						value = tx;
+						break;
+					}
+					if (value) break;
+				}
+				if (value) break;
+			}
 		}
 		if (!value) {
 			const wrapperText = visibleText(wrapper);
@@ -695,12 +751,75 @@ async def _clear_dropdown_search(page: Any) -> None:
     await asyncio.sleep(0.15)
 
 
+async def _focus_dropdown_filter_input(page: Any) -> None:
+    """Move focus to the open combobox or listbox search field before typing.
+
+    Without this, ``page.keyboard`` may target ``body`` and searchable menus
+    never filter — the UI looks unchanged while options stay unmatchable.
+    """
+    js = """() => {
+	const tryFocus = (el) => {
+		if (!el) return false;
+		try {
+			el.focus();
+			return true;
+		} catch (e) {
+			return false;
+		}
+	};
+	const expanded = document.querySelector('[role="combobox"][aria-expanded="true"]');
+	if (tryFocus(expanded)) return true;
+	const lb = document.querySelector('[role="listbox"]');
+	if (lb) {
+		const inp = lb.querySelector(
+			'input:not([type="hidden"]):not([disabled]), textarea, [role="searchbox"]'
+		);
+		if (tryFocus(inp)) return true;
+	}
+	const auto = document.querySelector(
+		'input[aria-autocomplete="list"], input[aria-autocomplete="both"], input[aria-autocomplete="inline"]'
+	);
+	return tryFocus(auto);
+}"""
+    with contextlib.suppress(Exception):
+        await page.evaluate(js)
+
+
+async def _click_option_via_playwright(page: Any, matched_text: str) -> dict[str, Any]:
+    """Click a visible menu row using Playwright (preferred over raw ``element.click()`` in evaluate).
+
+    Oracle Fusion and similar UIs expose choices as ``gridcell`` / ``listitem``;
+    synthetic React handlers often need the full pointer pipeline.
+    """
+    raw = (matched_text or "").strip()
+    if not raw:
+        return {"success": False, "error": "empty match text"}
+    safe = raw[:200]
+    try:
+        pattern = re.compile(re.escape(safe), re.IGNORECASE)
+    except re.error:
+        return {"success": False, "error": "invalid match text for locator"}
+    for role in ("option", "gridcell", "menuitem", "listitem"):
+        try:
+            loc = page.get_by_role(role, name=pattern)
+            if await loc.count() == 0:
+                continue
+            first = loc.first
+            await first.scroll_into_view_if_needed(timeout=2000)
+            await first.click(timeout=4000)
+            return {"success": True, "clicked": raw, "via": f"playwright:{role}"}
+        except Exception:
+            continue
+    return {"success": False, "error": "playwright_locator_miss"}
+
+
 async def _search_and_click_dropdown_option(page: Any, value: str) -> dict[str, Any]:
     """Type generic fallback search terms into an open dropdown and click a match."""
     for idx, term in enumerate(generate_dropdown_search_terms(value)):
         try:
             if idx > 0:
                 await _clear_dropdown_search(page)
+            await _focus_dropdown_filter_input(page)
             await page.keyboard.type(term, delay=45)
             await asyncio.sleep(0.3)
             result = await _click_option_via_page_js(page, value, "typed_search")
@@ -1736,12 +1855,14 @@ async def _select_via_event_bus(
 
 
 async def _click_option_via_page_js(page: Any, matched_text: str, dropdown_type: str) -> dict[str, Any]:
-    """Click a dropdown option using page.evaluate with a global JS search.
+    """Click a dropdown option: Playwright locators first, then global JS search.
 
-    This is the fallback when the event bus approach doesn't work. It searches
-    all visible option-like elements on the page (not tied to any specific
-    element index).
+    Playwright issues full pointer/keyboard focus semantics; plain DOM
+    ``click()`` inside ``evaluate`` often misses React/Vue synthetic handlers.
     """
+    pw = await _click_option_via_playwright(page, matched_text)
+    if pw.get("success"):
+        return pw
     raw_result = await page.evaluate(_CLICK_OPTION_JS, matched_text)
     if isinstance(raw_result, str):
         return json.loads(raw_result)

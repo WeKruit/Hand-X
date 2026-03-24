@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <title>DomHand — dropdown &amp; control lab (light + shadow DOM)</title>
+  <!--
+    Purpose
+    -------
+    Manual / Playwright fixture to exercise patterns DomHand handles across
+    domhand_select, domhand_fill, and domhand_interact_control.
+
+    Composite phone (section 10)
+    ----------------------------
+    Country-code LOV beside a national ``tel`` field: selected country is shown on a
+    readonly surface inside ``role=combobox`` (Oracle JET–style), not only on ``input.value``.
+    Use for readback / select-verify regression tests without live HCM.
+
+    Prior employment Yes/No
+    -----------------------
+    • Prefer domhand_interact_control with field_label matching the question
+      (or field_id from domhand_assess_state) and desired_value "Yes" / "No".
+    • Extraction should classify these as radio-group / button-group; recovery
+      uses __ff-bound JS (_CLICK_RADIO_OPTION_JS) then Playwright mouse.click
+      via _click_group_option_with_gui — not the same code path as searchable
+      comboboxes (domhand_select).
+
+    Dropdowns vs binary groups
+    --------------------------
+    • Do not route listbox/combobox flows through radio click JS — that adds
+      log noise and weak matches. Keep domhand_select (open → observe → type
+      → click option) for popup menus; keep interact_control for grouped Yes/No.
+
+    Manual use (why “nothing happens”)
+    -----------------------------------
+    The page is a *fixture*: it does not auto-run DomHand. Scroll, click controls,
+    and watch the black **log** at the bottom — that is the only feedback unless
+    you drive it from Python (see below). favicon.ico 404 in `http.server` is
+    harmless (we set an empty favicon to reduce that).
+
+    Automated smoke (extract + real browser)
+    ------------------------------------------
+    From repo root (no separate terminal server needed):
+      uv run pytest tests/ci/test_domhand_lab_fixture.py -v
+    Requires: `uv run playwright install chromium` once.
+
+    Manual server (optional)
+    ------------------------
+    cd tests/fixtures && python -m http.server 8765
+    → http://127.0.0.1:8765/domhand_dropdown_control_lab.html
+  -->
+  <style>
+    :root { font-family: system-ui, sans-serif; line-height: 1.4; }
+    body { max-width: 52rem; margin: 0 auto; padding: 1rem 1.25rem 3rem; }
+    h1 { font-size: 1.25rem; }
+    h2 { font-size: 1rem; margin-top: 1.75rem; border-bottom: 1px solid #ccc; padding-bottom: 0.25rem; }
+    fieldset { margin: 1rem 0; padding: 0.75rem 1rem; border: 1px solid #999; border-radius: 6px; }
+    legend { font-weight: 600; padding: 0 0.35rem; }
+    .row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin: 0.5rem 0; }
+    .log {
+      position: sticky; bottom: 0; background: #111; color: #e8e8e8; padding: 0.75rem;
+      font-size: 0.8rem; max-height: 10rem; overflow: auto; border-radius: 6px; margin-top: 2rem;
+      white-space: pre-wrap;
+    }
+    [role="listbox"] { border: 1px solid #666; max-height: 10rem; overflow: auto; padding: 0; margin: 0.25rem 0; list-style: none; }
+    [role="option"], [role="gridcell"] { padding: 0.35rem 0.5rem; cursor: pointer; }
+    [role="option"]:hover, [role="gridcell"]:hover { background: #e3f2fd; }
+    .combo-btn { padding: 0.4rem 0.75rem; cursor: pointer; }
+    .open [data-list] { display: block; }
+    [data-list][hidden] { display: none !important; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; background: #333; border: 1px solid #333; margin-top: 0.5rem; }
+    .grid [role="gridcell"] { background: #fff; min-height: 2rem; display: flex; align-items: center; }
+    .shadow-wrap { border: 2px dashed #607d8b; padding: 1rem; margin: 1rem 0; border-radius: 8px; }
+    .hint { font-size: 0.85rem; color: #555; margin: 0.25rem 0 0.75rem; }
+  </style>
+</head>
+<body>
+  <h1>DomHand lab: dropdowns, grids, Yes/No groups, shadow DOM</h1>
+  <p class="hint">
+    Interactions append to the log at the bottom. Inject <code>__ff</code> helpers before testing shadow-piercing extraction.
+  </p>
+
+  <!-- —— Prior employment: native radio group (fieldset) —— -->
+  <h2>1. Native radios — prior employment (fieldset / legend)</h2>
+  <p class="hint">Typical ATS wording; match <strong>desired_value</strong> <code>Yes</code> or <code>No</code> (avoid substring-only heuristics on labels).</p>
+  <fieldset data-testid="prior-employment-native">
+    <legend>Have you previously worked for ACME Corporation in a full-time role?</legend>
+    <div class="row">
+      <label><input type="radio" name="prior_acme" value="yes" /> Yes</label>
+      <label><input type="radio" name="prior_acme" value="no" /> No</label>
+    </div>
+  </fieldset>
+
+  <!-- —— ARIA radiogroup (button-styled) —— -->
+  <h2>2. ARIA radiogroup — Yes / No buttons</h2>
+  <fieldset data-testid="prior-employment-aria">
+    <legend id="lg-goldman">Have you ever been employed by Goldman Sachs?</legend>
+    <div role="radiogroup" aria-labelledby="lg-goldman" class="row">
+      <button type="button" role="radio" aria-checked="false" data-value="Yes" class="combo-btn">Yes</button>
+      <button type="button" role="radio" aria-checked="false" data-value="No" class="combo-btn">No</button>
+    </div>
+  </fieldset>
+
+  <!-- —— Native select —— -->
+  <h2>3. Native &lt;select&gt;</h2>
+  <label for="country-native">Country (native)</label>
+  <select id="country-native" data-testid="select-native">
+    <option value="">Select one</option>
+    <option value="US">United States</option>
+    <option value="CA">Canada</option>
+    <option value="GB">United Kingdom</option>
+  </select>
+
+  <!-- —— Closed ARIA combobox —— -->
+  <h2>4. ARIA combobox + listbox (opens on button)</h2>
+  <div class="combo" id="combo-fruit" data-testid="combobox-fruit">
+    <button type="button" class="combo-btn" id="combo-fruit-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="combo-fruit-list">
+      Choose fruit
+    </button>
+    <ul id="combo-fruit-list" data-list hidden role="listbox" aria-label="Fruits">
+      <li role="option" id="opt-apple">Apple</li>
+      <li role="option" id="opt-banana">Banana</li>
+      <li role="option" id="opt-cherry">Cherry</li>
+    </ul>
+  </div>
+
+  <!-- —— Searchable listbox —— -->
+  <h2>5. Searchable dropdown (input + filtered options)</h2>
+  <label for="search-city">City search</label>
+  <input id="search-city" type="text" autocomplete="off" aria-autocomplete="list" aria-controls="city-list" placeholder="Type to filter…" data-testid="search-city" />
+  <ul id="city-list" role="listbox" aria-label="Cities">
+    <li role="option">Los Angeles</li>
+    <li role="option">San Francisco</li>
+    <li role="option">New York</li>
+    <li role="option">Austin</li>
+  </ul>
+
+  <!-- —— React-select style: only "No options" until user types —— -->
+  <h2>6. Async search — list shows &quot;No options&quot; until you type (then real rows)</h2>
+  <p class="hint">
+    Mimics async menus: open/focus shows a placeholder row; typing filters the backing list into
+    <code>role=option</code> rows. DomHand should open/focus, type a search term, wait, then match/click.
+  </p>
+  <div data-testid="async-search-combo">
+    <label for="async-skill-input">Skill (type to load matches — e.g. <kbd>py</kbd>, <kbd>jav</kbd>)</label>
+    <div class="row" style="flex-direction: column; align-items: stretch; max-width: 22rem;">
+      <input
+        id="async-skill-input"
+        type="text"
+        role="combobox"
+        autocomplete="off"
+        aria-autocomplete="list"
+        aria-expanded="false"
+        aria-controls="async-skill-list"
+        placeholder="Type to search…"
+      />
+      <ul id="async-skill-list" role="listbox" aria-label="Skill suggestions" hidden></ul>
+    </div>
+  </div>
+
+  <!-- —— Oracle-style grid cells —— -->
+  <h2>7. role=&quot;grid&quot; + role=&quot;gridcell&quot; (country picker simulation)</h2>
+  <button type="button" class="combo-btn" id="grid-open-btn" aria-expanded="false" aria-controls="country-grid">Open country grid</button>
+  <div role="grid" id="country-grid" class="grid" hidden data-testid="grid-country">
+    <div role="gridcell" tabindex="0">United States</div>
+    <div role="gridcell" tabindex="0">Canada</div>
+    <div role="gridcell" tabindex="0">United Kingdom</div>
+    <div role="gridcell" tabindex="0">Germany</div>
+    <div role="gridcell" tabindex="0">Japan</div>
+    <div role="gridcell" tabindex="0">Australia</div>
+  </div>
+  <p class="hint">Mirrors Fusion-style list rows; DomHand discovery includes <code>gridcell</code> options.</p>
+
+  <!-- —— Datalist —— -->
+  <h2>8. Input + HTML datalist</h2>
+  <label for="lang-dl">Language</label>
+  <input id="lang-dl" list="langs" placeholder="Pick or type" data-testid="input-datalist" />
+  <datalist id="langs">
+    <option value="English"></option>
+    <option value="Spanish"></option>
+    <option value="Mandarin"></option>
+  </datalist>
+
+  <!-- —— Shadow DOM host —— -->
+  <h2>9. Shadow DOM (nested controls)</h2>
+  <div class="shadow-wrap">
+    <div id="shadow-lab-host"></div>
+  </div>
+
+  <!-- —— Composite phone: country LOV + tel (Oracle / Fusion–ish) —— -->
+  <h2>10. Composite phone — country code LOV + national <code>tel</code></h2>
+  <p class="hint">
+    Selected country is visible on a readonly <code>role="textbox"</code> inside
+    <code>role="combobox"</code> (inner <code>input.value</code> may be empty). National
+    digits live in a separate <code>type="tel"</code> control — matches split widgets that
+    confuse fill/assess when only the inner input is read.
+  </p>
+  <fieldset data-testid="phone-composite-lab">
+    <legend>Phone Number <span class="req" aria-hidden="true">*</span></legend>
+    <div class="row" style="align-items: flex-end; flex-wrap: wrap;">
+      <div data-automation-id="formField-country-code-lab" style="min-width: 11rem;">
+        <label id="lbl-phone-cc-lab" for="phone-cc-combo-lab">Country code</label>
+        <div class="oj-text-field-container" style="border: 1px solid #888; border-radius: 6px; background: #fafafa;">
+          <div
+            id="phone-cc-combo-lab"
+            role="combobox"
+            tabindex="0"
+            aria-labelledby="lbl-phone-cc-lab"
+            aria-expanded="false"
+            aria-haspopup="listbox"
+            aria-controls="phone-cc-list-lab"
+            style="display: flex; align-items: center; gap: 0.35rem; padding: 0.35rem 0.5rem; min-height: 2rem;"
+          >
+            <span role="textbox" aria-readonly="true" class="oj-text-field-middle" style="flex: 1; min-width: 0;">United States +1</span>
+            <button type="button" class="combo-btn" id="phone-cc-open-lab" aria-label="Open country codes" style="font-size: 0.75rem;">▼</button>
+          </div>
+          <ul id="phone-cc-list-lab" data-list hidden role="listbox" aria-label="Country codes" style="margin: 0; padding: 0; list-style: none; border-top: 1px solid #ccc; max-height: 7rem; overflow: auto;">
+            <li role="option" id="phone-opt-us">United States +1</li>
+            <li role="option" id="phone-opt-ca">Canada +1</li>
+            <li role="option" id="phone-opt-gb">United Kingdom +44</li>
+          </ul>
+        </div>
+      </div>
+      <div data-automation-id="formField-phone-national-lab">
+        <label for="phone-national-lab">Main number</label>
+        <input
+          id="phone-national-lab"
+          type="tel"
+          inputmode="tel"
+          autocomplete="tel-national"
+          data-testid="phone-national-lab"
+          placeholder="(555) 123-4567"
+          aria-required="true"
+        />
+      </div>
+    </div>
+  </fieldset>
+
+  <div class="log" id="interaction-log" aria-live="polite" role="log"></div>
+
+  <script>
+    (function () {
+      const logEl = document.getElementById('interaction-log');
+      function log(msg) {
+        const t = new Date().toISOString().slice(11, 23);
+        logEl.textContent += '[' + t + '] ' + msg + '\n';
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      document.querySelectorAll('input[name="prior_acme"]').forEach(function (el) {
+        el.addEventListener('change', function () {
+          log('Native prior_acme -> ' + el.value);
+        });
+      });
+
+      document.querySelectorAll('[role="radiogroup"] [role="radio"]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var g = btn.parentElement;
+          g.querySelectorAll('[role="radio"]').forEach(function (b) { b.setAttribute('aria-checked', 'false'); });
+          btn.setAttribute('aria-checked', 'true');
+          log('ARIA radiogroup -> ' + btn.getAttribute('data-value'));
+        });
+      });
+
+      document.getElementById('country-native').addEventListener('change', function (e) {
+        log('Native select country -> ' + e.target.value);
+      });
+
+      (function comboFruit() {
+        var root = document.getElementById('combo-fruit');
+        var btn = document.getElementById('combo-fruit-btn');
+        var list = document.getElementById('combo-fruit-list');
+        btn.addEventListener('click', function () {
+          var open = btn.getAttribute('aria-expanded') === 'true';
+          btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+          list.hidden = open;
+          if (!open) log('Combobox fruit opened');
+        });
+        list.querySelectorAll('[role="option"]').forEach(function (li) {
+          li.addEventListener('click', function () {
+            btn.textContent = li.textContent.trim();
+            list.hidden = true;
+            btn.setAttribute('aria-expanded', 'false');
+            log('Combobox fruit selected -> ' + li.textContent.trim());
+          });
+        });
+      })();
+
+      (function citySearch() {
+        var input = document.getElementById('search-city');
+        var list = document.getElementById('city-list');
+        var options = Array.from(list.querySelectorAll('[role="option"]'));
+        input.addEventListener('input', function () {
+          var q = input.value.trim().toLowerCase();
+          options.forEach(function (li) {
+            var t = li.textContent.trim().toLowerCase();
+            li.style.display = !q || t.includes(q) ? '' : 'none';
+          });
+        });
+        options.forEach(function (li) {
+          li.addEventListener('click', function () {
+            input.value = li.textContent.trim();
+            log('City search picked -> ' + li.textContent.trim());
+          });
+        });
+      })();
+
+      (function asyncSkillCombo() {
+        var input = document.getElementById('async-skill-input');
+        var list = document.getElementById('async-skill-list');
+        var pool = ['Python', 'PyTorch', 'Java', 'JavaScript', 'Rust', 'Ruby', 'Go', 'Scala'];
+        function placeholderNoOptions() {
+          list.innerHTML = '';
+          var li = document.createElement('li');
+          li.setAttribute('role', 'option');
+          li.setAttribute('aria-disabled', 'true');
+          li.textContent = 'No options';
+          list.appendChild(li);
+        }
+        function renderMatches(query) {
+          list.innerHTML = '';
+          var q = query.trim().toLowerCase();
+          if (!q) {
+            placeholderNoOptions();
+            return;
+          }
+          var hits = pool.filter(function (x) {
+            return x.toLowerCase().indexOf(q) !== -1;
+          });
+          if (hits.length === 0) {
+            placeholderNoOptions();
+            return;
+          }
+          hits.forEach(function (text) {
+            var li = document.createElement('li');
+            li.setAttribute('role', 'option');
+            li.textContent = text;
+            list.appendChild(li);
+          });
+        }
+        function openList() {
+          list.hidden = false;
+          input.setAttribute('aria-expanded', 'true');
+          renderMatches(input.value || '');
+          log('Async skill list open (query="' + (input.value || '') + '")');
+        }
+        function closeList() {
+          list.hidden = true;
+          input.setAttribute('aria-expanded', 'false');
+        }
+        input.addEventListener('focus', function () {
+          openList();
+        });
+        input.addEventListener('click', function () {
+          openList();
+        });
+        input.addEventListener('input', function () {
+          if (list.hidden) openList();
+          else renderMatches(input.value || '');
+        });
+        list.addEventListener('click', function (e) {
+          var li = e.target.closest('[role="option"]');
+          if (!li || li.getAttribute('aria-disabled') === 'true') return;
+          input.value = li.textContent.trim();
+          closeList();
+          log('Async skill selected -> ' + li.textContent.trim());
+        });
+        document.addEventListener('click', function (e) {
+          if (!e.target.closest('#async-skill-input') && !e.target.closest('#async-skill-list')) {
+            closeList();
+          }
+        });
+      })();
+
+      (function countryGrid() {
+        var btn = document.getElementById('grid-open-btn');
+        var grid = document.getElementById('country-grid');
+        btn.addEventListener('click', function () {
+          var open = btn.getAttribute('aria-expanded') === 'true';
+          btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+          grid.hidden = open;
+          if (!open) log('Country grid opened');
+        });
+        grid.querySelectorAll('[role="gridcell"]').forEach(function (cell) {
+          cell.addEventListener('click', function () {
+            log('Gridcell country -> ' + cell.textContent.trim());
+            grid.hidden = true;
+            btn.setAttribute('aria-expanded', 'false');
+          });
+        });
+      })();
+
+      document.getElementById('lang-dl').addEventListener('change', function (e) {
+        log('Datalist language -> ' + e.target.value);
+      });
+
+      (function phoneCcLab() {
+        var combo = document.getElementById('phone-cc-combo-lab');
+        var btn = document.getElementById('phone-cc-open-lab');
+        var list = document.getElementById('phone-cc-list-lab');
+        var display = combo ? combo.querySelector('.oj-text-field-middle') : null;
+        function openList() {
+          if (!list) return;
+          list.hidden = false;
+          combo.setAttribute('aria-expanded', 'true');
+          log('Phone country list opened');
+        }
+        function closeList() {
+          if (!list) return;
+          list.hidden = true;
+          combo.setAttribute('aria-expanded', 'false');
+        }
+        if (btn && combo && list) {
+          btn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            if (list.hidden) openList();
+            else closeList();
+          });
+          combo.addEventListener('click', function () {
+            if (list.hidden) openList();
+          });
+          list.querySelectorAll('[role="option"]').forEach(function (li) {
+            li.addEventListener('click', function () {
+              if (display) display.textContent = li.textContent.trim();
+              closeList();
+              log('Phone country -> ' + li.textContent.trim());
+            });
+          });
+          document.addEventListener('click', function (e) {
+            if (!e.target.closest('#phone-cc-combo-lab') && !e.target.closest('#phone-cc-list-lab')) {
+              closeList();
+            }
+          });
+        }
+        var nat = document.getElementById('phone-national-lab');
+        if (nat) {
+          nat.addEventListener('change', function () {
+            log('Phone national -> ' + nat.value);
+          });
+        }
+      })();
+
+      /* Shadow root: native select + combobox + prior employment radios */
+      var host = document.getElementById('shadow-lab-host');
+      var sr = host.attachShadow({ mode: 'open' });
+      sr.innerHTML = [
+        '<style>',
+        'fieldset { margin: 0.75rem 0; padding: 0.5rem 0.75rem; border: 1px solid #888; border-radius: 6px; }',
+        'legend { font-weight: 600; }',
+        '[role="listbox"] { border: 1px solid #666; padding: 0; list-style: none; margin: 0.25rem 0; max-height: 8rem; overflow: auto; }',
+        '[role="option"] { padding: 0.35rem; cursor: pointer; }',
+        '</style>',
+        '<fieldset><legend>Shadow: Department</legend>',
+        '<select id="sh-dept"><option value="">Choose</option><option value="eng">Engineering</option><option value="sales">Sales</option></select>',
+        '</fieldset>',
+        '<fieldset><legend>Shadow: Worked for subsidiary?</legend>',
+        '<label><input type="radio" name="sh_prior" value="yes" /> Yes</label> ',
+        '<label><input type="radio" name="sh_prior" value="no" /> No</label>',
+        '</fieldset>',
+        '<div><button type="button" id="sh-combo-btn" aria-haspopup="listbox" aria-expanded="false">Shadow combo</button>',
+        '<ul id="sh-combo-list" hidden role="listbox"><li role="option">Alpha</li><li role="option">Beta</li><li role="option">Gamma</li></ul></div>'
+      ].join('');
+
+      sr.getElementById('sh-dept').addEventListener('change', function (e) {
+        log('Shadow native select -> ' + e.target.value);
+      });
+      sr.querySelectorAll('input[name="sh_prior"]').forEach(function (el) {
+        el.addEventListener('change', function () {
+          log('Shadow prior subsidiary -> ' + el.value);
+        });
+      });
+      (function () {
+        var b = sr.getElementById('sh-combo-btn');
+        var ul = sr.getElementById('sh-combo-list');
+        b.addEventListener('click', function () {
+          var o = b.getAttribute('aria-expanded') === 'true';
+          b.setAttribute('aria-expanded', o ? 'false' : 'true');
+          ul.hidden = o;
+          if (!o) log('Shadow combobox opened');
+        });
+        ul.querySelectorAll('[role="option"]').forEach(function (li) {
+          li.addEventListener('click', function () {
+            b.textContent = li.textContent.trim();
+            ul.hidden = true;
+            b.setAttribute('aria-expanded', 'false');
+            log('Shadow combobox -> ' + li.textContent.trim());
+          });
+        });
+      })();
+
+      log('Fixture ready.');
+    })();
+  </script>
+</body>
+</html>
