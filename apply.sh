@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────
-# Hand-X — Apply to a job
+# Hand-X — Apply to a job (test harness)
+#
+# Uses the real CLI (ghosthands.cli) with --output-format human,
+# matching the same code path the Desktop app uses.
 #
 # Usage:
 #   ./apply.sh                                           # default Greenhouse job
@@ -36,12 +39,11 @@ if [ -z "${GOOGLE_API_KEY:-}" ]; then
 fi
 
 # ── Parse args ────────────────────────────────────────────────
-# JOB_URL="${1:-https://job-boards.greenhouse.io/starburst/jobs/5123053008}"
-JOB_URL="${1:-https://jobs.smartrecruiters.com/oneclick-ui/company/Laxir1/publication/79d18a58-32ce-485c-80b4-f04058efa20b?dcr_ci=Laxir1}"
+JOB_URL="${1:-https://job-boards.greenhouse.io/starburst/jobs/5123053008}"
 shift 2>/dev/null || true
 
 echo "══════════════════════════════════════════════════════════"
-echo "  Hand-X — Job Application"
+echo "  Hand-X — Job Application (CLI human mode)"
 echo "══════════════════════════════════════════════════════════"
 echo "  URL:    $JOB_URL"
 echo "  Resume: $RESUME"
@@ -49,8 +51,9 @@ echo "  Data:   $DATA"
 echo "══════════════════════════════════════════════════════════"
 echo
 
-exec python examples/apply_to_job.py \
+exec python -m ghosthands.cli \
   --job-url "$JOB_URL" \
   --resume "$RESUME" \
   --test-data "$DATA" \
+  --output-format human \
   "$@"

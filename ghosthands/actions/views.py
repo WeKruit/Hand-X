@@ -59,6 +59,13 @@ class FillFieldResult(BaseModel):
     source: str | None = None
     answer_mode: str | None = None
     confidence: float | None = None
+    fill_confidence: float = Field(
+        default=0.0,
+        description=(
+            "How confident we are the value actually committed to the DOM. "
+            "1.0=DOM verified, 0.8=LLM verified, 0.6=Stagehand verified, 0.0=failed."
+        ),
+    )
     state: str | None = None
     failure_reason: str | None = None
     takeover_suggestion: str | None = None
@@ -332,7 +339,30 @@ def generate_dropdown_search_terms(value: str) -> list[str]:
 
     seen: set[str] = set()
     terms: list[str] = []
-    stop_words = {"of", "and", "in", "the", "a", "an", "for", "to", "with", "or", "at", "by"}
+    stop_words = {
+        "of",
+        "and",
+        "in",
+        "the",
+        "a",
+        "an",
+        "for",
+        "to",
+        "with",
+        "or",
+        "at",
+        "by",
+        # EEO / decline phrases: never type these alone into react-select (e.g. "answer").
+        "answer",
+        "wish",
+        "disclose",
+        "identify",
+        "self",
+        "provided",
+        "supplied",
+        "decline",
+        "prefer",
+    }
     # Do not expand the Mobile/Cell cluster when the value is clearly a phone *number* — typing
     # "Mobile" into the number input is a common failure mode for react-select phone widgets.
     digit_count = sum(1 for ch in raw if ch.isdigit())
@@ -363,9 +393,12 @@ def generate_dropdown_search_terms(value: str) -> list[str]:
         add(part)
         words = [word for word in re.split(r"\s+", part) if len(word) > 1]
         meaningful_words = [word for word in words if word.lower() not in stop_words]
+        # Only add word shards when they are long enough to be useful search tokens;
+        # short words like "do", "not" pollute react-select filters.
         if len(meaningful_words) > 1:
             for word in meaningful_words:
-                add(word)
+                if len(word) >= 4:
+                    add(word)
 
     return terms
 

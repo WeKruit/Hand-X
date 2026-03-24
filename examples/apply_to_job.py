@@ -38,13 +38,20 @@ from dotenv import load_dotenv
 
 load_dotenv(ROOT / ".env")
 
+import atexit
+import stat
+import tempfile
+
 from browser_use import Agent, Browser, BrowserProfile, Tools
 from ghosthands.agent.hooks import install_same_tab_guard
 from ghosthands.agent.prompts import (
-    FAIL_OVER_CUSTOM_WIDGET,
-    FAIL_OVER_NATIVE_SELECT,
     _format_profile_summary,
-    build_completion_detection_text,
+    build_system_prompt,
+    build_task_prompt,
+)
+from ghosthands.bridge.profile_adapter import (
+    camel_to_snake_profile,
+    normalize_profile_defaults,
 )
 from ghosthands.config.settings import settings
 
@@ -54,7 +61,7 @@ DEFAULT_DATA = EXAMPLES_DIR / "apply_to_job_sample_data.json"
 DEFAULT_RESUME = EXAMPLES_DIR / "resume.pdf"
 DEFAULT_JOB_URL = "https://job-boards.greenhouse.io/starburst/jobs/5123053008"
 
-DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
+DEFAULT_MODEL = "gemini-3-flash-preview"
 
 
 def _get_llm(model: str | None = None):
@@ -92,7 +99,23 @@ async def apply_to_job(
 ):
     llm = _get_llm(model=model)
 
-    # ── Set profile text for DomHand (domhand_fill reads from env) ─
+    # ── Normalize profile (same flow as CLI / Desktop bridge) ─────
+    info = camel_to_snake_profile(info)
+    info = normalize_profile_defaults(info)
+
+    # ── Write profile to temp file (matches CLI's _apply_runtime_env) ──
+    profile_fd, profile_path = tempfile.mkstemp(prefix="gh_profile_", suffix=".json")
+    try:
+        os.fchmod(profile_fd, stat.S_IRUSR | stat.S_IWUSR)
+        os.write(profile_fd, json.dumps(info, indent=2).encode())
+        os.close(profile_fd)
+        os.environ["GH_USER_PROFILE_PATH"] = profile_path
+        atexit.register(lambda: os.unlink(profile_path) if os.path.exists(profile_path) else None)
+    except Exception:
+        os.close(profile_fd)
+        os.unlink(profile_path)
+        raise
+
     os.environ["GH_USER_PROFILE_TEXT"] = _format_profile_summary(info)
     os.environ["GH_USER_PROFILE_JSON"] = json.dumps(info)
     if resume_path:
@@ -119,13 +142,7 @@ async def apply_to_job(
     print(f"Platform: {platform}")
 
     # ── Build system prompt with profile + guardrails ─────────────
-    system_ext = ""
-    try:
-        from ghosthands.agent.prompts import build_system_prompt
-
-        system_ext = build_system_prompt(info, platform)
-    except ImportError:
-        pass
+    system_ext = build_system_prompt(info, platform)
 
     # ── Credentials as sensitive_data ─────────────────────────────
     sensitive_data = None
@@ -136,118 +153,38 @@ async def apply_to_job(
     browser = Browser(
         browser_profile=BrowserProfile(
             headless=headless,
-            keep_alive=True,  # Keep browser open for user review
+            keep_alive=True,
             wait_between_actions=settings.wait_between_actions,
         ),
     )
 
-    # ── Task prompt ───────────────────────────────────────────────
-    workday_start_flow_rules = ""
-    if platform == "workday":
-        workday_start_flow_rules = (
-            "- If a start dialog offers a SAME-SITE option such as 'Autofill with Resume'\n"
-            "  or 'Apply with Resume', prefer that path over manual entry.\n"
-            "- Do NOT choose external apply/import options such as LinkedIn, Indeed,\n"
-            "  Google, or other third-party account flows.\n"
-            "- After uploading a resume on Workday, WAIT for the filename or a\n"
-            "  success message to appear and for the Continue button to become\n"
-            "  enabled before clicking it.\n"
-            "- Do NOT upload a resume and click Continue in the same action batch.\n"
-        )
-
-    task = f"""Go to {job_url} and fill out the job application form completely.
-
-FORM PAGE SEQUENCE (repeat on EVERY form page):
-0. If a popup, modal, interstitial, or newsletter prompt is visibly blocking the form, call domhand_close_popup first. Use Escape or raw coordinate clicks only if domhand_close_popup fails.
-1. domhand_fill — fills all visible fields in one call. ALWAYS first.
-2. domhand_assess_state — classify the page, unresolved required fields, and scroll direction before deciding what to do next.
-3. Handle domhand_fill's unresolved fields with domhand_select or click.
-   Do this for REQUIRED fields.
-   For OPTIONAL fields, only do it when the applicant profile clearly maps
-   to that field with high confidence (address, LinkedIn, website,
-   referral source, etc.). If the optional match is ambiguous, leave it blank.
-4. Upload resume: domhand_upload or upload_file with path: {resume_path}
-5. For repeater sections (Work Experience, Education):
-   a. Call domhand_expand(section="Work Experience") to click Add
-   b. Call domhand_fill with heading_boundary matching the new entry heading
-      and entry_data containing ONLY that one profile entry
-   c. Repeat for each entry in the applicant profile
-6. Before any large scroll or any Next / Continue / Save & Continue click, call domhand_assess_state again and follow its unresolved field list plus scroll_bias.
-7. AFTER all fields are filled: click Next / Continue / Save & Continue.
-   *** YOU MUST CLICK NEXT while the page is still in `advanceable`.
-   Use the completion-state rules below for final stopping. ***
-8. On the new page, start over from step 1.
-
-AUTH PAGE SEQUENCE (Create Account / Sign In):
-Do NOT call domhand_fill on auth pages — it uses the wrong email.
-(1) input credentials, (2) domhand_check_agreement for 'I agree' checkbox,
-(3) VERIFY checkbox is checked, (4) domhand_click_button to submit.
-
-TRANSITION RULE:
-If the page looks blank or half-loaded after clicking a start/continue button,
-WAIT 5-10 seconds before going back, reopening the dialog, or retrying the click.
-Never use navigate() to go back to the original job URL after entering the
-application flow. Waiting is the default recovery, not restarting.
-
-DROPDOWN RULE:
-If domhand_select returns {FAIL_OVER_NATIVE_SELECT}, do NOT click the native
-<select>. Use dropdown_options(index=...) to inspect the exact option
-text/value, then use select_dropdown(index=..., text=...) with the exact
-text/value.
-If domhand_select returns {FAIL_OVER_CUSTOM_WIDGET}, STOP retrying it.
-Click the widget open yourself, search if supported, and click the final leaf
-option visually.
-If a dropdown is searchable or multi-layer, type/search, WAIT 2-3 seconds,
-and keep clicking until the FINAL leaf option is selected and the field text
-changes. Do NOT move on after the first click if a submenu appears or the
-field still looks empty/invalid. Do NOT click a dropdown option and then
-Save/Continue in the same action batch; wait briefly and re-evaluate first.
-For phone country code or phone type dropdowns, if the first term fails, try
-close variants like "United States +1", "United States", "+1", "USA", "US",
-"Mobile", and "Cell" before giving up.
-For stubborn checkbox/radio/button controls, if the intended option still does
-not stick after 2 tries, stop blind retries: click the currently selected
-option once to clear/reset stale state, then click the intended option again
-and verify the visible state changed.
-For text/date/search inputs that visibly contain the value but still show
-validation errors, focus the field and press Enter or Tab to commit it before
-moving on.
-
-COMPLETION STATES:
-{build_completion_detection_text(platform)}
-
-Other rules:
-- {"Use the provided credentials to log in or create an account if needed. For Workday, fill email + password + confirm password on the Create Account page." if sensitive_data else "If a login wall appears, report it as a blocker."}
-- Do NOT click the final Submit button. Use the completion-state rules above and stop with the done action when the page is review, confirmation, or an allowed presubmit_single_page state.
-- If anything pops up blocking the form, call domhand_close_popup first. Only fall back to Escape or coordinate clicks if that DOM-first popup close action fails.
-- Every non-consent applicant value must come from the provided user profile. If the profile does not provide it, leave it empty or unresolved.
-- Never invent placeholder personal info like John, Doe, or John Doe. Use the exact applicant identity from the provided profile only.
-{workday_start_flow_rules.rstrip()}
-- Stay on this site — do NOT open new tabs or navigate away.
-- After auth, continue from wherever the redirect lands — do NOT go back to the job URL.
-- Use domhand_assess_state before any large scroll, before clicking Next/Continue/Save, and before calling done(). Follow its unresolved field list and scroll_bias instead of doing a full-page reverification loop.
-- Keep working near the current unresolved section and continue downward. Do NOT scroll back to the top just to re-check earlier fields unless a specific earlier required field is visibly empty or invalid.
-- When close to completion, keep memory and next_goal short. Do NOT restate the whole form or do a top-to-bottom verification loop once a terminal completion state is reached.
-"""
+    # ── Task prompt (same as CLI's build_task_prompt) ─────────────
+    task = build_task_prompt(
+        job_url,
+        resume_path,
+        sensitive_data,
+        platform=platform,
+    )
 
     async def _on_step_start(agent_instance):
         await install_same_tab_guard(agent_instance)
         try:
             pass
         except Exception:
-            pass  # Non-fatal — best effort
+            pass
 
     # ── Create agent ──────────────────────────────────────────────
+    available_files = [resume_path] if resume_path else []
     agent = Agent(
         task=task,
         llm=llm,
         browser=browser,
         tools=tools,
-        extend_system_message=system_ext if system_ext else None,
+        extend_system_message=system_ext or None,
         sensitive_data=sensitive_data,
-        available_file_paths=[resume_path],
-        use_vision=True,
-        max_actions_per_step=settings.agent_max_actions_per_step,
+        available_file_paths=available_files or None,
+        use_vision="auto",
+        max_actions_per_step=5,
         calculate_cost=True,
     )
 

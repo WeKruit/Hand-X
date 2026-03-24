@@ -42,6 +42,7 @@ from ghosthands.actions.views import (
     normalize_name,
     split_dropdown_value_hierarchy,
 )
+from ghosthands.dom.dropdown_match import match_dropdown_option_dict
 from ghosthands.runtime_learning import (
     DOMHAND_RETRY_CAP,
     clear_domhand_failure,
@@ -644,39 +645,13 @@ def _fuzzy_match_option(
     target: str,
     options: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Find the best matching option for a target value using multi-pass fuzzy matching."""
-    target_norm = normalize_name(target)
-    if not target_norm:
-        return None
+    """Find the best matching option for a target value using multi-pass fuzzy matching.
 
-    # Pass 1: Exact match
-    for opt in options:
-        if normalize_name(opt.get("text", "")) == target_norm:
-            return opt
-        if normalize_name(opt.get("value", "")) == target_norm:
-            return opt
-
-    # Pass 2: Contains (either direction)
-    for opt in options:
-        opt_norm = normalize_name(opt.get("text", ""))
-        if opt_norm and (target_norm in opt_norm or opt_norm in target_norm):
-            return opt
-
-    # Pass 3: Word overlap (at least 1 shared meaningful word)
-    target_words = set(target_norm.split()) - {"the", "a", "an", "of", "for", "in", "to"}
-    if len(target_words) >= 1:
-        best_overlap = 0
-        best_opt: dict[str, Any] | None = None
-        for opt in options:
-            opt_words = set(normalize_name(opt.get("text", "")).split()) - {"the", "a", "an", "of", "for", "in", "to"}
-            overlap = len(target_words & opt_words)
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_opt = opt
-        if best_opt is not None and best_overlap >= 1:
-            return best_opt
-
-    return None
+    Delegates to ``ghosthands.dom.dropdown_match.match_dropdown_option_dict``
+    which implements the canonical 5-pass cascade (exact → prefix → contains →
+    synonym → word-overlap).
+    """
+    return match_dropdown_option_dict(target, options)
 
 
 # React-select / async combobox often reports placeholder rows like "No options" before the menu

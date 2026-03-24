@@ -205,8 +205,42 @@ def register_domhand_actions(tools: "Tools") -> None:
         func=domhand_expand,
     )
 
+    # ── Stagehand Layer 1 tools ─────────────────────────────
+    # Expose Stagehand's semantic fill and observation to the agent so it
+    # can explicitly request Layer 1 assistance for stubborn fields.
+    from ghosthands.actions.stagehand_tools import (
+        StagehandFillParams,
+        StagehandObserveParams,
+        stagehand_fill_field,
+        stagehand_observe_fields,
+    )
+
+    _register_action(
+        description=(
+            "Use Stagehand (AI semantic layer) to fill a specific form field that DomHand "
+            "could not handle. Stagehand uses AI vision to understand the page and interact "
+            "with elements semantically. Use this for dropdowns, custom widgets, or any field "
+            "that DomHand reported as failed. Cheaper than manual click/type sequences."
+        ),
+        param_model=StagehandFillParams,
+        func=stagehand_fill_field,
+    )
+
+    _register_action(
+        description=(
+            "Use Stagehand (AI semantic layer) to observe and list all interactive form "
+            "elements on the page. Use this to cross-reference with DomHand's field extraction "
+            "when you suspect fields were missed, or to understand custom widget structure."
+        ),
+        param_model=StagehandObserveParams,
+        func=stagehand_observe_fields,
+    )
+
     # Log what was registered
-    registered = [name for name in tools.registry.registry.actions if name.startswith("domhand_")]
+    registered = [
+        name for name in tools.registry.registry.actions
+        if name.startswith("domhand_") or name.startswith("stagehand_")
+    ]
     logger.info(
         f"domhand.actions_registered count={len(registered)} actions={registered}",
         extra={"count": len(registered), "actions": registered},

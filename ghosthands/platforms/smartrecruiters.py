@@ -158,5 +158,14 @@ SMARTRECRUITERS_CONFIG = PlatformConfig(
         "Wait for resume parsing to complete after upload before filling fields.",
     ],
     form_strategy="repeater_expand",
+    automation_id_map={
+        "application_form": ".application-form, #application",
+        "submit_button": 'button[type="submit"], .btn-submit',
+        "add_another": 'button:has-text("Add Another"), .add-another-btn',
+        "repeater_section": ".repeater-section, .experience-section",
+    },
+    fill_overrides={
+        "select": "searchable_dropdown",
+    },
     single_page_presubmit_allowed=True,
 )
