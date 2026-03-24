@@ -214,10 +214,10 @@ async def test_checkbox_group_already_matches_multi_select_uses_binary_state():
     )
 
     with (
-        patch("ghosthands.actions.domhand_fill._read_binary_state", AsyncMock(return_value=True)),
-        patch("ghosthands.actions.domhand_fill._field_has_validation_error", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_verify._read_binary_state", AsyncMock(return_value=True)),
+        patch("ghosthands.dom.fill_verify._field_has_validation_error", AsyncMock(return_value=False)),
         patch(
-            "ghosthands.actions.domhand_fill._read_group_selection", AsyncMock(return_value="Health insurance")
+            "ghosthands.dom.fill_verify._read_group_selection", AsyncMock(return_value="Health insurance")
         ) as read_group,
     ):
         assert await _field_already_matches(AsyncMock(), field, "Health insurance") is True
@@ -240,12 +240,12 @@ async def test_fill_checkbox_group_multi_select_keeps_binary_path():
     page.evaluate = AsyncMock(return_value='{"clicked": true, "alreadyChecked": false}')
 
     with (
-        patch("ghosthands.actions.domhand_fill._load_field_interaction_recipe", AsyncMock(return_value=None)),
-        patch("ghosthands.actions.domhand_fill._read_binary_state", AsyncMock(return_value=True)),
-        patch("ghosthands.actions.domhand_fill._field_has_validation_error", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._click_binary_with_gui", AsyncMock(return_value=False)) as click_binary,
-        patch("ghosthands.actions.domhand_fill._refresh_binary_field", AsyncMock(return_value=False)) as refresh_binary,
-        patch("ghosthands.actions.domhand_fill._record_field_interaction_recipe"),
+        patch("ghosthands.dom.fill_executor._load_field_interaction_recipe", AsyncMock(return_value=None)),
+        patch("ghosthands.dom.fill_executor._read_binary_state", AsyncMock(return_value=True)),
+        patch("ghosthands.dom.fill_executor._field_has_validation_error", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_executor._click_binary_with_gui", AsyncMock(return_value=False)) as click_binary,
+        patch("ghosthands.dom.fill_executor._refresh_binary_field", AsyncMock(return_value=False)) as refresh_binary,
+        patch("ghosthands.dom.fill_executor._record_field_interaction_recipe"),
     ):
         assert await _fill_checkbox_group(page, field, "Health insurance", "[Benefits]") is True
         page.evaluate.assert_awaited_once_with(_CLICK_CHECKBOX_GROUP_JS, field.field_id)
@@ -268,12 +268,12 @@ async def test_fill_checkbox_uses_binary_click_path():
     page.evaluate = AsyncMock(return_value='{"clicked": true}')
 
     with (
-        patch("ghosthands.actions.domhand_fill._load_field_interaction_recipe", AsyncMock(return_value=None)),
-        patch("ghosthands.actions.domhand_fill._read_binary_state", AsyncMock(side_effect=[False, True])),
-        patch("ghosthands.actions.domhand_fill._field_has_validation_error", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._click_binary_with_gui", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._refresh_binary_field", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._record_field_interaction_recipe"),
+        patch("ghosthands.dom.fill_executor._load_field_interaction_recipe", AsyncMock(return_value=None)),
+        patch("ghosthands.dom.fill_executor._read_binary_state", AsyncMock(side_effect=[False, True])),
+        patch("ghosthands.dom.fill_executor._field_has_validation_error", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_executor._click_binary_with_gui", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_executor._refresh_binary_field", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_executor._record_field_interaction_recipe"),
     ):
         assert await _fill_checkbox(page, field, "Yes", "[Agreement]") is True
         page.evaluate.assert_awaited_once_with(_CLICK_BINARY_FIELD_JS, field.field_id, True)
@@ -295,12 +295,12 @@ async def test_fill_radio_group_keeps_group_option_path():
     page.evaluate = AsyncMock(return_value='{"clicked": true}')
 
     with (
-        patch("ghosthands.actions.domhand_fill._load_field_interaction_recipe", AsyncMock(return_value=None)),
-        patch("ghosthands.actions.domhand_fill._read_group_selection", AsyncMock(side_effect=["", "No"])),
-        patch("ghosthands.actions.domhand_fill._field_has_validation_error", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._click_group_option_with_gui", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._reset_group_selection_with_gui", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._record_field_interaction_recipe"),
+        patch("ghosthands.dom.fill_executor._load_field_interaction_recipe", AsyncMock(return_value=None)),
+        patch("ghosthands.dom.fill_executor._read_group_selection", AsyncMock(side_effect=["", "No"])),
+        patch("ghosthands.dom.fill_executor._field_has_validation_error", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_executor._click_group_option_with_gui", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_executor._reset_group_selection_with_gui", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_executor._record_field_interaction_recipe"),
     ):
         assert await _fill_radio_group(page, field, "No", "[Work Auth]") is True
         page.evaluate.assert_awaited_once_with(_CLICK_RADIO_OPTION_JS, field.field_id, "No")
@@ -322,15 +322,15 @@ async def test_fill_button_group_keeps_group_option_path():
     page.evaluate = AsyncMock(return_value='{"clicked": true}')
 
     with (
-        patch("ghosthands.actions.domhand_fill._load_field_interaction_recipe", AsyncMock(return_value=None)),
+        patch("ghosthands.dom.fill_executor._load_field_interaction_recipe", AsyncMock(return_value=None)),
         patch(
-            "ghosthands.actions.domhand_fill._read_group_selection",
+            "ghosthands.dom.fill_executor._read_group_selection",
             AsyncMock(side_effect=["", "I am not a protected veteran"]),
         ),
-        patch("ghosthands.actions.domhand_fill._field_has_validation_error", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._click_group_option_with_gui", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._reset_group_selection_with_gui", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._record_field_interaction_recipe"),
+        patch("ghosthands.dom.fill_executor._field_has_validation_error", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_executor._click_group_option_with_gui", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_executor._reset_group_selection_with_gui", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_executor._record_field_interaction_recipe"),
     ):
         assert await _fill_button_group(page, field, "I am not a protected veteran", "[Veteran]") is True
         page.evaluate.assert_awaited_once_with(_CLICK_BUTTON_GROUP_JS, field.field_id, "I am not a protected veteran")
@@ -367,12 +367,12 @@ async def test_fill_checkbox_group_exclusive_choice_uses_option_label_path():
     page.evaluate = AsyncMock(return_value='{"clicked": true}')
 
     with (
-        patch("ghosthands.actions.domhand_fill._load_field_interaction_recipe", AsyncMock(return_value=None)),
-        patch("ghosthands.actions.domhand_fill._read_group_selection", AsyncMock(side_effect=["Yes", "No"])),
-        patch("ghosthands.actions.domhand_fill._field_has_validation_error", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._click_group_option_with_gui", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._reset_group_selection_with_gui", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._record_field_interaction_recipe"),
+        patch("ghosthands.dom.fill_executor._load_field_interaction_recipe", AsyncMock(return_value=None)),
+        patch("ghosthands.dom.fill_executor._read_group_selection", AsyncMock(side_effect=["Yes", "No"])),
+        patch("ghosthands.dom.fill_executor._field_has_validation_error", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_executor._click_group_option_with_gui", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_executor._reset_group_selection_with_gui", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_executor._record_field_interaction_recipe"),
     ):
         assert await _fill_checkbox_group(page, field, "No", "[Relatives]") is True
         page.evaluate.assert_awaited_once_with(_CLICK_RADIO_OPTION_JS, field.field_id, "No")
@@ -433,10 +433,10 @@ async def test_attempt_domhand_fill_with_retry_cap_refuses_capped_field():
     )
 
     with (
-        patch("ghosthands.actions.domhand_fill._field_already_matches", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._fill_single_field", AsyncMock(return_value=True)) as fill_single,
+        patch("ghosthands.dom.fill_verify._field_already_matches", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_verify._fill_single_field", AsyncMock(return_value=True)) as fill_single,
     ):
-        success, error, failure_reason = await _attempt_domhand_fill_with_retry_cap(
+        success, error, failure_reason, _fc = await _attempt_domhand_fill_with_retry_cap(
             AsyncMock(),
             host="job-boards.greenhouse.io",
             field=field,
@@ -471,23 +471,23 @@ async def test_attempt_domhand_fill_fails_when_post_fill_observable_mismatch():
 
     with (
         patch(
-            "ghosthands.actions.domhand_fill._field_already_matches",
+            "ghosthands.dom.fill_verify._field_already_matches",
             AsyncMock(return_value=False),
         ),
         patch(
-            "ghosthands.actions.domhand_fill._fill_single_field",
+            "ghosthands.dom.fill_verify._fill_single_field",
             AsyncMock(return_value=True),
         ),
         patch(
-            "ghosthands.actions.domhand_fill._verify_fill_observable",
+            "ghosthands.dom.fill_verify._verify_fill_observable",
             AsyncMock(return_value=False),
         ),
         patch(
-            "ghosthands.actions.domhand_fill._read_observed_field_value",
+            "ghosthands.dom.fill_verify._read_observed_field_value",
             AsyncMock(return_value=""),
         ),
     ):
-        success, error, failure_reason = await _attempt_domhand_fill_with_retry_cap(
+        success, error, failure_reason, _fc = await _attempt_domhand_fill_with_retry_cap(
             page,
             host="job-boards.greenhouse.io",
             field=field,
@@ -498,6 +498,7 @@ async def test_attempt_domhand_fill_fails_when_post_fill_observable_mismatch():
     assert success is False
     assert failure_reason == "dom_fill_failed"
     assert error == "DOM fill failed"
+    assert _fc == 0.0
     reset_runtime_learning_state()
 
 
@@ -553,8 +554,8 @@ async def test_domhand_fill_reports_retry_capped_fields_without_retrying():
             ),
         ),
         patch("ghosthands.actions.domhand_fill._semantic_profile_value_for_field", AsyncMock(return_value=None)),
-        patch("ghosthands.actions.domhand_fill._field_already_matches", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._fill_single_field", AsyncMock(return_value=True)) as fill_single,
+        patch("ghosthands.dom.fill_verify._field_already_matches", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_executor._fill_single_field", AsyncMock(return_value=True)) as fill_single,
     ):
         result = await domhand_fill(DomHandFillParams(), browser_session)
 
@@ -1537,7 +1538,7 @@ async def test_domhand_fill_marks_ambiguous_education_row_order_as_best_effort()
         patch("ghosthands.actions.domhand_fill._safe_page_url", AsyncMock(return_value="https://example.com/job")),
         patch(
             "ghosthands.actions.domhand_fill._attempt_domhand_fill_with_retry_cap",
-            AsyncMock(return_value=(True, None, None)),
+            AsyncMock(return_value=(True, None, None, 1.0)),
         ),
     ):
         result = await domhand_fill(DomHandFillParams(), browser_session)
@@ -1865,7 +1866,7 @@ async def test_domhand_fill_logs_structured_repeater_section_binding_reuse_for_e
         patch("ghosthands.actions.domhand_fill._safe_page_url", AsyncMock(return_value="https://example.com/job")),
         patch(
             "ghosthands.actions.domhand_fill._attempt_domhand_fill_with_retry_cap",
-            AsyncMock(return_value=(True, None, None)),
+            AsyncMock(return_value=(True, None, None, 1.0)),
         ),
         patch("ghosthands.actions.domhand_fill.logger.info") as log_info,
     ):
@@ -3467,9 +3468,9 @@ async def test_record_expected_value_if_settled_skips_unsettled_autofill():
     page = AsyncMock()
 
     with (
-        patch("ghosthands.actions.domhand_fill._read_observed_field_value", AsyncMock(return_value="90000")),
-        patch("ghosthands.actions.domhand_fill._field_has_validation_error", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._field_already_matches", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_verify._read_observed_field_value", AsyncMock(return_value="90000")),
+        patch("ghosthands.dom.fill_executor._field_has_validation_error", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_verify._field_already_matches", AsyncMock(return_value=False)),
         patch("ghosthands.actions.domhand_fill.record_expected_field_value") as record_expected,
     ):
         recorded = await _record_expected_value_if_settled(
@@ -3521,7 +3522,7 @@ async def test_domhand_interact_control_uses_exact_recovery_after_retry_cap():
         ),
         patch(
             "ghosthands.actions.domhand_interact_control._attempt_domhand_fill_with_retry_cap",
-            AsyncMock(return_value=(False, "retry capped", "domhand_retry_capped")),
+            AsyncMock(return_value=(False, "retry capped", "domhand_retry_capped", 0.0)),
         ),
         patch(
             "ghosthands.actions.domhand_interact_control._attempt_exact_control_recovery",
@@ -3593,7 +3594,7 @@ async def test_domhand_interact_control_supports_exact_number_field_recovery_aft
         ),
         patch(
             "ghosthands.actions.domhand_interact_control._attempt_domhand_fill_with_retry_cap",
-            AsyncMock(return_value=(False, "retry capped", "domhand_retry_capped")),
+            AsyncMock(return_value=(False, "retry capped", "domhand_retry_capped", 0.0)),
         ),
         patch(
             "ghosthands.actions.domhand_interact_control._attempt_exact_control_recovery",
@@ -4162,8 +4163,8 @@ async def test_fill_date_field_uses_grouped_workday_date_widget_flow():
     page.press = AsyncMock(return_value=None)
 
     with (
-        patch("ghosthands.actions.domhand_fill._click_away_from_text_like_field", AsyncMock(return_value=True)),
-        patch("ghosthands.actions.domhand_fill._confirm_text_like_value", AsyncMock(return_value=True)),
+        patch("ghosthands.dom.fill_executor._click_away_from_text_like_field", AsyncMock(return_value=True)),
+        patch("ghosthands.dom.fill_executor._confirm_text_like_value", AsyncMock(return_value=True)),
     ):
         success = await domhand_fill_module._fill_date_field(page, field, "2026-03-19", "[Date]")
 
@@ -4282,8 +4283,8 @@ async def test_confirm_text_like_value_blurs_salary_fields_for_revalidation():
     page.locator = Mock(return_value=SimpleNamespace(first=locator))
 
     with (
-        patch("ghosthands.actions.domhand_fill._wait_for_field_value", AsyncMock(side_effect=["90000", "90000"])),
-        patch("ghosthands.actions.domhand_fill._field_has_validation_error", AsyncMock(return_value=False)),
+        patch("ghosthands.dom.fill_executor._wait_for_field_value", AsyncMock(side_effect=["90000", "90000"])),
+        patch("ghosthands.dom.fill_executor._field_has_validation_error", AsyncMock(return_value=False)),
     ):
         success = await _confirm_text_like_value(page, field, "90000", "[salary]")
 
@@ -4313,7 +4314,7 @@ async def test_fill_text_field_retries_salary_with_numeric_candidate_after_range
     )
 
     with patch(
-        "ghosthands.actions.domhand_fill._confirm_text_like_value",
+        "ghosthands.dom.fill_executor._confirm_text_like_value",
         AsyncMock(side_effect=[False, True]),
     ):
         success = await _fill_text_field(
@@ -4473,7 +4474,7 @@ async def test_domhand_fill_skips_llm_for_resolved_required_custom_widget_boolea
         patch("ghosthands.actions.domhand_fill._semantic_profile_value_for_field", AsyncMock(return_value=None)),
         patch(
             "ghosthands.actions.domhand_fill._attempt_domhand_fill_with_retry_cap",
-            AsyncMock(return_value=(True, None, None)),
+            AsyncMock(return_value=(True, None, None, 1.0)),
         ),
         patch("ghosthands.actions.domhand_fill._record_expected_value_if_settled", AsyncMock(return_value=None)),
         patch(
@@ -4497,14 +4498,14 @@ def test_answer_resolution_logs_shape_incompatible_rejection():
         required=True,
     )
 
-    with patch("ghosthands.actions.domhand_fill.logger.info") as log_info:
+    with patch("ghosthands.dom.fill_profile_resolver.logger.debug") as log_debug:
         result = _coerce_answer_if_compatible(field, "Yes", source_candidate="semantic")
 
     assert result is None
-    (event,) = log_info.call_args.args
+    (event,) = log_debug.call_args.args
     assert event == "domhand.answer_resolution"
-    assert log_info.call_args.kwargs["extra"]["shape_compatible"] is False
-    assert log_info.call_args.kwargs["extra"]["rejection_reason"] == "shape_incompatible"
+    assert log_debug.call_args.kwargs["extra"]["shape_compatible"] is False
+    assert log_debug.call_args.kwargs["extra"]["rejection_reason"] == "shape_incompatible"
 
 
 def test_record_page_token_cost_accumulates_per_page_context():

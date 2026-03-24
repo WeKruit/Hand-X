@@ -386,7 +386,7 @@ async def domhand_interact_control(
             },
         )
 
-    success, failure_error, failure_reason = await _attempt_domhand_fill_with_retry_cap(
+    success, failure_error, failure_reason, _fc = await _attempt_domhand_fill_with_retry_cap(
         page,
         host=page_host,
         field=target,

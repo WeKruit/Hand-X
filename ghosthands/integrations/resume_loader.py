@@ -108,12 +108,26 @@ async def load_resume(db: Database, user_id: str) -> dict[str, Any]:
     return profile
 
 
+def _is_already_flat_profile(data: dict[str, Any]) -> bool:
+    """Return True when *data* looks like an already-normalized flat profile.
+
+    Flat profiles use ``first_name`` / ``last_name`` (snake_case) and may
+    include ``education`` or ``experience`` as structured arrays.  VALET's
+    camelCase parsed-data instead uses ``fullName`` and ``workHistory``.
+
+    Without this guard, a flat JSON file that contains ``education`` would
+    incorrectly trigger ``_map_to_profile`` which only reads ``fullName``
+    for names — destroying ``first_name`` / ``last_name``.
+    """
+    return bool(data.get("first_name") or data.get("last_name"))
+
+
 def load_resume_from_file(path: str) -> dict[str, Any]:
     """Load a resume profile from a JSON file (for testing/development).
 
     The file should contain either:
     - A ``parsed_data`` dict matching VALET's camelCase format, or
-    - A pre-normalized profile dict (will be returned as-is).
+    - A pre-normalized flat profile dict (will be returned as-is).
 
     Args:
             path: Path to a JSON file.
@@ -123,13 +137,17 @@ def load_resume_from_file(path: str) -> dict[str, Any]:
     """
     data = json.loads(Path(path).read_text(encoding="utf-8"))
 
-    # If the file contains VALET-format parsed_data, normalize it
-    if "fullName" in data or "workHistory" in data or "education" in data:
-        return _map_to_profile(data)
-
     # If it looks like it wraps parsed_data
     if "parsed_data" in data:
         return _map_to_profile(data["parsed_data"])
+
+    # Already a flat profile with first_name/last_name — return as-is
+    if _is_already_flat_profile(data):
+        return data
+
+    # VALET camelCase format (fullName, workHistory, education)
+    if "fullName" in data or "workHistory" in data or "education" in data:
+        return _map_to_profile(data)
 
     # Assume it's already a normalized profile
     return data

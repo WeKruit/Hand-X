@@ -172,6 +172,21 @@ def get_config_by_name(name: str) -> PlatformConfig:
     return _PLATFORM_REGISTRY.get(name, GENERIC_CONFIG)
 
 
+def get_fill_strategy(url: str) -> str:
+    """Return the preferred form-filling strategy for the platform at *url*."""
+    return get_platform_config(url).form_strategy
+
+
+def get_automation_id_map(url: str) -> dict[str, str]:
+    """Return platform-specific automation-id selectors for the platform at *url*."""
+    return get_platform_config(url).automation_id_map
+
+
+def get_fill_overrides(url: str) -> dict[str, str]:
+    """Return per-control-type fill strategy overrides for the platform at *url*."""
+    return get_platform_config(url).fill_overrides
+
+
 __all__ = [
     "GENERIC_CONFIG",
     "GREENHOUSE_CONFIG",
@@ -181,6 +196,9 @@ __all__ = [
     "PlatformConfig",
     "detect_platform",
     "detect_platform_from_signals",
+    "get_automation_id_map",
     "get_config_by_name",
+    "get_fill_overrides",
+    "get_fill_strategy",
     "get_platform_config",
 ]

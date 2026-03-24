@@ -66,6 +66,21 @@ class PlatformConfig(BaseModel):
         default="dom_first",
         description="Preferred form-filling strategy: 'dom_first', 'fill_first', 'repeater_expand'.",
     )
+    automation_id_map: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Mapping of logical field role (e.g. 'form_label', 'date_month') to "
+            "a CSS selector or data-automation-id pattern the executor can use."
+        ),
+    )
+    fill_overrides: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-control-type fill strategy overrides keyed by field_type. "
+            "Values are fill strategy names: 'native_select', 'combobox_toggle', "
+            "'searchable_dropdown', 'playwright_fill', etc."
+        ),
+    )
     single_page_presubmit_allowed: bool = Field(
         default=False,
         description=(

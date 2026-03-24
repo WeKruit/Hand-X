@@ -258,8 +258,14 @@ def _format_profile_summary(resume_profile: dict) -> str:
         elif not isinstance(location, str):
             location = str(location)
         lines.append(f"Location: {location}")
-    if address := resume_profile.get("address"):
-        lines.append(f"Address: {address}")
+    address_raw = resume_profile.get("address")
+    if address_raw:
+        if isinstance(address_raw, dict):
+            addr_str = ", ".join(str(v).strip() for v in address_raw.values() if v and str(v).strip())
+            if addr_str:
+                lines.append(f"Address: {addr_str}")
+        elif isinstance(address_raw, str) and address_raw.strip():
+            lines.append(f"Address: {address_raw}")
     if address2 := resume_profile.get("address_line_2"):
         lines.append(f"Address line 2: {address2}")
     if city := resume_profile.get("city"):
@@ -274,6 +280,17 @@ def _format_profile_summary(resume_profile: dict) -> str:
         lines.append(f"Country: {country}")
     if phone_type := resume_profile.get("phone_type") or resume_profile.get("phone_device_type"):
         lines.append(f"Phone type: {phone_type}")
+
+    # ── Links / URLs ─────────────────────────────────────────────
+    if linkedin := resume_profile.get("linkedin") or resume_profile.get("linkedin_url"):
+        lines.append(f"LinkedIn: {linkedin}")
+    if portfolio := resume_profile.get("portfolio") or resume_profile.get("portfolio_url"):
+        lines.append(f"Portfolio / Website: {portfolio}")
+    if github := resume_profile.get("github") or resume_profile.get("github_url"):
+        lines.append(f"GitHub: {github}")
+    if website := resume_profile.get("website") or resume_profile.get("personal_website"):
+        if website != portfolio:
+            lines.append(f"Website: {website}")
 
     # ── Flat fields common in sample data ────────────────────────
     flat_fields = {
@@ -412,9 +429,11 @@ def _format_profile_summary(resume_profile: dict) -> str:
         lines.append(f"Notice period: {notice_period}")
 
     # ── Open-ended answers ───────────────────────────────────────
+    _already_emitted = {"how_did_you_hear"}
     for key, val in resume_profile.items():
         if (
             (key.startswith("what_") or key.startswith("why_") or key.startswith("how_"))
+            and key not in _already_emitted
             and isinstance(val, str)
             and val.strip()
         ):

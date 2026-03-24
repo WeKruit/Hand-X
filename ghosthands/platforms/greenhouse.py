@@ -126,5 +126,16 @@ GREENHOUSE_CONFIG = PlatformConfig(
         "Validation errors appear inline next to the field.",
     ],
     form_strategy="dom_first",
+    automation_id_map={
+        "application_form": "#application_form",
+        "submit_button": '#submit_app, button[type="submit"]',
+        "resume_input": 'input[type="file"][name*="resume"]',
+        "cover_letter_input": 'input[type="file"][name*="cover_letter"]',
+        "custom_question": "[data-question-id]",
+        "eeo_section": "#eeoc_fields, .eeoc-fields",
+    },
+    fill_overrides={
+        "select": "react_select",
+    },
     single_page_presubmit_allowed=True,
 )
