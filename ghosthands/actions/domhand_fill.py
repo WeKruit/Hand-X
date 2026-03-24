@@ -7344,6 +7344,46 @@ def _resolve_llm_answer_via_batch_key(
     )
 
 
+async def _discover_dropdown_options(
+    page: Any,
+    fields: list[FormField],
+) -> None:
+    """Open custom dropdowns with empty options to discover actual choices.
+
+    Mutates each field's ``options`` list in-place so that downstream
+    ``_build_field_description()`` includes them in the LLM prompt.
+    Mirrors GHOST-HANDS's ``discoverDropdownOptions()`` pattern.
+    """
+    for field in fields:
+        if field.field_type != "select":
+            continue
+        if getattr(field, "is_native", False):
+            continue
+        if field.options and len(field.options) > 0:
+            continue
+        if field.choices and len(field.choices) > 0:
+            continue
+        try:
+            await _try_open_combobox_menu(page, field.field_id, tag="discover")
+            await asyncio.sleep(0.5)
+            discovered = await _scan_dropdown_options(page)
+            if discovered:
+                field.options = discovered
+                field.choices = discovered
+                logger.debug(
+                    "domhand.discover_dropdown_options",
+                    field_id=field.field_id,
+                    option_count=len(discovered),
+                    sample=discovered[:5],
+                )
+            await _settle_dropdown_selection(page, delay=0.3)
+        except Exception:
+            try:
+                await _settle_dropdown_selection(page, delay=0.2)
+            except Exception:
+                pass
+
+
 async def _generate_answers(
     fields: list[FormField],
     profile_text: str,
@@ -8059,6 +8099,21 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 
         logger.info(f"Round {round_num}: {len(fillable_fields)} fillable fields found")
 
+        # ── Discover dropdown options for ALL custom select fields ──────
+        # This must run BEFORE triage so that:
+        # 1. Fields with discovered options get routed to the LLM (not direct_fills)
+        # 2. The LLM sees actual option texts and picks EXACT matches
+        # Mirrors GHOST-HANDS's discoverDropdownOptions() placement.
+        _select_fields_needing_discovery = [
+            f for f in fillable_fields
+            if f.field_type == "select"
+            and not getattr(f, "is_native", False)
+            and not (f.options or f.choices)
+            and not _field_has_effective_value(f)
+        ]
+        if _select_fields_needing_discovery:
+            await _discover_dropdown_options(page, _select_fields_needing_discovery)
+
         needs_llm: list[FormField] = []
         direct_fills: dict[str, str] = {}
         resolved_values: dict[str, ResolvedFieldValue] = {}
@@ -8349,6 +8404,17 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 minimum_confidence="medium" if f.required else "strong",
             )
             if known_resolution:
+                # Custom select fields with discovered options must go through the
+                # LLM so it picks the EXACT option text.  Raw profile values like
+                # "checked", "other", "No" won't match react-select options.
+                _has_discovered_opts = (
+                    f.field_type == "select"
+                    and not getattr(f, "is_native", False)
+                    and (f.options or f.choices)
+                )
+                if _has_discovered_opts:
+                    needs_llm.append(f)
+                    continue
                 direct_fills[f.field_id] = known_resolution.value
                 resolved_values[f.field_id] = known_resolution
                 continue
@@ -8358,6 +8424,14 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 profile_data,
             )
             if semantic_profile_val:
+                _has_discovered_opts = (
+                    f.field_type == "select"
+                    and not getattr(f, "is_native", False)
+                    and (f.options or f.choices)
+                )
+                if _has_discovered_opts:
+                    needs_llm.append(f)
+                    continue
                 direct_fills[f.field_id] = semantic_profile_val
                 resolved_values[f.field_id] = _resolved_field_value(
                     semantic_profile_val,
@@ -8867,41 +8941,36 @@ async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag
     from ghosthands.actions.domhand_select import _focus_dropdown_filter_input
 
     # ------------------------------------------------------------------
-    # Pre-scan: open dropdown, read ALL visible options, fuzzy-match the
-    # LLM answer against actual option texts, and click directly.  This
-    # avoids the "Male ≠ Man" problem where the LLM answer doesn't work
-    # as a search term for react-select filtering.
+    # PRIMARY: Click-first via Playwright locator (real browser events).
+    # With LLM discovery the answer is exact option text, so this should
+    # succeed immediately without any typing.
     # ------------------------------------------------------------------
     try:
         await _try_open_combobox_menu(page, ff_id, tag=tag)
         await asyncio.sleep(0.4)
+
+        # Try exact-text click first
+        if await _click_option_by_locator(page, value):
+            logger.debug(f'search-select {tag} -> "{value}" (locator click-first)')
+            await _settle_dropdown_selection(page)
+            return True
+
+        # Scan options, fuzzy-match, then click the best match via locator
         available = await _scan_dropdown_options(page)
         if available:
             best = _fuzzy_match_dropdown_option(value, available)
             if best:
-                # Try clicking the matched option directly (it's already visible)
-                clicked = await _click_dropdown_option(page, best)
-                if clicked.get("clicked"):
-                    logger.debug(f'search-select {tag} -> "{best}" (pre-scan direct click)')
+                if await _click_option_by_locator(page, best):
+                    logger.debug(f'search-select {tag} -> "{best}" (scan+fuzzy+locator)')
                     await _settle_dropdown_selection(page)
                     return True
-                # Direct click missed — type the matched option text as search instead
-                await _focus_dropdown_filter_input(page)
-                await _clear_dropdown_search(page)
-                await asyncio.sleep(0.1)
-                await page.keyboard.type(best, delay=40)
-                poll_clicked = await _poll_click_dropdown_option(page, best, max_wait_s=2.0)
-                if poll_clicked.get("clicked"):
-                    logger.debug(f'search-select {tag} -> "{best}" (pre-scan type+click)')
-                    await _settle_dropdown_selection(page)
-                    return True
-            # Pre-scan found options but no fuzzy match — fall through to search-term loop
-            logger.debug(f'search-select {tag}: pre-scan found {len(available)} options, no match for "{value}"')
+            logger.debug(f'search-select {tag}: click-first found {len(available)} options, no clickable match for "{value}"')
     except Exception as e:
-        logger.debug(f'search-select {tag}: pre-scan failed: {str(e)[:60]}')
+        logger.debug(f'search-select {tag}: click-first failed: {str(e)[:60]}')
 
     # ------------------------------------------------------------------
-    # Existing flow: type search terms, wait for filtered results, click.
+    # FALLBACK: type search terms, wait for filtered results, click.
+    # Only reached if direct clicking failed (e.g. async-loaded options).
     # ------------------------------------------------------------------
     for term_idx, search_term in enumerate(search_terms):
         try:
@@ -9543,8 +9612,91 @@ def _fuzzy_match_dropdown_option(target: str, options: list[str]) -> str | None:
     return None
 
 
+async def _click_option_by_locator(page: Any, text: str) -> bool:
+    """Click a dropdown option using Playwright locators (real browser click).
+
+    Mirrors GHOST-HANDS ``clickActiveListOption()``.  Uses Playwright's
+    ``page.locator().filter(has_text=...)`` so the click fires real mousedown →
+    mouseup → click events that React / Vue / Lit properly handle.  This is the
+    key difference from the old JS ``element.click()`` path which didn't trigger
+    React's synthetic-event system and left react-select in a "typed but not
+    selected" state.
+
+    Returns ``True`` if an option was successfully clicked.
+    """
+    import re as _re
+
+    escaped = _re.escape(text)
+    exact_re = _re.compile(rf"^\s*{escaped}\s*$", _re.IGNORECASE)
+
+    # Strategy 1: ARIA listbox > role=option (standard react-select / custom dropdowns)
+    try:
+        option = page.locator('[role="listbox"] [role="option"]').filter(has_text=exact_re).first
+        if await option.count() > 0:
+            await option.click(timeout=2000)
+            logger.debug("domhand.click_option_by_locator", strategy="listbox_option", text=text[:60])
+            return True
+    except Exception:
+        pass
+
+    # Strategy 2: Any visible role=option (may not be inside a listbox)
+    try:
+        option = page.locator('[role="option"]:visible').filter(has_text=exact_re).first
+        if await option.count() > 0:
+            await option.click(timeout=2000)
+            logger.debug("domhand.click_option_by_locator", strategy="any_option", text=text[:60])
+            return True
+    except Exception:
+        pass
+
+    # Strategy 3: role=menuitem (some dropdown libraries)
+    try:
+        option = page.locator('[role="menuitem"]:visible').filter(has_text=exact_re).first
+        if await option.count() > 0:
+            await option.click(timeout=2000)
+            logger.debug("domhand.click_option_by_locator", strategy="menuitem", text=text[:60])
+            return True
+    except Exception:
+        pass
+
+    # Strategy 4: Generic dropdown li elements (class*=option, select, menu, dropdown)
+    for container_sel in (
+        '[class*="menu"] li',
+        '[class*="select"] li',
+        '[class*="dropdown"] li',
+        '[class*="listbox"] li',
+    ):
+        try:
+            option = page.locator(container_sel).filter(has_text=exact_re).first
+            if await option.count() > 0:
+                await option.click(timeout=2000)
+                logger.debug("domhand.click_option_by_locator", strategy="generic_li", selector=container_sel, text=text[:60])
+                return True
+        except Exception:
+            pass
+
+    # Strategy 5: Substring / contains fallback (less strict matching)
+    try:
+        option = page.locator('[role="option"]:visible').filter(has_text=text).first
+        if await option.count() > 0:
+            await option.click(timeout=2000)
+            logger.debug("domhand.click_option_by_locator", strategy="substring_option", text=text[:60])
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
 async def _click_dropdown_option(page: Any, text: str) -> dict[str, Any]:
-    """Click a visible dropdown option by text."""
+    """Click a visible dropdown option by text.
+
+    Tries Playwright locator click first (real events), falls back to JS click.
+    """
+    # Prefer Playwright locator — fires real browser events that react-select handles
+    if await _click_option_by_locator(page, text):
+        return {"clicked": True, "text": text}
+    # Fallback to JS click for non-standard dropdown widgets
     try:
         raw_result = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, text)
     except Exception:
@@ -9678,42 +9830,60 @@ async def _fill_custom_dropdown(
         open_succeeded = True
         await asyncio.sleep(0.6)
 
-        # ── Pre-scan: read ALL options from the DOM and fuzzy-match ──
+        # ── PRIMARY: Click-first (Playwright locator — real browser events) ──
+        # Try clicking the exact option text directly.  With LLM discovery the
+        # answer IS an exact option string, so this should succeed on the first
+        # attempt for the vast majority of cases.
+        if await _click_option_by_locator(page, value):
+            current = await _wait_for_field_value(page, field, value)
+            if _field_value_matches_expected(current, value):
+                post_value = current
+                selection_stuck = True
+                logger.debug(f'select {tag} -> "{value}" (locator click-first)')
+                await _settle_dropdown_selection(page)
+                return True
+
+        # ── SECONDARY: Scan options from DOM, fuzzy-match, click via locator ──
+        # Handles cases where the LLM answer is close but not character-exact.
         try:
             available = await _scan_dropdown_options(page)
             if available:
                 best = _fuzzy_match_dropdown_option(value, available)
-                if best:
-                    clicked = await _click_dropdown_option(page, best)
-                    if clicked.get("clicked"):
+                if best and best.lower().strip() != value.lower().strip():
+                    if await _click_option_by_locator(page, best):
                         current = await _wait_for_field_value(page, field, value)
                         if _field_value_matches_expected(current, value):
                             post_value = current
                             selection_stuck = True
-                            logger.debug(f'select {tag} -> "{best}" (pre-scan)')
+                            logger.debug(f'select {tag} -> "{best}" (scan+fuzzy+locator)')
                             await _settle_dropdown_selection(page)
                             return True
         except Exception as exc:
-            logger.debug(f"select {tag}: pre-scan failed: {str(exc)[:60]}")
+            logger.debug(f"select {tag}: scan+fuzzy failed: {str(exc)[:60]}")
 
-        # Prefer waiting for options to paint, then click (type-to-filter is a later fallback).
-        clicked = await _poll_click_dropdown_option(page, value, max_wait_s=3.2)
+        # ── TERTIARY: JS click fallback (for non-standard dropdown widgets) ──
+        clicked = await _poll_click_dropdown_option(page, value, max_wait_s=2.5)
         if clicked.get("clicked"):
             current = await _wait_for_field_value(page, field, value)
             if _field_value_matches_expected(current, value):
                 post_value = current
                 selection_stuck = True
-                logger.debug(f'select {tag} -> "{clicked.get("text", value)}"')
+                logger.debug(f'select {tag} -> "{clicked.get("text", value)}" (poll JS click)')
                 await _settle_dropdown_selection(page)
                 return True
 
+        # ── QUATERNARY: Hierarchical dropdown segments ──
         segments = split_dropdown_value_hierarchy(value)
         if len(segments) > 1:
             for idx, segment in enumerate(segments):
-                clicked = await _poll_click_dropdown_option(page, segment, max_wait_s=2.8)
-                if not clicked.get("clicked"):
+                seg_ok = await _click_option_by_locator(page, segment)
+                if not seg_ok:
+                    clicked = await _poll_click_dropdown_option(page, segment, max_wait_s=2.8)
+                    seg_ok = clicked.get("clicked", False)
+                if not seg_ok:
                     clicked = await _type_and_click_dropdown_option(page, segment, tag)
-                if not clicked.get("clicked"):
+                    seg_ok = clicked.get("clicked", False)
+                if not seg_ok:
                     raise RuntimeError(f'No hierarchical dropdown match for "{segment}"')
                 await asyncio.sleep(0.8 if idx < len(segments) - 1 else 0.45)
             current = await _wait_for_field_value(page, field, value, timeout=2.8)
@@ -9724,6 +9894,7 @@ async def _fill_custom_dropdown(
                 await _settle_dropdown_selection(page, delay=0.6)
                 return True
 
+        # ── LAST RESORT: Type search terms (only if all click strategies failed) ──
         clicked = await _type_and_click_dropdown_option(page, value, tag)
         if clicked.get("clicked"):
             current = await _wait_for_field_value(page, field, value)
