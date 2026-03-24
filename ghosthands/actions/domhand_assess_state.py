@@ -1079,15 +1079,11 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                     else await _read_field_value(page, field.field_id)
                 )
                 if platform_hint == "phenom":
+                    _phenom_label = _preferred_field_label(field)
                     logger.info(
-                        "domhand.assess_state.phenom_debug.select_read",
-                        extra={
-                            "field_id": field.field_id,
-                            "field_label": _preferred_field_label(field),
-                            "current_value_repr": repr(field.current_value),
-                            "expected_value_repr": repr(expected.expected_value),
-                            "widget_kind": field.widget_kind or "",
-                        },
+                        f"domhand.assess_state.phenom_debug.select_read "
+                        f"field={field.field_id} label={_phenom_label!r} "
+                        f"current={field.current_value!r} expected={expected.expected_value!r}",
                     )
             elif field.field_type in {"checkbox", "toggle"}:
                 binary_state = await _read_binary_state(page, field.field_id)
@@ -1149,16 +1145,11 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             if not _field_value_matches_expected(field.current_value, expected.expected_value):
                 if platform_hint == "phenom":
                     logger.info(
-                        "domhand.assess_state.phenom_debug.mismatch_detected",
-                        extra={
-                            "field_id": field.field_id,
-                            "field_label": _preferred_field_label(field),
-                            "field_type": field.field_type,
-                            "current_value_repr": repr(field.current_value),
-                            "expected_value_repr": repr(expected.expected_value),
-                            "expected_source": expected.source,
-                            "attempt_index": attempt_index,
-                        },
+                        f"domhand.assess_state.phenom_debug.MISMATCH "
+                        f"field={field.field_id} label={_preferred_field_label(field)!r} "
+                        f"type={field.field_type} attempt={attempt_index} "
+                        f"current={field.current_value!r} expected={expected.expected_value!r} "
+                        f"source={expected.source}",
                     )
                 mismatched_attempt.append(
                     _verification_issue_for_field(
