@@ -8864,13 +8864,50 @@ async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag
     if not search_terms:
         search_terms = [value]
 
+    from ghosthands.actions.domhand_select import _focus_dropdown_filter_input
+
+    # ------------------------------------------------------------------
+    # Pre-scan: open dropdown, read ALL visible options, fuzzy-match the
+    # LLM answer against actual option texts, and click directly.  This
+    # avoids the "Male ≠ Man" problem where the LLM answer doesn't work
+    # as a search term for react-select filtering.
+    # ------------------------------------------------------------------
+    try:
+        await _try_open_combobox_menu(page, ff_id, tag=tag)
+        await asyncio.sleep(0.4)
+        available = await _scan_dropdown_options(page)
+        if available:
+            best = _fuzzy_match_dropdown_option(value, available)
+            if best:
+                # Try clicking the matched option directly (it's already visible)
+                clicked = await _click_dropdown_option(page, best)
+                if clicked.get("clicked"):
+                    logger.debug(f'search-select {tag} -> "{best}" (pre-scan direct click)')
+                    await _settle_dropdown_selection(page)
+                    return True
+                # Direct click missed — type the matched option text as search instead
+                await _focus_dropdown_filter_input(page)
+                await _clear_dropdown_search(page)
+                await asyncio.sleep(0.1)
+                await page.keyboard.type(best, delay=40)
+                poll_clicked = await _poll_click_dropdown_option(page, best, max_wait_s=2.0)
+                if poll_clicked.get("clicked"):
+                    logger.debug(f'search-select {tag} -> "{best}" (pre-scan type+click)')
+                    await _settle_dropdown_selection(page)
+                    return True
+            # Pre-scan found options but no fuzzy match — fall through to search-term loop
+            logger.debug(f'search-select {tag}: pre-scan found {len(available)} options, no match for "{value}"')
+    except Exception as e:
+        logger.debug(f'search-select {tag}: pre-scan failed: {str(e)[:60]}')
+
+    # ------------------------------------------------------------------
+    # Existing flow: type search terms, wait for filtered results, click.
+    # ------------------------------------------------------------------
     for term_idx, search_term in enumerate(search_terms):
         try:
             await _try_open_combobox_menu(page, ff_id, tag=tag)
             await asyncio.sleep(0.4)
 
-            # Focus the dropdown's search input (may differ from the trigger element)
-            from ghosthands.actions.domhand_select import _focus_dropdown_filter_input
             await _focus_dropdown_filter_input(page)
             await _clear_dropdown_search(page)
             await asyncio.sleep(0.1)
@@ -9361,6 +9398,151 @@ async def _fill_multi_select(page: Any, field: FormField, values: list[str], tag
     return False
 
 
+# ---------------------------------------------------------------------------
+# Option pre-scanning and fuzzy matching for react-select / custom dropdowns
+# ---------------------------------------------------------------------------
+
+_SCAN_DROPDOWN_OPTIONS_JS = r"""() => {
+    var qAll = (window.__ff && window.__ff.queryAll)
+        ? function(sel){ return window.__ff.queryAll(sel); }
+        : function(sel){ return Array.from(document.querySelectorAll(sel)); };
+    var selectors = [
+        '[role="option"]',
+        '[role="menuitem"]',
+        '[role="listitem"]',
+        '[role="gridcell"]',
+        'li[id*="option"]',
+        '[class*="option"]:not([class*="container"]):not([class*="placeholder"])'
+    ];
+    var seen = {};
+    var results = [];
+    for (var s = 0; s < selectors.length; s++) {
+        var els = qAll(selectors[s]);
+        for (var i = 0; i < els.length; i++) {
+            var el = els[i];
+            var text = (el.textContent || '').trim();
+            if (!text || text.length > 200) continue;
+            var key = text.toLowerCase();
+            if (seen[key]) continue;
+            seen[key] = true;
+            results.push(text);
+        }
+    }
+    return JSON.stringify(results);
+}"""
+
+
+async def _scan_dropdown_options(page: Any) -> list[str]:
+    """Read ALL dropdown option texts from the DOM of the currently open menu.
+
+    Queries all elements with option-like roles/classes regardless of scroll
+    position.  React-select (and most dropdown libraries) render all option
+    nodes in the DOM even when the list is scrollable — this captures them all.
+
+    Returns deduplicated option texts.  Used by the pre-scan logic so we can
+    fuzzy-match the LLM answer against *actual* options before typing.
+    """
+    try:
+        raw = await page.evaluate(_SCAN_DROPDOWN_OPTIONS_JS)
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(parsed, list):
+            return [str(t) for t in parsed if t]
+    except Exception:
+        pass
+    return []
+
+
+# Common demographic answer synonyms — bridges LLM answers ↔ actual dropdown options.
+# Each set contains equivalent terms; if both the target and an option text appear
+# in the same group the match succeeds.
+_SYNONYM_GROUPS: list[set[str]] = [
+    # Gender
+    {"male", "man", "m", "masculine"},
+    {"female", "woman", "f", "feminine"},
+    {"non-binary", "nonbinary", "non binary", "genderqueer", "gender non-conforming"},
+    # Decline / prefer-not-to-say variants
+    {
+        "i decline to self-identify",
+        "i dont wish to answer",
+        "i do not wish to answer",
+        "prefer not to say",
+        "i prefer not to say",
+        "decline to answer",
+        "prefer not to answer",
+        "i prefer to not describe",
+        "decline to self-identify",
+        "i prefer not to disclose",
+        "i don't wish to answer",
+    },
+    # Disability yes/no
+    {"no", "no disability", "i do not have a disability", "none", "no, i don't have a disability"},
+    {"yes", "i have a disability", "yes, i have a disability"},
+    # Hispanic/Latino
+    {"hispanic", "hispanic or latino", "hispanic, latinx or of spanish origin", "latino", "latina", "latinx"},
+    # Veteran
+    {"not a veteran", "i am not a veteran", "no, i am not a veteran", "i'm not a veteran"},
+    {"veteran", "i am a veteran", "yes, i am a veteran", "i identify as a veteran"},
+]
+
+
+def _are_synonyms(a: str, b: str) -> bool:
+    """Return True if *a* and *b* belong to the same synonym group."""
+    al, bl = a.lower().strip(), b.lower().strip()
+    if al == bl:
+        return True
+    for group in _SYNONYM_GROUPS:
+        if al in group and bl in group:
+            return True
+    return False
+
+
+def _fuzzy_match_dropdown_option(target: str, options: list[str]) -> str | None:
+    """Multi-pass fuzzy matching: exact → prefix → contains → reverse → synonyms → word-overlap.
+
+    Returns the best matching option text, or ``None`` if nothing matches.
+    """
+    if not target or not options:
+        return None
+    t = target.lower().strip()
+
+    # Pass 1: Exact match (case-insensitive)
+    for opt in options:
+        if opt.lower().strip() == t:
+            return opt
+
+    # Pass 2: Prefix match (either direction)
+    for opt in options:
+        o = opt.lower().strip()
+        if o.startswith(t) or t.startswith(o):
+            return opt
+
+    # Pass 3: Contains match (either direction)
+    for opt in options:
+        o = opt.lower().strip()
+        if t in o or o in t:
+            return opt
+
+    # Pass 4: Synonym / alias match
+    for opt in options:
+        if _are_synonyms(t, opt.lower().strip()):
+            return opt
+
+    # Pass 5: Word-overlap scoring (at least 1 meaningful shared word)
+    stop_words = {"the", "a", "an", "of", "for", "in", "to", "or", "and", "i", "not"}
+    target_words = {w for w in t.split() if w not in stop_words and len(w) > 1}
+    best_score, best_opt = 0, None
+    for opt in options:
+        opt_words = {w for w in opt.lower().split() if w not in stop_words and len(w) > 1}
+        overlap = len(target_words & opt_words)
+        if overlap > best_score:
+            best_score = overlap
+            best_opt = opt
+    if best_score > 0 and best_opt is not None:
+        return best_opt
+
+    return None
+
+
 async def _click_dropdown_option(page: Any, text: str) -> dict[str, Any]:
     """Click a visible dropdown option by text."""
     try:
@@ -9495,6 +9677,24 @@ async def _fill_custom_dropdown(
         await _try_open_combobox_menu(page, ff_id, tag=tag)
         open_succeeded = True
         await asyncio.sleep(0.6)
+
+        # ── Pre-scan: read ALL options from the DOM and fuzzy-match ──
+        try:
+            available = await _scan_dropdown_options(page)
+            if available:
+                best = _fuzzy_match_dropdown_option(value, available)
+                if best:
+                    clicked = await _click_dropdown_option(page, best)
+                    if clicked.get("clicked"):
+                        current = await _wait_for_field_value(page, field, value)
+                        if _field_value_matches_expected(current, value):
+                            post_value = current
+                            selection_stuck = True
+                            logger.debug(f'select {tag} -> "{best}" (pre-scan)')
+                            await _settle_dropdown_selection(page)
+                            return True
+        except Exception as exc:
+            logger.debug(f"select {tag}: pre-scan failed: {str(exc)[:60]}")
 
         # Prefer waiting for options to paint, then click (type-to-filter is a later fallback).
         clicked = await _poll_click_dropdown_option(page, value, max_wait_s=3.2)
