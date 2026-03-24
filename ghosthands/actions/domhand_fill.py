@@ -1180,7 +1180,7 @@ _EXTRACT_FIELDS_JS = r"""() => {
 			options: [],
 			choices: [],
 			accept: el.accept || null,
-			is_native: isNative || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA',
+			is_native: type === 'select' ? isNative : (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'),
 			is_multi_select: isMultiSelect || el.multiple || el.getAttribute('aria-multiselectable') === 'true',
 			visible: true,
 			raw_label: ff.getAccessibleName(el),
@@ -7947,6 +7947,7 @@ async def extract_visible_form_fields(page: Any) -> list[FormField]:
 
 async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSession) -> ActionResult:
     """Fill all visible form fields using fast DOM manipulation."""
+    logger.warning("HANDX_LOCAL_BUILD_2026_03_24 — domhand_fill entry (dropdown-fix branch)")
     page = await browser_session.get_current_page()
     if not page:
         return ActionResult(error="No active page found in browser session")
@@ -8099,6 +8100,30 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 
         logger.info(f"Round {round_num}: {len(fillable_fields)} fillable fields found")
 
+        # ── DEBUG: Log all field types to diagnose discovery filter ──────
+        for _dbg_f in fillable_fields:
+            if _dbg_f.field_type in ("select", "combobox") or (
+                hasattr(_dbg_f, "control_kind") and _dbg_f.control_kind in ("select", "combobox", "custom-select", "react-select")
+            ):
+                logger.warning(
+                    "domhand.discovery_filter_debug",
+                    field_id=_dbg_f.field_id,
+                    label=getattr(_dbg_f, "label", None) or getattr(_dbg_f, "name", None),
+                    field_type=_dbg_f.field_type,
+                    control_kind=getattr(_dbg_f, "control_kind", None),
+                    is_native=getattr(_dbg_f, "is_native", False),
+                    has_options=bool(_dbg_f.options),
+                    has_choices=bool(_dbg_f.choices),
+                    has_effective_value=_field_has_effective_value(_dbg_f),
+                    option_count=len(_dbg_f.options) if _dbg_f.options else 0,
+                    choices_count=len(_dbg_f.choices) if _dbg_f.choices else 0,
+                )
+        # Also log ALL fields briefly to see what types exist
+        _type_summary = {}
+        for _dbg_f in fillable_fields:
+            _type_summary[_dbg_f.field_type] = _type_summary.get(_dbg_f.field_type, 0) + 1
+        logger.warning("domhand.field_type_summary", types=_type_summary)
+
         # ── Discover dropdown options for ALL custom select fields ──────
         # This must run BEFORE triage so that:
         # 1. Fields with discovered options get routed to the LLM (not direct_fills)
@@ -8112,7 +8137,11 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             and not _field_has_effective_value(f)
         ]
         if _select_fields_needing_discovery:
+            logger.warning("domhand.discovery_will_run", count=len(_select_fields_needing_discovery),
+                           fields=[(f.field_id, getattr(f, "label", None) or getattr(f, "name", None)) for f in _select_fields_needing_discovery])
             await _discover_dropdown_options(page, _select_fields_needing_discovery)
+        else:
+            logger.warning("domhand.discovery_skipped_no_qualifying_fields", total_fields=len(fillable_fields))
 
         needs_llm: list[FormField] = []
         direct_fills: dict[str, str] = {}
