@@ -7399,9 +7399,48 @@ async def _discover_dropdown_options(
                 await _close_any_open_dropdown(page)
                 await asyncio.sleep(0.3)
 
-            await _try_open_combobox_menu(page, field.field_id, tag="discover")
-            await asyncio.sleep(0.6)
+            # Use Playwright locator click (real browser events) to open the
+            # dropdown.  JS element.click() doesn't reliably trigger
+            # react-select's menu opening on first interaction.
+            opened = False
+            ff_selector = f'[data-ff-id="{field.field_id}"]'
+            try:
+                el = page.locator(ff_selector)
+                if await el.count() > 0:
+                    # Scroll into view first so click works
+                    await el.scroll_into_view_if_needed(timeout=2000)
+                    await el.click(timeout=2000)
+                    opened = True
+                    await asyncio.sleep(0.5)
+            except Exception:
+                pass
+
+            if not opened:
+                # Fallback to JS-based open
+                await _try_open_combobox_menu(page, field.field_id, tag="discover")
+                await asyncio.sleep(0.5)
+
+            # Clear any stale search text so all options are visible
+            try:
+                await page.keyboard.press("Control+a")
+                await page.keyboard.press("Backspace")
+                await asyncio.sleep(0.3)
+            except Exception:
+                pass
+
+            # Click again to ensure menu is open (react-select sometimes
+            # needs a second interaction after clearing text)
+            try:
+                el = page.locator(ff_selector)
+                if await el.count() > 0:
+                    await el.click(timeout=1000)
+                    await asyncio.sleep(0.5)
+            except Exception:
+                pass
+
             discovered = await _scan_dropdown_options(page)
+            # Filter out "No options" placeholder
+            discovered = [o for o in discovered if o.lower().strip() != "no options"]
             if discovered:
                 field.options = discovered
                 field.choices = discovered
@@ -9547,6 +9586,29 @@ _SCAN_DROPDOWN_OPTIONS_JS = r"""() => {
     var qAll = (window.__ff && window.__ff.queryAll)
         ? function(sel){ return window.__ff.queryAll(sel); }
         : function(sel){ return Array.from(document.querySelectorAll(sel)); };
+    var isVisible = function(el) {
+        if (!el) return false;
+        var style = window.getComputedStyle(el);
+        if (!style) return false;
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        var rect = el.getBoundingClientRect();
+        if (!rect || rect.width === 0 || rect.height === 0) return false;
+        return true;
+    };
+    var isMenuVisible = function(el) {
+        // Walk up to the menu/listbox container and check IT is visible too.
+        // React-select hides menus by removing them or setting display:none on
+        // the menu container, not on individual options.
+        var node = el;
+        for (var depth = 0; depth < 10 && node && node !== document.body; depth++) {
+            var s = window.getComputedStyle(node);
+            if (s && (s.display === 'none' || s.visibility === 'hidden')) return false;
+            // Check for aria-hidden on the container
+            if (node.getAttribute && node.getAttribute('aria-hidden') === 'true') return false;
+            node = node.parentElement;
+        }
+        return isVisible(el);
+    };
     var selectors = [
         '[role="option"]',
         '[role="menuitem"]',
@@ -9561,6 +9623,7 @@ _SCAN_DROPDOWN_OPTIONS_JS = r"""() => {
         var els = qAll(selectors[s]);
         for (var i = 0; i < els.length; i++) {
             var el = els[i];
+            if (!isMenuVisible(el)) continue;
             var text = (el.textContent || '').trim();
             if (!text || text.length > 200) continue;
             var key = text.toLowerCase();
