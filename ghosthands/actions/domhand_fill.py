@@ -23,6 +23,7 @@ job application form filling.  It:
 """
 
 import asyncio
+import contextlib
 import inspect
 import json
 import os
@@ -1210,12 +1211,24 @@ _EXTRACT_FIELDS_JS = r"""() => {
 				if (!rect || rect.width === 0 || rect.height === 0) return '';
 				return (target.textContent || '').replace(/\s+/g, ' ').trim();
 			};
+			var selectLikeWrapper = function(n) {
+				if (!ff || !ff.closestCrossRoot) return n.parentElement || n;
+				return (
+					ff.closestCrossRoot(n, '.input-field-container') ||
+					ff.closestCrossRoot(n, '.cx-select-container') ||
+					ff.closestCrossRoot(n, '.input-row__control-container') ||
+					ff.closestCrossRoot(n, '.input-row') ||
+					ff.closestCrossRoot(
+						n,
+						'[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field'
+					) ||
+					n.parentElement ||
+					n
+				);
+			};
 			var ownText = localVisibleText(node);
 			if (ownText && !isUnsetLike(ownText)) return ownText;
-			var wrapper = ff.closestCrossRoot(
-				node,
-				'[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field'
-			) || node.parentElement || node;
+			var wrapper = selectLikeWrapper(node);
 			var tokenSelectors = [
 				'[data-automation-id*="selected"]',
 				'[data-automation-id*="Selected"]',
@@ -1258,11 +1271,16 @@ _EXTRACT_FIELDS_JS = r"""() => {
 				var ctrlId = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
 				var src = ctrlId ? ff.getByDomId(ctrlId) : null;
 				if (!src && el.tagName === 'INPUT') {
-					src = ff.closestCrossRoot(el, '[class*="select"], [class*="combobox"], .form-group, .field');
+					src = ff.closestCrossRoot(
+						el,
+						'[class*="cx-select"], [class*="select"], [class*="combobox"], .form-group, .field'
+					);
 				}
 				if (!src) src = el;
 				if (src) {
-					opts = Array.from(src.querySelectorAll('[role="option"], [role="menuitem"]'))
+					opts = Array.from(
+						src.querySelectorAll('[role="option"], [role="menuitem"], [role="gridcell"], [role="listitem"]')
+					)
 						.map(function(o) { return getOptionMainText(o); }).filter(Boolean);
 				}
 			}
@@ -1928,10 +1946,20 @@ _READ_FIELD_VALUE_JS = r"""(ffId) => {
 		if (!rect || rect.width === 0 || rect.height === 0) return '';
 		return (node.textContent || '').replace(/\s+/g, ' ').trim();
 	};
+	var comboHost = (ff && ff.closestCrossRoot)
+		? ff.closestCrossRoot(el, '[role="combobox"]')
+		: null;
+	if (comboHost === el) {
+		comboHost = null;
+	}
 	var isSelectLike = el.getAttribute('role') === 'combobox'
 		|| el.getAttribute('role') === 'listbox'
 		|| el.getAttribute('data-uxi-widget-type') === 'selectinput'
-		|| el.getAttribute('aria-haspopup') === 'listbox';
+		|| el.getAttribute('aria-haspopup') === 'listbox'
+		|| el.getAttribute('aria-haspopup') === 'grid';
+	if (!isSelectLike && comboHost) {
+		isSelectLike = true;
+	}
 	if (el.tagName === 'SELECT') {
 		var selOpt = el.options[el.selectedIndex];
 		return JSON.stringify(selOpt ? (selOpt.textContent || '').trim() : '');
@@ -1940,19 +1968,59 @@ _READ_FIELD_VALUE_JS = r"""(ffId) => {
 		var directValue = (el.value || '').trim();
 		if (directValue) return JSON.stringify(directValue);
 	}
+	// React-select (e.g. Greenhouse): combobox <input> holds the label; parent may expose data-value.
+	if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && isSelectLike) {
+		var comboDirect = (el.value || '').trim();
+		if (comboDirect && !isUnsetLike(comboDirect)) {
+			return JSON.stringify(comboDirect);
+		}
+		var comboParent = el.parentElement;
+		if (comboParent && comboParent.getAttribute) {
+			var dataAttrVal = (comboParent.getAttribute('data-value') || '').trim();
+			if (dataAttrVal && !isUnsetLike(dataAttrVal)) {
+				return JSON.stringify(dataAttrVal);
+			}
+		}
+		var rsControl = null;
+		if (ff && ff.closestCrossRoot) {
+			rsControl = ff.closestCrossRoot(el, '.select__control') || ff.closestCrossRoot(el, '.select-shell');
+		}
+		if (!rsControl && el.closest) {
+			rsControl = el.closest('.select__control') || el.closest('.select-shell');
+		}
+		if (rsControl && rsControl.querySelector) {
+			var rsSingle = rsControl.querySelector('.select__single-value');
+			if (rsSingle) {
+				var rsSingleTxt = visibleText(rsSingle);
+				if (rsSingleTxt && !isUnsetLike(rsSingleTxt)) {
+					return JSON.stringify(rsSingleTxt);
+				}
+			}
+		}
+	}
 	var value = '';
 	if (!isSelectLike && typeof el.value === 'string' && el.value.trim()) {
 		value = el.value.trim();
 	}
 	if (!value && isSelectLike) {
+		var fieldAnchor = comboHost || el;
 		var ownText = visibleText(el);
 		if (ownText && !isUnsetLike(ownText)) {
 			value = ownText;
 		}
-		var wrapper = ff.closestCrossRoot(
-			el,
-			'[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field'
-		) || el.parentElement || el;
+		var wrapper =
+			(ff && ff.closestCrossRoot && ff.closestCrossRoot(fieldAnchor, '.input-field-container')) ||
+			(ff && ff.closestCrossRoot && ff.closestCrossRoot(fieldAnchor, '.cx-select-container')) ||
+			(ff && ff.closestCrossRoot && ff.closestCrossRoot(fieldAnchor, '.input-row__control-container')) ||
+			(ff && ff.closestCrossRoot && ff.closestCrossRoot(fieldAnchor, '.input-row')) ||
+			(ff && ff.closestCrossRoot
+				? ff.closestCrossRoot(
+					fieldAnchor,
+					'[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field'
+				)
+				: null) ||
+			fieldAnchor.parentElement ||
+			fieldAnchor;
 		var tokenSelectors = [
 			'[data-automation-id*="selected"]',
 			'[data-automation-id*="Selected"]',
@@ -1975,6 +2043,35 @@ _READ_FIELD_VALUE_JS = r"""(ffId) => {
 				if (isUnsetLike(tokenText) || /^required$/i.test(tokenText)) continue;
 				value = tokenText;
 				break;
+			}
+		}
+		// Oracle JET / Fusion LOV: selected label is often outside the inner <input> DomHand tags.
+		if (!value && ff) {
+			var scanTargets = [];
+			var addT = function(n) {
+				if (n && scanTargets.indexOf(n) === -1) scanTargets.push(n);
+			};
+			addT(fieldAnchor);
+			addT(wrapper);
+			var jetSel = [
+				'[class*="oj-text-field-middle"]',
+				'[class*="TextFieldMiddle"]',
+				'[class*="oj-text-field-container"]',
+				'[class*="oj-text-field"]',
+				'[role="textbox"][aria-readonly="true"]'
+			];
+			for (var si = 0; si < scanTargets.length && !value; si++) {
+				var st = scanTargets[si];
+				if (!st || !st.querySelectorAll) continue;
+				for (var ej = 0; ej < jetSel.length && !value; ej++) {
+					var hits = st.querySelectorAll(jetSel[ej]);
+					for (var hk = 0; hk < hits.length; hk++) {
+						var tx = visibleText(hits[hk]);
+						if (!tx || isUnsetLike(tx) || /^required$/i.test(tx) || tx.length > 120) continue;
+						value = tx;
+						break;
+					}
+				}
 			}
 		}
 		if (!value) {
@@ -2876,11 +2973,24 @@ def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
     return None
 
 
+def _humanize_name_attr(name_attr: str) -> str:
+    """Turn camelCase/snake HTML names into spaced words for label matching (e.g. addressLine1 -> address Line 1)."""
+    raw = str(name_attr or "").strip()
+    if not raw:
+        return ""
+    spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", raw.replace("_", " "))
+    spaced = re.sub(r"([a-zA-Z])(\d)", r"\1 \2", spaced)
+    return re.sub(r"\s+", " ", spaced).strip()
+
+
 def _field_label_candidates(field: FormField) -> list[str]:
     """Return deduplicated field labels ordered from most to least descriptive."""
     seen: set[str] = set()
     candidates: list[str] = []
-    for label in (field.raw_label, field.name):
+    humanized = _humanize_name_attr(field.name_attr or "")
+    for label in (field.raw_label, field.name, humanized if humanized else None):
+        if label is None:
+            continue
         cleaned = str(label or "").strip()
         variants = [cleaned]
         stripped = _strip_required_marker(cleaned)
@@ -2932,8 +3042,15 @@ _SECTION_SCOPE_CHILDREN: dict[str, set[str]] = {
     # Workday also nests address/phone/legal-name groups under the page-level
     # "My Information" step.
     "information": {
-        "address", "phone", "legal name", "name", "contact", "contact information",
-        "how did you hear", "referral source", "source",
+        "address",
+        "phone",
+        "legal name",
+        "name",
+        "contact",
+        "contact information",
+        "how did you hear",
+        "referral source",
+        "source",
     },
     # Workday keeps the terms acknowledgment under Voluntary Disclosures.
     "voluntary disclosures": {"terms and conditions", "terms conditions"},
@@ -2968,6 +3085,46 @@ def _section_matches_scope(section: str | None, scope: str | None) -> bool:
     return len(overlap) >= 2
 
 
+def _merge_focus_matched_fields_across_sections(
+    filtered: list[FormField],
+    all_fields: list[FormField],
+    *,
+    target_section: str | None,
+    focus_fields: list[str] | None,
+) -> list[FormField]:
+    """When focus_fields target specific labels, include matching fields even if their section disagrees with target_section.
+
+    Oracle HCM / standard apply flow often sets a page-level section (e.g. \"Job application form\") on some fields
+    while address/contact blocks keep a distinct section (\"Contact\"). A strict section filter would drop those
+    fields before focus resolution, so domhand_fill(..., focus_fields=[\"Address Line 1\"]) could not see them.
+    """
+    if not target_section or not focus_fields:
+        return filtered
+    normalized_focus = [_normalize_match_label(label) for label in focus_fields if _normalize_match_label(label)]
+    if not normalized_focus:
+        return filtered
+    existing_ids = {f.field_id for f in filtered}
+    extras: list[FormField] = []
+    for field in all_fields:
+        if field.field_id in existing_ids:
+            continue
+        if not any(_field_matches_focus_label(field, fl) for fl in normalized_focus):
+            continue
+        extras.append(field)
+        existing_ids.add(field.field_id)
+    if not extras:
+        return filtered
+    logger.debug(
+        "DomHand scope: merged focus-matched fields outside target_section",
+        extra={
+            "target_section": target_section,
+            "focus_fields": focus_fields,
+            "merged_field_ids": [f.field_id for f in extras],
+        },
+    )
+    return [*filtered, *extras]
+
+
 def _filter_fields_for_scope(
     fields: list[FormField],
     target_section: str | None = None,
@@ -2977,6 +3134,7 @@ def _filter_fields_for_scope(
     allow_all_visible_fallback: bool = True,
 ) -> list[FormField]:
     """Restrict fields to a section and/or repeater entry boundary."""
+    original_fields = fields
     filtered = fields
     if target_section:
         section_filtered = [f for f in filtered if _section_matches_scope(f.section, target_section)]
@@ -3025,6 +3183,12 @@ def _filter_fields_for_scope(
                 "DomHand scope found no live match for target section without fallback",
                 extra={"target_section": target_section, "field_count": len(fields)},
             )
+    filtered = _merge_focus_matched_fields_across_sections(
+        filtered,
+        original_fields,
+        target_section=target_section,
+        focus_fields=focus_fields,
+    )
     if heading_boundary:
         filtered = [f for f in filtered if _section_matches_scope(f.section, heading_boundary)]
     return filtered
@@ -3674,7 +3838,12 @@ def _education_slot_name(field: FormField, visible_fields: list[FormField] | Non
             return "degree_type"
         if "degree" in name:
             return "degree"
-        if any(token in name for token in ("field of study", "major", "discipline", "area of study", "concentration")):
+        if "field of study" in name:
+            return "field_of_study"
+        if any(token in name for token in ("discipline", "area of study", "concentration")):
+            return "field_of_study"
+        # "major" matches EEO/demographic copy ("major life activities"); only treat as education major otherwise.
+        if "major" in name and "life activit" not in name and "major life" not in name:
             return "field_of_study"
         if any(token in name for token in ("minor", "minor field", "minor subject")):
             return "minor"
@@ -6126,6 +6295,28 @@ def _clear_domhand_failure_for_field(host: str, field: FormField, desired_value:
     )
 
 
+async def _verify_fill_observable(
+    page: Any,
+    field: FormField,
+    desired_value: str,
+    *,
+    timeout_s: float = 2.5,
+    poll_interval_s: float = 0.12,
+) -> bool:
+    """Poll until the filled value is readable in the DOM with no validation error.
+
+    Per-field fill helpers can return True when the last action succeeded, but react-select
+    and similar widgets may commit asynchronously. This gate aligns ``success`` with what
+    ``domhand_assess_state`` and ``_record_expected_value_if_settled`` consider settled.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if await _field_already_matches(page, field, desired_value):
+            return True
+        await asyncio.sleep(poll_interval_s)
+    return False
+
+
 async def _attempt_domhand_fill_with_retry_cap(
     page: Any,
     *,
@@ -6133,6 +6324,7 @@ async def _attempt_domhand_fill_with_retry_cap(
     field: FormField,
     desired_value: str,
     tool_name: str,
+    browser_session: BrowserSession | None = None,
 ) -> tuple[bool, str | None, str | None]:
     """Attempt a DomHand field fill while enforcing the generic per-field retry cap."""
     if await _field_already_matches(page, field, desired_value):
@@ -6157,7 +6349,25 @@ async def _attempt_domhand_fill_with_retry_cap(
         )
         return False, _domhand_retry_message(field), DOMHAND_RETRY_CAPPED
 
-    success = await _fill_single_field(page, field, desired_value)
+    success = await _fill_single_field(
+        page,
+        field,
+        desired_value,
+        browser_session=browser_session,
+    )
+    if success and not await _verify_fill_observable(page, field, desired_value):
+        observed = await _read_observed_field_value(page, field)
+        logger.warning(
+            "domhand.fill.observable_verify_failed",
+            tool=tool_name,
+            field_id=field.field_id,
+            field_label=_preferred_field_label(field),
+            field_type=field.field_type,
+            desired_preview=str(desired_value)[:120],
+            observed_preview=str(observed)[:120],
+        )
+        success = False
+
     if success:
         _clear_domhand_failure_for_field(host, field, desired_value)
         return True, None, None
@@ -8215,6 +8425,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     field=f,
                     desired_value=value,
                     tool_name="domhand_fill",
+                    browser_session=browser_session,
                 )
                 fr = FillFieldResult(
                     field_id=f.field_id,
@@ -8343,6 +8554,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 field=f,
                 desired_value=matched_answer,
                 tool_name="domhand_fill",
+                browser_session=browser_session,
             )
             fr = FillFieldResult(
                 field_id=f.field_id,
@@ -8497,7 +8709,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         json.dumps(structured_summary_full, ensure_ascii=True),
     )
 
-    _agent_failed = [_fill_result_summary_entry_for_agent(r) for r in _failed_all][: _AGENT_FILL_MAX_FAILED_FIELDS]
+    _agent_failed = [_fill_result_summary_entry_for_agent(r) for r in _failed_all][:_AGENT_FILL_MAX_FAILED_FIELDS]
     structured_summary_agent = {
         "filled_count": filled_count,
         "dom_failure_count": failed_count,
@@ -8555,7 +8767,13 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 # ── Per-field fill dispatch ──────────────────────────────────────────
 
 
-async def _fill_single_field(page: Any, field: FormField, value: str) -> bool:
+async def _fill_single_field(
+    page: Any,
+    field: FormField,
+    value: str,
+    *,
+    browser_session: BrowserSession | None = None,
+) -> bool:
     ff_id = field.field_id
     tag = f"[{field.name or field.field_type}]"
 
@@ -8575,7 +8793,7 @@ async def _fill_single_field(page: Any, field: FormField, value: str) -> bool:
         case "textarea":
             return await _fill_textarea_field(page, field, value, tag)
         case "select":
-            return await _fill_select_field(page, field, value, tag)
+            return await _fill_select_field(page, field, value, tag, browser_session=browser_session)
         case "radio-group":
             return await _fill_radio_group(page, field, value, tag)
         case "radio":
@@ -8847,8 +9065,10 @@ async def _fill_textarea_field(page: Any, field: FormField, value: str, tag: str
     try:
         result_json = await page.evaluate(_FILL_FIELD_JS, field.field_id, value, "textarea")
         result = json.loads(result_json) if isinstance(result_json, str) else result_json
-        if isinstance(result, dict) and result.get("success") and await _confirm_text_like_value(
-            page, field, value, tag
+        if (
+            isinstance(result, dict)
+            and result.get("success")
+            and await _confirm_text_like_value(page, field, value, tag)
         ):
             logger.debug(f'fill {tag} = "{value[:80]}{"..." if len(value) > 80 else ""}"')
             return True
@@ -8857,8 +9077,10 @@ async def _fill_textarea_field(page: Any, field: FormField, value: str, tag: str
     try:
         result_json = await page.evaluate(_FILL_CONTENTEDITABLE_JS, field.field_id, value)
         result = json.loads(result_json) if isinstance(result_json, str) else result_json
-        if isinstance(result, dict) and result.get("success") and await _confirm_text_like_value(
-            page, field, value, tag
+        if (
+            isinstance(result, dict)
+            and result.get("success")
+            and await _confirm_text_like_value(page, field, value, tag)
         ):
             logger.debug(f'fill {tag} = "{value[:80]}..." (contenteditable)')
             return True
@@ -8877,7 +9099,193 @@ async def _fill_textarea_field(page: Any, field: FormField, value: str, tag: str
     return False
 
 
-async def _fill_select_field(page: Any, field: FormField, value: str, tag: str) -> bool:
+async def _find_dom_tree_node_by_ff_id(browser_session: BrowserSession, ff_id: str) -> Any:
+    """Resolve ``EnhancedDOMTreeNode`` for ``data-ff-id`` from the agent selector map (CDP-backed)."""
+    if not str(ff_id).strip():
+        return None
+    try:
+        selector_map = await browser_session.get_selector_map()
+    except Exception:
+        return None
+    matches: list[Any] = []
+    for node in selector_map.values():
+        attrs = getattr(node, "attributes", None) or {}
+        if attrs.get("data-ff-id") != ff_id:
+            continue
+        matches.append(node)
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+
+    def _score(n: Any) -> int:
+        a = getattr(n, "attributes", None) or {}
+        tag = (getattr(n, "tag_name", None) or "").lower()
+        if tag == "select":
+            return 4
+        if a.get("role") == "combobox":
+            return 3
+        if tag == "input":
+            return 2
+        if a.get("aria-hidden") == "true":
+            return -2
+        return 0
+
+    matches.sort(key=_score, reverse=True)
+    return matches[0]
+
+
+async def _fill_custom_dropdown_cdp_first(
+    browser_session: BrowserSession,
+    page: Any,
+    field: FormField,
+    value: str,
+    tag: str,
+) -> bool:
+    """Greenhouse / react-select: same CDP discovery + open/poll as domhand_select, then page-level option click.
+
+    Skips ``GetDropdownOptionsEvent`` so the default action watchdog does not log errors for
+    ``input.select__input`` comboboxes during the initial domhand_fill pass.
+    """
+    from browser_use.browser.events import ClickElementEvent
+    from ghosthands.actions.domhand_select import (
+        _DISCOVER_OPTIONS_ON_NODE_JS,
+        _SELECT_NATIVE_ON_NODE_JS,
+        _call_function_on_node,
+        _click_option_via_page_js,
+        _fuzzy_match_option,
+        _meaningful_dropdown_options,
+        _needs_dropdown_open_trigger,
+        _options_for_fuzzy_match,
+        _try_click_combobox_toggle,
+    )
+    from ghosthands.dom.shadow_helpers import ensure_helpers
+
+    with contextlib.suppress(Exception):
+        await ensure_helpers(page)
+
+    node = await _find_dom_tree_node_by_ff_id(browser_session, field.field_id)
+    if node is None:
+        logger.debug("domhand.fill.dropdown_cdp_no_node", field_id=field.field_id, tag=tag)
+        return False
+
+    is_native_select = getattr(node, "tag_name", None) == "select"
+
+    try:
+        discovery: Any = await _call_function_on_node(browser_session, node, _DISCOVER_OPTIONS_ON_NODE_JS)
+    except Exception as exc:
+        logger.debug(
+            "domhand.fill.dropdown_cdp_discover_fail",
+            field_id=field.field_id,
+            tag=tag,
+            error=str(exc)[:120],
+        )
+        return False
+
+    if not isinstance(discovery, dict):
+        return False
+
+    dropdown_type = str(discovery.get("type") or "unknown")
+    options: list[dict[str, Any]] = list(discovery.get("options") or [])
+
+    if _needs_dropdown_open_trigger(is_native_select, dropdown_type, options):
+        for _click_attempt in range(3):
+            try:
+                toggled = False
+                if not is_native_select:
+                    toggled = await _try_click_combobox_toggle(browser_session, node)
+                if not toggled:
+                    event = browser_session.event_bus.dispatch(ClickElementEvent(node=node))
+                    await event
+                    await event.event_result(raise_if_any=True, raise_if_none=False)
+                for _tick in range(10):
+                    await asyncio.sleep(0.15)
+                    try:
+                        discovery = await _call_function_on_node(
+                            browser_session,
+                            node,
+                            _DISCOVER_OPTIONS_ON_NODE_JS,
+                        )
+                        if isinstance(discovery, dict):
+                            dropdown_type = str(discovery.get("type") or "unknown")
+                            options = list(discovery.get("options") or [])
+                    except Exception:
+                        pass
+                    if is_native_select and options:
+                        break
+                    if _meaningful_dropdown_options(options):
+                        break
+                if is_native_select and options:
+                    break
+                if _meaningful_dropdown_options(options):
+                    break
+            except Exception:
+                break
+
+    match_options = _options_for_fuzzy_match(is_native_select, options)
+    matched = _fuzzy_match_option(value, match_options)
+    if not matched and len(split_dropdown_value_hierarchy(value)) > 1:
+        for segment in split_dropdown_value_hierarchy(value):
+            matched = _fuzzy_match_option(segment, match_options)
+            if matched:
+                break
+
+    if not matched:
+        logger.debug(
+            "domhand.fill.dropdown_cdp_no_fuzzy_match",
+            field_id=field.field_id,
+            tag=tag,
+            option_sample=[str(o.get("text") or "")[:40] for o in match_options[:5]],
+        )
+        return False
+
+    matched_text = str(matched.get("text") or value).strip() or value
+
+    try:
+        if dropdown_type == "native_select" or is_native_select:
+            raw = await _call_function_on_node(
+                browser_session,
+                node,
+                _SELECT_NATIVE_ON_NODE_JS,
+                arguments=[{"value": matched_text}],
+            )
+            result = raw if isinstance(raw, dict) else {"success": False}
+        else:
+            result = await _click_option_via_page_js(page, matched_text, dropdown_type)
+    except Exception as exc:
+        logger.debug(
+            "domhand.fill.dropdown_cdp_click_fail",
+            field_id=field.field_id,
+            tag=tag,
+            error=str(exc)[:120],
+        )
+        return False
+
+    if not (isinstance(result, dict) and result.get("success")):
+        return False
+
+    current = await _wait_for_field_value(page, field, value, timeout=2.85)
+    if not _field_value_matches_expected(current, value):
+        return False
+
+    await _settle_dropdown_selection(page)
+    logger.info(
+        "domhand.fill.dropdown_cdp_first_ok",
+        field_id=field.field_id,
+        tag=tag,
+        matched_text=matched_text[:80],
+    )
+    return True
+
+
+async def _fill_select_field(
+    page: Any,
+    field: FormField,
+    value: str,
+    tag: str,
+    *,
+    browser_session: BrowserSession | None = None,
+) -> bool:
     if not value:
         logger.debug(f"skip {tag} (no value)")
         return False
@@ -8898,7 +9306,13 @@ async def _fill_select_field(page: Any, field: FormField, value: str, tag: str) 
     values = all_values[:_SKILL_FIELD_MAX_ITEMS] if is_skill else all_values
     if len(values) > 1 or is_skill:
         return await _fill_multi_select(page, field, values, tag)
-    return await _fill_custom_dropdown(page, field, value, tag)
+    return await _fill_custom_dropdown(
+        page,
+        field,
+        value,
+        tag,
+        browser_session=browser_session,
+    )
 
 
 async def _fill_multi_select(page: Any, field: FormField, values: list[str], tag: str) -> bool:
@@ -9053,7 +9467,25 @@ async def _type_and_click_dropdown_option(page: Any, value: str, tag: str) -> di
     return {"clicked": False}
 
 
-async def _fill_custom_dropdown(page: Any, field: FormField, value: str, tag: str) -> bool:
+async def _fill_custom_dropdown(
+    page: Any,
+    field: FormField,
+    value: str,
+    tag: str,
+    *,
+    browser_session: BrowserSession | None = None,
+) -> bool:
+    if browser_session is not None:
+        try:
+            if await _fill_custom_dropdown_cdp_first(browser_session, page, field, value, tag):
+                return True
+        except Exception as exc:
+            logger.debug(
+                "domhand.fill.dropdown_cdp_first_exception",
+                field_id=field.field_id,
+                tag=tag,
+                error=str(exc)[:120],
+            )
     ff_id = field.field_id
     pre_value = await _read_field_value_for_field(page, field)
     visible_before = await _visible_field_id_snapshot(page)
@@ -9066,7 +9498,8 @@ async def _fill_custom_dropdown(page: Any, field: FormField, value: str, tag: st
         open_succeeded = True
         await asyncio.sleep(0.6)
 
-        clicked = await _click_dropdown_option(page, value)
+        # Prefer waiting for options to paint, then click (type-to-filter is a later fallback).
+        clicked = await _poll_click_dropdown_option(page, value, max_wait_s=3.2)
         if clicked.get("clicked"):
             current = await _wait_for_field_value(page, field, value)
             if _field_value_matches_expected(current, value):
@@ -9079,7 +9512,7 @@ async def _fill_custom_dropdown(page: Any, field: FormField, value: str, tag: st
         segments = split_dropdown_value_hierarchy(value)
         if len(segments) > 1:
             for idx, segment in enumerate(segments):
-                clicked = await _click_dropdown_option(page, segment)
+                clicked = await _poll_click_dropdown_option(page, segment, max_wait_s=2.8)
                 if not clicked.get("clicked"):
                     clicked = await _type_and_click_dropdown_option(page, segment, tag)
                 if not clicked.get("clicked"):

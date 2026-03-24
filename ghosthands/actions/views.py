@@ -36,6 +36,10 @@ class FormField(BaseModel):
         description="True when the grouped widget exposes a visible calendar/date trigger affordance",
     )
     format_hint: str | None = Field(default=None, description="Optional visible format/placeholder hint")
+    name_attr: str = Field(
+        default="",
+        description="HTML name attribute from extraction (used for label/focus matching when ARIA name is camelCase)",
+    )
 
 
 class FillFieldResult(BaseModel):

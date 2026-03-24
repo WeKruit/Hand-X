@@ -452,6 +452,56 @@ async def test_attempt_domhand_fill_with_retry_cap_refuses_capped_field():
 
 
 @pytest.mark.asyncio
+async def test_attempt_domhand_fill_fails_when_post_fill_observable_mismatch():
+    """Fill helpers may succeed before DOM readback matches; success requires observable settle."""
+    from ghosthands.actions.domhand_fill import _attempt_domhand_fill_with_retry_cap
+    from ghosthands.actions.views import FormField
+    from ghosthands.runtime_learning import reset_runtime_learning_state
+
+    reset_runtime_learning_state()
+    field = FormField(
+        field_id="ff-privacy",
+        name="Candidate Privacy Policy",
+        field_type="select",
+        required=True,
+        field_fingerprint="privacy-fp",
+        is_native=False,
+    )
+    page = AsyncMock()
+
+    with (
+        patch(
+            "ghosthands.actions.domhand_fill._field_already_matches",
+            AsyncMock(return_value=False),
+        ),
+        patch(
+            "ghosthands.actions.domhand_fill._fill_single_field",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "ghosthands.actions.domhand_fill._verify_fill_observable",
+            AsyncMock(return_value=False),
+        ),
+        patch(
+            "ghosthands.actions.domhand_fill._read_observed_field_value",
+            AsyncMock(return_value=""),
+        ),
+    ):
+        success, error, failure_reason = await _attempt_domhand_fill_with_retry_cap(
+            page,
+            host="job-boards.greenhouse.io",
+            field=field,
+            desired_value="Acknowledge/Confirm",
+            tool_name="domhand_fill",
+        )
+
+    assert success is False
+    assert failure_reason == "dom_fill_failed"
+    assert error == "DOM fill failed"
+    reset_runtime_learning_state()
+
+
+@pytest.mark.asyncio
 async def test_domhand_fill_reports_retry_capped_fields_without_retrying():
     from ghosthands.actions.domhand_fill import ResolvedFieldValue, domhand_fill
     from ghosthands.actions.views import DomHandFillParams, FormField
@@ -1246,6 +1296,39 @@ def test_scope_only_keeps_blank_section_fields_when_they_are_targeted_blockers()
     )
 
     assert [field.field_id for field in filtered] == ["name"]
+
+
+def test_scope_generic_page_section_still_includes_focus_matched_contact_block_field():
+    """Oracle-style flows: page section is 'Job application form' but address lives under 'Contact'."""
+    from ghosthands.actions.domhand_fill import _filter_fields_for_focus, _filter_fields_for_scope
+    from ghosthands.actions.views import FormField
+
+    fields = [
+        FormField(
+            field_id="ff-link",
+            name="Link 1",
+            field_type="url",
+            section="Job application form",
+        ),
+        FormField(
+            field_id="ff-25",
+            name="addressLine1",
+            name_attr="addressLine1",
+            field_type="select",
+            section="Contact",
+            raw_label="addressLine1",
+        ),
+    ]
+
+    scoped = _filter_fields_for_scope(
+        fields,
+        target_section="Job application form",
+        focus_fields=["Address Line 1"],
+    )
+    assert any(f.field_id == "ff-25" for f in scoped)
+
+    focused = _filter_fields_for_focus(scoped, ["Address Line 1"])
+    assert [f.field_id for f in focused] == ["ff-25"]
 
 
 def test_coerce_answer_to_field_keeps_text_when_options_are_dom_noise():
@@ -3737,6 +3820,24 @@ def test_education_slot_name_infers_generic_year_columns_from_visible_fields():
     assert _education_slot_name(fields[1], fields) == "end_date"
     assert _structured_education_value_from_entry(fields[0], entry, fields) == "2021"
     assert _structured_education_value_from_entry(fields[1], entry, fields) == "2025"
+
+
+def test_education_slot_name_does_not_match_major_life_activities_eeoc_wording():
+    """Greenhouse disability prompts contain 'major life activities' — not education 'major'."""
+    from ghosthands.actions.domhand_fill import _education_slot_name
+    from ghosthands.actions.views import FormField
+
+    disability_select = FormField(
+        field_id="ff-30",
+        name=(
+            "Do you have a disability or chronic condition (physical, visual, auditory, cognitive, mental, "
+            "emotional, or other) that substantially limits one or more of your major life activities, "
+            "including mobility, communication, and learning?"
+        ),
+        field_type="select",
+        section="Demographic Questions",
+    )
+    assert _education_slot_name(disability_select, None) is None
 
 
 def test_structured_education_value_from_entry_supports_field_of_study_and_from_labels():
