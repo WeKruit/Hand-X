@@ -662,7 +662,14 @@ def _fuzzy_match_option(
         if opt_norm and (target_norm in opt_norm or opt_norm in target_norm):
             return opt
 
-    # Pass 3: Word overlap (at least 1 shared meaningful word)
+    # Pass 3: Synonym / alias match (bridges "Male" ↔ "Man", etc.)
+    from ghosthands.actions.domhand_fill import _are_synonyms
+    for opt in options:
+        opt_norm = normalize_name(opt.get("text", ""))
+        if opt_norm and _are_synonyms(target_norm, opt_norm):
+            return opt
+
+    # Pass 4: Word overlap (at least 1 shared meaningful word)
     target_words = set(target_norm.split()) - {"the", "a", "an", "of", "for", "in", "to"}
     if len(target_words) >= 1:
         best_overlap = 0
