@@ -8869,17 +8869,13 @@ async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag
             await _try_open_combobox_menu(page, ff_id, tag=tag)
             await asyncio.sleep(0.4)
 
-            await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
+            # Focus the dropdown's search input (may differ from the trigger element)
+            from ghosthands.actions.domhand_select import _focus_dropdown_filter_input
+            await _focus_dropdown_filter_input(page)
+            await _clear_dropdown_search(page)
             await asyncio.sleep(0.1)
-            await page.evaluate(_FILL_FIELD_JS, ff_id, search_term, "text")
-            await page.evaluate(
-                r"""(ffId) => {
-				var el = window.__ff ? window.__ff.byId(ffId) : null;
-				if (el) { el.dispatchEvent(new Event('input', {bubbles: true})); el.dispatchEvent(new Event('keyup', {bubbles: true})); }
-				return 'ok';
-			}""",
-                ff_id,
-            )
+            # Use real keystrokes so React/Vue frameworks detect the input
+            await page.keyboard.type(search_term, delay=40)
             # Options often load after debounce/network — poll instead of a single long sleep.
             poll_budget = 2.85 if term_idx == 0 else 2.2
             clicked = await _poll_click_dropdown_option(page, value, search_term, max_wait_s=poll_budget)
@@ -9447,8 +9443,10 @@ async def _visible_field_id_snapshot(page: Any) -> set[str]:
 
 async def _type_and_click_dropdown_option(page: Any, value: str, tag: str) -> dict[str, Any]:
     """Type search terms into an open dropdown and click the best visible match."""
+    from ghosthands.actions.domhand_select import _focus_dropdown_filter_input
     for idx, term in enumerate(generate_dropdown_search_terms(value)):
         try:
+            await _focus_dropdown_filter_input(page)
             if idx > 0:
                 await _clear_dropdown_search(page)
             await page.keyboard.type(term, delay=45)
