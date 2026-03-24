@@ -1078,6 +1078,17 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                     if (field.widget_kind or "") == "grouped_date"
                     else await _read_field_value(page, field.field_id)
                 )
+                if platform_hint == "phenom":
+                    logger.info(
+                        "domhand.assess_state.phenom_debug.select_read",
+                        extra={
+                            "field_id": field.field_id,
+                            "field_label": _preferred_field_label(field),
+                            "current_value_repr": repr(field.current_value),
+                            "expected_value_repr": repr(expected.expected_value),
+                            "widget_kind": field.widget_kind or "",
+                        },
+                    )
             elif field.field_type in {"checkbox", "toggle"}:
                 binary_state = await _read_binary_state(page, field.field_id)
                 field.current_value = "checked" if binary_state else ""
@@ -1136,6 +1147,19 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                     continue
 
             if not _field_value_matches_expected(field.current_value, expected.expected_value):
+                if platform_hint == "phenom":
+                    logger.info(
+                        "domhand.assess_state.phenom_debug.mismatch_detected",
+                        extra={
+                            "field_id": field.field_id,
+                            "field_label": _preferred_field_label(field),
+                            "field_type": field.field_type,
+                            "current_value_repr": repr(field.current_value),
+                            "expected_value_repr": repr(expected.expected_value),
+                            "expected_source": expected.source,
+                            "attempt_index": attempt_index,
+                        },
+                    )
                 mismatched_attempt.append(
                     _verification_issue_for_field(
                         field,
