@@ -7344,6 +7344,27 @@ def _resolve_llm_answer_via_batch_key(
     )
 
 
+async def _close_any_open_dropdown(page: Any) -> None:
+    """Close any open dropdown using real Escape keypresses (works with react-select).
+
+    JS synthetic events (blur/click on body) do NOT close react-select menus
+    because React ignores synthetic mouse events.  Playwright Escape fires a
+    real browser keydown that react-select listens to.
+    """
+    for _ in range(2):
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        await asyncio.sleep(0.15)
+    # Also run the JS dismiss as a fallback for non-react-select dropdowns
+    try:
+        await page.evaluate(_DISMISS_DROPDOWN_JS)
+    except Exception:
+        pass
+    await asyncio.sleep(0.2)
+
+
 async def _discover_dropdown_options(
     page: Any,
     fields: list[FormField],
@@ -7354,6 +7375,9 @@ async def _discover_dropdown_options(
     ``_build_field_description()`` includes them in the LLM prompt.
     Mirrors GHOST-HANDS's ``discoverDropdownOptions()`` pattern.
     """
+    # Ensure no dropdown is already open before we start
+    await _close_any_open_dropdown(page)
+
     for field in fields:
         if field.field_type != "select":
             continue
@@ -7364,22 +7388,41 @@ async def _discover_dropdown_options(
         if field.choices and len(field.choices) > 0:
             continue
         try:
+            # Verify no stale dropdown is open before opening this one
+            stale_options = await _scan_dropdown_options(page)
+            if stale_options:
+                logger.warning(
+                    "domhand.discover_stale_menu_detected",
+                    field_id=field.field_id,
+                    stale_count=len(stale_options),
+                )
+                await _close_any_open_dropdown(page)
+                await asyncio.sleep(0.3)
+
             await _try_open_combobox_menu(page, field.field_id, tag="discover")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.6)
             discovered = await _scan_dropdown_options(page)
             if discovered:
                 field.options = discovered
                 field.choices = discovered
-                logger.debug(
+                logger.warning(
                     "domhand.discover_dropdown_options",
                     field_id=field.field_id,
+                    label=getattr(field, "label", None) or getattr(field, "name", None),
                     option_count=len(discovered),
                     sample=discovered[:5],
                 )
-            await _settle_dropdown_selection(page, delay=0.3)
+            else:
+                logger.warning(
+                    "domhand.discover_no_options_found",
+                    field_id=field.field_id,
+                    label=getattr(field, "label", None) or getattr(field, "name", None),
+                )
+            # Close dropdown with real Escape key before moving to next field
+            await _close_any_open_dropdown(page)
         except Exception:
             try:
-                await _settle_dropdown_selection(page, delay=0.2)
+                await _close_any_open_dropdown(page)
             except Exception:
                 pass
 
