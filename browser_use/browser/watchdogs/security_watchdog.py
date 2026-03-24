@@ -4,7 +4,10 @@ from typing import TYPE_CHECKING, ClassVar
 
 from bubus import BaseEvent
 
+from pydantic import PrivateAttr
+
 from browser_use.browser.events import (
+	AgentFocusChangedEvent,
 	BrowserErrorEvent,
 	NavigateToUrlEvent,
 	NavigationCompleteEvent,
@@ -27,10 +30,16 @@ class SecurityWatchdog(BaseWatchdog):
 		NavigateToUrlEvent,
 		NavigationCompleteEvent,
 		TabCreatedEvent,
+		AgentFocusChangedEvent,
 	]
 	EMITS: ClassVar[list[type[BaseEvent]]] = [
 		BrowserErrorEvent,
 	]
+
+	# Track pre-existing tabs discovered during BrowserSession initialization.
+	# These belong to other jobs in shared-browser mode and must not be closed.
+	_initial_target_ids: set[str] = PrivateAttr(default_factory=set)
+	_initialization_complete: bool = PrivateAttr(default=False)
 
 	async def on_NavigateToUrlEvent(self, event: NavigateToUrlEvent) -> None:
 		"""Check if navigation URL is allowed before navigation starts."""
@@ -69,8 +78,38 @@ class SecurityWatchdog(BaseWatchdog):
 			# Preserve the visible blocker page instead of collapsing to about:blank.
 			return
 
+	async def on_AgentFocusChangedEvent(self, event: AgentFocusChangedEvent) -> None:
+		"""Mark initialization complete after the first focus event.
+
+		During BrowserSession.start(), TabCreatedEvents for all existing tabs are
+		dispatched BEFORE AgentFocusChangedEvent. Once focus is set, any subsequent
+		TabCreatedEvent represents a genuinely new tab (e.g. a popup).
+		"""
+		if not self._initialization_complete:
+			self._initialization_complete = True
+
 	async def on_TabCreatedEvent(self, event: TabCreatedEvent) -> None:
-		"""Check if new tab URL is allowed."""
+		"""Check if new tab URL is allowed.
+
+		In shared-browser mode (GH_TARGET_ID set), pre-existing tabs from other
+		jobs are preserved. Only the agent's own focus tab and genuinely new
+		popups are subject to domain lockdown.
+		"""
+		agent_target = self.browser_session.agent_focus_target_id
+		is_shared_browser = getattr(self.browser_session, '_initial_target_id', None) is not None
+
+		# In shared-browser mode, skip security checks for tabs that belong
+		# to other jobs (pre-existing tabs).
+		if is_shared_browser and agent_target and event.target_id != agent_target:
+			if not self._initialization_complete:
+				# Still during init — this is a pre-existing tab from another job
+				self._initial_target_ids.add(event.target_id)
+				return
+			if event.target_id in self._initial_target_ids:
+				# Known pre-existing tab, leave it alone
+				return
+			# Genuinely new tab created during agent execution — enforce security below
+
 		if not self._is_url_allowed(event.url):
 			self.logger.warning(f'⛔️ New tab created with disallowed URL: {event.url}')
 

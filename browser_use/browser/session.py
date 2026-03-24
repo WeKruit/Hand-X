@@ -169,6 +169,7 @@ class BrowserSession(BaseModel):
 		# Core configuration for local
 		id: str | None = None,
 		cdp_url: str | None = None,
+		target_id: str | None = None,
 		browser_profile: BrowserProfile | None = None,
 		# Local browser launch params
 		executable_path: str | Path | None = None,
@@ -229,6 +230,7 @@ class BrowserSession(BaseModel):
 		# Core configuration
 		id: str | None = None,
 		cdp_url: str | None = None,
+		target_id: str | None = None,
 		is_local: bool = False,
 		browser_profile: BrowserProfile | None = None,
 		# Cloud browser params (don't mix with local browser params)
@@ -305,6 +307,9 @@ class BrowserSession(BaseModel):
 	):
 		# Following the same pattern as AgentSettings in service.py
 		# Only pass non-None values to avoid validation errors
+		# target_id is stored after super().__init__() below (Pydantic PrivateAttr)
+		_target_id_for_cdp = target_id
+
 		profile_kwargs = {
 			k: v
 			for k, v in locals().items()
@@ -313,6 +318,7 @@ class BrowserSession(BaseModel):
 				'self',
 				'browser_profile',
 				'id',
+				'target_id',
 				'cloud_profile_id',
 				'cloud_proxy_country_code',
 				'cloud_timeout',
@@ -368,6 +374,9 @@ class BrowserSession(BaseModel):
 			id=id or str(uuid7str()),
 			browser_profile=resolved_browser_profile,
 		)
+
+		# Store the requested target_id for CDP connection (must be after super().__init__)
+		self._initial_target_id = _target_id_for_cdp
 
 	# Session configuration (session identity only)
 	id: str = Field(default_factory=lambda: str(uuid7str()), description='Unique identifier for this browser session')
@@ -502,6 +511,9 @@ class BrowserSession(BaseModel):
 
 	# Mutable public state - which target has agent focus
 	agent_focus_target_id: TargetID | None = None
+
+	# Target ID to attach to when connecting via CDP (Desktop shared-browser mode)
+	_initial_target_id: str | None = PrivateAttr(default=None)
 
 	# Mutable private state shared between watchdogs
 	_cdp_client_root: CDPClient | None = PrivateAttr(default=None)
@@ -1837,8 +1849,24 @@ class BrowserSession(BaseModel):
 				target_id = new_target['targetId']
 				self.logger.debug(f'📄 Created new blank page: {target_id}')
 			else:
-				target_id = page_targets_from_manager[0].target_id
-				self.logger.debug(f'📄 Using existing page: {target_id}')
+				# If a specific target_id was requested (e.g. Desktop shared-browser tab),
+				# attach to that target instead of defaulting to the first one.
+				requested_target_id = getattr(self, '_initial_target_id', None)
+				if requested_target_id:
+					known_ids = {t.target_id for t in page_targets_from_manager}
+					if requested_target_id in known_ids:
+						target_id = requested_target_id
+						self.logger.debug(f'📄 Attaching to requested target: {target_id}')
+					else:
+						self.logger.warning(
+							f'Requested target_id {requested_target_id} not found among '
+							f'{len(page_targets_from_manager)} discovered targets, '
+							f'falling back to first available target'
+						)
+						target_id = page_targets_from_manager[0].target_id
+				else:
+					target_id = page_targets_from_manager[0].target_id
+					self.logger.debug(f'📄 Using existing page: {target_id}')
 
 			# Set up initial focus using the public API
 			# Note: get_or_create_cdp_session() will wait for attach event and set focus
@@ -1871,11 +1899,12 @@ class BrowserSession(BaseModel):
 				self.logger.debug(f'Dispatching TabCreatedEvent for initial tab {idx}: {target_url}')
 				self.event_bus.dispatch(TabCreatedEvent(url=target_url, target_id=target.target_id))
 
-			# Dispatch initial focus event
+			# Dispatch initial focus event for the tab we actually selected
 			if page_targets_from_manager:
-				initial_url = page_targets_from_manager[0].url
-				self.event_bus.dispatch(AgentFocusChangedEvent(target_id=page_targets_from_manager[0].target_id, url=initial_url))
-				self.logger.debug(f'Initial agent focus set to tab 0: {initial_url}')
+				focused_target = self.session_manager.get_target(target_id)
+				initial_url = focused_target.url if focused_target else page_targets_from_manager[0].url
+				self.event_bus.dispatch(AgentFocusChangedEvent(target_id=target_id, url=initial_url))
+				self.logger.debug(f'Initial agent focus set to {target_id[:8]}...: {initial_url}')
 
 		except Exception as e:
 			# Fatal error - browser is not usable without CDP connection
