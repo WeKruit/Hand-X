@@ -96,10 +96,11 @@ class SecurityWatchdog(BaseWatchdog):
 		popups are subject to domain lockdown.
 		"""
 		agent_target = self.browser_session.agent_focus_target_id
+		is_shared_browser = getattr(self.browser_session, '_initial_target_id', None) is not None
 
 		# In shared-browser mode, skip security checks for tabs that belong
 		# to other jobs (pre-existing tabs).
-		if agent_target and event.target_id != agent_target:
+		if is_shared_browser and agent_target and event.target_id != agent_target:
 			if not self._initialization_complete:
 				# Still during init — this is a pre-existing tab from another job
 				self._initial_target_ids.add(event.target_id)

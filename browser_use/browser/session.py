@@ -1899,11 +1899,12 @@ class BrowserSession(BaseModel):
 				self.logger.debug(f'Dispatching TabCreatedEvent for initial tab {idx}: {target_url}')
 				self.event_bus.dispatch(TabCreatedEvent(url=target_url, target_id=target.target_id))
 
-			# Dispatch initial focus event
+			# Dispatch initial focus event for the tab we actually selected
 			if page_targets_from_manager:
-				initial_url = page_targets_from_manager[0].url
-				self.event_bus.dispatch(AgentFocusChangedEvent(target_id=page_targets_from_manager[0].target_id, url=initial_url))
-				self.logger.debug(f'Initial agent focus set to tab 0: {initial_url}')
+				focused_target = self.session_manager.get_target(target_id)
+				initial_url = focused_target.url if focused_target else page_targets_from_manager[0].url
+				self.event_bus.dispatch(AgentFocusChangedEvent(target_id=target_id, url=initial_url))
+				self.logger.debug(f'Initial agent focus set to {target_id[:8]}...: {initial_url}')
 
 		except Exception as e:
 			# Fatal error - browser is not usable without CDP connection
