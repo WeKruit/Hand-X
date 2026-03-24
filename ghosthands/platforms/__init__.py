@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlparse
 from ghosthands.platforms.generic import GENERIC_CONFIG
 from ghosthands.platforms.greenhouse import GREENHOUSE_CONFIG
 from ghosthands.platforms.lever import LEVER_CONFIG
+from ghosthands.platforms.phenom import PHENOM_CONFIG
 from ghosthands.platforms.smartrecruiters import SMARTRECRUITERS_CONFIG
 from ghosthands.platforms.views import PlatformConfig
 from ghosthands.platforms.workday import WORKDAY_CONFIG
@@ -19,6 +20,7 @@ _PLATFORM_REGISTRY: dict[str, PlatformConfig] = {
         WORKDAY_CONFIG,
         GREENHOUSE_CONFIG,
         LEVER_CONFIG,
+        PHENOM_CONFIG,
         SMARTRECRUITERS_CONFIG,
         GENERIC_CONFIG,
     ]
@@ -55,6 +57,14 @@ _URL_PATTERNS: list[tuple[list[str], str]] = [
             "lever.co",
         ],
         "lever",
+    ),
+    # Phenom
+    (
+        [
+            "phenom.com",
+            "phenompeople.com",
+        ],
+        "phenom",
     ),
     # SmartRecruiters
     (
@@ -149,7 +159,7 @@ def detect_platform_from_signals(
 def detect_platform(url: str) -> str:
     """Detect ATS platform from URL.
 
-    Returns: 'workday' | 'greenhouse' | 'lever' | 'smartrecruiters' | 'generic'
+    Returns: 'workday' | 'greenhouse' | 'lever' | 'phenom' | 'smartrecruiters' | 'generic'
     """
     normalized = url.lower()
     for patterns, platform_name in _URL_PATTERNS:
@@ -176,6 +186,7 @@ __all__ = [
     "GENERIC_CONFIG",
     "GREENHOUSE_CONFIG",
     "LEVER_CONFIG",
+    "PHENOM_CONFIG",
     "SMARTRECRUITERS_CONFIG",
     "WORKDAY_CONFIG",
     "PlatformConfig",
