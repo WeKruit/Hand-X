@@ -2823,10 +2823,20 @@ def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
         )
         return proficiency_choice
 
+    # Substring matching — prefer prefix matches over arbitrary containment.
+    # e.g. profile "VA" should match "Virginia" (prefix) not "Nevada" (mid-word).
+    _substring_fallback: str | None = None
     for choice in choices:
         choice_norm = normalize_name(choice)
-        if choice_norm and (choice_norm in text_norm or text_norm in choice_norm):
-            return choice
+        if not choice_norm:
+            continue
+        if choice_norm in text_norm or text_norm in choice_norm:
+            if choice_norm.startswith(text_norm) or text_norm.startswith(choice_norm):
+                return choice  # prefix match — high confidence
+            if _substring_fallback is None:
+                _substring_fallback = choice
+    if _substring_fallback is not None:
+        return _substring_fallback
 
     text_words = _choice_words(text)
     text_stems = {_stem_word(word) for word in text_words}
