@@ -1066,6 +1066,45 @@ def test_parse_profile_evidence_reads_application_question_defaults_from_profile
     assert evidence["certifications_licenses"] == "None"
 
 
+def test_parse_profile_evidence_reads_relocation_preference_alias():
+    from ghosthands.actions.domhand_fill import _parse_profile_evidence
+
+    evidence = _parse_profile_evidence('{"relocateOk":"Anywhere"}')
+
+    assert evidence["relocation_preference"] == "Anywhere"
+
+
+def test_parse_profile_evidence_reads_nested_address_object_without_stringifying_defaults():
+    from ghosthands.actions.domhand_fill import _parse_profile_evidence
+
+    evidence = _parse_profile_evidence(
+        '{"address":{"street":"","city":"","state":"","zip":"","county":"","country":"United States of America"},'
+        '"city":"New York","state":"NY","country":"United States"}'
+    )
+
+    assert evidence["address"] is None
+    assert evidence["city"] == "New York"
+    assert evidence["state"] == "NY"
+    assert evidence["country"] == "United States"
+
+
+def test_parse_profile_evidence_reads_street_fields_from_nested_address_object():
+    from ghosthands.actions.domhand_fill import _parse_profile_evidence
+
+    evidence = _parse_profile_evidence(
+        '{"address":{"street":"100 Main St","line2":"Apt 4B","city":"Austin","state":"TX","zip":"78701",'
+        '"county":"Travis County","country":"United States"}}'
+    )
+
+    assert evidence["address"] == "100 Main St"
+    assert evidence["address_line_2"] == "Apt 4B"
+    assert evidence["city"] == "Austin"
+    assert evidence["state"] == "TX"
+    assert evidence["zip"] == "78701"
+    assert evidence["county"] == "Travis County"
+    assert evidence["country"] == "United States"
+
+
 def test_request_open_question_answers_does_not_pause_for_hitl():
     from ghosthands.cli import _OpenQuestionIssue, _RecoveredFieldAnswer, _request_open_question_answers
 
@@ -1190,6 +1229,41 @@ def test_format_profile_summary_includes_structured_languages():
 
     assert "Languages: English (Native / bilingual), Mandarin (Conversational)" in summary
     assert "English proficiency: Native / bilingual" in summary
+
+
+def test_format_profile_summary_accepts_string_language_entries():
+    from ghosthands.agent.prompts import _format_profile_summary
+
+    summary = _format_profile_summary(
+        {
+            "languages": [
+                "English (Native / bilingual)",
+                {"language": "Mandarin", "proficiency": "Conversational"},
+            ],
+            "spoken_languages": "English (Native / bilingual), Mandarin (Conversational)",
+        }
+    )
+
+    assert "Languages: English (Native / bilingual), Mandarin (Conversational)" in summary
+
+
+def test_cap_qa_entries_uses_runtime_cap_without_name_error():
+    from ghosthands.dom.fill_profile_resolver import _cap_qa_entries
+
+    entries = [
+        {
+            "question": f"Question {i}",
+            "answer": f"Answer {i}",
+            "usage_mode": "always_use" if i % 2 == 0 else "learned",
+            "times_used": i,
+            "confidence": "exact" if i % 3 == 0 else "learned",
+        }
+        for i in range(25)
+    ]
+
+    capped = _cap_qa_entries(entries)
+
+    assert len(capped) == 20
 
 
 def test_section_scope_treats_languages_as_part_of_my_experience():
@@ -3156,6 +3230,89 @@ async def test_assess_state_caches_optional_validation_blockers():
 
 
 @pytest.mark.asyncio
+async def test_assess_state_allows_advancement_with_optional_unverified_fields():
+    from ghosthands.actions.domhand_assess_state import domhand_assess_state
+    from ghosthands.actions.views import DomHandAssessStateParams, FormField, get_stable_field_key
+    from ghosthands.runtime_learning import (
+        build_page_context_key,
+        record_expected_field_value,
+        reset_runtime_learning_state,
+    )
+
+    reset_runtime_learning_state()
+    field = FormField(
+        field_id="optional-note",
+        name="Optional note",
+        field_type="text",
+        section="Application Questions",
+        required=False,
+        field_fingerprint="optional-note-fingerprint",
+    )
+    page_context_key = build_page_context_key(
+        url="https://example.wd1.myworkdayjobs.com/job",
+        page_marker="Application Questions",
+    )
+    record_expected_field_value(
+        host="example.wd1.myworkdayjobs.com",
+        page_context_key=page_context_key,
+        field_key=get_stable_field_key(field),
+        field_label=field.name,
+        expected_value="Hello",
+        source="exact_profile",
+        field_type=field.field_type,
+        field_section=field.section,
+        field_fingerprint=field.field_fingerprint,
+    )
+
+    async def evaluate_side_effect(script, *args):
+        if args == (["optional-note"],):
+            return {"optional-note": {"in_view": True, "top": 0, "bottom": 20}}
+        return {
+            "button_texts": ["Save and Continue"],
+            "body_text": "",
+            "markers": [],
+            "submit_visible": False,
+            "submit_disabled": False,
+            "advance_visible": True,
+            "error_texts": [],
+            "heading_texts": ["Application Questions"],
+        }
+
+    page = AsyncMock()
+    page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
+    page.get_url = AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job")
+    browser_session = AsyncMock()
+    browser_session.get_current_page = AsyncMock(return_value=page)
+
+    with (
+        patch("ghosthands.dom.shadow_helpers.ensure_helpers", AsyncMock(return_value=None)),
+        patch("ghosthands.actions.domhand_assess_state.extract_visible_form_fields", AsyncMock(return_value=[field])),
+        patch(
+            "ghosthands.actions.domhand_assess_state._safe_page_url",
+            AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job"),
+        ),
+        patch(
+            "ghosthands.actions.domhand_fill._read_page_context_snapshot",
+            AsyncMock(
+                return_value={"page_marker": "Application Questions", "heading_texts": ["Application Questions"]}
+            ),
+        ),
+        patch("ghosthands.actions.domhand_assess_state._field_has_validation_error", AsyncMock(return_value=False)),
+        patch("ghosthands.actions.domhand_assess_state._read_field_value", AsyncMock(return_value="")),
+        patch.dict(os.environ, {"GH_VERIFICATION_EFFORT": "low"}, clear=False),
+    ):
+        result = await domhand_assess_state(
+            DomHandAssessStateParams(target_section="Application Questions"),
+            browser_session,
+        )
+
+    payload = json.loads((result.metadata or {})["application_state_json"])
+    assert len(payload["unverified_fields"]) == 1
+    assert payload["unverified_fields"][0]["name"] == "Optional note"
+    assert payload["advance_allowed"] is True
+
+
+@pytest.mark.asyncio
 async def test_assess_state_ignores_shape_incompatible_expected_value_for_conditional_detail_textarea():
     from ghosthands.actions.domhand_assess_state import domhand_assess_state
     from ghosthands.actions.views import DomHandAssessStateParams, FormField, get_stable_field_key
@@ -3279,6 +3436,37 @@ async def test_semantic_profile_value_for_field_skips_binary_answer_for_conditio
             field,
             evidence={},
             profile_data={"visa_sponsorship": "Yes"},
+        )
+
+    assert resolved is None
+
+
+@pytest.mark.asyncio
+async def test_semantic_profile_value_for_field_can_skip_llm_classifier_in_hot_path():
+    from ghosthands.actions.domhand_fill import _semantic_profile_value_for_field
+    from ghosthands.actions.views import FormField
+
+    field = FormField(
+        field_id="relocation-1",
+        name="Will you be located in the Seattle area during the internship?",
+        raw_label="Will you be located in the Seattle area during the internship?",
+        field_type="select",
+        required=True,
+        options=["Yes", "No"],
+    )
+
+    with (
+        patch("ghosthands.actions.domhand_fill.get_learned_question_alias", return_value=None),
+        patch(
+            "ghosthands.actions.domhand_fill._classify_known_intent_for_field",
+            AsyncMock(side_effect=AssertionError("classifier should not run")),
+        ),
+    ):
+        resolved = await _semantic_profile_value_for_field(
+            field,
+            evidence={},
+            profile_data={"relocation": "No"},
+            allow_llm_classification=False,
         )
 
     assert resolved is None
@@ -3451,6 +3639,49 @@ async def test_default_action_watchdog_blocks_continue_when_optional_validation_
 
     assert message is not None
     assert "optional validation: 1" in message
+
+
+@pytest.mark.asyncio
+async def test_default_action_watchdog_reroutes_target_blank_anchor_to_same_tab():
+    from bubus import EventBus
+
+    from browser_use.browser.watchdogs.default_action_watchdog import DefaultActionWatchdog
+
+    browser_session = AsyncMock()
+    browser_session.navigate_to = AsyncMock(return_value=None)
+
+    cdp_client = SimpleNamespace(
+        send=SimpleNamespace(
+            DOM=SimpleNamespace(resolveNode=AsyncMock(return_value={"object": {"objectId": "node-1"}})),
+            Runtime=SimpleNamespace(
+                callFunctionOn=AsyncMock(
+                    return_value={"result": {"value": {"url": "https://example.com/apply", "reason": "anchor_target"}}}
+                )
+            ),
+        )
+    )
+    cdp_session = SimpleNamespace(cdp_client=cdp_client, session_id="session-1")
+
+    node = SimpleNamespace(
+        backend_node_id=123,
+        tag_name="BUTTON",
+        attributes={"type": "button"},
+        node_name="button",
+        xpath="//button[1]",
+    )
+
+    watchdog = DefaultActionWatchdog.model_construct(
+        browser_session=browser_session,
+        event_bus=EventBus(),
+    )
+
+    result = await watchdog._maybe_reroute_same_tab_navigation(node, cdp_session, "session-1", 123)
+
+    browser_session.navigate_to.assert_awaited_once_with("https://example.com/apply", new_tab=False)
+    assert result == {
+        "same_tab_navigation_url": "https://example.com/apply",
+        "same_tab_navigation_reason": "anchor_target",
+    }
 
 
 @pytest.mark.asyncio
@@ -4073,6 +4304,79 @@ def test_value_shape_is_compatible_accepts_binary_for_empty_choice_boolean_paren
     assert _value_shape_is_compatible(visa_detail, "Yes") is False
 
 
+def test_field_conditional_cluster_treats_relocation_preamble_question_as_boolean_parent():
+    from ghosthands.actions.domhand_fill import _field_conditional_cluster, _value_shape_is_compatible
+    from ghosthands.actions.views import FormField
+
+    relocation = FormField(
+        field_id="ff-reloc",
+        name=(
+            "We are unable to provide relocation assistance. Will you be located in the Seattle area "
+            "and have the ability to come into our Bellevue office several days a week during the time "
+            "of the internship?*"
+        ),
+        field_type="select",
+        required=True,
+    )
+
+    assert _field_conditional_cluster(relocation) == ("relocation", "boolean_parent")
+    assert _value_shape_is_compatible(relocation, "New York, NY") is False
+    assert _value_shape_is_compatible(relocation, "No") is True
+
+
+def test_default_screening_answer_defaults_location_specific_relocation_question_to_yes():
+    from ghosthands.actions.domhand_fill import _default_screening_answer
+    from ghosthands.actions.views import FormField
+
+    relocation = FormField(
+        field_id="ff-reloc-2",
+        name=(
+            "We are unable to provide relocation assistance. Will you be located in the Seattle area "
+            "and have the ability to come into our Bellevue office several days a week during the time "
+            "of the internship?*"
+        ),
+        field_type="select",
+        required=True,
+        options=["Yes", "No"],
+    )
+
+    assert _default_screening_answer(relocation, {}) == "Yes"
+
+
+def test_default_screening_answer_respects_explicit_negative_relocation_preference():
+    from ghosthands.actions.domhand_fill import _default_screening_answer
+    from ghosthands.actions.views import FormField
+
+    relocation = FormField(
+        field_id="ff-reloc-3",
+        name="Are you open to relocation?",
+        field_type="select",
+        required=True,
+        options=["Yes", "No"],
+    )
+
+    assert _default_screening_answer(relocation, {"relocation_preference": "No"}) == "No"
+
+
+@pytest.mark.asyncio
+async def test_fill_button_group_skips_upload_like_controls():
+    from ghosthands.actions.views import FormField
+    from ghosthands.dom.fill_executor import _fill_button_group
+
+    page = AsyncMock()
+    field = FormField(
+        field_id="ff-upload",
+        name="Cover Letter",
+        field_type="button-group",
+        section="Resume/CV",
+        choices=["Attach", "Enter manually"],
+        required=False,
+    )
+
+    assert await _fill_button_group(page, field, "Attach", "[Cover Letter]") is False
+    page.evaluate.assert_not_called()
+
+
 def test_resolve_known_profile_value_for_field_matches_required_name_with_marker():
     from ghosthands.actions.domhand_fill import _resolve_known_profile_value_for_field
     from ghosthands.actions.views import FormField
@@ -4115,6 +4419,42 @@ def test_resolve_known_profile_value_for_field_skips_availability_for_education_
     )
 
     assert resolved is None
+
+
+def test_known_profile_value_formats_start_date_for_availability_window_prompt():
+    from ghosthands.actions.views import FormField
+    from ghosthands.dom.fill_profile_resolver import _resolve_known_profile_value_for_field
+
+    field = FormField(
+        field_id="availability-window",
+        name="What dates are you available for an internship?",
+        field_type="textarea",
+        required=True,
+    )
+
+    resolved = _resolve_known_profile_value_for_field(
+        field,
+        {"available_start_date": "2026-06-01"},
+        {"available_start_date": "2026-06-01"},
+    )
+
+    assert resolved is not None
+    assert resolved.value == "Available starting June 1, 2026"
+
+
+def test_value_shape_rejects_raw_iso_date_for_availability_window_text_prompt():
+    from ghosthands.actions.views import FormField
+    from ghosthands.dom.fill_profile_resolver import _value_shape_is_compatible
+
+    field = FormField(
+        field_id="availability-window",
+        name="What dates are you available for an internship?",
+        field_type="textarea",
+        required=True,
+    )
+
+    assert _value_shape_is_compatible(field, "2026-06-01") is False
+    assert _value_shape_is_compatible(field, "Available starting June 1, 2026") is True
 
 
 def test_text_fill_attempt_values_include_zero_padded_month_variant():

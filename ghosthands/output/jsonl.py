@@ -218,6 +218,7 @@ def emit_cost(
     *,
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
+    cost_summary: dict[str, Any] | None = None,
 ) -> None:
     """Emit a cost snapshot (cumulative LLM spend)."""
     emit_event(
@@ -225,6 +226,7 @@ def emit_cost(
         total_usd=round(total_usd, 6),
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        cost_summary=cost_summary,
     )
 
 

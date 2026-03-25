@@ -33,7 +33,11 @@ from browser_use.browser.events import (
     SelectDropdownOptionEvent,
 )
 from browser_use.dom.views import EnhancedDOMTreeNode
-from ghosthands.actions.combobox_toggle import CLICK_COMBOBOX_TOGGLE_ON_NODE_JS, combobox_toggle_clicked
+from ghosthands.actions.combobox_toggle import (
+    CLICK_COMBOBOX_TOGGLE_ON_NODE_JS,
+    combobox_toggle_clicked,
+    trusted_open_combobox_by_ffid,
+)
 from ghosthands.actions.domhand_fill import _get_page_context_key, _record_expected_value_if_settled
 from ghosthands.actions.views import (
     DomHandSelectParams,
@@ -139,9 +143,18 @@ _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 	// Case 3: Workday-style custom dropdowns (data-uxi-widget-type)
 	const widgetType = el.getAttribute('data-uxi-widget-type');
 	if (widgetType === 'selectinput' || el.getAttribute('role') === 'combobox') {
+		// Greenhouse / react-select: never treat the whole .form-group/.field wrapper text as the
+		// committed value — it concatenates QUESTION LABEL + placeholder ("Select..."), which made us
+		// return options: [] as if the field were already filled (CDP-first then never discovers menu).
+		const isReactSelectCombobox = el.getAttribute('role') === 'combobox' && widgetType !== 'selectinput';
+		const isUnsetPlaceholder = (t) => {
+			const s = clean(t).toLowerCase();
+			if (!s) return true;
+			return /^(select(\.{0,3}|…)?|select\s*(\.\.\.|…)|choose(\s+one)?|please\s+select|select\s+one|--\s*--|--)$/i.test(s);
+		};
 		const currentValue = (() => {
 			let value = clean(el.value || '');
-			if (value) return value;
+			if (value && !isUnsetPlaceholder(value)) return value;
 			const wrapper = el.closest('[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field') || el.parentElement || el;
 			const tokenSelectors = [
 				'[data-automation-id*="selected"]',
@@ -156,11 +169,26 @@ _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 				for (const node of wrapper.querySelectorAll(selector)) {
 					const text = visibleText(node);
 					if (!text || /^(select one|choose one|required)$/i.test(text)) continue;
+					if (isUnsetPlaceholder(text)) continue;
 					return text;
 				}
 			}
+			if (isReactSelectCombobox) {
+				const control =
+					el.closest('[class*="select__control"], [class*="Select__control"], [class*="css-"][class*="-control"]') ||
+					el.parentElement;
+				if (control) {
+					const single = control.querySelector(
+						'[class*="single-value"], [class*="SingleValue"], [class*="singleValue"]'
+					);
+					const sv = visibleText(single);
+					if (sv && !isUnsetPlaceholder(sv)) return clean(sv);
+				}
+				return '';
+			}
 			const wrapperText = visibleText(wrapper);
 			if (wrapperText && wrapperText.length <= 120 && !/^(select one|choose one|required)$/i.test(wrapperText)) {
+				if (isUnsetPlaceholder(wrapperText)) return '';
 				return wrapperText;
 			}
 			return '';
@@ -863,9 +891,7 @@ def _selection_matches_value(current: str, expected: str) -> bool:
             )
         )
     # Gender / short identity tokens: "male" must not match inside "female" (substring bug).
-    gender_or_identity_tokens = frozenset(
-        {"male", "female", "man", "woman", "non-binary", "nonbinary", "other"}
-    )
+    gender_or_identity_tokens = frozenset({"male", "female", "man", "woman", "non-binary", "nonbinary", "other"})
     if expected_norm in gender_or_identity_tokens:
         return bool(
             re.search(
@@ -923,11 +949,12 @@ def _options_look_like_phone_country_menu(options: list[dict[str, Any]]) -> bool
     phoneish = 0
     for t in texts:
         tl = t.lower().replace(" ", "")
-        if re.search(r"\(\+\d", t) or re.search(r"\+\d{1,4}\b", t):
-            phoneish += 1
-        elif "unitedstates" in tl and "+1" in tl.replace(" ", ""):
-            phoneish += 1
-        elif re.search(r"\(\+1\)", t):
+        if (
+            re.search(r"\(\+\d", t)
+            or re.search(r"\+\d{1,4}\b", t)
+            or ("unitedstates" in tl and "+1" in tl.replace(" ", ""))
+            or re.search(r"\(\+1\)", t)
+        ):
             phoneish += 1
     return phoneish >= max(1, (len(texts) + 1) // 2)
 
@@ -1152,6 +1179,8 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
 
     dropdown_type = discovery.get("type", "unknown") if isinstance(discovery, dict) else "unknown"
     options = discovery.get("options", []) if isinstance(discovery, dict) else []
+    node_attrs = getattr(node, "attributes", None) or {}
+    node_ff_id = str(node_attrs.get("data-ff-id") or "").strip()
     field_context = await _read_field_context(browser_session, node)
     field_label = str(field_context.get("label") or "").strip()
     widget_signature = (
@@ -1271,7 +1300,11 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             try:
                 toggled = False
                 if not is_native_select:
-                    toggled = await _try_click_combobox_toggle(browser_session, node)
+                    if node_ff_id:
+                        trusted = await trusted_open_combobox_by_ffid(page, node_ff_id)
+                        toggled = bool(trusted.get("clicked") or trusted.get("already_open"))
+                    if not toggled:
+                        toggled = await _try_click_combobox_toggle(browser_session, node)
                     if toggled:
                         logger.debug(
                             "domhand.select.open_via_toggle",

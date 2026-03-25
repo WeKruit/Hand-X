@@ -510,16 +510,24 @@ _CLICK_RADIO_OPTION_JS = r"""(ffId, text) => {
 		'fieldset, [role="radiogroup"], [role="group"], .radio-cards, .radio-group, .checkbox-group, [data-automation-id="formField"], [data-automation-id*="formField"]'
 	) || ff.rootParent(el) || el;
 	var items = group.querySelectorAll(
-		'[role="radio"], [role="checkbox"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], label.radio-card, .radio-card, .radio-option, label.checkbox-card, .checkbox-card, .checkbox-option, [role="button"], [role="cell"], input[type="radio"], input[type="checkbox"]'
+		'[role="radio"], [role="checkbox"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], label[for], label.radio-card, .radio-card, .radio-option, label.checkbox-card, .checkbox-card, .checkbox-option, [role="button"], [role="cell"], input[type="radio"], input[type="checkbox"]'
 	);
 	var lower = text.toLowerCase().trim();
+	var getLabelFor = function(item) {
+		if (!item || !item.id) return null;
+		return ff.queryOne('label[for="' + CSS.escape(item.id) + '"]');
+	};
 	var getClickable = function(item) {
+		var byFor = getLabelFor(item);
+		if (byFor) return byFor;
 		return ff.closestCrossRoot(
 			item,
 			'button, label, [role="row"], [role="cell"], [role="button"], [role="radio"], [role="checkbox"], .radio-card, .radio-option, .checkbox-card, .checkbox-option, [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], [data-automation-id*="radio"], [data-automation-id*="checkbox"]'
 		) || item.parentElement || item;
 	};
 	var getText = function(item) {
+		var byFor = getLabelFor(item);
+		if (byFor && byFor.textContent) return byFor.textContent.trim();
 		var labelEl = item.querySelector('[class*="label"], .rc-label');
 		if (labelEl && labelEl.textContent) return labelEl.textContent.trim();
 		var clickable = getClickable(item);
@@ -571,7 +579,8 @@ _CLICK_SINGLE_RADIO_JS = r"""(ffId, text) => {
 		if (label === target || label.includes(target) || target.includes(label)) {
 			var isChecked = radio.checked || radio.getAttribute('aria-checked') === 'true';
 			if (isChecked) return JSON.stringify({clicked: true, alreadyChecked: true});
-			radio.click(); return JSON.stringify({clicked: true, alreadyChecked: false});
+			var clickTarget = radio.id ? ff.queryOne('label[for="' + CSS.escape(radio.id) + '"]') : null;
+			(clickTarget || radio).click(); return JSON.stringify({clicked: true, alreadyChecked: false});
 		}
 	}
 	return JSON.stringify({clicked: false});
@@ -704,10 +713,11 @@ _GET_BINARY_CLICK_TARGET_JS = r"""(ffId) => {
 			: null;
 	};
 	var control = getControl(el) || el;
+	var byFor = control && control.id ? ff.queryOne('label[for="' + CSS.escape(control.id) + '"]') : null;
 	var target = ff.closestCrossRoot(
-		control,
+		byFor || control,
 		'label, [role="row"], [role="cell"], [role="button"], .checkbox-card, .checkbox-option, .radio-card, .radio-option, [data-automation-id*="checkbox"], [data-automation-id*="radio"], [data-automation-id*="promptOption"]'
-	) || control.parentElement || control;
+	) || byFor || control.parentElement || control;
 	if (target && target.scrollIntoView) {
 		target.scrollIntoView({block: 'center', inline: 'center'});
 	}
@@ -799,12 +809,18 @@ _GET_GROUP_OPTION_TARGET_JS = r"""(ffId, text) => {
 	) || ff.rootParent(el) || el;
 	var nodes = Array.from(
 		group.querySelectorAll(
-			'[role="radio"], [role="checkbox"], input[type="radio"], input[type="checkbox"], label.radio-card, .radio-card, .radio-option, label.checkbox-card, .checkbox-card, .checkbox-option, button, [role="button"], [role="cell"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"]'
+			'[role="radio"], [role="checkbox"], input[type="radio"], input[type="checkbox"], label[for], label.radio-card, .radio-card, .radio-option, label.checkbox-card, .checkbox-card, .checkbox-option, button, [role="button"], [role="cell"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"]'
 		)
 	);
 	var lower = text.toLowerCase().trim();
 	var best = null;
+	var getLabelFor = function(node) {
+		if (!node || !node.id) return null;
+		return ff.queryOne('label[for="' + CSS.escape(node.id) + '"]');
+	};
 	var getClickable = function(node) {
+		var byFor = getLabelFor(node);
+		if (byFor) return byFor;
 		return ff.closestCrossRoot(
 			node,
 			'button, label, [role="row"], [role="cell"], [role="button"], [role="radio"], [role="checkbox"], .radio-card, .radio-option, .checkbox-card, .checkbox-option, [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], [data-automation-id*="radio"], [data-automation-id*="checkbox"]'
@@ -812,10 +828,8 @@ _GET_GROUP_OPTION_TARGET_JS = r"""(ffId, text) => {
 	};
 	var getLabel = function(node) {
 		if (!node) return '';
-		if (node.id) {
-			var byFor = ff.queryOne('label[for="' + CSS.escape(node.id) + '"]');
-			if (byFor && byFor.textContent && byFor.textContent.trim()) return byFor.textContent.trim();
-		}
+		var byFor = getLabelFor(node);
+		if (byFor && byFor.textContent && byFor.textContent.trim()) return byFor.textContent.trim();
 		var ariaLabel = node.getAttribute('aria-label');
 		if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
 		var wrap = getClickable(node);
@@ -1096,6 +1110,28 @@ _DISMISS_DROPDOWN_JS = r"""() => {
 	return 'ok';
 }"""
 
+# Prefer after react-select option pick: synthetic body clicks can race the commit and clear selection.
+_DISMISS_DROPDOWN_SOFT_JS = r"""() => {
+	var ae = document.activeElement;
+	if (ae && ae.blur) ae.blur();
+	document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true}));
+	return 'ok';
+}"""
+
+_COLLAPSE_COMBOBOX_FOR_FF_JS = r"""(ffId) => {
+	var ff = window.__ff;
+	var el = ff ? ff.byId(ffId) : document.querySelector('[data-ff-id="' + ffId + '"]');
+	if (!el) return 'no_el';
+	var combo = (ff && ff.closestCrossRoot)
+		? ff.closestCrossRoot(el, '[role="combobox"]')
+		: (el.closest ? el.closest('[role="combobox"]') : null);
+	if (!combo) return 'no_combo';
+	if (combo.getAttribute('aria-expanded') !== 'true') return 'closed';
+	try { combo.focus(); } catch (e) {}
+	combo.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true}));
+	return 'escape';
+}"""
+
 _CLICK_OTHER_TEXTLIKE_FIELD_JS = r"""(ffId) => {
 	var ff = window.__ff;
 	var current = ff ? ff.byId(ffId) : document.querySelector('[data-ff-id="' + ffId + '"]');
@@ -1148,6 +1184,16 @@ _FOCUS_FIELD_JS = r"""(ffId) => {
 	var el = ff ? ff.byId(ffId) : document.querySelector('[data-ff-id="' + ffId + '"]');
 	if (!el) return JSON.stringify({ok: false, error: 'not found'});
 	if (el.focus) el.focus();
+	return JSON.stringify({ok: true});
+}"""
+
+_SCROLL_FF_INTO_VIEW_JS = r"""(ffId) => {
+	var ff = window.__ff;
+	var el = ff ? ff.byId(ffId) : document.querySelector('[data-ff-id="' + ffId + '"]');
+	if (!el) return JSON.stringify({ok: false, error: 'not found'});
+	if (el.scrollIntoView) {
+		el.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'});
+	}
 	return JSON.stringify({ok: true});
 }"""
 

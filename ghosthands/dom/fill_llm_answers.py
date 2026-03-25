@@ -525,6 +525,7 @@ async def _generate_answers(
     evidence = _parse_profile_evidence(profile_text)
     model_id = _settings.domhand_model
     llm = get_chat_model(model=model_id)
+    model_id = getattr(llm, "model", model_id)  # resolved model after proxy override
     input_tokens = 0
     output_tokens = 0
     step_cost = 0.0
@@ -548,6 +549,7 @@ Here are the form fields to fill:
 
 Rules:
 - For each field, decide what value to put based on the profile.
+- You are helping a job seeker complete applications successfully. Within the rules below, prefer answers that keep the candidate eligible and aligned with employer requirements.
 - For substantive applicant fields, use ONLY the applicant's actual profile data. Do not invent salary, start dates, work history, education, essays, addresses, or personal identifiers.
 - If the profile has NO relevant data for an OPTIONAL field, return "" (empty string). NEVER make up data or use placeholder values like "N/A", "None", "Not applicable", etc.
 - If the profile has NO direct answer for a REQUIRED field: first use a saved survey/profile answer, then a semantically equivalent QA-bank answer, then the closest structured education/experience value, then a deterministic default when one exists, and finally your best-effort guess. NEVER return "[NEEDS_USER_INPUT]".
@@ -565,7 +567,8 @@ Rules:
 - For structured education fields (GPA, field of study, actual vs expected end date, scoped education start/end dates) and structured language fields ("Language", fluent, reading/writing, speaking/listening, overall proficiency), NEVER guess. Only answer when the exact structured profile value is present.
 - When the profile wording and the site wording differ, map to the semantically closest visible option instead of escalating. Example: "Native / bilingual" may map to the top proficiency tier such as "Expert", "Advanced", or "Fluent".
 - For work-setup/location preference fields, use the saved preferred work mode / preferred locations if present. If the field is broad and only asks for an arrangement, prefer the work-mode answer over escalating.
-- For relocation fields, use the applicant's saved relocation preference; default to "Yes" when the profile has no contrary preference.
+- For relocation fields, use the applicant's saved relocation preference. If the profile does not specify one, default to "Anywhere". For generic willingness-to-relocate questions and location-specific office-attendance questions, prefer the employer-compatible answer unless the profile explicitly says the applicant cannot relocate or cannot be in-office at that location.
+- For upload-like controls rendered as buttons (for example "Attach", "Upload", "Browse", "Choose file", "Enter manually"), skip them just like file-upload fields.
 - For skill typeahead fields, return an ARRAY of relevant skills from the applicant profile.
 - For multi-select fields, return a JSON array of ALL matching options (e.g., ["Python", "Java"]).
 - For checkboxes/toggles, respond with "checked" or "unchecked".

@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from ghosthands.dom.fill_executor import _dispatch_platform_fill
 from ghosthands.actions.views import FormField
+from ghosthands.dom.fill_executor import FieldFillOutcome, _dispatch_platform_fill
 
 
 def _make_field(field_type: str = "select", name: str = "Country") -> FormField:
@@ -24,9 +24,9 @@ async def test_dispatch_combobox_toggle():
     fake_page = AsyncMock()
     field = _make_field("select")
     with patch(
-        "ghosthands.dom.fill_executor._fill_custom_dropdown",
+        "ghosthands.dom.fill_executor._fill_custom_dropdown_outcome",
         new_callable=AsyncMock,
-        return_value=True,
+        return_value=FieldFillOutcome(success=True, matched_label="United States"),
     ) as mock_fill:
         result = await _dispatch_platform_fill(
             fake_page, field, "United States", "[Country]", "combobox_toggle",
@@ -40,9 +40,9 @@ async def test_dispatch_react_select():
     fake_page = AsyncMock()
     field = _make_field("select")
     with patch(
-        "ghosthands.dom.fill_executor._fill_custom_dropdown",
+        "ghosthands.dom.fill_executor._fill_custom_dropdown_outcome",
         new_callable=AsyncMock,
-        return_value=True,
+        return_value=FieldFillOutcome(success=True, matched_label="Engineering"),
     ) as mock_fill:
         result = await _dispatch_platform_fill(
             fake_page,
@@ -100,9 +100,9 @@ async def test_fill_single_field_uses_platform_override():
             return_value={"select": "combobox_toggle"},
         ),
         patch(
-            "ghosthands.dom.fill_executor._dispatch_platform_fill",
+            "ghosthands.dom.fill_executor._dispatch_platform_fill_outcome",
             new_callable=AsyncMock,
-            return_value=True,
+            return_value=FieldFillOutcome(success=True, matched_label="United States"),
         ) as mock_dispatch,
     ):
         result = await _fill_single_field(fake_page, field, "United States")

@@ -383,9 +383,19 @@ def _format_profile_summary(resume_profile: dict) -> str:
     # ── Languages ────────────────────────────────────────────────
     languages = resume_profile.get("languages", [])
     if languages:
-        lang_strs = [
-            f"{lang.get('language', '')} ({lang.get('proficiency', '')})" for lang in languages if lang.get("language")
-        ]
+        lang_strs: list[str] = []
+        for lang in languages:
+            if isinstance(lang, dict):
+                language = str(lang.get("language") or "").strip()
+                proficiency = str(lang.get("proficiency") or "").strip()
+                if not language:
+                    continue
+                lang_strs.append(f"{language} ({proficiency})" if proficiency else language)
+                continue
+            if isinstance(lang, str):
+                text = lang.strip()
+                if text:
+                    lang_strs.append(text)
         if lang_strs:
             lines.append(f"Languages: {', '.join(lang_strs)}")
 

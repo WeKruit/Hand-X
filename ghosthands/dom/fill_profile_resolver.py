@@ -353,10 +353,60 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
                 last_name = " ".join(name.split()[1:])
 
             location = data.get("location")
-            city = str(data.get("city") or "").strip() or None
-            state = str(data.get("state") or data.get("province") or "").strip() or None
-            zip_code = str(data.get("zip") or data.get("zip_code") or data.get("postal_code") or "").strip() or None
-            county = str(data.get("county") or "").strip() or None
+            raw_address = data.get("address")
+            address_data = raw_address if isinstance(raw_address, dict) else {}
+
+            def _read_address_text(*keys: str) -> str | None:
+                for key in keys:
+                    if key in address_data:
+                        text = _entry_text_value(address_data.get(key))
+                        if text:
+                            return text
+                return None
+
+            address_line_1 = (
+                _read_address_text(
+                    "street",
+                    "line1",
+                    "address1",
+                    "address_1",
+                    "addressLine1",
+                    "street1",
+                    "street_line_1",
+                )
+                or (str(raw_address).strip() if isinstance(raw_address, str) and str(raw_address).strip() else None)
+            )
+            address_line_2 = (
+                _read_text("address_line_2", "addressLine2")
+                or _read_address_text(
+                    "line2",
+                    "address2",
+                    "address_2",
+                    "addressLine2",
+                    "street2",
+                    "street_line_2",
+                    "apartment",
+                    "unit",
+                    "suite",
+                )
+            )
+            city = (
+                str(data.get("city") or "").strip()
+                or _read_address_text("city", "town")
+                or None
+            )
+            state = (
+                str(data.get("state") or data.get("province") or "").strip()
+                or _read_address_text("state", "province", "region")
+                or None
+            )
+            zip_code = (
+                str(data.get("zip") or data.get("zip_code") or data.get("postal_code") or "").strip()
+                or _read_address_text("zip", "zipCode", "zip_code", "postalCode", "postal_code")
+                or None
+            )
+            county = str(data.get("county") or "").strip() or _read_address_text("county") or None
+            country = _read_text("country") or _read_address_text("country", "countryCode", "country_code")
             if isinstance(location, str) and location.strip() and (not city or not state or not zip_code):
                 parts = [p.strip() for p in location.split(",") if p.strip()]
                 if len(parts) >= 2:
@@ -432,13 +482,13 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
                 "last_name": last_name,
                 "email": str(data.get("email") or "").strip() or None,
                 "phone": str(data.get("phone") or "").strip() or None,
-                "address": str(data.get("address") or "").strip() or None,
-                "address_line_2": str(data.get("address_line_2") or "").strip() or None,
+                "address": address_line_1,
+                "address_line_2": address_line_2,
                 "city": city,
                 "state": state,
                 "zip": zip_code,
                 "county": county,
-                "country": _read_text("country"),
+                "country": country,
                 "phone_device_type": _read_text("phone_device_type", "phone_type", "phoneDeviceType"),
                 "phone_country_code": _read_text("phone_country_code", "phoneCountryCode"),
                 "linkedin": _read_text("linkedin", "linkedin_url", "linkedIn"),
@@ -472,6 +522,16 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
                 "country_of_residence": _read_text("country_of_residence", "countryOfResidence"),
                 "how_did_you_hear": _read_text("how_did_you_hear", "referral_source", "howDidYouHear"),
                 "willing_to_relocate": _read_text("willing_to_relocate", "willingToRelocate"),
+                "relocation_preference": _read_text(
+                    "relocation_preference",
+                    "relocationPreference",
+                    "relocate_preference",
+                    "relocatePreference",
+                    "relocate_ok",
+                    "relocateOk",
+                    "open_to_relocation",
+                    "openToRelocation",
+                ),
                 "preferred_work_mode": _read_text("preferred_work_mode", "preferredWorkMode"),
                 "preferred_locations": _read_text("preferred_locations", "preferredLocations"),
             }
@@ -549,6 +609,7 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
         "country_of_residence": read_line("Country of residence") or read_line("Country"),
         "how_did_you_hear": read_line("How did you hear about us"),
         "willing_to_relocate": read_line("Willing to relocate"),
+        "relocation_preference": read_line("Relocation preference") or read_line("Relocate OK"),
         "preferred_work_mode": read_line("Preferred work setup"),
         "preferred_locations": read_line("Preferred locations"),
     }
@@ -820,7 +881,7 @@ def _cap_qa_entries(
             _QA_CONFIDENCE_RANKS_getter().get(e.get("confidence", "learned"), 3),  # exact > inferred > learned
         )
     )
-    return qa_entries[:MAX_QA_ENTRIES]
+    return qa_entries[: _MAX_QA_ENTRIES()]
 
 
 def _match_qa_answer(field_label: str, qa_entries: list[dict[str, Any]]) -> str | None:
@@ -1113,7 +1174,17 @@ def _build_profile_answer_map(
     )
     add(canonical.get("github"), "GitHub", "GitHub URL", "GitHub Profile")
     add(canonical.get("work_authorization"), "Work Authorization")
-    add(canonical.get("willing_to_relocate"), "Willing to relocate", "Relocation")
+    add(
+        canonical.get("willing_to_relocate", allow_policy=True),
+        "Willing to relocate",
+        "Relocation",
+        "Open to relocation",
+    )
+    add(
+        canonical.get("relocation_preference", allow_policy=True),
+        "Relocation preference",
+        "Relocate OK",
+    )
     add(
         canonical.get("sponsorship_needed"),
         "Visa Sponsorship",
@@ -1339,12 +1410,13 @@ def _profile_has_employer_history(profile_data: dict[str, Any], employer_name: s
 
 
 def _default_screening_answer(field: FormField, profile_data: dict[str, Any]) -> str | None:
-    """Return an answer only when the profile explicitly supports it."""
+    """Return a deterministic answer for low-risk screening questions."""
     label = _preferred_field_label(field)
     norm = normalize_name(label)
     options = [normalize_name(choice) for choice in (field.options or field.choices or [])]
     if options and not ({"yes", "no"} & set(options)):
         return None
+    canonical = build_canonical_profile(profile_data or {}, {})
 
     named_employer = _extract_named_employer_from_question(norm)
     if named_employer:
@@ -1377,6 +1449,14 @@ def _default_screening_answer(field: FormField, profile_data: dict[str, Any]) ->
             return _coerce_answer_to_field(field, "Yes" if int(str(age_value).strip()) >= 18 else "No")
         except ValueError:
             return None
+
+    cluster, role = _field_conditional_cluster(field)
+    if cluster == "relocation" and role == "boolean_parent":
+        relocation_pref = canonical.get("relocation_preference", allow_policy=True)
+        willing = canonical.get("willing_to_relocate", allow_policy=True)
+        answer = willing or relocation_pref
+        if answer:
+            return _coerce_answer_to_field(field, answer)
 
     return None
 
@@ -1428,7 +1508,11 @@ def _resolve_semantic_intent_answer(
     if intent == "how_did_you_hear":
         return _coerce_answer_to_field(field, canonical.get("how_did_you_hear"))
     if intent == "willing_to_relocate":
-        return _coerce_answer_to_field(field, canonical.get("willing_to_relocate"))
+        return _coerce_answer_to_field(
+            field,
+            canonical.get("willing_to_relocate", allow_policy=True)
+            or canonical.get("relocation_preference", allow_policy=True),
+        )
     if intent == "salary_expectation":
         return _coerce_answer_to_field(field, canonical.get("salary_expectation"))
     if intent == "current_school_year":
@@ -1458,7 +1542,13 @@ def _resolve_semantic_intent_answer(
     if intent == "availability_window":
         return _coerce_answer_to_field(
             field,
-            canonical.get("availability_window") or canonical.get("available_start_date"),
+            _availability_answer_from_evidence(
+                _preferred_field_label(field),
+                evidence,
+                field_type=field.field_type,
+            )
+            or canonical.get("availability_window")
+            or canonical.get("available_start_date"),
         )
     if intent == "notice_period":
         return _coerce_answer_to_field(field, canonical.get("notice_period"))
@@ -1505,6 +1595,11 @@ _BOOLEAN_QUESTION_PREFIXES = (
     "is the applicant",
 )
 
+
+_BOOLEAN_QUESTION_CLAUSE_RE = re.compile(
+    r"\b(?:are|do|did|have|has|will|would|can|is)\s+you\b|\b(?:has|is)\s+the\s+applicant\b"
+)
+
 _DETAIL_CHILD_PROMPT_FRAGMENTS = (
     "please specify",
     "type of visa",
@@ -1535,6 +1630,10 @@ def _field_widget_kind_for_debug(field: FormField) -> str:
 
 def _label_starts_boolean_question(label: str) -> bool:
     return any(label.startswith(prefix) for prefix in _BOOLEAN_QUESTION_PREFIXES)
+
+
+def _label_contains_boolean_clause(label: str) -> bool:
+    return bool(_BOOLEAN_QUESTION_CLAUSE_RE.search(label))
 
 
 def _is_detail_child_prompt(label: str) -> bool:
@@ -1573,7 +1672,7 @@ def _field_conditional_cluster(field: FormField) -> tuple[str | None, str | None
         "toggle",
         "button-group",
     }
-    question_stem = _label_starts_boolean_question(label)
+    question_stem = _label_starts_boolean_question(label) or _label_contains_boolean_clause(label)
 
     if any(token in label for token in ("relocation", "relocate")):
         if any(token in label for token in ("location to which", "where would you relocate", "preferred location")):
@@ -1625,7 +1724,12 @@ def _field_conditional_cluster(field: FormField) -> tuple[str | None, str | None
 
     if "salary" in label or "compensation" in label:
         return "salary", "detail_child"
-    if "start date" in label or "availability" in label:
+    if (
+        "start date" in label
+        or "availability" in label
+        or ("dates" in label and "available" in label)
+        or ("when" in label and "available" in label)
+    ):
         return "availability_window", "detail_child"
     if "notice" in label:
         return "notice_period", "detail_child"
@@ -1638,6 +1742,77 @@ def _field_conditional_cluster(field: FormField) -> tuple[str | None, str | None
     ) and "education" in normalize_name(field.section or ""):
         return "education_dates", "end_child"
     return None, None
+
+
+def _looks_like_iso_profile_date(value: str | None) -> bool:
+    text = str(value or "").strip()
+    return bool(re.fullmatch(r"\d{4}-\d{2}(?:-\d{2})?", text))
+
+
+def _format_profile_date_for_text(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parts = text.split("-")
+    if len(parts) < 2:
+        return text
+    try:
+        year = int(parts[0])
+        month = int(parts[1])
+    except (TypeError, ValueError):
+        return text
+    if month < 1 or month > 12:
+        return text
+    month_labels = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ]
+    if len(parts) >= 3:
+        try:
+            day = int(parts[2])
+        except (TypeError, ValueError):
+            day = None
+        if day is not None and 1 <= day <= 31:
+            return f"{month_labels[month - 1]} {day}, {year}"
+    return f"{month_labels[month - 1]} {year}"
+
+
+def _availability_prompt_prefers_window_text(field_label: str, field_type: str | None = None) -> bool:
+    label = normalize_name(field_label)
+    if (field_type or "").strip().lower() not in {"text", "textarea", "search"}:
+        return False
+    if "what dates" in label or "when are you available" in label:
+        return True
+    return "dates" in label and "available" in label
+
+
+def _availability_answer_from_evidence(
+    field_label: str,
+    evidence: dict[str, str | None],
+    *,
+    field_type: str | None = None,
+) -> str | None:
+    explicit_window = str(evidence.get("availability_window") or "").strip()
+    if explicit_window:
+        return explicit_window
+
+    start_date = str(evidence.get("available_start_date") or "").strip()
+    if not start_date:
+        return None
+    if _availability_prompt_prefers_window_text(field_label, field_type):
+        human_date = _format_profile_date_for_text(start_date) or start_date
+        return f"Available starting {human_date}"
+    return start_date
 
 
 def _is_binary_value_text(value: str | None) -> bool:
@@ -1653,7 +1828,7 @@ def _value_shape_is_compatible(field: FormField, value: str | None) -> bool:
     if value in (None, ""):
         return False
 
-    _, role = _field_conditional_cluster(field)
+    cluster, role = _field_conditional_cluster(field)
     option_norms = _field_option_norms(field)
     expects_binary = bool(option_norms & {"yes", "no"}) or role == "boolean_parent"
     if expects_binary:
@@ -1666,6 +1841,13 @@ def _value_shape_is_compatible(field: FormField, value: str | None) -> bool:
         label = normalize_name(_preferred_field_label(field))
         if any(token in label for token in ("please specify", "location to which", "type of visa", "what visa")):
             return False
+
+    if (
+        cluster == "availability_window"
+        and _availability_prompt_prefers_window_text(_preferred_field_label(field), field.field_type)
+        and _looks_like_iso_profile_date(value)
+    ):
+        return False
 
     return True
 
@@ -1834,8 +2016,10 @@ async def _semantic_profile_value_for_field(
     field: FormField,
     evidence: dict[str, str | None],
     profile_data: dict[str, Any] | None = None,
+    *,
+    allow_llm_classification: bool = True,
 ) -> str | None:
-    """Resolve a field via learned aliases or classification-only semantic fallback."""
+    """Resolve a field via learned aliases and, optionally, LLM semantic classification."""
     for label in _field_label_candidates(field):
         alias = get_learned_question_alias(label, profile_data)
         if alias is None:
@@ -1855,6 +2039,9 @@ async def _semantic_profile_value_for_field(
                 coerced_value=_profile_debug_preview(coerced),
             )
             return coerced
+
+    if not allow_llm_classification:
+        return None
 
     intent, confidence = await _classify_known_intent_for_field(field, profile_data, evidence)
     if intent is None:
@@ -2022,8 +2209,10 @@ def _known_profile_value(
         for kw in ("work authorization", "authorized to work", "legally authorized", "legally permitted to work")
     ):
         return evidence.get("work_authorization")
-    if any(kw in name for kw in ("start date", "earliest start", "available date", "availability")):
-        return evidence.get("availability_window") or evidence.get("available_start_date")
+    if any(kw in name for kw in ("start date", "earliest start", "available date", "availability")) or (
+        "dates" in name and "available" in name
+    ):
+        return _availability_answer_from_evidence(field_name, evidence, field_type=field_type)
     if "notice period" in name:
         return evidence.get("notice_period")
     if any(kw in name for kw in ("salary", "compensation", "pay expectation")):
@@ -2045,7 +2234,11 @@ def _known_profile_value(
     if any(kw in name for kw in ("country of residence", "country/region", "country region", "country")):
         return evidence.get("country_of_residence") or evidence.get("country")
     if any(kw in name for kw in ("willing to relocate", "relocation")):
-        return evidence.get("willing_to_relocate")
+        canonical = build_canonical_profile(profile_data or {}, evidence)
+        return canonical.get("willing_to_relocate", allow_policy=True) or canonical.get(
+            "relocation_preference",
+            allow_policy=True,
+        )
     if any(
         kw in name
         for kw in (
@@ -2380,6 +2573,3 @@ def _default_value(field: FormField) -> str:
             return "None"
 
     return ""
-
-
-

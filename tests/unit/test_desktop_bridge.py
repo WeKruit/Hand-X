@@ -884,6 +884,59 @@ class TestProfileLoadingEnvFallback:
 
         assert result == flag_data
 
+    def test_user_id_loader_takes_precedence_over_test_data(self):
+        from ghosthands.cli import _load_profile
+
+        args = argparse.Namespace(
+            profile=None,
+            test_data="examples/apply_to_job_sample_data.json",
+            user_id="user-123",
+            resume_id="resume-456",
+        )
+
+        with patch("ghosthands.cli._load_profile_from_user_resume", return_value={"source": "db"}) as mocked:
+            result = _load_profile(args)
+
+        mocked.assert_called_once_with("user-123", "resume-456")
+        assert result == {"source": "db"}
+
+    @pytest.mark.asyncio
+    async def test_async_user_id_loader_takes_precedence_over_test_data(self):
+        from ghosthands.cli import _load_profile_async
+
+        args = argparse.Namespace(
+            profile=None,
+            test_data="examples/apply_to_job_sample_data.json",
+            user_id="user-123",
+            resume_id="resume-456",
+        )
+
+        with patch(
+            "ghosthands.cli._load_profile_from_user_resume_async",
+            new=AsyncMock(return_value={"source": "db"}),
+        ) as mocked:
+            result = await _load_profile_async(args)
+
+        mocked.assert_awaited_once_with("user-123", "resume-456")
+        assert result == {"source": "db"}
+
+    def test_resume_id_requires_user_id(self):
+        from ghosthands.cli import _load_profile
+
+        args = argparse.Namespace(profile=None, test_data=None, user_id=None, resume_id="resume-456")
+
+        with pytest.raises(ValueError, match="--resume-id requires --user-id"):
+            _load_profile(args)
+
+    @pytest.mark.asyncio
+    async def test_async_resume_id_requires_user_id(self):
+        from ghosthands.cli import _load_profile_async
+
+        args = argparse.Namespace(profile=None, test_data=None, user_id=None, resume_id="resume-456")
+
+        with pytest.raises(ValueError, match="--resume-id requires --user-id"):
+            await _load_profile_async(args)
+
 
 # ---------------------------------------------------------------------------
 # Test 6 — normalize_profile_defaults

@@ -1152,6 +1152,11 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             await asyncio.sleep(0.2)
 
     mismatched_fields, opaque_fields, unverified_fields = verification_failures
+    blocking_unverified_fields = [
+        issue
+        for issue in unverified_fields
+        if issue.required
+    ]
     optional_validation_blockers = [
         issue
         for issue in unresolved_optional
@@ -1237,7 +1242,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             and not visible_errors
             and not mismatched_fields
             and not opaque_fields
-            and not unverified_fields
+            and not blocking_unverified_fields
             and not (bool(page_scan.get("advance_visible")) and bool(page_scan.get("advance_disabled")))
         ),
         platform_hint=platform_hint,
@@ -1248,7 +1253,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         + optional_validation_blockers
         + application_state.mismatched_fields
         + application_state.opaque_fields
-        + application_state.unverified_fields
+        + blocking_unverified_fields
     )
     blocker_states: dict[str, dict[str, str]] = {}
     for issue in active_blocker_issues:
@@ -1303,9 +1308,9 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
     if (
         same_blocker_signature_count >= _STALE_MISMATCH_THRESHOLD
         and only_soft_blockers
-        and (mismatched_fields or opaque_fields or unverified_fields)
+        and (mismatched_fields or opaque_fields or blocking_unverified_fields)
     ):
-        stale_ids = [f.field_id for f in mismatched_fields + opaque_fields + unverified_fields]
+        stale_ids = [f.field_id for f in mismatched_fields + opaque_fields + blocking_unverified_fields]
         logger.warning(
             "domhand.assess_state.stale_blocker_override",
             extra={

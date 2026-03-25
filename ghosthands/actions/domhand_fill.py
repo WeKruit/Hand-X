@@ -530,6 +530,7 @@ def _structured_repeater_fill_result(
     error_msg = _structured_field_missing_reason(field)
     return FillFieldResult(
         field_id=field.field_id,
+        field_key=get_stable_field_key(field),
         name=_preferred_field_label(field),
         success=False,
         actor="skipped",
@@ -1744,6 +1745,52 @@ def _is_navigation_field(field: FormField) -> bool:
     return any(c in nav_keywords for c in choices_lower)
 
 
+def _is_upload_like_field(field: FormField) -> bool:
+    """True for file-upload controls that must be handled via domhand_upload, not clicks."""
+    if field.field_type == "file":
+        return True
+    if getattr(field, "accept", None):
+        return True
+    if field.field_type != "button-group":
+        return False
+
+    texts = [
+        _preferred_field_label(field),
+        field.name or "",
+        field.raw_label or "",
+        field.section or "",
+        *(field.choices or []),
+        *(field.options or []),
+    ]
+    normalized = [normalize_name(str(text)) for text in texts if str(text).strip()]
+    joined = " | ".join(normalized)
+
+    upload_keywords = (
+        "cover letter",
+        "resume",
+        "curriculum vitae",
+        "cv",
+        "upload",
+        "attach",
+        "attachment",
+        "browse",
+        "choose file",
+        "select file",
+        "drop file",
+        "drag and drop",
+        "accepted file types",
+    )
+    if any(keyword in joined for keyword in upload_keywords):
+        return True
+
+    choice_set = {choice for choice in normalized if choice}
+    if {"attach", "enter manually"} <= choice_set:
+        return True
+    if {"upload", "enter manually"} <= choice_set:
+        return True
+    return False
+
+
 # ── Core action function ─────────────────────────────────────────────
 
 
@@ -1967,12 +2014,14 @@ async def _stagehand_observe_cross_reference(
     helps improve the DOM scanner over time without blocking the fill pipeline.
     """
     try:
+        from ghosthands.cost_summary import mark_stagehand_usage
         from ghosthands.stagehand.compat import ensure_stagehand_for_session
 
         layer = await ensure_stagehand_for_session(browser_session)
         if not layer.is_available:
             return
 
+        mark_stagehand_usage(browser_session, source="stagehand_cross_reference")
         elements = await layer.observe("Find all unfilled or empty form fields on this page")
         if not elements:
             return
@@ -2120,6 +2169,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         for f in fields:
             if f.field_type == "file":
                 continue
+            if _is_upload_like_field(f):
+                continue
             key = get_stable_field_key(f)
             if key in fields_skipped:
                 continue
@@ -2177,6 +2228,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             if auth_overrides and _is_auth_like_field(f):
                 fr = FillFieldResult(
                     field_id=f.field_id,
+                    field_key=key,
                     name=_preferred_field_label(f),
                     success=False,
                     actor="skipped",
@@ -2447,6 +2499,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 f,
                 evidence,
                 profile_data,
+                allow_llm_classification=False,
             )
             if semantic_profile_val:
                 direct_fills[f.field_id] = semantic_profile_val
@@ -2510,7 +2563,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         confidence=0.95,
                     ),
                 )
-                success, field_error, failure_reason, fc = await _attempt_domhand_fill_with_retry_cap(
+                success, field_error, failure_reason, fc, settled_value = await _attempt_domhand_fill_with_retry_cap(
                     page,
                     host=page_host,
                     field=f,
@@ -2520,10 +2573,11 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 )
                 fr = FillFieldResult(
                     field_id=f.field_id,
+                    field_key=key,
                     name=_preferred_field_label(f),
                     success=success,
                     actor="dom",
-                    value_set=value if success else None,
+                    value_set=settled_value if success else None,
                     error=None if success else field_error,
                     required=f.required,
                     control_kind=f.field_type,
@@ -2558,7 +2612,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         page_context_key=page_context_key,
                         field=f,
                         field_key=key,
-                        expected_value=value,
+                        expected_value=settled_value,
                         source="exact_profile" if resolved_value.source == "exact_profile" else "derived_profile",
                         log_context="domhand.fill",
                     )
@@ -2568,7 +2622,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                             page_context_key=page_context_key,
                             field=f,
                             field_key=key,
-                            intended_value=value,
+                            intended_value=settled_value,
                     )
                 elif failure_reason == DOMHAND_RETRY_CAPPED:
                     fields_capped.add(key)
@@ -2585,7 +2639,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             batch_llm_key = _needs_llm_keys[_nli]
             resolved_value = _resolve_llm_answer_via_batch_key(f, batch_llm_key, answers)
             if resolved_value is None:
-            resolved_value = _resolve_llm_answer_for_field(f, answers, evidence, profile_data)
+                resolved_value = _resolve_llm_answer_for_field(f, answers, evidence, profile_data)
             _rejection_reason = ""
             if resolved_value and re.match(
                 r"^(n/?a|na|none|not applicable|unknown|placeholder)$",
@@ -2617,6 +2671,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     error_msg = "REQUIRED — could not fill automatically"
                 fr = FillFieldResult(
                     field_id=f.field_id,
+                    field_key=key,
                     name=_preferred_field_label(f),
                     success=False,
                     actor="skipped",
@@ -2640,7 +2695,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 fields_skipped.add(key)
                 continue
             matched_answer = resolved_value.value
-            success, field_error, failure_reason, fc = await _attempt_domhand_fill_with_retry_cap(
+            success, field_error, failure_reason, fc, settled_value = await _attempt_domhand_fill_with_retry_cap(
                 page,
                 host=page_host,
                 field=f,
@@ -2650,10 +2705,11 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             )
             fr = FillFieldResult(
                 field_id=f.field_id,
+                field_key=key,
                 name=_preferred_field_label(f),
                 success=success,
                 actor="dom",
-                value_set=matched_answer if success else None,
+                value_set=settled_value if success else None,
                 error=None if success else field_error,
                 required=f.required,
                 control_kind=f.field_type,
@@ -2688,7 +2744,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     page_context_key=page_context_key,
                     field=f,
                     field_key=key,
-                    expected_value=matched_answer,
+                    expected_value=settled_value,
                     source="exact_profile" if resolved_value.source == "exact_profile" else "derived_profile",
                     log_context="domhand.fill",
                 )
@@ -2698,7 +2754,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         page_context_key=page_context_key,
                         field=f,
                         field_key=key,
-                        intended_value=matched_answer,
+                        intended_value=settled_value,
                 )
             elif failure_reason == DOMHAND_RETRY_CAPPED:
                 fields_capped.add(key)
@@ -2747,7 +2803,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 if not matched_answer:
                     fields_skipped.add(key)
                     continue
-                success, failure_msg, failure_reason, fc = await _attempt_domhand_fill_with_retry_cap(
+                success, failure_msg, failure_reason, fc, settled_value = await _attempt_domhand_fill_with_retry_cap(
                     page,
                     host=page_host,
                     field=f,
@@ -2757,6 +2813,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 )
                 fr = FillFieldResult(
                     field_id=f.field_id,
+                    field_key=key,
                     control_kind=f.field_type,
                     name=_preferred_field_label(f),
                     section=f.section or "",
@@ -2764,7 +2821,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     actor="dom",
                     error=failure_msg if not success else None,
                     failure_reason=failure_reason if not success else None,
-                    value_set=matched_answer if success else None,
+                    value_set=settled_value if success else None,
                     answer_mode="conditional_reveal",
                     fill_confidence=fc,
                 )
@@ -2777,7 +2834,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 break
 
         for r in all_results:
-            rkey = r.field_id
+            rkey = r.field_key or r.field_id
             if r.fill_confidence > settled_fields.get(rkey, 0.0):
                 settled_fields[rkey] = r.fill_confidence
 

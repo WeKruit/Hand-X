@@ -34,12 +34,12 @@ from ghosthands.actions.domhand_fill import (
     extract_visible_form_fields,
 )
 from ghosthands.actions.domhand_interact_control import domhand_interact_control
-from ghosthands.actions.domhand_select import domhand_select
 from ghosthands.actions.domhand_select import (
     FAIL_OVER_CUSTOM_WIDGET,
     FAIL_OVER_NATIVE_SELECT,
     _build_failover_message,
     _selection_matches_value,
+    domhand_select,
 )
 from ghosthands.actions.views import (
     DomHandAssessStateParams,
@@ -56,6 +56,7 @@ from ghosthands.agent.prompts import (
     build_completion_detection_lines,
     build_system_prompt,
 )
+from ghosthands.dom.fill_executor import _fill_select_field
 from ghosthands.dom.shadow_helpers import ensure_helpers
 from ghosthands.integrations.resume_loader import _map_to_profile
 from ghosthands.platforms import detect_platform, detect_platform_from_signals, get_config_by_name
@@ -188,6 +189,7 @@ WORKDAY_INTERACTIVE_BLOCKERS_HTML = """
 	<div
 		id="source-field"
 		data-automation-id="formField"
+		aria-invalid="true"
 		style="display:flex;flex-direction:column;gap:8px;width:520px;margin-bottom:20px;"
 	>
 		<label for="source--source">How Did You Hear About Us?*</label>
@@ -347,6 +349,97 @@ ALREADY_SELECTED_INVALID_SOURCE_WITH_OPTIONS_HTML = """
 			field.setAttribute('aria-invalid', 'false');
 			pill.textContent = 'LinkedIn';
 			window.__selectedSource = 'LinkedIn';
+		});
+	</script>
+</body>
+</html>
+"""
+
+GREENHOUSE_TRUSTED_TOGGLE_SELECT_HTML = """
+<!DOCTYPE html>
+<html>
+<body>
+	<div
+		id="source-field"
+		data-automation-id="formField"
+		style="display:flex;flex-direction:column;gap:8px;width:520px;margin-bottom:20px;"
+	>
+		<label for="source--source">How Did You Hear About Us?*</label>
+		<div class="select__control" style="display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid #bbb;padding:8px;">
+			<div class="select__value-container" style="display:flex;align-items:center;gap:8px;flex:1;">
+				<div id="source-pill" data-automation-id="selectedItem" class="selected-pill">Select...</div>
+				<input
+					id="source--source"
+					data-ff-id="source--source"
+					role="combobox"
+					aria-label="How Did You Hear About Us?"
+					aria-haspopup="listbox"
+					aria-expanded="false"
+					aria-invalid="true"
+					value=""
+					style="flex:1;border:0;outline:none;"
+				/>
+			</div>
+			<button type="button" id="source-toggle" aria-label="Toggle flyout">Toggle</button>
+		</div>
+	</div>
+
+	<div
+		id="source-menu"
+		role="listbox"
+		hidden
+		style="border:1px solid #aaa;padding:8px;width:320px;background:#fff;"
+	>
+		<div role="option" id="linkedin-option">LinkedIn</div>
+		<div role="option" id="job-board-option">Job Board</div>
+	</div>
+
+	<script>
+		window.__selectedSource = '';
+		const input = document.getElementById('source--source');
+		const toggle = document.getElementById('source-toggle');
+		const menu = document.getElementById('source-menu');
+		const pill = document.getElementById('source-pill');
+		const linkedin = document.getElementById('linkedin-option');
+		const jobBoard = document.getElementById('job-board-option');
+
+		function openMenu() {
+			menu.hidden = false;
+			input.setAttribute('aria-expanded', 'true');
+		}
+
+		function closeMenu() {
+			menu.hidden = true;
+			input.setAttribute('aria-expanded', 'false');
+		}
+
+		toggle.addEventListener('click', (event) => {
+			if (!event.isTrusted) return;
+			openMenu();
+			input.focus();
+		});
+
+		input.addEventListener('click', (event) => {
+			if (!event.isTrusted) return;
+			openMenu();
+		});
+
+		linkedin.addEventListener('click', () => {
+			window.__selectedSource = 'LinkedIn';
+			pill.textContent = 'LinkedIn';
+			input.value = 'LinkedIn';
+			input.setAttribute('aria-invalid', 'false');
+			document.getElementById('source-field').setAttribute('aria-invalid', 'false');
+			closeMenu();
+		});
+
+		jobBoard.addEventListener('click', () => {
+			window.__selectedSource = 'Job Board';
+			pill.textContent = 'Job Board';
+			input.value = 'Job Board';
+			input.setAttribute('aria-invalid', 'false');
+			document.getElementById('source-field').setAttribute('aria-invalid', 'false');
+			closeMenu();
 		});
 	</script>
 </body>
@@ -1069,6 +1162,47 @@ async def test_fill_checkbox_uses_gui_fallback_for_untrusted_dom_clicks(
         ]
 
 
+async def test_fill_select_field_uses_trusted_click_for_greenhouse_toggle(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/greenhouse-trusted-toggle").respond_with_data(
+            GREENHOUSE_TRUSTED_TOGGLE_SELECT_HTML,
+            content_type="text/html",
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/greenhouse-trusted-toggle"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+
+        page = await browser_session.get_current_page()
+        assert page is not None
+        await page.evaluate(_build_inject_helpers_js())
+
+        field = FormField(
+            field_id="source--source",
+            name="How Did You Hear About Us?",
+            field_type="select",
+            section="Application Questions",
+            is_native=False,
+        )
+
+        success = await _fill_select_field(
+            page,
+            field,
+            "LinkedIn",
+            "[How Did You Hear About Us?]",
+            browser_session=browser_session,
+        )
+
+        assert success is True
+        assert await page.evaluate("() => window.__selectedSource") == "LinkedIn"
+
+
 async def test_domhand_interact_control_uses_gui_fallback_for_trusted_radio_wrappers(
     httpserver: HTTPServer,
 ):
@@ -1175,9 +1309,7 @@ async def test_domhand_select_short_circuits_when_value_already_selected(
         await browser_session.get_browser_state_summary()
         selector_map = await browser_session.get_selector_map()
         source_index = next(
-            idx
-            for idx, element in selector_map.items()
-            if (element.attributes or {}).get("id") == "source--source"
+            idx for idx, element in selector_map.items() if (element.attributes or {}).get("id") == "source--source"
         )
 
         result = await domhand_select(
@@ -1208,9 +1340,7 @@ async def test_domhand_select_does_not_short_circuit_when_selected_value_is_inva
         await browser_session.get_browser_state_summary()
         selector_map = await browser_session.get_selector_map()
         source_index = next(
-            idx
-            for idx, element in selector_map.items()
-            if (element.attributes or {}).get("id") == "source--source"
+            idx for idx, element in selector_map.items() if (element.attributes or {}).get("id") == "source--source"
         )
 
         result = await domhand_select(
@@ -1221,7 +1351,44 @@ async def test_domhand_select_does_not_short_circuit_when_selected_value_is_inva
         assert result.error is None
         assert "already showed" not in (result.extracted_content or "")
         page = await browser_session.get_current_page()
-        assert await page.evaluate("() => document.getElementById('source-field').getAttribute('aria-invalid')") == "false"
+        assert (
+            await page.evaluate("() => document.getElementById('source-field').getAttribute('aria-invalid')") == "false"
+        )
+
+
+async def test_domhand_select_uses_trusted_click_for_greenhouse_toggle(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/greenhouse-trusted-toggle-select").respond_with_data(
+            GREENHOUSE_TRUSTED_TOGGLE_SELECT_HTML,
+            content_type="text/html",
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/greenhouse-trusted-toggle-select"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+        await browser_session.get_browser_state_summary()
+        selector_map = await browser_session.get_selector_map()
+        source_index = next(
+            idx
+            for idx, element in selector_map.items()
+            if (element.attributes or {}).get("data-ff-id") == "source--source"
+        )
+
+        result = await domhand_select(
+            DomHandSelectParams(index=source_index, value="LinkedIn"),
+            browser_session,
+        )
+
+        assert result.error is None
+        page = await browser_session.get_current_page()
+        assert page is not None
+        assert await page.evaluate("() => window.__selectedSource") == "LinkedIn"
 
 
 async def test_fill_text_field_commits_exact_name_with_enter(
@@ -1754,6 +1921,4 @@ async def test_domhand_assess_state_prefers_visible_transition_section_over_stal
         state = json.loads((result.metadata or {})["application_state_json"])
 
         assert state["current_section"] == "Application Questions"
-        assert state["unresolved_required_fields"][0]["name"].startswith(
-            "Please tell us your current year in school"
-        )
+        assert state["unresolved_required_fields"][0]["name"].startswith("Please tell us your current year in school")

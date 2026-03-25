@@ -161,6 +161,12 @@ def parse_args() -> argparse.Namespace:
     # Profile source (one of these is required)
     parser.add_argument("--profile", default=None, help="Applicant profile as JSON string or @filepath")
     parser.add_argument("--test-data", default=None, help="Path to applicant data JSON file")
+    parser.add_argument("--user-id", default=None, help="VALET user UUID for DB-backed profile loading")
+    parser.add_argument(
+        "--resume-id",
+        default=None,
+        help="Specific VALET resume UUID to use when loading a DB-backed profile",
+    )
 
     # Optional
     parser.add_argument("--resume", default=None, help="Path to resume PDF")
@@ -265,14 +271,15 @@ def _setup_logging() -> None:
 # ── Profile loading ───────────────────────────────────────────────────
 
 
-def _load_profile(args: argparse.Namespace) -> dict:
-    """Load applicant profile from --profile or --test-data."""
+def _validate_profile_object(profile: Any) -> dict:
+    """Assert the parsed value is a JSON object (dict), not a list or scalar."""
+    if not isinstance(profile, dict):
+        raise ValueError("Profile must be a JSON object")
+    return profile
 
-    def _validate_profile(profile: Any) -> dict:
-        """Assert the parsed value is a JSON object (dict), not a list or scalar."""
-        if not isinstance(profile, dict):
-            raise ValueError("Profile must be a JSON object")
-        return profile
+
+async def _load_profile_async(args: argparse.Namespace) -> dict:
+    """Load applicant profile from CLI/env sources for async callers."""
 
     # --profile takes precedence (inline JSON or @filepath)
     if args.profile:
@@ -281,8 +288,15 @@ def _load_profile(args: argparse.Namespace) -> dict:
             path = Path(raw[1:])
             if not path.exists():
                 raise FileNotFoundError(f"Profile file not found: {path}")
-            return _validate_profile(json.loads(path.read_text()))
-        return _validate_profile(json.loads(raw))
+            return _validate_profile_object(json.loads(path.read_text()))
+        return _validate_profile_object(json.loads(raw))
+
+    user_id = getattr(args, "user_id", None)
+    resume_id = getattr(args, "resume_id", None)
+    if resume_id and not user_id:
+        raise ValueError("--resume-id requires --user-id")
+    if user_id:
+        return _validate_profile_object(await _load_profile_from_user_resume_async(user_id, resume_id))
 
     # --test-data: load from JSON file
     if args.test_data:
@@ -295,23 +309,59 @@ def _load_profile(args: argparse.Namespace) -> dict:
         try:
             from ghosthands.integrations.resume_loader import load_resume_from_file
 
-            return _validate_profile(load_resume_from_file(str(path)))
+            return _validate_profile_object(load_resume_from_file(str(path)))
         except Exception:
-            return _validate_profile(data)
+            return _validate_profile_object(data)
 
     # File-based profile (preferred — avoids /proc/pid/environ exposure)
     profile_path = os.environ.get("GH_USER_PROFILE_PATH", "")
     if profile_path:
         p = Path(profile_path)
         if p.is_file():
-            return _validate_profile(json.loads(p.read_text(encoding="utf-8")))
+            return _validate_profile_object(json.loads(p.read_text(encoding="utf-8")))
 
     # Environment variable fallback (for backwards compat with desktop bridge)
     profile_text = os.environ.get("GH_USER_PROFILE_TEXT", "")
     if profile_text:
-        return _validate_profile(json.loads(profile_text))
+        return _validate_profile_object(json.loads(profile_text))
 
     raise ValueError("Either --profile, --test-data, GH_USER_PROFILE_PATH, or GH_USER_PROFILE_TEXT env var is required")
+
+
+def _load_profile(args: argparse.Namespace) -> dict:
+    """Load applicant profile from CLI/env sources for sync callers."""
+    user_id = getattr(args, "user_id", None)
+    resume_id = getattr(args, "resume_id", None)
+    if resume_id and not user_id:
+        raise ValueError("--resume-id requires --user-id")
+    if user_id:
+        return _validate_profile_object(_load_profile_from_user_resume(user_id, resume_id))
+    return asyncio.run(_load_profile_async(args))
+
+
+async def _load_profile_from_user_resume_async(
+    user_id: str,
+    resume_id: str | None = None,
+) -> dict[str, Any]:
+    """Load a runtime profile from VALET's database using user/resume IDs."""
+    database_url = os.environ.get("GH_DATABASE_URL", "").strip()
+    if not database_url:
+        raise ValueError("GH_DATABASE_URL is required when using --user-id / --resume-id")
+
+    from ghosthands.integrations.database import Database
+    from ghosthands.integrations.resume_loader import load_runtime_profile
+
+    db = Database(database_url)
+    await db.connect()
+    try:
+        return await load_runtime_profile(db, user_id=user_id, resume_id=resume_id)
+    finally:
+        await db.close()
+
+
+def _load_profile_from_user_resume(user_id: str, resume_id: str | None = None) -> dict[str, Any]:
+    """Load a runtime profile from VALET's database using user/resume IDs."""
+    return asyncio.run(_load_profile_from_user_resume_async(user_id, resume_id))
 
 
 def _apply_runtime_env(
@@ -1165,6 +1215,7 @@ def _handle_review_result(
 
 async def run_agent_jsonl(args: argparse.Namespace) -> None:
     """Run the agent with JSONL event output on stdout."""
+    from ghosthands.cost_summary import summarize_history_cost
     from ghosthands.output.jsonl import (
         emit_account_created,
         emit_awaiting_review,
@@ -1194,7 +1245,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     # -- Load profile -------------------------------------------------------
     try:
-        profile = _load_profile(args)
+        profile = await _load_profile_async(args)
     except (json.JSONDecodeError, OSError, ValueError) as e:
         logger.error("profile_load_failed", error=str(e))
         emit_error("Failed to load applicant profile", fatal=True)
@@ -1398,24 +1449,30 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             except Exception as exc:
                 logger.warning("auto_prefill.failed", error=str(exc))
 
+    last_cost_summary: dict[str, Any] = {}
+
     async def _on_step_end(ag: Agent) -> None:
-        nonlocal account_created_emitted
+        nonlocal account_created_emitted, last_cost_summary
 
         usage = ag.history.usage
-        if usage:
+        cost_summary = summarize_history_cost(ag.history, ag.browser_session)
+        last_cost_summary = cost_summary
+        tracked_cost = float(cost_summary["total_tracked_cost_usd"])
+        if usage or tracked_cost:
             emit_cost(
-                total_usd=usage.total_cost or 0.0,
-                prompt_tokens=usage.total_prompt_tokens or 0,
-                completion_tokens=usage.total_completion_tokens or 0,
+                total_usd=tracked_cost,
+                prompt_tokens=int(cost_summary["total_tracked_prompt_tokens"]),
+                completion_tokens=int(cost_summary["total_tracked_completion_tokens"]),
+                cost_summary=cost_summary,
             )
 
         # Budget check
-        if usage and usage.total_cost and usage.total_cost >= args.max_budget:
+        if tracked_cost >= args.max_budget:
             ag.state.stopped = True
             emit_error("Budget exceeded", fatal=False, job_id=job_id)
 
         # Pre-step budget guard: stop if less than estimated step cost remaining
-        if usage and usage.total_cost and (args.max_budget - usage.total_cost) < _STEP_COST_ESTIMATE:
+        if (args.max_budget - tracked_cost) < _STEP_COST_ESTIMATE:
             ag.state.stopped = True
 
         # ── Account creation detection ──
@@ -1569,15 +1626,17 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         history, cancelled = await _run_agent_once(hitl_recovery_task)
         is_done = history.is_done()
         final_result = history.final_result() or ""
-        total_cost += history.usage.total_cost if history.usage else 0.0
+        cost_summary = summarize_history_cost(history, browser)
+        total_cost += float(cost_summary["total_tracked_cost_usd"])
         total_steps += len(history.history) if history.history else 0
 
         # Final cost event
-        if history and history.usage:
+        if history:
             emit_cost(
                 total_usd=total_cost,
-                prompt_tokens=history.usage.total_prompt_tokens or 0,
-                completion_tokens=history.usage.total_completion_tokens or 0,
+                prompt_tokens=int(cost_summary["total_tracked_prompt_tokens"]),
+                completion_tokens=int(cost_summary["total_tracked_completion_tokens"]),
+                cost_summary=cost_summary,
             )
 
         # Get real field counts and successful field provenance from DomHand callback
@@ -1617,6 +1676,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                     "success": False,
                     "steps": total_steps,
                     "costUsd": round(total_cost, 6),
+                    "costSummary": cost_summary,
                     "finalResult": final_result,
                     "blocker": None,
                     "platform": platform,
@@ -1644,6 +1704,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             "success": success,
             "steps": total_steps,
             "costUsd": round(total_cost, 6),
+            "costSummary": cost_summary,
             "finalResult": final_result,
             "blocker": blocker,
             "platform": platform,
@@ -1714,6 +1775,13 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     except Exception as e:
         logger.error("agent_run_failed", error=str(e))
+        if last_cost_summary:
+            emit_cost(
+                total_usd=float(last_cost_summary.get("total_tracked_cost_usd") or 0.0),
+                prompt_tokens=int(last_cost_summary.get("total_tracked_prompt_tokens") or 0),
+                completion_tokens=int(last_cost_summary.get("total_tracked_completion_tokens") or 0),
+                cost_summary=last_cost_summary,
+            )
         runtime_error = _classify_runtime_error(
             e,
             proxy_mode=bool(args.proxy_url or (app_settings and app_settings.llm_proxy_url)),
@@ -1754,15 +1822,40 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 # ── Human-readable agent run ─────────────────────────────────────────
 
 
+def _print_cost_breakdown(cost_summary: dict[str, Any]) -> None:
+    """Print a per-subsystem cost breakdown for human-mode output."""
+    total = float(cost_summary.get("total_tracked_cost_usd") or 0.0)
+    bu_cost = float(cost_summary.get("browser_use_cost_usd") or 0.0)
+    dh_cost = float(cost_summary.get("domhand_cost_usd") or 0.0)
+    sh_calls = int(cost_summary.get("stagehand_calls") or 0)
+    sh_used = bool(cost_summary.get("stagehand_used"))
+
+    print(f"  Cost:    ${total:.4f}")
+    print(f"    browser-use  ${bu_cost:.4f}  "
+          f"({int(cost_summary.get('browser_use_prompt_tokens') or 0)} in / "
+          f"{int(cost_summary.get('browser_use_completion_tokens') or 0)} out)")
+    print(f"    domhand      ${dh_cost:.4f}  "
+          f"({int(cost_summary.get('domhand_prompt_tokens') or 0)} in / "
+          f"{int(cost_summary.get('domhand_completion_tokens') or 0)} out, "
+          f"{int(cost_summary.get('domhand_llm_calls') or 0)} calls)")
+    if sh_used:
+        print(f"    stagehand    (untracked, {sh_calls} calls)")
+    if cost_summary.get("untracked_cost_possible"):
+        reasons = ", ".join(cost_summary.get("untracked_reasons") or []) or "unknown"
+        print(f"  Note:    Additional untracked cost possible ({reasons})")
+
+
 async def run_agent_human(args: argparse.Namespace) -> None:
     """Run the agent with human-readable terminal output.
 
     This replicates the examples/apply_to_job.py experience for developers
     who want to test from the command line without parsing JSONL.
     """
+    from ghosthands.cost_summary import summarize_history_cost
+
     # -- Load profile -------------------------------------------------------
     try:
-        profile = _load_profile(args)
+        profile = await _load_profile_async(args)
     except (json.JSONDecodeError, OSError, ValueError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1890,6 +1983,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     print()
 
     history = await agent.run(max_steps=args.max_steps)
+    cost_summary = summarize_history_cost(history, browser)
 
     print()
     print("=" * 60)
@@ -1897,9 +1991,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     print("=" * 60)
     print(f"  Done:    {history.is_done()}")
     print(f"  Steps:   {len(history.history) if history.history else 0}")
-    if history.usage:
-        print(f"  Cost:    ${history.usage.total_cost:.4f}")
-        print(f"  Tokens:  {history.usage.total_prompt_tokens} in / {history.usage.total_completion_tokens} out")
+    _print_cost_breakdown(cost_summary)
     result = history.final_result()
     if result:
         print(f"  Output:  {result[:500]}")

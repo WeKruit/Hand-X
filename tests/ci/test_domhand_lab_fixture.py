@@ -34,6 +34,10 @@ from ghosthands.actions.domhand_fill import (
     _read_field_value,
     extract_visible_form_fields,
 )
+from ghosthands.dom.fill_browser_scripts import (
+    _CLICK_RADIO_OPTION_JS,
+    _GET_GROUP_OPTION_TARGET_JS,
+)
 from ghosthands.dom.shadow_helpers import ensure_helpers
 
 _FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "domhand_dropdown_control_lab.html"
@@ -191,5 +195,56 @@ async def test_domhand_lab_async_combo_no_options_then_search(httpserver, lab_ht
             await page.wait_for_timeout(150)
             opt_texts2 = await page.locator("#async-skill-list [role='option']").all_inner_texts()
             assert any("python" in t.lower() for t in opt_texts2), opt_texts2
+        finally:
+            await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_group_option_scripts_use_label_for_native_checkbox_options() -> None:
+    html = """
+    <html>
+      <body>
+        <div class="checkbox-group">
+          <div class="checkbox__input">
+            <input id="sponsor-no" data-ff-id="ff-sponsor-no" type="checkbox" />
+          </div>
+          <label for="sponsor-no">No, I do not require sponsorship either now or in the future</label>
+        </div>
+      </body>
+    </html>
+    """
+
+    async with async_playwright() as p:
+        browser = await _launch_chromium(p)
+        try:
+            page = await browser.new_page()
+            await page.set_content(html, wait_until="domcontentloaded")
+            await ensure_helpers(page)
+            await page.evaluate(_build_inject_helpers_js())
+
+            raw_click = await page.evaluate(
+                f"([ffId, text]) => ({_CLICK_RADIO_OPTION_JS})(ffId, text)",
+                [
+                    "ff-sponsor-no",
+                    "No, I do not require sponsorship either now or in the future",
+                ],
+            )
+            click_data = json.loads(raw_click) if isinstance(raw_click, str) else raw_click
+            assert click_data.get("clicked") is True, click_data
+            assert await page.locator("#sponsor-no").is_checked() is True
+
+            await page.evaluate("() => { document.querySelector('#sponsor-no').checked = false; }")
+            raw_target = await page.evaluate(
+                f"([ffId, text]) => ({_GET_GROUP_OPTION_TARGET_JS})(ffId, text)",
+                [
+                    "ff-sponsor-no",
+                    "No, I do not require sponsorship either now or in the future",
+                ],
+            )
+            target = json.loads(raw_target) if isinstance(raw_target, str) else raw_target
+            assert target.get("found") is True, target
+
+            await page.mouse.click(target["x"], target["y"])
+            assert await page.locator("#sponsor-no").is_checked() is True
         finally:
             await browser.close()

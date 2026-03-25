@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from browser_use.agent.service import Agent
 
+from ghosthands.cost_summary import build_cost_summary, get_stagehand_usage
 from ghosthands.step_trace import (
     attach_step_trace_context,
     publish_browser_session_trace,
@@ -53,28 +54,71 @@ _SAME_TAB_GUARD_JS = r"""(() => {
 		} catch (e) {}
 	}
 
+	function navigateSameTab(url) {
+		if (typeof url !== 'string' || !url || url === 'about:blank') return;
+		try {
+			window.location.assign(url);
+		} catch (e) {}
+	}
+
 	var originalOpen = typeof window.open === 'function' ? window.open.bind(window) : null;
 	window.open = function(url) {
-		try {
-			if (typeof url === 'string' && url && url !== 'about:blank') {
-				window.location.assign(url);
-			}
-		} catch (e) {}
+		navigateSameTab(url);
 		return window;
 	};
 	window.__ghOriginalWindowOpen = originalOpen;
 
 	document.addEventListener('click', function(event) {
-		var el = event.target && event.target.closest ? event.target.closest('a[target], area[target]') : null;
-		if (el) {
-			try { el.removeAttribute('target'); } catch (e) {}
+		var el = event.target && event.target.closest ? event.target.closest('a[href], area[href]') : null;
+		if (!el) {
+			return;
 		}
+		var target = '';
+		try {
+			target = String(el.getAttribute('target') || '').trim().toLowerCase();
+		} catch (e) {}
+		try { el.removeAttribute('target'); } catch (e) {}
+		if (!target || target === '_self') {
+			return;
+		}
+		var href = '';
+		try {
+			href = String(el.href || el.getAttribute('href') || '').trim();
+		} catch (e) {}
+		if (!href || href.charAt(0) === '#' || href.toLowerCase().indexOf('javascript:') === 0) {
+			return;
+		}
+		try { event.preventDefault(); } catch (e) {}
+		try { event.stopImmediatePropagation(); } catch (e) {}
+		try { event.stopPropagation(); } catch (e) {}
+		navigateSameTab(href);
 	}, true);
 
 	document.addEventListener('submit', function(event) {
 		var form = event.target;
-		if (form && form.removeAttribute) {
-			try { form.removeAttribute('target'); } catch (e) {}
+		if (!form || !form.removeAttribute) {
+			return;
+		}
+		var target = '';
+		try {
+			target = String(form.getAttribute('target') || '').trim().toLowerCase();
+		} catch (e) {}
+		try { form.removeAttribute('target'); } catch (e) {}
+		if (target && target !== '_self') {
+			try { event.preventDefault(); } catch (e) {}
+			try { event.stopImmediatePropagation(); } catch (e) {}
+			try { event.stopPropagation(); } catch (e) {}
+			setTimeout(function() {
+				try {
+					if (typeof form.requestSubmit === 'function') {
+						form.requestSubmit();
+						return;
+					}
+				} catch (e) {}
+				try {
+					HTMLFormElement.prototype.submit.call(form);
+				} catch (e) {}
+			}, 0);
 		}
 	}, true);
 
@@ -125,8 +169,16 @@ async def install_same_tab_guard(agent: "Agent") -> None:
 			except Exception as exc:
 				logger.debug("step.same_tab_guard_init_failed", extra={"error": str(exc)})
 
-		page = await browser_session.get_current_page()
-		if page:
+		pages = []
+		try:
+			pages = list(await browser_session.get_pages())
+		except Exception:
+			pages = []
+		if not pages:
+			page = await browser_session.get_current_page()
+			if page:
+				pages = [page]
+		for page in pages:
 			await page.evaluate(_SAME_TAB_GUARD_JS)
 	except Exception as exc:
 		logger.debug("step.same_tab_guard_apply_failed", extra={"error": str(exc)})
@@ -232,7 +284,16 @@ class StepHooks:
         self.max_budget = max_budget
         self.on_status_update = on_status_update
         self._cumulative_cost: float = 0.0
-        self._metadata_cost_total: float = 0.0
+        self._browser_use_cost: float = 0.0
+        self._browser_use_prompt_tokens: int = 0
+        self._browser_use_completion_tokens: int = 0
+        self._domhand_cost_total: float = 0.0
+        self._domhand_input_tokens_total: int = 0
+        self._domhand_output_tokens_total: int = 0
+        self._domhand_llm_calls_total: int = 0
+        self._domhand_models: set[str] = set()
+        self._stagehand_sources: set[str] = set()
+        self._stagehand_calls: int = 0
         self._last_phase: str | None = None
 
     # ------------------------------------------------------------------
@@ -311,6 +372,9 @@ class StepHooks:
             browser_use_cost = usage.total_cost or 0.0
             usage_input_tokens = usage.total_prompt_tokens or 0
             usage_output_tokens = usage.total_completion_tokens or 0
+        self._browser_use_cost = browser_use_cost
+        self._browser_use_prompt_tokens = usage_input_tokens
+        self._browser_use_completion_tokens = usage_output_tokens
 
         last_entry = agent.history.history[-1] if agent.history.history else None
         step_cost: float | None = None
@@ -351,18 +415,27 @@ class StepHooks:
 
             if has_step_metadata:
                 step_cost = step_cost_total
-                self._metadata_cost_total += step_cost_total
+                self._domhand_cost_total += step_cost_total
                 if has_input_tokens:
                     step_input_tokens = step_input_total
+                    self._domhand_input_tokens_total += step_input_total
                 if has_output_tokens:
                     step_output_tokens = step_output_total
+                    self._domhand_output_tokens_total += step_output_total
                 if has_llm_calls:
                     step_llm_calls = step_llm_call_total
+                    self._domhand_llm_calls_total += step_llm_call_total
+                if step_model:
+                    self._domhand_models.add(step_model)
 
         # Planner cost from browser-use TokenCost (LiteLLM pricing) + DomHand tool LLM
         # from ActionResult.metadata step_cost (ghosthands.config.models.estimate_cost).
         # Totals are estimates; reconcile with provider/VALET billing separately.
-        self._cumulative_cost = browser_use_cost + self._metadata_cost_total
+        stagehand_usage = get_stagehand_usage(browser_session)
+        self._stagehand_sources.update(stagehand_usage["sources"])
+        self._stagehand_calls = int(stagehand_usage["calls"])
+        cost_summary = self.cost_summary
+        self._cumulative_cost = float(cost_summary["total_tracked_cost_usd"])
 
         if self._cumulative_cost >= self.max_budget:
             logger.warning(
@@ -399,6 +472,7 @@ class StepHooks:
                 "step": step,
                 "step_cost": round(step_cost, 6) if step_cost is not None else None,
                 "cost_usd": round(self._cumulative_cost, 6),
+                "cost_summary": cost_summary,
                 "is_done": agent.history.is_done(),
                 "page_url": current_url,
                 "actions": _summarize_actions(agent),
@@ -466,3 +540,20 @@ class StepHooks:
     def cumulative_cost(self) -> float:
         """Return the cumulative LLM cost tracked so far."""
         return self._cumulative_cost
+
+    @property
+    def cost_summary(self) -> dict[str, Any]:
+        """Return the unified tracked-cost summary for the current run."""
+        return build_cost_summary(
+            browser_use_cost_usd=self._browser_use_cost,
+            browser_use_prompt_tokens=self._browser_use_prompt_tokens,
+            browser_use_completion_tokens=self._browser_use_completion_tokens,
+            domhand_cost_usd=self._domhand_cost_total,
+            domhand_prompt_tokens=self._domhand_input_tokens_total,
+            domhand_completion_tokens=self._domhand_output_tokens_total,
+            domhand_llm_calls=self._domhand_llm_calls_total,
+            domhand_models=sorted(self._domhand_models),
+            stagehand_used=bool(self._stagehand_sources),
+            stagehand_calls=self._stagehand_calls,
+            stagehand_sources=sorted(self._stagehand_sources),
+        ).to_dict()

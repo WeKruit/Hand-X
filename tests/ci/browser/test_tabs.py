@@ -105,6 +105,41 @@ async def browser_session():
 	await session.kill()
 
 
+@pytest.mark.asyncio
+async def test_same_tab_guard_forces_target_blank_navigation_into_current_tab(browser_session, base_url):
+	"""Ensure target=_blank links and window.open() stay in the current tab under the guard."""
+	from types import SimpleNamespace
+
+	from ghosthands.agent.hooks import install_same_tab_guard
+
+	await browser_session.navigate_to(f'{base_url}/background-tab-test')
+	baseline_tabs = len(await browser_session.get_tabs())
+	agent = SimpleNamespace(browser_session=browser_session)
+	await install_same_tab_guard(agent)
+
+	page = await browser_session.get_current_page()
+	assert page is not None
+	await page.evaluate("() => document.getElementById('open-tab-link').click()")
+	await asyncio.sleep(0.3)
+
+	current_page = await browser_session.get_current_page()
+	assert current_page is not None
+	assert await current_page.get_url() == f'{base_url}/page3'
+	assert len(await browser_session.get_tabs()) == baseline_tabs
+
+	await browser_session.navigate_to(f'{base_url}/background-tab-test')
+	await install_same_tab_guard(agent)
+	page = await browser_session.get_current_page()
+	assert page is not None
+	await page.evaluate("() => document.getElementById('open-tab-btn').click()")
+	await asyncio.sleep(0.3)
+
+	current_page = await browser_session.get_current_page()
+	assert current_page is not None
+	assert await current_page.get_url() == f'{base_url}/page3'
+	assert len(await browser_session.get_tabs()) == baseline_tabs
+
+
 class TestMultiTabOperations:
 	"""Test multi-tab creation, switching, and closing."""
 

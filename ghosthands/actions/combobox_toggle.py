@@ -8,6 +8,7 @@ is open; this module only improves *opening* without changing matching semantics
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -132,6 +133,103 @@ CLICK_COMBOBOX_TOGGLE_BY_FFID_JS = r"""(ffId) => {
 }"""
 
 
+GET_COMBOBOX_TOGGLE_TARGET_BY_FFID_JS = r"""(ffId) => {
+	const ff = window.__ff;
+	const el = ff ? ff.byId(ffId) : document.querySelector('[data-ff-id="' + ffId + '"]');
+	if (!el) {
+		return JSON.stringify({ found: false, already_open: false, reason: 'no_el' });
+	}
+	const visible = (node) => {
+		if (!node) return false;
+		const style = window.getComputedStyle(node);
+		if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+		const rect = node.getBoundingClientRect();
+		return rect.width > 0 && rect.height > 0;
+	};
+	const classStr = (n) => {
+		const c = n && n.getAttribute ? n.getAttribute('class') : '';
+		return (c || '').toLowerCase();
+	};
+	const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
+	const qAll = (sel) => (window.__ff && window.__ff.queryAll)
+		? window.__ff.queryAll(sel)
+		: Array.from(document.querySelectorAll(sel));
+	const isClearOrRemove = (n) => {
+		const al = ((n && n.getAttribute && n.getAttribute('aria-label')) || '').toLowerCase();
+		const cls = classStr(n);
+		return al.includes('clear') || al.includes('remove') || cls.includes('clear-indicator');
+	};
+	const root =
+		el.closest('[class*="select__control"]')
+		|| el.closest('[class*="Select__control"]')
+		|| el.closest('[class*="css-"][class*="-control"]')
+		|| el.closest('[class*="react-select"]')
+		|| el.closest('[role="group"]')
+		|| el.closest('[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field')
+		|| el.parentElement
+		|| el;
+	const combo =
+		el.closest('[role="combobox"]')
+		|| (el.getAttribute && el.getAttribute('role') === 'combobox' ? el : null)
+		|| (root && root.querySelector ? root.querySelector('[role="combobox"]') : null);
+	const anchor = (combo || root || el).getBoundingClientRect();
+	const hasNearbyPopup = () => {
+		const popups = qAll(
+			'[role="listbox"], [role="menu"], [class*="menu"], [class*="Menu"], [class*="listbox"], [class*="dropdown-menu"], [class*="options-list"]'
+		);
+		for (const popup of popups) {
+			if (!visible(popup)) continue;
+			const rect = popup.getBoundingClientRect();
+			const overlapX = Math.max(0, Math.min(rect.right, anchor.right) - Math.max(rect.left, anchor.left));
+			const distanceY = Math.min(
+				Math.abs(rect.top - anchor.bottom),
+				Math.abs(anchor.top - rect.bottom)
+			);
+			if (overlapX > 0 || distanceY < 140) return true;
+		}
+		return false;
+	};
+	if ((combo && combo.getAttribute('aria-expanded') === 'true') || hasNearbyPopup()) {
+		return JSON.stringify({ found: false, already_open: true, reason: 'already_open' });
+	}
+	const orderedSelectors = [
+		'button[aria-label*="Toggle" i]',
+		'div[role="button"][aria-label*="Toggle" i]',
+		'button[aria-label*="Open" i]',
+		'button[aria-label*="Menu" i]',
+		'[class*="dropdown-indicator"]',
+		'[class*="DropdownIndicator"]',
+		'[class*="indicator-container"]',
+		'[class*="IndicatorsContainer"] [class*="indicator"]:not([class*="clear"])',
+	];
+	for (const sel of orderedSelectors) {
+		for (const btn of root.querySelectorAll(sel)) {
+			if (!visible(btn) || isClearOrRemove(btn)) continue;
+			const rect = btn.getBoundingClientRect();
+			return JSON.stringify({
+				found: true,
+				already_open: false,
+				via: 'toggle',
+				selector: sel,
+				x: rect.left + rect.width / 2,
+				y: rect.top + rect.height / 2,
+			});
+		}
+	}
+	if (visible(el)) {
+		const rect = el.getBoundingClientRect();
+		return JSON.stringify({
+			found: true,
+			already_open: false,
+			via: 'input',
+			x: rect.left + rect.width / 2,
+			y: rect.top + rect.height / 2,
+		});
+	}
+	return JSON.stringify({ found: false, already_open: false, reason: 'no_target' });
+}"""
+
+
 def combobox_toggle_clicked(result: Any) -> bool:
     """True when JS reported a successful toggle/chevron click."""
     if isinstance(result, dict):
@@ -143,6 +241,65 @@ def combobox_toggle_clicked(result: Any) -> bool:
             return False
         return bool(isinstance(data, dict) and data.get("clicked"))
     return False
+
+
+def combobox_toggle_target(result: Any) -> dict[str, Any]:
+    """Normalize helper payloads describing where a trusted combobox click should land."""
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, str):
+        try:
+            data = json.loads(result)
+        except (json.JSONDecodeError, ValueError):
+            return {"found": False, "already_open": False}
+        return data if isinstance(data, dict) else {"found": False, "already_open": False}
+    return {"found": False, "already_open": False}
+
+
+async def trusted_open_combobox_by_ffid(page: Any, ff_id: str) -> dict[str, Any]:
+    """Open a combobox with a real mouse click so React/Greenhouse sees ``isTrusted=true``."""
+    if not str(ff_id).strip():
+        return {"clicked": False, "found": False, "already_open": False, "reason": "missing_ff_id"}
+
+    try:
+        target = combobox_toggle_target(await page.evaluate(GET_COMBOBOX_TOGGLE_TARGET_BY_FFID_JS, ff_id))
+    except Exception as exc:
+        return {"clicked": False, "found": False, "already_open": False, "reason": f"evaluate_failed:{exc}"}
+
+    if target.get("already_open"):
+        target["clicked"] = False
+        return target
+    if not target.get("found"):
+        target["clicked"] = False
+        return target
+
+    try:
+        mouse = await page.mouse
+        await mouse.click(float(target["x"]), float(target["y"]))
+    except Exception as exc:
+        return {
+            **target,
+            "clicked": False,
+            "reason": f"mouse_click_failed:{exc}",
+        }
+
+    post: dict[str, Any] = {}
+    opened = False
+    for _ in range(5):
+        await asyncio.sleep(0.12)
+        try:
+            post = combobox_toggle_target(await page.evaluate(GET_COMBOBOX_TOGGLE_TARGET_BY_FFID_JS, ff_id))
+        except Exception:
+            post = {}
+        opened = bool(post.get("already_open"))
+        if opened:
+            break
+    return {
+        **target,
+        "clicked": opened,
+        "already_open": opened,
+        "post_check": post,
+    }
 
 
 CLICK_INPUT_BY_FFID_JS = r"""(ffId) => {

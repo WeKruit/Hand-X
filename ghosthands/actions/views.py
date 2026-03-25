@@ -48,6 +48,7 @@ class FillFieldResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     field_id: str
+    field_key: str = ""
     name: str
     success: bool
     actor: str = Field(description="Outcome owner: 'dom', 'skipped', or 'unfilled'")

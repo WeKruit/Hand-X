@@ -401,6 +401,78 @@ class DefaultActionWatchdog(BaseWatchdog):
 		except Exception:
 			raise
 
+	async def _maybe_reroute_same_tab_navigation(self, element_node, cdp_session, session_id, backend_node_id) -> dict | None:
+		"""Route target=_blank and window.open click targets into the current tab."""
+		try:
+			result = await cdp_session.cdp_client.send.DOM.resolveNode(
+				params={'backendNodeId': backend_node_id},
+				session_id=session_id,
+			)
+			assert 'object' in result and 'objectId' in result['object'], 'Failed to resolve node for same-tab reroute'
+			object_id = result['object']['objectId']
+			target_info = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+				params={
+					'functionDeclaration': """
+						function() {
+							function toAbsolute(url) {
+								if (typeof url !== 'string' || !url.trim()) return '';
+								try {
+									return new URL(url, window.location.href).toString();
+								} catch (e) {
+									return '';
+								}
+							}
+
+							function windowOpenTarget(node) {
+								if (!node || typeof node.getAttribute !== 'function') return null;
+								const onclick = String(node.getAttribute('onclick') || '').trim();
+								if (!onclick) return null;
+								const match = onclick.match(/window\\.open\\((['"`])([^'"`]+)\\1/i);
+								if (!match) return null;
+								const url = toAbsolute(match[2]);
+								return url ? {url, reason: 'window_open'} : null;
+							}
+
+							const node = this;
+							const anchor = node && node.closest ? node.closest('a[href], area[href]') : null;
+							if (anchor) {
+								const target = String(anchor.getAttribute('target') || '').trim().toLowerCase();
+								const href = toAbsolute(anchor.getAttribute('href') || anchor.href || '');
+								if (href && target && target !== '_self') {
+									return {url: href, reason: 'anchor_target'};
+								}
+							}
+
+							const form = node && node.form ? node.form : (node && node.closest ? node.closest('form') : null);
+							if (form) {
+								const target = String(form.getAttribute('target') || '').trim().toLowerCase();
+								const action = toAbsolute(form.getAttribute('action') || form.action || window.location.href);
+								if (action && target && target !== '_self') {
+									return {url: action, reason: 'form_target'};
+								}
+							}
+
+							return windowOpenTarget(node) || windowOpenTarget(anchor) || windowOpenTarget(form) || null;
+						}
+					""",
+					'objectId': object_id,
+					'returnByValue': True,
+				},
+				session_id=session_id,
+			)
+			value = ((target_info or {}).get('result') or {}).get('value')
+			if not isinstance(value, dict):
+				return None
+			url = str(value.get('url') or '').strip()
+			if not url:
+				return None
+			reason = str(value.get('reason') or 'same_tab_reroute').strip() or 'same_tab_reroute'
+			await self.browser_session.navigate_to(url, new_tab=False)
+			return {'same_tab_navigation_url': url, 'same_tab_navigation_reason': reason}
+		except Exception as e:
+			self.logger.debug(f'⚠️ Same-tab reroute inspection failed: {type(e).__name__}: {e}')
+			return None
+
 	def _is_create_account_first_run(self) -> bool:
 		"""Return whether this auth flow must stay on Create Account until proven otherwise."""
 		source = os.getenv('GH_CREDENTIAL_SOURCE', '').strip().lower()
@@ -1003,6 +1075,15 @@ class DefaultActionWatchdog(BaseWatchdog):
 			layout_metrics = await cdp_session.cdp_client.send.Page.getLayoutMetrics(session_id=session_id)
 			viewport_width = layout_metrics['layoutViewport']['clientWidth']
 			viewport_height = layout_metrics['layoutViewport']['clientHeight']
+
+			same_tab_navigation = await self._maybe_reroute_same_tab_navigation(
+				element_node,
+				cdp_session,
+				session_id,
+				backend_node_id,
+			)
+			if same_tab_navigation is not None:
+				return same_tab_navigation
 
 			# Scroll element into view FIRST before getting coordinates
 			try:

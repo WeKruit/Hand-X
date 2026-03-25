@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
+from ghosthands.cost_summary import mark_stagehand_usage
 
 
 class StagehandFillParams(BaseModel):
@@ -46,6 +47,7 @@ async def stagehand_fill_field(
             )
         )
 
+    mark_stagehand_usage(browser_session, source="stagehand_fill_tool")
     if params.field_type in ("select", "dropdown", "radio"):
         instruction = f"Select '{params.value}' in the '{params.label}' dropdown or field"
     elif params.field_type == "checkbox":
@@ -83,6 +85,7 @@ async def stagehand_observe_fields(
             error="Stagehand not available — use DOM inspection or screenshot instead."
         )
 
+    mark_stagehand_usage(browser_session, source="stagehand_observe_tool")
     elements = await layer.observe(params.instruction)
 
     if not elements:

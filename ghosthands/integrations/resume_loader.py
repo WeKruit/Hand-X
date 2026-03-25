@@ -6,6 +6,7 @@ profile dictionary that DomHand uses to match form fields to user data.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -104,6 +105,66 @@ async def load_resume(db: Database, user_id: str) -> dict[str, Any]:
         name=f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip(),
         confidence=raw.get("parsing_confidence"),
     )
+
+    return profile
+
+
+async def load_runtime_profile(
+    db: Database,
+    user_id: str,
+    resume_id: str | None = None,
+) -> dict[str, Any]:
+    """Load a desktop-like runtime profile from VALET data sources.
+
+    This reconstructs the profile shape Hand-X expects when testing against a
+    real VALET user:
+
+    1. Parsed resume data provides the base profile.
+    2. Global user application profile supplies survey-backed defaults.
+    3. Resume-specific application profile overrides win over global values.
+    4. QA bank entries are attached as answer-bank context.
+    """
+    if resume_id:
+        raw_resume = await db.load_resume_profile_by_id(user_id, resume_id)
+    else:
+        raw_resume = await db.load_resume_profile(user_id)
+
+    user_profile, global_application_profile, resume_application_profile, answer_bank = await asyncio.gather(
+        db.load_user_profile(user_id),
+        db.load_user_application_profile(user_id),
+        db.load_resume_application_profile(user_id, raw_resume["resume_id"]),
+        db.load_answer_bank(user_id),
+    )
+
+    profile = _map_to_profile(raw_resume["parsed_data"])
+    _apply_user_fallbacks(profile, user_profile or {})
+    merged_application_profile = _merge_application_profiles(
+        global_application_profile,
+        resume_application_profile,
+    )
+    _apply_application_profile_overrides(profile, merged_application_profile)
+
+    answer_bank_entries = [
+        {
+            "question": row["question"],
+            "answer": row["answer"],
+            "canonical_question": row.get("canonical_question"),
+            "intent_tag": row.get("intent_tag"),
+            "usage_mode": row.get("usage_mode"),
+            "source": row.get("source"),
+            "confidence": row.get("confidence"),
+            "synonyms": row.get("synonyms"),
+        }
+        for row in answer_bank
+    ]
+    if answer_bank_entries:
+        profile["answer_bank"] = answer_bank_entries
+        profile["answerBank"] = answer_bank_entries
+
+    profile["_resume_id"] = raw_resume["resume_id"]
+    profile["_file_key"] = raw_resume.get("file_key")
+    profile["_parsing_confidence"] = raw_resume.get("parsing_confidence")
+    profile["_raw_text"] = raw_resume.get("raw_text")
 
     return profile
 
@@ -347,3 +408,163 @@ def _parse_location(
         }
 
     return {**default_address, "city": location}
+
+
+def _has_profile_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value) > 0
+    return value is not None
+
+
+def _merge_application_profiles(
+    global_profile: dict[str, Any] | None,
+    resume_specific_profile: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not global_profile and not resume_specific_profile:
+        return None
+    if not resume_specific_profile:
+        return dict(global_profile or {})
+    if not global_profile:
+        return dict(resume_specific_profile)
+
+    merged = dict(global_profile)
+    for key, value in resume_specific_profile.items():
+        if key in {"id", "user_id", "resume_id", "created_at", "updated_at"}:
+            continue
+        if _has_profile_value(value):
+            merged[key] = value
+    return merged
+
+
+def _split_name(full_name: str) -> tuple[str, str]:
+    parts = full_name.strip().split()
+    if not parts:
+        return "", ""
+    return parts[0], " ".join(parts[1:]) if len(parts) > 1 else ""
+
+
+def _apply_user_fallbacks(profile: dict[str, Any], user_profile: dict[str, Any]) -> None:
+    if not user_profile:
+        return
+
+    if not profile.get("email") and user_profile.get("email"):
+        profile["email"] = str(user_profile["email"]).strip()
+    if not profile.get("phone") and user_profile.get("phone"):
+        profile["phone"] = str(user_profile["phone"]).strip()
+    if not profile.get("linkedin_url") and user_profile.get("linkedin_url"):
+        profile["linkedin_url"] = str(user_profile["linkedin_url"]).strip()
+    if not profile.get("website_url") and user_profile.get("portfolio_url"):
+        profile["website_url"] = str(user_profile["portfolio_url"]).strip()
+    if (not profile.get("skills")) and isinstance(user_profile.get("skills"), list):
+        profile["skills"] = user_profile["skills"]
+
+    if (not profile.get("first_name") or not profile.get("last_name")) and user_profile.get("name"):
+        first_name, last_name = _split_name(str(user_profile["name"]))
+        if not profile.get("first_name"):
+            profile["first_name"] = first_name
+        if not profile.get("last_name"):
+            profile["last_name"] = last_name
+        if not profile.get("full_name"):
+            profile["full_name"] = str(user_profile["name"]).strip()
+
+    raw_address = profile.get("address")
+    address_data = raw_address if isinstance(raw_address, dict) else {}
+    parsed_location = _parse_location(
+        _text_value(user_profile.get("location")),
+        PROFILE_DEFAULTS["address"],
+    )
+    if isinstance(address_data, dict):
+        merged_address = dict(address_data)
+        for key in ("street", "city", "state", "zip", "country"):
+            if not _has_profile_value(merged_address.get(key)) and _has_profile_value(parsed_location.get(key)):
+                merged_address[key] = parsed_location.get(key)
+        profile["address"] = merged_address
+
+    if not profile.get("city") and parsed_location.get("city"):
+        profile["city"] = parsed_location["city"]
+    if not profile.get("state") and parsed_location.get("state"):
+        profile["state"] = parsed_location["state"]
+    if not profile.get("zip") and parsed_location.get("zip"):
+        profile["zip"] = parsed_location["zip"]
+        profile["postal_code"] = parsed_location["zip"]
+    if not profile.get("country") and parsed_location.get("country"):
+        profile["country"] = parsed_location["country"]
+
+
+def _set_if_present(profile: dict[str, Any], key: str, value: Any) -> None:
+    if _has_profile_value(value):
+        profile[key] = value
+
+
+def _apply_application_profile_overrides(
+    profile: dict[str, Any],
+    application_profile: dict[str, Any] | None,
+) -> None:
+    if not application_profile:
+        return
+
+    address_value = profile.get("address")
+    address_data = address_value if isinstance(address_value, dict) else {}
+    if isinstance(address_data, dict):
+        merged_address = dict(address_data)
+        if _has_profile_value(application_profile.get("address")):
+            merged_address["street"] = str(application_profile["address"]).strip()
+        if _has_profile_value(application_profile.get("city")):
+            merged_address["city"] = str(application_profile["city"]).strip()
+        if _has_profile_value(application_profile.get("state")):
+            merged_address["state"] = str(application_profile["state"]).strip()
+        if _has_profile_value(application_profile.get("zip_code")):
+            merged_address["zip"] = str(application_profile["zip_code"]).strip()
+        if _has_profile_value(application_profile.get("county")):
+            merged_address["county"] = str(application_profile["county"]).strip()
+        if _has_profile_value(application_profile.get("country_of_residence")):
+            merged_address["country"] = str(application_profile["country_of_residence"]).strip()
+        profile["address"] = merged_address
+
+    _set_if_present(profile, "city", application_profile.get("city"))
+    _set_if_present(profile, "state", application_profile.get("state"))
+    if _has_profile_value(application_profile.get("zip_code")):
+        zip_code = str(application_profile["zip_code"]).strip()
+        profile["zip"] = zip_code
+        profile["postal_code"] = zip_code
+    _set_if_present(profile, "county", application_profile.get("county"))
+    _set_if_present(profile, "country", application_profile.get("country_of_residence"))
+    _set_if_present(profile, "country_of_residence", application_profile.get("country_of_residence"))
+
+    scalar_overrides = {
+        "work_authorization": application_profile.get("work_authorization"),
+        "visa_sponsorship": application_profile.get("visa_sponsorship"),
+        "gender": application_profile.get("eeo_gender"),
+        "race_ethnicity": application_profile.get("eeo_ethnicity"),
+        "veteran_status": application_profile.get("eeo_veteran"),
+        "disability_status": application_profile.get("eeo_disability"),
+        "salary_expectation": application_profile.get("salary_expectation"),
+        "spoken_languages": application_profile.get("spoken_languages"),
+        "english_proficiency": application_profile.get("english_proficiency"),
+        "preferred_work_mode": application_profile.get("preferred_work_mode"),
+        "preferred_locations": application_profile.get("preferred_locations"),
+        "willing_to_relocate": application_profile.get("willing_to_relocate"),
+        "how_did_you_hear": application_profile.get("how_did_you_hear"),
+        "availability_window": application_profile.get("availability_window"),
+        "notice_period": application_profile.get("notice_period"),
+        "preferred_name": application_profile.get("preferred_name"),
+        "current_school_year": application_profile.get("current_school_year"),
+        "graduation_date": application_profile.get("graduation_date"),
+        "degree_seeking": application_profile.get("degree_seeking"),
+        "certifications_licenses": application_profile.get("certifications_licenses"),
+        "secondary_email": application_profile.get("secondary_email"),
+        "sponsor_type": application_profile.get("sponsor_type"),
+        "transgender": application_profile.get("transgender"),
+        "sexual_orientation": application_profile.get("sexual_orientation"),
+        "pronouns": application_profile.get("pronouns"),
+        "dual_citizenship": application_profile.get("dual_citizenship"),
+        "dual_citizenship_country": application_profile.get("dual_citizenship_country"),
+        "birthday": application_profile.get("birthday"),
+    }
+    for key, value in scalar_overrides.items():
+        _set_if_present(profile, key, value)
+
+    if _has_profile_value(application_profile.get("languages")):
+        profile["languages"] = application_profile.get("languages")

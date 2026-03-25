@@ -37,6 +37,14 @@ from ghosthands.dom.dropdown_verify import selection_matches_desired
 
 logger = structlog.get_logger(__name__)
 
+# Greenhouse / react-select: the listbox often paints 400–900ms after open; selection commits
+# asynchronously. Too-short waits + early Escape (settle) looks like "nothing popped" or instant
+# click-away in headful runs.
+_DROPDOWN_OPEN_SETTLE_S = 1.8
+# After clicking a menu option: give react-select time to commit before dismiss/verify.
+POST_OPTION_CLICK_SETTLE_S = 2.0
+_POST_OPTION_CLICK_BREATHE_S = POST_OPTION_CLICK_SETTLE_S
+
 
 @dataclass
 class DropdownFillResult:
@@ -137,23 +145,33 @@ async def fill_interactive_dropdown(
     # ── Phase 1: open → scan → match → click ────────────────────────
     try:
         await open_fn()
-        await asyncio.sleep(0.55)
+        await asyncio.sleep(_DROPDOWN_OPEN_SETTLE_S)
     except Exception:
         return DropdownFillResult()
 
     options = await _scan_options(page)
     if not options:
-        try:
-            await open_fn()
-            await asyncio.sleep(0.4)
+        # Async option lists (Greenhouse) may render after open. Wait/rescan before
+        # calling open_fn() again — a second toggle click closes react-select (feels
+        # like a stray click / "click away").
+        for _ in range(5):
+            await asyncio.sleep(0.5)
             options = await _scan_options(page)
-        except Exception:
-            pass
+            if options:
+                break
+        if not options:
+            try:
+                await open_fn()
+                await asyncio.sleep(0.9)
+                options = await _scan_options(page)
+            except Exception:
+                pass
     if options:
         matched = match_dropdown_option(desired_value, options)
         if matched:
             clicked = await _click_option_js(page, matched)
             if clicked.get("clicked"):
+                await asyncio.sleep(_POST_OPTION_CLICK_BREATHE_S)
                 await _settle()
                 current = await _read_value(page, read_value_fn)
                 if selection_matches_desired(current, desired_value, matched_label=matched):
@@ -183,6 +201,7 @@ async def fill_interactive_dropdown(
             await asyncio.sleep(0.8 if idx < len(segments) - 1 else 0.4)
 
         if all_clicked:
+            await asyncio.sleep(_POST_OPTION_CLICK_BREATHE_S)
             await _settle()
             current = await _read_value(page, read_value_fn)
             if selection_matches_desired(current, desired_value):
@@ -205,7 +224,7 @@ async def fill_interactive_dropdown(
                 if clear_fn and term_idx > 0:
                     await clear_fn()
                 await type_fn(term)
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(0.52)
 
                 # Scan after typing and try fuzzy match
                 typed_options = await _scan_options(page)
@@ -214,6 +233,7 @@ async def fill_interactive_dropdown(
                     if typed_match:
                         clicked = await _click_option_js(page, typed_match)
                         if clicked.get("clicked"):
+                            await asyncio.sleep(_POST_OPTION_CLICK_BREATHE_S)
                             await _settle()
                             current = await _read_value(page, read_value_fn)
                             if selection_matches_desired(current, desired_value, matched_label=typed_match):
@@ -235,6 +255,7 @@ async def fill_interactive_dropdown(
                 while asyncio.get_event_loop().time() < deadline:
                     clicked = await _click_option_js(page, desired_value)
                     if clicked.get("clicked"):
+                        await asyncio.sleep(_POST_OPTION_CLICK_BREATHE_S)
                         await _settle()
                         current = await _read_value(page, read_value_fn)
                         if selection_matches_desired(current, desired_value, matched_label=clicked.get("text")):
@@ -246,7 +267,7 @@ async def fill_interactive_dropdown(
                                 pass_name="type_poll_click",
                             )
                         break
-                    await asyncio.sleep(0.12)
+                    await asyncio.sleep(0.18)
 
             except Exception:
                 continue
@@ -254,8 +275,9 @@ async def fill_interactive_dropdown(
     # ── Phase 4: ArrowDown + Enter last resort ───────────────────────
     try:
         await page.keyboard.press("ArrowDown")
-        await asyncio.sleep(0.25)
+        await asyncio.sleep(0.35)
         await page.keyboard.press("Enter")
+        await asyncio.sleep(0.55)
         await _settle()
         current = await _read_value(page, read_value_fn)
         if selection_matches_desired(current, desired_value):

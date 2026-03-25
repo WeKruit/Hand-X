@@ -264,18 +264,21 @@ async def execute_job(
         )
 
         # Step 8: Write result to DB
-        cost_summary = cost_tracker.get_summary()
+        unified_cost = result.get("cost_summary")
+        if not isinstance(unified_cost, dict) or not unified_cost:
+            unified_cost = cost_tracker.get_summary()
+        steps_taken = int(result.get("steps_taken") or unified_cost.get("step_count") or 0)
         result_data = {
             "success": result.get("success", True),
             "summary": result.get("summary", "Job completed"),
             "platform": platform,
-            "steps_taken": cost_summary["step_count"],
-            "cost": cost_summary,
+            "steps_taken": steps_taken,
+            "cost": unified_cost,
             **{k: v for k, v in result.items() if k not in ("success", "summary")},
         }
 
         await db.write_job_result(job_id, result_data)
-        await db.write_job_event(job_id, "completed", metadata=cost_summary)
+        await db.write_job_event(job_id, "completed", metadata={**unified_cost, "steps_taken": steps_taken})
 
         # Step 9: Fire VALET completion callback
         await valet.report_completion(
@@ -285,17 +288,19 @@ async def execute_job(
             valet_task_id=valet_task_id,
             worker_id=settings.worker_id,
             cost={
-                "total_cost_usd": cost_summary["total_cost_usd"],
-                "action_count": cost_summary["step_count"],
-                "total_tokens": cost_summary["total_tokens"],
+                "total_cost_usd": float(
+                    unified_cost.get("total_tracked_cost_usd", unified_cost.get("total_cost_usd", 0.0)) or 0.0
+                ),
+                "action_count": steps_taken,
+                "total_tokens": int(unified_cost.get("total_tracked_tokens", unified_cost.get("total_tokens", 0)) or 0),
             },
         )
 
         log.info(
             "executor.completed",
             success=True,
-            steps=cost_summary["step_count"],
-            cost=cost_summary["total_cost_usd"],
+            steps=steps_taken,
+            cost=float(unified_cost.get("total_tracked_cost_usd", unified_cost.get("total_cost_usd", 0.0)) or 0.0),
         )
 
         return result_data
@@ -563,6 +568,7 @@ Other rules:
                 "summary": "Cancelled by user",
                 "steps_taken": result.get("steps", 0),
                 "cost_usd": result.get("cost_usd", 0.0),
+                "cost_summary": result.get("cost_summary"),
                 "blocker": result.get("blocker"),
                 "error_code": "user_cancelled",
             }
@@ -578,6 +584,7 @@ Other rules:
         "summary": result.get("extracted_text") or "Agent completed",
         "steps_taken": result.get("steps", 0),
         "cost_usd": result.get("cost_usd", 0.0),
+        "cost_summary": result.get("cost_summary"),
         "blocker": result.get("blocker"),
     }
 

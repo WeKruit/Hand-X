@@ -7,6 +7,7 @@ accessed via late imports to avoid circular references.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from typing import Any
 
@@ -14,6 +15,8 @@ import structlog
 
 from browser_use.browser import BrowserSession
 from ghosthands.actions.views import FormField, get_stable_field_key
+from ghosthands.cost_summary import mark_stagehand_usage
+from ghosthands.dom.fill_browser_scripts import _COLLAPSE_COMBOBOX_FOR_FF_JS
 from ghosthands.runtime_learning import (
     DOMHAND_RETRY_CAP,
     clear_domhand_failure,
@@ -37,6 +40,18 @@ def _preferred_field_label(field: FormField) -> str:
 
 def _fill_single_field(page: Any, field: FormField, value: str, *, browser_session: BrowserSession | None = None):
     from ghosthands.dom.fill_executor import _fill_single_field as _impl
+    return _impl(page, field, value, browser_session=browser_session)
+
+
+def _fill_single_field_outcome(
+    page: Any,
+    field: FormField,
+    value: str,
+    *,
+    browser_session: BrowserSession | None = None,
+):
+    from ghosthands.dom.fill_executor import _fill_single_field_outcome as _impl
+
     return _impl(page, field, value, browser_session=browser_session)
 
 
@@ -65,9 +80,13 @@ def _read_field_value_for_field(page: Any, field: FormField):
     return _impl(page, field)
 
 
-def _field_value_matches_expected(current: str, expected: str) -> bool:
+def _field_value_matches_expected(
+    current: str,
+    expected: str,
+    matched_label: str | None = None,
+) -> bool:
     from ghosthands.actions.domhand_fill import _field_value_matches_expected as _impl
-    return _impl(current, expected)
+    return _impl(current, expected, matched_label=matched_label)
 
 
 def _is_explicit_false(val: str | None) -> bool:
@@ -117,6 +136,7 @@ async def _stagehand_escalate_fill(
         if browser_session is None:
             return False
 
+        mark_stagehand_usage(browser_session, source="domhand_fill_escalation")
         layer = await ensure_stagehand_for_session(browser_session)
         if not layer.is_available:
             return False
@@ -136,7 +156,17 @@ async def _stagehand_escalate_fill(
             )
             return False
 
-        verified = await _verify_fill_observable(page, field, desired_value)
+        await asyncio.sleep(0.95)
+        with contextlib.suppress(Exception):
+            await page.evaluate(_COLLAPSE_COMBOBOX_FOR_FF_JS, field.field_id)
+        await asyncio.sleep(0.35)
+        verified = await _verify_fill_observable(
+            page,
+            field,
+            desired_value,
+            timeout_s=6.0 if field.field_type == "select" else None,
+            poll_interval_s=0.22 if field.field_type == "select" else None,
+        )
         logger.info(
             "stagehand.escalation.result",
             field_label=label,
@@ -217,8 +247,9 @@ async def _verify_fill_observable(
     field: FormField,
     desired_value: str,
     *,
-    timeout_s: float = 2.5,
-    poll_interval_s: float = 0.12,
+    matched_label: str | None = None,
+    timeout_s: float | None = None,
+    poll_interval_s: float | None = None,
 ) -> bool:
     """Poll until the filled value is readable in the DOM with no validation error.
 
@@ -226,11 +257,18 @@ async def _verify_fill_observable(
     and similar widgets may commit asynchronously. This gate aligns ``success`` with what
     ``domhand_assess_state`` and ``_record_expected_value_if_settled`` consider settled.
     """
-    deadline = time.monotonic() + timeout_s
+    is_select = field.field_type == "select"
+    to = timeout_s if timeout_s is not None else (5.5 if is_select else 2.5)
+    poll = poll_interval_s if poll_interval_s is not None else (0.22 if is_select else 0.12)
+    deadline = time.monotonic() + to
     while time.monotonic() < deadline:
-        if await _field_already_matches(page, field, desired_value):
+        if is_select:
+            with contextlib.suppress(Exception):
+                await page.evaluate(_COLLAPSE_COMBOBOX_FOR_FF_JS, field.field_id)
+            await asyncio.sleep(0.14)
+        if await _field_already_matches(page, field, desired_value, matched_label=matched_label):
             return True
-        await asyncio.sleep(poll_interval_s)
+        await asyncio.sleep(poll)
     return False
 
 
@@ -242,15 +280,15 @@ async def _attempt_domhand_fill_with_retry_cap(
     desired_value: str,
     tool_name: str,
     browser_session: BrowserSession | None = None,
-) -> tuple[bool, str | None, str | None, float]:
+) -> tuple[bool, str | None, str | None, float, str]:
     """Attempt a DomHand field fill while enforcing the generic per-field retry cap.
 
-    Returns (success, error_msg, failure_reason, fill_confidence) where
+    Returns (success, error_msg, failure_reason, fill_confidence, settled_value) where
     fill_confidence is 1.0 for DOM-verified, 0.8 for LLM-verified, 0.0 for failed.
     """
     if await _field_already_matches(page, field, desired_value):
         _clear_domhand_failure_for_field(host, field, desired_value)
-        return True, None, None, 1.0
+        return True, None, None, 1.0, desired_value
 
     if _is_domhand_retry_capped_for_field(host, field, desired_value):
         logger.info(
@@ -268,17 +306,24 @@ async def _attempt_domhand_fill_with_retry_cap(
                 ),
             },
         )
-        return False, _domhand_retry_message(field), DOMHAND_RETRY_CAPPED, 0.0
+        return False, _domhand_retry_message(field), DOMHAND_RETRY_CAPPED, 0.0, desired_value
 
     fill_confidence = 0.0
 
-    success = await _fill_single_field(
+    fill_result = await _fill_single_field_outcome(
         page,
         field,
         desired_value,
         browser_session=browser_session,
     )
-    if success and not await _verify_fill_observable(page, field, desired_value):
+    success = fill_result.success
+    settled_value = fill_result.matched_label or desired_value
+    if success and not await _verify_fill_observable(
+        page,
+        field,
+        desired_value,
+        matched_label=fill_result.matched_label,
+    ):
         observed = await _read_observed_field_value(page, field)
 
         llm_confirmed = await _llm_verify_if_available(page, field, desired_value)
@@ -334,22 +379,29 @@ async def _attempt_domhand_fill_with_retry_cap(
 
     if success:
         _clear_domhand_failure_for_field(host, field, desired_value)
-        return True, None, None, fill_confidence
+        return True, None, None, fill_confidence, settled_value
 
     _, capped = _record_domhand_failure_for_field(host, field, desired_value, tool_name)
     if capped:
-        return False, _domhand_retry_message(field), DOMHAND_RETRY_CAPPED, 0.0
-    return False, "DOM fill failed", "dom_fill_failed", 0.0
+        return False, _domhand_retry_message(field), DOMHAND_RETRY_CAPPED, 0.0, desired_value
+    return False, "DOM fill failed", "dom_fill_failed", 0.0, desired_value
 
 
-async def _field_already_matches(page: Any, field: FormField, value: str | None) -> bool:
+async def _field_already_matches(
+    page: Any,
+    field: FormField,
+    value: str | None,
+    matched_label: str | None = None,
+) -> bool:
     """Live DOM check to avoid re-filling a field that already settled correctly."""
     if not value:
         return False
     if field.field_type == "checkbox-group":
         if _checkbox_group_is_exclusive_choice(field):
             current = await _read_group_selection(page, field.field_id)
-            return _field_value_matches_expected(current, value) and not await _field_has_validation_error(
+            return _field_value_matches_expected(
+                current, value, matched_label=matched_label
+            ) and not await _field_has_validation_error(
                 page, field.field_id
             )
         desired_checked = not _is_explicit_false(value)
@@ -361,11 +413,17 @@ async def _field_already_matches(page: Any, field: FormField, value: str | None)
         return state is desired_checked and not await _field_has_validation_error(page, field.field_id)
     if field.field_type in {"radio-group", "radio", "button-group"}:
         current = await _read_group_selection(page, field.field_id)
-        return _field_value_matches_expected(current, value) and not await _field_has_validation_error(
+        return _field_value_matches_expected(
+            current, value, matched_label=matched_label
+        ) and not await _field_has_validation_error(
             page, field.field_id
         )
     current = await _read_field_value_for_field(page, field)
-    return _field_value_matches_expected(current, value) and not await _field_has_validation_error(page, field.field_id)
+    return _field_value_matches_expected(
+        current,
+        value,
+        matched_label=matched_label,
+    ) and not await _field_has_validation_error(page, field.field_id)
 
 
 async def _read_observed_field_value(page: Any, field: FormField) -> str:

@@ -12,8 +12,10 @@ accessed via late imports to avoid circular references.
 import asyncio
 import contextlib
 import json
+import os
 import re
 import time
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
@@ -24,6 +26,7 @@ from ghosthands.actions.combobox_toggle import (
     CLICK_COMBOBOX_TOGGLE_BY_FFID_JS,
     CLICK_INPUT_BY_FFID_JS,
     combobox_toggle_clicked,
+    trusted_open_combobox_by_ffid,
 )
 from ghosthands.actions.views import (
     FormField,
@@ -31,14 +34,13 @@ from ghosthands.actions.views import (
     normalize_name,
     split_dropdown_value_hierarchy,
 )
-from ghosthands.dom.dropdown_fill import fill_interactive_dropdown
+from ghosthands.dom.dropdown_fill import POST_OPTION_CLICK_SETTLE_S, fill_interactive_dropdown
 from ghosthands.dom.dropdown_match import (
     SCAN_VISIBLE_OPTIONS_JS,
     synonym_groups_for_js,
 )
 from ghosthands.dom.dropdown_verify import selection_matches_desired
 from ghosthands.dom.fill_browser_scripts import (
-    _CLICK_ALTERNATE_FIELD_JS,
     _CLICK_BINARY_FIELD_JS,
     _CLICK_BUTTON_GROUP_JS,
     _CLICK_CHECKBOX_GROUP_JS,
@@ -46,7 +48,7 @@ from ghosthands.dom.fill_browser_scripts import (
     _CLICK_OTHER_TEXTLIKE_FIELD_JS,
     _CLICK_RADIO_OPTION_JS,
     _CLICK_SINGLE_RADIO_JS,
-    _DISMISS_DROPDOWN_JS,
+    _DISMISS_DROPDOWN_SOFT_JS,
     _ELEMENT_EXISTS_JS,
     _FILL_CONTENTEDITABLE_JS,
     _FILL_DATE_JS,
@@ -61,6 +63,7 @@ from ghosthands.dom.fill_browser_scripts import (
     _READ_BINARY_STATE_JS,
     _READ_FIELD_VALUE_JS,
     _READ_GROUP_SELECTION_JS,
+    _SCROLL_FF_INTO_VIEW_JS,
     _SELECT_GROUPED_DATE_PICKER_VALUE_JS,
 )
 from ghosthands.runtime_learning import (
@@ -73,7 +76,41 @@ from ghosthands.runtime_learning import (
 logger = structlog.get_logger(__name__)
 
 
+@dataclass(frozen=True)
+class FieldFillOutcome:
+    """Detailed outcome for a single-field fill attempt."""
+
+    success: bool
+    matched_label: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.success
+
+
+def _fill_outcome(success: bool, *, matched_label: str | None = None) -> FieldFillOutcome:
+    return FieldFillOutcome(success=success, matched_label=matched_label)
+
+
+def _verbose_dropdown_logs() -> bool:
+    return (os.environ.get("GH_VERBOSE_DROPDOWN") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _log_dropdown_diag(event: str, **kwargs: Any) -> None:
+    if _verbose_dropdown_logs():
+        logger.info(event, **kwargs)
+    else:
+        logger.debug(event, **kwargs)
+
+
+# react-select / portal menus: listbox often mounts after the open click; scanning or
+# clicking the option in the same tick closes the menu with nothing selected.
+_DROPDOWN_MENU_OPEN_SETTLE_S = 0.55
+_DROPDOWN_CDP_POLL_TICK_S = 0.22
+_DROPDOWN_CDP_POLL_MAX_TICKS = 14
+
+
 # ── Platform helpers ────────────────────────────────────────────────────────
+
 
 async def get_platform_selector(page: Any, role: str) -> str | None:
     """Look up a CSS selector for *role* from the current page's platform config.
@@ -82,6 +119,7 @@ async def get_platform_selector(page: Any, role: str) -> str | None:
     """
     try:
         from ghosthands.platforms import get_automation_id_map
+
         url = await page.evaluate("() => location.href")
         return get_automation_id_map(url).get(role)
     except Exception:
@@ -90,53 +128,64 @@ async def get_platform_selector(page: Any, role: str) -> str | None:
 
 # ── Late-import delegates for helpers still in domhand_fill / sibling modules ─
 
+
 def _preferred_field_label(field: FormField) -> str:
     from ghosthands.actions.domhand_fill import _preferred_field_label as _impl
+
     return _impl(field)
 
 
 def _is_effectively_unset_field_value(value: str | None) -> bool:
     from ghosthands.actions.domhand_fill import _is_effectively_unset_field_value as _impl
+
     return _impl(value)
 
 
 def _is_explicit_false(val: str | None) -> bool:
     from ghosthands.actions.domhand_fill import _is_explicit_false as _impl
+
     return _impl(val)
 
 
 def _is_skill_like(field_name: str) -> bool:
     from ghosthands.actions.domhand_fill import _is_skill_like as _impl
+
     return _impl(field_name)
 
 
 def _field_widget_kind_for_debug(field: FormField) -> str:
     from ghosthands.actions.domhand_fill import _field_widget_kind_for_debug as _impl
+
     return _impl(field)
 
 
 def _trace_profile_resolution(event: str, *, field_label: str, **extra: Any) -> None:
     from ghosthands.actions.domhand_fill import _trace_profile_resolution as _impl
+
     return _impl(event, field_label=field_label, **extra)
 
 
 def _safe_page_url(page: Any) -> Any:
     from ghosthands.actions.domhand_fill import _safe_page_url as _impl
+
     return _impl(page)
 
 
 def _get_profile_data() -> dict[str, Any]:
     from ghosthands.actions.domhand_fill import _get_profile_data as _impl
+
     return _impl()
 
 
 def _compose_grouped_date_value(month: str | None, day: str | None, year: str | None) -> str:
     from ghosthands.actions.domhand_fill import _compose_grouped_date_value as _impl
+
     return _impl(month, day, year)
 
 
 async def extract_visible_form_fields(page: Any) -> list[FormField]:
     from ghosthands.actions.domhand_fill import extract_visible_form_fields as _impl
+
     return await _impl(page)
 
 
@@ -195,7 +244,6 @@ def _checkbox_group_is_exclusive_choice(field: FormField) -> bool:
     return _checkbox_group_mode(field) == "exclusive_choice"
 
 
-
 def _parse_dropdown_click_result(raw_result: Any) -> dict[str, Any]:
     """Normalize dropdown click helper results into a dict."""
     if isinstance(raw_result, str):
@@ -241,8 +289,14 @@ async def _wait_for_field_value(
     expected: str,
     timeout: float = 2.4,
     poll_interval: float = 0.25,
+    *,
+    matched_label: str | None = None,
 ) -> str:
-    """Wait briefly for a field's visible value to reflect the intended selection."""
+    """Wait briefly for a field's visible value to reflect the intended selection.
+
+    ``matched_label`` is the option text we actually clicked (from fuzzy match); pass it so
+    verification accepts UI text that differs from the profile string (e.g. USA vs United States).
+    """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     last_value = ""
@@ -250,7 +304,7 @@ async def _wait_for_field_value(
         current = await _read_field_value_for_field(page, field)
         if current:
             last_value = current
-        if _field_value_matches_expected(current, expected):
+        if _field_value_matches_expected(current, expected, matched_label=matched_label):
             return current
         if loop.time() >= deadline:
             return last_value
@@ -495,7 +549,7 @@ async def _click_away_from_text_like_field(page: Any, field_id: str) -> bool:
         return bool(isinstance(parsed, dict) and parsed.get("clicked"))
     except Exception:
         try:
-            await page.evaluate(_DISMISS_DROPDOWN_JS)
+            await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
         except Exception:
             return False
         return False
@@ -525,7 +579,7 @@ async def _confirm_text_like_value(page: Any, field: FormField, value: str, tag:
             await locator.press("Enter")
             await asyncio.sleep(0.15)
         if needs_blur_revalidation:
-            await page.evaluate(_DISMISS_DROPDOWN_JS)
+            await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
             await asyncio.sleep(0.15)
         else:
             await locator.press("Tab")
@@ -538,7 +592,7 @@ async def _confirm_text_like_value(page: Any, field: FormField, value: str, tag:
                 await page.keyboard.press("Enter")
                 await asyncio.sleep(0.15)
             if needs_blur_revalidation:
-                await page.evaluate(_DISMISS_DROPDOWN_JS)
+                await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
                 await asyncio.sleep(0.15)
             else:
                 await page.keyboard.press("Tab")
@@ -703,7 +757,7 @@ def _record_field_interaction_recipe(context: dict[str, Any] | None, action_chai
     )
 
 
-async def _dispatch_platform_fill(
+async def _dispatch_platform_fill_outcome(
     page: Any,
     field: FormField,
     value: str,
@@ -711,29 +765,27 @@ async def _dispatch_platform_fill(
     strategy: str,
     *,
     browser_session: BrowserSession | None = None,
-) -> bool | None:
+) -> FieldFillOutcome | None:
     """Try a platform-specific fill strategy.
 
-    Returns ``True``/``False`` if the strategy handled the field,
+    Returns an outcome if the strategy handled the field,
     or ``None`` to fall through to default dispatch.
     """
     match strategy:
         case "combobox_toggle":
-            return await _fill_custom_dropdown(page, field, value, tag, browser_session=browser_session)
+            return await _fill_custom_dropdown_outcome(page, field, value, tag, browser_session=browser_session)
         case "react_select":
             # Same path as non-native <select>: CDP open → discover options → click match,
             # then fill_interactive_dropdown with real keyboard typing. The old
             # _fill_searchable_dropdown path used JS fill on the input and skipped CDP-first,
             # which breaks Greenhouse react-select (typing fragments like "answer").
-            return await _fill_custom_dropdown(
-                page, field, value, tag, browser_session=browser_session
-            )
+            return await _fill_custom_dropdown_outcome(page, field, value, tag, browser_session=browser_session)
         case "segmented_date":
-            return await _fill_grouped_date_field(page, field, value, tag)
+            return _fill_outcome(await _fill_grouped_date_field(page, field, value, tag))
         case "searchable_dropdown":
-            return await _fill_searchable_dropdown(page, field, value, tag)
+            return await _fill_searchable_dropdown_outcome(page, field, value, tag)
         case "playwright_fill":
-            return await _fill_text_field(page, field, value, tag)
+            return _fill_outcome(await _fill_text_field(page, field, value, tag))
         case _:
             logger.warning(
                 "domhand.unknown_platform_strategy",
@@ -743,13 +795,33 @@ async def _dispatch_platform_fill(
             return None
 
 
-async def _fill_single_field(
+async def _dispatch_platform_fill(
+    page: Any,
+    field: FormField,
+    value: str,
+    tag: str,
+    strategy: str,
+    *,
+    browser_session: BrowserSession | None = None,
+) -> bool | None:
+    outcome = await _dispatch_platform_fill_outcome(
+        page,
+        field,
+        value,
+        tag,
+        strategy,
+        browser_session=browser_session,
+    )
+    return None if outcome is None else outcome.success
+
+
+async def _fill_single_field_outcome(
     page: Any,
     field: FormField,
     value: str,
     *,
     browser_session: BrowserSession | None = None,
-) -> bool:
+) -> FieldFillOutcome:
     ff_id = field.field_id
     tag = f"[{field.name or field.field_type}]"
 
@@ -757,13 +829,14 @@ async def _fill_single_field(
         exists_json = await page.evaluate(_ELEMENT_EXISTS_JS, ff_id, field.field_type)
         if not json.loads(exists_json):
             logger.debug(f"skip {tag} (not visible)")
-            return False
+            return _fill_outcome(False)
     except Exception:
         pass
 
     fill_strategy: str | None = None
     try:
         from ghosthands.platforms import get_fill_overrides
+
         page_url = await page.evaluate("() => location.href")
         overrides = get_fill_overrides(page_url)
         fill_strategy = overrides.get(field.field_type)
@@ -778,35 +851,50 @@ async def _fill_single_field(
         pass
 
     if fill_strategy:
-        result = await _dispatch_platform_fill(
-            page, field, value, tag, fill_strategy, browser_session=browser_session,
+        result = await _dispatch_platform_fill_outcome(
+            page,
+            field,
+            value,
+            tag,
+            fill_strategy,
+            browser_session=browser_session,
         )
         if result is not None:
             return result
 
     match field.field_type:
         case "text" | "email" | "tel" | "url" | "number" | "password" | "search":
-            return await _fill_text_field(page, field, value, tag)
+            return _fill_outcome(await _fill_text_field(page, field, value, tag))
         case "date":
-            return await _fill_date_field(page, field, value, tag)
+            return _fill_outcome(await _fill_date_field(page, field, value, tag))
         case "textarea":
-            return await _fill_textarea_field(page, field, value, tag)
+            return _fill_outcome(await _fill_textarea_field(page, field, value, tag))
         case "select":
-            return await _fill_select_field(page, field, value, tag, browser_session=browser_session)
+            return await _fill_select_field_outcome(page, field, value, tag, browser_session=browser_session)
         case "radio-group":
-            return await _fill_radio_group(page, field, value, tag)
+            return _fill_outcome(await _fill_radio_group(page, field, value, tag))
         case "radio":
-            return await _fill_single_radio(page, field, value, tag)
+            return _fill_outcome(await _fill_single_radio(page, field, value, tag))
         case "button-group":
-            return await _fill_button_group(page, field, value, tag)
+            return _fill_outcome(await _fill_button_group(page, field, value, tag))
         case "checkbox-group":
-            return await _fill_checkbox_group(page, field, value, tag)
+            return _fill_outcome(await _fill_checkbox_group(page, field, value, tag))
         case "checkbox":
-            return await _fill_checkbox(page, field, value, tag)
+            return _fill_outcome(await _fill_checkbox(page, field, value, tag))
         case "toggle":
-            return await _fill_toggle(page, field, value, tag)
+            return _fill_outcome(await _fill_toggle(page, field, value, tag))
         case _:
-            return await _fill_text_field(page, field, value, tag)
+            return _fill_outcome(await _fill_text_field(page, field, value, tag))
+
+
+async def _fill_single_field(
+    page: Any,
+    field: FormField,
+    value: str,
+    *,
+    browser_session: BrowserSession | None = None,
+) -> bool:
+    return (await _fill_single_field_outcome(page, field, value, browser_session=browser_session)).success
 
 
 async def _fill_text_field(page: Any, field: FormField, value: str, tag: str) -> bool:
@@ -852,11 +940,16 @@ async def _fill_text_field(page: Any, field: FormField, value: str, tag: str) ->
     return False
 
 
-async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag: str) -> bool:
+async def _fill_searchable_dropdown_outcome(
+    page: Any,
+    field: FormField,
+    value: str,
+    tag: str,
+) -> FieldFillOutcome:
     ff_id = field.field_id
     if not value:
         logger.debug(f"skip {tag} (searchable dropdown, no answer)")
-        return False
+        return _fill_outcome(False)
 
     async def _open() -> None:
         await _try_open_combobox_menu(page, ff_id, tag=tag)
@@ -878,14 +971,14 @@ async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag
         )
 
     async def _clear() -> None:
-        await _clear_dropdown_search(page)
+        await _clear_dropdown_search(page, ff_id)
 
     async def _settle() -> None:
         await _settle_dropdown_selection(page)
 
     async def _dismiss() -> None:
         try:
-            await page.evaluate(_DISMISS_DROPDOWN_JS)
+            await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
         except Exception:
             pass
 
@@ -900,7 +993,11 @@ async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag
         clear_fn=_clear,
         tag=f"search-select {tag}",
     )
-    return result.success
+    return _fill_outcome(result.success, matched_label=result.matched_label)
+
+
+async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag: str) -> bool:
+    return (await _fill_searchable_dropdown_outcome(page, field, value, tag)).success
 
 
 async def _open_grouped_date_picker(page: Any, field: FormField) -> bool:
@@ -1136,7 +1233,7 @@ async def _fill_custom_dropdown_cdp_first(
     field: FormField,
     value: str,
     tag: str,
-) -> bool:
+) -> FieldFillOutcome:
     """Greenhouse / react-select: same CDP discovery + open/poll as domhand_select, then page-level option click.
 
     Skips ``GetDropdownOptionsEvent`` so the default action watchdog does not log errors for
@@ -1159,10 +1256,19 @@ async def _fill_custom_dropdown_cdp_first(
     with contextlib.suppress(Exception):
         await ensure_helpers(page)
 
+    with contextlib.suppress(Exception):
+        await page.evaluate(_SCROLL_FF_INTO_VIEW_JS, field.field_id)
+        await asyncio.sleep(0.35)
+
     node = await _find_dom_tree_node_by_ff_id(browser_session, field.field_id)
     if node is None:
-        logger.debug("domhand.fill.dropdown_cdp_no_node", field_id=field.field_id, tag=tag)
-        return False
+        _log_dropdown_diag(
+            "domhand.fill.dropdown_cdp_no_node",
+            field_id=field.field_id,
+            field_label=_preferred_field_label(field),
+            tag=tag,
+        )
+        return _fill_outcome(False)
 
     is_native_select = getattr(node, "tag_name", None) == "select"
 
@@ -1175,10 +1281,10 @@ async def _fill_custom_dropdown_cdp_first(
             tag=tag,
             error=str(exc)[:120],
         )
-        return False
+        return _fill_outcome(False)
 
     if not isinstance(discovery, dict):
-        return False
+        return _fill_outcome(False)
 
     dropdown_type = str(discovery.get("type") or "unknown")
     options: list[dict[str, Any]] = list(discovery.get("options") or [])
@@ -1188,13 +1294,16 @@ async def _fill_custom_dropdown_cdp_first(
             try:
                 toggled = False
                 if not is_native_select:
-                    toggled = await _try_click_combobox_toggle(browser_session, node)
+                    trusted = await trusted_open_combobox_by_ffid(page, field.field_id)
+                    toggled = bool(trusted.get("clicked") or trusted.get("already_open"))
+                    if not toggled:
+                        toggled = await _try_click_combobox_toggle(browser_session, node)
                 if not toggled:
                     event = browser_session.event_bus.dispatch(ClickElementEvent(node=node))
                     await event
                     await event.event_result(raise_if_any=True, raise_if_none=False)
-                for _tick in range(10):
-                    await asyncio.sleep(0.15)
+                await asyncio.sleep(_DROPDOWN_MENU_OPEN_SETTLE_S)
+                for _tick in range(_DROPDOWN_CDP_POLL_MAX_TICKS):
                     try:
                         discovery = await _call_function_on_node(
                             browser_session,
@@ -1210,6 +1319,7 @@ async def _fill_custom_dropdown_cdp_first(
                         break
                     if _meaningful_dropdown_options(options):
                         break
+                    await asyncio.sleep(_DROPDOWN_CDP_POLL_TICK_S)
                 if is_native_select and options:
                     break
                 if _meaningful_dropdown_options(options):
@@ -1226,13 +1336,15 @@ async def _fill_custom_dropdown_cdp_first(
                 break
 
     if not matched:
-        logger.debug(
+        _log_dropdown_diag(
             "domhand.fill.dropdown_cdp_no_fuzzy_match",
             field_id=field.field_id,
+            field_label=_preferred_field_label(field),
             tag=tag,
+            desired_preview=str(value)[:80],
             option_sample=[str(o.get("text") or "")[:40] for o in match_options[:5]],
         )
-        return False
+        return _fill_outcome(False)
 
     matched_text = str(matched.get("text") or value).strip() or value
 
@@ -1254,23 +1366,64 @@ async def _fill_custom_dropdown_cdp_first(
             tag=tag,
             error=str(exc)[:120],
         )
-        return False
+        return _fill_outcome(False)
 
     if not (isinstance(result, dict) and result.get("success")):
-        return False
+        return _fill_outcome(False)
 
-    current = await _wait_for_field_value(page, field, value, timeout=2.85)
-    if not _field_value_matches_expected(current, value):
-        return False
+    # Let react-select commit before reading single-value (avoids false mismatch vs verify).
+    await asyncio.sleep(POST_OPTION_CLICK_SETTLE_S)
+
+    # Pass matched_text so verify accepts committed UI that differs from profile (synonyms / longer labels).
+    current = await _wait_for_field_value(page, field, value, timeout=2.85, matched_label=matched_text)
+    if not _field_value_matches_expected(current, value, matched_label=matched_text):
+        return _fill_outcome(False)
 
     await _settle_dropdown_selection(page)
-    logger.info(
+    _log_dropdown_diag(
         "domhand.fill.dropdown_cdp_first_ok",
         field_id=field.field_id,
         tag=tag,
         matched_text=matched_text[:80],
     )
-    return True
+    return _fill_outcome(True, matched_label=matched_text)
+
+
+async def _fill_select_field_outcome(
+    page: Any,
+    field: FormField,
+    value: str,
+    tag: str,
+    *,
+    browser_session: BrowserSession | None = None,
+) -> FieldFillOutcome:
+    if not value:
+        logger.debug(f"skip {tag} (no value)")
+        return _fill_outcome(False)
+    if field.is_native:
+        try:
+            result_json = await page.evaluate(_FILL_FIELD_JS, field.field_id, value, "select")
+            result = json.loads(result_json) if isinstance(result_json, str) else result_json
+            if isinstance(result, dict) and result.get("success"):
+                logger.debug(f'select {tag} -> "{value}"')
+                return _fill_outcome(True)
+        except Exception:
+            pass
+        logger.debug(f"skip {tag} (native select failed)")
+        return _fill_outcome(False)
+
+    is_skill = _is_skill_like(field.name)
+    all_values = [v.strip() for v in value.split(",") if v.strip()]
+    values = all_values[:_SKILL_FIELD_MAX_ITEMS] if is_skill else all_values
+    if len(values) > 1 or is_skill:
+        return _fill_outcome(await _fill_multi_select(page, field, values, tag))
+    return await _fill_custom_dropdown_outcome(
+        page,
+        field,
+        value,
+        tag,
+        browser_session=browser_session,
+    )
 
 
 async def _fill_select_field(
@@ -1281,33 +1434,7 @@ async def _fill_select_field(
     *,
     browser_session: BrowserSession | None = None,
 ) -> bool:
-    if not value:
-        logger.debug(f"skip {tag} (no value)")
-        return False
-    if field.is_native:
-        try:
-            result_json = await page.evaluate(_FILL_FIELD_JS, field.field_id, value, "select")
-            result = json.loads(result_json) if isinstance(result_json, str) else result_json
-            if isinstance(result, dict) and result.get("success"):
-                logger.debug(f'select {tag} -> "{value}"')
-                return True
-        except Exception:
-            pass
-        logger.debug(f"skip {tag} (native select failed)")
-        return False
-
-    is_skill = _is_skill_like(field.name)
-    all_values = [v.strip() for v in value.split(",") if v.strip()]
-    values = all_values[:_SKILL_FIELD_MAX_ITEMS] if is_skill else all_values
-    if len(values) > 1 or is_skill:
-        return await _fill_multi_select(page, field, values, tag)
-    return await _fill_custom_dropdown(
-        page,
-        field,
-        value,
-        tag,
-        browser_session=browser_session,
-    )
+    return (await _fill_select_field_outcome(page, field, value, tag, browser_session=browser_session)).success
 
 
 async def _fill_multi_select(page: Any, field: FormField, values: list[str], tag: str) -> bool:
@@ -1349,7 +1476,7 @@ async def _fill_multi_select(page: Any, field: FormField, values: list[str], tag
             picked_count += 1
 
         try:
-            await page.evaluate(_DISMISS_DROPDOWN_JS)
+            await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
         except Exception:
             pass
         if picked_count > 0:
@@ -1372,8 +1499,8 @@ async def _click_dropdown_option(page: Any, text: str) -> dict[str, Any]:
 async def _poll_click_dropdown_option(
     page: Any,
     *match_texts: str,
-    max_wait_s: float = 2.75,
-    interval_s: float = 0.12,
+    max_wait_s: float = 2.85,
+    interval_s: float = 0.18,
 ) -> dict[str, Any]:
     """Poll for visible ``role=option`` rows after typing — async lists (e.g. Greenhouse country).
 
@@ -1383,6 +1510,7 @@ async def _poll_click_dropdown_option(
     texts = [m for m in match_texts if m and str(m).strip()]
     if not texts:
         return {"clicked": False}
+    await asyncio.sleep(0.3)
     deadline = time.monotonic() + max_wait_s
     while time.monotonic() < deadline:
         for mt in texts:
@@ -1394,7 +1522,50 @@ async def _poll_click_dropdown_option(
 
 
 async def _try_open_combobox_menu(page: Any, ff_id: str, *, tag: str) -> None:
-    """Open react-select / combobox: prefer chevron / Toggle flyout; fall back to input click."""
+    """Open react-select / combobox: prefer chevron / Toggle flyout; fall back to input click.
+
+    Idempotent: if the menu is already open (``aria-expanded=true`` on the combobox),
+    do **not** click the toggle again — a second click closes the menu (reads as
+    "opened then immediately clicked away").
+    """
+    try:
+        trusted = await trusted_open_combobox_by_ffid(page, ff_id)
+        if trusted.get("already_open"):
+            logger.debug("domhand.combobox_open", field_id=ff_id, tag=tag, via="already_open")
+            return
+        if trusted.get("clicked"):
+            logger.debug(
+                "domhand.combobox_open",
+                field_id=ff_id,
+                tag=tag,
+                via=f"trusted_{trusted.get('via') or 'click'}",
+            )
+            return
+    except Exception:
+        pass
+    try:
+        raw = await page.evaluate(
+            r"""(ffId) => {
+			var ff = window.__ff;
+			var el = ff ? ff.byId(ffId) : null;
+			if (!el) return JSON.stringify({open: false});
+			var combo = el.closest('[role="combobox"]');
+			if (!combo && el.getAttribute && el.getAttribute('role') === 'combobox') combo = el;
+			if (!combo) {
+				var inner = el.querySelector && el.querySelector('[role="combobox"]');
+				if (inner) combo = inner;
+			}
+			if (!combo) return JSON.stringify({open: false});
+			return JSON.stringify({open: combo.getAttribute('aria-expanded') === 'true'});
+		}""",
+            ff_id,
+        )
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(parsed, dict) and parsed.get("open"):
+            logger.debug("domhand.combobox_open", field_id=ff_id, tag=tag, via="already_expanded")
+            return
+    except Exception:
+        pass
     try:
         raw = await page.evaluate(CLICK_COMBOBOX_TOGGLE_BY_FFID_JS, ff_id)
         if combobox_toggle_clicked(raw):
@@ -1409,8 +1580,17 @@ async def _try_open_combobox_menu(page: Any, ff_id: str, *, tag: str) -> None:
         pass
 
 
-async def _clear_dropdown_search(page: Any) -> None:
-    """Clear the current searchable dropdown query if one is focused."""
+async def _clear_dropdown_search(page: Any, ff_id: str | None = None) -> None:
+    """Clear the current searchable dropdown query if one is focused.
+
+    When ``ff_id`` is set, focus that combobox first so shortcuts apply to the react-select input.
+    """
+    if ff_id:
+        try:
+            await page.evaluate(_FOCUS_FIELD_JS, ff_id)
+            await asyncio.sleep(0.08)
+        except Exception:
+            pass
     for shortcut in ("Meta+A", "Control+A"):
         try:
             await page.keyboard.press(shortcut)
@@ -1423,12 +1603,11 @@ async def _clear_dropdown_search(page: Any) -> None:
     await asyncio.sleep(0.15)
 
 
-async def _settle_dropdown_selection(page: Any, delay: float = 0.45) -> None:
-    """Dismiss an open dropdown and give the UI time to commit the selection."""
-    try:
-        await page.evaluate(_DISMISS_DROPDOWN_JS)
-    except Exception:
-        pass
+async def _settle_dropdown_selection(page: Any, delay: float = 0.55) -> None:
+    """Let react-select finish committing, then close without a synthetic body click (race-prone)."""
+    await asyncio.sleep(0.28)
+    with contextlib.suppress(Exception):
+        await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
     await asyncio.sleep(delay)
 
 
@@ -1446,13 +1625,14 @@ async def _type_and_click_dropdown_option(page: Any, value: str, tag: str) -> di
         try:
             if idx > 0:
                 await _clear_dropdown_search(page)
-            await page.keyboard.type(term, delay=45)
+            await page.keyboard.type(term, delay=55)
+            await asyncio.sleep(0.4)
             clicked = await _poll_click_dropdown_option(page, value, term, max_wait_s=2.85)
             if clicked.get("clicked"):
                 logger.debug(f'select {tag} -> "{clicked.get("text", value)}" (typed search)')
                 return clicked
             await page.keyboard.press("Enter")
-            await asyncio.sleep(0.35)
+            await asyncio.sleep(0.45)
             clicked = await _poll_click_dropdown_option(page, value, term, max_wait_s=1.2)
             if clicked.get("clicked"):
                 logger.debug(f'select {tag} -> "{clicked.get("text", value)}" (typed search, enter)')
@@ -1474,18 +1654,19 @@ async def _scan_visible_dropdown_options(page: Any) -> list[str]:
         return []
 
 
-async def _fill_custom_dropdown(
+async def _fill_custom_dropdown_outcome(
     page: Any,
     field: FormField,
     value: str,
     tag: str,
     *,
     browser_session: BrowserSession | None = None,
-) -> bool:
+) -> FieldFillOutcome:
     if browser_session is not None:
         try:
-            if await _fill_custom_dropdown_cdp_first(browser_session, page, field, value, tag):
-                return True
+            cdp_result = await _fill_custom_dropdown_cdp_first(browser_session, page, field, value, tag)
+            if cdp_result:
+                return cdp_result
         except Exception as exc:
             logger.debug(
                 "domhand.fill.dropdown_cdp_first_exception",
@@ -1504,17 +1685,22 @@ async def _fill_custom_dropdown(
         return await _read_field_value_for_field(page, field)
 
     async def _type(text: str) -> None:
-        await page.keyboard.type(text, delay=45)
+        try:
+            await page.evaluate(_FOCUS_FIELD_JS, ff_id)
+            await asyncio.sleep(0.18)
+        except Exception:
+            pass
+        await page.keyboard.type(text, delay=55)
 
     async def _clear() -> None:
-        await _clear_dropdown_search(page)
+        await _clear_dropdown_search(page, ff_id)
 
     async def _settle() -> None:
         await _settle_dropdown_selection(page)
 
     async def _dismiss() -> None:
         try:
-            await page.evaluate(_DISMISS_DROPDOWN_JS)
+            await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
         except Exception:
             pass
 
@@ -1548,7 +1734,26 @@ async def _fill_custom_dropdown(
             "pass_name": result.pass_name,
         },
     )
-    return result.success
+    return _fill_outcome(result.success, matched_label=result.matched_label)
+
+
+async def _fill_custom_dropdown(
+    page: Any,
+    field: FormField,
+    value: str,
+    tag: str,
+    *,
+    browser_session: BrowserSession | None = None,
+) -> bool:
+    return (
+        await _fill_custom_dropdown_outcome(
+            page,
+            field,
+            value,
+            tag,
+            browser_session=browser_session,
+        )
+    ).success
 
 
 async def _fill_radio_group(page: Any, field: FormField, value: str, tag: str) -> bool:
@@ -1695,6 +1900,11 @@ async def _fill_single_radio(page: Any, field: FormField, value: str, tag: str) 
 
 
 async def _fill_button_group(page: Any, field: FormField, value: str, tag: str) -> bool:
+    from ghosthands.actions.domhand_fill import _is_upload_like_field
+
+    if _is_upload_like_field(field):
+        logger.debug(f"skip {tag} (upload-like button-group; requires domhand_upload)")
+        return False
     choice = value or (field.choices[0] if field.choices else "")
     if not choice:
         logger.debug(f"skip {tag} (button-group, no answer)")
@@ -2012,5 +2222,3 @@ async def _fill_toggle(page: Any, field: FormField, value: str, tag: str) -> boo
         return True
     logger.debug(f"skip {tag} (did not remain on)")
     return False
-
-

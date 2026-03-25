@@ -190,6 +190,28 @@ def _format_graduation_date(value: Any) -> str | None:
     return f"{month_labels[month_index - 1]} {parts[0]}"
 
 
+def _relocation_preference_to_willingness(value: str | None) -> str | None:
+    text = _as_text(value)
+    if not text:
+        return None
+    normalized = text.strip().lower()
+    negative_tokens = (
+        "no",
+        "not willing",
+        "unwilling",
+        "cannot relocate",
+        "can't relocate",
+        "unable to relocate",
+        "do not relocate",
+        "don't relocate",
+        "not open",
+        "no relocation",
+    )
+    if any(token in normalized for token in negative_tokens):
+        return "No"
+    return "Yes"
+
+
 def build_canonical_profile(
     profile_data: dict[str, Any] | None,
     evidence: dict[str, str | None] | None = None,
@@ -294,6 +316,17 @@ def build_canonical_profile(
     register_profile_alias("country_of_residence", ("country_of_residence",))
     register_profile_alias("preferred_work_mode", ("preferred_work_mode",))
     register_profile_alias("preferred_locations", ("preferred_locations",))
+    register_profile_alias(
+        "relocation_preference",
+        ("relocation_preference",),
+        ("relocationPreference",),
+        ("relocate_preference",),
+        ("relocatePreference",),
+        ("relocate_ok",),
+        ("relocateOk",),
+        ("open_to_relocation",),
+        ("openToRelocation",),
+    )
     register_profile_alias("how_did_you_hear", ("how_did_you_hear",), ("referral_source",))
     register_profile_alias("willing_to_relocate", ("willing_to_relocate",))
     register_profile_alias("gender", ("gender",))
@@ -437,11 +470,36 @@ def build_canonical_profile(
         "country_of_residence": "country_of_residence",
         "preferred_work_mode": "preferred_work_mode",
         "preferred_locations": "preferred_locations",
+        "relocation_preference": "relocation_preference",
         "how_did_you_hear": "how_did_you_hear",
         "willing_to_relocate": "willing_to_relocate",
     }.items():
         if key not in canonical.values and observed.get(source_key):
             register(key, observed[source_key], source_path=f"evidence.{source_key}")
+
+    if "relocation_preference" not in canonical.values:
+        register(
+            "relocation_preference",
+            "Anywhere",
+            source_path="policy.relocation_preference",
+            provenance="policy",
+        )
+    if "willing_to_relocate" not in canonical.values:
+        willingness = _relocation_preference_to_willingness(
+            canonical.get("relocation_preference", allow_policy=True)
+        )
+        if willingness:
+            provenance: ProfileProvenance = (
+                "policy"
+                if canonical.get("relocation_preference") is None
+                else "derived"
+            )
+            register(
+                "willing_to_relocate",
+                willingness,
+                source_path="derived.relocation_preference",
+                provenance=provenance,
+            )
 
     first_name = canonical.get("first_name")
     last_name = canonical.get("last_name")
