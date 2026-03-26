@@ -1034,7 +1034,7 @@ def _infer_entry_data_from_scope(
     if not scope_norm:
         return None
 
-    if "education" in scope_norm:
+    if any(token in scope_norm for token in ("education", "college", "university", "school", "degree")):
         entries = profile_data.get("education")
     elif any(token in scope_norm for token in ("work experience", "experience", "employment")):
         entries = profile_data.get("experience")

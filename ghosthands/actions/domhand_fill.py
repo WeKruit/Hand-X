@@ -2653,10 +2653,17 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         page,
         fallback_marker=params.target_section or params.heading_boundary,
     )
-    same_page_advance_guard = _same_page_advance_guard_error(
-        browser_session,
-        page_context_key=page_context_key,
-        page_url=page_url,
+    # Scoped fills (heading_boundary, entry_data, focus_fields) bypass the
+    # advance guard — repeater sections are expanded AFTER the initial
+    # assessment and need a fresh fill pass.
+    is_scoped_fill = bool(params.heading_boundary or params.entry_data or params.focus_fields)
+    same_page_advance_guard = (
+        None if is_scoped_fill
+        else _same_page_advance_guard_error(
+            browser_session,
+            page_context_key=page_context_key,
+            page_url=page_url,
+        )
     )
     if same_page_advance_guard:
         return ActionResult(

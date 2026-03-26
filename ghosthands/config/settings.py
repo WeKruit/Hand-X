@@ -117,12 +117,15 @@ class Settings(BaseSettings):
         description="Seconds to wait between actions within the same agent step",
     )
     agent_max_actions_per_step: int = Field(
-        5,
-        description="Maximum browser-use actions to execute in a single agent step",
+        2,
+        description="Maximum browser-use actions to execute in a single agent step. "
+        "Kept low so the agent observes dropdown/combobox results between actions.",
     )
     agent_max_history_items: int | None = Field(
-        28,
-        description="Cap LLM conversation history items (None = keep all). Lowers cost on long Workday runs.",
+        12,
+        description="Cap LLM conversation history items (None = keep all). "
+        "With max_actions_per_step=2, 12 items covers ~24 actions (one page section). "
+        "Old page context is in the page transition note, not needed in history.",
     )
     cdp_url: str | None = Field(
         None, description="CDP URL of an existing browser to connect to (Desktop-owned browser mode)"

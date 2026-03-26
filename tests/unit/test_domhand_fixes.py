@@ -6719,8 +6719,7 @@ def test_build_task_prompt_search_widgets_forbid_value_substitution():
     )
 
     assert "NEVER switch to a different company, skill, school, or language" in prompt
-    assert "leave it unresolved for browser/manual fallback" in prompt
-    assert "Do NOT switch that field to 'Other'." in prompt
+    assert "select 'Other'" in prompt  # employer fallback when not found
     assert "Source/referral widgets are the exception" in prompt
     assert "LinkedIn" in prompt
     assert "Visual gate beats stale DOM optimism" in prompt

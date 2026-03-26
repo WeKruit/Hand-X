@@ -327,8 +327,8 @@ def is_placeholder_value(value: str) -> bool:
 
 
 def normalize_name(s: str) -> str:
-    """Normalize a field name for comparison: strip asterisks/underscores, collapse whitespace, lowercase."""
-    return re.sub(r"\s+", " ", s.replace("*", "").replace("_", " ")).strip().lower()
+    """Normalize a field name for comparison: strip asterisks/underscores/apostrophes, collapse whitespace, lowercase."""
+    return re.sub(r"\s+", " ", s.replace("*", "").replace("_", " ").replace("'", "").replace("\u2019", "")).strip().lower()
 
 
 def split_dropdown_value_hierarchy(value: str) -> list[str]:

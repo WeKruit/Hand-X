@@ -260,10 +260,8 @@ class MessageManager:
 		note = self._build_page_transition_note(previous_identity, current_identity)
 		history_note = HistoryItem(system_message=f'<sys>{note}</sys>')
 		self.state.agent_history_items.append(history_note)
-		if self.state.read_state_description:
-			self.state.read_state_description = f'{note}\n\n{self.state.read_state_description}'
-		else:
-			self.state.read_state_description = note
+		# Clear stale read_state from previous page — old fill results are useless
+		self.state.read_state_description = note
 
 		# Force compaction at next step so old-page context is pruned
 		self.state.last_compaction_step = 0
@@ -280,6 +278,12 @@ class MessageManager:
 		self.state.history.context_messages.clear()
 		self._update_agent_history_description(model_output, result, step_info)
 		self._apply_page_transition_context(browser_state_summary)
+
+		# Cap read_state_description to prevent context bloat on SPAs
+		# (Oracle Cloud HCM never changes URL/title across steps)
+		_READ_STATE_MAX_CHARS = 6000
+		if len(self.state.read_state_description) > _READ_STATE_MAX_CHARS:
+			self.state.read_state_description = self.state.read_state_description[-_READ_STATE_MAX_CHARS:]
 
 		effective_sensitive_data = sensitive_data if sensitive_data is not None else self.sensitive_data
 		if effective_sensitive_data is not None:

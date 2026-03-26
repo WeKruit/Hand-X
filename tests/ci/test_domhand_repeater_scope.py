@@ -2594,6 +2594,11 @@ def test_infer_entry_data_from_scope_uses_profile_lists():
 
     assert _infer_entry_data_from_scope(profile, "Work Experience 2", None) == {"title": "Engineer 2"}
     assert _infer_entry_data_from_scope(profile, "Education 1", "Education") == {"school": "RIT"}
+    # Oracle uses "College / University" as heading, not "Education"
+    assert _infer_entry_data_from_scope(profile, "College / University", "Experience") == {"school": "RIT"}
+    assert _infer_entry_data_from_scope(profile, "University", None) == {"school": "RIT"}
+    assert _infer_entry_data_from_scope(profile, None, "School") == {"school": "RIT"}
+    assert _infer_entry_data_from_scope(profile, "Degree", None) == {"school": "RIT"}
 
 
 def test_known_profile_value_matches_optional_address_fields():
