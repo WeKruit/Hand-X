@@ -30,8 +30,10 @@ from ghosthands.dom.fill_resolution import (
     _entry_text_and_source,
     _extract_date_component,
     _field_binding_identity,
+    _infer_gpa_scale_from_text,
     _infer_entry_data_from_scope,
     _is_education_like_section,
+    _looks_like_experience_years_prompt,
     _is_structured_education_candidate,
     _is_structured_education_field,
     _is_structured_language_field,
@@ -734,12 +736,63 @@ def _known_entry_value(field_name: str, entry_data: dict[str, Any] | None) -> st
 
     if any(kw in name for kw in ("job title", "title", "position", "role title")):
         return _entry_string("title")
+    if any(kw in name for kw in ("issuing organization", "issuing organisation", "issuing org", "issuer")):
+        return _entry_string_from_aliases(
+            "issuing_org",
+            "issuingOrg",
+            "issuing_organization",
+            "issuingOrganization",
+            "issuer",
+        )
     if any(kw in name for kw in ("company", "employer", "organization")):
         return _entry_string("company")
     if any(kw in name for kw in ("school", "university", "college", "institution")):
         return _entry_string_from_aliases("school", "institution")
+    if name == "skill type":
+        return _entry_string_from_aliases("skill_type", "skillType", "category", "taxonomy")
+    if any(kw in name for kw in ("skill name", "technical skill")) or name == "skill":
+        return _entry_string_from_aliases("skill_name", "skillName", "skill", "name")
+    if name in {"language", "language name"} or "preferred language" in name:
+        return _entry_string_from_aliases("language", "language_name", "languageName")
+    if "i am fluent in this language" in name or name == "fluent" or name == "is fluent":
+        current = entry_data.get("isFluent")
+        if current is None:
+            current = entry_data.get("is_fluent")
+        if current is None:
+            return None
+        return "Yes" if bool(current) else "No"
+    if "comprehension" in name:
+        return _entry_string_from_aliases(
+            "speakingListening",
+            "speaking_listening",
+            "overallProficiency",
+            "overall_proficiency",
+            "lang_proficiency",
+            "language_proficiency",
+            "languageProficiency",
+            "proficiency_level",
+            "proficiencyLevel",
+        )
+    if "reading" in name or "writing" in name:
+        return _entry_string_from_aliases("readingWriting", "reading_writing")
+    if "speaking" in name or "listening" in name:
+        return _entry_string_from_aliases("speakingListening", "speaking_listening")
+    if "overall" in name or "language proficiency" in name or "proficiency level" in name:
+        return _entry_string_from_aliases(
+            "overallProficiency",
+            "overall_proficiency",
+            "lang_proficiency",
+            "language_proficiency",
+            "languageProficiency",
+            "proficiency_level",
+            "proficiencyLevel",
+        )
+    if name == "proficiency" or "skill proficiency" in name:
+        return _entry_string_from_aliases("proficiency", "proficiency_level", "proficiencyLevel")
     if any(kw in name for kw in ("degree type", "type of degree", "degree level")):
         return _entry_string_from_aliases("degree_type", "degreeType")
+    if _looks_like_experience_years_prompt(name):
+        return None
     if "degree" in name:
         return _entry_string_from_aliases("degree", "degree_type", "degreeType")
     if any(kw in name for kw in ("field of study", "major", "discipline", "area of study", "concentration")):
@@ -759,6 +812,14 @@ def _known_entry_value(field_name: str, entry_data: dict[str, Any] | None) -> st
             "concentration",
             "specialization",
         )
+    if any(kw in name for kw in ("license name", "certification name", "license / certification", "license or certification")):
+        return _entry_string_from_aliases(
+            "license_name",
+            "licenseName",
+            "certification_name",
+            "certificationName",
+            "name",
+        )
     if any(kw in name for kw in ("minor", "minor field", "minor subject")):
         return _entry_string_from_aliases("minor", "minors", "minorName", "minorNames", "minor_name", "minor_names")
     if any(kw in name for kw in ("honors", "honours", "honour", "honor")):
@@ -770,6 +831,14 @@ def _known_entry_value(field_name: str, entry_data: dict[str, Any] | None) -> st
             "honoursList",
             "honors_list",
             "honours_list",
+        )
+    if any(kw in name for kw in ("grading system", "grading scale", "grade system")):
+        return _infer_gpa_scale_from_text(
+            entry_data.get("gpa_scale")
+            or entry_data.get("gpaScale")
+            or entry_data.get("grading_system")
+            or entry_data.get("gradingSystem")
+            or entry_data.get("gpa")
         )
     if "gpa" in name:
         return _entry_string("gpa")
@@ -1173,6 +1242,15 @@ def _build_profile_answer_map(
         "Blog",
     )
     add(canonical.get("github"), "GitHub", "GitHub URL", "GitHub Profile")
+    add(
+        _current_or_latest_employer_name(profile_data),
+        "Current employer",
+        "Current company",
+        "Latest employer",
+        "Most recent employer",
+        "Name of Latest Employer",
+        "Name of Current Employer",
+    )
     add(canonical.get("work_authorization"), "Work Authorization")
     add(
         canonical.get("willing_to_relocate", allow_policy=True),
@@ -1248,11 +1326,25 @@ def _find_best_profile_answer(
     if not label or not answer_map:
         return None
 
+    norm_label = normalize_name(label)
+    label_tokens = [token for token in norm_label.split() if token]
     best_answer: str | None = None
     best_rank = 0
     for question, answer in answer_map.items():
+        norm_question = normalize_name(question)
+        question_tokens = [token for token in norm_question.split() if token]
         confidence = _label_match_confidence(label, question)
         if not _meets_match_confidence(confidence, minimum_confidence):
+            continue
+        # Prevent short personal-profile labels (e.g. "Current employer") from
+        # leaking into long screening questions that merely mention the phrase.
+        if (
+            len(label_tokens) >= 8
+            and len(question_tokens) <= 3
+            and norm_question
+            and norm_question in norm_label
+            and norm_question != norm_label
+        ):
             continue
         rank = _MATCH_CONFIDENCE_RANKS_getter().get(confidence or "", 0)
         if rank > best_rank:
@@ -1409,14 +1501,177 @@ def _profile_has_employer_history(profile_data: dict[str, Any], employer_name: s
     return False
 
 
+def _first_matching_option(field: FormField, *targets: str) -> str | None:
+    """Return the first visible option whose normalized text matches one of *targets*."""
+    target_norms = {normalize_name(target) for target in targets if normalize_name(target)}
+    if not target_norms:
+        return None
+    for choice in (field.options or field.choices or []):
+        text = str(choice).strip()
+        if text and normalize_name(text) in target_norms:
+            return text
+    return None
+
+
+def _current_or_latest_employer_name(profile_data: dict[str, Any] | None) -> str | None:
+    """Return the applicant's current or most recent employer from profile data."""
+    if not isinstance(profile_data, dict):
+        return None
+
+    for key in ("current_company", "company", "employer", "organization"):
+        value = profile_data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    experience_entries = profile_data.get("experience")
+    if not isinstance(experience_entries, list):
+        return None
+
+    normalized_entries = [entry for entry in experience_entries if isinstance(entry, dict)]
+    if not normalized_entries:
+        return None
+
+    for entry in normalized_entries:
+        currentish = entry.get("currently_work_here")
+        if currentish is None:
+            currentish = entry.get("currently_working")
+        if currentish in {True, "true", "True", "checked", "Yes", "yes"}:
+            for key in ("company", "employer", "organization", "company_name"):
+                value = entry.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+    for entry in normalized_entries:
+        for key in ("company", "employer", "organization", "company_name"):
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _is_latest_employer_prompt(label: str) -> bool:
+    return any(
+        phrase in label
+        for phrase in (
+            "latest employer",
+            "most recent employer",
+            "current employer",
+            "recent employer",
+            "name of latest employer",
+            "name of current employer",
+            "name of most recent employer",
+        )
+    )
+
+
+def _latest_employer_answer(field: FormField, profile_data: dict[str, Any] | None) -> str | None:
+    """Resolve latest-employer prompts from runtime profile without value substitution."""
+    label = normalize_name(_preferred_field_label(field))
+    if not _is_latest_employer_prompt(label):
+        return None
+
+    employer_name = _current_or_latest_employer_name(profile_data)
+    if not employer_name:
+        return None
+
+    coerced = _coerce_answer_to_field(field, employer_name)
+    if coerced:
+        return coerced
+
+    return None if field.field_type == "select" else employer_name
+
+
+def _detail_followup_profile_value(
+    field: FormField,
+    cluster: str | None,
+    role: str | None,
+    evidence: dict[str, str | None],
+    profile_data: dict[str, Any] | None,
+) -> str | None:
+    """Return an explicit detail-child answer without leaking the parent binary answer."""
+    if role != "detail_child":
+        return None
+
+    canonical = build_canonical_profile(profile_data or {}, evidence)
+
+    if cluster == "work_authorization":
+        explicit = (
+            canonical.get("visa_type")
+            or canonical.get("visa_status")
+            or canonical.get("current_visa_type")
+            or canonical.get("employment_authorization_basis")
+            or canonical.get("authorization_basis")
+            or evidence.get("visa_type")
+            or evidence.get("visa_status")
+            or evidence.get("current_visa_type")
+            or evidence.get("employment_authorization_basis")
+            or evidence.get("authorization_basis")
+        )
+        coerced = _coerce_answer_to_field(field, explicit)
+        if coerced:
+            return coerced
+        label = normalize_name(_preferred_field_label(field))
+        if "choose n a if none of these apply" in label or "choose n/a if none of these apply" in label:
+            return _first_matching_option(field, "N/A", "NA")
+        return None
+
+    if cluster == "visa_sponsorship":
+        explicit = (
+            canonical.get("visa_type")
+            or canonical.get("sponsorship_type")
+            or canonical.get("sponsorship_details")
+            or evidence.get("visa_type")
+            or evidence.get("sponsorship_type")
+            or evidence.get("sponsorship_details")
+        )
+        coerced = _coerce_answer_to_field(field, explicit)
+        if coerced:
+            return coerced
+        label = normalize_name(_preferred_field_label(field))
+        if "choose n a if none of these apply" in label or "choose n/a if none of these apply" in label:
+            return _first_matching_option(field, "N/A", "NA")
+        return None
+
+    return None
+
+
 def _default_screening_answer(field: FormField, profile_data: dict[str, Any]) -> str | None:
     """Return a deterministic answer for low-risk screening questions."""
     label = _preferred_field_label(field)
     norm = normalize_name(label)
+    canonical = build_canonical_profile(profile_data or {}, {})
+
+    if any(
+        phrase in norm
+        for phrase in ("how did you hear", "learn about us", "referral source", "source of referral", "source")
+    ):
+        explicit_source = canonical.get("how_did_you_hear")
+        if explicit_source:
+            coerced_source = _coerce_answer_to_field(field, explicit_source)
+            if coerced_source:
+                return coerced_source
+        for preferred_target in (
+            "LinkedIn",
+            "Job Board/Social Media",
+            "Job Board",
+            "Social Media",
+            "Company Careers Page",
+            "Website",
+            "Online",
+            "Internet",
+            "Other",
+        ):
+            preferred_source = _first_matching_option(field, preferred_target)
+            if preferred_source:
+                return preferred_source
+        coerced_default = _coerce_answer_to_field(field, "LinkedIn")
+        if coerced_default:
+            return coerced_default
+        return "LinkedIn"
+
     options = [normalize_name(choice) for choice in (field.options or field.choices or [])]
     if options and not ({"yes", "no"} & set(options)):
         return None
-    canonical = build_canonical_profile(profile_data or {}, {})
 
     named_employer = _extract_named_employer_from_question(norm)
     if named_employer:
@@ -1494,13 +1749,24 @@ def _resolve_semantic_intent_answer(
 ) -> str | None:
     """Resolve a classified semantic intent into an explicit saved answer."""
     canonical = build_canonical_profile(profile_data or {}, evidence)
+    cluster, role = _field_conditional_cluster(field)
 
     if intent == "work_authorization":
+        detail_answer = _detail_followup_profile_value(field, cluster, role, evidence, profile_data)
+        if detail_answer:
+            return detail_answer
+        if role == "detail_child":
+            return None
         return _coerce_answer_to_field(
             field,
             canonical.get("work_authorization") or canonical.get("authorized_to_work"),
         )
     if intent == "visa_sponsorship":
+        detail_answer = _detail_followup_profile_value(field, cluster, role, evidence, profile_data)
+        if detail_answer:
+            return detail_answer
+        if role == "detail_child":
+            return None
         return _coerce_answer_to_field(
             field,
             canonical.get("sponsorship_needed"),
@@ -1939,7 +2205,7 @@ async def _classify_known_intent_for_field(
         return None, None
 
     model_id = _settings.semantic_match_model or _settings.domhand_model
-    llm = get_chat_model(model=model_id)
+    llm = get_chat_model(model=model_id, disable_google_thinking=True)
     allowed_intents = [
         {
             "intent": intent,
@@ -2266,6 +2532,31 @@ def _known_profile_value_for_field(
 ) -> str | None:
     """Try direct profile matching against all known labels for a field."""
     field_label = _preferred_field_label(field)
+    field_name_norm = normalize_name(field_label or field.name or "")
+
+    # Oracle HCM inline skill repeaters expose "Skill Type" as a local taxonomy/category
+    # control. Filling it from the applicant's joined global skills list produces garbage
+    # concatenations like "TechnicaMediapipeOpenSim" and prevents the entry from being saved.
+    if field_name_norm == "skill type":
+        return None
+
+    cluster, role = _field_conditional_cluster(field)
+    detail_answer = _detail_followup_profile_value(field, cluster, role, evidence, profile_data)
+    if detail_answer:
+        _trace_profile_resolution(
+            "domhand.profile_detail_child_match",
+            field_label=field_label,
+            raw_value=_profile_debug_preview(detail_answer),
+        )
+        return detail_answer
+    employer_answer = _latest_employer_answer(field, profile_data)
+    if employer_answer:
+        _trace_profile_resolution(
+            "domhand.profile_latest_employer_match",
+            field_label=field_label,
+            raw_value=_profile_debug_preview(employer_answer),
+        )
+        return employer_answer
     profile_answer_map = _build_profile_answer_map(profile_data or {}, evidence)
     for label in _field_label_candidates(field):
         value = _find_best_profile_answer(label, profile_answer_map, minimum_confidence=minimum_confidence)
@@ -2422,6 +2713,52 @@ def _resolve_known_profile_value_for_field(
     minimum_confidence: str = "medium",
 ) -> ResolvedFieldValue | None:
     field_label = _preferred_field_label(field)
+    field_name_norm = normalize_name(field_label or field.name or "")
+
+    if field_name_norm == "skill type":
+        _trace_profile_resolution(
+            "domhand.profile_lookup_miss",
+            field_label=field_label,
+            minimum_confidence=minimum_confidence,
+            reason="oracle_skill_type_requires_local_selection",
+        )
+        return None
+
+    cluster, role = _field_conditional_cluster(field)
+    detail_answer = _detail_followup_profile_value(field, cluster, role, evidence, profile_data)
+    if detail_answer:
+        _trace_profile_resolution(
+            "domhand.profile_detail_child_match",
+            field_label=field_label,
+            raw_value=_profile_debug_preview(detail_answer),
+        )
+        return _resolved_field_value(
+            detail_answer,
+            source="derived_profile",
+            answer_mode="profile_backed",
+            confidence=0.9,
+        )
+    employer_answer = _latest_employer_answer(field, profile_data)
+    if employer_answer:
+        _trace_profile_resolution(
+            "domhand.profile_latest_employer_match",
+            field_label=field_label,
+            raw_value=_profile_debug_preview(employer_answer),
+        )
+        return _resolved_field_value(
+            employer_answer,
+            source="derived_profile",
+            answer_mode="profile_backed",
+            confidence=0.9,
+        )
+    if field.field_type == "select" and _is_latest_employer_prompt(field_name_norm):
+        _trace_profile_resolution(
+            "domhand.profile_lookup_miss",
+            field_label=field_label,
+            minimum_confidence=minimum_confidence,
+            reason="latest_employer_requires_safe_runtime_match",
+        )
+        return None
     if _is_structured_education_field(field):
         _trace_profile_resolution(
             "domhand.profile_lookup_miss",

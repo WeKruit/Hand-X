@@ -73,6 +73,76 @@
     .grid [role="gridcell"] { background: #fff; min-height: 2rem; display: flex; align-items: center; }
     .shadow-wrap { border: 2px dashed #607d8b; padding: 1rem; margin: 1rem 0; border-radius: 8px; }
     .hint { font-size: 0.85rem; color: #555; margin: 0.25rem 0 0.75rem; }
+    .workday-shell { max-width: 24rem; }
+    .workday-selectinput {
+      display: flex;
+      align-items: center;
+      border: 1px solid #7d8998;
+      border-radius: 4px;
+      background: #fff;
+      min-height: 2.5rem;
+      overflow: hidden;
+    }
+    .workday-selectinput input {
+      flex: 1;
+      border: 0;
+      outline: 0;
+      padding: 0.5rem 0.65rem;
+      font: inherit;
+      min-width: 0;
+      background: transparent;
+    }
+    .workday-selectinput button {
+      border: 0;
+      background: transparent;
+      padding: 0.45rem 0.65rem;
+      cursor: pointer;
+      color: #394b59;
+      font-size: 1rem;
+    }
+    .wd-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      min-height: 1.5rem;
+      margin: 0.35rem 0;
+    }
+    .wd-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.2rem 0.45rem;
+      border-radius: 999px;
+      background: #e9eef7;
+      color: #1f2d3d;
+      font-size: 0.9rem;
+    }
+    .wd-chip button {
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+      color: #5c6f82;
+      padding: 0;
+      line-height: 1;
+    }
+    .wd-proficiency-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(12rem, 1fr));
+      gap: 0.75rem 1rem;
+      max-width: 38rem;
+    }
+    .wd-field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+    .wd-field label {
+      font-weight: 600;
+    }
+    .wd-value-note {
+      font-size: 0.8rem;
+      color: #617184;
+    }
   </style>
 </head>
 <body>
@@ -237,6 +307,202 @@
     </div>
   </fieldset>
 
+  <!-- —— Dependent visa type combobox —— -->
+  <h2>11. Visa sponsorship dependency — parent pill reveals visa type combobox</h2>
+  <p class="hint">
+    Harsh regression target: selecting the parent sponsorship pill reveals a required visa type combobox.
+    The field only counts as complete after the dropdown option is clicked and the commit marker updates.
+  </p>
+  <div data-testid="visa-dependency-lab">
+    <div class="input-row input-row--has-picker">
+      <div>Will you now or in the future require visa sponsorship? *</div>
+      <div class="input-row__control-container reset-z-index">
+        <div class="oracle-pill-group" data-group-id="visa-sponsorship">
+          <ul class="cx-select-pills-container">
+            <li><button type="button" id="ff-visa-sponsor-yes" class="cx-select-pill-section" data-ff-id="ff-visa-sponsor-yes" aria-pressed="false">Yes</button></li>
+            <li><button type="button" id="ff-visa-sponsor-no" class="cx-select-pill-section" data-ff-id="ff-visa-sponsor-no" aria-pressed="false">No</button></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <div id="visa-type-block" hidden data-automation-id="formField-visa-type">
+      <label id="visa-type-label" for="visa-type-input">Visa type *</label>
+      <div class="oj-text-field-container" style="border: 1px solid #888; border-radius: 6px; background: #fafafa; max-width: 22rem;">
+        <input
+          id="visa-type-input"
+          data-ff-id="ff-visa-type"
+          type="text"
+          role="combobox"
+          aria-labelledby="visa-type-label"
+          aria-haspopup="listbox"
+          aria-expanded="false"
+          aria-controls="visa-type-list"
+          autocomplete="off"
+          placeholder="Select one"
+          style="width: 100%; border: 0; padding: 0.45rem 0.5rem; background: transparent;"
+        />
+        <ul id="visa-type-list" role="listbox" hidden aria-label="Visa types" style="margin: 0; padding: 0; list-style: none; border-top: 1px solid #ccc; max-height: 7rem; overflow: auto;">
+          <li role="option">H-1B</li>
+          <li role="option">F-1 OPT</li>
+          <li role="option">TN</li>
+          <li role="option">N/A</li>
+        </ul>
+      </div>
+      <div id="visa-type-commit" class="hint" aria-live="polite">Committed value: <span id="visa-type-commit-value"></span></div>
+    </div>
+  </div>
+
+  <!-- —— Workday skills selectinput —— -->
+  <h2>12. Workday-style skills selectinput (prompt search required)</h2>
+  <p class="hint">
+    Harsh regression target: clicking the input alone shows <code>No Items.</code>; a trusted click on
+    <code>promptSearchButton</code> is required before search results can commit a chip.
+  </p>
+  <div data-automation-id="formField" data-testid="workday-skills-lab" class="workday-shell">
+    <label id="wd-skills-label" for="wd-skills-input">Type to Add Skills</label>
+    <div id="wd-skills-root" data-automation-id="multiSelectContainer">
+      <div id="wd-skills-chip-row" class="wd-chip-row" data-automation-id="selectedItems"></div>
+      <div data-automation-id="multiselectInputContainer" class="workday-selectinput">
+        <input
+          id="wd-skills-input"
+          data-ff-id="ff-wd-skills"
+          data-automation-id="searchBox"
+          data-uxi-widget-type="selectinput"
+          type="search"
+          role="combobox"
+          aria-labelledby="wd-skills-label"
+          aria-controls="wd-skills-list"
+          aria-expanded="false"
+          aria-autocomplete="list"
+          autocomplete="off"
+          placeholder="Search"
+        />
+        <button
+          id="wd-skills-prompt"
+          type="button"
+          data-automation-id="promptSearchButton"
+          aria-label="Open prompt search"
+        >≡</button>
+      </div>
+      <div id="wd-skills-selection-label" data-automation-id="promptSelectionLabel" class="wd-value-note">0 items selected</div>
+      <ul id="wd-skills-list" role="listbox" hidden aria-label="Workday skill suggestions"></ul>
+    </div>
+  </div>
+
+  <!-- —— Workday language proficiency repeater —— -->
+  <h2>13. Workday-style language proficiency repeater</h2>
+  <p class="hint">
+    Mirrors the repeated language row where semantic profile values like <code>Native / bilingual</code>
+    must map to live options like <code>5 - Fluent</code> for <code>Comprehension</code> and
+    <code>Overall</code>.
+  </p>
+  <div data-testid="workday-language-lab">
+    <div class="wd-value-note">Language 2 = English</div>
+    <div class="wd-proficiency-grid">
+      <div class="wd-field" data-automation-id="formField">
+        <label id="wd-lang2-comprehension-label" for="wd-lang2-comprehension">Comprehension</label>
+        <div class="workday-selectinput">
+          <input
+            id="wd-lang2-comprehension"
+            data-ff-id="ff-wd-lang2-comprehension"
+            data-uxi-widget-type="selectinput"
+            type="text"
+            role="combobox"
+            aria-labelledby="wd-lang2-comprehension-label"
+            aria-controls="wd-lang2-comprehension-list"
+            aria-expanded="false"
+            autocomplete="off"
+            placeholder="Select One"
+          />
+          <button id="wd-lang2-comprehension-toggle" type="button" data-automation-id="promptSearchButton" aria-label="Open comprehension options">▼</button>
+        </div>
+        <ul id="wd-lang2-comprehension-list" role="listbox" hidden aria-label="Comprehension options"></ul>
+      </div>
+      <div class="wd-field" data-automation-id="formField">
+        <label id="wd-lang2-overall-label" for="wd-lang2-overall">Overall</label>
+        <div class="workday-selectinput">
+          <input
+            id="wd-lang2-overall"
+            data-ff-id="ff-wd-lang2-overall"
+            data-uxi-widget-type="selectinput"
+            type="text"
+            role="combobox"
+            aria-labelledby="wd-lang2-overall-label"
+            aria-controls="wd-lang2-overall-list"
+            aria-expanded="false"
+            autocomplete="off"
+            placeholder="Select One"
+          />
+          <button id="wd-lang2-overall-toggle" type="button" data-automation-id="promptSearchButton" aria-label="Open overall options">▼</button>
+        </div>
+        <ul id="wd-lang2-overall-list" role="listbox" hidden aria-label="Overall options"></ul>
+      </div>
+      <div class="wd-field" data-automation-id="formField">
+        <label id="wd-lang2-reading-label" for="wd-lang2-reading">Reading</label>
+        <div class="workday-selectinput">
+          <input
+            id="wd-lang2-reading"
+            data-ff-id="ff-wd-lang2-reading"
+            data-uxi-widget-type="selectinput"
+            type="text"
+            role="combobox"
+            aria-labelledby="wd-lang2-reading-label"
+            aria-controls="wd-lang2-reading-list"
+            aria-expanded="false"
+            autocomplete="off"
+            placeholder="Select One"
+            value="5 - Fluent"
+            data-committed-value="5 - Fluent"
+          />
+          <button id="wd-lang2-reading-toggle" type="button" data-automation-id="promptSearchButton" aria-label="Open reading options">▼</button>
+        </div>
+        <ul id="wd-lang2-reading-list" role="listbox" hidden aria-label="Reading options"></ul>
+      </div>
+      <div class="wd-field" data-automation-id="formField">
+        <label id="wd-lang2-speaking-label" for="wd-lang2-speaking">Speaking</label>
+        <div class="workday-selectinput">
+          <input
+            id="wd-lang2-speaking"
+            data-ff-id="ff-wd-lang2-speaking"
+            data-uxi-widget-type="selectinput"
+            type="text"
+            role="combobox"
+            aria-labelledby="wd-lang2-speaking-label"
+            aria-controls="wd-lang2-speaking-list"
+            aria-expanded="false"
+            autocomplete="off"
+            placeholder="Select One"
+            value="5 - Fluent"
+            data-committed-value="5 - Fluent"
+          />
+          <button id="wd-lang2-speaking-toggle" type="button" data-automation-id="promptSearchButton" aria-label="Open speaking options">▼</button>
+        </div>
+        <ul id="wd-lang2-speaking-list" role="listbox" hidden aria-label="Speaking options"></ul>
+      </div>
+      <div class="wd-field" data-automation-id="formField">
+        <label id="wd-lang2-writing-label" for="wd-lang2-writing">Writing</label>
+        <div class="workday-selectinput">
+          <input
+            id="wd-lang2-writing"
+            data-ff-id="ff-wd-lang2-writing"
+            data-uxi-widget-type="selectinput"
+            type="text"
+            role="combobox"
+            aria-labelledby="wd-lang2-writing-label"
+            aria-controls="wd-lang2-writing-list"
+            aria-expanded="false"
+            autocomplete="off"
+            placeholder="Select One"
+            value="5 - Fluent"
+            data-committed-value="5 - Fluent"
+          />
+          <button id="wd-lang2-writing-toggle" type="button" data-automation-id="promptSearchButton" aria-label="Open writing options">▼</button>
+        </div>
+        <ul id="wd-lang2-writing-list" role="listbox" hidden aria-label="Writing options"></ul>
+      </div>
+    </div>
+  </div>
+
   <div class="log" id="interaction-log" aria-live="polite" role="log"></div>
 
   <script>
@@ -352,7 +618,8 @@
         input.addEventListener('focus', function () {
           openList();
         });
-        input.addEventListener('click', function () {
+        input.addEventListener('click', function (event) {
+          if (!event.isTrusted) return;
           openList();
         });
         input.addEventListener('input', function () {
@@ -362,6 +629,7 @@
         list.addEventListener('click', function (e) {
           var li = e.target.closest('[role="option"]');
           if (!li || li.getAttribute('aria-disabled') === 'true') return;
+          if (!e.isTrusted) return;
           input.value = li.textContent.trim();
           closeList();
           log('Async skill selected -> ' + li.textContent.trim());
@@ -441,6 +709,326 @@
         }
       })();
 
+      (function visaTypeDependency() {
+        var group = document.querySelector('.oracle-pill-group[data-group-id="visa-sponsorship"]');
+        var yes = document.getElementById('ff-visa-sponsor-yes');
+        var no = document.getElementById('ff-visa-sponsor-no');
+        var block = document.getElementById('visa-type-block');
+        var input = document.getElementById('visa-type-input');
+        var list = document.getElementById('visa-type-list');
+        var commitValue = document.getElementById('visa-type-commit-value');
+        if (!group || !yes || !no || !block || !input || !list || !commitValue) {
+          return;
+        }
+
+        function setPressed(activeButton) {
+          group.querySelectorAll('.cx-select-pill-section').forEach(function (candidate) {
+            candidate.setAttribute('aria-pressed', candidate === activeButton ? 'true' : 'false');
+            candidate.classList.toggle('cx-select-pill-section--selected', candidate === activeButton);
+          });
+        }
+
+        function openList() {
+          list.hidden = false;
+          input.setAttribute('aria-expanded', 'true');
+        }
+
+        function closeList() {
+          list.hidden = true;
+          input.setAttribute('aria-expanded', 'false');
+        }
+
+        function revealVisaType() {
+          block.hidden = false;
+          log('Visa type revealed');
+        }
+
+        function hideVisaType() {
+          closeList();
+          block.hidden = true;
+          input.value = '';
+          input.removeAttribute('data-committed-value');
+          commitValue.textContent = '';
+        }
+
+        group.querySelectorAll('.cx-select-pill-section[data-ff-id]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            setPressed(button);
+            if (button === no) {
+              revealVisaType();
+            } else {
+              hideVisaType();
+            }
+            log('Visa sponsorship -> ' + button.textContent.trim());
+          });
+        });
+
+        input.addEventListener('focus', openList);
+        input.addEventListener('click', function () {
+          if (!block.hidden) {
+            openList();
+          }
+        });
+        input.addEventListener('input', function () {
+          if (!block.hidden && list.hidden) {
+            openList();
+          }
+        });
+        list.querySelectorAll('[role="option"]').forEach(function (li) {
+          li.addEventListener('click', function () {
+            var text = li.textContent.trim();
+            input.value = text;
+            input.setAttribute('data-committed-value', text);
+            commitValue.textContent = text;
+            closeList();
+            log('Visa type -> ' + text);
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+          });
+        });
+        document.addEventListener('click', function (e) {
+          if (!e.target.closest('#visa-type-block')) {
+            closeList();
+          }
+        });
+      })();
+
+      (function workdaySkills() {
+        var root = document.getElementById('wd-skills-root');
+        var input = document.getElementById('wd-skills-input');
+        var button = document.getElementById('wd-skills-prompt');
+        var list = document.getElementById('wd-skills-list');
+        var chips = document.getElementById('wd-skills-chip-row');
+        var label = document.getElementById('wd-skills-selection-label');
+        var catalog = [
+          { label: 'Python', queries: ['python'] },
+          { label: 'Java', queries: ['java'] },
+          { label: 'JavaScript', queries: ['javascript'] },
+          { label: 'TypeScript', queries: ['typescript'] },
+          { label: 'ReactJS', queries: ['reactjs'] },
+          { label: 'Express', queries: ['express'] },
+          { label: 'MySQL', queries: ['mysql'] },
+          { label: 'NodeJS', queries: ['nodejs', 'node js'] },
+          { label: 'AWS', queries: ['aws'] },
+          { label: 'Tailwind CSS', queries: ['tailwind css', 'tailwindcss'] }
+        ];
+        if (!root || !input || !button || !list || !chips || !label) return;
+
+        var state = {
+          promptReady: false,
+          open: false,
+          highlightIndex: -1,
+          selected: [],
+        };
+
+        function syncSummary() {
+          label.textContent = state.selected.length + ' item' + (state.selected.length === 1 ? '' : 's') + ' selected';
+          root.setAttribute('data-selected-count', String(state.selected.length));
+        }
+
+        function setHighlighted(index) {
+          var options = Array.from(list.querySelectorAll('[role="option"]:not([aria-disabled="true"])'));
+          state.highlightIndex = options.length ? Math.max(0, Math.min(index, options.length - 1)) : -1;
+          options.forEach(function (node, idx) {
+            node.setAttribute('aria-selected', idx === state.highlightIndex ? 'true' : 'false');
+          });
+        }
+
+        function renderNoItems() {
+          list.innerHTML = '';
+          var li = document.createElement('li');
+          li.setAttribute('role', 'option');
+          li.setAttribute('aria-disabled', 'true');
+          li.textContent = 'No Items.';
+          list.appendChild(li);
+          state.highlightIndex = -1;
+        }
+
+        function isBlobQuery(query) {
+          if (!query) return false;
+          if (query.indexOf(',') !== -1) return true;
+          var words = query.split(/\s+/).filter(Boolean);
+          return words.length > 3;
+        }
+
+        function renderMatches() {
+          list.innerHTML = '';
+          if (!state.promptReady) {
+            renderNoItems();
+            return;
+          }
+          var query = (input.value || '').trim().toLowerCase();
+          if (isBlobQuery(query)) {
+            renderNoItems();
+            return;
+          }
+          var hits = catalog.filter(function (item) {
+            if (state.selected.indexOf(item.label) !== -1) return false;
+            if (!query) return true;
+            return item.queries.indexOf(query) !== -1;
+          });
+          if (!hits.length) {
+            renderNoItems();
+            return;
+          }
+          hits.forEach(function (item, idx) {
+            var li = document.createElement('li');
+            li.setAttribute('role', 'option');
+            li.setAttribute('data-option-value', item.label);
+            li.textContent = item.label;
+            li.setAttribute('aria-selected', idx === 0 ? 'true' : 'false');
+            list.appendChild(li);
+          });
+          state.highlightIndex = 0;
+        }
+
+        function openList() {
+          list.hidden = false;
+          state.open = true;
+          input.setAttribute('aria-expanded', 'true');
+          renderMatches();
+        }
+
+        function closeList() {
+          list.hidden = true;
+          state.open = false;
+          input.setAttribute('aria-expanded', 'false');
+          state.highlightIndex = -1;
+        }
+
+        function commit(text) {
+          if (!text || state.selected.indexOf(text) !== -1) return;
+          state.selected.push(text);
+          var chip = document.createElement('span');
+          chip.className = 'wd-chip';
+          chip.setAttribute('data-automation-id', 'selectedItem');
+          chip.innerHTML = '<span>' + text + '</span><button type="button" aria-label="Remove ' + text + '">x</button>';
+          chips.appendChild(chip);
+          input.value = '';
+          input.setAttribute('data-committed-value', text);
+          state.promptReady = false;
+          syncSummary();
+          closeList();
+          log('Workday skills -> ' + text);
+        }
+
+        input.addEventListener('focus', function () {
+          openList();
+        });
+        input.addEventListener('click', function () {
+          openList();
+        });
+        input.addEventListener('input', function () {
+          if (!state.open) openList();
+          else renderMatches();
+        });
+        input.addEventListener('keydown', function (event) {
+          var options = Array.from(list.querySelectorAll('[role="option"]:not([aria-disabled="true"])'));
+          if (event.key === 'ArrowDown' && options.length) {
+            event.preventDefault();
+            setHighlighted(state.highlightIndex + 1);
+            return;
+          }
+          if (event.key === 'ArrowUp' && options.length) {
+            event.preventDefault();
+            setHighlighted(state.highlightIndex - 1);
+            return;
+          }
+          if (event.key === 'Enter' && options.length && state.highlightIndex >= 0) {
+            event.preventDefault();
+            commit(options[state.highlightIndex].getAttribute('data-option-value'));
+          }
+        });
+        button.addEventListener('click', function (event) {
+          if (!event.isTrusted) return;
+          state.promptReady = true;
+          openList();
+          input.focus();
+          log('Workday skills prompt opened');
+        });
+        list.addEventListener('click', function (event) {
+          var option = event.target.closest('[role="option"]');
+          if (!option || option.getAttribute('aria-disabled') === 'true' || !event.isTrusted) return;
+          commit(option.getAttribute('data-option-value'));
+        });
+        document.addEventListener('click', function (event) {
+          if (!event.target.closest('#wd-skills-root')) closeList();
+        });
+        syncSummary();
+      })();
+
+      (function workdayLanguageRepeater() {
+        var options = ['1 - Beginner', '3 - Intermediate', '5 - Fluent'];
+
+        function bindSingleSelect(inputId, listId, buttonId) {
+          var input = document.getElementById(inputId);
+          var list = document.getElementById(listId);
+          var button = document.getElementById(buttonId);
+          if (!input || !list || !button) return;
+
+          function render() {
+            list.innerHTML = '';
+            options.forEach(function (text, idx) {
+              var li = document.createElement('li');
+              li.setAttribute('role', 'option');
+              li.setAttribute('data-option-value', text);
+              li.setAttribute('aria-selected', idx === 0 ? 'true' : 'false');
+              li.textContent = text;
+              list.appendChild(li);
+            });
+          }
+
+          function openList() {
+            render();
+            list.hidden = false;
+            input.setAttribute('aria-expanded', 'true');
+          }
+
+          function closeList() {
+            list.hidden = true;
+            input.setAttribute('aria-expanded', 'false');
+          }
+
+          function commit(text) {
+            input.value = text;
+            input.setAttribute('data-committed-value', text);
+            closeList();
+            log(inputId + ' -> ' + text);
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+
+          input.addEventListener('focus', openList);
+          input.addEventListener('click', openList);
+          button.addEventListener('click', function (event) {
+            if (!event.isTrusted) return;
+            openList();
+            input.focus();
+          });
+          list.addEventListener('click', function (event) {
+            var option = event.target.closest('[role="option"]');
+            if (!option || !event.isTrusted) return;
+            commit(option.getAttribute('data-option-value'));
+          });
+          input.addEventListener('keydown', function (event) {
+            if (event.key !== 'Enter') return;
+            var current = list.querySelector('[role="option"][aria-selected="true"]') || list.querySelector('[role="option"]');
+            if (!current) return;
+            event.preventDefault();
+            commit(current.getAttribute('data-option-value'));
+          });
+          document.addEventListener('click', function (event) {
+            if (!event.target.closest('#' + inputId) && !event.target.closest('#' + buttonId) && !event.target.closest('#' + listId)) {
+              closeList();
+            }
+          });
+        }
+
+        bindSingleSelect('wd-lang2-comprehension', 'wd-lang2-comprehension-list', 'wd-lang2-comprehension-toggle');
+        bindSingleSelect('wd-lang2-overall', 'wd-lang2-overall-list', 'wd-lang2-overall-toggle');
+        bindSingleSelect('wd-lang2-reading', 'wd-lang2-reading-list', 'wd-lang2-reading-toggle');
+        bindSingleSelect('wd-lang2-speaking', 'wd-lang2-speaking-list', 'wd-lang2-speaking-toggle');
+        bindSingleSelect('wd-lang2-writing', 'wd-lang2-writing-list', 'wd-lang2-writing-toggle');
+      })();
+
       /* Shadow root: native select + combobox + prior employment radios */
       var host = document.getElementById('shadow-lab-host');
       var sr = host.attachShadow({ mode: 'open' });
@@ -459,7 +1047,12 @@
         '<label><input type="radio" name="sh_prior" value="no" /> No</label>',
         '</fieldset>',
         '<div><button type="button" id="sh-combo-btn" aria-haspopup="listbox" aria-expanded="false">Shadow combo</button>',
-        '<ul id="sh-combo-list" hidden role="listbox"><li role="option">Alpha</li><li role="option">Beta</li><li role="option">Gamma</li></ul></div>'
+        '<ul id="sh-combo-list" hidden role="listbox"><li role="option">Alpha</li><li role="option">Beta</li><li role="option">Gamma</li></ul></div>',
+        '<fieldset><legend>Shadow: Skill search</legend>',
+        '<label for="sh-skill-input">Shadow Skill</label>',
+        '<input id="sh-skill-input" data-ff-id="ff-shadow-skill" type="text" role="combobox" aria-expanded="false" aria-controls="sh-skill-list" aria-haspopup="listbox" autocomplete="off" placeholder="Type py or jav" />',
+        '<ul id="sh-skill-list" hidden role="listbox" aria-label="Shadow skill suggestions"></ul>',
+        '</fieldset>'
       ].join('');
 
       sr.getElementById('sh-dept').addEventListener('change', function (e) {
@@ -486,6 +1079,75 @@
             b.setAttribute('aria-expanded', 'false');
             log('Shadow combobox -> ' + li.textContent.trim());
           });
+        });
+      })();
+
+      (function () {
+        var input = sr.getElementById('sh-skill-input');
+        var list = sr.getElementById('sh-skill-list');
+        var pool = ['Python', 'PyTorch', 'Java', 'JavaScript', 'Rust', 'Ruby', 'Go', 'Scala'];
+        function placeholderNoOptions() {
+          list.innerHTML = '';
+          var li = document.createElement('li');
+          li.setAttribute('role', 'option');
+          li.setAttribute('aria-disabled', 'true');
+          li.textContent = 'No options';
+          list.appendChild(li);
+        }
+        function renderMatches(query) {
+          list.innerHTML = '';
+          var q = query.trim().toLowerCase();
+          if (!q) {
+            placeholderNoOptions();
+            return;
+          }
+          var hits = pool.filter(function (x) {
+            return x.toLowerCase().indexOf(q) !== -1;
+          });
+          if (hits.length === 0) {
+            placeholderNoOptions();
+            return;
+          }
+          hits.forEach(function (text) {
+            var li = document.createElement('li');
+            li.setAttribute('role', 'option');
+            li.textContent = text;
+            list.appendChild(li);
+          });
+        }
+        function openList() {
+          list.hidden = false;
+          input.setAttribute('aria-expanded', 'true');
+          renderMatches(input.value || '');
+          log('Shadow async skill open (query="' + (input.value || '') + '")');
+        }
+        function closeList() {
+          list.hidden = true;
+          input.setAttribute('aria-expanded', 'false');
+        }
+        input.addEventListener('focus', function () {
+          openList();
+        });
+        input.addEventListener('click', function (event) {
+          if (!event.isTrusted) return;
+          openList();
+        });
+        input.addEventListener('input', function () {
+          if (list.hidden) openList();
+          else renderMatches(input.value || '');
+        });
+        list.addEventListener('click', function (e) {
+          var li = e.target.closest('[role="option"]');
+          if (!li || li.getAttribute('aria-disabled') === 'true') return;
+          if (!e.isTrusted) return;
+          input.value = li.textContent.trim();
+          closeList();
+          log('Shadow async skill -> ' + li.textContent.trim());
+        });
+        document.addEventListener('click', function (e) {
+          if (!e.target.closest('#shadow-lab-host')) {
+            closeList();
+          }
         });
       })();
 

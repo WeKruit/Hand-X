@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -34,6 +35,7 @@ def _mock_anthropic_response(text: str) -> MagicMock:
 
 # ── llm_verify_field_value ───────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_verify_returns_true_on_match():
     page = AsyncMock()
@@ -42,9 +44,7 @@ async def test_verify_returns_true_on_match():
 
     field = _make_field()
     mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(
-        return_value=_mock_anthropic_response('{"matches": true}')
-    )
+    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response('{"matches": true}'))
     with patch(
         "ghosthands.dom.fill_llm_escalation._get_anthropic_client",
         return_value=mock_client,
@@ -61,9 +61,7 @@ async def test_verify_returns_false_on_mismatch():
 
     field = _make_field()
     mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(
-        return_value=_mock_anthropic_response('{"matches": false}')
-    )
+    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response('{"matches": false}'))
     with patch(
         "ghosthands.dom.fill_llm_escalation._get_anthropic_client",
         return_value=mock_client,
@@ -102,6 +100,7 @@ async def test_verify_returns_none_on_api_error():
 
 # ── llm_suggest_fill_action ──────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_suggest_returns_strategy_dict():
     page = AsyncMock()
@@ -115,9 +114,7 @@ async def test_suggest_returns_strategy_dict():
         "steps": ["click selector", "type value"],
     }
     mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(
-        return_value=_mock_anthropic_response(json.dumps(suggestion))
-    )
+    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response(json.dumps(suggestion)))
     with patch(
         "ghosthands.dom.fill_llm_escalation._get_anthropic_client",
         return_value=mock_client,
@@ -139,6 +136,7 @@ async def test_suggest_returns_none_on_failure():
 
 # ── llm_execute_fill_suggestion ──────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_execute_click_then_type():
     page = AsyncMock()
@@ -148,7 +146,9 @@ async def test_execute_click_then_type():
 
     field = _make_field("text", "Name")
     result = await llm_execute_fill_suggestion(
-        page, field, "John Doe",
+        page,
+        field,
+        "John Doe",
         {"strategy": "click_then_type", "selector": "#name"},
     )
     assert result is True
@@ -165,7 +165,9 @@ async def test_execute_clear_and_retype():
 
     field = _make_field("text", "Email")
     result = await llm_execute_fill_suggestion(
-        page, field, "test@example.com",
+        page,
+        field,
+        "test@example.com",
         {"strategy": "clear_and_retype", "selector": "#email"},
     )
     assert result is True
@@ -177,7 +179,9 @@ async def test_execute_unknown_strategy():
     page = AsyncMock()
     field = _make_field()
     result = await llm_execute_fill_suggestion(
-        page, field, "value",
+        page,
+        field,
+        "value",
         {"strategy": "nonexistent"},
     )
     assert result is False
@@ -191,7 +195,9 @@ async def test_execute_use_keyboard():
 
     field = _make_field("text", "Name")
     result = await llm_execute_fill_suggestion(
-        page, field, "test",
+        page,
+        field,
+        "test",
         {
             "strategy": "use_keyboard",
             "steps": ["press:Tab", "type:hello", "click:#submit"],
@@ -203,6 +209,7 @@ async def test_execute_use_keyboard():
 
 
 # ── Integration with fill_verify ─────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_verify_pipeline_llm_override():
@@ -216,19 +223,28 @@ async def test_verify_pipeline_llm_override():
     with (
         patch("ghosthands.dom.fill_verify._field_already_matches", new_callable=AsyncMock, return_value=False),
         patch("ghosthands.dom.fill_verify._is_domhand_retry_capped_for_field", return_value=False),
-        patch("ghosthands.dom.fill_verify._fill_single_field", new_callable=AsyncMock, return_value=True),
+        patch(
+            "ghosthands.dom.fill_verify._fill_single_field_outcome",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(success=True, matched_label=None),
+        ),
         patch("ghosthands.dom.fill_verify._verify_fill_observable", new_callable=AsyncMock, return_value=False),
         patch("ghosthands.dom.fill_verify._read_observed_field_value", new_callable=AsyncMock, return_value="wrong"),
         patch("ghosthands.dom.fill_verify._llm_verify_if_available", new_callable=AsyncMock, return_value=True),
         patch("ghosthands.dom.fill_verify._clear_domhand_failure_for_field"),
     ):
-        success, msg, code, fc = await _attempt_domhand_fill_with_retry_cap(
-            page, host="example.com", field=field,
-            desired_value="John", tool_name="test",
+        success, msg, code, fc, settled_value = await _attempt_domhand_fill_with_retry_cap(
+            page,
+            host="example.com",
+            field=field,
+            desired_value="John",
+            tool_name="test",
         )
     assert success is True
     assert msg is None
+    assert code is None
     assert fc == 0.8
+    assert settled_value == "John"
 
 
 @pytest.mark.asyncio
@@ -243,14 +259,24 @@ async def test_verify_pipeline_llm_escalation_rescues():
     with (
         patch("ghosthands.dom.fill_verify._field_already_matches", new_callable=AsyncMock, return_value=False),
         patch("ghosthands.dom.fill_verify._is_domhand_retry_capped_for_field", return_value=False),
-        patch("ghosthands.dom.fill_verify._fill_single_field", new_callable=AsyncMock, return_value=False),
+        patch(
+            "ghosthands.dom.fill_verify._fill_single_field_outcome",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(success=False, matched_label=None),
+        ),
         patch("ghosthands.dom.fill_verify._llm_verify_if_available", new_callable=AsyncMock, return_value=None),
         patch("ghosthands.dom.fill_verify._llm_escalate_fill", new_callable=AsyncMock, return_value=True),
         patch("ghosthands.dom.fill_verify._clear_domhand_failure_for_field"),
     ):
-        success, msg, code, fc = await _attempt_domhand_fill_with_retry_cap(
-            page, host="example.com", field=field,
-            desired_value="United States", tool_name="test",
+        success, msg, code, fc, settled_value = await _attempt_domhand_fill_with_retry_cap(
+            page,
+            host="example.com",
+            field=field,
+            desired_value="United States",
+            tool_name="test",
         )
     assert success is True
+    assert msg is None
+    assert code is None
     assert fc == 0.8
+    assert settled_value == "United States"

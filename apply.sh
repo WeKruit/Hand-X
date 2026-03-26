@@ -47,6 +47,30 @@ source "$DIR/.venv/bin/activate"
 # ── Load .env ─────────────────────────────────────────────────
 [ -f "$DIR/.env" ] && set -a && source "$DIR/.env" && set +a
 
+_generate_fresh_create_account_email() {
+  local base_email="$1"
+  local default_domain="nyu.edu"
+  local domain="${base_email#*@}"
+  if [[ -z "$base_email" || "$domain" == "$base_email" || -z "$domain" ]]; then
+    domain="$default_domain"
+  fi
+
+  local local_part=""
+  while [[ ${#local_part} -lt 8 ]]; do
+    local_part+=$(LC_ALL=C tr -dc 'a-z' </dev/urandom | head -c 8)
+  done
+  local_part="${local_part:0:8}"
+  printf '%s@%s' "$local_part" "$domain"
+}
+
+if [[ "${GH_CREDENTIAL_SOURCE:-}" == "user" && "${GH_CREDENTIAL_INTENT:-}" == "create_account" ]]; then
+  FRESH_CREATE_ACCOUNT_EMAIL="$(_generate_fresh_create_account_email "${GH_EMAIL:-}")"
+  export GH_EMAIL="$FRESH_CREATE_ACCOUNT_EMAIL"
+fi
+
+GH_SUBMIT_INTENT="${GH_SUBMIT_INTENT:-review}"
+export GH_SUBMIT_INTENT
+
 # ── Stagehand (optional tools): needs MODEL_API_KEY; Browserbase optional ─
 # Prefer Anthropic when unset (same as DomHand / Haiku). Override with explicit MODEL_API_KEY=...
 if [ -z "${MODEL_API_KEY:-}" ]; then
@@ -131,6 +155,10 @@ if [[ -n "$USER_ID" ]]; then
 else
   echo "  Data:   $DATA"
 fi
+if [[ "${GH_CREDENTIAL_SOURCE:-}" == "user" && "${GH_CREDENTIAL_INTENT:-}" == "create_account" ]]; then
+  echo "  Auth:   create_account email=${GH_EMAIL:-}"
+fi
+echo "  Submit: $GH_SUBMIT_INTENT"
 echo "══════════════════════════════════════════════════════════"
 echo
 
@@ -138,6 +166,7 @@ CLI_ARGS=(
   --job-url "$JOB_URL"
   --resume "$RESUME"
   --output-format human
+  --submit-intent "$GH_SUBMIT_INTENT"
 )
 
 if [[ -n "$USER_ID" ]]; then

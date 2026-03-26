@@ -108,3 +108,100 @@ async def test_fill_single_field_uses_platform_override():
         result = await _fill_single_field(fake_page, field, "United States")
     assert result is True
     mock_dispatch.assert_awaited_once()
+
+
+def test_workday_platform_does_not_override_select_fill_strategy():
+    from ghosthands.platforms import get_fill_overrides
+
+    overrides = get_fill_overrides("https://company.wd5.myworkdayjobs.com/en-US/jobs/apply")
+
+    assert overrides.get("date") == "segmented_date"
+    assert "select" not in overrides
+
+
+@pytest.mark.asyncio
+async def test_fill_select_field_outcome_routes_workday_referral_source_to_dedicated_handler():
+    from ghosthands.dom.fill_executor import _fill_select_field_outcome
+
+    fake_page = AsyncMock()
+    field = _make_field("select", name="How Did You Hear About Us?")
+
+    with (
+        patch(
+            "ghosthands.dom.fill_executor._safe_page_url",
+            new=AsyncMock(return_value="https://company.wd5.myworkdayjobs.com/en-US/jobs/apply"),
+        ),
+        patch(
+            "ghosthands.dom.fill_executor._fill_workday_referral_source_select",
+            new_callable=AsyncMock,
+            return_value=FieldFillOutcome(success=True, matched_label="Other"),
+        ) as mock_referral,
+        patch(
+            "ghosthands.dom.fill_executor._fill_custom_dropdown_outcome",
+            new_callable=AsyncMock,
+        ) as mock_generic,
+    ):
+        result = await _fill_select_field_outcome(fake_page, field, "Other", "[How Did You Hear About Us?]")
+
+    assert result.success is True
+    mock_referral.assert_awaited_once()
+    mock_generic.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fill_select_field_outcome_keeps_non_referral_workday_selects_on_generic_path():
+    from ghosthands.dom.fill_executor import _fill_select_field_outcome
+
+    fake_page = AsyncMock()
+    field = _make_field("select", name="Country")
+
+    with (
+        patch(
+            "ghosthands.dom.fill_executor._safe_page_url",
+            new=AsyncMock(return_value="https://company.wd5.myworkdayjobs.com/en-US/jobs/apply"),
+        ),
+        patch(
+            "ghosthands.dom.fill_executor._fill_workday_referral_source_select",
+            new_callable=AsyncMock,
+        ) as mock_referral,
+        patch(
+            "ghosthands.dom.fill_executor._fill_custom_dropdown_outcome",
+            new_callable=AsyncMock,
+            return_value=FieldFillOutcome(success=True, matched_label="United States"),
+        ) as mock_generic,
+    ):
+        result = await _fill_select_field_outcome(fake_page, field, "United States", "[Country]")
+
+    assert result.success is True
+    mock_referral.assert_not_awaited()
+    mock_generic.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_workday_referral_source_uses_arrow_enter_last_resort():
+    """Main's _fill_custom_dropdown uses ArrowDown+Enter as last resort when no
+    click match is found. Referral source is intentionally generous."""
+    from ghosthands.dom.fill_executor import _fill_workday_referral_source_select
+
+    fake_page = AsyncMock()
+    field = _make_field("select", name="How Did You Hear About Us?")
+
+    with (
+        patch("ghosthands.dom.fill_executor._try_open_combobox_menu", new=AsyncMock()),
+        patch("ghosthands.dom.fill_executor._clear_dropdown_search", new=AsyncMock()),
+        patch("ghosthands.dom.fill_executor._type_text_compat", new=AsyncMock()),
+        patch("ghosthands.dom.fill_executor._click_dropdown_option", new=AsyncMock(return_value={"clicked": False})),
+        patch("ghosthands.dom.fill_executor._poll_click_dropdown_option", new=AsyncMock(return_value={"clicked": False})),
+        patch("ghosthands.dom.fill_executor._settle_dropdown_selection", new=AsyncMock()),
+        patch("ghosthands.dom.fill_executor._press_key_compat", new=AsyncMock()) as mock_press,
+    ):
+        result = await _fill_workday_referral_source_select(
+            fake_page,
+            field,
+            "Other",
+            "[How Did You Hear About Us?]",
+        )
+
+    # Main-like: ArrowDown+Enter last resort → optimistic success
+    assert result.success is True
+    assert mock_press.await_count >= 2  # ArrowDown + Enter

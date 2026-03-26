@@ -321,7 +321,6 @@ WORKDAY_CONFIG = PlatformConfig(
     form_strategy="dom_first",
     automation_id_map=WORKDAY_SELECTORS,
     fill_overrides={
-        "select": "combobox_toggle",
         "date": "segmented_date",
     },
 )

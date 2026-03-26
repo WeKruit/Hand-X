@@ -2,6 +2,7 @@
 
 import base64
 import io
+import json
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,31 @@ class TestImageInLLMMessages:
 		assert len(mm.state.read_state_images) == 2
 		assert mm.state.read_state_images[0]['name'] == 'img1.png'
 		assert mm.state.read_state_images[1]['name'] == 'img2.jpg'
+
+	@pytest.mark.asyncio
+	async def test_domhand_fill_and_assess_do_not_pollute_read_state(self, tmp_path: Path):
+		"""Test that large DomHand page-pass summaries are suppressed from read_state."""
+		fs = FileSystem(tmp_path)
+		system_message = SystemMessage(content='Test system message')
+		mm = MessageManager(task='test', system_message=system_message, file_system=fs)
+
+		action_results = [
+			ActionResult(
+				extracted_content='DomHand fill summary that should not enter browser-use read_state',
+				include_extracted_content_only_once=True,
+				metadata={'tool': 'domhand_fill'},
+			),
+			ActionResult(
+				extracted_content='DomHand assess summary that should not enter browser-use read_state',
+				include_extracted_content_only_once=True,
+				metadata={'tool': 'domhand_assess_state'},
+			),
+		]
+
+		step_info = AgentStepInfo(step_number=1, max_steps=10)
+		mm._update_agent_history_description(model_output=None, result=action_results, step_info=step_info)
+
+		assert mm.state.read_state_description == ''
 
 	def test_agent_message_prompt_includes_images(self, tmp_path: Path):
 		"""Test that AgentMessagePrompt includes images in message content."""
@@ -350,6 +376,132 @@ class TestEndToEndIntegration:
 		# Verify image data is correct
 		base64_str = base64.b64encode(img_bytes).decode('utf-8')
 		assert base64_str in image_parts[0].image_url.url
+
+
+class TestPageTransitionContext:
+	"""Test that MessageManager injects explicit page-update context across steps."""
+
+	def _browser_state(self, *, url: str, title: str) -> BrowserStateSummary:
+		return BrowserStateSummary(
+			url=url,
+			title=title,
+			tabs=[TabInfo(target_id='test-0', url=url, title=title)],
+			screenshot=None,
+			dom_state=SerializedDOMState(_root=None, selector_map={}),
+		)
+
+	def test_prepare_step_state_injects_page_update_note_on_transition(self, tmp_path: Path):
+		fs = FileSystem(tmp_path)
+		mm = MessageManager(task='test', system_message=SystemMessage(content='System'), file_system=fs)
+
+		page_one = self._browser_state(url='https://example.com/apply/1', title='Personal Info')
+		page_two = self._browser_state(url='https://example.com/apply/2', title='Experience')
+
+		mm.prepare_step_state(page_one, result=[], step_info=AgentStepInfo(step_number=1, max_steps=10))
+		assert 'PAGE UPDATE:' not in mm.state.read_state_description
+
+		mm.prepare_step_state(page_two, result=[], step_info=AgentStepInfo(step_number=2, max_steps=10))
+
+		assert 'PAGE UPDATE:' in mm.state.read_state_description
+		assert 'Current page: Experience | https://example.com/apply/2' in mm.state.read_state_description
+		assert any(
+			item.system_message and 'PAGE UPDATE:' in item.system_message for item in mm.state.agent_history_items
+		)
+
+	def test_prepare_step_state_does_not_inject_page_update_note_on_same_page(self, tmp_path: Path):
+		fs = FileSystem(tmp_path)
+		mm = MessageManager(task='test', system_message=SystemMessage(content='System'), file_system=fs)
+
+		page_one = self._browser_state(url='https://example.com/apply/1', title='Personal Info')
+
+		mm.prepare_step_state(page_one, result=[], step_info=AgentStepInfo(step_number=1, max_steps=10))
+		mm.prepare_step_state(page_one, result=[], step_info=AgentStepInfo(step_number=2, max_steps=10))
+
+		assert 'PAGE UPDATE:' not in mm.state.read_state_description
+		assert not any(
+			item.system_message and 'PAGE UPDATE:' in item.system_message for item in mm.state.agent_history_items
+		)
+
+	def test_domhand_assess_state_advance_allowed_injects_advance_now_note(self, tmp_path: Path):
+		fs = FileSystem(tmp_path)
+		mm = MessageManager(task='test', system_message=SystemMessage(content='System'), file_system=fs)
+
+		result = [
+			ActionResult(
+				extracted_content='DomHand assess_state: state=advanceable; advance_allowed=yes.',
+				include_extracted_content_only_once=True,
+				metadata={
+					'tool': 'domhand_assess_state',
+					'application_state_json': json.dumps({'advance_allowed': True}),
+				},
+			)
+		]
+
+		mm._update_agent_history_description(
+			model_output=None,
+			result=result,
+			step_info=AgentStepInfo(step_number=1, max_steps=10),
+		)
+
+		assert 'ADVANCE NOW:' in mm.state.read_state_description
+		assert 'Do NOT call domhand_fill or domhand_assess_state again' in mm.state.read_state_description
+
+	def test_same_page_advance_guard_injects_advance_now_note(self, tmp_path: Path):
+		fs = FileSystem(tmp_path)
+		mm = MessageManager(task='test', system_message=SystemMessage(content='System'), file_system=fs)
+
+		result = [
+			ActionResult(
+				error='This SAME page was already assessed as advance_allowed=yes.',
+				include_extracted_content_only_once=True,
+				metadata={
+					'tool': 'domhand_fill',
+					'same_page_advance_guard': True,
+				},
+			)
+		]
+
+		mm._update_agent_history_description(
+			model_output=None,
+			result=result,
+			step_info=AgentStepInfo(step_number=1, max_steps=10),
+		)
+
+		assert 'ADVANCE NOW:' in mm.state.read_state_description
+		assert 'same-page advance guard was just triggered' in mm.state.read_state_description
+		assert 'domhand_fill should NOT be used again on this page' in mm.state.read_state_description
+
+	def test_assess_state_blocked_page_injects_review_current_page_note(self, tmp_path: Path):
+		fs = FileSystem(tmp_path)
+		mm = MessageManager(task='test', system_message=SystemMessage(content='System'), file_system=fs)
+
+		result = [
+			ActionResult(
+				extracted_content='DomHand assess_state: state=blocked; advance_allowed=no.',
+				include_extracted_content_only_once=True,
+				metadata={
+					'tool': 'domhand_assess_state',
+					'application_state_json': json.dumps(
+						{
+							'advance_allowed': False,
+							'unresolved_required_count': 2,
+							'optional_validation_count': 0,
+							'visible_error_count': 1,
+						}
+					),
+				},
+			)
+		]
+
+		mm._update_agent_history_description(
+			model_output=None,
+			result=result,
+			step_info=AgentStepInfo(step_number=1, max_steps=10),
+		)
+
+		assert 'REVIEW CURRENT PAGE:' in mm.state.read_state_description
+		assert 'Do NOT run another broad domhand_fill on this same page' in mm.state.read_state_description
+		assert 'review the currently visible blockers one at a time' in mm.state.read_state_description
 
 	@pytest.mark.asyncio
 	async def test_docx_end_to_end(self, tmp_path: Path):

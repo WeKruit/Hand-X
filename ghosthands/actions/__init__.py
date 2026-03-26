@@ -131,11 +131,12 @@ def register_domhand_actions(tools: "Tools") -> None:
 
     _register_action(
         description=(
-            "Interact with one exact non-text control by field label and desired value. "
-            "Use this for stubborn radios, checkboxes, toggles, button groups, and selects "
-            "when domhand_fill did not clear a required blocker. Resolves the real control "
-            "by question label, applies the desired option/value, verifies the committed state, "
-            "and captures diagnostics if the control still does not stick."
+            "Interact with one exact binary/group control by field label and desired value. "
+            "Use this for stubborn radios, checkboxes, toggles, and button groups when "
+            "domhand_fill did not clear a required blocker. Do NOT use this for dropdowns "
+            "or generic text inputs. Resolves the real control by question label, applies "
+            "the desired option/value, verifies the committed state, and captures diagnostics "
+            "if the control still does not stick."
         ),
         param_model=DomHandInteractControlParams,
         func=domhand_interact_control,
@@ -144,8 +145,8 @@ def register_domhand_actions(tools: "Tools") -> None:
     _register_action(
         description=(
             "Record the expected visible value for one field after a raw manual recovery action. "
-            "Use this immediately after a fallback click/input/select that changed a specific field, "
-            "then call domhand_assess_state before any unrelated action."
+            "Use this immediately after a fallback click/input/select that changed a specific field. "
+            "This suppresses stale readback noise on later checkpoints."
         ),
         param_model=DomHandRecordExpectedValueParams,
         func=domhand_record_expected_value,

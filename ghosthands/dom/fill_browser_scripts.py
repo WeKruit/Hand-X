@@ -64,6 +64,82 @@ _EXTRACT_FIELDS_JS = r"""() => {
 	var seen = new Set();
 	var out = [];
 
+	var normalizeFieldText = function(text) {
+		return (text || '').replace(/\s+/g, ' ').trim();
+	};
+
+	var cleanFieldLabelText = function(node) {
+		if (!node) return '';
+		var clone = node.cloneNode(true);
+		clone.querySelectorAll(
+			'input, textarea, select, button, ul, ol, li, [role="radio"], [role="checkbox"], [role="switch"], [role="textbox"], [role="combobox"], [role="option"], [role="listbox"], [role="dialog"], [role="grid"], [class*="desc"], [class*="sub"], [class*="hint"], .option-desc, small'
+		).forEach(function(x) { x.remove(); });
+		return normalizeFieldText(clone.textContent || '');
+	};
+
+	var firstMeaningfulWrapperLabel = function(wrapper) {
+		if (!wrapper) return '';
+		var candidates = [];
+		var push = function(node) {
+			if (!node) return;
+			var text = cleanFieldLabelText(node);
+			if (!text || isGenericSearchLabel(text) || candidates.indexOf(text) !== -1) return;
+			candidates.push(text);
+		};
+		var pushPrevious = function(node) {
+			if (!node || !node.previousElementSibling) return;
+			var prev = node.previousElementSibling;
+			if (
+				prev.matches &&
+				prev.matches('[data-automation-id="formField"], [data-automation-id*="formField"], fieldset, .form-group, .field')
+			) {
+				return;
+			}
+			push(prev);
+		};
+		push(wrapper.querySelector(':scope > legend'));
+		push(wrapper.querySelector(':scope > [data-automation-id="fieldLabel"]'));
+		push(wrapper.querySelector(':scope > [data-automation-id*="fieldLabel"]'));
+		push(wrapper.querySelector(':scope > label'));
+		push(wrapper.querySelector(':scope > [class*="question"]'));
+		push(wrapper.querySelector('[data-automation-id="fieldLabel"]'));
+		push(wrapper.querySelector('[data-automation-id*="fieldLabel"]'));
+		push(wrapper.querySelector('label'));
+		push(wrapper.querySelector('[class*="question"]'));
+		pushPrevious(wrapper);
+		var formField = ff.closestCrossRoot(
+			wrapper,
+			'[data-automation-id="formField"], [data-automation-id*="formField"]'
+		);
+		if (formField && formField !== wrapper) {
+			push(formField.querySelector(':scope > legend'));
+			push(formField.querySelector(':scope > [data-automation-id="fieldLabel"]'));
+			push(formField.querySelector(':scope > [data-automation-id*="fieldLabel"]'));
+			push(formField.querySelector(':scope > label'));
+			push(formField.querySelector(':scope > [class*="question"]'));
+			push(formField.querySelector('[data-automation-id="fieldLabel"]'));
+			push(formField.querySelector('[data-automation-id*="fieldLabel"]'));
+			push(formField.querySelector('label'));
+			push(formField.querySelector('[class*="question"]'));
+			pushPrevious(formField);
+		}
+		return candidates.length ? candidates[0] : '';
+	};
+
+	var isGenericSearchLabel = function(text) {
+		var norm = normalizeFieldText(text).toLowerCase();
+		if (!norm) return true;
+		return /^(search|search\.\.\.|search here|type to search|filter|find|lookup)$/.test(norm);
+	};
+
+	var getSearchFieldWrapperLabel = function(el) {
+		var wrapper = ff.closestCrossRoot(
+			el,
+			'[data-automation-id="formField"], [data-automation-id*="formField"], fieldset, .form-group, .field'
+		) || el.parentElement || el;
+		return firstMeaningfulWrapperLabel(wrapper);
+	};
+
 	var shouldSkip = function(el) {
 		if (ff.closestCrossRoot(el, '[class*="select-dropdown"], [class*="select-option"]')) return true;
 		if (ff.closestCrossRoot(el, '.iti__dropdown-content')) return true;
@@ -74,7 +150,9 @@ _EXTRACT_FIELDS_JS = r"""() => {
 			var controller = ff.queryOne('[role="combobox"][aria-controls="' + el.id + '"]');
 			if (controller) return true;
 		}
-		if (el.tagName === 'INPUT' && el.type === 'search' && ff.closestCrossRoot(el, '[class*="dropdown"], [role="dialog"]')) return true;
+		if (el.tagName === 'INPUT' && el.type === 'search' && ff.closestCrossRoot(el, '[class*="dropdown"], [role="dialog"]')) {
+			return !getSearchFieldWrapperLabel(el);
+		}
 		if (el.tagName === 'INPUT' && (el.type === 'radio' || el.type === 'checkbox') && window.getComputedStyle(el).display === 'none') return true;
 		return false;
 	};
@@ -144,24 +222,11 @@ _EXTRACT_FIELDS_JS = r"""() => {
 			if (!node) return '';
 			var clone = node.cloneNode(true);
 			clone.querySelectorAll(
-				'input, textarea, select, button, [role="radio"], [role="checkbox"], [role="switch"], [role="textbox"], [role="combobox"], [class*="desc"], [class*="sub"], [class*="hint"], .option-desc, small'
+				'input, textarea, select, button, ul, ol, li, [role="radio"], [role="checkbox"], [role="switch"], [role="textbox"], [role="combobox"], [role="option"], [role="listbox"], [role="dialog"], [role="grid"], [class*="desc"], [class*="sub"], [class*="hint"], .option-desc, small'
 			).forEach(function(x) { x.remove(); });
 			return clone.textContent ? clone.textContent.replace(/\s+/g, ' ').trim() : '';
 		};
-		var label = '';
-		var candidates = [
-			wrapper.querySelector(':scope > legend'),
-			wrapper.querySelector(':scope > [data-automation-id="fieldLabel"]'),
-			wrapper.querySelector(':scope > [data-automation-id*="fieldLabel"]'),
-			wrapper.querySelector(':scope > label'),
-			wrapper.querySelector(':scope > [class*="question"]')
-		];
-		for (var i = 0; i < candidates.length; i++) {
-			var text = cleanText(candidates[i]);
-			if (!text) continue;
-			label = text;
-			break;
-		}
+		var label = firstMeaningfulWrapperLabel(wrapper);
 		var hasCalendarTrigger = !!wrapper.querySelector(
 			'button[aria-label*="calendar" i], button[title*="calendar" i], [data-automation-id*="datePicker"], [data-automation-id*="dateIcon"], [data-automation-id*="dateTrigger"]'
 		);
@@ -237,11 +302,12 @@ _EXTRACT_FIELDS_JS = r"""() => {
 			field_type: type,
 			section: ff.getSection(el),
 			name_attr: el.getAttribute('name') || '',
+			placeholder: el.getAttribute('placeholder') || el.getAttribute('aria-placeholder') || '',
 			required: el.required || el.getAttribute('aria-required') === 'true' || el.dataset.required === 'true' || el.dataset.ffRequired === 'true',
 			options: [],
 			choices: [],
 			accept: el.accept || null,
-			is_native: isNative || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA',
+			is_native: isNative,
 			is_multi_select: isMultiSelect || el.multiple || el.getAttribute('aria-multiselectable') === 'true',
 			visible: true,
 			raw_label: ff.getAccessibleName(el),
@@ -272,6 +338,53 @@ _EXTRACT_FIELDS_JS = r"""() => {
 				if (!rect || rect.width === 0 || rect.height === 0) return '';
 				return (target.textContent || '').replace(/\s+/g, ' ').trim();
 			};
+			var collectControlledIds = function(target) {
+				var ids = [];
+				var addIds = function(raw) {
+					if (!raw) return;
+					String(raw)
+						.split(/\s+/)
+						.map(function(part) { return part.trim(); })
+						.filter(Boolean)
+						.forEach(function(part) {
+							if (ids.indexOf(part) === -1) ids.push(part);
+						});
+				};
+				if (!target || !target.getAttribute) return ids;
+				addIds(target.getAttribute('aria-controls'));
+				addIds(target.getAttribute('aria-owns'));
+				return ids;
+			};
+			var visibleTextWithoutPopups = function(target, controlledIds) {
+				if (!target || !target.cloneNode) return '';
+				var clone = target.cloneNode(true);
+				var removeSelector = [
+					'label',
+					'legend',
+					'small',
+					'[aria-live]',
+					'[role="listbox"]',
+					'[role="menu"]',
+					'[role="grid"]',
+					'[role="tree"]',
+					'[role="dialog"]',
+					'[data-list]',
+					'[data-automation-id="fieldLabel"]',
+					'[data-automation-id*="fieldLabel"]',
+					'[class*="hint"]',
+					'[class*="Hint"]'
+				].join(', ');
+				var doomed = Array.from(clone.querySelectorAll(removeSelector));
+				(controlledIds || []).forEach(function(id) {
+					if (!id) return;
+					var byId = clone.querySelector('#' + CSS.escape(id));
+					if (byId) doomed.push(byId);
+				});
+				doomed.forEach(function(candidate) {
+					if (candidate && candidate.remove) candidate.remove();
+				});
+				return (clone.textContent || '').replace(/\s+/g, ' ').trim();
+			};
 			var selectLikeWrapper = function(n) {
 				if (!ff || !ff.closestCrossRoot) return n.parentElement || n;
 				return (
@@ -287,9 +400,14 @@ _EXTRACT_FIELDS_JS = r"""() => {
 					n
 				);
 			};
+			if ((node.tagName === 'INPUT' || node.tagName === 'TEXTAREA') && typeof node.value === 'string') {
+				var directValue = node.value.replace(/\s+/g, ' ').trim();
+				if (directValue && !isUnsetLike(directValue)) return directValue;
+			}
 			var ownText = localVisibleText(node);
 			if (ownText && !isUnsetLike(ownText)) return ownText;
 			var wrapper = selectLikeWrapper(node);
+			var controlledIds = collectControlledIds(node);
 			var tokenSelectors = [
 				'[data-automation-id*="selected"]',
 				'[data-automation-id*="Selected"]',
@@ -312,7 +430,7 @@ _EXTRACT_FIELDS_JS = r"""() => {
 					return tokenText;
 				}
 			}
-			var wrapperText = localVisibleText(wrapper);
+			var wrapperText = visibleTextWithoutPopups(wrapper, controlledIds);
 			if (wrapperText && !isUnsetLike(wrapperText) && wrapperText.length <= 120) {
 				return wrapperText;
 			}
@@ -385,9 +503,21 @@ _EXTRACT_FIELDS_JS = r"""() => {
 			entry.current_value = el.value || (el.textContent ? el.textContent.trim() : '') || '';
 		}
 
-		var wrapperMeta = getFieldWrapperMeta(el);
-		if (wrapperMeta.wrapperId) entry.wrapper_id = wrapperMeta.wrapperId;
-		if (wrapperMeta.wrapperLabel) entry.wrapper_label = wrapperMeta.wrapperLabel;
+			var wrapperMeta = getFieldWrapperMeta(el);
+			var usesSearchStyleLabel =
+				type === 'search' ||
+				(type === 'select' && el.getAttribute('data-uxi-widget-type') === 'selectinput');
+			if (usesSearchStyleLabel && wrapperMeta.wrapperLabel) {
+				var currentLabel = normalizeFieldText(entry.name || '');
+				var placeholderLabel = normalizeFieldText(entry.placeholder || '');
+				if (!currentLabel || isGenericSearchLabel(currentLabel) || (placeholderLabel && currentLabel.toLowerCase() === placeholderLabel.toLowerCase())) {
+					entry.name = wrapperMeta.wrapperLabel;
+					entry.raw_label = wrapperMeta.wrapperLabel;
+					entry.synthetic_label = false;
+				}
+			}
+			if (wrapperMeta.wrapperId) entry.wrapper_id = wrapperMeta.wrapperId;
+			if (wrapperMeta.wrapperLabel) entry.wrapper_label = wrapperMeta.wrapperLabel;
 		if (wrapperMeta.hasCalendarTrigger) entry.has_calendar_trigger = true;
 		if (wrapperMeta.formatHint) entry.format_hint = wrapperMeta.formatHint;
 		var labelNorm = (entry.name || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -542,6 +672,15 @@ _CLICK_RADIO_OPTION_JS = r"""(ffId, text) => {
 			if (clickable && clickable.scrollIntoView) {
 				clickable.scrollIntoView({block: 'center', inline: 'center'});
 			}
+			if (clickable && clickable.focus) clickable.focus();
+			try {
+				var ptrOpts = { bubbles: true, cancelable: true, view: window, pointerType: 'mouse', isPrimary: true };
+				clickable.dispatchEvent(new PointerEvent('pointerdown', ptrOpts));
+				clickable.dispatchEvent(new PointerEvent('pointerup', ptrOpts));
+			} catch(e) {}
+			var mOpts = { bubbles: true, cancelable: true, view: window };
+			clickable.dispatchEvent(new MouseEvent('mousedown', mOpts));
+			clickable.dispatchEvent(new MouseEvent('mouseup', mOpts));
 			clickable.click();
 			return JSON.stringify({clicked: true, text: itemText});
 		}
@@ -744,10 +883,27 @@ _READ_GROUP_SELECTION_JS = r"""(ffId) => {
 	var ff = window.__ff;
 	var el = ff ? ff.byId(ffId) : null;
 	if (!el) return JSON.stringify({selected: ''});
-	var group = ff.closestCrossRoot(
-		el,
-		'fieldset, [role="radiogroup"], [role="group"], .radio-group, .radio-cards, .checkbox-group, [data-automation-id="formField"], [data-automation-id*="formField"]'
-	) || ff.rootParent(el) || el;
+	var exactGroupSelectors =
+		'ul.cx-select-pills-container, .oracle-pill-group, fieldset, [role="radiogroup"], [role="group"], .radio-group, .radio-cards, .checkbox-group';
+	var broadGroupSelectors =
+		exactGroupSelectors + ', [data-automation-id="formField"], [data-automation-id*="formField"], .input-row__control-container';
+	var resolveGroup = function(node) {
+		if (!node) return null;
+		var descendant = node.querySelector ? node.querySelector(exactGroupSelectors) : null;
+		if (descendant) return descendant;
+		if (node.matches && node.matches(exactGroupSelectors)) return node;
+		var ancestor = ff.closestCrossRoot(node, exactGroupSelectors);
+		if (ancestor) return ancestor;
+		var broad = ff.closestCrossRoot(node, broadGroupSelectors);
+		if (broad) {
+			descendant = broad.querySelector ? broad.querySelector(exactGroupSelectors) : null;
+			if (descendant) return descendant;
+			if (broad.matches && broad.matches(exactGroupSelectors)) return broad;
+			return broad;
+		}
+		return ff.rootParent(node) || node;
+	};
+	var group = resolveGroup(el);
 	var nodes = Array.from(
 		group.querySelectorAll(
 			'[role="radio"], [role="checkbox"], input[type="radio"], input[type="checkbox"], label.radio-card, .radio-card, .radio-option, label.checkbox-card, .checkbox-card, .checkbox-option, button, [role="button"], [role="cell"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"]'
@@ -803,10 +959,27 @@ _GET_GROUP_OPTION_TARGET_JS = r"""(ffId, text) => {
 	var ff = window.__ff;
 	var el = ff ? ff.byId(ffId) : null;
 	if (!el) return JSON.stringify({found: false, error: 'Element not found'});
-	var group = ff.closestCrossRoot(
-		el,
-		'fieldset, [role="radiogroup"], [role="group"], .radio-group, .radio-cards, .checkbox-group, [data-automation-id="formField"], [data-automation-id*="formField"]'
-	) || ff.rootParent(el) || el;
+	var exactGroupSelectors =
+		'ul.cx-select-pills-container, .oracle-pill-group, fieldset, [role="radiogroup"], [role="group"], .radio-group, .radio-cards, .checkbox-group';
+	var broadGroupSelectors =
+		exactGroupSelectors + ', [data-automation-id="formField"], [data-automation-id*="formField"], .input-row__control-container';
+	var resolveGroup = function(node) {
+		if (!node) return null;
+		var descendant = node.querySelector ? node.querySelector(exactGroupSelectors) : null;
+		if (descendant) return descendant;
+		if (node.matches && node.matches(exactGroupSelectors)) return node;
+		var ancestor = ff.closestCrossRoot(node, exactGroupSelectors);
+		if (ancestor) return ancestor;
+		var broad = ff.closestCrossRoot(node, broadGroupSelectors);
+		if (broad) {
+			descendant = broad.querySelector ? broad.querySelector(exactGroupSelectors) : null;
+			if (descendant) return descendant;
+			if (broad.matches && broad.matches(exactGroupSelectors)) return broad;
+			return broad;
+		}
+		return ff.rootParent(node) || node;
+	};
+	var group = resolveGroup(el);
 	var nodes = Array.from(
 		group.querySelectorAll(
 			'[role="radio"], [role="checkbox"], input[type="radio"], input[type="checkbox"], label[for], label.radio-card, .radio-card, .radio-option, label.checkbox-card, .checkbox-card, .checkbox-option, button, [role="button"], [role="cell"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"]'
@@ -855,6 +1028,7 @@ _GET_GROUP_OPTION_TARGET_JS = r"""(ffId, text) => {
 				found: true,
 				score: score,
 				text: label,
+				optionFfId: (clickable && clickable.getAttribute && clickable.getAttribute('data-ff-id')) || '',
 				x: Math.round(rect.left + (rect.width / 2)),
 				y: Math.round(rect.top + (rect.height / 2)),
 			};
@@ -912,6 +1086,65 @@ _READ_FIELD_VALUE_JS = r"""(ffId) => {
 		if (!rect || rect.width === 0 || rect.height === 0) return '';
 		return (node.textContent || '').replace(/\s+/g, ' ').trim();
 	};
+	var collectControlledIds = function(node) {
+		var ids = [];
+		var addIds = function(raw) {
+			if (!raw) return;
+			String(raw)
+				.split(/\s+/)
+				.map(function(part) { return part.trim(); })
+				.filter(Boolean)
+				.forEach(function(part) {
+					if (ids.indexOf(part) === -1) ids.push(part);
+				});
+		};
+		if (!node || !node.getAttribute) return ids;
+		addIds(node.getAttribute('aria-controls'));
+		addIds(node.getAttribute('aria-owns'));
+		return ids;
+	};
+	var hasVisibleControlledPopup = function(ids) {
+		var list = Array.isArray(ids) ? ids : [];
+		for (var i = 0; i < list.length; i++) {
+			var controlled = ff && ff.getByDomId ? ff.getByDomId(list[i]) : document.getElementById(list[i]);
+			if (!controlled) continue;
+			var style = window.getComputedStyle(controlled);
+			if (!style || style.visibility === 'hidden' || style.display === 'none') continue;
+			var rect = controlled.getBoundingClientRect();
+			if (rect && rect.width > 0 && rect.height > 0) return true;
+		}
+		return false;
+	};
+	var visibleTextWithoutPopups = function(node, controlledIds) {
+		if (!node || !node.cloneNode) return '';
+		var clone = node.cloneNode(true);
+		var removeSelector = [
+			'label',
+			'legend',
+			'small',
+			'[aria-live]',
+			'[role="listbox"]',
+			'[role="menu"]',
+			'[role="grid"]',
+			'[role="tree"]',
+			'[role="dialog"]',
+			'[data-list]',
+			'[data-automation-id="fieldLabel"]',
+			'[data-automation-id*="fieldLabel"]',
+			'[class*="hint"]',
+			'[class*="Hint"]'
+		].join(', ');
+		var doomed = Array.from(clone.querySelectorAll(removeSelector));
+		(controlledIds || []).forEach(function(id) {
+			if (!id) return;
+			var byId = clone.querySelector('#' + CSS.escape(id));
+			if (byId) doomed.push(byId);
+		});
+		doomed.forEach(function(candidate) {
+			if (candidate && candidate.remove) candidate.remove();
+		});
+		return (clone.textContent || '').replace(/\s+/g, ' ').trim();
+	};
 	var comboHost = (ff && ff.closestCrossRoot)
 		? ff.closestCrossRoot(el, '[role="combobox"]')
 		: null;
@@ -930,29 +1163,53 @@ _READ_FIELD_VALUE_JS = r"""(ffId) => {
 		var selOpt = el.options[el.selectedIndex];
 		return JSON.stringify(selOpt ? (selOpt.textContent || '').trim() : '');
 	}
+	var committedAttr = (el.getAttribute && el.getAttribute('data-committed-value')) || '';
+	if (committedAttr && !isUnsetLike(committedAttr)) {
+		return JSON.stringify(committedAttr.trim());
+	}
 	if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !isSelectLike) {
 		var directValue = (el.value || '').trim();
 		if (directValue) return JSON.stringify(directValue);
 	}
-	// React-select (e.g. Greenhouse): combobox <input> holds the label; parent may expose data-value.
-	if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && isSelectLike) {
-		var comboDirect = (el.value || '').trim();
-		if (comboDirect && !isUnsetLike(comboDirect)) {
-			return JSON.stringify(comboDirect);
+	if (isSelectLike) {
+		var comboControlledIds = collectControlledIds(el);
+		if (comboHost && comboHost !== el) {
+			collectControlledIds(comboHost).forEach(function(id) {
+				if (comboControlledIds.indexOf(id) === -1) comboControlledIds.push(id);
+			});
 		}
-		var comboParent = el.parentElement;
+		var comboPopupVisible = hasVisibleControlledPopup(comboControlledIds);
+		var comboAriaExpanded = el.getAttribute('aria-expanded') === 'true'
+			|| (comboHost && comboHost.getAttribute && comboHost.getAttribute('aria-expanded') === 'true');
+		var comboPopupOpen = comboPopupVisible || (!comboControlledIds.length && comboAriaExpanded);
+		var comboInput = null;
+		if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && el.getAttribute('role') === 'combobox') {
+			comboInput = el;
+		} else if ((comboHost && (comboHost.tagName === 'INPUT' || comboHost.tagName === 'TEXTAREA'))) {
+			comboInput = comboHost;
+		} else if (el.querySelector) {
+			comboInput = el.querySelector('[role="combobox"], input, textarea');
+		}
+		if (comboInput && typeof comboInput.value === 'string') {
+			var comboDirect = comboInput.value.trim();
+			if (comboDirect && !isUnsetLike(comboDirect) && !comboPopupOpen) {
+				return JSON.stringify(comboDirect);
+			}
+		}
+		var comboParent = comboInput ? comboInput.parentElement : el.parentElement;
 		if (comboParent && comboParent.getAttribute) {
 			var dataAttrVal = (comboParent.getAttribute('data-value') || '').trim();
-			if (dataAttrVal && !isUnsetLike(dataAttrVal)) {
+			if (dataAttrVal && !isUnsetLike(dataAttrVal) && !comboPopupOpen) {
 				return JSON.stringify(dataAttrVal);
 			}
 		}
 		var rsControl = null;
+		var rsAnchor = comboInput || comboHost || el;
 		if (ff && ff.closestCrossRoot) {
-			rsControl = ff.closestCrossRoot(el, '.select__control') || ff.closestCrossRoot(el, '.select-shell');
+			rsControl = ff.closestCrossRoot(rsAnchor, '.select__control') || ff.closestCrossRoot(rsAnchor, '.select-shell');
 		}
-		if (!rsControl && el.closest) {
-			rsControl = el.closest('.select__control') || el.closest('.select-shell');
+		if (!rsControl && rsAnchor.closest) {
+			rsControl = rsAnchor.closest('.select__control') || rsAnchor.closest('.select-shell');
 		}
 		if (rsControl && rsControl.querySelector) {
 			var rsSingle = rsControl.querySelector('.select__single-value');
@@ -970,6 +1227,12 @@ _READ_FIELD_VALUE_JS = r"""(ffId) => {
 	}
 	if (!value && isSelectLike) {
 		var fieldAnchor = comboHost || el;
+		var controlledIds = collectControlledIds(el);
+		if (comboHost && comboHost !== el) {
+			collectControlledIds(comboHost).forEach(function(id) {
+				if (controlledIds.indexOf(id) === -1) controlledIds.push(id);
+			});
+		}
 		var ownText = visibleText(el);
 		if (ownText && !isUnsetLike(ownText)) {
 			value = ownText;
@@ -1032,7 +1295,7 @@ _READ_FIELD_VALUE_JS = r"""(ffId) => {
 				for (var ej = 0; ej < jetSel.length && !value; ej++) {
 					var hits = st.querySelectorAll(jetSel[ej]);
 					for (var hk = 0; hk < hits.length; hk++) {
-						var tx = visibleText(hits[hk]);
+						var tx = visibleTextWithoutPopups(hits[hk], controlledIds);
 						if (!tx || isUnsetLike(tx) || /^required$/i.test(tx) || tx.length > 120) continue;
 						value = tx;
 						break;
@@ -1041,7 +1304,7 @@ _READ_FIELD_VALUE_JS = r"""(ffId) => {
 			}
 		}
 		if (!value) {
-			var wrapperText = visibleText(wrapper);
+			var wrapperText = visibleTextWithoutPopups(wrapper, controlledIds);
 			if (wrapperText && !isUnsetLike(wrapperText) && !/^required$/i.test(wrapperText) && wrapperText.length <= 120) {
 				value = wrapperText;
 			}
@@ -1062,13 +1325,99 @@ _READ_FIELD_VALUE_JS = r"""(ffId) => {
 
 _CLICK_BUTTON_GROUP_JS = r"""(ffId, text) => {
 	var ff = window.__ff;
-	var container = ff ? ff.byId(ffId) : null;
-	if (!container) return JSON.stringify({clicked: false});
-	var textLower = text.toLowerCase().trim();
-	var btns = container.querySelectorAll('button, [role="button"]');
-	for (var i = 0; i < btns.length; i++) { var bt = (btns[i].textContent || '').trim().toLowerCase(); if (bt === textLower) { btns[i].click(); return JSON.stringify({clicked: true}); } }
-	for (var j = 0; j < btns.length; j++) { var btt = (btns[j].textContent || '').trim().toLowerCase(); if (btt.includes(textLower) || textLower.includes(btt)) { btns[j].click(); return JSON.stringify({clicked: true}); } }
-	return JSON.stringify({clicked: false});
+	var el = ff ? ff.byId(ffId) : null;
+	if (!el) return JSON.stringify({clicked: false, error: 'Element not found'});
+	var exactGroupSelectors =
+		'ul.cx-select-pills-container, .oracle-pill-group, fieldset, [role="radiogroup"], [role="group"], .radio-group, .radio-cards, .checkbox-group';
+	var broadGroupSelectors =
+		exactGroupSelectors + ', [data-automation-id="formField"], [data-automation-id*="formField"], .input-row__control-container';
+	var resolveGroup = function(node) {
+		if (!node) return null;
+		var descendant = node.querySelector ? node.querySelector(exactGroupSelectors) : null;
+		if (descendant) return descendant;
+		if (node.matches && node.matches(exactGroupSelectors)) return node;
+		var ancestor = ff.closestCrossRoot(node, exactGroupSelectors);
+		if (ancestor) return ancestor;
+		var broad = ff.closestCrossRoot(node, broadGroupSelectors);
+		if (broad) {
+			descendant = broad.querySelector ? broad.querySelector(exactGroupSelectors) : null;
+			if (descendant) return descendant;
+			if (broad.matches && broad.matches(exactGroupSelectors)) return broad;
+			return broad;
+		}
+		return ff.rootParent(node) || node;
+	};
+	var group = resolveGroup(el);
+	var nodes = Array.from(
+		group.querySelectorAll(
+			'[role="radio"], [role="checkbox"], input[type="radio"], input[type="checkbox"], label[for], label.radio-card, .radio-card, .radio-option, label.checkbox-card, .checkbox-card, .checkbox-option, button, [role="button"], [role="cell"], [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"]'
+		)
+	);
+	var lower = text.toLowerCase().trim();
+	var getLabelFor = function(node) {
+		if (!node || !node.id) return null;
+		return ff.queryOne('label[for="' + CSS.escape(node.id) + '"]');
+	};
+	var getClickable = function(node) {
+		var byFor = getLabelFor(node);
+		if (byFor) return byFor;
+		return ff.closestCrossRoot(
+			node,
+			'button, label, [role="row"], [role="cell"], [role="button"], [role="radio"], [role="checkbox"], .radio-card, .radio-option, .checkbox-card, .checkbox-option, .cx-select-pill-section, .oracle-pill-group li, [data-automation-id*="promptOption"], [data-automation-id*="PromptOption"], [data-automation-id*="radio"], [data-automation-id*="checkbox"]'
+		) || node.parentElement || node;
+	};
+	var getText = function(node) {
+		var byFor = getLabelFor(node);
+		if (byFor && byFor.textContent) return byFor.textContent.trim();
+		var ariaLabel = node.getAttribute && node.getAttribute('aria-label');
+		if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
+		var labelEl = node.querySelector ? node.querySelector('[class*="label"], .rc-label') : null;
+		if (labelEl && labelEl.textContent) return labelEl.textContent.trim();
+		var clickable = getClickable(node);
+		return (clickable && clickable.textContent ? clickable.textContent : node.textContent || '').trim();
+	};
+	var dispatchClickSequence = function(node) {
+		if (!node || !node.dispatchEvent) return;
+		var mouseOpts = { bubbles: true, cancelable: true, view: window };
+		try {
+			var ptrOpts = { bubbles: true, cancelable: true, view: window, pointerType: 'mouse', isPrimary: true };
+			node.dispatchEvent(new PointerEvent('pointerover', ptrOpts));
+			node.dispatchEvent(new PointerEvent('pointerenter', Object.assign({}, ptrOpts, {bubbles: false})));
+			node.dispatchEvent(new PointerEvent('pointerdown', ptrOpts));
+			node.dispatchEvent(new PointerEvent('pointerup', ptrOpts));
+		} catch(e) {}
+		node.dispatchEvent(new MouseEvent('mouseover', mouseOpts));
+		node.dispatchEvent(new MouseEvent('mouseenter', mouseOpts));
+		node.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
+		node.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
+		node.dispatchEvent(new MouseEvent('click', mouseOpts));
+	};
+	var best = null;
+	for (var i = 0; i < nodes.length; i++) {
+		var node = nodes[i];
+		var itemText = getText(node);
+		if (!itemText) continue;
+		var itemLower = itemText.toLowerCase().trim();
+		var score = 0;
+		if (itemLower === lower) score = 3;
+		else if (itemLower.includes(lower) || lower.includes(itemLower)) score = 2;
+		if (score === 0) continue;
+		if (!best || score > best.score) {
+			best = { node: node, text: itemText, score: score };
+			if (score === 3) break;
+		}
+	}
+	if (!best) return JSON.stringify({clicked: false, error: 'No matching button'});
+	var clickable = getClickable(best.node);
+	if (clickable && clickable.scrollIntoView) {
+		clickable.scrollIntoView({block: 'center', inline: 'center'});
+	}
+	try {
+		if (clickable && clickable.focus) clickable.focus();
+		if (clickable && clickable.click) clickable.click();
+		dispatchClickSequence(clickable);
+	} catch (e) {}
+	return JSON.stringify({clicked: true, text: best.text});
 }"""
 
 _IS_SEARCHABLE_DROPDOWN_JS = r"""(ffId) => {

@@ -272,6 +272,29 @@ async def domhand_expand(params: DomHandExpandParams, browser_session: BrowserSe
 	if not page:
 		return ActionResult(error='No active page found in browser session')
 
+	try:
+		open_inline_forms = await page.evaluate("""() => {
+			const visible = (el) => {
+				if (!el) return false;
+				const style = window.getComputedStyle(el);
+				if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+				const rect = el.getBoundingClientRect();
+				return rect.width > 0 && rect.height > 0;
+			};
+			return Array.from(document.querySelectorAll('.profile-inline-form'))
+				.filter((el) => visible(el))
+				.length;
+		}""")
+	except Exception:
+		open_inline_forms = 0
+	if int(open_inline_forms or 0) > 0:
+		return ActionResult(
+			error=(
+				'A profile inline editor is already open. Finish the current entry and wait for its '
+				'saved tile before clicking another Add button.'
+			),
+		)
+
 	# ── Step 1: Count fields before expansion ─────────────────
 	try:
 		raw_before = await page.evaluate(_COUNT_FIELDS_JS, params.section)

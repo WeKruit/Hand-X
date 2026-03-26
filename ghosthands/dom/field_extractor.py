@@ -56,6 +56,45 @@ _JS_EXTRACT_RAW_FIELDS = """
 	var seen = new Set();
 	var out = [];
 
+	var normalizeFieldText = function(text) {
+		return (text || '').replace(/\s+/g, ' ').trim();
+	};
+
+	var cleanFieldLabelText = function(node) {
+		if (!node) return '';
+		var clone = node.cloneNode(true);
+		clone.querySelectorAll(
+			'input, textarea, select, button, [role="radio"], [role="checkbox"], [role="switch"], [role="textbox"], [role="combobox"], [class*="desc"], [class*="sub"], [class*="hint"], .option-desc, small'
+		).forEach(function(x) { x.remove(); });
+		return normalizeFieldText(clone.textContent || '');
+	};
+
+	var isGenericSearchLabel = function(text) {
+		var norm = normalizeFieldText(text).toLowerCase();
+		if (!norm) return true;
+		return /^(search|search\.\.\.|search here|type to search|filter|find|lookup)$/.test(norm);
+	};
+
+	var getSearchFieldWrapperLabel = function(el) {
+		var wrapper = ff.closestCrossRoot(
+			el,
+			'[data-automation-id="formField"], [data-automation-id*="formField"], fieldset, .form-group, .field'
+		) || el.parentElement || el;
+		var candidates = [
+			wrapper.querySelector(':scope > legend'),
+			wrapper.querySelector(':scope > [data-automation-id="fieldLabel"]'),
+			wrapper.querySelector(':scope > [data-automation-id*="fieldLabel"]'),
+			wrapper.querySelector(':scope > label'),
+			wrapper.querySelector(':scope > [class*="question"]')
+		];
+		for (var i = 0; i < candidates.length; i++) {
+			var text = cleanFieldLabelText(candidates[i]);
+			if (!text || isGenericSearchLabel(text)) continue;
+			return text;
+		}
+		return '';
+	};
+
 	var shouldSkip = function(el) {
 		if (ff.closestCrossRoot(el, '[class*="select-dropdown"], [class*="select-option"]')) return true;
 		if (ff.closestCrossRoot(el, '.iti__dropdown-content')) return true;
@@ -65,7 +104,9 @@ _JS_EXTRACT_RAW_FIELDS = """
 			var controller = ff.queryOne('[role="combobox"][aria-controls="' + el.id + '"]');
 			if (controller) return true;
 		}
-		if (el.tagName === 'INPUT' && el.type === 'search' && ff.closestCrossRoot(el, '[class*="dropdown"], [role="dialog"]')) return true;
+		if (el.tagName === 'INPUT' && el.type === 'search' && ff.closestCrossRoot(el, '[class*="dropdown"], [role="dialog"]')) {
+			return !getSearchFieldWrapperLabel(el);
+		}
 		if (el.tagName === 'INPUT' && (el.type === 'radio' || el.type === 'checkbox') && window.getComputedStyle(el).display === 'none') return true;
 		return false;
 	};
@@ -132,7 +173,14 @@ _JS_EXTRACT_RAW_FIELDS = """
 		);
 
 		/* ── label ── */
-		var rawLabel = ff.getAccessibleName(el);
+			var rawLabel = ff.getAccessibleName(el);
+			var wrapperLabel = (
+				type === 'search' ||
+				(type === 'select' && el.getAttribute('data-uxi-widget-type') === 'selectinput')
+			) ? getSearchFieldWrapperLabel(el) : '';
+			if (wrapperLabel && (!rawLabel || isGenericSearchLabel(rawLabel))) {
+				rawLabel = wrapperLabel;
+			}
 
 		/* ── required signals ── */
 		var requiredSignals = [];
@@ -185,7 +233,7 @@ _JS_EXTRACT_RAW_FIELDS = """
 		var section = ff.getSection(el);
 
 		/* ── placeholder ── */
-		var placeholder = el.placeholder || el.getAttribute('placeholder') || '';
+			var placeholder = el.placeholder || el.getAttribute('placeholder') || '';
 
 		/* ── disabled ── */
 		var disabled = !!(el.disabled || el.getAttribute('aria-disabled') === 'true');
@@ -289,6 +337,41 @@ _JS_DETECT_BUTTON_GROUPS = """
 	var allBtnEls = document.querySelectorAll('button, [role="button"]');
 	var parentMap = {};
 	var NAV_TEXTS = """ + _NAV_BUTTON_TEXTS_JS + """;
+	var normalize = function(text) {
+		return (text || '').replace(/\\s+/g, ' ').trim();
+	};
+	var cleanQuestionText = function(node) {
+		if (!node) return '';
+		var clone = node.cloneNode(true);
+		clone.querySelectorAll(
+			'button, [role="button"], [role="radio"], [role="checkbox"], [role="switch"], input, textarea, select, ul, ol, li, [role="option"], [role="listbox"], .cx-select-pills-container, .oracle-pill-group, [class*="hint"], [class*="desc"], [class*="sub"], small'
+		).forEach(function(x) { x.remove(); });
+		return normalize(clone.textContent || '');
+	};
+	var isOptionOnlyText = function(text, optionNorms) {
+		var norm = normalize(text).toLowerCase();
+		if (!norm) return true;
+		return optionNorms.has(norm);
+	};
+	var pushCandidate = function(candidates, text, optionNorms) {
+		var clean = normalize(text);
+		if (!clean || clean.length > 2000) return;
+		if (isOptionOnlyText(clean, optionNorms)) return;
+		candidates.push(clean);
+	};
+	var pushBestPrecedingSiblingText = function(candidates, startNode, stopNode, optionNorms) {
+		var cursor = startNode;
+		while (cursor && cursor !== stopNode) {
+			var sibling = cursor.previousElementSibling;
+			while (sibling) {
+				pushCandidate(candidates, cleanQuestionText(sibling), optionNorms);
+				if (candidates.length) return candidates[candidates.length - 1];
+				sibling = sibling.previousElementSibling;
+			}
+			cursor = cursor.parentElement;
+		}
+		return '';
+	};
 
 	for (var i = 0; i < allBtnEls.length; i++) {
 		var btn = allBtnEls[i];
@@ -299,6 +382,7 @@ _JS_DETECT_BUTTON_GROUPS = """
 		if (btn.getAttribute('role') === 'combobox') continue;
 		if (btn.getAttribute('aria-haspopup') === 'listbox') continue;
 		if (btn.tagName.toLowerCase() === 'input') continue;
+		if (btn.closest('[data-automation-id="selectedItemList"], [data-automation-id="selectedItems"], [data-automation-id="multiSelectContainer"], [data-uxi-widget-type="multiselect"]')) continue;
 
 		var btnText = (btn.textContent || '').trim();
 		if (!btnText || btnText.length > 30) continue;
@@ -348,11 +432,21 @@ _JS_DETECT_BUTTON_GROUPS = """
 
 		var container = group.parent;
 		var questionLabel = '';
+		var choices = [];
+		for (var ci = 0; ci < group.buttons.length; ci++) {
+			choices.push(group.buttons[ci].text);
+		}
+		var optionNorms = new Set(
+			choices.map(function(text) { return normalize(text).toLowerCase(); }).filter(Boolean)
+		);
+
+		/* prefer text that lives in the same owning container before the pills */
+		questionLabel = pushBestPrecedingSiblingText([], container, container.parentElement, optionNorms);
 
 		/* try previous sibling */
 		var prevSib = container.previousElementSibling;
-		if (prevSib) {
-			var prevText = (prevSib.textContent || '').trim();
+		if (!questionLabel && prevSib) {
+			var prevText = cleanQuestionText(prevSib);
 			if (prevText && prevText.length > 5 && prevText.length < 300) {
 				questionLabel = prevText;
 			}
@@ -366,7 +460,7 @@ _JS_DETECT_BUTTON_GROUPS = """
 				for (var ch = 0; ch < children.length; ch++) {
 					var child = children[ch];
 					if (child === container || child.contains(container)) break;
-					var childText = (child.textContent || '').trim();
+					var childText = cleanQuestionText(child);
 					if (childText && childText.length > 5 && childText.length < 300) {
 						questionLabel = childText;
 					}
@@ -402,8 +496,8 @@ _JS_DETECT_BUTTON_GROUPS = """
 			questionLabel = questionLabel.substring(0, 200).trim();
 		}
 
-		/* collect choices and tag buttons */
-		var choices = [];
+		/* collect tagged choices */
+		choices = [];
 		var btnIds = [];
 		for (var ci = 0; ci < group.buttons.length; ci++) {
 			var bid = ff.tag(group.buttons[ci].el);

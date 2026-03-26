@@ -48,13 +48,30 @@ def _ensure_cli_importable():
     if "ghosthands.agent" not in sys.modules:
         mock_agent = types.ModuleType("ghosthands.agent")
         sys.modules["ghosthands.agent"] = mock_agent
+    else:
+        mock_agent = sys.modules["ghosthands.agent"]
     if "ghosthands.agent.factory" not in sys.modules:
         mock_factory = types.ModuleType("ghosthands.agent.factory")
         sys.modules["ghosthands.agent.factory"] = mock_factory
+    else:
+        mock_factory = sys.modules["ghosthands.agent.factory"]
+    if "ghosthands.agent.prompts" not in sys.modules:
+        mock_prompts = types.ModuleType("ghosthands.agent.prompts")
+        sys.modules["ghosthands.agent.prompts"] = mock_prompts
+    else:
+        mock_prompts = sys.modules["ghosthands.agent.prompts"]
     if "ghosthands.agent.hooks" not in sys.modules:
         mock_hooks = types.ModuleType("ghosthands.agent.hooks")
         mock_hooks.install_same_tab_guard = AsyncMock()
+        mock_hooks.install_final_submit_guard = AsyncMock()
+        mock_hooks.consume_blocked_final_submit = AsyncMock(return_value=None)
         sys.modules["ghosthands.agent.hooks"] = mock_hooks
+    else:
+        mock_hooks = sys.modules["ghosthands.agent.hooks"]
+
+    setattr(mock_agent, "factory", mock_factory)
+    setattr(mock_agent, "prompts", mock_prompts)
+    setattr(mock_agent, "hooks", mock_hooks)
 
 
 _ensure_cli_importable()
@@ -257,6 +274,22 @@ class TestOutputFormat:
         """Invalid --output-format values are rejected."""
         with pytest.raises(SystemExit):
             _parse(["--job-url", "https://example.com", "--output-format", "xml"])
+
+
+class TestSubmitIntent:
+    """Tests for the --submit-intent argument."""
+
+    def test_submit_intent_default_none(self):
+        args = _parse(["--job-url", "https://example.com"])
+        assert args.submit_intent is None
+
+    def test_submit_intent_review(self):
+        args = _parse(["--job-url", "https://example.com", "--submit-intent", "review"])
+        assert args.submit_intent == "review"
+
+    def test_submit_intent_submit(self):
+        args = _parse(["--job-url", "https://example.com", "--submit-intent", "submit"])
+        assert args.submit_intent == "submit"
 
 
 # ---------------------------------------------------------------------------

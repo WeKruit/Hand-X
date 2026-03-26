@@ -9,9 +9,10 @@ from __future__ import annotations
 import json
 import re
 from datetime import date
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
+from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from ghosthands.actions.views import (
     FormField,
@@ -25,150 +26,190 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
+class _DomHandAnswerBatchBase(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+
 # ── Late-import delegates ────────────────────────────────────────────────
+
 
 def _is_skill_like(name: str) -> bool:
     from ghosthands.actions.domhand_fill import _is_skill_like as _impl
+
     return _impl(name)
 
 
 def _field_label_candidates(field: FormField) -> list[str]:
     from ghosthands.actions.domhand_fill import _field_label_candidates as _impl
+
     return _impl(field)
 
 
 def _is_non_guess_name_fragment(label: str) -> bool:
     from ghosthands.actions.domhand_fill import _is_non_guess_name_fragment as _impl
+
     return _impl(label)
 
 
 def _normalize_match_label(text: str) -> str:
     from ghosthands.dom.fill_label_match import _normalize_match_label as _impl
+
     return _impl(text)
 
 
 def _label_match_confidence(label: str, key: str) -> str | None:
     from ghosthands.dom.fill_label_match import _label_match_confidence as _impl
+
     return _impl(label, key)
 
 
 def _meets_match_confidence(confidence: str | None, minimum: str) -> bool:
     from ghosthands.dom.fill_label_match import _meets_match_confidence as _impl
+
     return _impl(confidence, minimum)
 
 
 def _coerce_answer_if_compatible(field: FormField, raw: Any, *, source_candidate: str) -> str | None:
     from ghosthands.dom.fill_profile_resolver import _coerce_answer_if_compatible as _impl
+
     return _impl(field, raw, source_candidate=source_candidate)
 
 
 def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
     from ghosthands.dom.fill_label_match import _coerce_answer_to_field as _impl
+
     return _impl(field, answer)
 
 
-def _resolved_field_value(value: str, *, source: str, answer_mode: str | None, confidence: float, state: str = "filled") -> ResolvedFieldValue:
+def _resolved_field_value(
+    value: str, *, source: str, answer_mode: str | None, confidence: float, state: str = "filled"
+) -> ResolvedFieldValue:
     from ghosthands.dom.fill_profile_resolver import _resolved_field_value as _impl
+
     return _impl(value, source=source, answer_mode=answer_mode, confidence=confidence, state=state)
 
 
-def _resolved_field_value_if_compatible(field: FormField, value: str, *, source: str, source_candidate: str, answer_mode: str | None, confidence: float) -> ResolvedFieldValue | None:
+def _resolved_field_value_if_compatible(
+    field: FormField, value: str, *, source: str, source_candidate: str, answer_mode: str | None, confidence: float
+) -> ResolvedFieldValue | None:
     from ghosthands.dom.fill_profile_resolver import _resolved_field_value_if_compatible as _impl
-    return _impl(field, value, source=source, source_candidate=source_candidate, answer_mode=answer_mode, confidence=confidence)
+
+    return _impl(
+        field, value, source=source, source_candidate=source_candidate, answer_mode=answer_mode, confidence=confidence
+    )
 
 
 def _match_confidence_score(confidence: str | None) -> float:
     from ghosthands.dom.fill_profile_resolver import _match_confidence_score as _impl
+
     return _impl(confidence)
 
 
 def _default_answer_mode_for_field(field: FormField, value: str) -> str:
     from ghosthands.dom.fill_profile_resolver import _default_answer_mode_for_field as _impl
+
     return _impl(field, value)
 
 
 def _default_value(field: FormField) -> str | None:
     from ghosthands.dom.fill_profile_resolver import _default_value as _impl
+
     return _impl(field)
 
 
 def _known_profile_value(field_name: str, evidence: dict[str, str | None]) -> str | None:
     from ghosthands.dom.fill_profile_resolver import _known_profile_value as _impl
+
     return _impl(field_name, evidence)
 
 
 def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
     from ghosthands.dom.fill_profile_resolver import _parse_profile_evidence as _impl
+
     return _impl(profile_text)
 
 
 def _preferred_field_label(field: FormField) -> str:
     from ghosthands.dom.fill_label_match import _preferred_field_label as _impl
+
     return _impl(field)
 
 
 def _trace_profile_resolution(event: str, **kwargs: Any) -> None:
     from ghosthands.dom.fill_profile_resolver import _trace_profile_resolution as _impl
+
     return _impl(event, **kwargs)
 
 
 def _profile_debug_preview(value: Any) -> str:
     from ghosthands.dom.fill_profile_resolver import _profile_debug_preview as _impl
+
     return _impl(value)
 
 
 def _is_binary_value_text(text: str) -> bool:
     from ghosthands.dom.fill_profile_resolver import _is_binary_value_text as _impl
+
     return _impl(text)
 
 
 def _build_field_description(field: FormField, display_name: str) -> str:
     from ghosthands.actions.domhand_fill import _build_field_description as _impl
+
     return _impl(field, display_name)
 
 
 def _replace_placeholder_answers(parsed: dict, fields: list, names: list) -> None:
     from ghosthands.actions.domhand_fill import _replace_placeholder_answers as _impl
+
     return _impl(parsed, fields, names)
 
 
 def _match_answer(field: FormField, answers: dict, evidence: dict, profile_data: dict | None) -> str | None:
     from ghosthands.actions.domhand_fill import _match_answer as _impl
+
     return _impl(field, answers, evidence, profile_data)
 
 
 def _get_profile_text() -> str | None:
     from ghosthands.actions.domhand_fill import _get_profile_text as _impl
+
     return _impl()
 
 
 def _MATCH_CONFIDENCE_RANKS_getter() -> dict[str, int]:
     from ghosthands.dom.fill_label_match import _MATCH_CONFIDENCE_RANKS
+
     return _MATCH_CONFIDENCE_RANKS
 
 
 def _AUTHORITATIVE_SELECT_KEYS_getter() -> dict[str, list[str]]:
     from ghosthands.actions.domhand_fill import _AUTHORITATIVE_SELECT_KEYS
+
     return _AUTHORITATIVE_SELECT_KEYS
 
 
 def _AUTHORITATIVE_SELECT_DEFAULTS_getter() -> dict[str, str]:
     from ghosthands.actions.domhand_fill import _AUTHORITATIVE_SELECT_DEFAULTS
+
     return _AUTHORITATIVE_SELECT_DEFAULTS
 
 
 def _AUTHORITATIVE_TEXT_DEFAULTS_getter() -> dict[str, str]:
     from ghosthands.actions.domhand_fill import _AUTHORITATIVE_TEXT_DEFAULTS
+
     return _AUTHORITATIVE_TEXT_DEFAULTS
 
 
 def _EEO_DECLINE_DEFAULTS_getter() -> dict[str, str]:
     from ghosthands.actions.domhand_fill import _EEO_DECLINE_DEFAULTS
+
     return _EEO_DECLINE_DEFAULTS
 
 
 def _SOCIAL_OR_ID_NO_GUESS_RE_getter():
     from ghosthands.actions.domhand_fill import _SOCIAL_OR_ID_NO_GUESS_RE
+
     return _SOCIAL_OR_ID_NO_GUESS_RE
 
 
@@ -485,6 +526,8 @@ def _resolve_llm_answer_via_batch_key(
     answers: dict[str, str],
 ) -> ResolvedFieldValue | None:
     """When the model used the batch key (e.g. Field 1), map directly."""
+    if _is_skill_like(field.name):
+        return None
     if batch_key not in answers:
         return None
     raw = answers[batch_key]
@@ -507,6 +550,47 @@ def _resolve_llm_answer_via_batch_key(
     )
 
 
+def _build_answer_output_model(display_names: list[str]) -> type[BaseModel]:
+    fields: dict[str, Any] = {}
+    for index, display_name in enumerate(display_names):
+        fields[f"field_{index}"] = (
+            str | list[str] | None,
+            Field(default=None, alias=display_name, serialization_alias=display_name),
+        )
+    return cast(
+        type[BaseModel],
+        create_model(
+            "DomHandAnswerBatch",
+            __base__=_DomHandAnswerBatchBase,
+            **fields,
+        ),
+    )
+
+
+def _structured_completion_to_answer_map(completion: Any) -> dict[str, Any] | None:
+    if isinstance(completion, BaseModel):
+        return completion.model_dump(by_alias=True, exclude_none=True)
+    if isinstance(completion, dict):
+        return completion
+    if isinstance(completion, str):
+        return _parse_llm_json_answer_object(completion)
+    return None
+
+
+def _normalize_generated_answer_map(parsed: dict[str, Any]) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for key, value in parsed.items():
+        if value is None:
+            continue
+        if isinstance(value, list):
+            normalized[key] = ",".join(str(item) for item in value)
+        elif isinstance(value, (int, float)):
+            normalized[key] = str(value)
+        else:
+            normalized[key] = str(value)
+    return normalized
+
+
 async def _generate_answers(
     fields: list[FormField],
     profile_text: str,
@@ -524,13 +608,14 @@ async def _generate_answers(
 
     evidence = _parse_profile_evidence(profile_text)
     model_id = _settings.domhand_model
-    llm = get_chat_model(model=model_id)
+    llm = get_chat_model(model=model_id, disable_google_thinking=True)
     model_id = getattr(llm, "model", model_id)  # resolved model after proxy override
     input_tokens = 0
     output_tokens = 0
     step_cost = 0.0
 
     disambiguated_names = _disambiguated_field_names(fields)
+    output_model = _build_answer_output_model(disambiguated_names)
 
     field_descriptions = "\n".join(
         _build_field_description(field, disambiguated_names[i]) for i, field in enumerate(fields)
@@ -587,12 +672,31 @@ Rules:
 Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because..."}}"""
 
     scaled_max_tokens = max(4096, min(len(fields) * 128, 16384))
+    messages = [UserMessage(content=prompt)]
     try:
-        response = await llm.ainvoke(
-            [UserMessage(content=prompt)],
-            max_tokens=scaled_max_tokens,
-        )
-        text = response.completion if isinstance(response.completion, str) else ""
+        try:
+            response = await llm.ainvoke(
+                messages,
+                output_format=output_model,
+                max_tokens=scaled_max_tokens,
+            )
+            parsed = _structured_completion_to_answer_map(response.completion)
+            if parsed is None:
+                raise ValueError("Structured answer completion could not be converted to an answer map")
+        except Exception as structured_error:
+            logger.warning(
+                "domhand.structured_answer_fallback",
+                error=str(structured_error),
+                model=model_id,
+            )
+            response = await llm.ainvoke(
+                messages,
+                max_tokens=scaled_max_tokens,
+            )
+            text = response.completion if isinstance(response.completion, str) else ""
+            logger.warning(f"LLM answer response: {text[:500]}{'...' if len(text) > 500 else ''}")
+            parsed = _parse_llm_json_answer_object(text)
+
         input_tokens = response.usage.prompt_tokens if response.usage else 0
         output_tokens = response.usage.completion_tokens if response.usage else 0
         try:
@@ -602,15 +706,8 @@ Example: {{"First Name": "Alex", "Cover Letter": "I am excited to apply because.
             step_cost = 0.0
         if response.stop_reason == "max_tokens":
             logger.warning("LLM response was truncated (hit max_tokens).")
-        logger.warning(f"LLM answer response: {text[:500]}{'...' if len(text) > 500 else ''}")
 
-        parsed: dict[str, Any] = _parse_llm_json_answer_object(text)
-
-        for k, v in list(parsed.items()):
-            if isinstance(v, list):
-                parsed[k] = ",".join(str(item) for item in v)
-            elif isinstance(v, (int, float)):
-                parsed[k] = str(v)
+        parsed = _normalize_generated_answer_map(parsed)
 
         _replace_placeholder_answers(parsed, fields, disambiguated_names)
 

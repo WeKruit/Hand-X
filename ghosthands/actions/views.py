@@ -19,7 +19,7 @@ class FormField(BaseModel):
     options: list[str] = Field(default_factory=list, description="Available options for select/radio/checkbox fields")
     choices: list[str] = Field(default_factory=list, description="Alternative choice list (some ATS platforms)")
     accept: str | None = Field(default=None, description="Accepted file types for file inputs")
-    is_native: bool = Field(default=True, description="Whether this is a native HTML element vs custom widget")
+    is_native: bool = Field(default=False, description="Whether this is a native HTML element vs custom widget")
     is_multi_select: bool = Field(default=False, description="Whether multiple selections are allowed")
     visible: bool = Field(default=True, description="Whether the field is currently visible")
     raw_label: str | None = Field(default=None, description="Original label text before cleanup")
@@ -34,6 +34,10 @@ class FormField(BaseModel):
     has_calendar_trigger: bool = Field(
         default=False,
         description="True when the grouped widget exposes a visible calendar/date trigger affordance",
+    )
+    placeholder: str = Field(
+        default="",
+        description="Visible placeholder text captured from extraction for routing and matching.",
     )
     format_hint: str | None = Field(default=None, description="Optional visible format/placeholder hint")
     name_attr: str = Field(
@@ -122,7 +126,10 @@ class DomHandFillParams(BaseModel):
 class DomHandSelectParams(BaseModel):
     """Select a dropdown option using platform-aware discovery."""
 
-    index: int = Field(description="Element index of the dropdown trigger")
+    index: int | None = Field(
+        default=None,
+        description="Optional element index of the dropdown trigger when already known.",
+    )
     value: str = Field(description="Value or text to select")
     field_id: str | None = Field(
         default=None,
@@ -198,6 +205,7 @@ class DomHandExpandParams(BaseModel):
 
 
 ApplicationTerminalState = Literal[
+    "editing",
     "advanceable",
     "review",
     "confirmation",

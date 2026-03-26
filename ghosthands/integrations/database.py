@@ -451,7 +451,13 @@ class Database:
 			""",
 			uuid.UUID(user_id) if isinstance(user_id, str) else user_id,
 		)
-		return dict(row) if row is not None else None
+		if row is None:
+			return None
+		data = dict(row)
+		languages = data.get("languages")
+		if isinstance(languages, str):
+			data["languages"] = json.loads(languages)
+		return data
 
 	async def load_resume_application_profile(
 		self,

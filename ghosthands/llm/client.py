@@ -59,7 +59,7 @@ def get_anthropic_client() -> Any:
 	return anthropic.AsyncAnthropic(api_key=api_key or None)
 
 
-def get_chat_model(model: str | None = None) -> Any:
+def get_chat_model(model: str | None = None, *, disable_google_thinking: bool = False) -> Any:
 	"""Get a browser-use chat model for the agent loop.
 
 	When proxy is configured:
@@ -73,6 +73,9 @@ def get_chat_model(model: str | None = None) -> Any:
 	  - Uses the appropriate provider based on model name (direct API keys).
 	"""
 	model = model or settings.agent_model
+	google_kwargs: dict[str, Any] = {}
+	if disable_google_thinking:
+		google_kwargs["thinking_budget"] = 0
 
 	if settings.llm_proxy_url:
 		proxy_url = settings.llm_proxy_url.rstrip("/")
@@ -90,6 +93,7 @@ def get_chat_model(model: str | None = None) -> Any:
 				temperature=settings.llm_temperature,
 				api_key=settings.llm_runtime_grant or settings.google_api_key or "dummy",
 				http_options={"baseUrl": proxy_url + "/gemini"},
+				**google_kwargs,
 			)
 
 		# ── GPT/OpenAI models → override to Sonnet (no OpenAI proxy route) ──
@@ -134,4 +138,5 @@ def get_chat_model(model: str | None = None) -> Any:
 		model=model,
 		temperature=settings.llm_temperature,
 		max_output_tokens=16384,
+		**google_kwargs,
 	)

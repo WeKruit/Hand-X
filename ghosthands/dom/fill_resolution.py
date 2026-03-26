@@ -77,6 +77,131 @@ def _is_education_like_section(value: str | None) -> bool:
     return "education" in section_norm or any(token in section_norm for token in ("school", "university", "college"))
 
 
+def _looks_like_experience_years_prompt(label: str | None) -> bool:
+    norm = normalize_name(label or "")
+    if not norm:
+        return False
+    return (
+        "work experience" in norm
+        and "year" in norm
+        and "degree" in norm
+    )
+
+
+def _field_has_education_context(field: FormField, visible_fields: list[FormField] | None = None) -> bool:
+    if _is_education_like_section(field.section):
+        return True
+
+    labels = [normalize_name(label) for label in _field_label_candidates(field)]
+    if any(
+        label in {"degree", "degree type", "type of degree", "degree level", "school", "major", "minor"}
+        or any(
+            token in label
+            for token in (
+                "field of study",
+                "area of study",
+                "discipline",
+                "concentration",
+                "college",
+                "university",
+                "institution",
+                "gpa",
+                "grading system",
+                "grading scale",
+                "honors",
+                "honours",
+                "honour",
+                "start date",
+                "end date",
+                "graduation date",
+            )
+        )
+        for label in labels
+    ):
+        return True
+
+    if not visible_fields:
+        return False
+
+    section_norm = _field_section_name(field)
+    sibling_tokens: set[str] = set()
+    for candidate in visible_fields:
+        if candidate.field_id == field.field_id:
+            continue
+        candidate_section = _field_section_name(candidate)
+        if section_norm and candidate_section and candidate_section != section_norm:
+            continue
+        for label in _field_label_candidates(candidate):
+            label_norm = normalize_name(label)
+            if not label_norm:
+                continue
+            sibling_tokens.add(label_norm)
+    return any(
+        any(
+            token in label
+            for token in (
+                "school",
+                "university",
+                "college",
+                "field of study",
+                "major",
+                "minor",
+                "gpa",
+                "grading system",
+                "grading scale",
+                "degree",
+                "honors",
+                "honours",
+                "honour",
+            )
+        )
+        for label in sibling_tokens
+    )
+
+
+def _infer_gpa_scale_from_text(value: Any) -> str | None:
+    text = _entry_text_value(value)
+    if not text:
+        return None
+    norm = normalize_name(text)
+    if not norm:
+        return None
+
+    if "alphabet" in norm:
+        return "Alphabetical (A+ to P)"
+    if "pass fail" in norm:
+        return "Pass/Fail"
+    if "percentage" in norm or "percent" in norm:
+        return "GPA (out of 100)/Percentage"
+    if "out of 12" in norm or "/12" in text:
+        return "GPA/Grade (out of 12)"
+    if "out of 10" in norm or "/10" in text:
+        return "GPA/Grade (out of 10)"
+    if "out of 5" in norm or "/5" in text:
+        return "GPA/Grade (out of 5)"
+    if "out of 4" in norm or "/4" in text:
+        return "GPA/Grade (out of 4)"
+
+    match = re.search(r"\b(\d+(?:\.\d+)?)\b", text)
+    if not match:
+        return None
+    try:
+        numeric = float(match.group(1))
+    except ValueError:
+        return None
+    if numeric <= 4.3:
+        return "GPA/Grade (out of 4)"
+    if numeric <= 5.3:
+        return "GPA/Grade (out of 5)"
+    if numeric <= 10.3:
+        return "GPA/Grade (out of 10)"
+    if numeric <= 12.3:
+        return "GPA/Grade (out of 12)"
+    if numeric <= 100.0:
+        return "GPA (out of 100)/Percentage"
+    return None
+
+
 
 def _is_structured_education_field(field: FormField) -> bool:
     labels = [normalize_name(label) for label in _field_label_candidates(field)]
@@ -123,8 +248,18 @@ def _is_structured_education_candidate(field: FormField, visible_fields: list[Fo
     if _is_structured_education_field(field):
         return True
     slot_name = _education_slot_name(field, visible_fields)
-    if slot_name in {"field_of_study", "gpa", "end_date_type", "school", "degree", "degree_type", "minor", "honors"}:
-        return True
+    if slot_name in {
+        "field_of_study",
+        "gpa",
+        "gpa_scale",
+        "end_date_type",
+        "school",
+        "degree",
+        "degree_type",
+        "minor",
+        "honors",
+    }:
+        return _field_has_education_context(field, visible_fields)
     if slot_name not in {"start_date", "end_date"}:
         return False
     target_section = normalize_name(field.section or "")
@@ -150,6 +285,7 @@ def _is_structured_education_candidate(field: FormField, visible_fields: list[Fo
             "minor",
             "honors",
             "gpa",
+            "gpa_scale",
             "end_date_type",
         }:
             return True
@@ -170,21 +306,71 @@ def _field_binding_identity(field: FormField) -> str:
     return str(field.field_id or get_stable_field_key(field)).strip()
 
 
+def _structured_language_entry_value_and_source(
+    slot_name: str | None,
+    entry: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    if slot_name == "language":
+        return _entry_text_and_source(entry, "language", "language_name", "languageName")
+    if slot_name == "is_fluent":
+        if isinstance(entry.get("isFluent"), bool):
+            return ("Yes" if bool(entry.get("isFluent")) else "No"), "isFluent"
+        if isinstance(entry.get("is_fluent"), bool):
+            return ("Yes" if bool(entry.get("is_fluent")) else "No"), "is_fluent"
+        return None, None
+    if slot_name == "comprehension":
+        speaking_value, speaking_source = _entry_text_and_source(
+            entry,
+            "speakingListening",
+            "speaking_listening",
+        )
+        if speaking_value:
+            return speaking_value, speaking_source
+        return _entry_text_and_source(
+            entry,
+            "overallProficiency",
+            "overall_proficiency",
+            "lang_proficiency",
+            "language_proficiency",
+            "languageProficiency",
+            "proficiency_level",
+            "proficiencyLevel",
+        )
+    if slot_name == "reading_writing":
+        return _entry_text_and_source(entry, "readingWriting", "reading_writing")
+    if slot_name == "speaking_listening":
+        return _entry_text_and_source(entry, "speakingListening", "speaking_listening")
+    if slot_name == "overall_proficiency":
+        return _entry_text_and_source(
+            entry,
+            "overallProficiency",
+            "overall_proficiency",
+            "lang_proficiency",
+            "language_proficiency",
+            "languageProficiency",
+            "proficiency_level",
+            "proficiencyLevel",
+        )
+    return None, None
+
+
 
 def _language_slot_name(field: FormField) -> str | None:
     for label in _field_label_candidates(field):
         name = normalize_name(label)
         if not name:
             continue
-        if name == "language" or "preferred language" in name:
+        if name in {"language", "language name"} or "preferred language" in name:
             return "language"
         if "i am fluent in this language" in name or name == "fluent" or name == "is fluent":
             return "is_fluent"
+        if "comprehension" in name:
+            return "comprehension"
         if "reading" in name or "writing" in name:
             return "reading_writing"
         if "speaking" in name or "listening" in name:
             return "speaking_listening"
-        if "overall" in name or "language proficiency" in name:
+        if "overall" in name or "language proficiency" in name or "proficiency level" in name:
             return "overall_proficiency"
     return None
 
@@ -199,6 +385,8 @@ def _education_slot_name(field: FormField, visible_fields: list[FormField] | Non
             return "school"
         if any(token in name for token in ("degree type", "type of degree", "degree level")):
             return "degree_type"
+        if _looks_like_experience_years_prompt(name):
+            return None
         if "degree" in name:
             return "degree"
         if "field of study" in name:
@@ -212,6 +400,8 @@ def _education_slot_name(field: FormField, visible_fields: list[FormField] | Non
             return "minor"
         if any(token in name for token in ("honors", "honours", "honour", "honor")):
             return "honors"
+        if any(token in name for token in ("grading system", "grading scale", "grade system")):
+            return "gpa_scale"
         if "gpa" in name:
             return "gpa"
         if any(token in name for token in ("actual or expected", "actual expected", "expected or actual")):
@@ -401,6 +591,21 @@ def _structured_education_raw_value_and_source_from_entry(
         )
     if slot_name == "gpa":
         return _entry_text_and_source(entry, "gpa")
+    if slot_name == "gpa_scale":
+        explicit_scale, explicit_source = _entry_text_and_source(
+            entry,
+            "gpa_scale",
+            "gpaScale",
+            "grading_system",
+            "gradingSystem",
+            "gpa_grading_system",
+            "gpaGradingSystem",
+        )
+        if explicit_scale:
+            inferred = _infer_gpa_scale_from_text(explicit_scale)
+            return inferred or explicit_scale, explicit_source
+        inferred_from_gpa = _infer_gpa_scale_from_text(entry.get("gpa"))
+        return inferred_from_gpa, "gpa"
     if slot_name == "end_date_type":
         return _entry_text_and_source(entry, "end_date_type", "endDateType", "endDateKind")
 
@@ -464,19 +669,15 @@ def _match_entry_by_slot_value(
         return None
     matched: list[int] = []
     for index, entry in enumerate(entries):
-        if slot_name == "language":
-            expected = str(entry.get("language") or "").strip()
-        elif slot_name == "is_fluent":
-            bool_value = entry.get("isFluent")
-            if not isinstance(bool_value, bool):
-                bool_value = entry.get("is_fluent")
-            expected = "Yes" if bool_value is True else "No" if bool_value is False else ""
-        elif slot_name == "reading_writing":
-            expected = str(entry.get("readingWriting") or entry.get("reading_writing") or "").strip()
-        elif slot_name == "speaking_listening":
-            expected = str(entry.get("speakingListening") or entry.get("speaking_listening") or "").strip()
-        elif slot_name == "overall_proficiency":
-            expected = str(entry.get("overallProficiency") or entry.get("overall_proficiency") or "").strip()
+        if slot_name in {
+            "language",
+            "is_fluent",
+            "comprehension",
+            "reading_writing",
+            "speaking_listening",
+            "overall_proficiency",
+        }:
+            expected = str(_structured_language_entry_value_and_source(slot_name, entry)[0] or "").strip()
         elif slot_name == "school":
             expected = str(entry.get("school") or "").strip()
         elif slot_name == "degree":
@@ -529,6 +730,17 @@ def _match_entry_by_slot_value(
             )
         elif slot_name == "gpa":
             expected = _entry_text_value(entry.get("gpa")) or ""
+        elif slot_name == "gpa_scale":
+            expected = (
+                _infer_gpa_scale_from_text(
+                    entry.get("gpa_scale")
+                    or entry.get("gpaScale")
+                    or entry.get("grading_system")
+                    or entry.get("gradingSystem")
+                    or entry.get("gpa")
+                )
+                or ""
+            )
         elif slot_name == "start_date":
             expected, _ = _entry_date_text_and_source(
                 entry,
@@ -750,24 +962,7 @@ def _structured_language_raw_value_and_source_from_entry(
     field: FormField,
     entry: dict[str, Any],
 ) -> tuple[str | None, str | None]:
-    for label in _field_label_candidates(field):
-        name = normalize_name(label)
-        if not name:
-            continue
-        if name == "language" or "preferred language" in name:
-            return _entry_text_and_source(entry, "language")
-        if "i am fluent in this language" in name or name == "fluent" or name == "is fluent":
-            if isinstance(entry.get("isFluent"), bool):
-                return ("Yes" if bool(entry.get("isFluent")) else "No"), "isFluent"
-            if isinstance(entry.get("is_fluent"), bool):
-                return ("Yes" if bool(entry.get("is_fluent")) else "No"), "is_fluent"
-        if "reading" in name or "writing" in name:
-            return _entry_text_and_source(entry, "readingWriting", "reading_writing")
-        if "speaking" in name or "listening" in name:
-            return _entry_text_and_source(entry, "speakingListening", "speaking_listening")
-        if "overall" in name or "language proficiency" in name:
-            return _entry_text_and_source(entry, "overallProficiency", "overall_proficiency")
-    return None, None
+    return _structured_language_entry_value_and_source(_language_slot_name(field), entry)
 
 
 
@@ -806,6 +1001,7 @@ def _is_structured_language_field(field: FormField) -> bool:
             for token in (
                 "language",
                 "i am fluent in this language",
+                "comprehension",
                 "reading",
                 "writing",
                 "speaking",
@@ -858,6 +1054,3 @@ def _infer_entry_data_from_scope(
         return None
     entry = entries[entry_index]
     return entry if isinstance(entry, dict) and entry else None
-
-
-

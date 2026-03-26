@@ -51,6 +51,8 @@ CLICK_COMBOBOX_TOGGLE_ON_NODE_JS = r"""function() {
 		return JSON.stringify({ clicked: false, reason: 'no_root' });
 	}
 	const orderedSelectors = [
+		'[data-automation-id="promptSearchButton"]',
+		'[data-uxi-widget-type="selectinputicon"]:not([data-automation-id*="clear" i])',
 		'button[aria-label*="Toggle" i]',
 		'div[role="button"][aria-label*="Toggle" i]',
 		'button[aria-label*="Open" i]',
@@ -113,6 +115,8 @@ CLICK_COMBOBOX_TOGGLE_BY_FFID_JS = r"""(ffId) => {
 		return JSON.stringify({ clicked: false, reason: 'no_root' });
 	}
 	const orderedSelectors = [
+		'[data-automation-id="promptSearchButton"]',
+		'[data-uxi-widget-type="selectinputicon"]:not([data-automation-id*="clear" i])',
 		'button[aria-label*="Toggle" i]',
 		'div[role="button"][aria-label*="Toggle" i]',
 		'button[aria-label*="Open" i]',
@@ -151,6 +155,13 @@ GET_COMBOBOX_TOGGLE_TARGET_BY_FFID_JS = r"""(ffId) => {
 		return (c || '').toLowerCase();
 	};
 	const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
+	const collectIds = (node, attr) => {
+		if (!node || !node.getAttribute) return [];
+		return String(node.getAttribute(attr) || '')
+			.split(/\s+/)
+			.map((part) => part.trim())
+			.filter(Boolean);
+	};
 	const qAll = (sel) => (window.__ff && window.__ff.queryAll)
 		? window.__ff.queryAll(sel)
 		: Array.from(document.querySelectorAll(sel));
@@ -172,27 +183,31 @@ GET_COMBOBOX_TOGGLE_TARGET_BY_FFID_JS = r"""(ffId) => {
 		el.closest('[role="combobox"]')
 		|| (el.getAttribute && el.getAttribute('role') === 'combobox' ? el : null)
 		|| (root && root.querySelector ? root.querySelector('[role="combobox"]') : null);
-	const anchor = (combo || root || el).getBoundingClientRect();
-	const hasNearbyPopup = () => {
-		const popups = qAll(
-			'[role="listbox"], [role="menu"], [class*="menu"], [class*="Menu"], [class*="listbox"], [class*="dropdown-menu"], [class*="options-list"]'
-		);
-		for (const popup of popups) {
-			if (!visible(popup)) continue;
-			const rect = popup.getBoundingClientRect();
-			const overlapX = Math.max(0, Math.min(rect.right, anchor.right) - Math.max(rect.left, anchor.left));
-			const distanceY = Math.min(
-				Math.abs(rect.top - anchor.bottom),
-				Math.abs(anchor.top - rect.bottom)
-			);
-			if (overlapX > 0 || distanceY < 140) return true;
+	const controlledPopupVisible = () => {
+		const ids = [
+			...collectIds(el, 'aria-controls'),
+			...collectIds(el, 'aria-owns'),
+			...collectIds(combo, 'aria-controls'),
+			...collectIds(combo, 'aria-owns'),
+		];
+		for (const id of ids) {
+			const popup = document.getElementById(id);
+			if (visible(popup)) return true;
+		}
+		const descendants = root && root.querySelectorAll
+			? root.querySelectorAll('[role="listbox"], [role="menu"], [role="grid"], [class*="listbox"], [class*="dropdown-menu"], [class*="options-list"]')
+			: [];
+		for (const popup of descendants) {
+			if (visible(popup)) return true;
 		}
 		return false;
 	};
-	if ((combo && combo.getAttribute('aria-expanded') === 'true') || hasNearbyPopup()) {
+	if ((combo && combo.getAttribute('aria-expanded') === 'true') || controlledPopupVisible()) {
 		return JSON.stringify({ found: false, already_open: true, reason: 'already_open' });
 	}
 	const orderedSelectors = [
+		'[data-automation-id="promptSearchButton"]',
+		'[data-uxi-widget-type="selectinputicon"]:not([data-automation-id*="clear" i])',
 		'button[aria-label*="Toggle" i]',
 		'div[role="button"][aria-label*="Toggle" i]',
 		'button[aria-label*="Open" i]',
@@ -274,7 +289,23 @@ async def trusted_open_combobox_by_ffid(page: Any, ff_id: str) -> dict[str, Any]
         return target
 
     try:
+        await page.evaluate(
+            """(ffId) => {
+                const ff = window.__ff;
+                const el = ff ? ff.byId(ffId) : document.querySelector(`[data-ff-id="${ffId}"]`);
+                if (!el || !el.scrollIntoView) return false;
+                el.scrollIntoView({ block: 'center', inline: 'nearest' });
+                return true;
+            }""",
+            ff_id,
+        )
+        await asyncio.sleep(0.12)
+        refreshed = combobox_toggle_target(await page.evaluate(GET_COMBOBOX_TOGGLE_TARGET_BY_FFID_JS, ff_id))
+        if refreshed.get("found"):
+            target = refreshed
         mouse = await page.mouse
+        await mouse.move(float(target["x"]), float(target["y"]))
+        await asyncio.sleep(0.05)
         await mouse.click(float(target["x"]), float(target["y"]))
     except Exception as exc:
         return {

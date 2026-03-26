@@ -174,95 +174,161 @@ def _classify_blocker_strategy(action_name: str, params: dict[str, Any]) -> str:
 
 
 def _blocker_guard_decision(
-	last_state: dict[str, Any] | None,
-	actions: list[dict[str, Any]],
-	attempt_state: dict[str, dict[str, Any]] | None = None,
+    last_state: dict[str, Any] | None,
+    actions: list[dict[str, Any]],
+    attempt_state: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-	"""Return a blocker-guard rejection when the next actions drift from the active blocker set."""
-	if not isinstance(last_state, dict):
-		return None
-	blocker_keys = [str(value).strip() for value in (last_state.get('blocking_field_keys') or []) if str(value).strip()]
-	if not blocker_keys:
-		return None
-	attempt_state = attempt_state or {}
-	single_blocker = last_state.get('single_active_blocker')
-	if isinstance(single_blocker, dict):
-		blocker_key = str(single_blocker.get('field_key') or '').strip()
-		blocker_change = str((last_state.get('blocking_field_state_changes') or {}).get(blocker_key) or '').strip()
-		last_attempt = attempt_state.get(blocker_key, {})
-		for action in actions:
-			action_name = str(action.get('action') or 'unknown')
-			params = action.get('params') if isinstance(action.get('params'), dict) else {}
-			if action_name == 'domhand_assess_state':
-				continue
-			if not _action_targets_single_blocker(action_name, params, single_blocker):
-				return {
-					"reason": "unrelated_action_with_single_blocker",
-					"blocker_key": blocker_key,
-					"blocker": single_blocker,
-					"strategy": _classify_blocker_strategy(action_name, params),
-					"message": (
-						f'Latest domhand_assess_state reports a single active blocker: '
-						f'"{single_blocker.get("field_label") or single_blocker.get("field_id")}". '
-						'Do not target unrelated fields before this blocker is cleared or reassessed.'
-					),
-					"recommended_next_action": (
-						"use domhand_interact_control with the exact field_id/field_type for binary controls, "
-						"use domhand_select for select blockers, or call domhand_assess_state again"
-					),
-				}
-			current_strategy = _classify_blocker_strategy(action_name, params)
-			if blocker_change == 'no_state_change' and last_attempt.get('last_attempt_strategy') == current_strategy:
-				return {
-					"reason": "same_strategy_no_state_change",
-					"blocker_key": blocker_key,
-					"blocker": single_blocker,
-					"strategy": current_strategy,
-					"message": (
-						f'The blocker "{single_blocker.get("field_label") or single_blocker.get("field_id")}" '
-						'has not changed since the last assessment. '
-						f'Do not retry the same strategy "{current_strategy}" again.'
-					),
-					"recommended_next_action": last_attempt.get('recommended_next_action')
-					or 'change recovery strategy for the same blocker, then reassess immediately',
-				}
-			return None
-		return None
+    """Return a blocker-guard rejection only for true no-progress retry loops."""
+    def _is_broad_domhand_fill(action_name: str, params: dict[str, Any]) -> bool:
+        if action_name != "domhand_fill":
+            return False
+        focus_fields = params.get("focus_fields")
+        entry_data = params.get("entry_data")
+        heading_boundary = str(params.get("heading_boundary") or "").strip()
+        return not focus_fields and not entry_data and not heading_boundary
 
-	blocker_set = set(blocker_keys)
-	blocker_labels = {
-		_normalize_blocker_text(label)
-		for label in (last_state.get('blocking_field_labels') or [])
-		if str(label).strip()
-	}
-	for action in actions:
-		action_name = str(action.get('action') or 'unknown')
-		params = action.get('params') if isinstance(action.get('params'), dict) else {}
-		if action_name not in {'domhand_fill', 'domhand_interact_control', 'domhand_record_expected_value', 'domhand_select'}:
-			continue
-		param_field_id = str(params.get('field_id') or '').strip()
-		param_label = _normalize_blocker_text(params.get('field_label') or params.get('name') or '')
-		focus_fields = params.get('focus_fields') or []
-		normalized_focus = {_normalize_blocker_text(label) for label in focus_fields if str(label).strip()}
-		if param_field_id and param_field_id not in blocker_set:
-			return {
-				"reason": "explicit_non_blocker_target",
-				"strategy": _classify_blocker_strategy(action_name, params),
-				"message": "The planned action explicitly targets a field that is not in the latest blocker set.",
-			}
-		if param_label and param_label not in blocker_labels:
-			return {
-				"reason": "explicit_non_blocker_target",
-				"strategy": _classify_blocker_strategy(action_name, params),
-				"message": "The planned action explicitly targets a label that is not in the latest blocker set.",
-			}
-		if normalized_focus and normalized_focus.isdisjoint(blocker_labels):
-			return {
-				"reason": "explicit_non_blocker_target",
-				"strategy": _classify_blocker_strategy(action_name, params),
-				"message": "The planned focus_fields do not match the latest blocker set.",
-			}
-	return None
+    if not isinstance(last_state, dict):
+        return None
+
+    unresolved_required_count = int(last_state.get("unresolved_required_count") or 0)
+    optional_validation_count = int(last_state.get("optional_validation_count") or 0)
+    visible_error_count = int(last_state.get("visible_error_count") or 0)
+    has_active_hard_blockers = (
+        not bool(last_state.get("advance_allowed"))
+        and (unresolved_required_count > 0 or optional_validation_count > 0 or visible_error_count > 0)
+    )
+
+    for action in actions:
+        action_name = str(action.get("action") or "unknown")
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        if has_active_hard_blockers and _is_broad_domhand_fill(action_name, params):
+            return {
+                "reason": "broad_refill_with_active_blockers",
+                "strategy": "page_local_review",
+                "blocker": last_state.get("single_active_blocker"),
+                "advisory_only": True,
+                "message": (
+                    "The current page still has active required/validation blockers after a broad domhand_fill. "
+                    "Do not run another broad domhand_fill on this same page."
+                ),
+                "recommended_next_action": (
+                    "review the current visible blockers one at a time on this page; "
+                    "prefer browser-use/manual recovery for sticky radio/button-group/combobox widgets, "
+                    "or use a targeted DomHand action on one blocker only; then reassess"
+                ),
+            }
+
+    blocker_keys = [str(value).strip() for value in (last_state.get("blocking_field_keys") or []) if str(value).strip()]
+    if not blocker_keys:
+        return None
+    attempt_state = attempt_state or {}
+    single_blocker = last_state.get("single_active_blocker")
+    if isinstance(single_blocker, dict):
+        blocker_key = str(single_blocker.get("field_key") or "").strip()
+        blocker_change = str((last_state.get("blocking_field_state_changes") or {}).get(blocker_key) or "").strip()
+        last_attempt = attempt_state.get(blocker_key, {})
+        for action in actions:
+            action_name = str(action.get("action") or "unknown")
+            params = action.get("params") if isinstance(action.get("params"), dict) else {}
+            if action_name == "domhand_assess_state":
+                continue
+            current_strategy = _classify_blocker_strategy(action_name, params)
+            if (
+                _action_targets_single_blocker(action_name, params, single_blocker)
+                and blocker_change == "no_state_change"
+                and last_attempt.get("last_attempt_strategy") == current_strategy
+            ):
+                return {
+                    "reason": "same_strategy_no_state_change",
+                    "blocker_key": blocker_key,
+                    "blocker": single_blocker,
+                    "strategy": current_strategy,
+                    "message": (
+                        f'The blocker "{single_blocker.get("field_label") or single_blocker.get("field_id")}" '
+                        "has not changed since the last assessment. "
+                        f'Do not retry the same strategy "{current_strategy}" again.'
+                    ),
+                    "recommended_next_action": last_attempt.get("recommended_next_action")
+                    or "change recovery strategy for the same blocker, then reassess immediately",
+                }
+        return None
+    return None
+
+
+def _same_page_advance_decision(
+    last_state: dict[str, Any] | None,
+    actions: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Block broad same-page refills after the latest assess_state already cleared hard blockers."""
+    if not isinstance(last_state, dict):
+        return None
+    if not bool(last_state.get("advance_allowed")):
+        return None
+
+    unresolved_required_count = int(last_state.get("unresolved_required_count") or 0)
+    optional_validation_count = int(last_state.get("optional_validation_count") or 0)
+    visible_error_count = int(last_state.get("visible_error_count") or 0)
+    opaque_count = int(last_state.get("opaque_count") or 0)
+    if unresolved_required_count or optional_validation_count or visible_error_count or opaque_count:
+        return None
+
+    for action in actions:
+        action_name = str(action.get("action") or "unknown")
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        if action_name != "domhand_fill":
+            continue
+        focus_fields = params.get("focus_fields")
+        entry_data = params.get("entry_data")
+        heading_boundary = str(params.get("heading_boundary") or "").strip()
+        if focus_fields or entry_data or heading_boundary:
+            continue
+        return {
+            "reason": "same_page_advance_allowed",
+            "strategy": "advance_or_manual_browser_decision",
+            "advisory_only": True,
+            "message": (
+                "The latest domhand_assess_state on this same page already cleared hard blockers. "
+                "Do not run another broad domhand_fill on this page."
+            ),
+            "recommended_next_action": (
+                "if the page does not visibly show red validation errors or unselected required controls, "
+                "click Next/Continue/Save now; otherwise do page-local manual review only"
+            ),
+        }
+    return None
+
+
+def _same_page_fill_checkpoint_decision(
+    last_fill: dict[str, Any] | None,
+    actions: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Block repeated broad domhand_fill until the same-page assess checkpoint is consumed."""
+    if not isinstance(last_fill, dict):
+        return None
+    if not bool(last_fill.get("requires_assess_checkpoint")):
+        return None
+
+    for action in actions:
+        action_name = str(action.get("action") or "unknown")
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        if action_name != "domhand_fill":
+            continue
+        focus_fields = params.get("focus_fields")
+        entry_data = params.get("entry_data")
+        heading_boundary = str(params.get("heading_boundary") or "").strip()
+        if focus_fields or entry_data or heading_boundary:
+            continue
+        return {
+            "reason": "same_page_assess_checkpoint_required",
+            "strategy": "run_domhand_assess_state_next",
+            "advisory_only": True,
+            "message": (
+                "This same page already had a broad domhand_fill pass. "
+                "Run domhand_assess_state next before attempting another broad domhand_fill."
+            ),
+            "recommended_next_action": "run_domhand_assess_state_next",
+        }
+    return None
 
 
 def log_response(response: AgentOutput, registry=None, logger=None) -> None:
@@ -472,7 +538,7 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		self.browser_session = browser_session or BrowserSession(
 			browser_profile=browser_profile,
-			id=uuid7str()[:-4] + self.id[-4:],  # re-use the same 4-char suffix so they show up together in logs
+			id=uuid7str()[:-4] + self.id[-4:],  # reuse the same 4-char suffix so they show up together in logs
 		)
 
 		self._demo_mode_enabled: bool = bool(self.browser_profile.demo_mode) if self.browser_session else False
@@ -1374,7 +1440,66 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		for action in self.state.last_model_output.action:
 			action_name, params = _extract_action_name_params(action)
 			actions_data.append({"action": action_name, "params": params})
+		last_fill = getattr(self.browser_session, '_gh_last_domhand_fill', None) if self.browser_session else None
+		fill_checkpoint_decision = _same_page_fill_checkpoint_decision(last_fill, actions_data)
+		if fill_checkpoint_decision is not None:
+			message = fill_checkpoint_decision.get('message') or 'Same-page fill checkpoint rejected the planned action.'
+			self.state.last_result = [
+				ActionResult(
+					extracted_content=f"{message} {(fill_checkpoint_decision.get('recommended_next_action') or '')}".strip(),
+					metadata={
+						'blocker_guard': True,
+						'same_page_assess_checkpoint_guard': True,
+						'reason': fill_checkpoint_decision.get('reason'),
+						'strategy': fill_checkpoint_decision.get('strategy'),
+						'actions': actions_data,
+						'recommended_next_action': fill_checkpoint_decision.get('recommended_next_action'),
+					},
+				)
+			]
+			return
 		last_state = getattr(self.browser_session, '_gh_last_application_state', None) if self.browser_session else None
+		advance_decision = _same_page_advance_decision(last_state, actions_data)
+		if advance_decision is not None:
+			message = advance_decision.get('message') or 'Same-page advance guard rejected the planned action.'
+			self.state.last_result = [
+				ActionResult(
+					extracted_content=f"{message} {(advance_decision.get('recommended_next_action') or '')}".strip(),
+					metadata={
+						'blocker_guard': True,
+						'same_page_advance_guard': True,
+						'reason': advance_decision.get('reason'),
+						'strategy': advance_decision.get('strategy'),
+						'actions': actions_data,
+						'recommended_next_action': advance_decision.get('recommended_next_action'),
+					},
+				)
+			]
+			return
+		# Block repeated domhand_assess_state when blockers haven't changed
+		if isinstance(last_state, dict):
+			sig_count = int(last_state.get('same_blocker_signature_count') or 0)
+			if sig_count >= 2:
+				for act in actions_data:
+					if str(act.get('action') or '') == 'domhand_assess_state':
+						self.state.last_result = [
+							ActionResult(
+								error=(
+									f'domhand_assess_state has reported the same blocker set {sig_count} times. '
+									'STOP calling domhand_assess_state. '
+									'Either click Next/Continue to let the page validate, or use browser-use '
+									'manual click to resolve the remaining required field directly.'
+								),
+								metadata={
+									'blocker_guard': True,
+									'reason': 'assess_state_loop_cut',
+									'same_blocker_signature_count': sig_count,
+									'recommended_next_action': 'click_next_or_manual_resolve',
+								},
+							)
+						]
+						return
+
 		guard_decision = _blocker_guard_decision(
 			last_state,
 			actions_data,
@@ -1393,7 +1518,11 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				)
 			self.state.last_result = [
 				ActionResult(
-					error=guard_decision.get('message') or 'Active blocker guard rejected the planned action.',
+					error=(
+						None
+						if bool(guard_decision.get('advisory_only'))
+						else guard_decision.get('message') or 'Active blocker guard rejected the planned action.'
+					),
 					extracted_content=(
 						(guard_decision.get('message') or 'Active blocker guard rejected the planned action.')
 						+ ' '

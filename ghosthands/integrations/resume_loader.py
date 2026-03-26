@@ -418,6 +418,19 @@ def _has_profile_value(value: Any) -> bool:
     return value is not None
 
 
+def _normalize_application_profile_languages(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    raw = value.strip()
+    if not raw:
+        return value
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return value
+    return parsed
+
+
 def _merge_application_profiles(
     global_profile: dict[str, Any] | None,
     resume_specific_profile: dict[str, Any] | None,
@@ -433,6 +446,8 @@ def _merge_application_profiles(
     for key, value in resume_specific_profile.items():
         if key in {"id", "user_id", "resume_id", "created_at", "updated_at"}:
             continue
+        if key == "languages":
+            value = _normalize_application_profile_languages(value)
         if _has_profile_value(value):
             merged[key] = value
     return merged
@@ -566,5 +581,6 @@ def _apply_application_profile_overrides(
     for key, value in scalar_overrides.items():
         _set_if_present(profile, key, value)
 
-    if _has_profile_value(application_profile.get("languages")):
-        profile["languages"] = application_profile.get("languages")
+    normalized_languages = _normalize_application_profile_languages(application_profile.get("languages"))
+    if _has_profile_value(normalized_languages):
+        profile["languages"] = normalized_languages

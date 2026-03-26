@@ -38,7 +38,15 @@ from ghosthands.actions.combobox_toggle import (
     combobox_toggle_clicked,
     trusted_open_combobox_by_ffid,
 )
-from ghosthands.actions.domhand_fill import _get_page_context_key, _record_expected_value_if_settled
+from ghosthands.actions.domhand_fill import (
+    _field_matches_focus_label,
+    _filter_fields_for_scope,
+    _get_page_context_key,
+    _normalize_match_label,
+    _preferred_field_label,
+    _record_expected_value_if_settled,
+    extract_visible_form_fields,
+)
 from ghosthands.actions.views import (
     DomHandSelectParams,
     FormField,
@@ -47,6 +55,7 @@ from ghosthands.actions.views import (
     split_dropdown_value_hierarchy,
 )
 from ghosthands.dom.dropdown_match import match_dropdown_option_dict
+from ghosthands.dom.fill_label_match import _coerce_proficiency_choice
 from ghosthands.runtime_learning import (
     DOMHAND_RETRY_CAP,
     clear_domhand_failure,
@@ -75,6 +84,8 @@ def _profile_debug_enabled() -> bool:
 _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 	const el = this;
 	const tag = el.tagName.toLowerCase();
+	const role = (el.getAttribute('role') || '').toLowerCase();
+	const ariaHasPopup = (el.getAttribute('aria-haspopup') || '').toLowerCase();
 	const visible = (node) => {
 		if (!node) return false;
 		const style = window.getComputedStyle(node);
@@ -122,7 +133,7 @@ _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 	const listboxId = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
 	if (listboxId) {
 		const listbox = qById(listboxId);
-		if (listbox) {
+		if (listbox && visible(listbox)) {
 			const options = Array.from(
 				listbox.querySelectorAll('[role="option"], [role="gridcell"], [role="listitem"], li, [class*="option"], [data-value]')
 			).map((o, i) => ({
@@ -140,13 +151,23 @@ _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 		}
 	}
 
-	// Case 3: Workday-style custom dropdowns (data-uxi-widget-type)
+	// Case 3: Workday-style custom dropdowns (data-uxi-widget-type / button triggers)
 	const widgetType = el.getAttribute('data-uxi-widget-type');
-	if (widgetType === 'selectinput' || el.getAttribute('role') === 'combobox') {
+	const buttonTriggerText = clean(el.getAttribute('data-committed-value') || el.textContent || el.getAttribute('aria-label') || '');
+	const buttonClass = clean(el.getAttribute('class') || '');
+	const looksLikePopupButton = (tag === 'button' || role === 'button') && (
+		ariaHasPopup === 'listbox'
+		|| ariaHasPopup === 'menu'
+		|| !!el.getAttribute('aria-controls')
+		|| !!el.getAttribute('aria-owns')
+		|| /^(select one|choose one|please select)$/i.test(buttonTriggerText)
+		|| /select|dropdown|option|choice|combobox|css-/i.test(buttonClass)
+	);
+	if (widgetType === 'selectinput' || role === 'combobox' || looksLikePopupButton) {
 		// Greenhouse / react-select: never treat the whole .form-group/.field wrapper text as the
 		// committed value — it concatenates QUESTION LABEL + placeholder ("Select..."), which made us
 		// return options: [] as if the field were already filled (CDP-first then never discovers menu).
-		const isReactSelectCombobox = el.getAttribute('role') === 'combobox' && widgetType !== 'selectinput';
+		const isReactSelectCombobox = role === 'combobox' && widgetType !== 'selectinput';
 		const isUnsetPlaceholder = (t) => {
 			const s = clean(t).toLowerCase();
 			if (!s) return true;
@@ -155,6 +176,11 @@ _DISCOVER_OPTIONS_ON_NODE_JS = r"""function() {
 		const currentValue = (() => {
 			let value = clean(el.value || '');
 			if (value && !isUnsetPlaceholder(value)) return value;
+			if (looksLikePopupButton) {
+				const committed = clean(el.getAttribute('data-committed-value') || '');
+				if (committed && !isUnsetPlaceholder(committed)) return committed;
+				if (buttonTriggerText && !isUnsetPlaceholder(buttonTriggerText)) return buttonTriggerText;
+			}
 			const wrapper = el.closest('[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field') || el.parentElement || el;
 			const tokenSelectors = [
 				'[data-automation-id*="selected"]',
@@ -336,6 +362,58 @@ _CLICK_OPTION_JS = r"""(targetText) => {
 	});
 }"""
 
+_GET_OPTION_CLICK_TARGET_JS = r"""(targetText) => {
+	const lowerTarget = (targetText || '').toLowerCase().trim();
+	if (!lowerTarget) return JSON.stringify({found: false, reason: 'empty_target'});
+	const visible = (el) => {
+		if (!el) return false;
+		const style = window.getComputedStyle(el);
+		if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+		const rect = el.getBoundingClientRect();
+		return rect.width > 0 && rect.height > 0;
+	};
+	const selectors = [
+		'[role="option"]', '[role="menuitem"]', '[role="gridcell"]', '[role="row"]', '[role="listitem"]',
+		'li', '[class*="option"]', '[data-value]'
+	];
+	const candidates = [];
+	for (const selector of selectors) {
+		for (const el of Array.from(document.querySelectorAll(selector))) {
+			if (!visible(el)) continue;
+			const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+			if (!text) continue;
+			candidates.push({el, text});
+		}
+	}
+	const unique = [];
+	const seen = new Set();
+	for (const candidate of candidates) {
+		if (seen.has(candidate.el)) continue;
+		seen.add(candidate.el);
+		unique.push(candidate);
+	}
+	const exact = unique.find((candidate) => candidate.text.toLowerCase() === lowerTarget);
+	const partial = unique.find((candidate) => {
+		const text = candidate.text.toLowerCase();
+		return text.includes(lowerTarget) || lowerTarget.includes(text);
+	});
+	const match = exact || partial;
+	if (!match) {
+		return JSON.stringify({
+			found: false,
+			reason: 'no_match',
+			available: unique.slice(0, 20).map((candidate) => candidate.text),
+		});
+	}
+	const rect = match.el.getBoundingClientRect();
+	return JSON.stringify({
+		found: true,
+		text: match.text,
+		x: rect.left + rect.width / 2,
+		y: rect.top + rect.height / 2,
+	});
+}"""
+
 # Select a native <select> option by value or text — operates on `this` = the <select> element
 _SELECT_NATIVE_ON_NODE_JS = r"""function(targetValue) {
 	const el = this;
@@ -382,6 +460,7 @@ _SELECT_NATIVE_ON_NODE_JS = r"""function(targetValue) {
 # Verify current selection — operates on `this` = the trigger element
 _VERIFY_SELECTION_ON_NODE_JS = r"""function() {
 	const el = this;
+	const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
 	if (el.tagName.toLowerCase() === 'select') {
 		const sel = el.options[el.selectedIndex];
 		return JSON.stringify({value: sel ? sel.text.trim() : ''});
@@ -436,8 +515,26 @@ _VERIFY_SELECTION_ON_NODE_JS = r"""function() {
 	}
 	if (!value && isSelectLike) {
 		const fieldAnchor = comboHost || el;
+		const ownInputValue = typeof el.value === 'string' ? clean(el.value) : '';
+		if (ownInputValue && !isUnsetLike(ownInputValue)) {
+			value = ownInputValue;
+		}
+		const controlledPopupIds = [
+			...collectIds(el, 'aria-controls'),
+			...collectIds(el, 'aria-owns'),
+			...collectIds(comboHost, 'aria-controls'),
+			...collectIds(comboHost, 'aria-owns'),
+		];
+		const hasVisibleControlledPopup = controlledPopupIds.some((id) => {
+			const popup = document.getElementById(id);
+			if (!popup) return false;
+			const style = window.getComputedStyle(popup);
+			if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+			const rect = popup.getBoundingClientRect();
+			return !!rect && rect.width > 0 && rect.height > 0;
+		});
 		const ownText = visibleText(el);
-		if (ownText && !isUnsetLike(ownText)) {
+		if (!value && ownText && !isUnsetLike(ownText)) {
 			value = ownText;
 		}
 		const wrapper =
@@ -499,7 +596,13 @@ _VERIFY_SELECTION_ON_NODE_JS = r"""function() {
 		}
 		if (!value) {
 			const wrapperText = visibleText(wrapper);
-			if (wrapperText && wrapperText.length <= 120 && !isUnsetLike(wrapperText) && !/^required$/i.test(wrapperText)) {
+			if (
+				wrapperText
+				&& !hasVisibleControlledPopup
+				&& wrapperText.length <= 120
+				&& !isUnsetLike(wrapperText)
+				&& !/^required$/i.test(wrapperText)
+			) {
 				value = wrapperText;
 			}
 		}
@@ -672,6 +775,8 @@ async def _try_click_combobox_toggle(browser_session: BrowserSession, node: Enha
 def _fuzzy_match_option(
     target: str,
     options: list[dict[str, Any]],
+    *,
+    field_label: str = "",
 ) -> dict[str, Any] | None:
     """Find the best matching option for a target value using multi-pass fuzzy matching.
 
@@ -679,7 +784,56 @@ def _fuzzy_match_option(
     which implements the canonical 5-pass cascade (exact → prefix → contains →
     synonym → word-overlap).
     """
-    return match_dropdown_option_dict(target, options)
+    def _looks_like_employer_dropdown(label: str) -> bool:
+        norm = normalize_name(label)
+        return any(
+            token in norm
+            for token in (
+                "latest employer",
+                "current employer",
+                "employer name",
+                "name of latest employer",
+                "name of current employer",
+            )
+        )
+
+    def _meaningful_words(text: str) -> set[str]:
+        stop_words = {"the", "a", "an", "of", "for", "in", "to", "and", "or", "with", "at", "by"}
+        return {word for word in normalize_name(text).split() if len(word) > 1 and word not in stop_words}
+
+    def _is_strong_employer_match(expected: str, observed: str) -> bool:
+        expected_norm = normalize_name(expected)
+        observed_norm = normalize_name(observed)
+        if not expected_norm or not observed_norm:
+            return False
+        if expected_norm == observed_norm:
+            return True
+        if expected_norm in observed_norm or observed_norm in expected_norm:
+            return True
+        expected_words = _meaningful_words(expected)
+        observed_words = _meaningful_words(observed)
+        if not expected_words or not observed_words:
+            return False
+        overlap = expected_words & observed_words
+        if len(expected_words) == 1:
+            return len(overlap) == 1 and next(iter(expected_words)) == next(iter(observed_words & expected_words))
+        return len(overlap) >= 2
+
+    matched = match_dropdown_option_dict(target, options)
+    if matched is not None and _looks_like_employer_dropdown(field_label):
+        matched_text = str(matched.get("text") or matched.get("value") or "")
+        if not _is_strong_employer_match(target, matched_text):
+            return None
+    if matched is not None:
+        return matched
+    labels = [str(opt.get("text") or opt.get("value") or "") for opt in options]
+    coerced = _coerce_proficiency_choice(labels, target)
+    if not coerced:
+        return None
+    for opt, label in zip(options, labels):
+        if label == coerced:
+            return opt
+    return None
 
 
 # React-select / async combobox often reports placeholder rows like "No options" before the menu
@@ -789,10 +943,11 @@ async def _focus_dropdown_filter_input(page: Any) -> None:
 
 
 async def _click_option_via_playwright(page: Any, matched_text: str) -> dict[str, Any]:
-    """Click a visible menu row using Playwright (preferred over raw ``element.click()`` in evaluate).
+    """Click a visible option using the browser-use actor path before JS fallback.
 
-    Oracle Fusion and similar UIs expose choices as ``gridcell`` / ``listitem``;
-    synthetic React handlers often need the full pointer pipeline.
+    ``browser_use.actor.page.Page`` is not a Playwright page; its reliable trusted
+    click primitive is ``Element.click()``. Use that first so Oracle-style gridcell
+    rows fire the same pointer pipeline as production runs.
     """
     raw = (matched_text or "").strip()
     if not raw:
@@ -802,17 +957,88 @@ async def _click_option_via_playwright(page: Any, matched_text: str) -> dict[str
         pattern = re.compile(re.escape(safe), re.IGNORECASE)
     except re.error:
         return {"success": False, "error": "invalid match text for locator"}
-    for role in ("option", "gridcell", "menuitem", "listitem"):
+    actor_selectors = (
+        '[role="option"]',
+        '[role="gridcell"]',
+        '[role="menuitem"]',
+        '[role="listitem"]',
+        'li',
+        '[class*="option"]',
+        '[data-value]',
+        '[role="row"]',
+    )
+    for selector in actor_selectors:
         try:
-            loc = page.get_by_role(role, name=pattern)
-            if await loc.count() == 0:
-                continue
-            first = loc.first
-            await first.scroll_into_view_if_needed(timeout=2000)
-            await first.click(timeout=4000)
-            return {"success": True, "clicked": raw, "via": f"playwright:{role}"}
+            elements = await page.get_elements_by_css_selector(selector)
         except Exception:
-            continue
+            elements = []
+        best_partial = None
+        for element in elements:
+            try:
+                meta_raw = await element.evaluate(
+                    """() => {
+                        const style = window.getComputedStyle(this);
+                        const rect = this.getBoundingClientRect();
+                        return JSON.stringify({
+                            text: (this.textContent || '').replace(/\\s+/g, ' ').trim(),
+                            visible: !!style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0,
+                        });
+                    }"""
+                )
+                meta = json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw
+            except Exception:
+                continue
+            if not isinstance(meta, dict) or not meta.get("visible"):
+                continue
+            text = str(meta.get("text") or "").strip()
+            if not text:
+                continue
+            if text.lower() == raw.lower():
+                try:
+                    await element.click()
+                    return {"success": True, "clicked": text, "via": f"actor:{selector}:exact"}
+                except Exception:
+                    continue
+            if text.lower().find(raw.lower()) != -1 or raw.lower().find(text.lower()) != -1:
+                best_partial = (element, text)
+        if best_partial is not None:
+            element, text = best_partial
+            try:
+                await element.click()
+                return {"success": True, "clicked": text, "via": f"actor:{selector}:partial"}
+            except Exception:
+                continue
+    for role in ("option", "gridcell", "row", "menuitem", "listitem"):
+        locator_candidates: list[tuple[str, Any]] = []
+        with contextlib.suppress(Exception):
+            locator_candidates.append((f"playwright:{role}:name", page.get_by_role(role, name=pattern)))
+        with contextlib.suppress(Exception):
+            locator_candidates.append((f"playwright:{role}:text", page.locator(f'[role=\"{role}\"]').filter(has_text=pattern)))
+        for via, loc in locator_candidates:
+            try:
+                if await loc.count() == 0:
+                    continue
+                first = loc.first
+                await first.scroll_into_view_if_needed(timeout=2000)
+                await first.click(timeout=4000)
+                return {"success": True, "clicked": raw, "via": via}
+            except Exception:
+                continue
+    try:
+        raw_target = await page.evaluate(_GET_OPTION_CLICK_TARGET_JS, raw)
+        target = json.loads(raw_target) if isinstance(raw_target, str) else raw_target
+    except Exception:
+        target = {"found": False, "reason": "target_lookup_failed"}
+    if isinstance(target, dict) and target.get("found"):
+        try:
+            mouse = await page.mouse
+            await mouse.move(float(target["x"]), float(target["y"]))
+            await asyncio.sleep(0.05)
+            await mouse.click(float(target["x"]), float(target["y"]))
+            await asyncio.sleep(0.2)
+            return {"success": True, "clicked": target.get("text", raw), "via": "playwright:mouse"}
+        except Exception:
+            pass
     return {"success": False, "error": "playwright_locator_miss"}
 
 
@@ -1062,16 +1288,170 @@ def _select_failover_or_retry_cap_message(
     )
 
 
+def _score_selector_map_node(node: EnhancedDOMTreeNode) -> int:
+    attrs = getattr(node, "attributes", None) or {}
+    tag = (getattr(node, "tag_name", None) or "").lower()
+    score = 0
+    if tag == "select":
+        score += 5
+    if attrs.get("role") == "combobox":
+        score += 4
+    if tag == "input":
+        score += 3
+    if attrs.get("aria-haspopup") in {"listbox", "grid"}:
+        score += 2
+    if attrs.get("aria-hidden") == "true":
+        score -= 3
+    return score
+
+
+async def _resolve_select_node(
+    browser_session: BrowserSession,
+    *,
+    index: int | None,
+    field_id: str | None,
+) -> tuple[EnhancedDOMTreeNode | None, int | None, str | None]:
+    """Resolve the dropdown trigger by browser-use index first, then by exact ff-id."""
+    if index is not None:
+        try:
+            node = await browser_session.get_element_by_index(index)
+            if node is not None:
+                return node, index, None
+            index_error = f"Element index {index} not available. Page may have changed."
+        except Exception as exc:
+            index_error = f"Failed to find element at index {index}: {exc}"
+    else:
+        index_error = None
+
+    requested_id = str(field_id or "").strip()
+    if not requested_id:
+        return None, index, index_error or "domhand_select requires either index or field_id."
+
+    try:
+        with contextlib.suppress(Exception):
+            await browser_session.get_browser_state_summary()
+        selector_map = await browser_session.get_selector_map()
+    except Exception as exc:
+        return None, index, f'Failed to resolve selector map for field_id="{requested_id}": {exc}'
+
+    matches: list[tuple[int | None, EnhancedDOMTreeNode]] = []
+    for selector_index, node in selector_map.items():
+        attrs = getattr(node, "attributes", None) or {}
+        if attrs.get("data-ff-id") != requested_id:
+            continue
+        try:
+            resolved_index = int(selector_index)
+        except Exception:
+            resolved_index = None
+        matches.append((resolved_index, node))
+
+    if not matches:
+        if index_error:
+            return None, index, (
+                f'{index_error} No visible dropdown matched field_id="{requested_id}".'
+            )
+        return None, index, f'No visible dropdown matched field_id="{requested_id}".'
+
+    matches.sort(key=lambda item: _score_selector_map_node(item[1]), reverse=True)
+    resolved_index, node = matches[0]
+    return node, resolved_index if resolved_index is not None else index, None
+
+
 async def _read_current_selection(
     browser_session: BrowserSession,
     node: EnhancedDOMTreeNode,
+    *,
+    field_id: str | None = None,
 ) -> str:
     """Read the widget's currently visible value."""
+    resolved_node = node
+    if str(field_id or "").strip():
+        with contextlib.suppress(Exception):
+            refreshed_node, _, _ = await _resolve_select_node(browser_session, index=None, field_id=str(field_id))
+            if refreshed_node is not None:
+                resolved_node = refreshed_node
     try:
-        verify = await _call_function_on_node(browser_session, node, _VERIFY_SELECTION_ON_NODE_JS)
+        verify = await _call_function_on_node(browser_session, resolved_node, _VERIFY_SELECTION_ON_NODE_JS)
     except Exception:
         return ""
     return verify.get("value", "") if isinstance(verify, dict) else ""
+
+
+async def _read_live_selection_by_field_id(page: Any, field_id: str | None) -> str:
+    """Read the current value directly from the live DOM using ``data-ff-id``."""
+    if not str(field_id or "").strip():
+        return ""
+    try:
+        raw = await page.evaluate(
+            """(ffId) => {
+                const el = document.querySelector(`[data-ff-id="${ffId}"]`);
+                if (!el) return '';
+                const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                const fromValue = typeof el.value === 'string' ? clean(el.value) : '';
+                if (fromValue) return fromValue;
+                return clean(el.textContent || el.getAttribute('aria-label') || '');
+            }""",
+            str(field_id),
+        )
+    except Exception:
+        return ""
+    return str(raw or "").strip()
+
+
+async def _resolve_stale_select_field_id(
+    page: Any,
+    *,
+    field_id: str | None,
+    field_label: str | None,
+    target_section: str | None,
+) -> tuple[str | None, str | None]:
+    """Recover from a stale dropdown field_id only when the label resolves uniquely."""
+    requested_id = str(field_id or "").strip()
+    requested_label = str(field_label or "").strip()
+    if not requested_id or not requested_label:
+        return None, None
+
+    try:
+        fields = await extract_visible_form_fields(page)
+    except Exception as exc:
+        return None, f'Failed to extract visible dropdowns while resolving field_id="{requested_id}": {exc}'
+
+    scoped_fields = _filter_fields_for_scope(
+        fields,
+        target_section=target_section,
+        heading_boundary=None,
+        focus_fields=[requested_label],
+    )
+    fallback_fields = [field for field in scoped_fields if field.field_type == "select"]
+    normalized_requested_label = _normalize_match_label(requested_label)
+    focused = [
+        field
+        for field in fallback_fields
+        if normalized_requested_label and _field_matches_focus_label(field, normalized_requested_label)
+    ]
+    if len(focused) > 1:
+        details = ", ".join(
+            f'{_preferred_field_label(field)}: {field.field_id} ({field.field_type})'
+            for field in focused
+        )
+        return None, (
+            "Provided field_id is stale and label fallback is ambiguous. "
+            f"Provide the live field_id before selecting. {details}"
+        )
+    if len(focused) != 1:
+        return None, None
+
+    resolved = focused[0]
+    logger.info(
+        "domhand.select.stale_field_id_fallback",
+        extra={
+            "requested_field_id": requested_id,
+            "resolved_field_id": resolved.field_id,
+            "field_label": _preferred_field_label(resolved),
+            "field_type": resolved.field_type,
+        },
+    )
+    return resolved.field_id, None
 
 
 async def _read_field_context(
@@ -1093,13 +1473,17 @@ async def _confirm_selection(
     dropdown_type: str,
     expected: str,
     clicked_text: str,
+    *,
+    field_id: str | None = None,
 ) -> tuple[str, str]:
     """Retry searchable/multi-layer dropdowns until the final visible value is confirmed."""
     current = ""
     last_clicked = clicked_text
     for attempt in range(3):
         await asyncio.sleep(0.7 if attempt == 0 else 0.9)
-        current = await _read_current_selection(browser_session, node)
+        current = await _read_current_selection(browser_session, node, field_id=field_id)
+        if not current and field_id:
+            current = await _read_live_selection_by_field_id(page, field_id)
         if _selection_matches_value(current, expected):
             return current, last_clicked
         if dropdown_type == "native_select" or attempt == 2:
@@ -1114,7 +1498,9 @@ async def _confirm_selection(
         retry = await _search_and_click_dropdown_path(page, expected)
         if retry.get("success"):
             last_clicked = retry.get("clicked", last_clicked)
-    current = await _read_current_selection(browser_session, node)
+    current = await _read_current_selection(browser_session, node, field_id=field_id)
+    if not current and field_id:
+        current = await _read_live_selection_by_field_id(page, field_id)
     if _profile_debug_enabled():
         logger.info(
             "domhand.select_confirmed",
@@ -1126,6 +1512,48 @@ async def _confirm_selection(
             },
         )
     return current, last_clicked
+
+
+async def _try_shared_select_fill_fallback(
+    *,
+    page: Any,
+    browser_session: BrowserSession,
+    params: DomHandSelectParams,
+    field_label: str,
+    field_id: str | None,
+    is_native_select: bool,
+) -> dict[str, Any] | None:
+    """Delegate stubborn custom-widget selects to the shared fill_executor path."""
+    fallback_field_id = str(field_id or "").strip()
+    if not fallback_field_id or is_native_select:
+        return None
+    try:
+        from ghosthands.dom.fill_executor import _fill_select_field_outcome
+    except Exception:
+        return None
+
+    fallback_field = FormField(
+        field_id=fallback_field_id,
+        name=field_label or params.field_label or f"dropdown[{params.index}]",
+        field_type="select",
+        section=params.target_section or "",
+        is_native=False,
+    )
+    outcome = await _fill_select_field_outcome(
+        page,
+        fallback_field,
+        params.value,
+        f"[domhand_select {params.index}]",
+        browser_session=browser_session,
+    )
+    if not outcome.success:
+        return None
+    current = await _read_live_selection_by_field_id(page, fallback_field_id)
+    return {
+        "clicked_text": outcome.matched_label or params.value,
+        "current_value": current or params.value,
+        "used_action_chain": ["shared_fill_select_fallback"],
+    }
 
 
 # ── Core action function ─────────────────────────────────────────────
@@ -1153,12 +1581,31 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
         logger.debug(f"Could not inject __ff helpers: {e}")
 
     # ── Step 1: Get the trigger element ───────────────────────
-    try:
-        node = await browser_session.get_element_by_index(params.index)
-        if node is None:
-            return ActionResult(error=f"Element index {params.index} not available. Page may have changed.")
-    except Exception as e:
-        return ActionResult(error=f"Failed to find element at index {params.index}: {e}")
+    node, resolved_index, resolve_error = await _resolve_select_node(
+        browser_session,
+        index=params.index,
+        field_id=params.field_id,
+    )
+    if node is None and params.field_id and params.field_label:
+        fallback_field_id, fallback_error = await _resolve_stale_select_field_id(
+            page,
+            field_id=params.field_id,
+            field_label=params.field_label,
+            target_section=params.target_section,
+        )
+        if fallback_error:
+            return ActionResult(error=fallback_error)
+        if fallback_field_id:
+            params.field_id = fallback_field_id
+            node, resolved_index, resolve_error = await _resolve_select_node(
+                browser_session,
+                index=params.index,
+                field_id=params.field_id,
+            )
+    if node is None:
+        return ActionResult(error=resolve_error or "Failed to resolve dropdown trigger.")
+    if resolved_index is not None:
+        params.index = resolved_index
 
     # ── Step 2: Try browser-use event bus first (handles native + ARIA) ──
     # For native <select> elements, try the built-in SelectDropdownOptionEvent
@@ -1235,8 +1682,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
         )
         return ActionResult(
             extracted_content=(
-                f'Dropdown "{field_label or params.index}" already showed "{current_before}". '
-                "Immediately call domhand_assess_state for this blocker."
+                f'Dropdown "{field_label or params.index}" already showed "{current_before}".'
             ),
             include_extracted_content_only_once=False,
             metadata={
@@ -1246,7 +1692,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                 "strategy": "already_selected",
                 "state_change": "unchanged",
                 "retry_capped": False,
-                "recommended_next_action": "call domhand_assess_state",
+                "recommended_next_action": "continue_current_recovery",
             },
         )
     if _selection_matches_value(current_before, params.value) and field_invalid:
@@ -1279,7 +1725,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
         return ActionResult(
             extracted_content=(
                 f'Dropdown "{field_label or params.index}" already showed "{discovery_value}" '
-                "(from discovery). Immediately call domhand_assess_state for this blocker."
+                "(from discovery)."
             ),
             include_extracted_content_only_once=False,
             metadata={
@@ -1289,7 +1735,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                 "strategy": "already_selected",
                 "state_change": "unchanged",
                 "retry_capped": False,
-                "recommended_next_action": "call domhand_assess_state",
+                "recommended_next_action": "continue_current_recovery",
             },
         )
 
@@ -1388,11 +1834,23 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                 "strategy": "domhand_select",
                 "state_change": "no_state_change",
                 "retry_capped": True,
-                "recommended_next_action": "change strategy for this blocker and reassess immediately",
+                "recommended_next_action": "switch_to_browser_use_manual_for_this_field",
             },
         )
 
+    shared_result: dict[str, Any] | None = None
+
     if not options:
+        shared_result = await _try_shared_select_fill_fallback(
+            page=page,
+            browser_session=browser_session,
+            params=params,
+            field_label=field_label,
+            field_id=node_ff_id or params.field_id,
+            is_native_select=is_native_select,
+        )
+
+    if not options and shared_result is None:
         current = current_before
         post_invalid = field_invalid
         logger.warning(
@@ -1417,7 +1875,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             retry_capped=is_domhand_retry_capped(host=page_host, field_key=field_key, desired_value=params.value),
             success=False,
             state_change="no_state_change",
-            recommended_next_action="change strategy for this blocker and reassess immediately",
+            recommended_next_action="switch_to_browser_use_manual_for_this_field",
         )
         await publish_browser_session_trace(
             browser_session,
@@ -1436,7 +1894,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                     host=page_host, field_key=field_key, desired_value=params.value
                 ),
                 "state_change": "no_state_change",
-                "recommended_next_action": "change strategy for this blocker and reassess immediately",
+                "recommended_next_action": "switch_to_browser_use_manual_for_this_field",
             },
         )
         return ActionResult(
@@ -1465,6 +1923,9 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
     except Exception:
         recipe = None
         profile_data = None
+
+    if dropdown_type == "aria_listbox":
+        recipe = None
 
     if recipe is not None and not is_native_select:
         if _profile_debug_enabled():
@@ -1531,9 +1992,9 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             },
         )
 
-    matched = _fuzzy_match_option(params.value, match_options)
+    matched = _fuzzy_match_option(params.value, match_options, field_label=field_label) if shared_result is None else None
 
-    if result is None and not matched:
+    if result is None and shared_result is None and not matched:
         if dropdown_type != "native_select":
             result = await _search_and_click_dropdown_path(page, params.value)
             if result.get("success"):
@@ -1542,6 +2003,15 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                     ["hierarchy_search"] if len(split_dropdown_value_hierarchy(params.value)) > 1 else ["typed_search"]
                 )
         if result is None or not result.get("success"):
+            shared_result = await _try_shared_select_fill_fallback(
+                page=page,
+                browser_session=browser_session,
+                params=params,
+                field_label=field_label,
+                field_id=node_ff_id or params.field_id,
+                is_native_select=is_native_select,
+            )
+        if (result is None or not result.get("success")) and shared_result is None:
             available_texts = [opt.get("text", "") for opt in match_options[:20]]
             logger.warning(
                 "domhand.select.no_match "
@@ -1568,7 +2038,11 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             )
 
     # ── Step 5: Click the matched option ──────────────────────
-    if result is None:
+    if shared_result is not None:
+        clicked_text = str(shared_result.get("clicked_text") or params.value)
+        used_action_chain = list(shared_result.get("used_action_chain") or ["shared_fill_select_fallback"])
+        result = {"success": True, "clicked": clicked_text}
+    elif result is None:
         matched_text = matched.get("text", params.value)
         try:
             if dropdown_type == "native_select":
@@ -1583,7 +2057,19 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                 # For custom dropdowns, try SelectDropdownOptionEvent first
                 try:
                     if field_invalid:
-                        result = await _click_option_via_page_js(page, matched_text, dropdown_type)
+                        result = await _click_option_via_page_js(
+                            page, matched_text, dropdown_type
+                        )
+                        if result.get("success"):
+                            used_action_chain = ["page_js_click"]
+                    elif dropdown_type == "aria_listbox":
+                        if node_ff_id:
+                            with contextlib.suppress(Exception):
+                                await trusted_open_combobox_by_ffid(page, node_ff_id)
+                                await asyncio.sleep(0.12)
+                        result = await _click_option_via_page_js(
+                            page, matched_text, dropdown_type
+                        )
                         if result.get("success"):
                             used_action_chain = ["page_js_click"]
                     else:
@@ -1596,11 +2082,15 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                             used_action_chain = ["event_bus_select"]
                         else:
                             # Fallback: click the option via page-level JS
-                            result = await _click_option_via_page_js(page, matched_text, dropdown_type)
+                            result = await _click_option_via_page_js(
+                                page, matched_text, dropdown_type
+                            )
                             if result.get("success"):
                                 used_action_chain = ["page_js_click"]
                 except Exception:
-                    result = await _click_option_via_page_js(page, matched_text, dropdown_type)
+                    result = await _click_option_via_page_js(
+                        page, matched_text, dropdown_type
+                    )
                     if result.get("success"):
                         used_action_chain = ["page_js_click"]
         except Exception as e:
@@ -1632,9 +2122,30 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
         dropdown_type,
         params.value,
         clicked_text,
+        field_id=node_ff_id or params.field_id,
     )
     post_context = await _read_field_context(browser_session, node)
     post_invalid = bool(post_context.get("invalid"))
+    if (
+        (not _selection_matches_value(current, params.value) or post_invalid)
+        and used_action_chain == ["event_bus_select"]
+        and dropdown_type != "native_select"
+    ):
+        retry_result = await _click_option_via_page_js(page, matched_text, dropdown_type)
+        if isinstance(retry_result, dict) and retry_result.get("success"):
+            used_action_chain.append("page_js_retry")
+            clicked_text = retry_result.get("clicked", matched_text)
+            current, clicked_text = await _confirm_selection(
+                page,
+                browser_session,
+                node,
+                dropdown_type,
+                params.value,
+                clicked_text,
+                field_id=node_ff_id or params.field_id,
+            )
+            post_context = await _read_field_context(browser_session, node)
+            post_invalid = bool(post_context.get("invalid"))
     logger.info(
         "domhand.select.observed "
         f"index={params.index} "
@@ -1647,6 +2158,22 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
         f"field_invalid_after={post_invalid} "
         f"used_action_chain={used_action_chain}"
     )
+
+    if not _selection_matches_value(current, params.value) or post_invalid:
+        shared_retry = await _try_shared_select_fill_fallback(
+            page=page,
+            browser_session=browser_session,
+            params=params,
+            field_label=field_label,
+            field_id=node_ff_id or params.field_id,
+            is_native_select=is_native_select,
+        )
+        if shared_retry is not None:
+            clicked_text = str(shared_retry.get("clicked_text") or clicked_text or params.value)
+            current = str(shared_retry.get("current_value") or current or params.value)
+            used_action_chain = list(shared_retry.get("used_action_chain") or ["shared_fill_select_fallback"])
+            post_context = await _read_field_context(browser_session, node)
+            post_invalid = bool(post_context.get("invalid"))
 
     if not _selection_matches_value(current, params.value) or post_invalid:
         logger.warning(
@@ -1686,7 +2213,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                 "retry_capped": is_domhand_retry_capped(
                     host=page_host, field_key=field_key, desired_value=params.value
                 ),
-                "recommended_next_action": "change strategy for this blocker and reassess immediately",
+                "recommended_next_action": "switch_to_browser_use_manual_for_this_field",
             },
         )
 
@@ -1720,9 +2247,9 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
         retry_capped=False,
         success=True,
         state_change="changed",
-        recommended_next_action="call domhand_assess_state",
+        recommended_next_action="continue_current_recovery",
     )
-    memory = f'Selected "{clicked_text}" for dropdown at index {params.index}. Immediately call domhand_assess_state for this blocker.'
+    memory = f'Selected "{clicked_text}" for dropdown at index {params.index}.'
     if current and normalize_name(current) != normalize_name(clicked_text):
         memory += f' (showing: "{current}")'
 
@@ -1742,7 +2269,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             "strategy": "domhand_select",
             "retry_capped": False,
             "state_change": "changed",
-            "recommended_next_action": "call domhand_assess_state",
+            "recommended_next_action": "continue_current_recovery",
         },
     )
     if _profile_debug_enabled() and used_action_chain:
@@ -1796,7 +2323,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             "strategy": "domhand_select",
             "state_change": "changed",
             "retry_capped": False,
-            "recommended_next_action": "call domhand_assess_state",
+            "recommended_next_action": "continue_current_recovery",
         },
     )
 
@@ -1827,7 +2354,7 @@ async def _select_via_event_bus(
 
     # Convert to our option format if needed
     options = raw_options if isinstance(raw_options, list) else []
-    matched = _fuzzy_match_option(params.value, options)
+    matched = _fuzzy_match_option(params.value, options, field_label=str(getattr(params, "field_label", "") or ""))
 
     if not matched:
         available_texts = [opt.get("text", "") for opt in options[:20]]

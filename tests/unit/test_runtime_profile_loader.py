@@ -156,3 +156,53 @@ def test_load_runtime_profile_uses_default_resume_and_preserves_global_defaults_
     assert profile["willing_to_relocate"] == "No"
     assert profile["availability_window"] == "Immediately"
     assert profile["county"] == "King County"
+
+
+def test_load_runtime_profile_accepts_global_languages_as_json_string():
+    from ghosthands.integrations.resume_loader import load_runtime_profile
+
+    class StubDB:
+        async def load_resume_profile_by_id(self, user_id: str, resume_id: str):
+            raise AssertionError("load_resume_profile_by_id() should not be used when resume_id is omitted")
+
+        async def load_resume_profile(self, user_id: str):
+            return {
+                "resume_id": "resume-default",
+                "file_key": "resumes/user-3/default.pdf",
+                "parsing_confidence": 0.91,
+                "raw_text": "Default resume raw text",
+                "parsed_data": {
+                    "fullName": "John Example",
+                    "email": "john@example.com",
+                },
+            }
+
+        async def load_user_profile(self, user_id: str):
+            return {
+                "email": "fallback@example.com",
+                "name": "John Example",
+            }
+
+        async def load_user_application_profile(self, user_id: str):
+            return {
+                "spoken_languages": "English (Native / bilingual)",
+                "languages": (
+                    '[{"language":"English","overall_proficiency":"Native / bilingual",'
+                    '"reading":"Native / bilingual","writing":"Native / bilingual","speaking":"Native / bilingual"},'
+                    '{"language":"Mandarin","overall_proficiency":"Conversational",'
+                    '"reading":"Conversational","writing":"Conversational","speaking":"Conversational"}]'
+                ),
+            }
+
+        async def load_resume_application_profile(self, user_id: str, resume_id: str):
+            return None
+
+        async def load_answer_bank(self, user_id: str):
+            return []
+
+    profile = asyncio.run(load_runtime_profile(StubDB(), "user-3"))
+
+    assert isinstance(profile["languages"], list)
+    assert profile["languages"][0]["language"] == "English"
+    assert profile["languages"][1]["language"] == "Mandarin"
+    assert profile["spoken_languages"] == "English (Native / bilingual)"

@@ -46,13 +46,16 @@ from ghosthands.runtime_learning import detect_host_from_url
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_FIELD_TYPES = {
-    "select",
     "radio-group",
     "radio",
     "button-group",
     "checkbox-group",
     "checkbox",
     "toggle",
+}
+
+_DROPDOWN_FIELD_TYPES = {"select"}
+_GENERIC_INPUT_FIELD_TYPES = {
     "text",
     "email",
     "tel",
@@ -65,6 +68,13 @@ _SUPPORTED_FIELD_TYPES = {
 }
 
 
+def _normalize_requested_control_type(field_type: str | None) -> str:
+    requested = str(field_type or "").strip().lower()
+    if requested in {"button", "pill", "choice"}:
+        return ""
+    return requested
+
+
 def _match_exact_control(
     fields: list[FormField],
     *,
@@ -72,11 +82,11 @@ def _match_exact_control(
     field_type: str | None,
 ) -> FormField | None:
     requested_id = str(field_id or "").strip()
-    requested_type = str(field_type or "").strip().lower()
-    if not requested_id and not requested_type:
+    requested_type = _normalize_requested_control_type(field_type)
+    if not requested_id:
         return None
     for field in fields:
-        if requested_id and field.field_id != requested_id:
+        if field.field_id != requested_id:
             continue
         if requested_type and field.field_type.lower() != requested_type:
             continue
@@ -156,14 +166,17 @@ async def _attempt_exact_control_recovery(page, field: FormField, desired_value:
         if current_value and not _is_explicit_false(current_value):
             if await _reset_group_selection_with_gui(page, field, current_value, desired_value, tag):
                 return True, "exact_group_reset"
-        if await _click_group_option_with_gui(page, field, desired_value, tag):
-            return True, "exact_group_gui"
         try:
             await page.evaluate(_CLICK_RADIO_OPTION_JS, field.field_id, desired_value)
+            # Oracle JET needs time for aria-pressed to propagate after synthetic click
+            import asyncio
+            await asyncio.sleep(0.5)
             if await _field_already_matches(page, field, desired_value):
                 return True, "exact_group_dom"
         except Exception:
             pass
+        if await _click_group_option_with_gui(page, field, desired_value, tag):
+            return True, "exact_group_gui"
         return False, "exact_group_failed"
     if field.field_type in {"checkbox", "toggle"}:
         desired_checked = not _is_explicit_false(desired_value)
@@ -199,6 +212,35 @@ async def domhand_interact_control(
     browser_session: BrowserSession,
 ) -> ActionResult:
     """Resolve and interact with one exact stateful control by label."""
+    requested_type = _normalize_requested_control_type(params.field_type)
+    if requested_type in _DROPDOWN_FIELD_TYPES:
+        return ActionResult(
+            error=(
+                "domhand_interact_control only handles binary/group widgets "
+                "(radio, checkbox, toggle, button-group). Use domhand_select "
+                "for dropdowns/comboboxes."
+            ),
+            metadata={
+                "tool": "domhand_interact_control",
+                "state_change": "no_state_change",
+                "retry_capped": False,
+                "recommended_next_action": "use_domhand_select_or_browser_use_manual",
+            },
+        )
+    if requested_type in _GENERIC_INPUT_FIELD_TYPES:
+        return ActionResult(
+            error=(
+                "domhand_interact_control is not for generic text-like inputs. "
+                "Use browser-use/manual input actions for this field."
+            ),
+            metadata={
+                "tool": "domhand_interact_control",
+                "state_change": "no_state_change",
+                "retry_capped": False,
+                "recommended_next_action": "switch_to_browser_use_manual_for_this_field",
+            },
+        )
+
     page = await browser_session.get_current_page()
     if not page:
         return ActionResult(error="No active page found in browser session")
@@ -217,17 +259,18 @@ async def domhand_interact_control(
     except Exception as exc:
         return ActionResult(error=f"Failed to extract controls: {exc}")
 
+    scoped_fields = _filter_fields_for_scope(
+        fields,
+        target_section=params.target_section,
+        heading_boundary=params.heading_boundary,
+        focus_fields=[params.field_label],
+    )
     extracted_supported_fields = [
         field
         for field in fields
         if field.field_type in _SUPPORTED_FIELD_TYPES
     ]
-    scoped_supported_fields = _filter_fields_for_scope(
-        extracted_supported_fields,
-        target_section=params.target_section,
-        heading_boundary=params.heading_boundary,
-        focus_fields=[params.field_label],
-    )
+    scoped_supported_fields = [field for field in scoped_fields if field.field_type in _SUPPORTED_FIELD_TYPES]
     logger.info(
         "domhand.interact_control.candidates "
         f"requested_label={params.field_label!r} "
@@ -246,12 +289,59 @@ async def domhand_interact_control(
         field_type=params.field_type,
     )
     if params.field_id and target is None:
-        return ActionResult(
-            error=(
-                f'No visible interactive control matched field_id="{params.field_id}"'
-                + (f' and field_type="{params.field_type}"' if params.field_type else "")
-                + ". Refusing to fall back to label-only matching."
-            ),
+        stale_id_candidate = next(
+            (field for field in scoped_supported_fields if field.field_id == params.field_id),
+            None,
+        )
+        if stale_id_candidate is not None:
+            return ActionResult(
+                error=(
+                    f'No visible interactive control matched field_id="{params.field_id}"'
+                    + (f' and field_type="{params.field_type}"' if params.field_type else "")
+                    + ". Refusing to fall back to label-only matching."
+                ),
+            )
+
+        fallback_fields = scoped_supported_fields
+        if requested_type:
+            fallback_fields = [
+                field for field in scoped_supported_fields if field.field_type.lower() == requested_type
+            ]
+
+        normalized_requested_label = _normalize_match_label(params.field_label)
+        focused = [
+            field
+            for field in fallback_fields
+            if normalized_requested_label and _field_matches_focus_label(field, normalized_requested_label)
+        ]
+        if len(focused) > 1:
+            details = ", ".join(
+                f'{_preferred_field_label(field)}: {field.field_id} ({field.field_type})'
+                for field in focused
+            )
+            return ActionResult(
+                error=(
+                    "Provided field_id is stale and label fallback is ambiguous. "
+                    f"Provide the live field_id before interacting. {details}"
+                ),
+            )
+        if len(focused) != 1:
+            return ActionResult(
+                error=(
+                    f'No visible interactive control matched field_id="{params.field_id}"'
+                    + (f' and field_type="{params.field_type}"' if params.field_type else "")
+                    + ". Refusing to fall back to label-only matching."
+                ),
+            )
+        target = focused[0]
+        logger.info(
+            "domhand.interact_control.stale_field_id_fallback",
+            extra={
+                "requested_field_id": params.field_id,
+                "resolved_field_id": target.field_id,
+                "field_label": _preferred_field_label(target),
+                "field_type": target.field_type,
+            },
         )
     focused: list[FormField]
     if target is None:
@@ -265,6 +355,49 @@ async def domhand_interact_control(
         focused = [target]
 
     if not focused:
+        unsupported_matches = [
+            field
+            for field in scoped_fields
+            if _normalize_match_label(params.field_label)
+            and _field_matches_focus_label(field, _normalize_match_label(params.field_label))
+            and field.field_type not in _SUPPORTED_FIELD_TYPES
+        ]
+        if len(unsupported_matches) == 1:
+            unsupported = unsupported_matches[0]
+            if unsupported.field_type in _DROPDOWN_FIELD_TYPES:
+                return ActionResult(
+                    error=(
+                        f'"{_preferred_field_label(unsupported)}" is a dropdown/combobox. '
+                        "Use domhand_select or browser-use/manual recovery instead of "
+                        "domhand_interact_control."
+                    ),
+                    metadata={
+                        "tool": "domhand_interact_control",
+                        "field_id": unsupported.field_id,
+                        "field_key": get_stable_field_key(unsupported),
+                        "strategy": "unsupported_dropdown",
+                        "state_change": "no_state_change",
+                        "retry_capped": False,
+                        "recommended_next_action": "use_domhand_select_or_browser_use_manual",
+                    },
+                )
+            if unsupported.field_type in _GENERIC_INPUT_FIELD_TYPES:
+                return ActionResult(
+                    error=(
+                        f'"{_preferred_field_label(unsupported)}" is a generic input. '
+                        "Use browser-use/manual input actions instead of "
+                        "domhand_interact_control."
+                    ),
+                    metadata={
+                        "tool": "domhand_interact_control",
+                        "field_id": unsupported.field_id,
+                        "field_key": get_stable_field_key(unsupported),
+                        "strategy": "unsupported_generic_input",
+                        "state_change": "no_state_change",
+                        "retry_capped": False,
+                        "recommended_next_action": "switch_to_browser_use_manual_for_this_field",
+                    },
+                )
         available_labels = sorted({_preferred_field_label(field) for field in scoped_supported_fields if _preferred_field_label(field)})
         screenshot_path = await _capture_control_screenshot(browser_session, params.field_label)
         logger.warning(
@@ -367,7 +500,7 @@ async def domhand_interact_control(
                 "strategy": "already_matched",
                 "retry_capped": False,
                 "state_change": "unchanged",
-                "recommended_next_action": "call domhand_assess_state",
+                "recommended_next_action": "continue_current_recovery",
             },
         )
         return ActionResult(
@@ -382,7 +515,7 @@ async def domhand_interact_control(
                 "strategy": "already_matched",
                 "state_change": "unchanged",
                 "retry_capped": False,
-                "recommended_next_action": "call domhand_assess_state",
+                "recommended_next_action": "continue_current_recovery",
             },
         )
 
@@ -446,7 +579,7 @@ async def domhand_interact_control(
             retry_capped=False,
             success=True,
             state_change="changed",
-            recommended_next_action="call domhand_assess_state",
+            recommended_next_action="continue_current_recovery",
         )
         logger.info(
             "domhand.interact_control.result",
@@ -474,13 +607,12 @@ async def domhand_interact_control(
                 "strategy": strategy,
                 "retry_capped": False,
                 "state_change": "changed",
-                "recommended_next_action": "call domhand_assess_state",
+                "recommended_next_action": "continue_current_recovery",
             },
         )
         return ActionResult(
             extracted_content=(
-                f'Interacted with "{_preferred_field_label(target)}" and set it to "{current_value}". '
-                "Immediately call domhand_assess_state for this blocker."
+                f'Interacted with "{_preferred_field_label(target)}" and set it to "{current_value}".'
             ),
             include_extracted_content_only_once=False,
             metadata={
@@ -490,7 +622,7 @@ async def domhand_interact_control(
                 "strategy": strategy,
                 "state_change": "changed",
                 "retry_capped": False,
-                "recommended_next_action": "call domhand_assess_state",
+                "recommended_next_action": "continue_current_recovery",
             },
         )
     if success and not settled:
@@ -510,6 +642,8 @@ async def domhand_interact_control(
         },
     )
     details = (
+        "Switch to browser-use/manual recovery for this field now: click the intended control directly, "
+        "verify the selected state changed, then reassess once. "
         f'{failure_error or "Failed to confirm the requested value."} '
         f'Failed to confirm "{params.desired_value}" for "{_preferred_field_label(target)}". '
         f'Current value: "{current_value}". Field type: {target.field_type}. '
@@ -520,6 +654,7 @@ async def domhand_interact_control(
     if failure_reason == DOMHAND_RETRY_CAPPED:
         details += " Do not repeat the same DomHand strategy on this field/value pair in this run."
     retry_capped = failure_reason == DOMHAND_RETRY_CAPPED
+    recommended_next_action = "switch_to_browser_use_manual_for_this_field"
     update_blocker_attempt_state(
         browser_session,
         field_key=get_stable_field_key(target),
@@ -531,11 +666,7 @@ async def domhand_interact_control(
         retry_capped=retry_capped,
         success=False,
         state_change="no_state_change",
-        recommended_next_action=(
-            "change strategy for this blocker and reassess immediately"
-            if retry_capped
-            else "call domhand_assess_state after a different control-targeted recovery"
-        ),
+        recommended_next_action=recommended_next_action,
     )
     await publish_browser_session_trace(
         browser_session,
@@ -552,11 +683,7 @@ async def domhand_interact_control(
             "strategy": strategy,
             "retry_capped": retry_capped,
             "state_change": "no_state_change",
-            "recommended_next_action": (
-                "change strategy for this blocker and reassess immediately"
-                if retry_capped
-                else "call domhand_assess_state after a different control-targeted recovery"
-            ),
+            "recommended_next_action": recommended_next_action,
         },
     )
     return ActionResult(
@@ -568,10 +695,6 @@ async def domhand_interact_control(
             "strategy": strategy,
             "state_change": "no_state_change",
             "retry_capped": retry_capped,
-            "recommended_next_action": (
-                "change strategy for this blocker and reassess immediately"
-                if retry_capped
-                else "call domhand_assess_state after a different control-targeted recovery"
-            ),
+            "recommended_next_action": recommended_next_action,
         },
     )

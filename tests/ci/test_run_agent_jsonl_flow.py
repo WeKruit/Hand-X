@@ -26,7 +26,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Module-level setup: stub ALL the modules run_agent_jsonl imports from.
 # We track which modules we installed so we can restore them later.
@@ -40,6 +39,7 @@ _m_emit_status = MagicMock()
 _m_emit_phase = MagicMock()
 _m_emit_cost = MagicMock()
 _m_emit_browser_ready = MagicMock()
+_m_emit_account_created = MagicMock()
 _m_emit_error = MagicMock()
 _m_emit_done = MagicMock()
 _m_emit_awaiting_review = MagicMock()
@@ -65,9 +65,17 @@ def _restore_stubs() -> None:
 
 def _reset_mocks() -> None:
     """Reset all module-level mocks."""
-    for m in [_m_emit_status, _m_emit_phase, _m_emit_cost,
-              _m_emit_browser_ready, _m_emit_error, _m_emit_done,
-              _m_emit_awaiting_review, _m_cleanup_browser]:
+    for m in [
+        _m_emit_status,
+        _m_emit_phase,
+        _m_emit_cost,
+        _m_emit_account_created,
+        _m_emit_browser_ready,
+        _m_emit_error,
+        _m_emit_done,
+        _m_emit_awaiting_review,
+        _m_cleanup_browser,
+    ]:
         m.reset_mock()
 
 
@@ -97,9 +105,13 @@ def _stub_all():
     bu.Tools = MagicMock
 
     rs_mod = sys.modules["browser_use.browser.providers.route_selector"]
-    rs_mod.RouteSelector = type("RouteSelector", (), {
-        "select_engine": staticmethod(lambda *a, **kw: "chromium"),
-    })
+    rs_mod.RouteSelector = type(
+        "RouteSelector",
+        (),
+        {
+            "select_engine": staticmethod(lambda *a, **kw: "chromium"),
+        },
+    )
 
     # ---- browser_use.llm.anthropic ----
     _chat_key = "browser_use.llm.anthropic.chat"
@@ -122,6 +134,8 @@ def _stub_all():
 
     ga_hooks = types.ModuleType("ghosthands.agent.hooks")
     ga_hooks.install_same_tab_guard = AsyncMock()
+    ga_hooks.install_final_submit_guard = AsyncMock()
+    ga_hooks.consume_blocked_final_submit = AsyncMock(return_value=None)
     ga_hooks.infer_phase_from_goal = MagicMock(return_value=None)
     _install_stub("ghosthands.agent.hooks", ga_hooks)
 
@@ -141,6 +155,7 @@ def _stub_all():
     go_jsonl.emit_status = _m_emit_status
     go_jsonl.emit_phase = _m_emit_phase
     go_jsonl.emit_cost = _m_emit_cost
+    go_jsonl.emit_account_created = _m_emit_account_created
     go_jsonl.emit_browser_ready = _m_emit_browser_ready
     go_jsonl.emit_error = _m_emit_error
     go_jsonl.emit_done = _m_emit_done
@@ -150,6 +165,7 @@ def _stub_all():
     go_fe = types.ModuleType("ghosthands.output.field_events")
     go_fe.install_jsonl_callback = MagicMock()
     go_fe.get_field_counts = MagicMock(return_value=(10, 2))
+    go_fe.get_filled_field_records = MagicMock(return_value=[])
     _install_stub("ghosthands.output.field_events", go_fe)
     go.field_events = go_fe
 
@@ -174,6 +190,8 @@ def _stub_all():
     gsdl = types.ModuleType("ghosthands.security.domain_lockdown")
     mock_lockdown = MagicMock()
     mock_lockdown.get_allowed_domains.return_value = ["greenhouse.io"]
+    mock_lockdown.freeze.return_value = None
+    gsdl.DomainLockdown = MagicMock(return_value=mock_lockdown)
     gsdl.create_lockdown_for_platform = MagicMock(return_value=mock_lockdown)
     _install_stub("ghosthands.security.domain_lockdown", gsdl)
 
@@ -189,6 +207,7 @@ _restore_stubs()
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_args(**overrides) -> argparse.Namespace:
     defaults = {
@@ -214,7 +233,7 @@ def _make_args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**defaults)
 
 
-def _make_mock_history(*, is_done=True, final_result="Application submitted"):
+def _make_mock_history(*, is_done=True, final_result="Application filled"):
     history = MagicMock()
     history.is_done.return_value = is_done
     history.final_result.return_value = final_result
@@ -252,6 +271,7 @@ def _apply_stubs_and_patches(mock_browser, mock_agent, extra_patches=None):
     mock_settings.job_id = ""
     mock_settings.lease_id = ""
     mock_settings.llm_proxy_url = None
+    mock_settings.submit_intent = "review"
 
     patches = [
         patch("ghosthands.cli._load_profile", return_value={"name": "Test User", "email": "test@example.com"}),
@@ -293,7 +313,7 @@ class TestRunAgentJsonlFlow:
     async def test_success_path_emits_awaiting_review(self):
         """When agent.run() succeeds, emit_awaiting_review is called
         before wait_for_review_command."""
-        mock_history = _make_mock_history(is_done=True, final_result="Application submitted")
+        mock_history = _make_mock_history(is_done=True, final_result="Application filled")
         mock_browser = _make_mock_browser()
 
         mock_agent = AsyncMock()
@@ -328,8 +348,7 @@ class TestRunAgentJsonlFlow:
         mock_agent.run = AsyncMock(return_value=mock_history)
         mock_agent.state = MagicMock(n_steps=10, last_model_output=None, stopped=False)
 
-        with _apply_stubs_and_patches(mock_browser, mock_agent), \
-             pytest.raises(SystemExit) as exc_info:
+        with _apply_stubs_and_patches(mock_browser, mock_agent), pytest.raises(SystemExit) as exc_info:
             await run_agent_jsonl(_make_args())
 
         assert exc_info.value.code == 1
@@ -361,8 +380,7 @@ class TestRunAgentJsonlFlow:
 
         extra = [patch("ghosthands.cli.listen_for_cancel", _fake_listen_for_cancel)]
 
-        with _apply_stubs_and_patches(mock_browser, mock_agent, extra), \
-             pytest.raises(SystemExit) as exc_info:
+        with _apply_stubs_and_patches(mock_browser, mock_agent, extra), pytest.raises(SystemExit) as exc_info:
             await run_agent_jsonl(_make_args())
 
         assert exc_info.value.code == 1
@@ -384,8 +402,7 @@ class TestRunAgentJsonlFlow:
         mock_agent.run = AsyncMock(side_effect=RuntimeError("LLM connection timeout"))
         mock_agent.state = MagicMock(n_steps=0, last_model_output=None, stopped=False)
 
-        with _apply_stubs_and_patches(mock_browser, mock_agent), \
-             pytest.raises(SystemExit) as exc_info:
+        with _apply_stubs_and_patches(mock_browser, mock_agent), pytest.raises(SystemExit) as exc_info:
             await run_agent_jsonl(_make_args())
 
         assert exc_info.value.code == 1
@@ -401,7 +418,7 @@ class TestRunAgentJsonlFlow:
     async def test_success_complete_review_no_exit(self):
         """When review returns 'complete' and _handle_review_result returns None,
         run_agent_jsonl finishes without sys.exit."""
-        mock_history = _make_mock_history(is_done=True, final_result="Application submitted")
+        mock_history = _make_mock_history(is_done=True, final_result="Application filled")
         mock_browser = _make_mock_browser()
 
         mock_agent = AsyncMock()
@@ -416,7 +433,7 @@ class TestRunAgentJsonlFlow:
         with _apply_stubs_and_patches(mock_browser, mock_agent, extra):
             await run_agent_jsonl(_make_args())
 
-        _m_cleanup_browser.assert_called()
+        _m_cleanup_browser.assert_not_called()
 
     # ------------------------------------------------------------------
     # Scenario 6: Blocker in final_result
@@ -434,8 +451,7 @@ class TestRunAgentJsonlFlow:
         mock_agent.run = AsyncMock(return_value=mock_history)
         mock_agent.state = MagicMock(n_steps=8, last_model_output=None, stopped=False)
 
-        with _apply_stubs_and_patches(mock_browser, mock_agent), \
-             pytest.raises(SystemExit) as exc_info:
+        with _apply_stubs_and_patches(mock_browser, mock_agent), pytest.raises(SystemExit) as exc_info:
             await run_agent_jsonl(_make_args())
 
         assert exc_info.value.code == 1
@@ -457,10 +473,31 @@ class TestRunAgentJsonlFlow:
         mock_agent.run = AsyncMock(return_value=mock_history)
         mock_agent.state = MagicMock(n_steps=5, last_model_output=None, stopped=False)
 
-        with _apply_stubs_and_patches(mock_browser, mock_agent), \
-             pytest.raises(SystemExit):
+        with _apply_stubs_and_patches(mock_browser, mock_agent), pytest.raises(SystemExit):
             await run_agent_jsonl(_make_args())
 
         _m_emit_cost.assert_called()
         _, kwargs = _m_emit_cost.call_args
         assert kwargs.get("total_usd") == 0.12
+
+    async def test_submit_guard_breach_marks_failure_in_review_mode(self):
+        """A run that reports submission while submit_intent=review must fail."""
+        mock_history = _make_mock_history(
+            is_done=True,
+            final_result="Application submitted successfully",
+        )
+        mock_browser = _make_mock_browser()
+
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(return_value=mock_history)
+        mock_agent.state = MagicMock(n_steps=9, last_model_output=None, stopped=False)
+
+        with _apply_stubs_and_patches(mock_browser, mock_agent), pytest.raises(SystemExit) as exc_info:
+            await run_agent_jsonl(_make_args())
+
+        assert exc_info.value.code == 1
+        _m_emit_awaiting_review.assert_not_called()
+        _m_emit_done.assert_called_once()
+        kwargs = _m_emit_done.call_args.kwargs
+        assert kwargs["success"] is False
+        assert "guard breach" in (kwargs.get("message") or "").lower()

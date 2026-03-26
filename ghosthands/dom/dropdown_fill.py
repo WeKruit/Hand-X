@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine
 
@@ -33,6 +34,7 @@ from ghosthands.dom.dropdown_match import (
     match_dropdown_option,
     synonym_groups_for_js,
 )
+from ghosthands.dom.fill_label_match import _coerce_proficiency_choice
 from ghosthands.dom.dropdown_verify import selection_matches_desired
 
 logger = structlog.get_logger(__name__)
@@ -70,6 +72,72 @@ async def _scan_options(page: Any) -> list[str]:
 
 
 async def _click_option_js(page: Any, text: str) -> dict[str, Any]:
+    raw = (text or "").strip()
+    if raw:
+        try:
+            pattern = re.compile(re.escape(raw), re.IGNORECASE)
+        except re.error:
+            pattern = None
+        actor_selectors = (
+            '[role="option"]',
+            '[role="gridcell"]',
+            '[role="menuitem"]',
+            '[role="listitem"]',
+            'li',
+            '[class*="option"]',
+            '[data-value]',
+            '[role="row"]',
+        )
+        if pattern is not None:
+            for selector in actor_selectors:
+                try:
+                    elements = await page.get_elements_by_css_selector(selector)
+                except Exception:
+                    elements = []
+                best_partial = None
+                for element in elements:
+                    try:
+                        meta_raw = await element.evaluate(
+                            """() => {
+                                const style = window.getComputedStyle(this);
+                                const rect = this.getBoundingClientRect();
+                                return JSON.stringify({
+                                    text: (this.textContent || '').replace(/\\s+/g, ' ').trim(),
+                                    visible: !!style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0,
+                                    x: rect.left + rect.width / 2,
+                                    y: rect.top + rect.height / 2,
+                                });
+                            }"""
+                        )
+                        meta = json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw
+                    except Exception:
+                        continue
+                    if not isinstance(meta, dict) or not meta.get("visible"):
+                        continue
+                    option_text = str(meta.get("text") or "").strip()
+                    if not option_text:
+                        continue
+                    if option_text.lower() == raw.lower():
+                        try:
+                            mouse = await page.mouse
+                            await mouse.move(float(meta.get("x") or 0), float(meta.get("y") or 0))
+                            await asyncio.sleep(0.05)
+                            await mouse.click(float(meta.get("x") or 0), float(meta.get("y") or 0))
+                            return {"clicked": True, "text": option_text, "via": f"actor:{selector}:exact"}
+                        except Exception:
+                            continue
+                    if option_text.lower().find(raw.lower()) != -1 or raw.lower().find(option_text.lower()) != -1:
+                        best_partial = (meta, option_text)
+                if best_partial is not None:
+                    meta, option_text = best_partial
+                    try:
+                        mouse = await page.mouse
+                        await mouse.move(float(meta.get("x") or 0), float(meta.get("y") or 0))
+                        await asyncio.sleep(0.05)
+                        await mouse.click(float(meta.get("x") or 0), float(meta.get("y") or 0))
+                        return {"clicked": True, "text": option_text, "via": f"actor:{selector}:partial"}
+                    except Exception:
+                        continue
     try:
         raw = await page.evaluate(CLICK_DROPDOWN_OPTION_ENHANCED_JS, text, synonym_groups_for_js())
     except Exception:
@@ -89,6 +157,16 @@ async def _read_value(page: Any, read_value_fn: Callable[..., Coroutine[Any, Any
         return ""
 
 
+def _match_dropdown_option_with_proficiency_fallback(
+    desired_value: str,
+    options: list[str],
+) -> str | None:
+    matched = match_dropdown_option(desired_value, options)
+    if matched:
+        return matched
+    return _coerce_proficiency_choice(options, desired_value)
+
+
 # ── Core orchestrator ─────────────────────────────────────────────────
 
 async def fill_interactive_dropdown(
@@ -97,10 +175,12 @@ async def fill_interactive_dropdown(
     *,
     open_fn: Callable[..., Coroutine[Any, Any, None]],
     read_value_fn: Callable[..., Coroutine[Any, Any, str]],
+    scan_options_fn: Callable[[], Coroutine[Any, Any, list[str]]] | None = None,
     settle_fn: Callable[..., Coroutine[Any, Any, None]] | None = None,
     dismiss_fn: Callable[..., Coroutine[Any, Any, None]] | None = None,
     type_fn: Callable[[str], Coroutine[Any, Any, None]] | None = None,
     clear_fn: Callable[..., Coroutine[Any, Any, None]] | None = None,
+    click_option_fn: Callable[[str], Coroutine[Any, Any, dict[str, Any]]] | None = None,
     tag: str = "",
 ) -> DropdownFillResult:
     """Unified dropdown fill — open → scan → match → click → verify → fallback type.
@@ -142,6 +222,16 @@ async def fill_interactive_dropdown(
         else:
             await asyncio.sleep(0.2)
 
+    async def _scan() -> list[str]:
+        if scan_options_fn is not None:
+            return await scan_options_fn()
+        return await _scan_options(page)
+
+    async def _click_option(text: str) -> dict[str, Any]:
+        if click_option_fn is not None:
+            return await click_option_fn(text)
+        return await _click_option_js(page, text)
+
     # ── Phase 1: open → scan → match → click ────────────────────────
     try:
         await open_fn()
@@ -149,27 +239,27 @@ async def fill_interactive_dropdown(
     except Exception:
         return DropdownFillResult()
 
-    options = await _scan_options(page)
+    options = await _scan()
     if not options:
         # Async option lists (Greenhouse) may render after open. Wait/rescan before
         # calling open_fn() again — a second toggle click closes react-select (feels
         # like a stray click / "click away").
         for _ in range(5):
             await asyncio.sleep(0.5)
-            options = await _scan_options(page)
+            options = await _scan()
             if options:
                 break
         if not options:
             try:
                 await open_fn()
                 await asyncio.sleep(0.9)
-                options = await _scan_options(page)
+                options = await _scan()
             except Exception:
                 pass
     if options:
-        matched = match_dropdown_option(desired_value, options)
+        matched = _match_dropdown_option_with_proficiency_fallback(desired_value, options)
         if matched:
-            clicked = await _click_option_js(page, matched)
+            clicked = await _click_option(matched)
             if clicked.get("clicked"):
                 await asyncio.sleep(_POST_OPTION_CLICK_BREATHE_S)
                 await _settle()
@@ -188,10 +278,14 @@ async def fill_interactive_dropdown(
     if len(segments) > 1:
         all_clicked = True
         for idx, segment in enumerate(segments):
-            seg_options = await _scan_options(page)
-            seg_match = match_dropdown_option(segment, seg_options) if seg_options else None
+            seg_options = await _scan()
+            seg_match = (
+                _match_dropdown_option_with_proficiency_fallback(segment, seg_options)
+                if seg_options
+                else None
+            )
             if seg_match:
-                clicked = await _click_option_js(page, seg_match)
+                clicked = await _click_option(seg_match)
                 if not clicked.get("clicked"):
                     all_clicked = False
                     break
@@ -227,11 +321,14 @@ async def fill_interactive_dropdown(
                 await asyncio.sleep(0.52)
 
                 # Scan after typing and try fuzzy match
-                typed_options = await _scan_options(page)
+                typed_options = await _scan()
                 if typed_options:
-                    typed_match = match_dropdown_option(desired_value, typed_options)
+                    typed_match = _match_dropdown_option_with_proficiency_fallback(
+                        desired_value,
+                        typed_options,
+                    )
                     if typed_match:
-                        clicked = await _click_option_js(page, typed_match)
+                        clicked = await _click_option(typed_match)
                         if clicked.get("clicked"):
                             await asyncio.sleep(_POST_OPTION_CLICK_BREATHE_S)
                             await _settle()
@@ -253,7 +350,7 @@ async def fill_interactive_dropdown(
                 # Direct JS click without pre-scan (poll retries)
                 deadline = asyncio.get_event_loop().time() + 2.5
                 while asyncio.get_event_loop().time() < deadline:
-                    clicked = await _click_option_js(page, desired_value)
+                    clicked = await _click_option(desired_value)
                     if clicked.get("clicked"):
                         await asyncio.sleep(_POST_OPTION_CLICK_BREATHE_S)
                         await _settle()

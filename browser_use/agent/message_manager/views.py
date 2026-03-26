@@ -97,5 +97,6 @@ class MessageManagerState(BaseModel):
 	compacted_memory: str | None = None
 	compaction_count: int = 0
 	last_compaction_step: int | None = None
+	last_page_identity: str | None = None
 
 	model_config = ConfigDict(arbitrary_types_allowed=True)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Literal
 
@@ -28,6 +29,9 @@ from browser_use.observability import observe_debug
 from browser_use.utils import match_url_with_domain_pattern, time_execution_sync
 
 logger = logging.getLogger(__name__)
+
+
+_READ_STATE_SUPPRESSED_TOOLS = frozenset({"domhand_fill", "domhand_assess_state"})
 
 
 # ========== Logging Helper Functions ==========
@@ -104,7 +108,7 @@ class MessageManager:
 		task: str,
 		system_message: SystemMessage,
 		file_system: FileSystem,
-		state: MessageManagerState = MessageManagerState(),
+		state: MessageManagerState | None = None,
 		use_thinking: bool = True,
 		include_attributes: list[str] | None = None,
 		sensitive_data: dict[str, str | dict[str, str]] | None = None,
@@ -117,7 +121,7 @@ class MessageManager:
 		max_clickable_elements_length: int = 40000,
 	):
 		self.task = task
-		self.state = state
+		self.state = state or MessageManagerState()
 		self.system_prompt = system_message
 		self.file_system = file_system
 		self.sensitive_data_description = ''
@@ -182,6 +186,88 @@ class MessageManager:
 		task_update_item = HistoryItem(system_message=new_task)
 		self.state.agent_history_items.append(task_update_item)
 
+	def _page_identity(self, browser_state_summary: BrowserStateSummary) -> str:
+		url = (browser_state_summary.url or '').strip()
+		title = (browser_state_summary.title or '').strip()
+		return f'{title}\n{url}'
+
+	def _build_page_transition_note(self, previous_identity: str, current_identity: str) -> str:
+		prev_title, _, prev_url = previous_identity.partition('\n')
+		curr_title, _, curr_url = current_identity.partition('\n')
+		return (
+			'PAGE UPDATE: You are on a new page/context now.\n'
+			f'Previous page: {prev_title or "(unknown)"} | {prev_url or "(unknown url)"}\n'
+			f'Current page: {curr_title or "(unknown)"} | {curr_url or "(unknown url)"}\n'
+			'Any unresolved blockers, repeater editors, or fallback plans from the previous page are stale '
+			'unless they are still visibly present in the current browser state. Re-plan from the current page only.'
+		)
+
+	def _build_assess_guidance_note(self, result: list[ActionResult]) -> str:
+		for action_result in reversed(result):
+			metadata = action_result.metadata or {}
+			if bool(metadata.get('same_page_advance_guard')):
+				tool_name = str(metadata.get('tool') or '').strip() or 'domhand tool'
+				return (
+					'ADVANCE NOW: A same-page advance guard was just triggered.\n'
+					f'The current page was already judged advanceable, so {tool_name} should NOT be used again on this page.\n'
+					'Proceed/advance is now a browser-use local decision. If the current page does not visibly show red validation '
+					'errors or unselected required radio/button-group controls, click Next/Continue/Save immediately.\n'
+					'Do NOT call domhand_fill or domhand_assess_state again on this same page before trying to advance.'
+				)
+			if str(metadata.get('tool') or '').strip() != 'domhand_assess_state':
+				continue
+			raw_state = metadata.get('application_state_json')
+			if not raw_state:
+				return ''
+			try:
+				state = json.loads(raw_state) if isinstance(raw_state, str) else raw_state
+			except Exception:
+				return ''
+			if not isinstance(state, dict):
+				return ''
+			if not bool(state.get('advance_allowed')):
+				unresolved = int(state.get('unresolved_required_count') or 0)
+				optional_validation = int(state.get('optional_validation_count') or 0)
+				visible_errors = int(state.get('visible_error_count') or 0)
+				hard_blockers = unresolved + optional_validation + visible_errors
+				if hard_blockers <= 0:
+					return ''
+				return (
+					'REVIEW CURRENT PAGE: The latest domhand_assess_state on this SAME page says advance_allowed=no.\n'
+					f'There are still {hard_blockers} hard blocker(s) on the current page '
+					f'(required={unresolved}, validation={optional_validation}, visible_errors={visible_errors}).\n'
+					'Do NOT run another broad domhand_fill on this same page.\n'
+					'Use browser-use to review the currently visible blockers one at a time on this page. '
+					'Prefer local/manual recovery for sticky radio/button-group/combobox widgets. '
+					'After a meaningful repair, reassess once.'
+				)
+			return (
+				'ADVANCE NOW: The latest domhand_assess_state on this SAME page says advance_allowed=yes.\n'
+				'Proceed/advance is now a browser-use local decision. If the current page does not visibly show red validation '
+				'errors or unselected required radio/button-group controls, click Next/Continue/Save immediately.\n'
+				'Do NOT call domhand_fill or domhand_assess_state again on this same page before trying to advance.'
+			)
+		return ''
+
+	def _apply_page_transition_context(self, browser_state_summary: BrowserStateSummary) -> None:
+		current_identity = self._page_identity(browser_state_summary)
+		previous_identity = (self.state.last_page_identity or '').strip()
+		self.state.last_page_identity = current_identity
+
+		if not previous_identity or previous_identity == current_identity:
+			return
+
+		note = self._build_page_transition_note(previous_identity, current_identity)
+		history_note = HistoryItem(system_message=f'<sys>{note}</sys>')
+		self.state.agent_history_items.append(history_note)
+		if self.state.read_state_description:
+			self.state.read_state_description = f'{note}\n\n{self.state.read_state_description}'
+		else:
+			self.state.read_state_description = note
+
+		# Force compaction at next step so old-page context is pruned
+		self.state.last_compaction_step = 0
+
 	def prepare_step_state(
 		self,
 		browser_state_summary: BrowserStateSummary,
@@ -193,6 +279,7 @@ class MessageManager:
 		"""Prepare state for the next LLM call without building the final state message."""
 		self.state.history.context_messages.clear()
 		self._update_agent_history_description(model_output, result, step_info)
+		self._apply_page_transition_context(browser_state_summary)
 
 		effective_sensitive_data = sensitive_data if sensitive_data is not None else self.sensitive_data
 		if effective_sensitive_data is not None:
@@ -303,12 +390,21 @@ class MessageManager:
 		read_state_idx = 0
 
 		for idx, action_result in enumerate(result):
-			if action_result.include_extracted_content_only_once and action_result.extracted_content:
+			tool_name = str((action_result.metadata or {}).get('tool') or '').strip()
+			suppress_read_state = tool_name in _READ_STATE_SUPPRESSED_TOOLS
+
+			if (
+				action_result.include_extracted_content_only_once
+				and action_result.extracted_content
+				and not suppress_read_state
+			):
 				self.state.read_state_description += (
 					f'<read_state_{read_state_idx}>\n{action_result.extracted_content}\n</read_state_{read_state_idx}>\n'
 				)
 				read_state_idx += 1
 				logger.debug(f'Added extracted_content to read_state_description: {action_result.extracted_content}')
+			elif suppress_read_state and action_result.extracted_content:
+				logger.debug(f'Skipped read_state_description for suppressed tool: {tool_name}')
 
 			# Store images for one-time inclusion in the next message
 			if action_result.images:
@@ -331,6 +427,13 @@ class MessageManager:
 				logger.debug(f'Added error to action_results: {error_text}')
 
 		# Simple 60k character limit for read_state_description
+		assess_guidance_note = self._build_assess_guidance_note(result)
+		if assess_guidance_note:
+			if self.state.read_state_description:
+				self.state.read_state_description = f'{assess_guidance_note}\n\n{self.state.read_state_description}'
+			else:
+				self.state.read_state_description = assess_guidance_note
+
 		MAX_CONTENT_SIZE = 60000
 		if len(self.state.read_state_description) > MAX_CONTENT_SIZE:
 			self.state.read_state_description = (

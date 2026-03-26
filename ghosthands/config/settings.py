@@ -85,6 +85,11 @@ class Settings(BaseSettings):
         description="How user-provided credentials should be used on auth pages: "
         "'existing_account' (sign in directly) or 'create_account' (use for registration first)",
     )
+    submit_intent: str = Field(
+        "review",
+        description="Whether the run may actually submit the application: "
+        "'review' (default, stop before final submit) or 'submit' (explicitly allow final submit).",
+    )
     allowed_domains: list[str] = Field(
         default_factory=lambda: [
             "myworkdayjobs.com",
@@ -112,7 +117,7 @@ class Settings(BaseSettings):
         description="Seconds to wait between actions within the same agent step",
     )
     agent_max_actions_per_step: int = Field(
-        1,
+        5,
         description="Maximum browser-use actions to execute in a single agent step",
     )
     agent_max_history_items: int | None = Field(

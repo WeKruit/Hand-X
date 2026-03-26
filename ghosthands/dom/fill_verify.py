@@ -70,6 +70,11 @@ def _read_group_selection(page: Any, field_id: str):
     return _impl(page, field_id)
 
 
+def _read_multi_select_selection(page: Any, field_id: str):
+    from ghosthands.dom.fill_executor import _read_multi_select_selection as _impl
+    return _impl(page, field_id)
+
+
 def _field_has_validation_error(page: Any, field_id: str):
     from ghosthands.dom.fill_executor import _field_has_validation_error as _impl
     return _impl(page, field_id)
@@ -94,6 +99,53 @@ def _is_explicit_false(val: str | None) -> bool:
     return _impl(val)
 
 
+async def _uses_multi_select_observation(page: Any, field: FormField) -> bool:
+    """Mirror executor routing when deciding how to observe a settled field.
+
+    Oracle searchable comboboxes can be labeled like a skill field, but they are
+    still single-select inputs. Observable verification must only use token-based
+    multi-select reads for actual multi-select widgets.
+    """
+    if field.field_type != "select":
+        return False
+    if field.is_multi_select:
+        return True
+    try:
+        from ghosthands.dom.fill_executor import _uses_workday_skill_multiselect
+
+        return await _uses_workday_skill_multiselect(page, field)
+    except Exception:
+        return False
+
+
+async def _is_workday_prompt_search_widget(page: Any, field: FormField) -> bool:
+    if field.field_type != "select":
+        return False
+    if await _uses_multi_select_observation(page, field):
+        return True
+    signal = " ".join(
+        part
+        for part in (
+            getattr(field, "name", "") or "",
+            getattr(field, "raw_label", "") or "",
+            getattr(field, "section", "") or "",
+            getattr(field, "placeholder", "") or "",
+        )
+        if part
+    ).lower()
+    prompt_search_markers = (
+        "school or university",
+        "field of study",
+        "latest employer",
+        "employer",
+        "language",
+        "how did you hear",
+        "referral",
+        "source",
+    )
+    return any(marker in signal for marker in prompt_search_markers)
+
+
 # ── Retry identity helpers ───────────────────────────────────────────────
 
 def _domhand_retry_field_identity(field: FormField) -> str:
@@ -105,6 +157,43 @@ def _domhand_retry_message(field: FormField) -> str:
         f'"{_preferred_field_label(field)}" hit the DomHand retry cap after '
         f"{DOMHAND_RETRY_CAP} failed attempts. Use browser-use or one screenshot/vision fallback."
     )
+
+
+# ── Skill widget verification helpers ───────────────────────────────────
+
+def _normalize_skill_list(raw_value: str | None) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for part in str(raw_value or "").split(","):
+        item = part.strip()
+        if not item:
+            continue
+        key = item.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        values.append(item)
+        if len(values) >= 15:
+            break
+    return values
+
+
+async def _skill_select_matches_observed_tokens(page: Any, field: FormField, desired_value: str) -> bool:
+    selection = await _read_multi_select_selection(page, field.field_id)
+    observed_tokens = [
+        str(token or "").strip()
+        for token in (selection.get("tokens") or [])
+        if str(token or "").strip()
+    ]
+    if not observed_tokens:
+        return False
+    desired_tokens = _normalize_skill_list(desired_value)
+    if not desired_tokens:
+        return False
+    for observed in observed_tokens:
+        if not any(_field_value_matches_expected(observed, desired) for desired in desired_tokens):
+            return False
+    return True
 
 
 # ── LLM escalation helpers ───────────────────────────────────────────────
@@ -309,6 +398,7 @@ async def _attempt_domhand_fill_with_retry_cap(
         return False, _domhand_retry_message(field), DOMHAND_RETRY_CAPPED, 0.0, desired_value
 
     fill_confidence = 0.0
+    skip_freeform_escalation = await _is_workday_prompt_search_widget(page, field)
 
     fill_result = await _fill_single_field_outcome(
         page,
@@ -351,7 +441,7 @@ async def _attempt_domhand_fill_with_retry_cap(
     elif success:
         fill_confidence = 1.0
 
-    if not success:
+    if not success and not skip_freeform_escalation:
         stagehand_rescued = await _stagehand_escalate_fill(
             page, field, desired_value, browser_session=browser_session,
         )
@@ -364,8 +454,15 @@ async def _attempt_domhand_fill_with_retry_cap(
                 desired_preview=str(desired_value)[:120],
             )
             success = True
+    elif not success and skip_freeform_escalation:
+        logger.info(
+            "domhand.fill.skip_freeform_prompt_search_escalation",
+            tool=tool_name,
+            field_label=_preferred_field_label(field),
+            desired_preview=str(desired_value)[:120],
+        )
 
-    if not success:
+    if not success and not skip_freeform_escalation:
         llm_rescued = await _llm_escalate_fill(page, field, desired_value)
         if llm_rescued:
             fill_confidence = 0.8
@@ -418,6 +515,10 @@ async def _field_already_matches(
         ) and not await _field_has_validation_error(
             page, field.field_id
         )
+    if await _uses_multi_select_observation(page, field):
+        return await _skill_select_matches_observed_tokens(page, field, value) and not await _field_has_validation_error(
+            page, field.field_id
+        )
     current = await _read_field_value_for_field(page, field)
     return _field_value_matches_expected(
         current,
@@ -438,6 +539,10 @@ async def _read_observed_field_value(page: Any, field: FormField) -> str:
         return "checked" if state else ""
     if field.field_type in {"radio-group", "radio", "button-group"}:
         return await _read_group_selection(page, field.field_id)
+    if await _uses_multi_select_observation(page, field):
+        selection = await _read_multi_select_selection(page, field.field_id)
+        tokens = [str(token or "").strip() for token in (selection.get("tokens") or []) if str(token or "").strip()]
+        return ", ".join(tokens)
     return await _read_field_value_for_field(page, field)
 
 

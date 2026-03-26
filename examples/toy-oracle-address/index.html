@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <title>Toy — Oracle HCM home address cluster (gridcell suggestions)</title>
+  <!--
+    Regression target for Goldman / Oracle Candidate Experience style flows:
+    • Address Line 1 is role="combobox" (not a plain textbox).
+    • Suggestions render as role="gridcell" inside role="grid" (Fusion/JET pattern).
+    • ZIP / City / County stay invalid/empty until a suggestion is committed; then backfill.
+
+    Manual:
+      cd examples/toy-oracle-address && python -m http.server 8766
+      ./apply.sh "http://127.0.0.1:8766/" --max-steps 20
+
+    CI: tests/ci/test_toy_oracle_address_fixture.py
+  -->
+  <style>
+    :root { font-family: system-ui, sans-serif; line-height: 1.45; }
+    body { max-width: 40rem; margin: 0 auto; padding: 1rem 1.25rem 4rem; }
+    h1 { font-size: 1.15rem; }
+    .hint { color: #444; font-size: 0.9rem; margin: 0.5rem 0 1rem; }
+    .field { margin: 1rem 0; }
+    label { display: block; font-weight: 600; margin-bottom: 0.35rem; }
+    .input-shell {
+      border: 1px solid #bbb; border-radius: 8px; padding: 0.35rem 0.5rem;
+      background: #fafafa;
+    }
+    .input-shell.invalid { border-color: #c62828; box-shadow: 0 0 0 1px #c62828 inset; }
+    input[role="combobox"] { width: 100%; border: none; background: transparent; font: inherit; box-sizing: border-box; }
+    #addr-suggest-panel {
+      margin-top: 0.35rem; border: 1px solid #888; border-radius: 6px;
+      max-height: 10rem; overflow: auto; background: #fff;
+    }
+    #addr-suggest-panel[hidden] { display: none !important; }
+    [role="row"] { display: flex; border-bottom: 1px solid #e0e0e0; cursor: pointer; }
+    [role="row"]:hover { background: #e3f2fd; }
+    [role="gridcell"] { padding: 0.45rem 0.5rem; flex: 1; font-size: 0.9rem; }
+    .err { color: #c62828; font-size: 0.85rem; margin-top: 0.35rem; }
+    .err[hidden] { display: none !important; }
+    #log {
+      position: fixed; bottom: 0; left: 0; right: 0; max-height: 6rem; overflow: auto;
+      background: #111; color: #9ccc65; font: 12px/1.4 ui-monospace, monospace;
+      padding: 0.5rem 0.75rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Home Address — Oracle-style toy</h1>
+  <p class="hint">
+    Type a street fragment; suggestions use <code>role="grid"</code> / <code>gridcell</code>.
+    ZIP / City / County only populate after you pick a row (trusted click).
+  </p>
+
+  <section aria-label="Home Address">
+    <div class="field" data-automation-id="formField">
+      <label id="lbl-addr1">Address Line 1 *</label>
+      <div class="input-shell invalid" id="addr1-shell">
+        <input
+          id="addr-line1"
+          name="addressLine1"
+          type="text"
+          role="combobox"
+          autocomplete="off"
+          aria-expanded="false"
+          aria-haspopup="listbox"
+          aria-controls="addr-suggest-panel"
+          aria-labelledby="lbl-addr1"
+          aria-invalid="true"
+          placeholder="Start typing your street"
+        />
+      </div>
+      <div id="addr-suggest-panel" role="grid" aria-label="Address suggestions" hidden></div>
+      <div class="err" id="addr1-err">The Address Line 1 field is required.</div>
+    </div>
+
+    <div class="field">
+      <label id="lbl-zip">ZIP Code *</label>
+      <div class="input-shell invalid" id="zip-shell">
+        <input
+          id="zip-field"
+          type="text"
+          role="combobox"
+          aria-labelledby="lbl-zip"
+          aria-haspopup="listbox"
+          aria-invalid="true"
+          readonly
+          data-toy-dependent="true"
+          placeholder=""
+        />
+      </div>
+      <div class="err" id="zip-err">The ZIP Code field is required.</div>
+    </div>
+
+    <div class="field">
+      <label id="lbl-city">City *</label>
+      <div class="input-shell invalid" id="city-shell">
+        <input
+          id="city-field"
+          type="text"
+          role="combobox"
+          aria-labelledby="lbl-city"
+          aria-haspopup="listbox"
+          aria-invalid="true"
+          readonly
+          data-toy-dependent="true"
+          placeholder=""
+        />
+      </div>
+      <div class="err" id="city-err">The City field is required.</div>
+    </div>
+
+    <div class="field">
+      <label id="lbl-county">County *</label>
+      <div class="input-shell invalid" id="county-shell">
+        <input
+          id="county-field"
+          type="text"
+          role="combobox"
+          aria-labelledby="lbl-county"
+          aria-haspopup="listbox"
+          aria-invalid="true"
+          readonly
+          data-toy-dependent="true"
+          placeholder=""
+        />
+      </div>
+      <div class="err" id="county-err">The County field is required.</div>
+    </div>
+  </section>
+
+  <pre id="log"></pre>
+
+  <script>
+    (function () {
+      var logEl = document.getElementById('log');
+      function log(msg) {
+        var t = new Date().toISOString().slice(11, 23);
+        logEl.textContent = '[' + t + '] ' + msg + '\n' + logEl.textContent;
+      }
+
+      var ADDR = [
+        {
+          display: '13600 BROCKMEYER CT, CHANTILLY, VIRGINIA, 20151',
+          line1: '13600 BROCKMEYER CT',
+          city: 'CHANTILLY',
+          state: 'VIRGINIA',
+          zip: '20151',
+          county: 'Fairfax',
+        },
+        {
+          display: '1 WALL ST, NEW YORK, NEW YORK, 10005',
+          line1: '1 WALL ST',
+          city: 'NEW YORK',
+          state: 'NEW YORK',
+          zip: '10005',
+          county: 'New York',
+        },
+      ];
+
+      var input = document.getElementById('addr-line1');
+      var panel = document.getElementById('addr-suggest-panel');
+      var addr1Shell = document.getElementById('addr1-shell');
+      var addr1Err = document.getElementById('addr1-err');
+      var zip = document.getElementById('zip-field');
+      var city = document.getElementById('city-field');
+      var county = document.getElementById('county-field');
+      var zipShell = document.getElementById('zip-shell');
+      var cityShell = document.getElementById('city-shell');
+      var countyShell = document.getElementById('county-shell');
+      var zipErr = document.getElementById('zip-err');
+      var cityErr = document.getElementById('city-err');
+      var countyErr = document.getElementById('county-err');
+
+      var debounceTimer = null;
+
+      function setCommitted(row) {
+        input.value = row.line1;
+        input.setAttribute('data-committed-line1', row.line1);
+        input.setAttribute('aria-invalid', 'false');
+        addr1Shell.classList.remove('invalid');
+        addr1Err.hidden = true;
+
+        zip.value = row.zip;
+        city.value = row.city;
+        county.value = row.county;
+        [zip, city, county].forEach(function (el) {
+          el.setAttribute('aria-invalid', 'false');
+        });
+        [zipShell, cityShell, countyShell].forEach(function (s) {
+          s.classList.remove('invalid');
+        });
+        [zipErr, cityErr, countyErr].forEach(function (e) {
+          e.hidden = true;
+        });
+
+        panel.hidden = true;
+        input.setAttribute('aria-expanded', 'false');
+        log('Committed gridcell -> ' + row.display);
+      }
+
+      function renderSuggestions(q) {
+        panel.innerHTML = '';
+        var qq = (q || '').trim().toLowerCase();
+        var hits = ADDR.filter(function (row) {
+          return !qq || row.display.toLowerCase().indexOf(qq) !== -1;
+        });
+        hits.forEach(function (row, idx) {
+          var r = document.createElement('div');
+          r.setAttribute('role', 'row');
+          r.setAttribute('data-row-index', String(idx));
+          var cell = document.createElement('div');
+          cell.setAttribute('role', 'gridcell');
+          cell.textContent = row.display;
+          cell.tabIndex = -1;
+          r.appendChild(cell);
+          /* Toy only: do not gate on isTrusted — programmatic clicks are used in tests. */
+          r.addEventListener('click', function () {
+            setCommitted(row);
+          });
+          panel.appendChild(r);
+        });
+      }
+
+      function openPanel() {
+        panel.hidden = false;
+        input.setAttribute('aria-expanded', 'true');
+      }
+
+      function closePanel() {
+        panel.hidden = true;
+        input.setAttribute('aria-expanded', 'false');
+      }
+
+      input.addEventListener('focus', function () {
+        renderSuggestions(input.value);
+        openPanel();
+      });
+
+      input.addEventListener('input', function () {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(function () {
+          renderSuggestions(input.value);
+          openPanel();
+          log('Typed address fragment (debounced)');
+        }, 120);
+      });
+
+      document.addEventListener('click', function (e) {
+        if (!e.target.closest('#addr-line1') && !e.target.closest('#addr-suggest-panel')) {
+          closePanel();
+        }
+      });
+
+      log('Toy Oracle address cluster ready');
+    })();
+  </script>
+</body>
+</html>

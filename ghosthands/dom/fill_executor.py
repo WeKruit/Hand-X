@@ -34,7 +34,11 @@ from ghosthands.actions.views import (
     normalize_name,
     split_dropdown_value_hierarchy,
 )
-from ghosthands.dom.dropdown_fill import POST_OPTION_CLICK_SETTLE_S, fill_interactive_dropdown
+from ghosthands.dom.dropdown_fill import (
+    POST_OPTION_CLICK_SETTLE_S,
+    _match_dropdown_option_with_proficiency_fallback,
+    fill_interactive_dropdown,
+)
 from ghosthands.dom.dropdown_match import (
     SCAN_VISIBLE_OPTIONS_JS,
     synonym_groups_for_js,
@@ -107,6 +111,21 @@ def _log_dropdown_diag(event: str, **kwargs: Any) -> None:
 _DROPDOWN_MENU_OPEN_SETTLE_S = 0.55
 _DROPDOWN_CDP_POLL_TICK_S = 0.22
 _DROPDOWN_CDP_POLL_MAX_TICKS = 14
+_WORKDAY_SKILL_RESULT_SETTLE_S = 2.2
+_WORKDAY_SKILL_POST_ENTER_SETTLE_S = 2.3
+_WORKDAY_REFERRAL_RESULT_SETTLE_S = 2.3
+_WORKDAY_REFERRAL_POST_ENTER_SETTLE_S = 2.3
+
+_WORKDAY_SKILL_ALIAS_MAP: dict[str, tuple[str, ...]] = {
+    "react": ("ReactJS", "React.js"),
+    "reactjs": ("React", "React.js"),
+    "express": ("ExpressJS", "Express.js"),
+    "expressjs": ("Express", "Express.js"),
+    "nodejs": ("Node.js", "Node JS"),
+    "mysql": ("MySQLDB", "My SQL"),
+    "mysqldb": ("MySQL", "My SQL"),
+    "tailwindcss": ("TailwindCSS",),
+}
 
 
 # ── Platform helpers ────────────────────────────────────────────────────────
@@ -153,6 +172,31 @@ def _is_skill_like(field_name: str) -> bool:
     return _impl(field_name)
 
 
+def _skill_signal_text(field: FormField) -> str:
+    """Return the same skill-routing signal used by the stable main path.
+
+    Skills/widgets should only route to ``_fill_multi_select`` when the field's
+    primary label itself is skill-like. Broader placeholder/section heuristics
+    caused unrelated searchable inputs and dropdowns to get mis-routed.
+    """
+    return str(field.name or "").strip()
+
+
+async def _uses_workday_skill_multiselect(page: Any, field: FormField) -> bool:
+    """Detect whether this field is the Workday prompt-search skill widget.
+
+    Oracle searchable comboboxes can use labels like "Skill" or "Skill Name",
+    but they are still single-select inputs. Only the real Workday skill widget
+    should use the multi-select contract.
+    """
+    if field.field_type not in {"text", "search", "select"}:
+        return False
+    if not _is_skill_like(_skill_signal_text(field)):
+        return False
+    widget = await _read_workday_skill_widget(page, field.field_id)
+    return bool(widget.get("is_workday_skill"))
+
+
 def _field_widget_kind_for_debug(field: FormField) -> str:
     from ghosthands.actions.domhand_fill import _field_widget_kind_for_debug as _impl
 
@@ -189,7 +233,6 @@ async def extract_visible_form_fields(page: Any) -> list[FormField]:
     return await _impl(page)
 
 
-_SKILL_FIELD_MAX_ITEMS = 10
 _MULTI_SELECT_CHECKBOX_PROMPT_RE = re.compile(
     r"\b(select|check|choose|mark)\s+all\s+that\s+apply\b|\ball that apply\b",
     re.IGNORECASE,
@@ -266,6 +309,106 @@ def _field_value_matches_expected(current: str, expected: str, matched_label: st
     if _is_effectively_unset_field_value((current or "").strip()):
         return False
     return selection_matches_desired(current, expected, matched_label=matched_label)
+
+
+def _compact_workday_skill_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def _workday_skill_query_candidates(skill: str) -> list[str]:
+    base = re.sub(r"\s+", " ", str(skill or "").strip())
+    if not base:
+        return []
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(candidate: str) -> None:
+        text = re.sub(r"\s+", " ", str(candidate or "").strip(" ,"))
+        if not text:
+            return
+        key = text.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(text)
+
+    add(base)
+    compact = _compact_workday_skill_key(base)
+    for alias in _WORKDAY_SKILL_ALIAS_MAP.get(compact, ()):
+        add(alias)
+
+    if compact.endswith("db"):
+        add(re.sub(r"(?i)\s*db$", "", base).strip(" -_/"))
+    if compact.endswith("database"):
+        add(re.sub(r"(?i)\s*database$", "", base).strip(" -_/"))
+    if compact.endswith("js") and compact not in {"javascript", "typescript", "nodejs"}:
+        add(re.sub(r"(?i)\s*\.?js$", "", base).strip(" -_/"))
+    if compact in {"react", "express"}:
+        add(base + "JS")
+        add(base + ".js")
+    if compact == "nodejs":
+        add("Node.js")
+        add("Node JS")
+    if compact == "tailwindcss":
+        add("Tailwind CSS")
+
+    return candidates
+
+
+def _workday_skill_commit_matches(
+    committed: dict[str, Any],
+    desired_skill: str,
+    *,
+    matched_label: str | None = None,
+) -> bool:
+    if not committed.get("committed"):
+        return False
+    for token in committed.get("tokens", []):
+        if _field_value_matches_expected(str(token).strip(), desired_skill, matched_label=matched_label):
+            return True
+    return False
+
+
+def _find_exact_workday_skill_option(query: str, options: list[str]) -> str | None:
+    needle = str(query or "").strip().casefold()
+    if not needle:
+        return None
+    for option in options:
+        text = str(option or "").strip()
+        if text and text.casefold() == needle:
+            return text
+    return None
+
+
+def _is_workday_url(url: str) -> bool:
+    lowered = str(url or "").strip().lower()
+    return any(
+        token in lowered
+        for token in (
+            "myworkdayjobs.com",
+            "myworkday.com",
+            "myworkdaysite.com",
+            "workday.com",
+        )
+    )
+
+
+def _is_workday_referral_source_field(field: FormField) -> bool:
+    label = normalize_name(_preferred_field_label(field))
+    return any(
+        needle in label
+        for needle in (
+            "how did you hear",
+            "where did you hear",
+            "learn about us",
+            "referral source",
+            "source of referral",
+            "source of application",
+            "application source",
+            "hear about us",
+        )
+    )
 
 
 async def _read_field_value(page: Any, field_id: str) -> str:
@@ -511,6 +654,11 @@ def _field_has_effective_value(field: FormField) -> bool:
 
 
 async def _read_field_value_for_field(page: Any, field: FormField) -> str:
+    if field.field_type == "select" and (field.is_multi_select or await _uses_workday_skill_multiselect(page, field)):
+        selection = await _read_multi_select_selection(page, field.field_id)
+        tokens = [str(token).strip() for token in selection.get("tokens", []) if str(token).strip()]
+        if tokens:
+            return ", ".join(tokens)
     if not _is_grouped_date_field(field):
         return await _read_field_value(page, field.field_id)
     component_ids = list(field.component_field_ids)
@@ -589,13 +737,13 @@ async def _confirm_text_like_value(page: Any, field: FormField, value: str, tag:
             await page.evaluate(_FOCUS_FIELD_JS, field.field_id)
             await asyncio.sleep(0.05)
             if needs_enter_commit:
-                await page.keyboard.press("Enter")
+                await _press_key_compat(page, "Enter")
                 await asyncio.sleep(0.15)
             if needs_blur_revalidation:
                 await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
                 await asyncio.sleep(0.15)
             else:
-                await page.keyboard.press("Tab")
+                await _press_key_compat(page, "Tab")
                 await asyncio.sleep(0.1)
         except Exception:
             return _field_value_matches_expected(current, value) and not await _field_has_validation_error(
@@ -636,23 +784,75 @@ async def _fill_text_like_with_keyboard(page: Any, field: FormField, value: str,
         return False
 
 
+async def _poll_group_selection(page: Any, field_id: str, expected: str, max_wait: float = 1.0) -> str:
+    """Poll group selection for up to *max_wait* seconds after a click.
+
+    Oracle Cloud HCM (JET/VDSA) can take 400-800ms to update aria-pressed
+    after a trusted click.  A single-shot 250ms read misses this.
+    """
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + max_wait
+    interval = 0.2
+    current = ""
+    while True:
+        try:
+            current = await _read_group_selection(page, field_id)
+        except Exception:
+            current = ""
+        if _field_value_matches_expected(current, expected):
+            return current
+        if loop.time() >= deadline:
+            return current
+        await asyncio.sleep(interval)
+
+
 async def _click_group_option_with_gui(page: Any, field: FormField, value: str, tag: str) -> bool:
     """Use a real mouse click on the visible option when DOM clicks do not stick."""
     target = await _get_group_option_target(page, field.field_id, value)
     if not target.get("found"):
         return False
     try:
-        mouse = await page.mouse
+        mouse = page.mouse
+        if hasattr(mouse, "__await__"):
+            mouse = await mouse
+        await mouse.move(int(target["x"]), int(target["y"]))
+        await asyncio.sleep(0.05)
         await mouse.click(int(target["x"]), int(target["y"]))
-        await asyncio.sleep(0.25)
+        current = await _poll_group_selection(page, field.field_id, value, max_wait=1.0)
+        if _field_value_matches_expected(current, value):
+            logger.debug(f'gui-select {tag} -> "{target.get("text", value)}"')
+            return True
     except Exception as exc:
-        logger.debug(f"gui click {tag} failed: {str(exc)[:60]}")
-        return False
-
-    current = await _read_group_selection(page, field.field_id)
-    if _field_value_matches_expected(current, value):
-        logger.debug(f'gui-select {tag} -> "{target.get("text", value)}"')
-        return True
+        logger.debug(f"gui mouse click {tag} failed: {str(exc)[:60]}")
+    option_ff_id = str(target.get("optionFfId") or "").strip()
+    if option_ff_id:
+        try:
+            exact_elements = await page.get_elements_by_css_selector(f'[data-ff-id="{option_ff_id}"]')
+            if exact_elements:
+                await exact_elements[0].click()
+                current = await _poll_group_selection(page, field.field_id, value, max_wait=0.8)
+                if _field_value_matches_expected(current, value):
+                    logger.debug(f'gui-select {tag} -> "{target.get("text", value)}"')
+                    return True
+        except Exception as exc:
+            logger.debug(f"gui exact element click {tag} failed: {str(exc)[:60]}")
+        try:
+            locator = getattr(page, "locator", None)
+            if callable(locator):
+                await locator(f'[data-ff-id="{option_ff_id}"]').first.click(timeout=1200)
+                current = await _poll_group_selection(page, field.field_id, value, max_wait=0.8)
+                if _field_value_matches_expected(current, value):
+                    logger.debug(f'gui-select {tag} -> "{target.get("text", value)}"')
+                    return True
+        except Exception as exc:
+            logger.debug(f"gui locator click {tag} failed: {str(exc)[:60]}")
+    try:
+        current = await _read_group_selection(page, field.field_id)
+        if _field_value_matches_expected(current, value):
+            logger.debug(f'gui-select {tag} -> "{target.get("text", value)}"')
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -851,6 +1051,13 @@ async def _fill_single_field_outcome(
         pass
 
     if fill_strategy:
+        # Workday skill widgets are technically select-like, but they must keep the
+        # stable per-skill multi-select contract instead of the generic platform
+        # combobox override.
+        if field.field_type == "select" and await _uses_workday_skill_multiselect(page, field):
+            fill_strategy = None
+
+    if fill_strategy:
         result = await _dispatch_platform_fill_outcome(
             page,
             field,
@@ -899,9 +1106,14 @@ async def _fill_single_field(
 
 async def _fill_text_field(page: Any, field: FormField, value: str, tag: str) -> bool:
     ff_id = field.field_id
+    if await _uses_workday_skill_multiselect(page, field):
+        values = [part.strip() for part in str(value or "").split(",") if part.strip()]
+        if values:
+            return await _fill_multi_select(page, field, values, tag)
     try:
         is_search_json = await page.evaluate(_IS_SEARCHABLE_DROPDOWN_JS, ff_id)
-        if json.loads(is_search_json):
+        is_searchable_dropdown = bool(json.loads(is_search_json))
+        if is_searchable_dropdown:
             return await _fill_searchable_dropdown(page, field, value, tag)
     except Exception:
         pass
@@ -957,6 +1169,9 @@ async def _fill_searchable_dropdown_outcome(
     async def _read() -> str:
         return await _read_field_value_for_field(page, field)
 
+    async def _scan() -> list[str]:
+        return await _scan_visible_dropdown_options(page, field_id=ff_id)
+
     async def _type(text: str) -> None:
         await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
         await asyncio.sleep(0.1)
@@ -982,17 +1197,24 @@ async def _fill_searchable_dropdown_outcome(
         except Exception:
             pass
 
+    async def _click_option(text: str) -> dict[str, Any]:
+        return await _click_dropdown_option(page, text, field_id=ff_id)
+
     result = await fill_interactive_dropdown(
         page,
         value,
         open_fn=_open,
         read_value_fn=_read,
+        scan_options_fn=_scan,
         settle_fn=_settle,
         dismiss_fn=_dismiss,
         type_fn=_type,
         clear_fn=_clear,
+        click_option_fn=_click_option,
         tag=f"search-select {tag}",
     )
+    if result.success and await _field_has_validation_error(page, field.field_id):
+        return _fill_outcome(False)
     return _fill_outcome(result.success, matched_label=result.matched_label)
 
 
@@ -1244,7 +1466,6 @@ async def _fill_custom_dropdown_cdp_first(
         _DISCOVER_OPTIONS_ON_NODE_JS,
         _SELECT_NATIVE_ON_NODE_JS,
         _call_function_on_node,
-        _click_option_via_page_js,
         _fuzzy_match_option,
         _meaningful_dropdown_options,
         _needs_dropdown_open_trigger,
@@ -1358,7 +1579,11 @@ async def _fill_custom_dropdown_cdp_first(
             )
             result = raw if isinstance(raw, dict) else {"success": False}
         else:
-            result = await _click_option_via_page_js(page, matched_text, dropdown_type)
+            clicked = await _click_dropdown_option(page, matched_text, field_id=field.field_id)
+            result = {
+                "success": bool(clicked.get("clicked")),
+                "clicked": clicked.get("text", matched_text),
+            }
     except Exception as exc:
         logger.debug(
             "domhand.fill.dropdown_cdp_click_fail",
@@ -1380,6 +1605,8 @@ async def _fill_custom_dropdown_cdp_first(
         return _fill_outcome(False)
 
     await _settle_dropdown_selection(page)
+    if await _field_has_validation_error(page, field.field_id):
+        return _fill_outcome(False)
     _log_dropdown_diag(
         "domhand.fill.dropdown_cdp_first_ok",
         field_id=field.field_id,
@@ -1412,10 +1639,14 @@ async def _fill_select_field_outcome(
         logger.debug(f"skip {tag} (native select failed)")
         return _fill_outcome(False)
 
-    is_skill = _is_skill_like(field.name)
-    all_values = [v.strip() for v in value.split(",") if v.strip()]
-    values = all_values[:_SKILL_FIELD_MAX_ITEMS] if is_skill else all_values
-    if len(values) > 1 or is_skill:
+    page_url = ""
+    with contextlib.suppress(Exception):
+        page_url = str(await _safe_page_url(page) or "")
+    if _is_workday_url(page_url) and _is_workday_referral_source_field(field):
+        return await _fill_workday_referral_source_select(page, field, value, tag)
+
+    if field.is_multi_select or await _uses_workday_skill_multiselect(page, field):
+        values = [v.strip() for v in value.split(",") if v.strip()]
         return _fill_outcome(await _fill_multi_select(page, field, values, tag))
     return await _fill_custom_dropdown_outcome(
         page,
@@ -1437,43 +1668,88 @@ async def _fill_select_field(
     return (await _fill_select_field_outcome(page, field, value, tag, browser_session=browser_session)).success
 
 
+async def _type_text_compat(page: Any, text: str, *, delay: int = 0) -> None:
+    """Type text on either a Playwright page or browser_use actor page."""
+    keyboard = getattr(page, "keyboard", None)
+    if keyboard is not None and hasattr(keyboard, "type"):
+        await keyboard.type(text, delay=delay)
+        return
+    client = getattr(page, "_client", None)
+    session_id = None
+    if client is not None and getattr(type(page), "session_id", None) is not None:
+        with contextlib.suppress(Exception):
+            session_id = await page.session_id
+    if client is not None and session_id:
+        if delay and delay > 0:
+            for char in text:
+                await client.send.Input.insertText(params={"text": char}, session_id=session_id)
+                await asyncio.sleep(delay / 1000.0)
+        else:
+            await client.send.Input.insertText(params={"text": text}, session_id=session_id)
+        return
+    raise AttributeError("page does not support text typing")
+
+
+async def _press_key_compat(page: Any, key: str) -> None:
+    """Press a key on either a Playwright page or browser_use actor page."""
+    keyboard = getattr(page, "keyboard", None)
+    if keyboard is not None and hasattr(keyboard, "press"):
+        await keyboard.press(key)
+        return
+    if hasattr(page, "press"):
+        await page.press(key)
+        return
+    raise AttributeError(f"page does not support key press: {key}")
+
+
 async def _fill_multi_select(page: Any, field: FormField, values: list[str], tag: str) -> bool:
     ff_id = field.field_id
     try:
-        await page.evaluate(
-            r"""(ffId) => {
-			var ff = window.__ff; var el = ff ? ff.byId(ffId) : null;
-			if (el) el.click(); return 'ok';
-		}""",
-            ff_id,
-        )
-        await asyncio.sleep(0.6)
-
+        if await _uses_workday_skill_multiselect(page, field):
+            workday_result = await _fill_workday_skill_multiselect(page, field, values, tag)
+            if workday_result is not None:
+                return workday_result
         picked_count = 0
         for val in values:
-            await page.evaluate(_FILL_FIELD_JS, ff_id, val, "text")
-            try:
-                await page.evaluate(
-                    r"""(ffId) => {
-					var el = window.__ff ? window.__ff.byId(ffId) : null;
-					if (el) {
-						el.dispatchEvent(new Event('input', {bubbles: true}));
-						el.dispatchEvent(new Event('keyup', {bubbles: true}));
-					}
-					return 'ok';
-				}""",
-                    ff_id,
-                )
-            except Exception:
-                pass
-            clicked = await _poll_click_dropdown_option(page, val, max_wait_s=2.4)
+            before_selection = await _read_multi_select_selection(page, ff_id)
+            await _try_open_combobox_menu(page, ff_id, tag=tag)
+            await asyncio.sleep(0.2)
+            await _clear_dropdown_search(page, ff_id)
+            with contextlib.suppress(Exception):
+                await page.evaluate(_FOCUS_FIELD_JS, ff_id)
+            await asyncio.sleep(0.08)
+            await _type_text_compat(page, val, delay=55)
+            await asyncio.sleep(0.45)
+            clicked = await _poll_click_dropdown_option(page, val, field_id=ff_id, max_wait_s=2.85)
             if clicked.get("clicked"):
-                picked_count += 1
-                await asyncio.sleep(0.2)
-                continue
-            await page.press("Enter")
+                await _settle_dropdown_selection(page)
+                committed = await _wait_for_multi_select_commit(
+                    page,
+                    field,
+                    val,
+                    previous_selection=before_selection,
+                    matched_label=clicked.get("text"),
+                )
+                if committed.get("committed"):
+                    picked_count += 1
+                    continue
+            with contextlib.suppress(Exception):
+                await _press_key_compat(page, "ArrowDown")
+            await asyncio.sleep(0.12)
+            with contextlib.suppress(Exception):
+                await _press_key_compat(page, "Enter")
             await asyncio.sleep(0.3)
-            picked_count += 1
+            await _settle_dropdown_selection(page)
+            committed = await _wait_for_multi_select_commit(
+                page,
+                field,
+                val,
+                previous_selection=before_selection,
+            )
+            if committed.get("committed"):
+                picked_count += 1
+                continue
+            logger.debug(f'multi-select {tag} option "{val}" not committed')
 
         try:
             await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
@@ -1487,8 +1763,581 @@ async def _fill_multi_select(page: Any, field: FormField, values: list[str], tag
     return False
 
 
-async def _click_dropdown_option(page: Any, text: str) -> dict[str, Any]:
-    """Click a visible dropdown option by text using the enhanced 5-pass matcher."""
+async def _fill_workday_skill_multiselect(
+    page: Any,
+    field: FormField,
+    values: list[str],
+    tag: str,
+) -> bool | None:
+    """Workday skill multi-select — matches main's _fill_multi_select flow.
+
+    For each skill: open → clear → type → poll click → Enter fallback → count picked.
+    Keeps normalization/dedup and 15-skill cap from current branch.
+    """
+    ff_id = field.field_id
+    widget = await _read_workday_skill_widget(page, ff_id)
+    if not widget.get("is_workday_skill"):
+        return None
+
+    normalized_values: list[str] = []
+    seen_values: set[str] = set()
+    for raw_value in values:
+        skill = str(raw_value or "").strip()
+        if not skill:
+            continue
+        key = skill.casefold()
+        if key in seen_values:
+            continue
+        seen_values.add(key)
+        normalized_values.append(skill)
+        if len(normalized_values) >= 15:
+            break
+    if not normalized_values:
+        return False
+
+    picked_count = 0
+    try:
+        for val in normalized_values:
+            # Open/focus (like main's click-to-open but via combobox helper)
+            await _try_open_combobox_menu(page, ff_id, tag=tag)
+            await asyncio.sleep(0.2)
+            await _clear_dropdown_search(page, ff_id)
+            with contextlib.suppress(Exception):
+                await page.evaluate(_FOCUS_FIELD_JS, ff_id)
+            await asyncio.sleep(0.08)
+
+            # Type the skill (main used JS fill + events; keyboard is more
+            # reliable for Workday's React search input)
+            await _type_text_compat(page, val, delay=55)
+            await asyncio.sleep(0.45)
+
+            # Poll click (like main)
+            clicked = await _poll_click_dropdown_option(
+                page, val, field_id=ff_id, max_wait_s=2.4,
+            )
+            if clicked.get("clicked"):
+                await _settle_dropdown_selection(page)
+                picked_count += 1
+                await asyncio.sleep(0.2)
+                continue
+
+            # Enter fallback (like main)
+            with contextlib.suppress(Exception):
+                await _press_key_compat(page, "Enter")
+            await asyncio.sleep(0.3)
+            await _settle_dropdown_selection(page)
+            picked_count += 1
+
+        # Dismiss (like main)
+        try:
+            await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
+        except Exception:
+            pass
+
+        if picked_count > 0:
+            logger.debug(f"workday skill multi-select {tag} -> {picked_count}/{len(normalized_values)} skills")
+            return True
+    except Exception as exc:
+        logger.debug(f"workday skill multi-select {tag} failed: {str(exc)[:60]}")
+    return False
+
+
+async def _fill_workday_referral_source_select(
+    page: Any,
+    field: FormField,
+    value: str,
+    tag: str,
+) -> FieldFillOutcome:
+    """Workday referral/source handler — matches main's _fill_custom_dropdown flow.
+
+    Open → direct click → hierarchy → type-search+click → ArrowDown+Enter.
+    """
+    ff_id = field.field_id
+    desired = str(value or "").strip()
+    if not desired:
+        logger.debug(f"skip {tag} (workday referral/source, no value)")
+        return _fill_outcome(False)
+
+    try:
+        # Phase 1: Open and try direct click (main's first pass)
+        await _try_open_combobox_menu(page, ff_id, tag=tag)
+        await asyncio.sleep(0.6)
+
+        clicked = await _click_dropdown_option(page, desired, field_id=ff_id)
+        if clicked.get("clicked"):
+            current = await _wait_for_field_value(page, field, desired, matched_label=clicked.get("text"))
+            if _field_value_matches_expected(current, desired, matched_label=clicked.get("text")):
+                logger.debug(f'workday referral/source {tag} -> "{clicked.get("text", desired)}"')
+                await _settle_dropdown_selection(page)
+                return _fill_outcome(True, matched_label=clicked.get("text"))
+
+        # Phase 2: Hierarchy segments (main's second pass)
+        segments = split_dropdown_value_hierarchy(desired)
+        if len(segments) > 1:
+            all_clicked = True
+            for idx, segment in enumerate(segments):
+                seg_clicked = await _click_dropdown_option(page, segment, field_id=ff_id)
+                if not seg_clicked.get("clicked"):
+                    all_clicked = False
+                    break
+                await asyncio.sleep(0.8 if idx < len(segments) - 1 else 0.45)
+            if all_clicked:
+                current = await _wait_for_field_value(page, field, desired, timeout=2.8)
+                if _field_value_matches_expected(current, desired):
+                    logger.debug(f'workday referral/source {tag} -> "{desired}" (hierarchy)')
+                    await _settle_dropdown_selection(page, delay=0.6)
+                    return _fill_outcome(True)
+
+        # Phase 3: Type search terms and click (main's type-and-click + searchable fallback)
+        search_terms = generate_dropdown_search_terms(desired)
+        if not search_terms:
+            search_terms = [desired]
+
+        for term_idx, term in enumerate(search_terms):
+            query = str(term or "").strip()
+            if not query:
+                continue
+            try:
+                if term_idx > 0:
+                    await _clear_dropdown_search(page, ff_id)
+                with contextlib.suppress(Exception):
+                    await page.evaluate(_FOCUS_FIELD_JS, ff_id)
+                    await asyncio.sleep(0.08)
+                await _type_text_compat(page, query, delay=45)
+
+                poll_budget = 2.85 if term_idx == 0 else 2.2
+                clicked = await _poll_click_dropdown_option(
+                    page, desired, query, field_id=ff_id, max_wait_s=poll_budget,
+                )
+                if clicked.get("clicked"):
+                    logger.debug(f'workday referral/source {tag} -> "{clicked.get("text", desired)}" (typed "{query}")')
+                    await _settle_dropdown_selection(page)
+                    return _fill_outcome(True, matched_label=clicked.get("text"))
+
+                if term_idx == len(search_terms) - 1:
+                    # Last resort: ArrowDown + Enter (main's fallback)
+                    with contextlib.suppress(Exception):
+                        await _press_key_compat(page, "ArrowDown")
+                    await asyncio.sleep(0.2)
+                    with contextlib.suppress(Exception):
+                        await _press_key_compat(page, "Enter")
+                    await asyncio.sleep(0.35)
+                    logger.debug(f'workday referral/source {tag} -> first result (keyboard, term: "{query}")')
+                    await _settle_dropdown_selection(page)
+                    return _fill_outcome(True)
+            except Exception:
+                continue
+
+    except Exception as exc:
+        logger.debug(f"workday referral/source {tag} failed: {str(exc)[:60]}")
+
+    return _fill_outcome(False)
+
+
+async def _set_text_field_value(page: Any, field_id: str, value: str) -> None:
+    try:
+        await page.evaluate(_FILL_FIELD_JS, field_id, value, "text")
+    except Exception:
+        pass
+
+
+async def _read_workday_skill_widget(page: Any, field_id: str) -> dict[str, Any]:
+    try:
+        raw = await page.evaluate(_READ_WORKDAY_SKILL_WIDGET_JS, field_id)
+    except Exception:
+        return {"is_workday_skill": False}
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return {"is_workday_skill": False}
+    return parsed if isinstance(parsed, dict) else {"is_workday_skill": False}
+
+
+async def _read_workday_skill_input_state(page: Any, field_id: str) -> dict[str, Any]:
+    try:
+        raw = await page.evaluate(_READ_WORKDAY_SKILL_INPUT_STATE_JS, field_id)
+    except Exception:
+        return {"found_input": False, "input_value": "", "has_clear_button": False}
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return {"found_input": False, "input_value": "", "has_clear_button": False}
+    return parsed if isinstance(parsed, dict) else {"found_input": False, "input_value": "", "has_clear_button": False}
+
+
+async def _focus_workday_skill_input(page: Any, field_id: str) -> bool:
+    try:
+        raw = await page.evaluate(_FOCUS_WORKDAY_SKILL_INPUT_JS, field_id)
+    except Exception:
+        return False
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return False
+    return bool(isinstance(parsed, dict) and parsed.get("focused"))
+
+
+async def _set_workday_skill_input_value(page: Any, field_id: str, value: str) -> bool:
+    try:
+        raw = await page.evaluate(_SET_WORKDAY_SKILL_INPUT_VALUE_JS, [field_id, value])
+    except Exception:
+        return False
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return False
+    return bool(isinstance(parsed, dict) and parsed.get("success"))
+
+
+async def _click_workday_skill_clear_button(page: Any, *, field_id: str) -> bool:
+    try:
+        raw_target = await page.evaluate(_GET_WORKDAY_SKILL_CLEAR_TARGET_JS, field_id)
+        target = json.loads(raw_target) if isinstance(raw_target, str) else raw_target
+    except Exception:
+        return False
+    if not isinstance(target, dict) or not target.get("found"):
+        return False
+    try:
+        mouse = await page.mouse
+        await mouse.move(float(target["x"]), float(target["y"]))
+        await asyncio.sleep(0.05)
+        await mouse.click(float(target["x"]), float(target["y"]))
+        await asyncio.sleep(0.15)
+        return True
+    except Exception:
+        pass
+    try:
+        marked = await page.get_elements_by_css_selector('[data-domhand-workday-skill-clear-target="true"]')
+    except Exception:
+        marked = []
+    if marked:
+        try:
+            await marked[0].click()
+            await asyncio.sleep(0.15)
+            return True
+        except Exception:
+            pass
+    return False
+
+
+async def _ensure_workday_skill_query_empty(page: Any, field_id: str, *, tag: str) -> bool:
+    state = await _read_workday_skill_input_state(page, field_id)
+    current_value = str(state.get("input_value") or "").strip()
+    if not current_value:
+        return True
+    if bool(state.get("has_clear_button")):
+        with contextlib.suppress(Exception):
+            if await _click_workday_skill_clear_button(page, field_id=field_id):
+                await asyncio.sleep(0.1)
+                state = await _read_workday_skill_input_state(page, field_id)
+                if not str(state.get("input_value") or "").strip():
+                    return True
+    with contextlib.suppress(Exception):
+        await _focus_workday_skill_input(page, field_id)
+        await asyncio.sleep(0.05)
+    for shortcut in ("Meta+A", "Control+A"):
+        with contextlib.suppress(Exception):
+            await _press_key_compat(page, shortcut)
+            await asyncio.sleep(0.03)
+    for key in ("Backspace", "Delete"):
+        with contextlib.suppress(Exception):
+            await _press_key_compat(page, key)
+            await asyncio.sleep(0.06)
+    state = await _read_workday_skill_input_state(page, field_id)
+    if not str(state.get("input_value") or "").strip():
+        return True
+    if await _set_workday_skill_input_value(page, field_id, ""):
+        await asyncio.sleep(0.12)
+        state = await _read_workday_skill_input_state(page, field_id)
+        if not str(state.get("input_value") or "").strip():
+            return True
+    logger.debug(
+        "domhand.workday_skill_clear_failed",
+        field_id=field_id,
+        tag=tag,
+        current_value=str(state.get("input_value") or ""),
+    )
+    return False
+
+
+async def _set_workday_skill_query(page: Any, field_id: str, value: str, *, tag: str) -> bool:
+    desired = str(value or "").strip()
+    if not desired:
+        return True
+    with contextlib.suppress(Exception):
+        await _focus_workday_skill_input(page, field_id)
+        await asyncio.sleep(0.05)
+    await _type_text_compat(page, desired, delay=55)
+    await asyncio.sleep(0.2)
+    state = await _read_workday_skill_input_state(page, field_id)
+    actual = str(state.get("input_value") or "").strip()
+    if actual == desired:
+        return True
+    if not await _ensure_workday_skill_query_empty(page, field_id, tag=tag):
+        return False
+    if await _set_workday_skill_input_value(page, field_id, desired):
+        await asyncio.sleep(0.15)
+        state = await _read_workday_skill_input_state(page, field_id)
+        actual = str(state.get("input_value") or "").strip()
+        if actual == desired:
+            return True
+    logger.debug(
+        "domhand.workday_skill_query_mismatch",
+        field_id=field_id,
+        tag=tag,
+        desired_value=desired,
+        actual_value=actual,
+    )
+    return False
+
+
+async def _open_workday_skill_prompt(page: Any, field_id: str, *, tag: str) -> None:
+    with contextlib.suppress(Exception):
+        if await _focus_workday_skill_input(page, field_id):
+            await asyncio.sleep(0.05)
+    with contextlib.suppress(Exception):
+        prompt = await _get_workday_skill_prompt_target(page, field_id)
+        if prompt.get("clicked"):
+            logger.debug(
+                "domhand.workday_skill_prompt_open",
+                field_id=field_id,
+                tag=tag,
+                via=f"prompt_{prompt.get('via') or 'click'}",
+            )
+            await asyncio.sleep(0.08)
+            return
+    logger.debug("domhand.workday_skill_prompt_open", field_id=field_id, tag=tag, via="focus_then_combobox")
+    await _try_open_combobox_menu(page, field_id, tag=tag)
+
+
+_DISMISS_WORKDAY_SKILL_PROMPT_JS = r"""(ffId) => {
+    const ff = window.__ff || null;
+    const byFfId = (id) => (ff && ff.byId) ? ff.byId(id) : document.querySelector('[data-ff-id="' + id + '"]');
+    const scopedQuery = (root, sel) => {
+        if (!root || !root.querySelector) return null;
+        try { return root.querySelector(sel); } catch (e) { return null; }
+    };
+    const isVisible = (node) => {
+        if (!node) return false;
+        const style = window.getComputedStyle(node);
+        if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    };
+    const el = byFfId(ffId);
+    if (!el) return JSON.stringify({ dismissed: false, reason: 'missing_field' });
+    const inputContainer = (ff && ff.closestCrossRoot)
+        ? ff.closestCrossRoot(el, '[data-automation-id="multiselectInputContainer"]')
+        : (el.closest ? el.closest('[data-automation-id="multiselectInputContainer"]') : null);
+    const wrapper = ((ff && ff.closestCrossRoot)
+        ? ff.closestCrossRoot(el, '[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]')
+        : (el.closest ? el.closest('[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]') : null))
+        || inputContainer
+        || (el.parentElement || null);
+    const effectiveContainer = inputContainer || wrapper;
+    const input = scopedQuery(effectiveContainer, '[data-uxi-widget-type="selectinput"], input[role="combobox"], input[type="search"], input[type="text"]');
+    const button = scopedQuery(effectiveContainer, '[data-automation-id="promptSearchButton"], [data-uxi-widget-type="selectinputicon"]')
+        || scopedQuery(wrapper, '[data-automation-id="promptSearchButton"], [data-uxi-widget-type="selectinputicon"]');
+    const popup = scopedQuery(wrapper, '[data-automation-id="responsiveMonikerPrompt"], [data-automation-id*="responsiveMonikerPrompt"], [data-uxi-widget-type="prompt"]')
+        || document.querySelector('[data-automation-id="responsiveMonikerPrompt"], [data-automation-id*="responsiveMonikerPrompt"], [data-uxi-widget-type="prompt"]');
+    let action = 'noop';
+    if (isVisible(popup) && button) {
+        try {
+            button.click();
+            action = 'button';
+        } catch (e) {}
+    }
+    if (input && input.blur) {
+        try { input.blur(); } catch (e) {}
+        if (action === 'noop') action = 'blur';
+    }
+    if (document.activeElement && document.activeElement.blur) {
+        try { document.activeElement.blur(); } catch (e) {}
+    }
+    if (isVisible(popup)) {
+        try {
+            document.body.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+            if (action === 'noop') action = 'outside_click';
+        } catch (e) {}
+    }
+    if (popup) {
+        try { popup.classList.remove('open'); } catch (e) {}
+        try { popup.innerHTML = ''; } catch (e) {}
+        if (action === 'noop') action = 'popup_clear';
+    }
+    if (input && input.setAttribute) {
+        try { input.setAttribute('aria-expanded', 'false'); } catch (e) {}
+    }
+    return JSON.stringify({ dismissed: action !== 'noop', action });
+}"""
+
+
+async def _dismiss_workday_skill_prompt(page: Any, field_id: str, *, tag: str) -> None:
+    with contextlib.suppress(Exception):
+        await _press_key_compat(page, "Escape")
+        await asyncio.sleep(0.08)
+    with contextlib.suppress(Exception):
+        raw = await page.evaluate(_DISMISS_WORKDAY_SKILL_PROMPT_JS, field_id)
+        result = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(result, dict) and result.get("dismissed"):
+            logger.debug(
+                "domhand.workday_skill_prompt_dismissed",
+                field_id=field_id,
+                tag=tag,
+                action=result.get("action") or "unknown",
+            )
+        await asyncio.sleep(0.08)
+
+
+async def _get_workday_skill_prompt_target(page: Any, field_id: str) -> dict[str, Any]:
+    try:
+        raw = await page.evaluate(_GET_WORKDAY_SKILL_PROMPT_TARGET_JS, field_id)
+        target = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return {"clicked": False}
+    if not isinstance(target, dict) or not target.get("found"):
+        return {"clicked": False}
+    try:
+        mouse = await page.mouse
+        await mouse.move(float(target["x"]), float(target["y"]))
+        await asyncio.sleep(0.05)
+        await mouse.click(float(target["x"]), float(target["y"]))
+        await asyncio.sleep(0.15)
+        return {"clicked": True, "via": "mouse"}
+    except Exception:
+        pass
+    try:
+        marked = await page.get_elements_by_css_selector('[data-domhand-workday-skill-prompt-target="true"]')
+    except Exception:
+        marked = []
+    if marked:
+        try:
+            await marked[0].click()
+            await asyncio.sleep(0.15)
+            return {"clicked": True, "via": "actor_marked"}
+        except Exception:
+            pass
+    return {"clicked": False}
+
+
+async def _click_workday_skill_option(page: Any, text: str, *, field_id: str) -> dict[str, Any]:
+    try:
+        raw_target = await page.evaluate(
+            _GET_WORKDAY_SKILL_OPTION_TARGET_JS,
+            [str(field_id), text, synonym_groups_for_js()],
+        )
+        target = json.loads(raw_target) if isinstance(raw_target, str) else raw_target
+    except Exception:
+        return {"clicked": False}
+    if not isinstance(target, dict) or not target.get("found"):
+        return {"clicked": False}
+    try:
+        mouse = await page.mouse
+        await mouse.move(float(target["x"]), float(target["y"]))
+        await asyncio.sleep(0.05)
+        await mouse.click(float(target["x"]), float(target["y"]))
+        await asyncio.sleep(0.15)
+        return {"clicked": True, "text": target.get("text", text), "via": "mouse_scoped"}
+    except Exception:
+        pass
+    try:
+        marked = await page.get_elements_by_css_selector('[data-domhand-workday-skill-option-target="true"]')
+    except Exception:
+        marked = []
+    if marked:
+        try:
+            await marked[0].click()
+            await asyncio.sleep(0.15)
+            return {"clicked": True, "text": target.get("text", text), "via": "actor_marked"}
+        except Exception:
+            pass
+    try:
+        raw_clicked = await page.evaluate(
+            """() => {
+                const node = document.querySelector('[data-domhand-workday-skill-option-target="true"]');
+                if (!node) return false;
+                try {
+                    if (node.scrollIntoView) node.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+                    node.click();
+                    return true;
+                } catch (e) {
+                    return false;
+                }
+            }"""
+        )
+        if raw_clicked:
+            await asyncio.sleep(0.15)
+            return {"clicked": True, "text": target.get("text", text), "via": "dom_click"}
+    except Exception:
+        pass
+    return {"clicked": False}
+
+
+async def _poll_click_workday_skill_option(
+    page: Any,
+    *match_texts: str,
+    field_id: str,
+    max_wait_s: float = 2.85,
+    interval_s: float = 0.18,
+) -> dict[str, Any]:
+    texts = [m for m in match_texts if m and str(m).strip()]
+    if not texts:
+        return {"clicked": False}
+    await asyncio.sleep(0.3)
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
+        for mt in texts:
+            result = await _click_workday_skill_option(page, mt, field_id=field_id)
+            if result.get("clicked"):
+                return result
+        await asyncio.sleep(interval_s)
+    return {"clicked": False}
+
+
+async def _click_dropdown_option(page: Any, text: str, *, field_id: str | None = None) -> dict[str, Any]:
+    """Click a visible dropdown option by text, scoped to the current field when possible."""
+    if str(field_id or "").strip():
+        try:
+            raw_target = await page.evaluate(
+                _GET_SCOPED_DROPDOWN_OPTION_TARGET_JS,
+                [str(field_id), text, synonym_groups_for_js()],
+            )
+            target = json.loads(raw_target) if isinstance(raw_target, str) else raw_target
+        except Exception:
+            target = {"found": False}
+        if isinstance(target, dict) and target.get("found"):
+            try:
+                mouse = await page.mouse
+                await mouse.move(float(target["x"]), float(target["y"]))
+                await asyncio.sleep(0.05)
+                await mouse.click(float(target["x"]), float(target["y"]))
+                await asyncio.sleep(0.15)
+                return {
+                    "clicked": True,
+                    "text": target.get("text", text),
+                    "source": target.get("source", "scoped"),
+                    "pass": target.get("pass"),
+                    "via": "mouse_scoped",
+                }
+            except Exception:
+                pass
+            try:
+                marked = await page.get_elements_by_css_selector('[data-domhand-option-target="true"]')
+            except Exception:
+                marked = []
+            if marked:
+                try:
+                    await marked[0].click()
+                    await asyncio.sleep(0.15)
+                    return {
+                        "clicked": True,
+                        "text": target.get("text", text),
+                        "source": target.get("source", "scoped"),
+                        "pass": target.get("pass"),
+                        "via": "actor_marked",
+                    }
+                except Exception:
+                    pass
     try:
         raw_result = await page.evaluate(_CLICK_DROPDOWN_OPTION_JS, text, synonym_groups_for_js())
     except Exception:
@@ -1499,6 +2348,7 @@ async def _click_dropdown_option(page: Any, text: str) -> dict[str, Any]:
 async def _poll_click_dropdown_option(
     page: Any,
     *match_texts: str,
+    field_id: str | None = None,
     max_wait_s: float = 2.85,
     interval_s: float = 0.18,
 ) -> dict[str, Any]:
@@ -1514,7 +2364,7 @@ async def _poll_click_dropdown_option(
     deadline = time.monotonic() + max_wait_s
     while time.monotonic() < deadline:
         for mt in texts:
-            result = await _click_dropdown_option(page, mt)
+            result = await _click_dropdown_option(page, mt, field_id=field_id)
             if result.get("clicked"):
                 return result
         await asyncio.sleep(interval_s)
@@ -1531,8 +2381,10 @@ async def _try_open_combobox_menu(page: Any, ff_id: str, *, tag: str) -> None:
     try:
         trusted = await trusted_open_combobox_by_ffid(page, ff_id)
         if trusted.get("already_open"):
-            logger.debug("domhand.combobox_open", field_id=ff_id, tag=tag, via="already_open")
-            return
+            visible_options = await _scan_visible_dropdown_options(page, field_id=ff_id)
+            if visible_options:
+                logger.debug("domhand.combobox_open", field_id=ff_id, tag=tag, via="already_open")
+                return
         if trusted.get("clicked"):
             logger.debug(
                 "domhand.combobox_open",
@@ -1593,11 +2445,11 @@ async def _clear_dropdown_search(page: Any, ff_id: str | None = None) -> None:
             pass
     for shortcut in ("Meta+A", "Control+A"):
         try:
-            await page.keyboard.press(shortcut)
+            await _press_key_compat(page, shortcut)
         except Exception:
             pass
     try:
-        await page.keyboard.press("Backspace")
+        await _press_key_compat(page, "Backspace")
     except Exception:
         pass
     await asyncio.sleep(0.15)
@@ -1609,6 +2461,462 @@ async def _settle_dropdown_selection(page: Any, delay: float = 0.55) -> None:
     with contextlib.suppress(Exception):
         await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
     await asyncio.sleep(delay)
+
+
+_READ_MULTI_SELECT_SELECTION_JS = r"""(ffId) => {
+    const ff = window.__ff || null;
+    const byId = (id) => {
+        if (!id) return null;
+        if (ff && ff.byId) return ff.byId(id);
+        return document.querySelector('[data-ff-id="' + id + '"]') || document.getElementById(id);
+    };
+    const el = byId(ffId);
+    const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const visible = (node) => {
+        if (!node) return false;
+        const style = window.getComputedStyle(node);
+        if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    };
+    const visibleText = (node) => {
+        if (!node || !visible(node)) return '';
+        const clone = node.cloneNode(true);
+        clone.querySelectorAll('script,style,[aria-hidden="true"],[hidden],input,textarea,select').forEach((child) => child.remove());
+        return clean(clone.textContent || '');
+    };
+    const isUnsetLike = (text) => {
+        const value = clean(text).toLowerCase();
+        return !value
+            || value === 'search'
+            || value === 'no items.'
+            || value === 'no items'
+            || value === '0 items selected'
+            || value === 'select one';
+    };
+    if (!el) return JSON.stringify({tokens: [], count: 0, summary: ''});
+    const wrapper =
+        (ff && ff.closestCrossRoot && (
+            ff.closestCrossRoot(el, '[data-automation-id="formField"]') ||
+            ff.closestCrossRoot(el, '[data-automation-id*="formField"]') ||
+            ff.closestCrossRoot(el, '[data-automation-id="multiselectInputContainer"]') ||
+            ff.closestCrossRoot(el, '.input-field-container') ||
+            ff.closestCrossRoot(el, '.cx-select-container') ||
+            ff.closestCrossRoot(el, '.input-row__control-container') ||
+            ff.closestCrossRoot(el, '.input-row')
+        )) ||
+        el.parentElement ||
+        el;
+    const selectors = [
+        '[data-automation-id*="selected"]',
+        '[data-automation-id*="Selected"]',
+        '[data-automation-id*="token"]',
+        '[data-automation-id*="Token"]',
+        '[class*="token"]',
+        '[class*="Token"]',
+        '[class*="pill"]',
+        '[class*="Pill"]',
+        '[class*="chip"]',
+        '[class*="Chip"]',
+        '[class*="tag"]',
+        '[class*="Tag"]'
+    ];
+    const tokens = [];
+    const seen = new Set();
+    const pushToken = (raw) => {
+        const text = clean(raw);
+        if (isUnsetLike(text)) return;
+        const key = text.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        tokens.push(text);
+    };
+    for (const selector of selectors) {
+        for (const node of wrapper.querySelectorAll(selector)) {
+            pushToken(visibleText(node));
+        }
+    }
+    const summary = visibleText(wrapper);
+    const countMatch = summary.match(/\b(\d+)\s+items?\s+selected\b/i);
+    const count = countMatch ? parseInt(countMatch[1], 10) : tokens.length;
+    return JSON.stringify({tokens, count: Number.isFinite(count) ? count : tokens.length, summary});
+}"""
+
+
+_READ_WORKDAY_SKILL_WIDGET_JS = r"""(ffId) => {
+    const ff = window.__ff || null;
+    const byFfId = (id) => (ff && ff.byId) ? ff.byId(id) : document.querySelector('[data-ff-id="' + id + '"]');
+    const scopedQuery = (root, sel) => {
+        if (!root || !root.querySelector) return null;
+        try { return root.querySelector(sel); } catch (e) { return null; }
+    };
+    const el = byFfId(ffId);
+    if (!el) return JSON.stringify({ is_workday_skill: false, reason: 'missing_field' });
+    const inputContainer = (ff && ff.closestCrossRoot)
+        ? ff.closestCrossRoot(el, '[data-automation-id="multiselectInputContainer"]')
+        : (el.closest ? el.closest('[data-automation-id="multiselectInputContainer"]') : null);
+    const wrapper = ((ff && ff.closestCrossRoot)
+        ? ff.closestCrossRoot(el, '[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]')
+        : (el.closest ? el.closest('[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]') : null))
+        || inputContainer
+        || (el.parentElement || null);
+    if (!wrapper) return JSON.stringify({ is_workday_skill: false, reason: 'missing_wrapper' });
+    const effectiveContainer = inputContainer || wrapper;
+    const promptButton = scopedQuery(effectiveContainer, '[data-automation-id="promptSearchButton"], [data-uxi-widget-type="selectinputicon"]')
+        || scopedQuery(wrapper, '[data-automation-id="promptSearchButton"], [data-uxi-widget-type="selectinputicon"]');
+    const promptPopup = scopedQuery(wrapper, '[data-automation-id="responsiveMonikerPrompt"], [data-automation-id*="responsiveMonikerPrompt"], [data-uxi-widget-type="prompt"]')
+        || document.querySelector('[data-automation-id="responsiveMonikerPrompt"], [data-automation-id*="responsiveMonikerPrompt"], [data-uxi-widget-type="prompt"]');
+    const selectedList = scopedQuery(wrapper, '[data-automation-id="selectedItemList"], [data-automation-id="selectedItems"]')
+        || scopedQuery(effectiveContainer, '[data-automation-id="selectedItemList"], [data-automation-id="selectedItems"]');
+    const isSelectInput =
+        (el.getAttribute && el.getAttribute('data-uxi-widget-type') === 'selectinput') ||
+        el.type === 'search' ||
+        el.getAttribute('role') === 'combobox';
+    return JSON.stringify({
+        is_workday_skill: Boolean(wrapper && promptButton && isSelectInput),
+        has_prompt_button: Boolean(promptButton),
+        has_prompt_popup: Boolean(promptPopup),
+        has_selected_list: Boolean(selectedList),
+    });
+}"""
+
+
+_READ_WORKDAY_SKILL_INPUT_STATE_JS = r"""(ffId) => {
+    const ff = window.__ff || null;
+    const byFfId = (id) => (ff && ff.byId) ? ff.byId(id) : document.querySelector('[data-ff-id="' + id + '"]');
+    const scopedQuery = (root, sel) => {
+        if (!root || !root.querySelector) return null;
+        try { return root.querySelector(sel); } catch (e) { return null; }
+    };
+    const visible = (node) => {
+        if (!node) return false;
+        const style = window.getComputedStyle(node);
+        if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    };
+    const el = byFfId(ffId);
+    if (!el) return JSON.stringify({ found_input: false, input_value: '', has_clear_button: false });
+    const wrapper = (ff && ff.closestCrossRoot)
+        ? ff.closestCrossRoot(el, '[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]')
+        : (el.closest ? el.closest('[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]') : null);
+    if (!wrapper) return JSON.stringify({ found_input: false, input_value: '', has_clear_button: false });
+    const inputContainer = scopedQuery(wrapper, '[data-automation-id="multiselectInputContainer"]') || wrapper;
+    const input = scopedQuery(inputContainer, '[data-uxi-widget-type="selectinput"], input[role="combobox"], input[type="search"], input[type="text"]');
+    if (!input) return JSON.stringify({ found_input: false, input_value: '', has_clear_button: false });
+    const clearButton = scopedQuery(
+        inputContainer,
+        '[data-automation-id="clearSearchButton"], [data-automation-id*="clearSearch"], [data-automation-id*="ClearSearch"], button[aria-label*="clear" i], [role="button"][aria-label*="clear" i], [title*="clear" i], [data-icon*="clear" i]'
+    );
+    return JSON.stringify({
+        found_input: true,
+        input_value: String(input.value || ''),
+        has_clear_button: Boolean(clearButton && visible(clearButton)),
+    });
+}"""
+
+
+_FOCUS_WORKDAY_SKILL_INPUT_JS = r"""(ffId) => {
+    const ff = window.__ff || null;
+    const byFfId = (id) => (ff && ff.byId) ? ff.byId(id) : document.querySelector('[data-ff-id="' + id + '"]');
+    const scopedQuery = (root, sel) => {
+        if (!root || !root.querySelector) return null;
+        try { return root.querySelector(sel); } catch (e) { return null; }
+    };
+    const el = byFfId(ffId);
+    if (!el) return JSON.stringify({ focused: false, reason: 'missing_field' });
+    const wrapper = (ff && ff.closestCrossRoot)
+        ? ff.closestCrossRoot(el, '[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]')
+        : (el.closest ? el.closest('[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]') : null);
+    const inputContainer = scopedQuery(wrapper || el, '[data-automation-id="multiselectInputContainer"]') || wrapper || el;
+    const input = scopedQuery(inputContainer, '[data-uxi-widget-type="selectinput"], input[role="combobox"], input[type="search"], input[type="text"]');
+    if (!input) return JSON.stringify({ focused: false, reason: 'missing_input' });
+    try {
+        if (input.scrollIntoView) input.scrollIntoView({ block: 'center', inline: 'center' });
+        if (input.focus) input.focus();
+        if (typeof input.setSelectionRange === 'function') {
+            const current = String(input.value || '');
+            input.setSelectionRange(current.length, current.length);
+        }
+    } catch (e) {}
+    return JSON.stringify({ focused: document.activeElement === input || input.matches(':focus') });
+}"""
+
+
+_SET_WORKDAY_SKILL_INPUT_VALUE_JS = r"""([ffId, value]) => {
+    const ff = window.__ff || null;
+    const byFfId = (id) => (ff && ff.byId) ? ff.byId(id) : document.querySelector('[data-ff-id="' + id + '"]');
+    const scopedQuery = (root, sel) => {
+        if (!root || !root.querySelector) return null;
+        try { return root.querySelector(sel); } catch (e) { return null; }
+    };
+    const el = byFfId(ffId);
+    if (!el) return JSON.stringify({ success: false, reason: 'missing_field' });
+    const wrapper = (ff && ff.closestCrossRoot)
+        ? ff.closestCrossRoot(el, '[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]')
+        : (el.closest ? el.closest('[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]') : null);
+    const inputContainer = scopedQuery(wrapper || el, '[data-automation-id="multiselectInputContainer"]') || wrapper || el;
+    const input = scopedQuery(inputContainer, '[data-uxi-widget-type="selectinput"], input[role="combobox"], input[type="search"], input[type="text"]');
+    if (!input) return JSON.stringify({ success: false, reason: 'missing_input' });
+    try {
+        const setter =
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value') ||
+            Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+        if (setter && setter.set) setter.set.call(input, String(value || ''));
+        else input.value = String(value || '');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Backspace', code: 'Backspace' }));
+        return JSON.stringify({ success: true, value: String(input.value || '') });
+    } catch (e) {
+        return JSON.stringify({ success: false, reason: e && e.message ? e.message : 'unknown' });
+    }
+}"""
+
+
+_GET_WORKDAY_SKILL_PROMPT_TARGET_JS = r"""(ffId) => {
+    const ff = window.__ff || null;
+    const byFfId = (id) => (ff && ff.byId) ? ff.byId(id) : document.querySelector('[data-ff-id="' + id + '"]');
+    const globalQueryAll = (sel) => (ff && ff.queryAll) ? ff.queryAll(sel) : Array.from(document.querySelectorAll(sel));
+    const scopedQuery = (root, sel) => {
+        if (!root || !root.querySelector) return null;
+        try { return root.querySelector(sel); } catch (e) { return null; }
+    };
+    const visible = (node) => {
+        if (!node) return false;
+        const style = window.getComputedStyle(node);
+        if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    };
+    const clearMarks = () => {
+        for (const node of globalQueryAll('[data-domhand-workday-skill-prompt-target="true"]')) {
+            node.removeAttribute('data-domhand-workday-skill-prompt-target');
+        }
+    };
+    const el = byFfId(ffId);
+    if (!el) return JSON.stringify({ found: false, reason: 'missing_field' });
+    const wrapper = (ff && ff.closestCrossRoot)
+        ? ff.closestCrossRoot(el, '[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]')
+        : (el.closest ? el.closest('[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]') : null);
+    const button = scopedQuery(wrapper, '[data-automation-id="promptSearchButton"], [data-uxi-widget-type="selectinputicon"]');
+    if (!visible(button)) return JSON.stringify({ found: false, reason: 'missing_prompt_button' });
+    clearMarks();
+    button.setAttribute('data-domhand-workday-skill-prompt-target', 'true');
+    const rect = button.getBoundingClientRect();
+    return JSON.stringify({
+        found: true,
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+    });
+}"""
+
+
+_GET_WORKDAY_SKILL_CLEAR_TARGET_JS = r"""(ffId) => {
+    const ff = window.__ff || null;
+    const byFfId = (id) => (ff && ff.byId) ? ff.byId(id) : document.querySelector('[data-ff-id="' + id + '"]');
+    const globalQueryAll = (sel) => (ff && ff.queryAll) ? ff.queryAll(sel) : Array.from(document.querySelectorAll(sel));
+    const scopedQuery = (root, sel) => {
+        if (!root || !root.querySelector) return null;
+        try { return root.querySelector(sel); } catch (e) { return null; }
+    };
+    const visible = (node) => {
+        if (!node) return false;
+        const style = window.getComputedStyle(node);
+        if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    };
+    const clearMarks = () => {
+        for (const node of globalQueryAll('[data-domhand-workday-skill-clear-target="true"]')) {
+            node.removeAttribute('data-domhand-workday-skill-clear-target');
+        }
+    };
+    const el = byFfId(ffId);
+    if (!el) return JSON.stringify({ found: false, reason: 'missing_field' });
+    const wrapper = (ff && ff.closestCrossRoot)
+        ? ff.closestCrossRoot(el, '[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]')
+        : (el.closest ? el.closest('[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]') : null);
+    if (!wrapper) return JSON.stringify({ found: false, reason: 'missing_wrapper' });
+    const inputContainer = scopedQuery(wrapper, '[data-automation-id="multiselectInputContainer"]') || wrapper;
+    const button = scopedQuery(
+        inputContainer,
+        '[data-automation-id="clearSearchButton"], [data-automation-id*="clearSearch"], [data-automation-id*="ClearSearch"], button[aria-label*="clear" i], [role="button"][aria-label*="clear" i], [title*="clear" i], [data-icon*="clear" i]'
+    );
+    if (!visible(button)) return JSON.stringify({ found: false, reason: 'missing_clear_button' });
+    clearMarks();
+    button.setAttribute('data-domhand-workday-skill-clear-target', 'true');
+    const rect = button.getBoundingClientRect();
+    return JSON.stringify({
+        found: true,
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+    });
+}"""
+
+
+_GET_WORKDAY_SKILL_OPTION_TARGET_JS = r"""([ffId, targetText, synonymGroups]) => {
+    const ff = window.__ff || null;
+    const byFfId = (id) => (ff && ff.byId) ? ff.byId(id) : document.querySelector('[data-ff-id="' + id + '"]');
+    const globalQueryAll = (sel) => (ff && ff.queryAll) ? ff.queryAll(sel) : Array.from(document.querySelectorAll(sel));
+    const scopedQueryAll = (root, sel) => {
+        if (!root || !root.querySelectorAll) return [];
+        try { return Array.from(root.querySelectorAll(sel)); } catch (e) { return []; }
+    };
+    const visible = (node) => {
+        if (!node) return false;
+        const style = window.getComputedStyle(node);
+        if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    };
+    const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim();
+    const stopWords = { the: 1, a: 1, an: 1, of: 1, for: 1, in: 1, to: 1, and: 1, or: 1 };
+    const lowerTarget = normalize(targetText).toLowerCase();
+    const clearMarks = () => {
+        for (const node of globalQueryAll('[data-domhand-workday-skill-option-target="true"]')) {
+            node.removeAttribute('data-domhand-workday-skill-option-target');
+        }
+    };
+    const el = byFfId(ffId);
+    if (!el || !lowerTarget) return JSON.stringify({ found: false, reason: 'missing_field_or_target' });
+    const inputContainer = (ff && ff.closestCrossRoot)
+        ? ff.closestCrossRoot(el, '[data-automation-id="multiselectInputContainer"]')
+        : (el.closest ? el.closest('[data-automation-id="multiselectInputContainer"]') : null);
+    const wrapper = ((ff && ff.closestCrossRoot)
+        ? ff.closestCrossRoot(el, '[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]')
+        : (el.closest ? el.closest('[data-automation-id="multiSelectContainer"], [data-automation-id*="multiSelectContainer"], [data-uxi-widget-type="multiselect"]') : null))
+        || inputContainer
+        || (el.parentElement || null);
+    if (!wrapper) return JSON.stringify({ found: false, reason: 'missing_wrapper' });
+    const popupCandidates = [];
+    const pushPopup = (node) => {
+        if (!node || !visible(node)) return;
+        if (popupCandidates.includes(node)) return;
+        popupCandidates.push(node);
+    };
+    pushPopup(wrapper.querySelector('[data-automation-id="responsiveMonikerPrompt"], [data-automation-id*="responsiveMonikerPrompt"], [data-uxi-widget-type="prompt"]'));
+    if (inputContainer) {
+        pushPopup(inputContainer.querySelector('[data-automation-id="responsiveMonikerPrompt"], [data-automation-id*="responsiveMonikerPrompt"], [data-uxi-widget-type="prompt"]'));
+    }
+    for (const popup of globalQueryAll('[data-automation-id="responsiveMonikerPrompt"], [data-automation-id*="responsiveMonikerPrompt"], [data-uxi-widget-type="prompt"]')) {
+        pushPopup(popup);
+    }
+    if (!popupCandidates.length) return JSON.stringify({ found: false, reason: 'no_prompt_popup' });
+    const options = [];
+    for (const popup of popupCandidates) {
+        const optionNodes = scopedQueryAll(
+            popup,
+            '[role="option"], [data-automation-id*="promptOption"], [data-automation-id*="menuItem"]'
+        );
+        for (const node of optionNodes) {
+            if (!visible(node)) continue;
+            if (node.closest && node.closest('[data-automation-id="selectedItemList"], [data-automation-id="selectedItems"]')) continue;
+            const text = normalize(node.textContent || node.getAttribute('aria-label') || node.getAttribute('title') || '');
+            if (!text || text.toLowerCase() === 'no items.' || text.toLowerCase() === 'no items') continue;
+            const rect = node.getBoundingClientRect();
+            options.push({
+                node,
+                text,
+                lower: text.toLowerCase(),
+                x: rect.left + rect.width / 2,
+                y: rect.top + rect.height / 2,
+            });
+        }
+    }
+    if (!options.length) return JSON.stringify({ found: false, reason: 'no_options' });
+    const finalizeTarget = (opt, pass) => {
+        try {
+            if (opt.node && opt.node.scrollIntoView) {
+                opt.node.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+            }
+        } catch (e) {}
+        clearMarks();
+        opt.node.setAttribute('data-domhand-workday-skill-option-target', 'true');
+        const rect = opt.node.getBoundingClientRect();
+        return JSON.stringify({
+            found: true,
+            text: opt.text,
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2,
+            pass,
+        });
+    };
+    const canonicalSkill = (value) => normalize(String(value || '').replace(/\s*\([^)]*\)\s*$/, ''));
+    const canonicalTarget = canonicalSkill(lowerTarget);
+    const exact = options.find((opt) => opt.lower === lowerTarget);
+    if (exact) return finalizeTarget(exact, 1);
+    if (canonicalTarget) {
+        const canonicalExact = options.find((opt) => canonicalSkill(opt.text) === canonicalTarget);
+        if (canonicalExact) return finalizeTarget(canonicalExact, 2);
+    }
+    return JSON.stringify({
+        found: false,
+        reason: 'no_match',
+        available: options.slice(0, 20).map((opt) => opt.text),
+    });
+}"""
+
+
+async def _read_multi_select_selection(page: Any, field_id: str) -> dict[str, Any]:
+    try:
+        raw = await page.evaluate(_READ_MULTI_SELECT_SELECTION_JS, field_id)
+    except Exception:
+        return {"tokens": [], "count": 0, "summary": ""}
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return {"tokens": [], "count": 0, "summary": ""}
+    if not isinstance(parsed, dict):
+        return {"tokens": [], "count": 0, "summary": ""}
+    tokens = [str(token).strip() for token in parsed.get("tokens", []) if str(token).strip()]
+    count = parsed.get("count", len(tokens))
+    try:
+        count = int(count)
+    except (TypeError, ValueError):
+        count = len(tokens)
+    return {
+        "tokens": tokens,
+        "count": max(count, len(tokens)),
+        "summary": str(parsed.get("summary") or "").strip(),
+    }
+
+
+async def _wait_for_multi_select_commit(
+    page: Any,
+    field: FormField,
+    expected: str,
+    *,
+    previous_selection: dict[str, Any],
+    matched_label: str | None = None,
+    timeout: float = 1.8,
+    poll_interval: float = 0.18,
+) -> dict[str, Any]:
+    previous_tokens = {
+        str(token).strip().lower() for token in previous_selection.get("tokens", []) if str(token).strip()
+    }
+    previous_count = int(previous_selection.get("count", 0) or 0)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    last_selection: dict[str, Any] = {
+        "tokens": list(previous_selection.get("tokens", [])),
+        "count": previous_count,
+        "summary": str(previous_selection.get("summary") or "").strip(),
+    }
+    while True:
+        current = await _read_multi_select_selection(page, field.field_id)
+        last_selection = current
+        tokens = [str(token).strip() for token in current.get("tokens", []) if str(token).strip()]
+        for token in tokens:
+            if _field_value_matches_expected(token, expected, matched_label=matched_label):
+                return {**current, "committed": True, "via": "token_match"}
+        if int(current.get("count", 0) or 0) > previous_count:
+            return {**current, "committed": True, "via": "count_increase"}
+        if any(token.lower() not in previous_tokens for token in tokens):
+            return {**current, "committed": True, "via": "new_token"}
+        if loop.time() >= deadline:
+            return {**last_selection, "committed": False}
+        await asyncio.sleep(poll_interval)
 
 
 async def _visible_field_id_snapshot(page: Any) -> set[str]:
@@ -1625,13 +2933,13 @@ async def _type_and_click_dropdown_option(page: Any, value: str, tag: str) -> di
         try:
             if idx > 0:
                 await _clear_dropdown_search(page)
-            await page.keyboard.type(term, delay=55)
+            await _type_text_compat(page, term, delay=55)
             await asyncio.sleep(0.4)
             clicked = await _poll_click_dropdown_option(page, value, term, max_wait_s=2.85)
             if clicked.get("clicked"):
                 logger.debug(f'select {tag} -> "{clicked.get("text", value)}" (typed search)')
                 return clicked
-            await page.keyboard.press("Enter")
+            await _press_key_compat(page, "Enter")
             await asyncio.sleep(0.45)
             clicked = await _poll_click_dropdown_option(page, value, term, max_wait_s=1.2)
             if clicked.get("clicked"):
@@ -1642,8 +2950,301 @@ async def _type_and_click_dropdown_option(page: Any, value: str, tag: str) -> di
     return {"clicked": False}
 
 
-async def _scan_visible_dropdown_options(page: Any) -> list[str]:
-    """Read all visible dropdown option labels from the open menu."""
+_SCOPED_DROPDOWN_OPTIONS_JS = r"""(ffId) => {
+    const ff = window.__ff || null;
+    const byFfId = (id) => (ff && ff.byId) ? ff.byId(id) : document.querySelector('[data-ff-id="' + id + '"]');
+    const getByDomId = (id) => {
+        if (!id) return null;
+        if (ff && ff.getByDomId) return ff.getByDomId(id);
+        return document.getElementById(id);
+    };
+    const globalQueryAll = (sel) => (ff && ff.queryAll) ? ff.queryAll(sel) : Array.from(document.querySelectorAll(sel));
+    const scopedQueryAll = (root, sel) => {
+        if (!root || !root.querySelectorAll) return [];
+        try { return Array.from(root.querySelectorAll(sel)); } catch (e) { return []; }
+    };
+    const visible = (el) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    };
+    const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim();
+    const collectIds = (node, attr) => {
+        if (!node || !node.getAttribute) return [];
+        return String(node.getAttribute(attr) || '').split(/\s+/).map((part) => part.trim()).filter(Boolean);
+    };
+    const el = byFfId(ffId);
+    if (!el) return JSON.stringify([]);
+    const optionSelectors = '[role="option"], [role="gridcell"], [role="menuitem"], [role="listitem"], li, [class*="option"], [data-value]';
+    const popupSelectors = '[role="listbox"], [role="menu"], [role="grid"], [data-automation-id="activeListContainer"], [class*="dropdown-menu"], [class*="options-list"], [class*="listbox"], [class*="menu"]';
+    const fieldRect = el.getBoundingClientRect();
+    const fieldCenterX = fieldRect.left + fieldRect.width / 2;
+    const fieldCenterY = fieldRect.top + fieldRect.height / 2;
+    const scorePopup = (popup, boost) => {
+        const rect = popup.getBoundingClientRect();
+        let score = boost || 0;
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        score -= Math.abs(centerX - fieldCenterX) * 0.04;
+        score -= Math.abs(centerY - fieldCenterY) * 0.02;
+        if (rect.top >= fieldRect.top - 12) score += 25;
+        if (rect.left <= fieldRect.right + 12 && rect.right >= fieldRect.left - 12) score += 15;
+        if (popup.contains(el)) score += 5;
+        return score;
+    };
+    const optionData = (popup) => {
+        const out = [];
+        const isSelectedToken = (node) => {
+            if (!node || !node.closest) return false;
+            return Boolean(
+                node.closest(
+                    '[data-automation-id="selectedItem"], [data-automation-id="selectedItemList"], [data-automation-id="selectedItems"], [data-automation-id*="selectedItem"], [class*="selectedItem"], [class*="SelectedItem"], [class*="token"], [class*="Token"], [class*="chip"], [class*="Chip"], [class*="pill"], [class*="Pill"]'
+                )
+            );
+        };
+        for (const opt of scopedQueryAll(popup, optionSelectors)) {
+            if (!visible(opt)) continue;
+            if (isSelectedToken(opt)) continue;
+            const text = normalize(opt.textContent || opt.getAttribute('aria-label') || '');
+            if (!text) continue;
+            out.push({ text, lower: text.toLowerCase() });
+        }
+        return out;
+    };
+    const popupCandidates = [];
+    const seenPopups = new Set();
+    const addPopup = (popup, boost) => {
+        if (!popup || !visible(popup) || seenPopups.has(popup)) return;
+        const opts = optionData(popup);
+        if (!opts.length) return;
+        seenPopups.add(popup);
+        popupCandidates.push({ score: scorePopup(popup, boost), opts });
+    };
+    const combo = (el.closest && el.closest('[role="combobox"]')) || (el.getAttribute && el.getAttribute('role') === 'combobox' ? el : null);
+    const wrapper = (ff && ff.closestCrossRoot)
+        ? ff.closestCrossRoot(el, '[data-automation-id="formField"], [data-automation-id*="formField"], fieldset, .form-group, .field, [role="group"]')
+        : (el.closest ? el.closest('[data-automation-id="formField"], [data-automation-id*="formField"], fieldset, .form-group, .field, [role="group"]') : null);
+    const root = el.getRootNode ? el.getRootNode() : document;
+    const controlledIds = [
+        ...collectIds(el, 'aria-controls'),
+        ...collectIds(el, 'aria-owns'),
+        ...collectIds(combo, 'aria-controls'),
+        ...collectIds(combo, 'aria-owns'),
+    ];
+    for (const id of controlledIds) addPopup(getByDomId(id), 1000);
+    if (wrapper) {
+        for (const popup of scopedQueryAll(wrapper, popupSelectors)) addPopup(popup, 250);
+    }
+    if (root && root !== document) {
+        for (const popup of scopedQueryAll(root, popupSelectors)) addPopup(popup, 320);
+    }
+    for (const popup of globalQueryAll(popupSelectors)) addPopup(popup, 0);
+    popupCandidates.sort((a, b) => b.score - a.score);
+    if (!popupCandidates.length) return JSON.stringify([]);
+    const seenText = new Set();
+    const out = [];
+    for (const opt of popupCandidates[0].opts) {
+        if (seenText.has(opt.lower)) continue;
+        seenText.add(opt.lower);
+        out.push(opt.text);
+    }
+    return JSON.stringify(out);
+}"""
+
+
+_GET_SCOPED_DROPDOWN_OPTION_TARGET_JS = r"""([ffId, targetText, synonymGroups]) => {
+    const ff = window.__ff || null;
+    const byFfId = (id) => (ff && ff.byId) ? ff.byId(id) : document.querySelector('[data-ff-id="' + id + '"]');
+    const getByDomId = (id) => {
+        if (!id) return null;
+        if (ff && ff.getByDomId) return ff.getByDomId(id);
+        return document.getElementById(id);
+    };
+    const globalQueryAll = (sel) => (ff && ff.queryAll) ? ff.queryAll(sel) : Array.from(document.querySelectorAll(sel));
+    const scopedQueryAll = (root, sel) => {
+        if (!root || !root.querySelectorAll) return [];
+        try { return Array.from(root.querySelectorAll(sel)); } catch (e) { return []; }
+    };
+    const visible = (el) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    };
+    const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim();
+    const collectIds = (node, attr) => {
+        if (!node || !node.getAttribute) return [];
+        return String(node.getAttribute(attr) || '').split(/\s+/).map((part) => part.trim()).filter(Boolean);
+    };
+    const stopWords = { the: 1, a: 1, an: 1, of: 1, for: 1, in: 1, to: 1, and: 1, or: 1 };
+    const lowerTarget = normalize(targetText).toLowerCase();
+    const el = byFfId(ffId);
+    if (!el || !lowerTarget) return JSON.stringify({ found: false, reason: 'missing_field_or_target' });
+    const optionSelectors = '[role="option"], [role="gridcell"], [role="menuitem"], [role="listitem"], li, [class*="option"], [data-value]';
+    const popupSelectors = '[role="listbox"], [role="menu"], [role="grid"], [data-automation-id="activeListContainer"], [class*="dropdown-menu"], [class*="options-list"], [class*="listbox"], [class*="menu"]';
+    const fieldRect = el.getBoundingClientRect();
+    const fieldCenterX = fieldRect.left + fieldRect.width / 2;
+    const fieldCenterY = fieldRect.top + fieldRect.height / 2;
+    const scorePopup = (popup, boost) => {
+        const rect = popup.getBoundingClientRect();
+        let score = boost || 0;
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        score -= Math.abs(centerX - fieldCenterX) * 0.04;
+        score -= Math.abs(centerY - fieldCenterY) * 0.02;
+        if (rect.top >= fieldRect.top - 12) score += 25;
+        if (rect.left <= fieldRect.right + 12 && rect.right >= fieldRect.left - 12) score += 15;
+        if (popup.contains(el)) score += 5;
+        return score;
+    };
+    const optionData = (popup) => {
+        const out = [];
+        const isSelectedToken = (node) => {
+            if (!node || !node.closest) return false;
+            return Boolean(
+                node.closest(
+                    '[data-automation-id="selectedItem"], [data-automation-id="selectedItemList"], [data-automation-id="selectedItems"], [data-automation-id*="selectedItem"], [class*="selectedItem"], [class*="SelectedItem"], [class*="token"], [class*="Token"], [class*="chip"], [class*="Chip"], [class*="pill"], [class*="Pill"]'
+                )
+            );
+        };
+        for (const opt of scopedQueryAll(popup, optionSelectors)) {
+            if (!visible(opt)) continue;
+            if (isSelectedToken(opt)) continue;
+            const text = normalize(opt.textContent || opt.getAttribute('aria-label') || '');
+            if (!text) continue;
+            const rect = opt.getBoundingClientRect();
+            out.push({
+                node: opt,
+                text,
+                lower: text.toLowerCase(),
+                x: rect.left + rect.width / 2,
+                y: rect.top + rect.height / 2,
+            });
+        }
+        return out;
+    };
+    const markTarget = (opt) => {
+        for (const candidate of globalQueryAll('[data-domhand-option-target="true"]')) {
+            candidate.removeAttribute('data-domhand-option-target');
+        }
+        if (opt && opt.node && opt.node.setAttribute) {
+            opt.node.setAttribute('data-domhand-option-target', 'true');
+        }
+    };
+    const popupCandidates = [];
+    const seenPopups = new Set();
+    const addPopup = (popup, boost, source) => {
+        if (!popup || !visible(popup) || seenPopups.has(popup)) return;
+        const opts = optionData(popup);
+        if (!opts.length) return;
+        seenPopups.add(popup);
+        popupCandidates.push({ score: scorePopup(popup, boost), opts, source });
+    };
+    const combo = (el.closest && el.closest('[role="combobox"]')) || (el.getAttribute && el.getAttribute('role') === 'combobox' ? el : null);
+    const wrapper = (ff && ff.closestCrossRoot)
+        ? ff.closestCrossRoot(el, '[data-automation-id="formField"], [data-automation-id*="formField"], fieldset, .form-group, .field, [role="group"]')
+        : (el.closest ? el.closest('[data-automation-id="formField"], [data-automation-id*="formField"], fieldset, .form-group, .field, [role="group"]') : null);
+    const root = el.getRootNode ? el.getRootNode() : document;
+    const controlledIds = [
+        ...collectIds(el, 'aria-controls'),
+        ...collectIds(el, 'aria-owns'),
+        ...collectIds(combo, 'aria-controls'),
+        ...collectIds(combo, 'aria-owns'),
+    ];
+    for (const id of controlledIds) addPopup(getByDomId(id), 1000, 'controlled:' + id);
+    if (wrapper) {
+        for (const popup of scopedQueryAll(wrapper, popupSelectors)) addPopup(popup, 250, 'wrapper');
+    }
+    if (root && root !== document) {
+        for (const popup of scopedQueryAll(root, popupSelectors)) addPopup(popup, 320, 'same_root');
+    }
+    for (const popup of globalQueryAll(popupSelectors)) addPopup(popup, 0, 'global');
+    popupCandidates.sort((a, b) => b.score - a.score);
+    if (!popupCandidates.length) return JSON.stringify({ found: false, reason: 'no_popup' });
+    const opts = popupCandidates[0].opts;
+    const finalizeTarget = (opt, pass) => {
+        try {
+            if (opt.node && opt.node.scrollIntoView) {
+                opt.node.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+            }
+        } catch (e) {}
+        const rect = opt.node && opt.node.getBoundingClientRect ? opt.node.getBoundingClientRect() : null;
+        const x = rect ? rect.left + rect.width / 2 : opt.x;
+        const y = rect ? rect.top + rect.height / 2 : opt.y;
+        markTarget(opt);
+        return JSON.stringify({
+            found: true,
+            text: opt.text,
+            x,
+            y,
+            source: popupCandidates[0].source,
+            pass,
+        });
+    };
+    const exact = opts.find((opt) => opt.lower === lowerTarget);
+    if (exact) {
+        return finalizeTarget(exact, 1);
+    }
+    const prefix = opts.find((opt) => opt.lower.startsWith(lowerTarget) || lowerTarget.startsWith(opt.lower));
+    if (prefix) {
+        return finalizeTarget(prefix, 2);
+    }
+    const partial = opts.find((opt) => lowerTarget.includes(opt.lower) || opt.lower.includes(lowerTarget));
+    if (partial) {
+        return finalizeTarget(partial, 3);
+    }
+    if (Array.isArray(synonymGroups) && synonymGroups.length > 0) {
+        let targetGroup = null;
+        for (const group of synonymGroups) {
+            if (Array.isArray(group) && group.includes(lowerTarget)) {
+                targetGroup = group;
+                break;
+            }
+        }
+        if (targetGroup) {
+            const synonymMatch = opts.find((opt) => targetGroup.includes(opt.lower));
+            if (synonymMatch) {
+                return finalizeTarget(synonymMatch, 4);
+            }
+        }
+    }
+    const targetWords = lowerTarget.split(/\s+/).filter((word) => word.length > 1 && !stopWords[word]);
+    if (targetWords.length > 0) {
+        let best = null;
+        let bestScore = 0;
+        for (const opt of opts) {
+            const words = opt.lower.split(/\s+/).filter((word) => word.length > 1 && !stopWords[word]);
+            let score = 0;
+            for (const word of targetWords) {
+                if (words.includes(word)) score += 1;
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                best = opt;
+            }
+        }
+        if (best && bestScore >= 1) {
+            return finalizeTarget(best, 5);
+        }
+    }
+    return JSON.stringify({ found: false, reason: 'no_match', source: popupCandidates[0].source, available: opts.slice(0, 20).map((opt) => opt.text) });
+}"""
+
+
+async def _scan_visible_dropdown_options(page: Any, *, field_id: str | None = None) -> list[str]:
+    """Read visible dropdown option labels from the field's active popup when possible."""
+    if str(field_id or "").strip():
+        try:
+            raw = await page.evaluate(_SCOPED_DROPDOWN_OPTIONS_JS, str(field_id))
+            if isinstance(raw, str):
+                parsed = json.loads(raw)
+                return parsed if isinstance(parsed, list) else []
+            return raw if isinstance(raw, list) else []
+        except Exception:
+            pass
     try:
         raw = await page.evaluate(SCAN_VISIBLE_OPTIONS_JS)
         if isinstance(raw, str):
@@ -1684,13 +3285,16 @@ async def _fill_custom_dropdown_outcome(
     async def _read() -> str:
         return await _read_field_value_for_field(page, field)
 
+    async def _scan() -> list[str]:
+        return await _scan_visible_dropdown_options(page, field_id=ff_id)
+
     async def _type(text: str) -> None:
         try:
             await page.evaluate(_FOCUS_FIELD_JS, ff_id)
             await asyncio.sleep(0.18)
         except Exception:
             pass
-        await page.keyboard.type(text, delay=55)
+        await _type_text_compat(page, text, delay=55)
 
     async def _clear() -> None:
         await _clear_dropdown_search(page, ff_id)
@@ -1704,17 +3308,24 @@ async def _fill_custom_dropdown_outcome(
         except Exception:
             pass
 
+    async def _click_option(text: str) -> dict[str, Any]:
+        return await _click_dropdown_option(page, text, field_id=ff_id)
+
     result = await fill_interactive_dropdown(
         page,
         value,
         open_fn=_open,
         read_value_fn=_read,
+        scan_options_fn=_scan,
         settle_fn=_settle,
         dismiss_fn=_dismiss,
         type_fn=_type,
         clear_fn=_clear,
+        click_option_fn=_click_option,
         tag=f"custom-select {tag}",
     )
+    if result.success and await _field_has_validation_error(page, field.field_id):
+        result = FieldFillOutcome(success=False, matched_label=result.matched_label)
 
     post_value = result.committed_value or await _read_field_value_for_field(page, field)
     visible_after = await _visible_field_id_snapshot(page)
@@ -1793,7 +3404,7 @@ async def _fill_radio_group(page: Any, field: FormField, value: str, tag: str) -
         result_json = await page.evaluate(_CLICK_RADIO_OPTION_JS, field.field_id, choice)
         result = json.loads(result_json)
         if result.get("clicked"):
-            current = await _read_group_selection(page, field.field_id)
+            current = await _poll_group_selection(page, field.field_id, choice, max_wait=0.8)
             if _field_value_matches_expected(current, choice) and not await _field_has_validation_error(
                 page, field.field_id
             ):
@@ -1805,7 +3416,7 @@ async def _fill_radio_group(page: Any, field: FormField, value: str, tag: str) -
         result_json = await page.evaluate(_CLICK_RADIO_OPTION_JS, field.field_id, choice)
         result = json.loads(result_json)
         if result.get("clicked"):
-            current = await _read_group_selection(page, field.field_id)
+            current = await _poll_group_selection(page, field.field_id, choice, max_wait=0.8)
             if _field_value_matches_expected(current, choice) and not await _field_has_validation_error(
                 page, field.field_id
             ):
@@ -1941,7 +3552,7 @@ async def _fill_button_group(page: Any, field: FormField, value: str, tag: str) 
         result_json = await page.evaluate(_CLICK_BUTTON_GROUP_JS, field.field_id, choice)
         result = json.loads(result_json)
         if result.get("clicked"):
-            current = await _read_group_selection(page, field.field_id)
+            current = await _poll_group_selection(page, field.field_id, choice, max_wait=0.8)
             if _field_value_matches_expected(current, choice) and not await _field_has_validation_error(
                 page, field.field_id
             ):
@@ -1953,7 +3564,7 @@ async def _fill_button_group(page: Any, field: FormField, value: str, tag: str) 
         result_json = await page.evaluate(_CLICK_BUTTON_GROUP_JS, field.field_id, choice)
         result = json.loads(result_json)
         if result.get("clicked"):
-            current = await _read_group_selection(page, field.field_id)
+            current = await _poll_group_selection(page, field.field_id, choice, max_wait=0.8)
             if _field_value_matches_expected(current, choice) and not await _field_has_validation_error(
                 page, field.field_id
             ):

@@ -365,6 +365,109 @@ def _field_accepts_phone_digits_not_line_type(field: FormField) -> bool:
     )
 
 
+def _normalize_degree_family_answer(answer: str | None) -> str | None:
+    norm = normalize_name(answer or "")
+    if not norm:
+        return None
+    compact = re.sub(r"[^a-z0-9]+", "", norm)
+    if any(token in norm for token in ("associate", "associates")):
+        return "Associates"
+    if any(
+        token in norm
+        for token in (
+            "bachelor",
+            "bachelors",
+            "bs",
+            "b s",
+            "ba",
+            "b a",
+            "bsc",
+            "b sc",
+            "bachelor of science",
+            "bachelor of arts",
+        )
+    ) or compact in {"bs", "ba", "bsc"}:
+        return "Bachelors"
+    if any(
+        token in norm
+        for token in (
+            "master",
+            "masters",
+            "ms",
+            "m s",
+            "ma",
+            "m a",
+            "msc",
+            "m sc",
+            "mba",
+            "master of science",
+            "master of arts",
+        )
+    ) or compact in {"ms", "ma", "msc", "mba"}:
+        return "Masters"
+    if any(
+        token in norm
+        for token in (
+            "doctor",
+            "doctorate",
+            "doctoral",
+            "phd",
+            "ph d",
+            "dphil",
+            "d phil",
+            "jd",
+            "j d",
+            "md",
+            "m d",
+        )
+    ) or compact in {"phd", "dphil", "jd", "md"}:
+        return "Doctorate"
+    return None
+
+
+def _matches_degree_family_choice(choice: str, degree_family_answer: str | None) -> bool:
+    """Return True when a select option belongs to the requested degree family."""
+    if not choice or not degree_family_answer:
+        return False
+
+    choice_norm = normalize_name(choice)
+    family_norm = normalize_name(degree_family_answer)
+    if not choice_norm or not family_norm:
+        return False
+
+    if choice_norm == family_norm or family_norm in choice_norm or choice_norm in family_norm:
+        return True
+
+    choice_compact = re.sub(r"[^a-z0-9]+", "", choice_norm)
+    family_compact = re.sub(r"[^a-z0-9]+", "", family_norm)
+    if not choice_compact or not family_compact:
+        return False
+
+    if (
+        choice_compact == family_compact
+        or family_compact in choice_compact
+        or choice_compact in family_compact
+    ):
+        return True
+
+    family_word_markers = {
+        "associates": {"associate", "associates"},
+        "bachelors": {"bachelor", "bachelors"},
+        "masters": {"master", "masters"},
+        "doctorate": {"doctor", "doctorate", "doctoral"},
+    }
+    if any(marker in choice_norm for marker in family_word_markers.get(family_compact, set())):
+        return True
+
+    family_exact_aliases = {
+        "associates": {"aa", "as", "aas"},
+        "bachelors": {"ba", "bs", "bsc", "beng", "be"},
+        "masters": {"ma", "ms", "msc", "meng", "mba", "me"},
+        "doctorate": {"phd", "dphil", "jd", "md"},
+    }
+    return choice_compact in family_exact_aliases.get(family_compact, set())
+
+
 def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
     """Map a profile answer onto the closest available field option when present."""
     if answer in (None, ""):
@@ -378,8 +481,41 @@ def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
     if _field_accepts_phone_digits_not_line_type(field) and _answer_is_phone_line_type_token(text):
         return None
 
+    degree_like_label = any(
+        normalize_name(candidate) in {"degree", "degree type", "type of degree", "degree level"}
+        for candidate in _field_label_candidates(field)
+    )
+    degree_family_answer = _normalize_degree_family_answer(text) if degree_like_label else None
+
+    # Workday skills/selectinput widgets intentionally accept comma-joined
+    # multi-value answers and split them later inside ``_fill_multi_select``.
+    # Treating them like a single-option select drops the answer before fill.
+    from ghosthands.actions.domhand_fill import _is_skill_like as _is_skill_like_impl
+
+    if _is_skill_like_impl(_preferred_field_label(field) or field.name or ""):
+        return text
+
+    latest_employer_label = any(
+        any(
+            token in normalize_name(candidate)
+            for token in (
+                "latest employer",
+                "current employer",
+                "most recent employer",
+                "name of latest employer",
+                "name of current employer",
+                "name of most recent employer",
+            )
+        )
+        for candidate in _field_label_candidates(field)
+    )
+
     choices = [str(choice).strip() for choice in (field.options or field.choices or []) if str(choice).strip()]
     if not choices:
+        if field.field_type == "select" and latest_employer_label:
+            return None
+        if field.field_type == "select" and degree_family_answer:
+            return degree_family_answer
         return text
 
     text_norm = normalize_name(text)
@@ -387,10 +523,18 @@ def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
         if normalize_name(choice) == text_norm:
             return choice
 
+    if degree_family_answer:
+        for choice in choices:
+            if _matches_degree_family_choice(choice, degree_family_answer):
+                return choice
+
     boolish = _normalize_yes_no_answer(text)
     if boolish:
         for choice in choices:
             if normalize_name(choice) == normalize_name(boolish):
+                return choice
+        for choice in choices:
+            if _normalize_binary_match_value(choice) == boolish:
                 return choice
 
     proficiency_choice = _coerce_proficiency_choice(choices, text)
@@ -806,7 +950,11 @@ def _active_blocker_focus_fields(
     fields: list[FormField],
     page_context_key: str,
     page_url: str,
+    focus_fields: list[str] | None = None,
 ) -> tuple[list[FormField], bool]:
+    if focus_fields:
+        return fields, False
+
     last_state = getattr(browser_session, "_gh_last_application_state", None)
     if not isinstance(last_state, dict):
         return fields, False
@@ -843,5 +991,3 @@ def _active_blocker_focus_fields(
         blocker_state_changes.get(key) == "no_state_change" for key in filtered_keys
     )
     return filtered, all_no_state_change
-
-

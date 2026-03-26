@@ -35,6 +35,7 @@ from ghosthands.step_trace import (
 
 logger = logging.getLogger(__name__)
 _SAME_TAB_GUARD_INSTALLED: set[int] = set()
+_FINAL_SUBMIT_GUARD_INSTALLED: set[int] = set()
 
 _SAME_TAB_GUARD_JS = r"""(() => {
 	if (window.__ghSameTabGuardInstalled) {
@@ -148,6 +149,165 @@ _SAME_TAB_GUARD_JS = r"""(() => {
 	stripTargets(document);
 })();"""
 
+_FINAL_SUBMIT_GUARD_JS = r"""(() => {
+	if (window.__ghFinalSubmitGuardInstalled) return;
+	window.__ghFinalSubmitGuardInstalled = true;
+	window.__ghFinalSubmitGuardState = window.__ghFinalSubmitGuardState || { blocked: false, label: "", text: "", count: 0 };
+
+	function normalize(text) {
+		return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+	}
+
+	function getText(el) {
+		if (!el) return '';
+		return [
+			el.getAttribute && el.getAttribute('aria-label'),
+			el.getAttribute && el.getAttribute('title'),
+			el.value,
+			el.innerText,
+			el.textContent,
+		].filter(Boolean).join(' ');
+	}
+
+	function isVisible(el) {
+		if (!el || !(el instanceof Element)) return false;
+		const style = window.getComputedStyle(el);
+		if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+		const rect = el.getBoundingClientRect();
+		return rect.width > 0 && rect.height > 0;
+	}
+
+	function hasPasswordField(form) {
+		try {
+			return !!(form && form.querySelector && form.querySelector('input[type="password"]'));
+		} catch (e) {
+			return false;
+		}
+	}
+
+	function recordBlock(el) {
+		const text = normalize(getText(el));
+		window.__ghFinalSubmitGuardState = {
+			blocked: true,
+			label: text || 'submit',
+			text: getText(el) || '',
+			count: Number((window.__ghFinalSubmitGuardState && window.__ghFinalSubmitGuardState.count) || 0) + 1,
+		};
+	}
+
+	function looksLikeFinalSubmit(el) {
+		const control = el && el.closest ? el.closest('button, input[type="submit"], input[type="button"], [role="button"]') : null;
+		if (!control || !isVisible(control)) return false;
+		if (control.disabled) return false;
+		if (String(control.getAttribute && control.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return false;
+
+		const form = control.form || (control.closest ? control.closest('form') : null);
+		if (hasPasswordField(form)) return false;
+
+		const text = normalize(getText(control));
+		if (!text) return false;
+		if (
+			text.includes('sign in') ||
+			text.includes('log in') ||
+			text.includes('login') ||
+			text.includes('create account') ||
+			text.includes('register') ||
+			text.includes('save and continue') ||
+			text === 'next' ||
+			text === 'continue' ||
+			text.includes('continue to review') ||
+			text.includes('apply with resume') ||
+			text === 'apply'
+		) {
+			return false;
+		}
+
+		return (
+			text === 'submit' ||
+			text.includes('submit application') ||
+			text.includes('review and submit') ||
+			text.includes('finish and submit') ||
+			text.includes('complete application') ||
+			text.includes('confirm and submit') ||
+			text.includes('send application')
+		);
+	}
+
+	function shouldBlockFormSubmit(form, candidate) {
+		if (hasPasswordField(form)) return false;
+		if (candidate && looksLikeFinalSubmit(candidate)) return candidate.closest('button, input[type="submit"], input[type="button"], [role="button"]');
+		try {
+			const controls = Array.from(form.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'));
+			return controls.find(looksLikeFinalSubmit) || null;
+		} catch (e) {
+			return null;
+		}
+	}
+
+	document.addEventListener('click', function(event) {
+		const control = event.target && event.target.closest ? event.target.closest('button, input[type="submit"], input[type="button"], [role="button"]') : null;
+		if (!control || !looksLikeFinalSubmit(control)) return;
+		recordBlock(control);
+		try { event.preventDefault(); } catch (e) {}
+		try { event.stopImmediatePropagation(); } catch (e) {}
+		try { event.stopPropagation(); } catch (e) {}
+	}, true);
+
+	document.addEventListener('keydown', function(event) {
+		const active = document.activeElement;
+		if (!active || !looksLikeFinalSubmit(active)) return;
+		if (event.key === 'Enter' || event.key === ' ') {
+			recordBlock(active);
+			try { event.preventDefault(); } catch (e) {}
+			try { event.stopImmediatePropagation(); } catch (e) {}
+			try { event.stopPropagation(); } catch (e) {}
+		}
+	}, true);
+
+	document.addEventListener('submit', function(event) {
+		const form = event.target;
+		const submitter = event.submitter || document.activeElement;
+		const blockedControl = shouldBlockFormSubmit(form, submitter);
+		if (!blockedControl) return;
+		recordBlock(blockedControl);
+		try { event.preventDefault(); } catch (e) {}
+		try { event.stopImmediatePropagation(); } catch (e) {}
+		try { event.stopPropagation(); } catch (e) {}
+	}, true);
+
+	const nativeRequestSubmit = HTMLFormElement.prototype.requestSubmit;
+	HTMLFormElement.prototype.requestSubmit = function(submitter) {
+		const blockedControl = shouldBlockFormSubmit(this, submitter || document.activeElement);
+		if (blockedControl) {
+			recordBlock(blockedControl);
+			return;
+		}
+		return nativeRequestSubmit.call(this, submitter);
+	};
+
+	const nativeSubmit = HTMLFormElement.prototype.submit;
+	HTMLFormElement.prototype.submit = function() {
+		const blockedControl = shouldBlockFormSubmit(this, document.activeElement);
+		if (blockedControl) {
+			recordBlock(blockedControl);
+			return;
+		}
+		return nativeSubmit.call(this);
+	};
+})();"""
+
+_READ_AND_CLEAR_FINAL_SUBMIT_BLOCK_JS = r"""(() => {
+	const state = window.__ghFinalSubmitGuardState || null;
+	if (!state || !state.blocked) return null;
+	window.__ghFinalSubmitGuardState = {
+		blocked: false,
+		label: '',
+		text: '',
+		count: Number(state.count || 0),
+	};
+	return state;
+})();"""
+
 
 async def install_same_tab_guard(agent: "Agent") -> None:
 	"""Prevent sites from opening new tabs during job-application flows.
@@ -182,6 +342,53 @@ async def install_same_tab_guard(agent: "Agent") -> None:
 			await page.evaluate(_SAME_TAB_GUARD_JS)
 	except Exception as exc:
 		logger.debug("step.same_tab_guard_apply_failed", extra={"error": str(exc)})
+
+
+async def install_final_submit_guard(agent: "Agent", *, allow_submit: bool) -> None:
+	"""Install a runtime guard that blocks final application submission by default."""
+	if allow_submit:
+		return
+	try:
+		browser_session = getattr(agent, "browser_session", None)
+		if browser_session is None:
+			return
+
+		session_key = id(browser_session)
+		if session_key not in _FINAL_SUBMIT_GUARD_INSTALLED:
+			try:
+				await browser_session._cdp_add_init_script(_FINAL_SUBMIT_GUARD_JS)
+				_FINAL_SUBMIT_GUARD_INSTALLED.add(session_key)
+			except Exception as exc:
+				logger.debug("step.final_submit_guard_init_failed", extra={"error": str(exc)})
+
+		pages = []
+		try:
+			pages = list(await browser_session.get_pages())
+		except Exception:
+			pages = []
+		if not pages:
+			page = await browser_session.get_current_page()
+			if page:
+				pages = [page]
+		for page in pages:
+			await page.evaluate(_FINAL_SUBMIT_GUARD_JS)
+	except Exception as exc:
+		logger.debug("step.final_submit_guard_apply_failed", extra={"error": str(exc)})
+
+
+async def consume_blocked_final_submit(agent: "Agent") -> dict[str, Any] | None:
+	"""Return and clear the latest blocked final-submit attempt, if any."""
+	try:
+		browser_session = getattr(agent, "browser_session", None)
+		if browser_session is None:
+			return None
+		page = await browser_session.get_current_page()
+		if page is None:
+			return None
+		state = await page.evaluate(_READ_AND_CLEAR_FINAL_SUBMIT_BLOCK_JS)
+		return state if isinstance(state, dict) else None
+	except Exception:
+		return None
 
 PHASE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"upload.*resume|resume.*upload|attach.*resume", re.IGNORECASE), "Uploading resume"),
