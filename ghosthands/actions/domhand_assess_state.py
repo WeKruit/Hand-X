@@ -1018,6 +1018,14 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
 
     await page.evaluate(_build_inject_helpers_js())
     current_url = await _safe_page_url(page)
+
+    # Clear stale application state when URL changes (SPA hash routing, etc.)
+    _prev_state = getattr(browser_session, "_gh_last_application_state", None)
+    if isinstance(_prev_state, dict):
+        prev_url = str(_prev_state.get("page_url") or "")
+        if prev_url and prev_url != current_url:
+            delattr(browser_session, "_gh_last_application_state")
+
     page_context_key = await _get_page_context_key(page, fallback_marker=params.target_section)
     last_fill = getattr(browser_session, "_gh_last_domhand_fill", None)
     if (

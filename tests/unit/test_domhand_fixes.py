@@ -8371,3 +8371,167 @@ def test_prioritize_fillable_fields_puts_skill_type_before_skill_name():
     ordered = _prioritize_fillable_fields(fields, page_host="127.0.0.1")
 
     assert [field.field_id for field in ordered] == ["skill-type", "skill", "proficiency"]
+
+
+# ---------------------------------------------------------------------------
+# Fix 1B: _is_generic_marker
+# ---------------------------------------------------------------------------
+
+
+class TestIsGenericMarker:
+    def test_generic_markers(self):
+        from ghosthands.actions.domhand_fill import _is_generic_marker
+
+        assert _is_generic_marker("Job application form") is True
+        assert _is_generic_marker("Application") is True
+        assert _is_generic_marker("apply") is True
+        assert _is_generic_marker("  Job Application  ") is True
+        assert _is_generic_marker("") is True
+
+    def test_specific_markers_not_generic(self):
+        from ghosthands.actions.domhand_fill import _is_generic_marker
+
+        assert _is_generic_marker("Personal Information") is False
+        assert _is_generic_marker("Step 3: Experience :: Job application form") is False
+        assert _is_generic_marker("My Experience") is False
+        assert _is_generic_marker("auth create account") is False
+        assert _is_generic_marker("Education") is False
+
+
+# ---------------------------------------------------------------------------
+# Fix 3E: _canonical_section_name Oracle aliases
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalSectionNameOracle:
+    def test_oracle_education_aliases(self):
+        from ghosthands.dom.fill_label_match import _canonical_section_name
+
+        assert _canonical_section_name("College / University") == "education"
+        assert _canonical_section_name("College University") == "education"
+        assert _canonical_section_name("college / university") == "education"
+        assert _canonical_section_name("College and University") == "education"
+
+    def test_oracle_skills_alias(self):
+        from ghosthands.dom.fill_label_match import _canonical_section_name
+
+        assert _canonical_section_name("Technical Skills") == "skills"
+
+    def test_oracle_language_alias(self):
+        from ghosthands.dom.fill_label_match import _canonical_section_name
+
+        assert _canonical_section_name("Language Skills") == "languages"
+
+    def test_oracle_licenses_alias(self):
+        from ghosthands.dom.fill_label_match import _canonical_section_name
+
+        assert _canonical_section_name("Licenses and Certificates") == "licenses"
+        assert _canonical_section_name("Licenses / Certificates") == "licenses"
+
+    def test_existing_workday_aliases_preserved(self):
+        from ghosthands.dom.fill_label_match import _canonical_section_name
+
+        assert _canonical_section_name("My Experience") == "experience"
+        assert _canonical_section_name("My Information") == "information"
+        assert _canonical_section_name("My Education") == "education"
+
+    def test_slash_normalization(self):
+        from ghosthands.dom.fill_label_match import _canonical_section_name
+
+        assert _canonical_section_name("Licenses / Certificates") == "licenses"
+        assert _canonical_section_name("A / B / C") == "a b c"
+
+
+# ---------------------------------------------------------------------------
+# Fix 3F: _section_matches_scope with Oracle headings
+# ---------------------------------------------------------------------------
+
+
+class TestSectionMatchesScopeOracle:
+    def test_oracle_education_matches_education_scope(self):
+        from ghosthands.dom.fill_label_match import _section_matches_scope
+
+        assert _section_matches_scope("College / University", "education") is True
+        assert _section_matches_scope("College / University", "Education") is True
+
+    def test_oracle_education_matches_experience_scope(self):
+        from ghosthands.dom.fill_label_match import _section_matches_scope
+
+        assert _section_matches_scope("College / University", "experience") is True
+        assert _section_matches_scope("College / University", "My Experience") is True
+
+    def test_oracle_skills_matches_scopes(self):
+        from ghosthands.dom.fill_label_match import _section_matches_scope
+
+        assert _section_matches_scope("Technical Skills", "skills") is True
+        assert _section_matches_scope("Technical Skills", "experience") is True
+
+    def test_oracle_language_matches_scopes(self):
+        from ghosthands.dom.fill_label_match import _section_matches_scope
+
+        assert _section_matches_scope("Language Skills", "languages") is True
+        assert _section_matches_scope("Language Skills", "experience") is True
+
+    def test_oracle_section_self_match(self):
+        from ghosthands.dom.fill_label_match import _section_matches_scope
+
+        assert _section_matches_scope("College / University", "College / University") is True
+        assert _section_matches_scope("Technical Skills", "Technical Skills") is True
+
+    def test_empty_scope_matches_everything(self):
+        from ghosthands.dom.fill_label_match import _section_matches_scope
+
+        assert _section_matches_scope("College / University", "") is True
+        assert _section_matches_scope("College / University", None) is True
+
+    def test_unrelated_section_does_not_match(self):
+        from ghosthands.dom.fill_label_match import _section_matches_scope
+
+        assert _section_matches_scope("College / University", "voluntary disclosures") is False
+        assert _section_matches_scope("Technical Skills", "address") is False
+
+
+# ---------------------------------------------------------------------------
+# Fix 1B: build_page_context_key produces different keys for different steppers
+# ---------------------------------------------------------------------------
+
+
+class TestPageContextKeyDifferentiation:
+    def test_different_stepper_labels_produce_different_keys(self):
+        from ghosthands.runtime_learning import build_page_context_key
+
+        key1 = build_page_context_key(
+            url="https://example.com/app/apply",
+            page_marker="Step 1: Personal Info :: Job application form",
+        )
+        key2 = build_page_context_key(
+            url="https://example.com/app/apply",
+            page_marker="Step 3: Experience :: Job application form",
+        )
+        assert key1 != key2
+
+    def test_same_url_different_fallback_markers(self):
+        from ghosthands.runtime_learning import build_page_context_key
+
+        key_personal = build_page_context_key(
+            url="https://oracle.com/hcmUI/apply",
+            page_marker="Personal Information",
+        )
+        key_experience = build_page_context_key(
+            url="https://oracle.com/hcmUI/apply",
+            page_marker="Experience",
+        )
+        assert key_personal != key_experience
+
+    def test_generic_marker_same_url_same_key(self):
+        from ghosthands.runtime_learning import build_page_context_key
+
+        key1 = build_page_context_key(
+            url="https://oracle.com/hcmUI/apply",
+            page_marker="Job application form",
+        )
+        key2 = build_page_context_key(
+            url="https://oracle.com/hcmUI/apply",
+            page_marker="Job application form",
+        )
+        assert key1 == key2

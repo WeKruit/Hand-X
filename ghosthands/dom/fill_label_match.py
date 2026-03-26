@@ -642,6 +642,9 @@ def _preferred_field_label(field: FormField) -> str:
 
 def _canonical_section_name(value: str | None) -> str:
     normalized = normalize_name(value or "")
+    # Normalize `/` separators (Oracle uses "College / University")
+    normalized = normalized.replace(" / ", " ").replace("/", " ")
+    normalized = " ".join(normalized.split())
     replacements = {
         "my information": "information",
         "personal information": "information",
@@ -657,15 +660,38 @@ def _canonical_section_name(value: str | None) -> str:
         "voluntary self-identification": "self identify",
         "voluntary self identification of disability": "self identify",
         "voluntary self-identification of disability": "self identify",
+        # Oracle HCM repeater section headings
+        "college university": "education",
+        "college and university": "education",
+        "technical skills": "skills",
+        "language skills": "languages",
+        "licenses and certificates": "licenses",
+        "licenses certificates": "licenses",
+        "certifications and licenses": "licenses",
+        "work history": "experience",
     }
     return replacements.get(normalized, normalized)
 
 
 _SECTION_SCOPE_CHILDREN: dict[str, set[str]] = {
     # Workday nests Education / Languages under the page-level "My Experience"
-    # step. When domhand_fill targets "My Experience", it should treat those
-    # subsections as part of the same fill scope instead of excluding them.
-    "experience": {"education", "languages", "language", "skills", "certifications"},
+    # step. Oracle HCM similarly nests "College / University", "Technical Skills",
+    # "Language Skills" etc. under the page-level "Experience" step.
+    "experience": {
+        "education",
+        "languages",
+        "language",
+        "skills",
+        "certifications",
+        "licenses",
+        # Oracle HCM sub-section names (post-canonicalization)
+        "college university",
+        "technical skills",
+        "language skills",
+        "licenses and certificates",
+        "licenses certificates",
+        "work history",
+    },
     # Workday also nests address/phone/legal-name groups under the page-level
     # "My Information" step.
     "information": {
@@ -681,7 +707,17 @@ _SECTION_SCOPE_CHILDREN: dict[str, set[str]] = {
     },
     # Workday keeps the terms acknowledgment under Voluntary Disclosures.
     "voluntary disclosures": {"terms and conditions", "terms conditions"},
+    # Oracle HCM parent scopes
+    "education": {"college university", "college and university"},
+    "skills": {"technical skills"},
+    "languages": {"language skills"},
+    "licenses": {"licenses and certificates", "licenses certificates", "certifications and licenses"},
 }
+
+
+def _normalize_separator(value: str) -> str:
+    """Normalize `/` separators and collapse whitespace (pre-alias step)."""
+    return " ".join(normalize_name(value or "").replace(" / ", " ").replace("/", " ").split())
 
 
 def _section_matches_scope(section: str | None, scope: str | None) -> bool:
@@ -696,6 +732,10 @@ def _section_matches_scope(section: str | None, scope: str | None) -> bool:
         return True
     child_sections = _SECTION_SCOPE_CHILDREN.get(scope_norm)
     if child_sections and section_norm in child_sections:
+        return True
+    # Also check the pre-alias `/`-normalized form against child sets
+    section_raw_norm = _normalize_separator(section)
+    if child_sections and section_raw_norm and section_raw_norm in child_sections:
         return True
     section_tokens = {token for token in section_norm.split() if token not in {"my", "work", "personal"}}
     scope_tokens = {token for token in scope_norm.split() if token not in {"my", "work", "personal"}}

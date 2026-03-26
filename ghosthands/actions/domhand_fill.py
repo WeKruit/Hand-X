@@ -992,6 +992,27 @@ def _first_meaningful_section(fields: list[FormField] | None) -> str:
     return ""
 
 
+_GENERIC_PAGE_MARKERS: set[str] = {
+    "job application form",
+    "application",
+    "apply",
+    "application form",
+    "job application",
+    "apply for job",
+    "submit application",
+    "candidate application",
+    "careers",
+}
+
+
+def _is_generic_marker(marker: str) -> bool:
+    """Return True when the JS-detected page marker is too generic to differentiate SPA steps."""
+    if not marker:
+        return True
+    normalized = marker.strip().lower()
+    return normalized in _GENERIC_PAGE_MARKERS
+
+
 async def _get_page_context_key(
     page: Any,
     *,
@@ -1001,11 +1022,18 @@ async def _get_page_context_key(
     """Build a stable page-context key shared by fill, recovery, and assessment."""
     page_url = await _safe_page_url(page)
     snapshot = await _read_page_context_snapshot(page)
-    marker = (
-        str(snapshot.get("page_marker") or "").strip()
-        or str(fallback_marker or "").strip()
-        or _first_meaningful_section(fields)
-    )
+    js_marker = str(snapshot.get("page_marker") or "").strip()
+    fb_marker = str(fallback_marker or "").strip()
+
+    if js_marker and not _is_generic_marker(js_marker):
+        marker = js_marker
+    elif fb_marker:
+        marker = fb_marker
+    elif js_marker:
+        marker = js_marker
+    else:
+        marker = _first_meaningful_section(fields)
+
     heading_texts = snapshot.get("heading_texts") or []
     if not marker and heading_texts:
         marker = str(heading_texts[0] or "").strip()
@@ -1283,6 +1311,34 @@ def _build_inject_helpers_js() -> str:
 		}},
 
 		getSection: function(el) {{
+			// Oracle HCM repeater container detection — check before generic walk
+			var oracleContainerSels = [
+				'.profile-inline-form',
+				'.apply-flow-profile-item-section',
+				'.apply-flow-block',
+			];
+			for (var oi = 0; oi < oracleContainerSels.length; oi++) {{
+				var oc = el.closest ? el.closest(oracleContainerSels[oi]) : null;
+				if (oc) {{
+					var oTitle = oc.querySelector(
+						'.apply-flow-profile-item-section__title, .apply-flow-block__title, ' +
+						':scope > h3, :scope > h4, :scope > h2'
+					);
+					if (oTitle) {{
+						var oText = oTitle.textContent.trim();
+						if (oText && oText.length <= 80) return oText;
+					}}
+					var oPrev = oc.previousElementSibling;
+					while (oPrev) {{
+						if (oPrev.matches && oPrev.matches('h2, h3, h4')) {{
+							var opText = oPrev.textContent.trim();
+							if (opText && opText.length <= 80) return opText;
+						}}
+						oPrev = oPrev.previousElementSibling;
+					}}
+				}}
+			}}
+
 			var n = window.__ff.rootParent(el);
 			while (n) {{
 				var heading = n.querySelector(':scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > [data-automation-id="pageHeader"], :scope > [data-automation-id*="pageHeader"], :scope > [data-automation-id*="sectionTitle"], :scope > [data-automation-id*="stepTitle"]');

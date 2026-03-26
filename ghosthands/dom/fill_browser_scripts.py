@@ -42,6 +42,41 @@ _PAGE_CONTEXT_SCAN_JS = r"""() => {
 	const createAccountSignals = hasText([/\bcreate account\b/, /\bregister\b/, /\bsign up\b/]);
 	const signInSignals = hasText([/\bsign in\b/, /\blog in\b/, /\blogin\b/]);
 	const startDialogSignals = hasText([/\bstart your application\b/, /\bautofill with resume\b/, /\bapply manually\b/, /\buse my last application\b/]);
+	// Detect active stepper/wizard step for SPA multi-page forms
+	let stepperLabel = '';
+	const stepperSelectors = [
+		'[aria-current="step"]',
+		'[aria-current="page"]',
+		'.apply-flow-stepper [aria-selected="true"]',
+		'.apply-flow-pagination [aria-selected="true"]',
+		'.apply-flow-stepper .active',
+		'.apply-flow-pagination .active',
+		'[role="tablist"] [aria-selected="true"]',
+		'.stepper .step.active',
+		'.stepper .step.current',
+		'.progress-step.active',
+		'.progress-step.current',
+	];
+	for (const sel of stepperSelectors) {
+		const el = document.querySelector(sel);
+		if (el && visible(el)) {
+			const text = normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+			if (text && text.length <= 80) {
+				stepperLabel = text;
+				break;
+			}
+		}
+	}
+	if (!stepperLabel) {
+		const stepPattern = /\b(?:step\s+\d+|page\s+\d+|\d+\s+of\s+\d+)\b/i;
+		for (const text of allText) {
+			if (stepPattern.test(text) && text.length <= 40) {
+				stepperLabel = text;
+				break;
+			}
+		}
+	}
+
 	let pageMarker = '';
 	if (confirmPasswordVisible || createAccountSignals) {
 		pageMarker = 'auth create account';
@@ -49,11 +84,16 @@ _PAGE_CONTEXT_SCAN_JS = r"""() => {
 		pageMarker = 'auth native login';
 	} else if (startDialogSignals) {
 		pageMarker = 'auth entry';
+	} else if (stepperLabel && headingTexts.length > 0) {
+		pageMarker = stepperLabel + ' :: ' + headingTexts[0];
+	} else if (stepperLabel) {
+		pageMarker = stepperLabel;
 	} else if (headingTexts.length > 0) {
 		pageMarker = headingTexts[0];
 	}
 	return JSON.stringify({
 		page_marker: pageMarker,
+		stepper_label: stepperLabel,
 		heading_texts: headingTexts,
 	});
 }"""
