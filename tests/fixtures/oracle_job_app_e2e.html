@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<link rel="icon" href="data:,"/>
+<title>Oracle HCM — E2E Job Application (Test Fixture)</title>
+<style>
+:root{font-family:system-ui,sans-serif;line-height:1.5}
+body{max-width:720px;margin:0 auto;padding:1rem 1.25rem 3rem;background:#f5f5f5}
+h1{font-size:1.3rem;color:#1a1a2e}
+h2{font-size:1rem;margin-top:1.5rem;border-bottom:1px solid #ccc;padding-bottom:.25rem}
+.page{display:none}.page.active{display:block}
+.card{background:#fff;border-radius:8px;padding:1.25rem;margin:1rem 0;box-shadow:0 1px 4px rgba(0,0,0,.1)}
+.form-group{margin-bottom:1rem}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+label{display:block;font-weight:600;font-size:.9rem;margin-bottom:.3rem}
+.req{color:#d00}
+input[type=text],input[type=email],input[type=tel],input[type=url],input[type=number],
+select,textarea{width:100%;padding:.5rem;border:1px solid #999;border-radius:4px;font-size:.9rem;box-sizing:border-box}
+input:focus,select:focus{border-color:#0066cc;outline:none}
+.error input,.error select{border-color:#d00}
+.error-msg{color:#d00;font-size:.8rem;display:none}
+.error .error-msg{display:block}
+.cx-select-container{position:relative;width:100%}
+.cx-select-container input{width:100%;padding:.5rem 2rem .5rem .5rem}
+.cx-select-container .toggle{position:absolute;right:4px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:.8rem;color:#666;padding:4px}
+.cx-select-dropdown{position:absolute;top:100%;left:0;right:0;max-height:200px;overflow-y:auto;background:#fff;border:1px solid #ccc;border-top:none;border-radius:0 0 4px 4px;z-index:100;display:none;box-shadow:0 4px 8px rgba(0,0,0,.15)}
+.cx-select-dropdown.open{display:block}
+.cx-select-dropdown .option{padding:.4rem .6rem;cursor:pointer;font-size:.85rem}
+.cx-select-dropdown .option:hover{background:#e3f2fd}
+.cx-select-dropdown .no-results{padding:.6rem;color:#999;font-style:italic;font-size:.85rem}
+.pill-group{display:flex;gap:.5rem;flex-wrap:wrap}
+.pill{padding:.4rem .8rem;border:1px solid #999;border-radius:20px;cursor:pointer;font-size:.85rem;background:#fff;transition:all .15s}
+.pill[aria-pressed=true]{background:#0066cc;color:#fff;border-color:#0066cc}
+.committed-display{font-size:.75rem;color:#666;margin-top:.2rem}
+.committed-display .val{color:#0066cc;font-weight:600}
+.nav-bar{display:flex;justify-content:space-between;margin:1.5rem 0}
+.btn{padding:.6rem 1.5rem;border:none;border-radius:6px;cursor:pointer;font-size:.9rem;font-weight:600}
+.btn-primary{background:#0066cc;color:#fff}.btn-primary:hover{background:#0052a3}
+.btn-secondary{background:#e0e0e0;color:#333}.btn-secondary:hover{background:#ccc}
+.repeater-tile{border:1px solid #ddd;border-radius:8px;padding:.75rem 1rem;margin:.5rem 0;background:#fafafa;display:flex;justify-content:space-between;align-items:center}
+.repeater-tile .remove{cursor:pointer;color:#d00;font-size:.8rem}
+.add-btn{display:inline-block;padding:.5rem 1rem;border:2px solid #0066cc;border-radius:20px;color:#0066cc;cursor:pointer;font-size:.85rem;font-weight:600;background:#fff;margin:.5rem 0}
+.add-btn:hover{background:#e3f2fd}
+.inline-form{border:1px solid #0066cc;border-radius:8px;padding:1rem;margin:.5rem 0;background:#f0f7ff;display:none}
+.inline-form.open{display:block}
+.step-indicator{text-align:center;color:#666;font-size:.85rem;margin-bottom:1rem}
+.log{position:sticky;bottom:0;background:#111;color:#e8e8e8;padding:.5rem;font-size:.7rem;max-height:6rem;overflow:auto;border-radius:4px;margin-top:1.5rem;white-space:pre-wrap;font-family:monospace}
+</style>
+</head>
+<body>
+<h1>Acme Corp — Senior Engineer Application</h1>
+<div class="step-indicator" id="step-indicator">Step <span id="current-step">1</span> of 3</div>
+
+<!-- ============ PAGE 1: Personal Info ============ -->
+<div class="page active" id="page-1" data-page="1">
+<div class="card"><h2>Personal Information</h2>
+<div class="form-row">
+  <div class="form-group" id="fg-prefix">
+    <label>Prefix</label>
+    <div class="pill-group" data-ff-id="ff-prefix" role="group" aria-label="Prefix">
+      <span class="pill" role="option" aria-pressed="false" data-value="Mr.">Mr.</span>
+      <span class="pill" role="option" aria-pressed="false" data-value="Ms.">Ms.</span>
+      <span class="pill" role="option" aria-pressed="false" data-value="Mrs.">Mrs.</span>
+      <span class="pill" role="option" aria-pressed="false" data-value="Dr.">Dr.</span>
+    </div>
+  </div>
+  <div class="form-group"><label>Suffix</label>
+    <input type="text" id="ff-suffix" data-ff-id="ff-suffix" placeholder="Jr., Sr., etc."/>
+  </div>
+</div>
+<div class="form-row">
+  <div class="form-group"><label>First Name <span class="req">*</span></label>
+    <input type="text" id="ff-first-name" data-ff-id="ff-first-name" required/>
+    <div class="error-msg">First name is required</div>
+  </div>
+  <div class="form-group"><label>Last Name <span class="req">*</span></label>
+    <input type="text" id="ff-last-name" data-ff-id="ff-last-name" required/>
+    <div class="error-msg">Last name is required</div>
+  </div>
+</div>
+<div class="form-group"><label>Email <span class="req">*</span></label>
+  <input type="email" id="ff-email" data-ff-id="ff-email" required/>
+</div>
+<div class="form-group"><label>Phone <span class="req">*</span></label>
+  <input type="tel" id="ff-phone" data-ff-id="ff-phone" required/>
+</div>
+<div class="form-group"><label>Address Line 1 <span class="req">*</span></label>
+  <input type="text" id="ff-address1" data-ff-id="ff-address1" required/>
+</div>
+<div class="form-group"><label>Address Line 2</label>
+  <input type="text" id="ff-address2" data-ff-id="ff-address2"/>
+</div>
+<div class="form-row">
+  <div class="form-group"><label>Country <span class="req">*</span></label>
+    <div class="cx-select-container"><input type="text" id="ff-country" data-ff-id="ff-country" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" autocomplete="off" placeholder="Search country..." required/><span class="toggle" data-toggle="ff-country">&#x25BC;</span><div class="cx-select-dropdown" id="ff-country-list" role="listbox"></div></div>
+    <div class="committed-display">Committed: <span class="val" id="ff-country-val">—</span></div>
+  </div>
+  <div class="form-group"><label>ZIP Code</label>
+    <input type="text" id="ff-zip" data-ff-id="ff-zip"/>
+  </div>
+</div>
+<div class="form-row">
+  <div class="form-group"><label>State</label>
+    <div class="cx-select-container"><input type="text" id="ff-state" data-ff-id="ff-state" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" autocomplete="off" placeholder="Search state..."/><span class="toggle" data-toggle="ff-state">&#x25BC;</span><div class="cx-select-dropdown" id="ff-state-list" role="listbox"></div></div>
+    <div class="committed-display">Committed: <span class="val" id="ff-state-val">—</span></div>
+  </div>
+  <div class="form-group"><label>City</label>
+    <input type="text" id="ff-city" data-ff-id="ff-city"/>
+  </div>
+</div>
+<div class="form-group"><label>LinkedIn URL</label>
+  <input type="url" id="ff-linkedin" data-ff-id="ff-linkedin" placeholder="https://linkedin.com/in/..."/>
+</div>
+</div>
+<div class="nav-bar"><div></div><button class="btn btn-primary" onclick="goToPage(2)">Next</button></div>
+</div>
+
+<!-- ============ PAGE 2: Application Questions ============ -->
+<div class="page" id="page-2" data-page="2">
+<div class="card"><h2>Application Questions</h2>
+<div class="form-group"><label>Are you authorized to work in this country? <span class="req">*</span></label>
+  <div class="pill-group" data-ff-id="ff-work-auth" role="group"><span class="pill" role="option" aria-pressed="false" data-value="Yes">Yes</span><span class="pill" role="option" aria-pressed="false" data-value="No">No</span></div>
+</div>
+<div class="form-group"><label>Will you now or in the future require sponsorship? <span class="req">*</span></label>
+  <div class="pill-group" data-ff-id="ff-sponsorship" role="group"><span class="pill" role="option" aria-pressed="false" data-value="Yes">Yes</span><span class="pill" role="option" aria-pressed="false" data-value="No">No</span></div>
+</div>
+<!-- Conditional: appears after sponsorship=Yes -->
+<div class="form-group" id="fg-visa-type" style="display:none"><label>Visa Type</label>
+  <div class="cx-select-container"><input type="text" id="ff-visa-type" data-ff-id="ff-visa-type" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" autocomplete="off" placeholder="Select visa type..."/><span class="toggle" data-toggle="ff-visa-type">&#x25BC;</span><div class="cx-select-dropdown" id="ff-visa-type-list" role="listbox"></div></div>
+</div>
+<div class="form-group"><label>Have you previously worked at this company?</label>
+  <div class="pill-group" data-ff-id="ff-prev-employee" role="group"><span class="pill" role="option" aria-pressed="false" data-value="Yes">Yes</span><span class="pill" role="option" aria-pressed="false" data-value="No">No</span></div>
+</div>
+<div class="form-group"><label>Expected Salary (USD)</label>
+  <input type="text" id="ff-salary" data-ff-id="ff-salary" placeholder="e.g. 150000"/>
+</div>
+<div class="form-group"><label>How did you hear about us?</label>
+  <div class="cx-select-container"><input type="text" id="ff-source" data-ff-id="ff-source" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" autocomplete="off" placeholder="Select source..."/><span class="toggle" data-toggle="ff-source">&#x25BC;</span><div class="cx-select-dropdown" id="ff-source-list" role="listbox"></div></div>
+</div>
+</div>
+<div class="nav-bar"><button class="btn btn-secondary" onclick="goToPage(1)">Back</button><button class="btn btn-primary" onclick="goToPage(3)">Next</button></div>
+</div>
+
+<!-- ============ PAGE 3: Experience ============ -->
+<div class="page" id="page-3" data-page="3">
+<div class="card"><h2>Experience</h2>
+
+<!-- Education Section -->
+<div id="education-section">
+<h2>Education — College / University</h2>
+<div id="education-tiles"></div>
+<div id="education-inline" class="inline-form" data-profile-type="education">
+  <div class="form-row">
+    <div class="form-group"><label>School <span class="req">*</span></label>
+      <div class="cx-select-container"><input type="text" id="ff-school" data-ff-id="ff-school" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" autocomplete="off" placeholder="Search school..." required/><span class="toggle" data-toggle="ff-school">&#x25BC;</span><div class="cx-select-dropdown" id="ff-school-list" role="listbox"></div></div>
+      <div class="committed-display">Committed: <span class="val" id="ff-school-val">—</span></div>
+    </div>
+    <div class="form-group"><label>Degree <span class="req">*</span></label>
+      <div class="cx-select-container"><input type="text" id="ff-degree" data-ff-id="ff-degree" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" autocomplete="off" placeholder="Search degree..." required/><span class="toggle" data-toggle="ff-degree">&#x25BC;</span><div class="cx-select-dropdown" id="ff-degree-list" role="listbox"></div></div>
+      <div class="committed-display">Committed: <span class="val" id="ff-degree-val">—</span></div>
+    </div>
+  </div>
+  <div class="form-row">
+    <div class="form-group"><label>Major <span class="req">*</span></label>
+      <div class="cx-select-container"><input type="text" id="ff-major" data-ff-id="ff-major" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" autocomplete="off" placeholder="Search major..." required/><span class="toggle" data-toggle="ff-major">&#x25BC;</span><div class="cx-select-dropdown" id="ff-major-list" role="listbox"></div></div>
+    </div>
+    <div class="form-group"><label>Major 2 / Minor</label>
+      <div class="cx-select-container"><input type="text" id="ff-minor" data-ff-id="ff-minor" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" autocomplete="off" placeholder="Search..."/><span class="toggle" data-toggle="ff-minor">&#x25BC;</span><div class="cx-select-dropdown" id="ff-minor-list" role="listbox"></div></div>
+    </div>
+  </div>
+  <div class="form-row">
+    <div class="form-group"><label>GPA</label>
+      <select id="ff-gpa" data-ff-id="ff-gpa"><option value="">Select GPA</option></select>
+    </div>
+    <div class="form-group"><label>Did you graduate? <span class="req">*</span></label>
+      <div class="pill-group" data-ff-id="ff-graduated" role="group"><span class="pill" role="option" aria-pressed="false" data-value="Yes">Yes</span><span class="pill" role="option" aria-pressed="false" data-value="No">No</span></div>
+    </div>
+  </div>
+  <div class="form-row">
+    <div class="form-group"><label>Country</label>
+      <div class="cx-select-container"><input type="text" id="ff-edu-country" data-ff-id="ff-edu-country" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" autocomplete="off"/><span class="toggle" data-toggle="ff-edu-country">&#x25BC;</span><div class="cx-select-dropdown" id="ff-edu-country-list" role="listbox"></div></div>
+    </div>
+    <div class="form-group"><label>State</label>
+      <div class="cx-select-container"><input type="text" id="ff-edu-state" data-ff-id="ff-edu-state" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" autocomplete="off"/><span class="toggle" data-toggle="ff-edu-state">&#x25BC;</span><div class="cx-select-dropdown" id="ff-edu-state-list" role="listbox"></div></div>
+    </div>
+  </div>
+  <!-- Conditional: dates appear after degree is selected -->
+  <div id="date-fields" style="display:none">
+  <div class="form-row">
+    <div class="form-group"><label>Start Month</label><select id="ff-start-month" data-ff-id="ff-start-month"><option value="">Month</option></select></div>
+    <div class="form-group"><label>Start Year</label><select id="ff-start-year" data-ff-id="ff-start-year"><option value="">Year</option></select></div>
+  </div>
+  <div class="form-row">
+    <div class="form-group"><label>End Month</label><select id="ff-end-month" data-ff-id="ff-end-month"><option value="">Month</option></select></div>
+    <div class="form-group"><label>End Year</label><select id="ff-end-year" data-ff-id="ff-end-year"><option value="">Year</option></select></div>
+  </div>
+  </div>
+</div>
+<div class="add-btn" id="add-education-btn" onclick="toggleEducationForm()">Add Education</div>
+</div>
+
+<!-- Skills Section -->
+<div id="skills-section">
+<h2>Technical Skills</h2>
+<div id="skill-tiles"></div>
+<div id="skill-inline" class="inline-form">
+  <div class="form-group"><label>Skill</label>
+    <div class="cx-select-container"><input type="text" id="ff-skill" data-ff-id="ff-skill" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" autocomplete="off" placeholder="Search skill..."/><span class="toggle" data-toggle="ff-skill">&#x25BC;</span><div class="cx-select-dropdown" id="ff-skill-list" role="listbox"></div></div>
+  </div>
+</div>
+<div class="add-btn" id="add-skill-btn" onclick="toggleSkillForm()">Add Skill</div>
+</div>
+
+<!-- Languages Section -->
+<div id="languages-section">
+<h2>Languages</h2>
+<div id="language-tiles"></div>
+<div id="language-inline" class="inline-form">
+  <div class="form-row">
+    <div class="form-group"><label>Language</label>
+      <div class="cx-select-container"><input type="text" id="ff-language" data-ff-id="ff-language" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" autocomplete="off" placeholder="Search language..."/><span class="toggle" data-toggle="ff-language">&#x25BC;</span><div class="cx-select-dropdown" id="ff-language-list" role="listbox"></div></div>
+    </div>
+    <div class="form-group"><label>Proficiency</label>
+      <select id="ff-proficiency" data-ff-id="ff-proficiency">
+        <option value="">Select</option><option>Native</option><option>Fluent</option><option>Advanced</option><option>Intermediate</option><option>Basic</option>
+      </select>
+    </div>
+  </div>
+</div>
+<div class="add-btn" id="add-language-btn" onclick="toggleLanguageForm()">Add Language</div>
+</div>
+
+<!-- Employer Section -->
+<div id="employer-section">
+<h2>Work Experience</h2>
+<div class="form-group"><label>Name of Latest Employer</label>
+  <div class="cx-select-container"><input type="text" id="ff-employer" data-ff-id="ff-employer" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" autocomplete="off" placeholder="Search employer..."/><span class="toggle" data-toggle="ff-employer">&#x25BC;</span><div class="cx-select-dropdown" id="ff-employer-list" role="listbox"></div></div>
+  <div class="committed-display">Committed: <span class="val" id="ff-employer-val">—</span></div>
+</div>
+</div>
+</div>
+<div class="nav-bar"><button class="btn btn-secondary" onclick="goToPage(2)">Back</button><button class="btn btn-primary" onclick="alert('Review page — not submitting')">Submit</button></div>
+</div>
+
+<div class="log" id="log">E2E fixture loaded.\n</div>
+
+<script>
+// =========================================================================
+// Data
+// =========================================================================
+let UNIVERSITIES=[];
+const DEGREES=["Associate of Arts (AA)","Associate of Science (AS)","Bachelor of Arts (BA)","Bachelor of Science (BS)","Bachelor of Business Administration (BBA)","Bachelor of Engineering (BE)","Bachelor of Fine Arts (BFA)","Bachelors","Master of Arts (MA)","Master of Science (MS)","Master of Business Administration (MBA)","Master of Engineering (ME)","Masters","Doctor of Philosophy (PhD)","Doctor of Medicine (MD)","Doctor of Jurisprudence (JD)","High School Diploma","GED","Certificate","Postgraduate Diploma"];
+const MAJORS=["Accounting","Aerospace Engineering","Anthropology","Applied Mathematics","Architecture","Art History","Artificial Intelligence","Biochemistry","Biology","Biomedical Engineering","Business Administration","Chemical Engineering","Chemistry","Civil Engineering","Classics","Cognitive Science","Communication","Computer Engineering","Computer Science","Computer Science and Engineering","Computer Science with Artificial Intelligence","Creative Writing","Criminal Justice","Cybersecurity","Data Science","Design","Economics","Education","Electrical Engineering","English","Entrepreneurship","Environmental Engineering","Environmental Science","Finance","Food Science","Genetics","Geography","Geology","Graphic Design","Health Sciences","History","Human Resources","Industrial Engineering","Information Systems","Information Technology","International Business","International Relations","Journalism","Kinesiology","Law","Linguistics","Management","Marine Biology","Marketing","Materials Science","Mathematics","Mechanical Engineering","Media Studies","Microbiology","Molecular Biology","Music","Nanotechnology","Neuroscience","Nursing","Nutrition","Operations Management","Pharmacology","Philosophy","Photography","Physical Therapy","Physics","Political Science","Psychology","Public Health","Public Policy","Robotics","Social Work","Sociology","Software Engineering","Spanish","Speech Pathology","Sports Management","Statistics","Supply Chain Management","Systems Engineering","Theater","Urban Planning","Veterinary Science","Visual Arts","Zoology"];
+const COUNTRIES=["Afghanistan","Albania","Algeria","Argentina","Armenia","Australia","Austria","Bangladesh","Belgium","Bolivia","Brazil","Bulgaria","Cambodia","Cameroon","Canada","Chile","China","Colombia","Costa Rica","Croatia","Cuba","Czech Republic","Denmark","Dominican Republic","Ecuador","Egypt","El Salvador","Estonia","Ethiopia","Finland","France","Georgia","Germany","Ghana","Greece","Guatemala","Haiti","Honduras","Hungary","Iceland","India","Indonesia","Iran","Iraq","Ireland","Israel","Italy","Jamaica","Japan","Jordan","Kazakhstan","Kenya","Korea, South","Kuwait","Latvia","Lebanon","Lithuania","Luxembourg","Malaysia","Mexico","Mongolia","Morocco","Myanmar","Nepal","Netherlands","New Zealand","Nicaragua","Nigeria","Norway","Oman","Pakistan","Panama","Paraguay","Peru","Philippines","Poland","Portugal","Qatar","Romania","Russia","Saudi Arabia","Senegal","Serbia","Singapore","Slovakia","Slovenia","South Africa","Spain","Sri Lanka","Sudan","Sweden","Switzerland","Syria","Taiwan","Tanzania","Thailand","Trinidad and Tobago","Tunisia","Turkey","Uganda","Ukraine","United Arab Emirates","United Kingdom","United States","Uruguay","Uzbekistan","Venezuela","Vietnam","Yemen","Zambia","Zimbabwe"];
+const STATES=["Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa","Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan","Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire","New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio","Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota","Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia","Wisconsin","Wyoming"];
+const EMPLOYERS=["Other","Accenture","Adobe","Airbnb","Amazon","Apple","Bank of America","BlackRock","Bloomberg","Boeing","Capital One","Cisco","Citigroup","Coinbase","Deloitte","Dell","Disney","eBay","EY","Facebook (Meta)","FedEx","Ford","General Electric","Goldman Sachs","Google","HP","IBM","Intel","Intuit","JPMorgan Chase","KPMG","LinkedIn","Lockheed Martin","Lyft","Mastercard","McKinsey","Meta Platforms","Microsoft","Morgan Stanley","Netflix","Nike","Nvidia","Oracle","Palantir","PayPal","Pinterest","PwC","Qualcomm","Salesforce","Samsung","SAP","Shopify","Siemens","Snap Inc.","Sony","Spotify","Stripe","Target","Tesla","TikTok","Twitter (X)","Uber","UBS","Verizon","Visa","VMware","Walmart","Wells Fargo","Workday","Zoom"];
+const SKILLS=["Python","JavaScript","TypeScript","Java","C++","C#","Go","Rust","Ruby","Swift","Kotlin","SQL","PostgreSQL","MySQL","MongoDB","Redis","Docker","Kubernetes","AWS","Azure","GCP","Terraform","Git","React","Angular","Vue.js","Node.js","Django","Flask","Spring Boot","GraphQL","REST API","gRPC","TensorFlow","PyTorch","Machine Learning","Deep Learning","NLP","Computer Vision","Data Analysis","Pandas","NumPy","Scikit-learn","Apache Spark","Kafka","RabbitMQ","Elasticsearch","Linux","Bash","CI/CD","Jenkins","GitHub Actions","Agile","Scrum","Jira","Figma","Tableau","Power BI","Excel","R","MATLAB","Hadoop","Hive","Airflow","dbt","Snowflake","BigQuery","Redshift","Databricks","LangChain","OpenAI API","RAG","Vector Databases","Playwright","Selenium","Cypress","Jest","pytest","JUnit"];
+const LANGUAGES=["Afrikaans","Albanian","Arabic","Armenian","Bengali","Bosnian","Bulgarian","Burmese","Cantonese","Catalan","Chinese (Mandarin)","Croatian","Czech","Danish","Dutch","English","Estonian","Filipino","Finnish","French","Georgian","German","Greek","Gujarati","Haitian Creole","Hebrew","Hindi","Hungarian","Icelandic","Indonesian","Italian","Japanese","Javanese","Kannada","Kazakh","Khmer","Korean","Kurdish","Lao","Latvian","Lithuanian","Malay","Malayalam","Marathi","Mongolian","Nepali","Norwegian","Pashto","Persian (Farsi)","Polish","Portuguese","Punjabi","Romanian","Russian","Serbian","Sinhala","Slovak","Slovenian","Somali","Spanish","Swahili","Swedish","Tagalog","Tamil","Telugu","Thai","Turkish","Ukrainian","Urdu","Uzbek","Vietnamese","Welsh","Yoruba","Zulu"];
+const VISA_TYPES=["H-1B","H-2B","L-1","O-1","TN","E-2","F-1 OPT","J-1","Green Card","Permanent Resident","Other"];
+const SOURCES=["Company Website","LinkedIn","Indeed","Glassdoor","Referral","University Career Fair","Handshake","Job Board","Social Media","Recruiter","Other"];
+const MONTHS=["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+// GPA
+const gpaSelect=document.getElementById('ff-gpa');
+for(let i=0;i<=43;i++){const v=(i/10).toFixed(1);const o=document.createElement('option');o.value=v;o.textContent=v;gpaSelect.appendChild(o);}
+// Month/Year selects
+['ff-start-month','ff-end-month'].forEach(id=>{const s=document.getElementById(id);MONTHS.forEach(m=>{const o=document.createElement('option');o.value=m;o.textContent=m;s.appendChild(o);});});
+['ff-start-year','ff-end-year'].forEach(id=>{const s=document.getElementById(id);for(let y=2030;y>=1970;y--){const o=document.createElement('option');o.value=y;o.textContent=y;s.appendChild(o);}});
+
+// =========================================================================
+// Logging
+// =========================================================================
+const logEl=document.getElementById('log');
+function log(m){const t=new Date().toISOString().slice(11,23);logEl.textContent+=`[${t}] ${m}\n`;logEl.scrollTop=logEl.scrollHeight;}
+
+// =========================================================================
+// Oracle Combobox Engine
+// =========================================================================
+class Combobox{
+  constructor(inputId,listboxId,valId,options,{maxVisible=10,debounceMs=150}={}){
+    this.input=document.getElementById(inputId);
+    this.listbox=document.getElementById(listboxId);
+    this.valEl=valId?document.getElementById(valId):null;
+    this.allOptions=options;this.maxVisible=maxVisible;
+    this.debounceMs=debounceMs;this.committedValue='';
+    this.debounceTimer=null;this.filtered=[];this.hi=-1;
+    this._setup();
+  }
+  _setup(){
+    // Oracle ignores programmatic el.value changes — only real keyboard
+    // events trigger the filter.  Track whether the latest value change came
+    // from a trusted keyboard event (isTrusted=true on keyup/keydown).
+    this._lastKeyTrusted=false;
+    this.input.addEventListener('keydown',(e)=>{this._lastKeyTrusted=e.isTrusted;});
+    this.input.addEventListener('keyup',(e)=>{this._lastKeyTrusted=e.isTrusted;clearTimeout(this.debounceTimer);this.debounceTimer=setTimeout(()=>this._filter(),this.debounceMs);});
+    this.input.addEventListener('input',()=>{
+      // Only filter on input if the previous key event was trusted (real keyboard).
+      // JS el.value='...' + dispatchEvent('input') won't have a preceding trusted key.
+      if(!this._lastKeyTrusted)return;
+      clearTimeout(this.debounceTimer);this.debounceTimer=setTimeout(()=>this._filter(),this.debounceMs);
+    });
+    this.input.addEventListener('keydown',e=>{if(e.key==='ArrowDown'){e.preventDefault();this._move(1);}else if(e.key==='ArrowUp'){e.preventDefault();this._move(-1);}else if(e.key==='Enter'){e.preventDefault();if(this.hi>=0&&this.filtered[this.hi])this._commit(this.filtered[this.hi]);}else if(e.key==='Escape')this._close();});
+    this.input.addEventListener('focus',()=>{if(this.input.value.trim())this._filter();else this._showAll();});
+    const toggle=this.input.parentElement.querySelector('.toggle');
+    if(toggle)toggle.addEventListener('click',()=>{if(this.listbox.classList.contains('open'))this._close();else{this._showAll();this.input.focus();}});
+    document.addEventListener('click',e=>{if(!this.input.parentElement.contains(e.target))this._close();});
+  }
+  _filter(){
+    const q=this.input.value.trim().toLowerCase();
+    if(!q){this._showAll();return;}
+    const sw=[],co=[];
+    for(const o of this.allOptions){const l=o.toLowerCase();if(l.startsWith(q))sw.push(o);else if(l.includes(q))co.push(o);}
+    this.filtered=[...sw,...co].slice(0,this.maxVisible);this._render();this._open();
+    log(`Filter "${q}" → ${sw.length+co.length} total, showing ${this.filtered.length}`);
+  }
+  _showAll(){this.filtered=this.allOptions.slice(0,this.maxVisible);this._render();this._open();}
+  _render(){
+    this.listbox.innerHTML='';this.hi=-1;
+    if(!this.filtered.length){const d=document.createElement('div');d.className='no-results';d.textContent='No results found';this.listbox.appendChild(d);return;}
+    this.filtered.forEach((o,i)=>{const d=document.createElement('div');d.className='option';d.setAttribute('role','option');d.setAttribute('data-value',o);d.textContent=o;d.addEventListener('click',()=>this._commit(o));d.addEventListener('mouseenter',()=>{this.hi=i;this._hl();});this.listbox.appendChild(d);});
+  }
+  _move(d){if(!this.filtered.length)return;this.hi=Math.max(0,Math.min(this.filtered.length-1,this.hi+d));this._hl();}
+  _hl(){this.listbox.querySelectorAll('.option').forEach((e,i)=>e.classList.toggle('highlighted',i===this.hi));}
+  _commit(v){this.input.value=v;this.committedValue=v;this.input.dataset.committedValue=v;if(this.valEl)this.valEl.textContent=v;this._close();this.input.dispatchEvent(new Event('input',{bubbles:true}));this.input.dispatchEvent(new Event('change',{bubbles:true}));log(`Committed: "${v}"`);
+    // Conditional: show date fields after degree selection
+    if(this.input.id==='ff-degree'){document.getElementById('date-fields').style.display='';reRegisterFf();}
+    // Conditional: show visa type after sponsorship=Yes
+  }
+  _open(){this.listbox.classList.add('open');this.input.setAttribute('aria-expanded','true');}
+  _close(){this.listbox.classList.remove('open');this.input.setAttribute('aria-expanded','false');this.hi=-1;}
+}
+
+// =========================================================================
+// Pill groups
+// =========================================================================
+document.querySelectorAll('.pill-group').forEach(group=>{
+  group.querySelectorAll('.pill').forEach(pill=>{
+    pill.addEventListener('click',()=>{
+      group.querySelectorAll('.pill').forEach(p=>p.setAttribute('aria-pressed','false'));
+      pill.setAttribute('aria-pressed','true');
+      log(`Pill: ${group.getAttribute('data-ff-id')} = ${pill.getAttribute('data-value')}`);
+      // Conditional: sponsorship=Yes shows visa type
+      if(group.getAttribute('data-ff-id')==='ff-sponsorship'&&pill.getAttribute('data-value')==='Yes'){
+        document.getElementById('fg-visa-type').style.display='';reRegisterFf();
+      }
+    });
+  });
+});
+
+// =========================================================================
+// Repeater toggles
+// =========================================================================
+function toggleEducationForm(){
+  const f=document.getElementById('education-inline');
+  f.classList.toggle('open');reRegisterFf();
+  log('Toggle education form: '+(f.classList.contains('open')?'open':'closed'));
+}
+function toggleSkillForm(){
+  const f=document.getElementById('skill-inline');
+  f.classList.toggle('open');reRegisterFf();
+  log('Toggle skill form: '+(f.classList.contains('open')?'open':'closed'));
+}
+function toggleLanguageForm(){
+  const f=document.getElementById('language-inline');
+  f.classList.toggle('open');reRegisterFf();
+  log('Toggle language form: '+(f.classList.contains('open')?'open':'closed'));
+}
+
+// =========================================================================
+// Page navigation (SPA)
+// =========================================================================
+function goToPage(n){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById('page-'+n).classList.add('active');
+  document.getElementById('current-step').textContent=n;
+  window.location.hash='#page'+n;
+  reRegisterFf();
+  log('Navigate to page '+n);
+}
+
+// =========================================================================
+// __ff bridge
+// =========================================================================
+function reRegisterFf(){
+  window.__ff=window.__ff||{_fields:{},register(id,el){this._fields[id]=el;},byId(id){return this._fields[id]||document.querySelector('[data-ff-id="'+id+'"]');}};
+  document.querySelectorAll('[data-ff-id]').forEach(el=>{window.__ff.register(el.getAttribute('data-ff-id'),el);});
+}
+
+// =========================================================================
+// Init
+// =========================================================================
+async function init(){
+  try{const r=await fetch('universities.json');if(r.ok)UNIVERSITIES=await r.json();log(`Loaded ${UNIVERSITIES.length} universities`);}
+  catch(e){log('universities.json not found, using small fallback');UNIVERSITIES=["9 Eylul University","California Institute of Technology","Columbia University","Cornell University","Harvard University","Massachusetts Institute of Technology","New York University","Princeton University","Stanford University","University of California, Berkeley","University of California, Los Angeles","University of Michigan","Yale University"];}
+
+  window._cb={
+    school:new Combobox('ff-school','ff-school-list','ff-school-val',UNIVERSITIES),
+    degree:new Combobox('ff-degree','ff-degree-list','ff-degree-val',DEGREES),
+    major:new Combobox('ff-major','ff-major-list',null,MAJORS),
+    minor:new Combobox('ff-minor','ff-minor-list',null,MAJORS),
+    country:new Combobox('ff-country','ff-country-list','ff-country-val',COUNTRIES),
+    state:new Combobox('ff-state','ff-state-list','ff-state-val',STATES),
+    eduCountry:new Combobox('ff-edu-country','ff-edu-country-list',null,COUNTRIES),
+    eduState:new Combobox('ff-edu-state','ff-edu-state-list',null,STATES),
+    employer:new Combobox('ff-employer','ff-employer-list','ff-employer-val',EMPLOYERS),
+    skill:new Combobox('ff-skill','ff-skill-list',null,SKILLS),
+    language:new Combobox('ff-language','ff-language-list',null,LANGUAGES),
+    visaType:new Combobox('ff-visa-type','ff-visa-type-list',null,VISA_TYPES),
+    source:new Combobox('ff-source','ff-source-list',null,SOURCES),
+  };
+  reRegisterFf();
+  log('All comboboxes initialized');
+}
+init();
+</script>
+</body>
+</html>

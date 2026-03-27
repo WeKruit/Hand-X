@@ -1318,6 +1318,52 @@ _ORACLE_COMBOBOX_READ_VALUE_JS = r"""
 """
 
 
+def _oracle_combobox_search_terms(value: str) -> list[str]:
+    """Generate progressively shorter search terms for Oracle combobox retry.
+
+    When the full value doesn't match Oracle's naming format (e.g. comma vs
+    dash, abbreviation), shorter sub-phrases are more likely to filter the
+    dropdown to a small set containing the target.
+    """
+    raw = re.sub(r"\s+", " ", (value or "").strip())
+    if not raw:
+        return []
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def add(t: str) -> None:
+        t = t.strip()
+        if not t or t.lower() in seen:
+            return
+        seen.add(t.lower())
+        terms.append(t)
+
+    # 1. Full value (stripped of parenthetical suffix)
+    stripped = re.sub(r"\s*\([^)]*\)\s*$", "", raw).strip()
+    add(stripped)
+    # 2. Parenthetical abbreviation (e.g. "UCLA" from "(UCLA)")
+    paren = re.search(r"\(([^)]{2,})\)\s*$", raw)
+    if paren:
+        add(paren.group(1))
+    # 3. Comma segments: "University of California, Los Angeles" → "Los Angeles"
+    parts = [p.strip() for p in stripped.split(",") if p.strip()]
+    if len(parts) >= 2:
+        # Last segment (e.g. "Los Angeles")
+        add(parts[-1])
+        # Last two segments combined
+        add(", ".join(parts[-2:]))
+    # 4. First significant word (skip stop words + school-generic words)
+    _stop = {
+        "of", "and", "in", "the", "a", "an", "for", "to", "at", "by",
+        "university", "college", "institute", "school", "academy",
+        "polytechnic", "new", "state",
+    }
+    words = [w for w in stripped.split() if w.lower() not in _stop and len(w) > 3]
+    if words:
+        add(words[0])
+    return terms
+
+
 async def _fill_oracle_combobox_outcome(
     page: Any,
     field: FormField,
@@ -1328,7 +1374,10 @@ async def _fill_oracle_combobox_outcome(
 
     Oracle's React/Fusion framework ignores values set via JS — it requires
     actual keystrokes to trigger the autocomplete and commit the selection.
-    Uses page.evaluate() + _type_text_compat() (compatible with browser-use).
+
+    When the first type attempt doesn't find a matching option (naming format
+    differs between profile and Oracle's database), retries with progressively
+    shorter search terms derived from the value.
     """
     ff_id = field.field_id
     if not value:
@@ -1342,45 +1391,97 @@ async def _fill_oracle_combobox_outcome(
             logger.debug(f"skip {tag} (oracle combobox, element not found)")
             return _fill_outcome(False)
 
-        await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
-        await asyncio.sleep(0.15)
+        # Build search terms: full value first, then shorter alternatives.
+        search_terms = _oracle_combobox_search_terms(value)
+        if not search_terms:
+            search_terms = [value]
 
-        await _type_text_compat(page, value, delay=30)
-        await asyncio.sleep(1.0)
-
-        click_raw = await page.evaluate(_ORACLE_COMBOBOX_CLICK_BEST_OPTION_JS, ff_id, value)
-        click_result = json.loads(click_raw) if isinstance(click_raw, str) else click_raw
         matched_label: str | None = None
-        if isinstance(click_result, dict) and click_result.get("clicked"):
-            matched_label = click_result.get("text")
-            await asyncio.sleep(0.3)
+        effective = ""
 
-        await asyncio.sleep(1.2)
+        for attempt_idx, term in enumerate(search_terms):
+            await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
+            await asyncio.sleep(0.15)
 
-        val_raw = await page.evaluate(_ORACLE_COMBOBOX_READ_VALUE_JS, ff_id)
-        val_result = json.loads(val_raw) if isinstance(val_raw, str) else val_raw
-        current_val = (val_result.get("value") or "") if isinstance(val_result, dict) else ""
-        committed = (val_result.get("committed") or "") if isinstance(val_result, dict) else ""
-        effective = committed or current_val
+            await _type_text_compat(page, term, delay=30)
+            await asyncio.sleep(1.0)
 
-        if not effective.strip():
-            logger.warning(
-                "domhand.oracle_combobox_rejected",
+            # Try to click the best matching option — match against the
+            # ORIGINAL desired value, not the search term.
+            click_raw = await page.evaluate(
+                _ORACLE_COMBOBOX_CLICK_BEST_OPTION_JS, ff_id, value,
+            )
+            click_result = json.loads(click_raw) if isinstance(click_raw, str) else click_raw
+            if isinstance(click_result, dict) and click_result.get("clicked"):
+                matched_label = click_result.get("text")
+                await asyncio.sleep(0.3)
+
+            await asyncio.sleep(1.2)
+
+            val_raw = await page.evaluate(_ORACLE_COMBOBOX_READ_VALUE_JS, ff_id)
+            val_result = json.loads(val_raw) if isinstance(val_raw, str) else val_raw
+            current_val = (val_result.get("value") or "") if isinstance(val_result, dict) else ""
+            committed = (val_result.get("committed") or "") if isinstance(val_result, dict) else ""
+            effective = committed or current_val
+
+            if effective.strip():
+                logger.debug(
+                    "domhand.oracle_combobox_ok",
+                    field_label=field.name,
+                    value=effective[:60],
+                    matched_label=(matched_label or "")[:60],
+                    search_term=term[:60],
+                    attempt=attempt_idx + 1,
+                )
+                if await _field_has_validation_error(page, ff_id):
+                    return _fill_outcome(False)
+                return _fill_outcome(True, matched_label=matched_label)
+
+            # No match with this term — log and try the next one.
+            logger.debug(
+                "domhand.oracle_combobox_retry",
+                field_label=field.name,
+                search_term=term[:60],
+                attempt=attempt_idx + 1,
+                remaining=len(search_terms) - attempt_idx - 1,
+            )
+
+        # All search terms exhausted — employer fallback to "Other".
+        _is_employer = any(
+            token in normalize_name(field.name or "")
+            for token in ("employer", "company", "organization")
+        )
+        if _is_employer and value.lower() != "other":
+            logger.info(
+                "domhand.oracle_combobox_employer_fallback",
                 field_label=field.name,
                 attempted=value[:60],
+                fallback="Other",
             )
-            return _fill_outcome(False)
+            await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
+            await asyncio.sleep(0.15)
+            await _type_text_compat(page, "Other", delay=30)
+            await asyncio.sleep(1.0)
+            click_raw = await page.evaluate(
+                _ORACLE_COMBOBOX_CLICK_BEST_OPTION_JS, ff_id, "Other",
+            )
+            click_result = json.loads(click_raw) if isinstance(click_raw, str) else click_raw
+            if isinstance(click_result, dict) and click_result.get("clicked"):
+                matched_label = click_result.get("text")
+                await asyncio.sleep(1.2)
+                val_raw = await page.evaluate(_ORACLE_COMBOBOX_READ_VALUE_JS, ff_id)
+                val_result = json.loads(val_raw) if isinstance(val_raw, str) else val_raw
+                effective = (val_result.get("committed") or val_result.get("value") or "") if isinstance(val_result, dict) else ""
+                if effective.strip():
+                    return _fill_outcome(True, matched_label=matched_label)
 
-        if await _field_has_validation_error(page, ff_id):
-            return _fill_outcome(False)
-
-        logger.debug(
-            "domhand.oracle_combobox_ok",
+        logger.warning(
+            "domhand.oracle_combobox_rejected",
             field_label=field.name,
-            value=effective[:60],
-            matched_label=(matched_label or "")[:60],
+            attempted=value[:60],
+            search_terms_tried=[t[:40] for t in search_terms],
         )
-        return _fill_outcome(True, matched_label=matched_label)
+        return _fill_outcome(False)
 
     except Exception as exc:
         logger.warning(

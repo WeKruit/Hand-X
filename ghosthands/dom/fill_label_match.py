@@ -516,6 +516,13 @@ def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
             return None
         if field.field_type == "select" and degree_family_answer:
             return degree_family_answer
+        # Select fields without known options (Oracle custom dropdowns): reject
+        # values that look like sentences/descriptions rather than option labels.
+        # Real dropdown options are short (e.g. "N/A", "H-1B", "Virginia").
+        # Sentence-like values indicate the profile resolver returned descriptive
+        # text, not an actual option — let LLM handle with enriched options.
+        if field.field_type == "select" and (len(text) > 60 or text.count(" ") > 6):
+            return None
         return text
 
     text_norm = normalize_name(text)

@@ -109,7 +109,11 @@ def _strip_phone_code_norm(norm_text: str) -> str:
     """Remove trailing phone-code digits from a normalized country name.
 
     After normalization, "+1" becomes "1", "+44" becomes "44".
+    Only applied when the text has letters (country names like "united states 1"),
+    not pure numeric strings like GPA values "3.91".
     """
+    if not any(c.isalpha() for c in norm_text):
+        return norm_text
     return _PHONE_CODE_SUFFIX_NORM_RE.sub("", norm_text).strip()
 
 
@@ -174,6 +178,30 @@ def match_dropdown_option(
                 best_opt = opt
         if best_opt is not None and best_score >= 1:
             return best_opt
+
+    # Pass 6: Closest numeric match (e.g. GPA 3.91 → option "3.9")
+    # When the target is numeric and options are mostly numeric, pick the
+    # closest option that doesn't exceed the target value.
+    try:
+        target_num = float(target.strip())
+        numeric_opts: list[tuple[str, float]] = []
+        for opt, _ in normed_opts:
+            try:
+                numeric_opts.append((opt, float(opt.strip())))
+            except ValueError:
+                continue
+        if len(numeric_opts) >= 3:  # Only if options are a numeric list
+            # Prefer closest option ≤ target, fall back to closest overall
+            below = [(opt, val) for opt, val in numeric_opts if val <= target_num]
+            if below:
+                best = max(below, key=lambda x: x[1])
+                return best[0]
+            above = [(opt, val) for opt, val in numeric_opts if val > target_num]
+            if above:
+                best = min(above, key=lambda x: x[1])
+                return best[0]
+    except ValueError:
+        pass
 
     return None
 

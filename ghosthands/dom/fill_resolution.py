@@ -404,6 +404,15 @@ def _education_slot_name(field: FormField, visible_fields: list[FormField] | Non
             return "gpa_scale"
         if "gpa" in name:
             return "gpa"
+        # Education location fields — tagged as school_* so the structured
+        # resolver tries the education entry first. If not found, the triage
+        # sends them to needs_llm (not skipped) for inference from school name.
+        if name in {"country", "country region"} or "country" in name:
+            return "school_country"
+        if name in {"state", "state province", "province"}:
+            return "school_state"
+        if name in {"city", "city town"}:
+            return "school_city"
         if any(token in name for token in ("actual or expected", "actual expected", "expected or actual")):
             return "end_date_type"
         if name in {"from", "from date"} or any(token in name for token in ("start date", "date from", "begin date")):
@@ -608,6 +617,14 @@ def _structured_education_raw_value_and_source_from_entry(
         return inferred_from_gpa, "gpa"
     if slot_name == "end_date_type":
         return _entry_text_and_source(entry, "end_date_type", "endDateType", "endDateKind")
+    # School location — pull from education entry (not residential address).
+    # Returns None if not present, preventing fallback to residential data.
+    if slot_name == "school_country":
+        return _entry_text_and_source(entry, "country", "school_country", "schoolCountry", "location_country")
+    if slot_name == "school_state":
+        return _entry_text_and_source(entry, "state", "school_state", "schoolState", "location_state")
+    if slot_name == "school_city":
+        return _entry_text_and_source(entry, "city", "school_city", "schoolCity", "location_city")
 
     if slot_name == "start_date":
         raw_value, source_key = _entry_date_text_and_source(

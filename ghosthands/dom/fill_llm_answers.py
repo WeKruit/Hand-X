@@ -451,11 +451,17 @@ def _sanitize_no_guess_answer(
 
 
 def _disambiguated_field_names(fields: list[FormField]) -> list[str]:
-    """Build deterministic display names for batched LLM answer generation."""
+    """Build deterministic display names for batched LLM answer generation.
+
+    Newlines and control characters in labels are replaced with spaces so the
+    LLM can echo them back as valid JSON keys without parse errors.
+    """
     name_counts: dict[str, int] = {}
     disambiguated_names: list[str] = []
     for i, field in enumerate(fields):
         base_name = _preferred_field_label(field) or f"Field {i + 1}"
+        # Sanitize control characters that break JSON when echoed as keys
+        base_name = re.sub(r"[\x00-\x1f\x7f]+", " ", base_name).strip()
         norm = normalize_name(base_name) or f"field-{i + 1}"
         count = name_counts.get(norm, 0) + 1
         name_counts[norm] = count
@@ -464,7 +470,13 @@ def _disambiguated_field_names(fields: list[FormField]) -> list[str]:
 
 
 def _repair_invalid_json_string_escapes(blob: str) -> str:
-    """Drop invalid \\ escapes inside JSON strings (models often emit e.g. WHOOP\\ s)."""
+    """Repair invalid escapes and control characters inside JSON strings.
+
+    Models often emit literal newlines or bad backslash escapes inside JSON
+    string values (e.g. field labels containing \\n\\n).  This repairs them
+    so ``json.loads`` succeeds.
+    """
+    ctrl_map = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
     out: list[str] = []
     i = 0
     in_str = False
@@ -474,6 +486,15 @@ def _repair_invalid_json_string_escapes(blob: str) -> str:
             if c == '"':
                 in_str = True
             out.append(c)
+            i += 1
+            continue
+        # Escape raw control characters inside JSON strings
+        if c in ctrl_map:
+            out.append(ctrl_map[c])
+            i += 1
+            continue
+        if ord(c) < 0x20 and c not in ctrl_map:
+            out.append(f"\\u{ord(c):04x}")
             i += 1
             continue
         if c == "\\" and i + 1 < len(blob):
@@ -649,6 +670,7 @@ Rules:
 - Use the section, current field value, sibling field names, and listed options together to infer meaning for short or generic labels.
 - If a label is generic (for example "Overall", "Type", "Status", or "Source"), do NOT rely on label matching alone. Use section context plus the available options to choose the best answer.
 - For dropdowns WITHOUT listed options, provide the value from the profile if available. If the field name closely matches a profile entry, use that value.
+- For School/University/Institution search dropdowns, ALWAYS use the FULL official name (e.g., "University of California, Los Angeles" not "UCLA"; "Massachusetts Institute of Technology" not "MIT"; "New York University" not "NYU"). The dropdown searches by full name, not abbreviations.
 - For low-risk standardized screening fields, prefer a best-effort answer instead of "[NEEDS_USER_INPUT]". This includes referral/source fields, phone type, country/country of residence, work arrangement, relocation, and demographic/EEO fields.
 - For low-risk standardized screening dropdowns/radios, use the saved profile/default answer and choose the closest matching option text if the wording differs slightly.
 - For "How did you hear about us?" or similar source/referral fields: use the applicant profile value if available. If the profile has no source, default to "LinkedIn" (or the closest matching option like "Job Board", "Online Job Board", "Internet"). NEVER return "[NEEDS_USER_INPUT]" for referral source fields — they always have a safe default.
