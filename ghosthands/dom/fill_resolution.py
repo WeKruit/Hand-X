@@ -11,7 +11,11 @@ import json
 import re
 from typing import Any
 
+import structlog
+
 from ghosthands.actions.views import FormField, get_stable_field_key, normalize_name
+
+logger = structlog.get_logger(__name__)
 
 
 def _field_section_name(field: FormField) -> str:
@@ -441,6 +445,13 @@ def _education_slot_name(field: FormField, visible_fields: list[FormField] | Non
 
 
 
+_MONTH_NUM_TO_NAME = {
+    1: "January", 2: "February", 3: "March", 4: "April",
+    5: "May", 6: "June", 7: "July", 8: "August",
+    9: "September", 10: "October", 11: "November", 12: "December",
+}
+
+
 def _extract_date_component(value: Any, component: str) -> str | None:
     text = str(value or "").strip()
     if not text:
@@ -450,12 +461,16 @@ def _extract_date_component(value: Any, component: str) -> str | None:
         year_match = re.search(r"\b(19|20)\d{2}\b", text)
         return year_match.group(0) if year_match else None
 
+    # Extract month number, then return English name (most ATS dropdowns use names)
     normalized = text.replace("/", "-").replace(".", "-")
     parts = [part.strip() for part in normalized.split("-") if part.strip()]
+    month_num: int | None = None
     if len(parts) >= 2 and re.fullmatch(r"\d{4}", parts[0]) and re.fullmatch(r"\d{1,2}", parts[1]):
-        return str(int(parts[1]))
-    if len(parts) >= 2 and re.fullmatch(r"\d{1,2}", parts[0]) and re.fullmatch(r"\d{4}", parts[1]):
-        return str(int(parts[0]))
+        month_num = int(parts[1])
+    elif len(parts) >= 2 and re.fullmatch(r"\d{1,2}", parts[0]) and re.fullmatch(r"\d{4}", parts[1]):
+        month_num = int(parts[0])
+    if month_num and 1 <= month_num <= 12:
+        return _MONTH_NUM_TO_NAME[month_num]
 
     month_names = {
         "jan": 1,
@@ -486,7 +501,7 @@ def _extract_date_component(value: Any, component: str) -> str | None:
     lowered = normalize_name(text)
     for token, month in month_names.items():
         if token in lowered:
-            return str(month)
+            return _MONTH_NUM_TO_NAME.get(month, str(month))
     return None
 
 
@@ -653,10 +668,33 @@ def _structured_education_raw_value_and_source_from_entry(
         if not raw_value:
             raw_value, source_key = _entry_text_and_source(entry, "expectedGraduation", "expected_graduation")
 
-    if label_norm == "year":
-        return _extract_date_component(raw_value, "year"), source_key
-    if label_norm == "month":
-        return _extract_date_component(raw_value, "month"), source_key
+    # Oracle uses compound labels like "Start Date Year", "End Date Month".
+    # Match "year" or "month" as a standalone word anywhere in the label.
+    _label_words = set(label_norm.split())
+    if "year" in _label_words:
+        _component = _extract_date_component(raw_value, "year")
+        logger.debug(
+            "domhand.education_date_component",
+            field_label=_preferred_field_label(field),
+            label_norm=label_norm,
+            slot_name=slot_name,
+            raw_value=str(raw_value)[:30] if raw_value else "None",
+            component="year",
+            extracted=str(_component)[:20] if _component else "None",
+        )
+        return _component, source_key
+    if "month" in _label_words:
+        _component = _extract_date_component(raw_value, "month")
+        logger.debug(
+            "domhand.education_date_component",
+            field_label=_preferred_field_label(field),
+            label_norm=label_norm,
+            slot_name=slot_name,
+            raw_value=str(raw_value)[:30] if raw_value else "None",
+            component="month",
+            extracted=str(_component)[:20] if _component else "None",
+        )
+        return _component, source_key
     text = str(raw_value or "").strip()
     return (text or None), source_key
 

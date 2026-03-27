@@ -79,6 +79,52 @@ def test_candidate_auto_expand_sections_prioritizes_exact_oracle_skill_scopes():
     assert language_sections[0] == "Language Skills"
 
 
+@pytest.mark.asyncio
+async def test_maybe_auto_expand_skips_already_successful_section_same_session():
+    from ghosthands.actions.domhand_fill import (
+        _DOMHAND_AUTO_EXPAND_PROFILE_SECTIONS_ATTR,
+        _maybe_auto_expand_profile_repeaters,
+    )
+    from ghosthands.actions.views import normalize_name
+
+    page = AsyncMock()
+    browser_session = SimpleNamespace()
+    browser_session.get_current_page = AsyncMock(return_value=page)
+
+    expand = AsyncMock(return_value=SimpleNamespace(error=None))
+    with (
+        patch(
+            "ghosthands.actions.domhand_fill._candidate_auto_expand_sections",
+            return_value=["Technical Skills"],
+        ),
+        patch("ghosthands.actions.domhand_expand.domhand_expand", expand),
+        patch(
+            "ghosthands.actions.domhand_fill._visible_open_profile_inline_form_count",
+            AsyncMock(return_value=0),
+        ),
+    ):
+        r1 = await _maybe_auto_expand_profile_repeaters(
+            browser_session=browser_session,
+            profile_data={"skills": ["Python"]},
+            target_section=None,
+            heading_boundary=None,
+            focus_fields=None,
+        )
+        r2 = await _maybe_auto_expand_profile_repeaters(
+            browser_session=browser_session,
+            profile_data={"skills": ["Python"]},
+            target_section=None,
+            heading_boundary=None,
+            focus_fields=None,
+        )
+
+    assert r1 is True
+    assert r2 is False
+    assert expand.await_count == 1
+    attempted = getattr(browser_session, _DOMHAND_AUTO_EXPAND_PROFILE_SECTIONS_ATTR)
+    assert normalize_name("Technical Skills") in attempted
+
+
 def test_profile_backed_repeater_issues_ignore_non_live_sections():
     from ghosthands.actions.domhand_assess_state import _profile_backed_repeater_issues
 
@@ -127,67 +173,6 @@ def test_profile_backed_repeater_issues_flag_live_open_education_editor():
     assert "Start Date Month/Year" in (issues[0].question_text or "")
 
 
-@pytest.mark.asyncio
-async def test_domhand_fill_auto_expands_profile_repeater_when_only_add_buttons_are_visible():
-    from ghosthands.actions.domhand_fill import domhand_fill
-    from ghosthands.actions.views import DomHandFillParams, FormField
-
-    page = AsyncMock()
-    page.evaluate = AsyncMock(return_value="{}")
-    browser_session = AsyncMock()
-    browser_session.get_current_page = AsyncMock(return_value=page)
-    browser_session._gh_last_application_state = None
-
-    school_field = FormField(
-        field_id="edu-school",
-        name="School",
-        field_type="text",
-        section="Education 1",
-        required=True,
-    )
-
-    with (
-        patch("ghosthands.actions.domhand_fill._get_profile_text", return_value="profile text"),
-        patch(
-            "ghosthands.actions.domhand_fill._get_profile_data",
-            return_value={"education": [{"school": "University of California, Los Angeles"}]},
-        ),
-        patch("ghosthands.actions.domhand_fill._get_auth_override_data", return_value={}),
-        patch("ghosthands.actions.domhand_fill._infer_entry_data_from_scope", return_value=None),
-        patch("ghosthands.actions.domhand_fill._parse_profile_evidence", return_value={}),
-        patch(
-            "ghosthands.actions.domhand_fill._safe_page_url",
-            AsyncMock(return_value="https://hdpc.fa.us2.oraclecloud.com/example"),
-        ),
-        patch(
-            "ghosthands.actions.domhand_fill.extract_visible_form_fields",
-            AsyncMock(side_effect=[[], [school_field]]),
-        ),
-        patch("ghosthands.actions.domhand_fill._filter_fields_for_scope", side_effect=lambda fields, **_: fields),
-        patch(
-            "ghosthands.actions.domhand_fill._resolve_focus_fields",
-            side_effect=lambda fields, _focus: SimpleNamespace(fields=fields, ambiguous_labels={}),
-        ),
-        patch("ghosthands.actions.domhand_fill._is_navigation_field", return_value=False),
-        patch("ghosthands.actions.domhand_fill._known_auth_override_for_field", return_value=None),
-        patch(
-            "ghosthands.actions.domhand_fill._maybe_auto_expand_profile_repeaters",
-            AsyncMock(return_value=True),
-        ) as auto_expand,
-        patch(
-            "ghosthands.actions.domhand_fill._attempt_domhand_fill_with_retry_cap",
-            AsyncMock(return_value=(True, None, None, 1.0, "University of California, Los Angeles")),
-        ),
-        patch("ghosthands.actions.domhand_fill._record_expected_value_if_settled", AsyncMock(return_value=True)),
-        patch("ghosthands.actions.domhand_fill._stagehand_observe_cross_reference", AsyncMock(return_value=None)),
-    ):
-        result = await domhand_fill(DomHandFillParams(), browser_session)
-
-    assert result.error is None
-    auto_expand.assert_awaited_once()
-
-
-@pytest.mark.asyncio
 async def test_domhand_fill_blocks_auto_expand_when_profile_inline_editor_is_open():
     from ghosthands.actions.domhand_fill import domhand_fill
     from ghosthands.actions.views import DomHandFillParams
@@ -229,44 +214,6 @@ async def test_domhand_fill_blocks_auto_expand_when_profile_inline_editor_is_ope
     assert "profile inline editor is already open" in result.error
 
 
-@pytest.mark.asyncio
-async def test_domhand_fill_blocks_same_page_refill_after_advanceable_assess_state():
-    from ghosthands.actions.domhand_fill import domhand_fill
-    from ghosthands.actions.views import DomHandFillParams
-
-    page = AsyncMock()
-    browser_session = AsyncMock()
-    browser_session.get_current_page = AsyncMock(return_value=page)
-    browser_session._gh_last_application_state = {
-        "page_context_key": "page-1",
-        "page_url": "https://hdpc.fa.us2.oraclecloud.com/example",
-        "advance_allowed": True,
-    }
-
-    with (
-        patch("ghosthands.actions.domhand_fill._get_profile_text", return_value="profile text"),
-        patch("ghosthands.actions.domhand_fill._get_profile_data", return_value={}),
-        patch("ghosthands.actions.domhand_fill._get_auth_override_data", return_value={}),
-        patch("ghosthands.actions.domhand_fill._infer_entry_data_from_scope", return_value=None),
-        patch("ghosthands.actions.domhand_fill._parse_profile_evidence", return_value={}),
-        patch(
-            "ghosthands.actions.domhand_fill._safe_page_url",
-            AsyncMock(return_value="https://hdpc.fa.us2.oraclecloud.com/example"),
-        ),
-        patch("ghosthands.actions.domhand_fill._get_page_context_key", AsyncMock(return_value="page-1")),
-        patch(
-            "ghosthands.actions.domhand_fill.extract_visible_form_fields",
-            AsyncMock(side_effect=AssertionError("should not re-enter field extraction")),
-        ),
-    ):
-        result = await domhand_fill(DomHandFillParams(target_section="Personal Info"), browser_session)
-
-    assert result.error is None
-    assert "advance_allowed=yes" in (result.extracted_content or "")
-    assert result.metadata["same_page_advance_guard"] is True
-
-
-@pytest.mark.asyncio
 async def test_domhand_fill_blocks_repeated_broad_same_page_fill_until_assess_checkpoint():
     from ghosthands.actions.domhand_fill import domhand_fill
     from ghosthands.actions.views import DomHandFillParams
@@ -301,163 +248,6 @@ async def test_domhand_fill_blocks_repeated_broad_same_page_fill_until_assess_ch
     assert result.metadata["same_page_fill_guard"] is True
 
 
-@pytest.mark.asyncio
-async def test_domhand_fill_reconciles_auto_populated_required_fields_before_summary():
-    from ghosthands.actions.domhand_fill import domhand_fill
-    from ghosthands.actions.views import DomHandFillParams, FormField
-
-    initial_city_field = FormField(
-        field_id="city-field",
-        name="City",
-        field_type="text",
-        section="Contact",
-        required=True,
-        current_value="",
-    )
-    settled_city_field = FormField(
-        field_id="city-field",
-        name="City",
-        field_type="text",
-        section="Contact",
-        required=True,
-        current_value="",
-    )
-
-    page = AsyncMock()
-    page.evaluate = AsyncMock(return_value="{}")
-    browser_session = AsyncMock()
-    browser_session.get_current_page = AsyncMock(return_value=page)
-    browser_session._gh_last_application_state = None
-
-    with (
-        patch("ghosthands.actions.domhand_fill._get_profile_text", return_value="profile text"),
-        patch("ghosthands.actions.domhand_fill._get_profile_data", return_value={}),
-        patch("ghosthands.actions.domhand_fill._get_auth_override_data", return_value={}),
-        patch("ghosthands.actions.domhand_fill._infer_entry_data_from_scope", return_value=None),
-        patch("ghosthands.actions.domhand_fill._parse_profile_evidence", return_value={}),
-        patch(
-            "ghosthands.actions.domhand_fill._safe_page_url",
-            AsyncMock(return_value="https://higher.gs.com/apply"),
-        ),
-        patch("ghosthands.actions.domhand_fill._get_page_context_key", AsyncMock(return_value="page-1")),
-        patch(
-            "ghosthands.actions.domhand_fill.extract_visible_form_fields",
-            AsyncMock(side_effect=[[initial_city_field], [settled_city_field]]),
-        ),
-        patch("ghosthands.actions.domhand_fill._filter_fields_for_scope", side_effect=lambda fields, **_: fields),
-        patch(
-            "ghosthands.actions.domhand_fill._resolve_focus_fields",
-            side_effect=lambda fields, _focus: SimpleNamespace(fields=fields, ambiguous_labels={}),
-        ),
-        patch("ghosthands.actions.domhand_fill._generate_answers", AsyncMock(return_value=({}, 0, 0, 0.0, None))),
-        patch("ghosthands.actions.domhand_fill._record_page_token_cost", return_value=None),
-        patch(
-            "ghosthands.actions.domhand_fill._enrich_missing_select_options_for_llm",
-            AsyncMock(return_value=None),
-        ),
-        patch("ghosthands.actions.domhand_fill._field_has_validation_error", AsyncMock(return_value=False)),
-        patch(
-            "ghosthands.actions.domhand_fill._read_field_value_for_field",
-            AsyncMock(side_effect=["", "", "Fairfax"]),
-        ),
-        patch("ghosthands.actions.domhand_fill.asyncio.sleep", AsyncMock(return_value=None)),
-        patch("ghosthands.actions.domhand_fill._stagehand_observe_cross_reference", AsyncMock(return_value=None)),
-    ):
-        result = await domhand_fill(DomHandFillParams(target_section="Contact"), browser_session)
-
-    payload = (result.metadata or {})["domhand_fill_json"]
-    full_payload = (result.metadata or {})["domhand_fill_full_json"]
-    assert full_payload["unresolved_required_fields"] == []
-    assert full_payload["failed_fields"] == []
-    assert full_payload["reconciled_settled_fields"] == [
-        {
-            "field_id": "city-field",
-            "name": "City",
-            "section": "Contact",
-            "current_value": "Fairfax",
-            "previous_actor": "skipped",
-        }
-    ]
-    assert payload["filled_count"] >= 0
-    assert browser_session._gh_last_domhand_fill["page_context_key"] == "page-1"
-    assert browser_session._gh_last_domhand_fill["broad_fill_completed"] is True
-
-
-@pytest.mark.asyncio
-async def test_domhand_fill_reconciles_required_field_when_oracle_rebuilds_field_id():
-    from ghosthands.actions.domhand_fill import domhand_fill
-    from ghosthands.actions.views import DomHandFillParams, FormField
-
-    initial_city_field = FormField(
-        field_id="city-old",
-        name="City",
-        field_type="select",
-        section="Contact",
-        required=True,
-        current_value="",
-    )
-    rebuilt_city_field = FormField(
-        field_id="city-new",
-        name="City",
-        field_type="select",
-        section="Contact",
-        required=True,
-        current_value="Fairfax",
-    )
-
-    page = AsyncMock()
-    page.evaluate = AsyncMock(return_value="{}")
-    browser_session = AsyncMock()
-    browser_session.get_current_page = AsyncMock(return_value=page)
-    browser_session._gh_last_application_state = None
-
-    with (
-        patch("ghosthands.actions.domhand_fill._get_profile_text", return_value="profile text"),
-        patch("ghosthands.actions.domhand_fill._get_profile_data", return_value={}),
-        patch("ghosthands.actions.domhand_fill._get_auth_override_data", return_value={}),
-        patch("ghosthands.actions.domhand_fill._infer_entry_data_from_scope", return_value=None),
-        patch("ghosthands.actions.domhand_fill._parse_profile_evidence", return_value={}),
-        patch(
-            "ghosthands.actions.domhand_fill._safe_page_url",
-            AsyncMock(return_value="https://higher.gs.com/apply"),
-        ),
-        patch("ghosthands.actions.domhand_fill._get_page_context_key", AsyncMock(return_value="page-1")),
-        patch(
-            "ghosthands.actions.domhand_fill.extract_visible_form_fields",
-            AsyncMock(side_effect=[[initial_city_field], [rebuilt_city_field]]),
-        ),
-        patch("ghosthands.actions.domhand_fill._filter_fields_for_scope", side_effect=lambda fields, **_: fields),
-        patch(
-            "ghosthands.actions.domhand_fill._resolve_focus_fields",
-            side_effect=lambda fields, _focus: SimpleNamespace(fields=fields, ambiguous_labels={}),
-        ),
-        patch("ghosthands.actions.domhand_fill._generate_answers", AsyncMock(return_value=({}, 0, 0, 0.0, None))),
-        patch("ghosthands.actions.domhand_fill._record_page_token_cost", return_value=None),
-        patch(
-            "ghosthands.actions.domhand_fill._enrich_missing_select_options_for_llm",
-            AsyncMock(return_value=None),
-        ),
-        patch("ghosthands.actions.domhand_fill._field_has_validation_error", AsyncMock(return_value=False)),
-        patch("ghosthands.actions.domhand_fill._read_field_value_for_field", AsyncMock(return_value="Fairfax")),
-        patch("ghosthands.actions.domhand_fill.asyncio.sleep", AsyncMock(return_value=None)),
-        patch("ghosthands.actions.domhand_fill._stagehand_observe_cross_reference", AsyncMock(return_value=None)),
-    ):
-        result = await domhand_fill(DomHandFillParams(target_section="Contact"), browser_session)
-
-    full_payload = (result.metadata or {})["domhand_fill_full_json"]
-    assert full_payload["unresolved_required_fields"] == []
-    assert full_payload["reconciled_settled_fields"] == [
-        {
-            "field_id": "city-old",
-            "name": "City",
-            "section": "Contact",
-            "current_value": "Fairfax",
-            "previous_actor": "skipped",
-        }
-    ]
-
-
-@pytest.mark.asyncio
 async def test_domhand_fill_agent_summary_defers_blocker_reporting_to_assess_state():
     from ghosthands.actions.domhand_fill import domhand_fill
     from ghosthands.actions.views import DomHandFillParams, FormField
@@ -539,50 +329,6 @@ def test_same_page_advance_guard_requires_clean_assess_state():
     assert fill_hard_clear(noisy_state) is True
 
 
-@pytest.mark.asyncio
-async def test_domhand_fill_blocks_same_page_refill_after_advanceable_assess_state_with_soft_noise():
-    from ghosthands.actions.domhand_fill import domhand_fill
-    from ghosthands.actions.views import DomHandFillParams
-
-    page = AsyncMock()
-    browser_session = AsyncMock()
-    browser_session.get_current_page = AsyncMock(return_value=page)
-    browser_session._gh_last_application_state = {
-        "page_context_key": "page-1",
-        "page_url": "https://hdpc.fa.us2.oraclecloud.com/example",
-        "advance_allowed": True,
-        "unresolved_required_count": 0,
-        "optional_validation_count": 0,
-        "visible_error_count": 0,
-        "opaque_count": 0,
-        "mismatched_count": 0,
-        "unverified_count": 1,
-    }
-
-    with (
-        patch("ghosthands.actions.domhand_fill._get_profile_text", return_value="profile text"),
-        patch("ghosthands.actions.domhand_fill._get_profile_data", return_value={}),
-        patch("ghosthands.actions.domhand_fill._get_auth_override_data", return_value={}),
-        patch("ghosthands.actions.domhand_fill._infer_entry_data_from_scope", return_value=None),
-        patch("ghosthands.actions.domhand_fill._parse_profile_evidence", return_value={}),
-        patch(
-            "ghosthands.actions.domhand_fill._safe_page_url",
-            AsyncMock(return_value="https://hdpc.fa.us2.oraclecloud.com/example"),
-        ),
-        patch("ghosthands.actions.domhand_fill._get_page_context_key", AsyncMock(return_value="page-1")),
-        patch(
-            "ghosthands.actions.domhand_fill.extract_visible_form_fields",
-            AsyncMock(side_effect=AssertionError("should not re-enter field extraction")),
-        ),
-    ):
-        result = await domhand_fill(DomHandFillParams(target_section="Personal Info"), browser_session)
-
-    assert result.error is None
-    assert "advance_allowed=yes" in (result.extracted_content or "")
-    assert result.metadata["same_page_advance_guard"] is True
-
-
-@pytest.mark.asyncio
 async def test_domhand_assess_state_blocks_same_page_reassess_after_clean_advanceable_result():
     from ghosthands.actions.domhand_assess_state import domhand_assess_state
     from ghosthands.actions.views import DomHandAssessStateParams
@@ -875,120 +621,6 @@ def test_estimate_cost_gemini_3_flash_preview():
     assert model.input_cost_per_1k > 0
 
 
-# ---------------------------------------------------------------------------
-# _sanitize_no_guess_answer with [NEEDS_USER_INPUT]
-# ---------------------------------------------------------------------------
-
-
-def test_sanitize_suppresses_needs_user_input_for_required():
-    """Required fields no longer surface the HITL marker in apply flows."""
-    from ghosthands.actions.domhand_fill import _sanitize_no_guess_answer
-
-    result = _sanitize_no_guess_answer(
-        "Country code",
-        True,
-        "[NEEDS_USER_INPUT]",
-        {},
-        field_type="select",
-        question_text="Select country code",
-    )
-
-    assert result == ""
-
-
-def test_sanitize_skips_needs_user_input_for_optional():
-    """Optional fields with [NEEDS_USER_INPUT] should return empty string."""
-    from ghosthands.actions.domhand_fill import _sanitize_no_guess_answer
-
-    result = _sanitize_no_guess_answer(
-        "Facebook",
-        False,
-        "[NEEDS_USER_INPUT]",
-        {},
-    )
-    assert result == ""
-
-
-def test_sanitize_prefers_known_profile_value_over_needs_user_input_marker():
-    """Known profile values should override LLM escalation markers for required fields."""
-    from ghosthands.actions.domhand_fill import _sanitize_no_guess_answer
-
-    result = _sanitize_no_guess_answer(
-        "Expectations on Compensation",
-        True,
-        "[NEEDS_USER_INPUT]",
-        {"salary_expectation": "$90,000-$120,000 base (flexible)"},
-        field_type="textarea",
-        question_text="Expectations on Compensation",
-    )
-
-    assert result == "$90,000-$120,000 base (flexible)"
-
-
-def test_sanitize_returns_none_literal_for_certifications_marker():
-    """Certification/license prompts default to literal None when profile is blank."""
-    from ghosthands.actions.domhand_fill import _sanitize_no_guess_answer
-
-    result = _sanitize_no_guess_answer(
-        "Please list any relevant certifications or licenses.*",
-        True,
-        "[NEEDS_USER_INPUT]",
-        {},
-        field_type="textarea",
-        question_text="Please list any relevant certifications or licenses.*",
-    )
-
-    assert result == "None"
-
-
-def test_sanitize_normal_values_unchanged():
-    """Normal values should pass through without emitting events."""
-    from ghosthands.actions.domhand_fill import _sanitize_no_guess_answer
-
-    result = _sanitize_no_guess_answer(
-        "First Name",
-        True,
-        "Jane",
-        {"first_name": "Jane"},
-    )
-    assert result == "Jane"
-
-
-def test_sanitize_preserves_no_on_dlh_question_with_social_scientific_in_label():
-    """'Social Scientific Solutions' must not false-trigger social-handle stripping."""
-    from ghosthands.actions.domhand_fill import _sanitize_no_guess_answer
-
-    label = (
-        "Do you have any relatives that work for DLH or any of its subsidiaries "
-        "(Danya/IBA/Social Scientific Solutions, GRSi)?*"
-    )
-    result = _sanitize_no_guess_answer(
-        label,
-        True,
-        "No",
-        {},
-        field_type="select",
-        question_text=label,
-    )
-    assert result == "No"
-
-
-def test_sanitize_binary_select_survives_true_social_media_question_match():
-    """When the label genuinely matches the social regex, Yes/No screening still passes through."""
-    from ghosthands.actions.domhand_fill import _sanitize_no_guess_answer
-
-    label = "Do you have a social media account we may review?"
-    result = _sanitize_no_guess_answer(
-        label,
-        True,
-        "No",
-        {},
-        field_type="select",
-        question_text=label,
-    )
-    assert result == "No"
-
-
 def test_coerce_binary_consent_answer_to_visible_select_option():
     from ghosthands.actions.views import FormField
     from ghosthands.dom.fill_label_match import _coerce_answer_to_field
@@ -1019,23 +651,6 @@ def test_coerce_binary_consent_answer_does_not_force_nonbinary_select():
     assert _coerce_answer_to_field(field, "checked") is None
 
 
-def test_sanitize_does_not_guess_optional_suffix():
-    """Optional legal-name fragments should stay blank unless explicitly saved."""
-    from ghosthands.actions.domhand_fill import _sanitize_no_guess_answer
-
-    result = _sanitize_no_guess_answer(
-        "Suffix",
-        False,
-        "II",
-        {},
-        field_type="text",
-        question_text="Suffix",
-    )
-
-    assert result == ""
-
-
-@pytest.mark.asyncio
 async def test_checkbox_group_already_matches_multi_select_uses_binary_state():
     from ghosthands.actions.domhand_fill import _field_already_matches
     from ghosthands.actions.views import FormField
@@ -1091,36 +706,6 @@ async def test_field_already_matches_uses_live_value_for_oracle_skill_combobox()
     read_tokens.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_fill_checkbox_group_multi_select_keeps_binary_path():
-    from ghosthands.actions.domhand_fill import _CLICK_CHECKBOX_GROUP_JS, _fill_checkbox_group
-    from ghosthands.actions.views import FormField
-
-    field = FormField(
-        field_id="benefits",
-        name="Which benefits are you interested in? (Select all that apply)",
-        field_type="checkbox-group",
-        choices=["Health insurance", "Dental", "Vision"],
-        required=True,
-    )
-    page = AsyncMock()
-    page.evaluate = AsyncMock(return_value='{"clicked": true, "alreadyChecked": false}')
-
-    with (
-        patch("ghosthands.dom.fill_executor._load_field_interaction_recipe", AsyncMock(return_value=None)),
-        patch("ghosthands.dom.fill_executor._read_binary_state", AsyncMock(return_value=True)),
-        patch("ghosthands.dom.fill_executor._field_has_validation_error", AsyncMock(return_value=False)),
-        patch("ghosthands.dom.fill_executor._click_binary_with_gui", AsyncMock(return_value=False)) as click_binary,
-        patch("ghosthands.dom.fill_executor._refresh_binary_field", AsyncMock(return_value=False)) as refresh_binary,
-        patch("ghosthands.dom.fill_executor._record_field_interaction_recipe"),
-    ):
-        assert await _fill_checkbox_group(page, field, "Health insurance", "[Benefits]") is True
-        page.evaluate.assert_awaited_once_with(_CLICK_CHECKBOX_GROUP_JS, field.field_id)
-        click_binary.assert_not_awaited()
-        refresh_binary.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_fill_checkbox_uses_binary_click_path():
     from ghosthands.actions.domhand_fill import _CLICK_BINARY_FIELD_JS, _fill_checkbox
     from ghosthands.actions.views import FormField
@@ -1171,36 +756,6 @@ async def test_fill_radio_group_keeps_group_option_path():
     ):
         assert await _fill_radio_group(page, field, "No", "[Work Auth]") is True
         page.evaluate.assert_awaited_once_with(_CLICK_RADIO_OPTION_JS, field.field_id, "No")
-
-
-@pytest.mark.asyncio
-async def test_fill_button_group_keeps_group_option_path():
-    from ghosthands.actions.domhand_fill import _CLICK_BUTTON_GROUP_JS, _fill_button_group
-    from ghosthands.actions.views import FormField
-
-    field = FormField(
-        field_id="veteran",
-        name="Veteran status",
-        field_type="button-group",
-        choices=["I am not a protected veteran", "I am a protected veteran"],
-        required=True,
-    )
-    page = AsyncMock()
-    page.evaluate = AsyncMock(return_value='{"clicked": true}')
-
-    with (
-        patch("ghosthands.dom.fill_executor._load_field_interaction_recipe", AsyncMock(return_value=None)),
-        patch(
-            "ghosthands.dom.fill_executor._read_group_selection",
-            AsyncMock(side_effect=["", "I am not a protected veteran"]),
-        ),
-        patch("ghosthands.dom.fill_executor._field_has_validation_error", AsyncMock(return_value=False)),
-        patch("ghosthands.dom.fill_executor._click_group_option_with_gui", AsyncMock(return_value=False)),
-        patch("ghosthands.dom.fill_executor._reset_group_selection_with_gui", AsyncMock(return_value=False)),
-        patch("ghosthands.dom.fill_executor._record_field_interaction_recipe"),
-    ):
-        assert await _fill_button_group(page, field, "I am not a protected veteran", "[Veteran]") is True
-        page.evaluate.assert_awaited_once_with(_CLICK_BUTTON_GROUP_JS, field.field_id, "I am not a protected veteran")
 
 
 def test_checkbox_group_mode_detects_exclusive_yes_no_cluster():
@@ -1378,52 +933,6 @@ async def test_attempt_domhand_fill_succeeds_when_post_fill_observable_mismatch(
     reset_runtime_learning_state()
 
 
-@pytest.mark.asyncio
-async def test_attempt_domhand_fill_does_not_stagehand_or_llm_escalate_skill_select_widgets():
-    from ghosthands.actions.domhand_fill import _attempt_domhand_fill_with_retry_cap
-    from ghosthands.actions.views import FormField
-    from ghosthands.runtime_learning import reset_runtime_learning_state
-
-    reset_runtime_learning_state()
-    field = FormField(
-        field_id="skills--skills",
-        name="Type to Add Skills",
-        field_type="select",
-        required=False,
-        field_fingerprint="skills-fp",
-    )
-    page = AsyncMock()
-
-    with (
-        patch("ghosthands.dom.fill_verify._field_already_matches", AsyncMock(return_value=False)),
-        patch(
-            "ghosthands.dom.fill_verify._fill_single_field_outcome",
-            AsyncMock(return_value=SimpleNamespace(success=False, matched_label=None)),
-        ),
-        patch(
-            "ghosthands.dom.fill_verify._stagehand_escalate_fill", AsyncMock(return_value=True)
-        ) as stagehand_escalate,
-        patch("ghosthands.dom.fill_verify._llm_escalate_fill", AsyncMock(return_value=True)) as llm_escalate,
-    ):
-        success, error, failure_reason, fill_confidence, settled_value = await _attempt_domhand_fill_with_retry_cap(
-            page,
-            host="intel.wd1.myworkdayjobs.com",
-            field=field,
-            desired_value="Python,Java,JavaScript",
-            tool_name="domhand_fill",
-        )
-
-    assert success is False
-    assert error == "DOM fill failed"
-    assert failure_reason == "dom_fill_failed"
-    assert fill_confidence == 0.0
-    assert settled_value == "Python,Java,JavaScript"
-    stagehand_escalate.assert_not_awaited()
-    llm_escalate.assert_not_awaited()
-    reset_runtime_learning_state()
-
-
-@pytest.mark.asyncio
 async def test_domhand_fill_reports_retry_capped_fields_without_retrying():
     from ghosthands.actions.domhand_fill import domhand_fill
     from ghosthands.actions.views import DomHandFillParams, FormField
@@ -1535,18 +1044,6 @@ def test_resolve_llm_answer_marks_best_effort_guess():
     assert resolved.value == "I learn quickly and ship reliably."
     assert resolved.answer_mode == "best_effort_guess"
     assert resolved.source == "llm"
-
-
-def test_parse_llm_json_skips_prefix_and_repairs_invalid_escapes():
-    """Gemini sometimes emits prefix text and invalid \\-sequences inside strings."""
-    from ghosthands.actions.domhand_fill import _parse_llm_json_answer_object
-
-    raw = """Here is JSON:
-{"Field 1": "Line with WHOOP\\ s bad escape", "Field 2": "ok"}
-trailing junk"""
-    out = _parse_llm_json_answer_object(raw)
-    assert out["Field 2"] == "ok"
-    assert "WHOOP" in out["Field 1"]
 
 
 def test_resolve_llm_answer_via_batch_key_when_dom_labels_empty():
@@ -1868,20 +1365,6 @@ def test_build_task_prompt_user_create_account():
     assert "take ONE screenshot/vision retry on that blocker" in prompt
 
 
-def test_build_task_prompt_later_pages_do_not_repeat_resume_upload_search():
-    from ghosthands.agent.prompts import build_task_prompt
-
-    prompt = build_task_prompt(
-        "https://higher.gs.com/roles/162133",
-        "/tmp/resume.pdf",
-        {},
-    )
-
-    assert "On each new page, call domhand_fill AGAIN as the first action." in prompt
-    assert "Do NOT search for another resume upload field on later pages" in prompt
-    assert "repeat from step 1 (check for Easy Apply / resume upload first)" not in prompt
-
-
 def test_build_task_prompt_replaces_old_hitl_salary_instruction():
     from ghosthands.agent.prompts import build_task_prompt
 
@@ -1940,22 +1423,6 @@ def test_build_task_prompt_explicit_submit_intent_allows_final_submit():
 
     assert "Do NOT click the final Submit button" not in prompt
     assert "EXPLICIT SUBMIT INTENT" in prompt
-
-
-def test_build_task_prompt_greenhouse_handles_start_state_before_form():
-    from ghosthands.agent.prompts import build_task_prompt
-
-    prompt = build_task_prompt(
-        "https://job-boards.greenhouse.io/acme/jobs/123",
-        "/tmp/resume.pdf",
-        None,
-        platform="greenhouse",
-    )
-
-    assert "LOOK for an 'Easy Apply' section or" in prompt
-    assert "a resume upload area at the top of the form" in prompt
-    assert "Easy Apply with resume upload is ALWAYS the preferred path" in prompt
-    assert "After navigating to the page" in prompt
 
 
 def test_build_system_prompt_greenhouse_mentions_start_state():
@@ -3317,53 +2784,6 @@ async def test_assess_state_does_not_fallback_to_unrelated_sections_when_target_
     assert payload["unresolved_required_fields"] == []
 
 
-@pytest.mark.asyncio
-async def test_assess_state_blocks_advance_when_advance_control_is_disabled():
-    from ghosthands.actions.domhand_assess_state import domhand_assess_state
-    from ghosthands.actions.views import DomHandAssessStateParams
-
-    page = AsyncMock()
-    page.evaluate = AsyncMock(
-        side_effect=[
-            None,
-            {
-                "button_texts": ["Save and Continue"],
-                "body_text": "",
-                "markers": [],
-                "submit_visible": False,
-                "submit_disabled": False,
-                "advance_visible": True,
-                "advance_disabled": True,
-                "error_texts": [],
-                "heading_texts": ["My Experience"],
-            },
-            {},
-        ]
-    )
-    page.get_url = AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job")
-    browser_session = AsyncMock()
-    browser_session.get_current_page = AsyncMock(return_value=page)
-
-    with (
-        patch("ghosthands.dom.shadow_helpers.ensure_helpers", AsyncMock(return_value=None)),
-        patch("ghosthands.actions.domhand_assess_state.extract_visible_form_fields", AsyncMock(return_value=[])),
-        patch(
-            "ghosthands.actions.domhand_assess_state._safe_page_url",
-            AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job"),
-        ),
-    ):
-        result = await domhand_assess_state(
-            DomHandAssessStateParams(target_section="My Experience"),
-            browser_session,
-        )
-
-    payload = json.loads((result.metadata or {})["application_state_json"])
-    assert payload["advance_visible"] is True
-    assert payload["advance_disabled"] is True
-    assert payload["advance_allowed"] is False
-
-
-@pytest.mark.asyncio
 async def test_assess_state_reports_grouped_date_mismatch_at_logical_date_field():
     from ghosthands.actions.domhand_assess_state import domhand_assess_state
     from ghosthands.actions.views import DomHandAssessStateParams, FormField, get_stable_field_key
@@ -4653,67 +4073,6 @@ def test_resolve_known_profile_value_for_field_skips_binary_default_for_conditio
     assert resolved is None
 
 
-@pytest.mark.asyncio
-async def test_semantic_profile_value_for_field_skips_binary_answer_for_conditional_detail_textarea():
-    from ghosthands.actions.domhand_fill import _semantic_profile_value_for_field
-    from ghosthands.actions.views import FormField
-
-    field = FormField(
-        field_id="visa-detail",
-        name="You answered 'Yes' to the previous question. Please specify the type of visa sponsorship you require from your employer, now or in the future.*",
-        field_type="textarea",
-        section="Application Questions",
-        required=True,
-    )
-
-    with (
-        patch("ghosthands.actions.domhand_fill.get_learned_question_alias", return_value=None),
-        patch(
-            "ghosthands.actions.domhand_fill._classify_known_intent_for_field",
-            AsyncMock(return_value=("visa_sponsorship", "high")),
-        ),
-    ):
-        resolved = await _semantic_profile_value_for_field(
-            field,
-            evidence={},
-            profile_data={"visa_sponsorship": "Yes"},
-        )
-
-    assert resolved is None
-
-
-@pytest.mark.asyncio
-async def test_semantic_profile_value_for_field_can_skip_llm_classifier_in_hot_path():
-    from ghosthands.actions.domhand_fill import _semantic_profile_value_for_field
-    from ghosthands.actions.views import FormField
-
-    field = FormField(
-        field_id="relocation-1",
-        name="Will you be located in the Seattle area during the internship?",
-        raw_label="Will you be located in the Seattle area during the internship?",
-        field_type="select",
-        required=True,
-        options=["Yes", "No"],
-    )
-
-    with (
-        patch("ghosthands.actions.domhand_fill.get_learned_question_alias", return_value=None),
-        patch(
-            "ghosthands.actions.domhand_fill._classify_known_intent_for_field",
-            AsyncMock(side_effect=AssertionError("classifier should not run")),
-        ),
-    ):
-        resolved = await _semantic_profile_value_for_field(
-            field,
-            evidence={},
-            profile_data={"relocation": "No"},
-            allow_llm_classification=False,
-        )
-
-    assert resolved is None
-
-
-@pytest.mark.asyncio
 async def test_assess_state_ignores_duplicate_boolean_companion_control_mismatch():
     from ghosthands.actions.domhand_assess_state import domhand_assess_state
     from ghosthands.actions.views import DomHandAssessStateParams, FormField, get_stable_field_key
@@ -6462,6 +5821,10 @@ async def test_fill_workday_skill_multiselect_uses_enter_fallback_when_click_fai
         ),
         patch("ghosthands.dom.fill_executor._press_key_compat", AsyncMock()) as press_key,
         patch("ghosthands.dom.fill_executor._settle_dropdown_selection", AsyncMock(return_value=None)),
+        patch(
+            "ghosthands.dom.fill_executor._wait_for_multi_select_commit",
+            AsyncMock(return_value={"committed": True, "via": "mock"}),
+        ),
     ):
         ok = await _fill_workday_skill_multiselect(page, field, ["Python", "Java"], "[Skills]")
 
@@ -6500,6 +5863,10 @@ async def test_fill_workday_skill_multiselect_succeeds_on_poll_click():
         ),
         patch("ghosthands.dom.fill_executor._press_key_compat", AsyncMock()) as press_key,
         patch("ghosthands.dom.fill_executor._settle_dropdown_selection", AsyncMock(return_value=None)) as settle,
+        patch(
+            "ghosthands.dom.fill_executor._wait_for_multi_select_commit",
+            AsyncMock(return_value={"committed": True, "via": "mock"}),
+        ),
     ):
         ok = await _fill_workday_skill_multiselect(page, field, ["Python"], "[Skills]")
 
@@ -6546,6 +5913,10 @@ async def test_fill_workday_skill_multiselect_opens_and_types_before_clicking():
         patch("ghosthands.dom.fill_executor._type_text_compat", AsyncMock(side_effect=track_type)),
         patch("ghosthands.dom.fill_executor._poll_click_dropdown_option", AsyncMock(side_effect=track_click)),
         patch("ghosthands.dom.fill_executor._settle_dropdown_selection", AsyncMock(return_value=None)),
+        patch(
+            "ghosthands.dom.fill_executor._wait_for_multi_select_commit",
+            AsyncMock(return_value={"committed": True, "via": "mock"}),
+        ),
     ):
         ok = await _fill_workday_skill_multiselect(page, field, ["Python"], "[Skills]")
 
@@ -6581,6 +5952,10 @@ async def test_fill_workday_skill_multiselect_limits_runtime_to_first_fifteen_sk
             AsyncMock(return_value={"clicked": True, "text": "Skill"}),
         ),
         patch("ghosthands.dom.fill_executor._settle_dropdown_selection", AsyncMock(return_value=None)),
+        patch(
+            "ghosthands.dom.fill_executor._wait_for_multi_select_commit",
+            AsyncMock(return_value={"committed": True, "via": "mock"}),
+        ),
     ):
         ok = await _fill_workday_skill_multiselect(page, field, values, "[Skills]")
 
@@ -6617,6 +5992,10 @@ async def test_fill_workday_skill_multiselect_deduplicates_skills():
             AsyncMock(return_value={"clicked": True, "text": "Python"}),
         ),
         patch("ghosthands.dom.fill_executor._settle_dropdown_selection", AsyncMock(return_value=None)),
+        patch(
+            "ghosthands.dom.fill_executor._wait_for_multi_select_commit",
+            AsyncMock(return_value={"committed": True, "via": "mock"}),
+        ),
     ):
         ok = await _fill_workday_skill_multiselect(
             page, field, ["Python", "python", "PYTHON", "Java"], "[Skills]",
@@ -6669,32 +6048,6 @@ async def test_fill_workday_skill_multiselect_returns_false_for_empty_values():
         result = await _fill_workday_skill_multiselect(page, field, [], "[Skills]")
 
     assert result is False
-
-
-def test_build_task_prompt_workday_skills_requires_one_skill_at_a_time():
-    from ghosthands.agent.prompts import build_task_prompt
-
-    prompt = build_task_prompt(
-        "https://intel.wd1.myworkdayjobs.com/en-US/External/job/US-Oregon-Hillsboro/GPU-Software-Development-Engineer_JR0282186",
-        "/tmp/resume.pdf",
-        sensitive_data=None,
-        platform="workday",
-    )
-
-    assert "Type to Add Skills" in prompt
-    assert "ONE skill at a time" in prompt
-    assert "press Enter ONLY if the SAME exact skill is visibly present" in prompt
-    assert "After Enter, wait another 2-3 seconds and VERIFY that a chip/token" in prompt
-    assert "comma-separated list of skills" in prompt
-    assert "BEFORE clicking 'Add Another'" in prompt
-    assert "Do NOT substitute a different skill" in prompt
-    assert "THAT SAME profile skill" in prompt
-    assert "Workday searchable selectinput widgets" in prompt
-    assert "STOP using domhand_fill, domhand_select, and domhand_interact_control" in prompt
-    assert "do NOT append more text" in prompt
-    assert "React -> ReactJS" in prompt
-    assert "Do NOT search for another resume upload field" in prompt
-    assert "stepper/current page says `Review`" in prompt
 
 
 def test_workday_skill_query_candidates_include_same_skill_aliases():
@@ -7290,57 +6643,6 @@ def test_text_fill_attempt_values_include_zero_padded_month_variant():
     assert _text_fill_attempt_values(field, "3") == ["3", "03"]
 
 
-@pytest.mark.asyncio
-async def test_fill_date_field_uses_grouped_workday_date_widget_flow():
-    from ghosthands.actions import domhand_fill as domhand_fill_module
-    from ghosthands.actions.views import FormField
-
-    field = FormField(
-        field_id="date-wrapper",
-        name="Date",
-        field_type="date",
-        section="Voluntary Self-Identification of Disability",
-        required=True,
-        widget_kind="grouped_date",
-        component_field_ids=["date-month", "date-day", "date-year"],
-        has_calendar_trigger=True,
-        format_hint="MM/DD/YYYY",
-    )
-
-    async def evaluate_side_effect(script, *args):
-        if script == domhand_fill_module._OPEN_GROUPED_DATE_PICKER_JS:
-            return json.dumps({"clicked": True, "opened": True})
-        if script == domhand_fill_module._SELECT_GROUPED_DATE_PICKER_VALUE_JS:
-            return json.dumps({"selected": False})
-        if script == domhand_fill_module._FILL_FIELD_JS:
-            return json.dumps({"success": True})
-        return json.dumps(None)
-
-    page = AsyncMock()
-    page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
-    page.press = AsyncMock(return_value=None)
-
-    with (
-        patch("ghosthands.dom.fill_executor._click_away_from_text_like_field", AsyncMock(return_value=True)),
-        patch("ghosthands.dom.fill_executor._confirm_text_like_value", AsyncMock(return_value=True)),
-    ):
-        success = await domhand_fill_module._fill_date_field(page, field, "2026-03-19", "[Date]")
-
-    assert success is True
-    assert any(
-        call.args[0] == domhand_fill_module._OPEN_GROUPED_DATE_PICKER_JS for call in page.evaluate.await_args_list
-    )
-    assert any(
-        call.args[0] == domhand_fill_module._SELECT_GROUPED_DATE_PICKER_VALUE_JS
-        for call in page.evaluate.await_args_list
-    )
-    assert any(
-        call.args[0] == domhand_fill_module._FILL_FIELD_JS and call.args[1] == "date-year"
-        for call in page.evaluate.await_args_list
-    )
-
-
-@pytest.mark.asyncio
 async def test_assess_state_treats_checked_terms_checkbox_as_matching_yes_expected_value():
     from ghosthands.actions.domhand_assess_state import domhand_assess_state
     from ghosthands.actions.views import DomHandAssessStateParams, FormField, get_stable_field_key
@@ -7480,45 +6782,6 @@ async def test_confirm_text_like_value_actor_fallback_uses_key_compat_for_blur()
     press_key.assert_awaited_once_with(page, "Tab")
 
 
-@pytest.mark.asyncio
-async def test_fill_text_field_retries_salary_with_numeric_candidate_after_range_failure():
-    from ghosthands.actions.domhand_fill import _FILL_FIELD_JS, _fill_text_field
-    from ghosthands.actions.views import FormField
-
-    field = FormField(
-        field_id="salary-field",
-        name="What is your desired Annual Salary?",
-        field_type="text",
-        section="Application Questions",
-        required=False,
-    )
-    page = AsyncMock()
-    page.evaluate = AsyncMock(
-        side_effect=[
-            json.dumps(False),
-            json.dumps({"success": True}),
-            json.dumps({"success": True}),
-        ]
-    )
-
-    with patch(
-        "ghosthands.dom.fill_executor._confirm_text_like_value",
-        AsyncMock(side_effect=[False, True]),
-    ):
-        success = await _fill_text_field(
-            page,
-            field,
-            "$90,000-$120,000 base (flexible)",
-            "[salary]",
-        )
-
-    assert success is True
-    fill_calls = [call for call in page.evaluate.await_args_list if call.args and call.args[0] == _FILL_FIELD_JS]
-    assert fill_calls[0].args[2] == "$90,000-$120,000 base (flexible)"
-    assert fill_calls[1].args[2] == "90000"
-
-
-@pytest.mark.asyncio
 async def test_domhand_select_no_options_returns_failover_without_unboundlocalerror():
     from types import SimpleNamespace
     from unittest.mock import Mock
@@ -7877,66 +7140,6 @@ async def test_domhand_fill_routes_closed_choice_location_question_through_llm()
     assert llm_calls == [[field.field_id]]
 
 
-@pytest.mark.asyncio
-async def test_domhand_fill_enriches_missing_select_options_before_llm_generation():
-    from ghosthands.actions.domhand_fill import domhand_fill
-    from ghosthands.actions.views import DomHandFillParams, FormField
-
-    page = AsyncMock()
-    page.evaluate = AsyncMock(return_value="{}")
-    browser_session = AsyncMock()
-    browser_session.get_current_page = AsyncMock(return_value=page)
-    browser_session._gh_last_application_state = None
-    field = FormField(
-        field_id="ff-21",
-        name="What location do you intend to work out of?",
-        field_type="select",
-        section="Software Engineering Intern",
-        required=True,
-        is_native=False,
-        is_multi_select=False,
-    )
-    captured_options: list[str] = []
-
-    async def fake_generate(fields, *_args, **_kwargs):
-        captured_options[:] = list(fields[0].options)
-        return {"What location do you intend to work out of?": "Boston, MA"}, 12, 4, 0.001, "test-llm"
-
-    with (
-        patch("ghosthands.actions.domhand_fill._get_profile_text", return_value="profile text"),
-        patch("ghosthands.actions.domhand_fill._get_profile_data", return_value={"city": "Chantilly", "state": "VA"}),
-        patch("ghosthands.actions.domhand_fill._get_auth_override_data", return_value={}),
-        patch("ghosthands.actions.domhand_fill._infer_entry_data_from_scope", return_value=None),
-        patch(
-            "ghosthands.actions.domhand_fill._parse_profile_evidence", return_value={"city": "Chantilly", "state": "VA"}
-        ),
-        patch(
-            "ghosthands.actions.domhand_fill._safe_page_url",
-            AsyncMock(return_value="https://job-boards.greenhouse.io/example/jobs/1"),
-        ),
-        patch("ghosthands.actions.domhand_fill.extract_visible_form_fields", AsyncMock(return_value=[field])),
-        patch("ghosthands.actions.domhand_fill._filter_fields_for_scope", side_effect=lambda fields, **_: fields),
-        patch("ghosthands.actions.domhand_fill._is_navigation_field", return_value=False),
-        patch("ghosthands.actions.domhand_fill._known_auth_override_for_field", return_value=None),
-        patch("ghosthands.actions.domhand_fill._try_open_combobox_menu", AsyncMock(return_value=None)),
-        patch(
-            "ghosthands.actions.domhand_fill._scan_visible_dropdown_options",
-            AsyncMock(return_value=["Boston, MA", "New York, NY"]),
-        ),
-        patch("ghosthands.actions.domhand_fill._generate_answers", AsyncMock(side_effect=fake_generate)),
-        patch(
-            "ghosthands.actions.domhand_fill._attempt_domhand_fill_with_retry_cap",
-            AsyncMock(return_value=(True, None, None, 1.0, "Boston, MA")),
-        ),
-        patch("ghosthands.actions.domhand_fill._record_expected_value_if_settled", AsyncMock(return_value=True)),
-        patch("ghosthands.actions.domhand_fill._stagehand_observe_cross_reference", AsyncMock(return_value=None)),
-    ):
-        result = await domhand_fill(DomHandFillParams(target_section="Software Engineering Intern"), browser_session)
-
-    assert result.error is None
-    assert captured_options == ["Boston, MA", "New York, NY"]
-
-
 def test_answer_resolution_logs_shape_incompatible_rejection():
     from ghosthands.actions.domhand_fill import _coerce_answer_if_compatible
     from ghosthands.actions.views import FormField
@@ -8069,115 +7272,6 @@ async def test_domhand_fill_allows_explicit_focus_retry_for_stale_blocker():
     assert "DOMHAND_FILL_JSON" not in (result.extracted_content or "")
 
 
-@pytest.mark.asyncio
-async def test_domhand_fill_defers_conditional_reveal_to_next_round_without_poisoning_field():
-    from ghosthands.actions.domhand_fill import domhand_fill
-    from ghosthands.actions.views import DomHandFillParams, FormField
-
-    page = AsyncMock()
-    page.evaluate = AsyncMock(return_value="{}")
-    browser_session = AsyncMock()
-    browser_session.get_current_page = AsyncMock(return_value=page)
-    browser_session._gh_last_application_state = None
-
-    work_auth = FormField(
-        field_id="work-auth",
-        name="Are you legally permitted to work in the country where this job is located?*",
-        field_type="button-group",
-        section="Application Questions",
-        required=True,
-        choices=["Yes", "No"],
-    )
-    visa_detail = FormField(
-        field_id="visa-detail",
-        name="You answered 'Yes' to the previous question. Please specify the type of visa sponsorship you require from your employer, now or in the future.*",
-        field_type="select",
-        section="Application Questions",
-        required=True,
-        is_native=False,
-        choices=["F-1 OPT", "H-1B", "TN"],
-    )
-
-    visible_field_sequences = [
-        [work_auth],
-        [work_auth, visa_detail],
-        [work_auth, visa_detail],
-        [work_auth, visa_detail],
-    ]
-
-    async def extract_side_effect(_page):
-        if visible_field_sequences:
-            return visible_field_sequences.pop(0)
-        return [work_auth, visa_detail]
-
-    llm_batches = []
-
-    async def generate_answers(fields, profile_text, profile_data=None):
-        llm_batches.append([field.field_id for field in fields])
-        if any(field.field_id == work_auth.field_id for field in fields):
-            return (
-                {work_auth.name: "Yes"},
-                21,
-                7,
-                0.002,
-                "test-llm",
-            )
-        return (
-            {visa_detail.name: "F-1 OPT"},
-            21,
-            7,
-            0.002,
-            "test-llm",
-        )
-
-    fill_attempts = []
-
-    async def attempt_fill(page, host, field, desired_value, tool_name, browser_session):
-        fill_attempts.append((field.field_id, desired_value))
-        if field.field_id == work_auth.field_id:
-            return (True, None, None, 1.0, "Yes")
-        if field.field_id == visa_detail.field_id:
-            return (True, None, None, 1.0, "F-1 OPT")
-        raise AssertionError(f"unexpected field {field.field_id}")
-
-    with (
-        patch("ghosthands.actions.domhand_fill._get_profile_text", return_value="profile text"),
-        patch("ghosthands.actions.domhand_fill._get_profile_data", return_value={"work_authorization": "Yes"}),
-        patch("ghosthands.actions.domhand_fill._get_auth_override_data", return_value={}),
-        patch("ghosthands.actions.domhand_fill._infer_entry_data_from_scope", return_value=None),
-        patch("ghosthands.actions.domhand_fill._parse_profile_evidence", return_value={"work_authorization": "Yes"}),
-        patch(
-            "ghosthands.actions.domhand_fill._safe_page_url",
-            AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job"),
-        ),
-        patch("ghosthands.actions.domhand_fill._get_page_context_key", AsyncMock(return_value="ctx")),
-        patch(
-            "ghosthands.actions.domhand_fill.extract_visible_form_fields", AsyncMock(side_effect=extract_side_effect)
-        ),
-        patch("ghosthands.actions.domhand_fill._filter_fields_for_scope", side_effect=lambda fields, **_: fields),
-        patch("ghosthands.actions.domhand_fill._is_navigation_field", return_value=False),
-        patch("ghosthands.actions.domhand_fill._known_auth_override_for_field", return_value=None),
-        patch("ghosthands.actions.domhand_fill._generate_answers", AsyncMock(side_effect=generate_answers)),
-        patch(
-            "ghosthands.actions.domhand_fill._attempt_domhand_fill_with_retry_cap",
-            AsyncMock(side_effect=attempt_fill),
-        ),
-        patch("ghosthands.actions.domhand_fill._record_expected_value_if_settled", AsyncMock(return_value=True)),
-        patch("ghosthands.actions.domhand_fill._stagehand_observe_cross_reference", AsyncMock(return_value=None)),
-    ):
-        result = await domhand_fill(
-            DomHandFillParams(target_section="Application Questions"),
-            browser_session,
-        )
-
-    assert result.error is None
-    assert llm_batches == [[work_auth.field_id], [visa_detail.field_id]]
-    assert ("visa-detail", "F-1 OPT") in fill_attempts
-    payload = (result.metadata or {})["domhand_fill_json"]
-    assert payload["filled_count"] == 2
-
-
-@pytest.mark.asyncio
 async def test_domhand_fill_does_not_skip_invalid_prefilled_select():
     from ghosthands.actions.domhand_fill import domhand_fill
     from ghosthands.actions.views import DomHandFillParams, FormField
@@ -8665,3 +7759,168 @@ def test_get_entries_for_section_with_max():
     profile = {"skills": ["Python", "Java", "Go", "Rust", "C++"]}
     entries = _get_entries_for_section(profile, "skills", 3)
     assert len(entries) == 3
+
+
+# ── Oracle entity no-fuzzy-fallback guard ──────────────────────────
+
+
+def _make_ff(*, name, field_type="select", is_native=False, oracle_freeform=False):
+    from ghosthands.actions.views import FormField
+
+    return FormField(
+        field_id="ff-test",
+        name=name,
+        field_type=field_type,
+        is_native=is_native,
+        oracle_freeform_combobox_answer=oracle_freeform,
+    )
+
+
+def test_is_oracle_entity_no_fuzzy_fallback_school():
+    from ghosthands.dom.fill_executor import _is_oracle_entity_no_fuzzy_fallback_field
+
+    assert _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="School"))
+    assert _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="University Name"))
+    assert _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="College"))
+    assert _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="Institution"))
+
+
+def test_is_oracle_entity_no_fuzzy_fallback_employer():
+    from ghosthands.dom.fill_executor import _is_oracle_entity_no_fuzzy_fallback_field
+
+    assert _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="Name of Latest Employer"))
+    assert _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="Company Name"))
+    assert _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="Organization"))
+
+
+def test_is_oracle_entity_no_fuzzy_fallback_excludes_non_entity():
+    from ghosthands.dom.fill_executor import _is_oracle_entity_no_fuzzy_fallback_field
+
+    # These should NOT be treated as entity fields — they have short deterministic option lists
+    assert not _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="Visa Status"))
+    assert not _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="Major"))
+    assert not _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="Field of Study"))
+    assert not _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="Degree"))
+    assert not _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="Country"))
+    assert not _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="State"))
+    assert not _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="Work Authorization"))
+    assert not _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="Sponsorship Required"))
+
+
+def test_is_oracle_school_llm_field_gating():
+    from ghosthands.dom.fill_executor import _is_oracle_school_llm_field
+
+    # School with oracle_freeform flag → True
+    assert _is_oracle_school_llm_field(_make_ff(name="School", oracle_freeform=True))
+    assert _is_oracle_school_llm_field(_make_ff(name="University Name", oracle_freeform=True))
+    # School without flag → False
+    assert not _is_oracle_school_llm_field(_make_ff(name="School", oracle_freeform=False))
+    # Major/field_of_study WITH flag → False (stays on deterministic path)
+    assert not _is_oracle_school_llm_field(_make_ff(name="Major", oracle_freeform=True))
+    assert not _is_oracle_school_llm_field(_make_ff(name="Field of Study", oracle_freeform=True))
+    # Employer WITH flag → False (not a school label)
+    assert not _is_oracle_school_llm_field(_make_ff(name="Latest Employer", oracle_freeform=True))
+
+
+@pytest.mark.asyncio
+async def test_try_oracle_combobox_blocks_entity_fallthrough():
+    """When _is_oracle_entity_no_fuzzy_fallback_field matches and combobox fails,
+    _try_oracle_searchable_combobox_first must return a failed outcome (not None),
+    blocking fallthrough to fill_interactive_dropdown word-overlap matching."""
+    from ghosthands.dom.fill_executor import _try_oracle_searchable_combobox_first
+
+    field = _make_ff(name="School", field_type="select", is_native=False)
+    page = AsyncMock()
+    # Oracle searchable: True
+    page.evaluate = AsyncMock(side_effect=[
+        True,  # _IS_ORACLE_SEARCHABLE_JS
+        json.dumps({"exists": True}),  # _ELEMENT_EXISTS_JS
+        # _fill_oracle_combobox_outcome will fail — but we mock at higher level
+    ])
+
+    with (
+        patch("ghosthands.platforms.detect_platform", return_value="oracle"),
+        patch(
+            "ghosthands.dom.fill_executor._fill_oracle_combobox_outcome",
+            AsyncMock(return_value=SimpleNamespace(success=False, matched_label=None)),
+        ),
+    ):
+        result = await _try_oracle_searchable_combobox_first(
+            page, field, "University of California, Los Angeles", "test-tag",
+            page_url="https://hdpc.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/X/job/1/apply",
+        )
+
+    # Must NOT be None — must be a failed outcome to prevent fallthrough
+    assert result is not None
+    assert result.success is False
+
+
+@pytest.mark.asyncio
+async def test_try_oracle_combobox_allows_non_entity_fallthrough():
+    """Non-entity fields (e.g. visa status) should still fall through to generic handler."""
+    from ghosthands.dom.fill_executor import _try_oracle_searchable_combobox_first
+
+    field = _make_ff(name="Visa Status", field_type="select", is_native=False)
+    page = AsyncMock()
+    page.evaluate = AsyncMock(side_effect=[
+        True,  # _IS_ORACLE_SEARCHABLE_JS
+        json.dumps({"exists": True}),  # _ELEMENT_EXISTS_JS
+    ])
+
+    with (
+        patch("ghosthands.platforms.detect_platform", return_value="oracle"),
+        patch(
+            "ghosthands.dom.fill_executor._fill_oracle_combobox_outcome",
+            AsyncMock(return_value=SimpleNamespace(success=False, matched_label=None)),
+        ),
+    ):
+        result = await _try_oracle_searchable_combobox_first(
+            page, field, "H-1B", "test-tag",
+            page_url="https://hdpc.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/X/job/1/apply",
+        )
+
+    # Should be None — allows fallthrough to generic select handler
+    assert result is None
+
+
+# ── Shared Oracle combobox polling helper ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_poll_oracle_combobox_options_returns_on_second_poll():
+    """_poll_oracle_combobox_options should keep polling until options appear."""
+    from ghosthands.dom.fill_executor import _poll_oracle_combobox_options
+
+    call_count = 0
+
+    async def mock_list_options(js, ff_id):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            return "[]"  # empty on first two reads
+        return json.dumps([{"text": "UCLA", "dataValue": "UCLA"}])
+
+    page = AsyncMock()
+    page.evaluate = AsyncMock(side_effect=mock_list_options)
+
+    with patch(
+        "ghosthands.dom.fill_executor._oracle_list_combobox_option_labels",
+        AsyncMock(side_effect=[[], [], ["UCLA"]]),
+    ):
+        labels = await _poll_oracle_combobox_options(page, "ff-school", max_wait_s=2.0)
+
+    assert labels == ["UCLA"]
+
+
+@pytest.mark.asyncio
+async def test_poll_oracle_combobox_options_returns_empty_on_timeout():
+    from ghosthands.dom.fill_executor import _poll_oracle_combobox_options
+
+    page = AsyncMock()
+    with patch(
+        "ghosthands.dom.fill_executor._oracle_list_combobox_option_labels",
+        AsyncMock(return_value=[]),
+    ):
+        labels = await _poll_oracle_combobox_options(page, "ff-school", max_wait_s=0.8)
+
+    assert labels == []

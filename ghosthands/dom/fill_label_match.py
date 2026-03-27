@@ -476,6 +476,9 @@ def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
     if not text:
         return None
 
+    if field.oracle_freeform_combobox_answer:
+        return text
+
     # LLM/prompt often says default *device type* to "Mobile"; that must never become the <tel> value.
     # Also react-select noise lists include "Mobile" as an option — do not snap the number field to it.
     if _field_accepts_phone_digits_not_line_type(field) and _answer_is_phone_line_type_token(text):

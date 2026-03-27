@@ -36,7 +36,6 @@ from ghosthands.actions.views import (
 )
 from ghosthands.dom.dropdown_fill import (
     POST_OPTION_CLICK_SETTLE_S,
-    _match_dropdown_option_with_proficiency_fallback,
     fill_interactive_dropdown,
 )
 from ghosthands.dom.dropdown_match import (
@@ -69,6 +68,11 @@ from ghosthands.dom.fill_browser_scripts import (
     _READ_GROUP_SELECTION_JS,
     _SCROLL_FF_INTO_VIEW_JS,
     _SELECT_GROUPED_DATE_PICKER_VALUE_JS,
+)
+from ghosthands.dom.oracle_combobox_llm import (
+    oracle_combobox_pick_option_llm,
+    oracle_combobox_search_terms_llm,
+    oracle_combobox_verify_commit_llm,
 )
 from ghosthands.runtime_learning import (
     detect_host_from_url,
@@ -1076,6 +1080,19 @@ async def _fill_single_field_outcome(
         if result is not None:
             return result
 
+    # School-only: bypass generic Oracle combobox path and use LLM search+pick.
+    if field.oracle_freeform_combobox_answer and _is_oracle_school_llm_field(field):
+        outcome = await _fill_oracle_school_combobox_llm_outcome(page, field, value, tag)
+        if outcome.success:
+            return outcome
+        # School LLM path failed — block fuzzy fallback (entity guard)
+        logger.info(
+            "domhand.oracle_school_llm_direct_failed",
+            field_label=field.name,
+            value=value[:60],
+        )
+        return outcome  # return failed outcome, no fallthrough
+
     oracle_first = await _try_oracle_searchable_combobox_first(
         page, field, value, tag, page_url=page_url
     )
@@ -1317,6 +1334,478 @@ _ORACLE_COMBOBOX_READ_VALUE_JS = r"""
 }
 """
 
+_ORACLE_COMBOBOX_LIST_OPTIONS_JS = r"""
+(ffId) => {
+    var el = window.__ff ? window.__ff.byId(ffId) : null;
+    if (!el) return JSON.stringify([]);
+    var controlsId = el.getAttribute('aria-controls');
+    var dropdown = controlsId ? document.getElementById(controlsId) : null;
+    if (!dropdown) {
+        var container = el.closest('.cx-select-container') || el.closest('.input-field-container');
+        if (container) dropdown = container.querySelector('.cx-select-dropdown, [role="grid"], [role="listbox"]');
+    }
+    if (!dropdown) {
+        var allListboxes = document.querySelectorAll('[role="listbox"], [role="grid"]');
+        for (var i = 0; i < allListboxes.length; i++) {
+            var s = getComputedStyle(allListboxes[i]);
+            if (s.display !== 'none' && s.visibility !== 'hidden') { dropdown = allListboxes[i]; break; }
+        }
+    }
+    if (!dropdown) return JSON.stringify([]);
+    var rows = dropdown.querySelectorAll('[role="row"]:not([data-empty-row="true"]), [role="option"]');
+    var visible = [];
+    for (var j = 0; j < rows.length; j++) {
+        var rs = getComputedStyle(rows[j]);
+        if (rs.display !== 'none' && rs.visibility !== 'hidden') visible.push(rows[j]);
+    }
+    var out = [];
+    var max = 30;
+    for (var k = 0; k < visible.length && k < max; k++) {
+        var row = visible[k];
+        var t = (row.textContent || '').replace(/\s+/g, ' ').trim();
+        var dv = (row.getAttribute('data-value') || '').trim();
+        out.push({text: t.substring(0, 240), dataValue: dv.substring(0, 240)});
+    }
+    return JSON.stringify(out);
+}
+"""
+
+_ORACLE_COMBOBOX_CLICK_INDEX_JS = r"""
+(ffId, index) => {
+    var el = window.__ff ? window.__ff.byId(ffId) : null;
+    if (!el) return JSON.stringify({clicked: false, reason: 'element_not_found'});
+    var controlsId = el.getAttribute('aria-controls');
+    var dropdown = controlsId ? document.getElementById(controlsId) : null;
+    if (!dropdown) {
+        var container = el.closest('.cx-select-container') || el.closest('.input-field-container');
+        if (container) dropdown = container.querySelector('.cx-select-dropdown, [role="grid"], [role="listbox"]');
+    }
+    if (!dropdown) {
+        var allListboxes = document.querySelectorAll('[role="listbox"], [role="grid"]');
+        for (var i = 0; i < allListboxes.length; i++) {
+            var s = getComputedStyle(allListboxes[i]);
+            if (s.display !== 'none' && s.visibility !== 'hidden') { dropdown = allListboxes[i]; break; }
+        }
+    }
+    if (!dropdown) return JSON.stringify({clicked: false, reason: 'no_dropdown'});
+    var rows = dropdown.querySelectorAll('[role="row"]:not([data-empty-row="true"]), [role="option"]');
+    var visible = [];
+    for (var j = 0; j < rows.length; j++) {
+        var rs = getComputedStyle(rows[j]);
+        if (rs.display !== 'none' && rs.visibility !== 'hidden') visible.push(rows[j]);
+    }
+    var idx = typeof index === 'number' ? index : parseInt(String(index), 10);
+    if (isNaN(idx) || idx < 0 || idx >= visible.length) {
+        return JSON.stringify({clicked: false, reason: 'bad_index', visible_count: visible.length});
+    }
+    var row = visible[idx];
+    var matchedText = (row.getAttribute('data-value') || row.textContent || '').replace(/\s+/g, ' ').trim();
+    // Oracle cx-select ignores simple el.click() — dispatch full mouse event sequence
+    // on the deepest text-bearing child (Oracle binds handlers on inner spans/cells).
+    var target = row.querySelector('[role="gridcell"] span, [role="gridcell"], span, a') || row;
+    var rect = target.getBoundingClientRect();
+    var cx = rect.left + rect.width / 2;
+    var cy = rect.top + rect.height / 2;
+    var opts = {bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy};
+    target.dispatchEvent(new MouseEvent('mousedown', opts));
+    target.dispatchEvent(new MouseEvent('mouseup', opts));
+    target.dispatchEvent(new MouseEvent('click', opts));
+    return JSON.stringify({clicked: true, text: matchedText.substring(0, 200)});
+}
+"""
+
+
+def _is_oracle_school_llm_field(field: FormField) -> bool:
+    """Oracle education combobox: use GPT type → scan → LLM index pick (not JS substring).
+
+    Triage may set ``oracle_freeform_combobox_answer`` for both **school** and **field_of_study**
+    on Oracle FA to skip option-list coercion. Only **school-like** labels enter this LLM picker;
+    major / field-of-study / discipline labels stay on the generic Oracle combobox path
+    (``_fill_oracle_combobox_outcome`` with keyboard + JS row match).
+    """
+    if not field.oracle_freeform_combobox_answer:
+        return False
+    label = normalize_name(_preferred_field_label(field))
+    if any(
+        tok in label
+        for tok in (
+            "major",
+            "minor",
+            "field of study",
+            "discipline",
+            "concentration",
+            "area of study",
+        )
+    ):
+        return False
+    return any(tok in label for tok in ("school", "university", "college", "institution"))
+
+
+def _is_oracle_entity_no_fuzzy_fallback_field(field: FormField) -> bool:
+    """High-risk entity names where word-overlap fallback must NOT be used.
+
+    School/college/university/institution and employer/company/organization labels
+    share common tokens (e.g. "University") with many unrelated options.  If the
+    Oracle combobox path fails, falling through to ``fill_interactive_dropdown`` →
+    ``match_dropdown_option`` pass 5 (word overlap) would silently pick the wrong
+    entity.  This guard does **not** require ``oracle_freeform_combobox_answer`` —
+    triage can still miss the flag for employer fields or non-structured paths.
+    """
+    label = normalize_name(_preferred_field_label(field))
+    # Exclude degree / major / discipline / visa — these have short, deterministic option lists.
+    if any(
+        tok in label
+        for tok in (
+            "major",
+            "minor",
+            "field of study",
+            "discipline",
+            "concentration",
+            "area of study",
+            "degree",
+            "visa",
+            "authorization",
+            "sponsorship",
+        )
+    ):
+        return False
+    return any(
+        tok in label
+        for tok in (
+            "school",
+            "university",
+            "college",
+            "institution",
+            "employer",
+            "company",
+            "organization",
+            "latest employer",
+        )
+    )
+
+
+def _oracle_combobox_options_raw_to_labels(raw: Any) -> list[str]:
+    items = raw
+    if isinstance(raw, str):
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(items, list):
+        return []
+    labels: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        t = str(item.get("text") or "").strip()
+        dv = str(item.get("dataValue") or "").strip()
+        label = t if t else dv
+        if label:
+            labels.append(label)
+    return labels
+
+
+async def _oracle_list_combobox_option_labels(page: Any, ff_id: str) -> list[str]:
+    try:
+        raw = await page.evaluate(_ORACLE_COMBOBOX_LIST_OPTIONS_JS, ff_id)
+        return _oracle_combobox_options_raw_to_labels(raw)
+    except Exception:
+        return []
+
+
+async def _poll_oracle_combobox_options(
+    page: Any,
+    ff_id: str,
+    *,
+    max_wait_s: float = 2.5,
+    interval_s: float = 0.25,
+) -> list[str]:
+    """Poll for non-empty Oracle combobox option labels after typing.
+
+    Shared by both the LLM school path and the generic Oracle combobox path.
+    Returns the first non-empty label list, or ``[]`` on timeout.
+    """
+    elapsed = 0.0
+    poll_count = 0
+    await asyncio.sleep(0.5)  # initial settle for Oracle grid render
+    elapsed += 0.5
+    while elapsed < max_wait_s:
+        poll_count += 1
+        labels = await _oracle_list_combobox_option_labels(page, ff_id)
+        if labels:
+            logger.info(
+                "domhand.oracle_poll_options_found",
+                field_id=ff_id,
+                poll_count=poll_count,
+                elapsed_s=round(elapsed, 2),
+                option_count=len(labels),
+            )
+            return labels
+        await asyncio.sleep(interval_s)
+        elapsed += interval_s
+    logger.info(
+        "domhand.oracle_poll_options_timeout",
+        field_id=ff_id,
+        poll_count=poll_count,
+        elapsed_s=round(elapsed, 2),
+    )
+    return []
+
+
+def _merge_unique_terms(primary: list[str], secondary: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for group in (primary, secondary):
+        for t in group:
+            s = str(t).strip()
+            if not s:
+                continue
+            k = s.lower()
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(s)
+    return out
+
+
+async def _fill_oracle_school_combobox_llm_outcome(
+    page: Any,
+    field: FormField,
+    value: str,
+    tag: str,
+) -> FieldFillOutcome:
+    """Oracle school: keyboard type → list visible rows → GPT picks index → verify commit."""
+    ff_id = field.field_id
+    canonical = " ".join(str(value or "").split()).strip()
+    if not canonical:
+        return _fill_outcome(False)
+
+    from ghosthands.dom.oracle_combobox_llm import _oracle_school_llm_disabled
+    logger.info(
+        "domhand.oracle_school_llm_enter",
+        field_label=field.name,
+        canonical=canonical[:80],
+        llm_disabled=_oracle_school_llm_disabled(),
+    )
+
+    max_term_generations = 2
+    # Each successful candidate search uses up to 2 LLM calls (pick + verify). Budget 12
+    # caps total pick+verify invocations (~6 full try/verify cycles) across all search terms.
+    max_option_llm_calls = 12
+    option_llm_calls = 0
+    all_terms_tried: list[str] = []
+
+    det_terms = _oracle_combobox_search_terms(canonical) or [canonical]
+
+    for gen in range(max_term_generations):
+        if gen == 0:
+            llm_terms = await oracle_combobox_search_terms_llm(canonical)
+            search_terms = _merge_unique_terms(llm_terms, det_terms)
+        else:
+            llm_terms = await oracle_combobox_search_terms_llm(
+                canonical, prior_terms_tried=all_terms_tried
+            )
+            search_terms = _merge_unique_terms(llm_terms, [])
+
+        logger.info(
+            "domhand.oracle_school_llm_terms",
+            field_label=field.name,
+            generation=gen + 1,
+            llm_term_count=len(llm_terms),
+            det_term_count=len(det_terms) if gen == 0 else 0,
+            merged_count=len(search_terms),
+            terms_preview=[t[:40] for t in search_terms[:5]],
+        )
+        if not search_terms:
+            continue
+
+        for term in search_terms:
+            if term.lower() in {t.lower() for t in all_terms_tried}:
+                continue
+            all_terms_tried.append(term)
+
+            if option_llm_calls >= max_option_llm_calls:
+                break
+
+            logger.info(
+                "domhand.oracle_school_llm_typing",
+                field_label=field.name,
+                search_term=term[:60],
+                generation=gen + 1,
+                terms_tried=len(all_terms_tried),
+                llm_calls_used=option_llm_calls,
+            )
+            with contextlib.suppress(Exception):
+                await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
+            await asyncio.sleep(0.12)
+            await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
+            await asyncio.sleep(0.1)
+            await _press_key_compat(page, "Control+a")
+            await _press_key_compat(page, "Backspace")
+            await asyncio.sleep(0.1)
+            await _type_text_compat(page, term, delay=30)
+
+            option_labels = await _poll_oracle_combobox_options(page, ff_id)
+            if option_labels:
+                logger.info(
+                    "domhand.oracle_school_llm_options_found",
+                    field_label=field.name,
+                    search_term=term[:60],
+                    option_count=len(option_labels),
+                    first_options=[o[:50] for o in option_labels[:5]],
+                )
+            if not option_labels:
+                logger.info(
+                    "domhand.oracle_school_llm_no_options",
+                    field_label=field.name,
+                    search_term=term[:60],
+                    generation=gen + 1,
+                )
+                continue
+
+            if option_llm_calls + 2 > max_option_llm_calls:
+                break
+
+            option_llm_calls += 1
+            if option_llm_calls >= max_option_llm_calls:
+                break
+
+            idx = await oracle_combobox_pick_option_llm(canonical, option_labels, term)
+            logger.info(
+                "domhand.oracle_school_llm_pick_result",
+                field_label=field.name,
+                search_term=term[:60],
+                picked_index=idx,
+                picked_label=(option_labels[idx][:60] if idx is not None and 0 <= idx < len(option_labels) else None),
+                option_count=len(option_labels),
+            )
+            if idx is None:
+                continue
+
+            click_raw = await page.evaluate(_ORACLE_COMBOBOX_CLICK_INDEX_JS, ff_id, idx)
+            click_result = json.loads(click_raw) if isinstance(click_raw, str) else click_raw
+            if not (isinstance(click_result, dict) and click_result.get("clicked")):
+                reason = str((click_result or {}).get("reason", ""))[:40]
+                logger.info(
+                    "domhand.oracle_school_llm_click_failed",
+                    field_label=field.name,
+                    search_term=term[:60],
+                    picked_index=idx,
+                    reason=reason,
+                )
+                # Dropdown may have dismissed during LLM call — retype to reopen and retry click once
+                if reason in ("no_dropdown", "element_not_found"):
+                    await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
+                    await asyncio.sleep(0.1)
+                    await _press_key_compat(page, "Control+a")
+                    await _press_key_compat(page, "Backspace")
+                    await asyncio.sleep(0.1)
+                    await _type_text_compat(page, term, delay=30)
+                    retry_options = await _poll_oracle_combobox_options(page, ff_id)
+                    if retry_options:
+                        click_raw2 = await page.evaluate(_ORACLE_COMBOBOX_CLICK_INDEX_JS, ff_id, idx)
+                        click_result2 = json.loads(click_raw2) if isinstance(click_raw2, str) else click_raw2
+                        if isinstance(click_result2, dict) and click_result2.get("clicked"):
+                            logger.info(
+                                "domhand.oracle_school_llm_click_retry_ok",
+                                field_label=field.name,
+                                search_term=term[:60],
+                                picked_index=idx,
+                            )
+                            # Fall through to value read + verify below
+                        else:
+                            continue
+                    else:
+                        continue
+                else:
+                    continue
+
+            await asyncio.sleep(1.2)
+            await _settle_dropdown_selection(page)
+
+            val_raw = await page.evaluate(_ORACLE_COMBOBOX_READ_VALUE_JS, ff_id)
+            val_result = json.loads(val_raw) if isinstance(val_raw, str) else val_raw
+            effective = ""
+            if isinstance(val_result, dict):
+                effective = str(val_result.get("committed") or val_result.get("value") or "").strip()
+
+            picked_label = option_labels[idx] if 0 <= idx < len(option_labels) else str(
+                click_result.get("text") or ""
+            ).strip()
+
+            if not effective:
+                logger.info(
+                    "domhand.oracle_school_llm_empty_after_click",
+                    field_label=field.name,
+                    search_term=term[:60],
+                    val_raw=str(val_raw)[:120] if val_raw else "None",
+                )
+                continue
+
+            option_llm_calls += 1
+            if option_llm_calls >= max_option_llm_calls:
+                break
+
+            verified = await oracle_combobox_verify_commit_llm(canonical, effective, picked_label)
+            logger.info(
+                "domhand.oracle_school_llm_verify",
+                field_label=field.name,
+                verified=verified,
+                canonical=canonical[:60],
+                committed=effective[:60],
+                picked=picked_label[:60],
+            )
+            if not verified:
+                with contextlib.suppress(Exception):
+                    await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
+                await asyncio.sleep(0.1)
+                # Clear residual text to prevent Oracle auto-commit on blur
+                with contextlib.suppress(Exception):
+                    await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
+                continue
+
+            if await _field_has_validation_error(page, ff_id):
+                return _fill_outcome(False)
+
+            logger.info(
+                "domhand.oracle_school_llm_ok",
+                field_label=field.name,
+                committed=effective[:80],
+                search_term=term[:60],
+                generation=gen + 1,
+            )
+            return _fill_outcome(True, matched_label=picked_label or effective)
+
+        if option_llm_calls >= max_option_llm_calls:
+            break
+
+    # Clear the combobox input to prevent Oracle auto-committing the first
+    # visible filtered option when focus leaves (the "A&M University" bug).
+    with contextlib.suppress(Exception):
+        await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
+    await asyncio.sleep(0.1)
+    with contextlib.suppress(Exception):
+        await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
+    with contextlib.suppress(Exception):
+        await page.evaluate(
+            r"""(ffId) => {
+            var el = window.__ff ? window.__ff.byId(ffId) : null;
+            if (!el) return;
+            el.value = '';
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+            el.blur();
+        }""",
+            ff_id,
+        )
+    logger.warning(
+        "domhand.oracle_school_llm_exhausted",
+        field_label=field.name,
+        canonical=canonical[:80],
+        terms_tried=len(all_terms_tried),
+    )
+    return _fill_outcome(False)
+
 
 def _oracle_combobox_search_terms(value: str) -> list[str]:
     """Generate progressively shorter search terms for Oracle combobox retry.
@@ -1388,8 +1877,34 @@ async def _fill_oracle_combobox_outcome(
         exists_raw = await page.evaluate(_ELEMENT_EXISTS_JS, ff_id, field.field_type)
         exists = json.loads(exists_raw) if isinstance(exists_raw, str) else exists_raw
         if not (isinstance(exists, dict) and exists.get("exists")):
-            logger.debug(f"skip {tag} (oracle combobox, element not found)")
+            logger.warning(
+                "domhand.oracle_combobox_element_not_found",
+                field_label=field.name,
+                field_id=ff_id,
+                field_type=field.field_type,
+                oracle_freeform_flag=field.oracle_freeform_combobox_answer,
+                exists_raw=str(exists_raw)[:120] if exists_raw else "None",
+            )
             return _fill_outcome(False)
+
+        is_school_llm = _is_oracle_school_llm_field(field)
+        logger.info(
+            "domhand.oracle_combobox_path_decision",
+            field_label=field.name,
+            field_id=ff_id,
+            is_school_llm=is_school_llm,
+            oracle_freeform_flag=field.oracle_freeform_combobox_answer,
+            value=value[:80],
+        )
+        if is_school_llm:
+            from ghosthands.dom.oracle_combobox_llm import _oracle_school_llm_disabled
+            if _oracle_school_llm_disabled():
+                logger.warning(
+                    "domhand.oracle_school_llm_disabled",
+                    field_label=field.name,
+                    reason="no OpenAI API key or VALET proxy grant configured",
+                )
+            return await _fill_oracle_school_combobox_llm_outcome(page, field, value, tag)
 
         # Build search terms: full value first, then shorter alternatives.
         search_terms = _oracle_combobox_search_terms(value)
@@ -1404,7 +1919,17 @@ async def _fill_oracle_combobox_outcome(
             await asyncio.sleep(0.15)
 
             await _type_text_compat(page, term, delay=30)
-            await asyncio.sleep(1.0)
+
+            # Poll for visible options instead of a fixed sleep — Oracle's grid
+            # can take >1s to render and a single read misses late arrivals.
+            polled_options = await _poll_oracle_combobox_options(page, ff_id)
+            if not polled_options:
+                logger.debug(
+                    "domhand.oracle_combobox_no_options_after_poll",
+                    field_label=field.name,
+                    search_term=term[:60],
+                    attempt=attempt_idx + 1,
+                )
 
             # Try to click the best matching option — match against the
             # ORIGINAL desired value, not the search term.
@@ -1475,6 +2000,25 @@ async def _fill_oracle_combobox_outcome(
                 if effective.strip():
                     return _fill_outcome(True, matched_label=matched_label)
 
+        # Clear the combobox input to prevent Oracle auto-committing the first
+        # visible filtered option when focus leaves (the "A&M University" bug).
+        with contextlib.suppress(Exception):
+            await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
+        await asyncio.sleep(0.1)
+        with contextlib.suppress(Exception):
+            await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
+        with contextlib.suppress(Exception):
+            await page.evaluate(
+                r"""(ffId) => {
+                var el = window.__ff ? window.__ff.byId(ffId) : null;
+                if (!el) return;
+                el.value = '';
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                el.blur();
+            }""",
+                ff_id,
+            )
         logger.warning(
             "domhand.oracle_combobox_rejected",
             field_label=field.name,
@@ -1530,6 +2074,17 @@ async def _try_oracle_searchable_combobox_first(
     outcome = await _fill_oracle_combobox_outcome(page, field, value, tag)
     if outcome.success:
         return outcome
+    # Entity-name fields (school, employer): do NOT fall through to generic
+    # fill_interactive_dropdown — word-overlap matching silently picks wrong entities
+    # (e.g. "University" token matching "9 Eylul University" for UCLA).
+    if _is_oracle_entity_no_fuzzy_fallback_field(field):
+        logger.info(
+            "domhand.oracle_entity_no_fuzzy_fallback",
+            field_label=field.name,
+            field_type=field.field_type,
+            value=value[:60],
+        )
+        return outcome  # return the failed outcome — caller sees success=False, no fallthrough
     logger.debug(
         "domhand.oracle_combobox_fallthrough",
         field_label=field.name,
@@ -2114,6 +2669,7 @@ async def _fill_workday_skill_multiselect(
     picked_count = 0
     try:
         for val in normalized_values:
+            before_selection = await _read_multi_select_selection(page, ff_id)
             # Open/focus (like main's click-to-open but via combobox helper)
             await _try_open_combobox_menu(page, ff_id, tag=tag)
             await asyncio.sleep(0.2)
@@ -2133,16 +2689,29 @@ async def _fill_workday_skill_multiselect(
             )
             if clicked.get("clicked"):
                 await _settle_dropdown_selection(page)
-                picked_count += 1
-                await asyncio.sleep(0.2)
-                continue
+                committed = await _wait_for_multi_select_commit(
+                    page, field, val,
+                    previous_selection=before_selection,
+                    matched_label=clicked.get("text"),
+                )
+                if committed.get("committed"):
+                    picked_count += 1
+                    await asyncio.sleep(0.2)
+                    continue
 
-            # Enter fallback (like main)
+            # Enter fallback (like main) — verify commit before counting
             with contextlib.suppress(Exception):
                 await _press_key_compat(page, "Enter")
             await asyncio.sleep(0.3)
             await _settle_dropdown_selection(page)
-            picked_count += 1
+            committed = await _wait_for_multi_select_commit(
+                page, field, val,
+                previous_selection=before_selection,
+            )
+            if committed.get("committed"):
+                picked_count += 1
+                continue
+            logger.debug(f'workday skill multi-select {tag} option "{val}" not committed')
 
         # Dismiss (like main)
         try:

@@ -125,6 +125,7 @@ from ghosthands.dom.fill_executor import (  # noqa: F401
     _settle_dropdown_selection,
     _text_fill_attempt_values,
     _try_open_combobox_menu,
+    _type_text_compat,
     _type_and_click_dropdown_option,
     _visible_field_id_snapshot,
     _wait_for_field_value,
@@ -720,6 +721,29 @@ def _set_structured_repeater_resolved_value(
     diagnostic.resolved_source_key = source_key
 
 
+def _structured_education_oracle_combobox_skip_dropdown_coercion(
+    f: FormField,
+    *,
+    is_structured_education_candidate: bool,
+    structured_education_diag: StructuredRepeaterDiagnostic | None,
+) -> bool:
+    """Non-native Oracle school/field comboboxes often expose only an alphabetical option slice.
+
+    ``match_dropdown_option`` pass 5 (word overlap) can map e.g. UCLA to the first
+    option sharing the token "University" (e.g. "9 Eylul University"). Skip coercion
+    so triage routes to ``needs_llm`` and the executor types the real profile value.
+    """
+    if not is_structured_education_candidate or not structured_education_diag:
+        return False
+    if structured_education_diag.slot_name not in {"school", "field_of_study"}:
+        return False
+    if f.is_native:
+        return False
+    if f.field_type != "select":
+        return False
+    return True
+
+
 def _looks_like_internal_widget_value(value: str | None) -> bool:
     text = " ".join(str(value or "").split()).strip()
     if not text:
@@ -849,6 +873,10 @@ def _candidate_auto_expand_sections(
     return sections
 
 
+# Normalized section names successfully auto-expanded in this browser session (avoid duplicate Add clicks).
+_DOMHAND_AUTO_EXPAND_PROFILE_SECTIONS_ATTR = "_gh_domhand_auto_expanded_profile_sections"
+
+
 _OPEN_PROFILE_INLINE_FORM_COUNT_JS = """() => {
     const visible = (el) => {
         if (!el) return false;
@@ -897,10 +925,24 @@ async def _maybe_auto_expand_profile_repeaters(
     if not candidate_sections:
         return False
 
+    attempted: set[str] | None = getattr(
+        browser_session, _DOMHAND_AUTO_EXPAND_PROFILE_SECTIONS_ATTR, None
+    )
+    if attempted is None:
+        attempted = set()
+        setattr(browser_session, _DOMHAND_AUTO_EXPAND_PROFILE_SECTIONS_ATTR, attempted)
+
     from ghosthands.actions.domhand_expand import domhand_expand
     from ghosthands.actions.views import DomHandExpandParams
 
     for section in candidate_sections:
+        section_key = normalize_name(section)
+        if section_key and section_key in attempted:
+            logger.debug(
+                "domhand.auto_expand_profile_repeater.already_attempted",
+                extra={"section": section, "target_section": target_section or ""},
+            )
+            continue
         result = await domhand_expand(DomHandExpandParams(section=section), browser_session)
         if getattr(result, "error", None):
             logger.debug(
@@ -908,6 +950,8 @@ async def _maybe_auto_expand_profile_repeaters(
                 extra={"section": section, "error": result.error},
             )
             continue
+        if section_key:
+            attempted.add(section_key)
         logger.info(
             "domhand.auto_expand_profile_repeater",
             extra={"section": section, "target_section": target_section or ""},
@@ -2076,6 +2120,14 @@ def _build_field_description(field: FormField, display_name: str) -> str:
         desc += f' [question: "{field.raw_label}"]'
     if field.current_value:
         desc += f' [current: "{field.current_value}"]'
+    # Education/experience location hint: tell the LLM this is the entity location
+    _label_lc = normalize_name(display_name)
+    _section_lc = normalize_name(field.section or "")
+    if (
+        _label_lc in {"country", "state", "city", "province", "region"}
+        and any(tok in _section_lc for tok in ("education", "college", "university", "experience", "work", "employment"))
+    ):
+        desc += " [CRITICAL: This field is the SCHOOL/EMPLOYER location — NOT the applicant's home address. Look at the School or Company field in THIS SAME section and return THAT institution's city/state/country. NEVER use the applicant's residential address here.]"
     return desc
 
 
@@ -2094,6 +2146,16 @@ def _is_latest_employer_search_field(field: FormField) -> bool:
             "name of most recent employer",
         )
     )
+
+
+def _is_searchable_combobox_on_oracle(field: FormField, *, page_host: str) -> bool:
+    """True on Oracle Fusion FA hosts for non-native ``select`` (HCM type-to-search combobox)."""
+    host = (page_host or "").strip().lower()
+    if not host:
+        return False
+    if field.field_type != "select" or field.is_native:
+        return False
+    return ".fa." in host and "oraclecloud.com" in host
 
 
 def _replace_placeholder_answers(
@@ -2668,14 +2730,33 @@ def _dedupe_option_texts(values: list[str]) -> list[str]:
     return deduped
 
 
-async def _enrich_missing_select_options_for_llm(page: Any, fields: list[FormField]) -> None:
+async def _enrich_missing_select_options_for_llm(
+    page: Any,
+    fields: list[FormField],
+    *,
+    page_host: str = "",
+    combobox_search_hints: dict[str, str] | None = None,
+) -> None:
     """Populate missing options for custom dropdowns before batch LLM answer generation.
 
     This is a read-only enrichment pass: open the combobox, scan visible options,
     then dismiss. If discovery fails, leave the field untouched.
+
+    For Oracle FA school/field-of-study rows, ``combobox_search_hints`` triggers
+    type-to-search so the LLM sees filtered options instead of the alphabetical slice.
     """
     enriched_labels: list[str] = []
+    hints = combobox_search_hints or {}
     for field in fields:
+        hint = hints.get(field.field_id)
+        if hint and _is_searchable_combobox_on_oracle(field, page_host=page_host):
+            field.options = []
+            field.choices = []
+            discovered = await _enrich_combobox_via_search(page, field, hint)
+            if discovered:
+                field.options = discovered
+                enriched_labels.append(_preferred_field_label(field))
+            continue
         if not _should_enrich_select_options_for_llm(field):
             continue
 
@@ -2727,6 +2808,92 @@ async def _enrich_missing_select_options_for_llm(page: Any, fields: list[FormFie
             count=len(enriched_labels),
             labels=enriched_labels[:10],
         )
+
+
+async def _enrich_combobox_via_search(page: Any, field: FormField, search_hint: str) -> list[str]:
+    """Type ``search_hint`` into an Oracle-style combobox, read filtered options, then clear the input.
+
+    Used by CI fixtures and flows where the default open→scan slice is alphabetical and wrong.
+    """
+    ff_id = field.field_id
+    tag = f"combobox type-search enrich [{ff_id}]"
+    discovered: list[str] = []
+    try:
+        with contextlib.suppress(Exception):
+            await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
+        await asyncio.sleep(0.06)
+        await _try_open_combobox_menu(page, ff_id, tag=tag)
+        await asyncio.sleep(0.1)
+        await _clear_dropdown_search(page, ff_id)
+        await asyncio.sleep(0.08)
+        await _type_text_compat(page, search_hint, delay=35)
+        await asyncio.sleep(0.5)
+        last_valid: list[str] = []
+        stable = 0
+        best_batch: list[str] = []
+        for _ in range(30):
+            raw = await _scan_visible_dropdown_options(page, field_id=ff_id)
+            batch = _dedupe_option_texts(raw)
+            if len(batch) > len(best_batch):
+                best_batch = list(batch)
+            if batch and not _select_extractions_look_like_pre_open_noise(field, batch):
+                if batch == last_valid:
+                    stable += 1
+                else:
+                    last_valid = list(batch)
+                    stable = 1
+                if stable >= 2 or (len(batch) >= 3 and stable >= 1):
+                    discovered = list(batch)
+                    break
+            else:
+                last_valid = []
+                stable = 0
+            await asyncio.sleep(0.08)
+        if not discovered:
+            discovered = list(last_valid) if last_valid else list(best_batch)
+        if not discovered:
+            try:
+                await _try_open_combobox_menu(page, ff_id, tag=f"{tag}-list-fallback")
+                await asyncio.sleep(0.2)
+                raw_fb = await page.evaluate(
+                    r"""(fid) => {
+					const lb = document.getElementById(fid + '-list');
+					if (!lb) return [];
+					if (!lb.classList.contains('open')) return [];
+					return Array.from(lb.querySelectorAll('.option'))
+						.map((n) => (n.textContent || '').replace(/\s+/g, ' ').trim())
+						.filter(Boolean);
+				}""",
+                    ff_id,
+                )
+                if isinstance(raw_fb, list) and raw_fb:
+                    discovered = _dedupe_option_texts([str(x) for x in raw_fb])
+            except Exception:
+                pass
+    except Exception:
+        discovered = []
+    finally:
+        with contextlib.suppress(Exception):
+            await page.evaluate(_DISMISS_DROPDOWN_SOFT_JS)
+        await asyncio.sleep(0.06)
+        for _ in range(2):
+            with contextlib.suppress(Exception):
+                await _clear_dropdown_search(page, ff_id)
+        with contextlib.suppress(Exception):
+            await page.evaluate(
+                r"""(ffId) => {
+				var el = document.getElementById(ffId);
+				if (!el && window.__ff && window.__ff.byId) el = window.__ff.byId(ffId);
+				if (el && 'value' in el) {
+					el.value = '';
+					el.dispatchEvent(new Event('input', { bubbles: true }));
+					el.dispatchEvent(new Event('change', { bubbles: true }));
+				}
+			}""",
+                ff_id,
+            )
+        await asyncio.sleep(0.05)
+    return discovered
 
 
 async def _stagehand_observe_cross_reference(
@@ -3084,6 +3251,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         logger.info(f"Round {round_num}: {len(fillable_fields)} fillable fields found")
 
         needs_llm: list[FormField] = []
+        oracle_combobox_search_hints: dict[str, str] = {}
         direct_fills: dict[str, str] = {}
         resolved_values: dict[str, ResolvedFieldValue] = {}
         resolved_bindings: dict[str, ResolvedFieldBinding] = {}
@@ -3290,13 +3458,25 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 continue
             entry_val = _known_entry_value_for_field(f, entry_data)
             is_structured_education_candidate = _is_structured_education_candidate(f, fillable_fields)
+            _edu_slot = _education_slot_name(f, fillable_fields)
+            if _edu_slot in {"school", "field_of_study"}:
+                logger.info(
+                    "domhand.education_triage",
+                    field_label=_preferred_field_label(f),
+                    field_type=f.field_type,
+                    is_native=f.is_native,
+                    is_structured_edu=is_structured_education_candidate,
+                    slot_name=_edu_slot,
+                    entry_val=(str(entry_val)[:40] if entry_val else None),
+                    section=f.section or "",
+                )
             structured_education_diag = (
                 StructuredRepeaterDiagnostic(
                     repeater_group="education",
                     field_id=f.field_id,
                     field_label=_preferred_field_label(f),
                     section=f.section or "",
-                    slot_name=_education_slot_name(f, fillable_fields),
+                    slot_name=_edu_slot,
                     numeric_index=(_parse_heading_index(f.section) - 1)
                     if _parse_heading_index(f.section) is not None
                     else None,
@@ -3305,6 +3485,41 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 if is_structured_education_candidate
                 else None
             )
+            skip_oracle_education_combobox_coercion = (
+                _structured_education_oracle_combobox_skip_dropdown_coercion(
+                    f,
+                    is_structured_education_candidate=is_structured_education_candidate,
+                    structured_education_diag=structured_education_diag,
+                )
+            )
+            # Fallback guard: Oracle FA school combobox should always go to needs_llm
+            # even if structured education gate didn't fire (section mismatch, etc.)
+            _label_norm_guard = normalize_name(_preferred_field_label(f))
+            _is_school_label = any(tok in _label_norm_guard for tok in ("school", "university", "college", "institution"))
+            if _is_school_label and f.field_type == "select" and not f.is_native:
+                logger.info(
+                    "domhand.oracle_school_guard_trace",
+                    field_label=_preferred_field_label(f),
+                    skip_already=skip_oracle_education_combobox_coercion,
+                    page_host=page_host[:60] if page_host else "EMPTY",
+                    is_oracle_fa=_is_searchable_combobox_on_oracle(f, page_host=page_host),
+                    is_structured_edu=is_structured_education_candidate,
+                    slot_name=(_edu_slot or "None"),
+                    entry_val=(str(entry_val)[:40] if entry_val else "None"),
+                )
+            if (
+                not skip_oracle_education_combobox_coercion
+                and not f.is_native
+                and f.field_type == "select"
+                and _is_school_label
+            ):
+                # Force the skip for school on ANY Oracle page, not just FA hosts
+                logger.info(
+                    "domhand.oracle_school_fallback_guard",
+                    field_label=_preferred_field_label(f),
+                    page_host=page_host[:60] if page_host else "EMPTY",
+                )
+                skip_oracle_education_combobox_coercion = True
             if structured_education_diag and entry_val:
                 _set_structured_repeater_resolved_value(structured_education_diag, entry_val)
             if not entry_val and is_structured_education_candidate and profile_data:
@@ -3356,15 +3571,26 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         )
                     )
                     if raw_structured_education_val:
-                        entry_val = _coerce_answer_to_field(f, raw_structured_education_val)
-                        if entry_val:
-                            _set_structured_repeater_resolved_value(
-                                structured_education_diag,
-                                entry_val,
-                                source_key=raw_structured_education_source,
-                            )
-                        elif structured_education_diag:
-                            structured_education_diag.failure_stage = "value_coercion_empty"
+                        if skip_oracle_education_combobox_coercion:
+                            entry_val = str(raw_structured_education_val).strip()
+                            if entry_val:
+                                _set_structured_repeater_resolved_value(
+                                    structured_education_diag,
+                                    entry_val,
+                                    source_key=raw_structured_education_source,
+                                )
+                            elif structured_education_diag:
+                                structured_education_diag.failure_stage = "entry_value_missing"
+                        else:
+                            entry_val = _coerce_answer_to_field(f, raw_structured_education_val)
+                            if entry_val:
+                                _set_structured_repeater_resolved_value(
+                                    structured_education_diag,
+                                    entry_val,
+                                    source_key=raw_structured_education_source,
+                                )
+                            elif structured_education_diag:
+                                structured_education_diag.failure_stage = "value_coercion_empty"
                     elif structured_education_diag:
                         structured_education_diag.failure_stage = "entry_value_missing"
                     if entry_val:
@@ -3373,6 +3599,17 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     structured_education_diag.failure_stage = (
                         "binding_unresolved" if len(raw_education) > 1 else "entry_value_missing"
                     )
+            if (
+                skip_oracle_education_combobox_coercion
+                and entry_val
+                and str(entry_val).strip()
+            ):
+                hint = str(entry_val).strip()
+                f_llm = f.model_copy(update={"oracle_freeform_combobox_answer": True})
+                oracle_combobox_search_hints[f_llm.field_id] = hint
+                _trace_structured_repeater_resolution(f, structured_education_diag)
+                needs_llm.append(f_llm)
+                continue
             if entry_val:
                 coerced_entry_val = _coerce_answer_to_field(f, entry_val)
                 if coerced_entry_val:
@@ -3393,6 +3630,17 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     continue
                 if structured_education_diag and not structured_education_diag.failure_stage:
                     structured_education_diag.failure_stage = "value_coercion_empty"
+            # Education location fields (Country/State/City) without entry data:
+            # route to needs_llm so the LLM infers from the school name, not the user's
+            # home address which the general profile resolver would return.
+            if (
+                is_structured_education_candidate
+                and structured_education_diag
+                and structured_education_diag.slot_name in {"school_country", "school_state", "school_city"}
+                and not entry_val
+            ):
+                needs_llm.append(f)
+                continue
             if is_structured_education_candidate:
                 if structured_education_diag and not structured_education_diag.failure_stage:
                     structured_education_diag.failure_stage = (
@@ -3446,6 +3694,20 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 fields_seen.add(key)
                 fields_skipped.add(key)
                 continue
+            # Entity location guard: Country/State/City inside Education or Experience
+            # sections refer to the school/company location, NOT the user's home address.
+            # Route to needs_llm so the LLM infers from the entity in the profile text.
+            _section_norm = normalize_name(f.section or "")
+            _label_norm_loc = normalize_name(_preferred_field_label(f))
+            if (
+                _label_norm_loc in {"country", "state", "city", "province", "region"}
+                and any(
+                    tok in _section_norm
+                    for tok in ("education", "experience", "work", "employment", "college", "university")
+                )
+            ):
+                needs_llm.append(f)
+                continue
             _has_constrained_choices = bool(f.choices or f.options) and f.field_type in {
                 "button-group", "radio-group", "radio", "checkbox-group",
             }
@@ -3479,7 +3741,12 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 
         answers: dict[str, str] = {}
         if needs_llm:
-            await _enrich_missing_select_options_for_llm(page, needs_llm)
+            await _enrich_missing_select_options_for_llm(
+                page,
+                needs_llm,
+                page_host=page_host,
+                combobox_search_hints=oracle_combobox_search_hints,
+            )
             llm_answers, in_tok, out_tok, step_cost, llm_model_name = await _generate_answers(
                 needs_llm,
                 profile_text,
@@ -4062,6 +4329,14 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             "llm_calls": llm_calls,
         },
     )
+
+    # Clear stale assess_state so the watchdog won't block Next clicks
+    # based on outdated unresolved_required data from before this fill.
+    if failed_count == 0 and hasattr(browser_session, "_gh_last_application_state"):
+        try:
+            delattr(browser_session, "_gh_last_application_state")
+        except AttributeError:
+            pass
 
     return ActionResult(
         extracted_content=agent_summary,

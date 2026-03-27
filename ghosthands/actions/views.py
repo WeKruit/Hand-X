@@ -44,6 +44,13 @@ class FormField(BaseModel):
         default="",
         description="HTML name attribute from extraction (used for label/focus matching when ARIA name is camelCase)",
     )
+    oracle_freeform_combobox_answer: bool = Field(
+        default=False,
+        description=(
+            "When True, LLM answers for this field skip option-list coercion (Oracle type-ahead comboboxes "
+            "where match_dropdown word-overlap would rewrite the correct school name)."
+        ),
+    )
 
 
 class FillFieldResult(BaseModel):
@@ -331,7 +338,8 @@ _PLACEHOLDER_RE = re.compile(
     r"|choose\.{0,3}|choose…|please\s+choose(\s+one)?|choose\s+one|pick"
     r"|start\s+typing|enter\s+(your|an?)\s+\S+"
     r"|type\s+here|--+\s*(select|choose)?\s*--*|—"
-    r"|no\s+response|no\s+answer|not\s+provided|not\s+specified|not\s+entered|not\s+supplied)$",
+    r"|no\s+response|no\s+answer|not\s+provided|not\s+specified|not\s+entered|not\s+supplied"
+    r"|month|year|day|mm|dd|yyyy)$",
     re.IGNORECASE,
 )
 

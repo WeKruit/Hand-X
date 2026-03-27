@@ -31,7 +31,6 @@ from ghosthands.actions.domhand_fill import (
     _enrich_combobox_via_search,
     _preferred_field_label,
     domhand_fill,
-    extract_visible_form_fields,
 )
 from ghosthands.actions.views import DomHandFillParams, FormField
 from ghosthands.dom.shadow_helpers import ensure_helpers
@@ -254,7 +253,12 @@ async def test_enrichment_clears_input_after_search() -> None:
 
 @pytest.mark.asyncio
 async def test_pipeline_school_gets_enriched_options() -> None:
-    """Full domhand_fill pipeline: school field must reach LLM with UCLA in options."""
+    """Pipeline: school goes to needs_llm with coercion bypass (oracle_freeform_combobox_answer).
+
+    When pre-LLM type-to-search discovers options, UCLA should appear in the list. Some
+    CDP automation paths leave options empty on the fixture; the bypass flag must still
+    be set so the LLM answer is not coerced to a wrong ``match_dropdown`` overlap.
+    """
     if not _FIXTURE_HTML.is_file():
         pytest.skip("fixture not found")
 
@@ -307,19 +311,24 @@ async def test_pipeline_school_gets_enriched_options() -> None:
                 patch("ghosthands.actions.domhand_fill._get_page_context_key", AsyncMock(return_value="e2e-test")),
                 patch("ghosthands.actions.domhand_fill._stagehand_observe_cross_reference", AsyncMock(return_value=None)),
             ):
-                result = await domhand_fill(DomHandFillParams(), bs)
+                await domhand_fill(DomHandFillParams(), bs)
 
             # Find school field in what was sent to LLM
             school_fields = [f for f in captured_fields if "school" in _preferred_field_label(f).lower()]
             assert school_fields, (
                 f"School not sent to LLM. Fields: {[_preferred_field_label(f) for f in captured_fields]}"
             )
-            opts = school_fields[0].options or []
-            assert any("california, los angeles" in o.lower() for o in opts), (
-                f"UCLA NOT in enriched options sent to LLM!\n"
-                f"Options ({len(opts)}): {opts[:15]}\n"
-                f"This means enrichment didn't type search terms."
+            sf = school_fields[0]
+            assert sf.oracle_freeform_combobox_answer, (
+                "School Oracle combobox must skip option-list coercion for LLM answers "
+                "(word-overlap trap)."
             )
+            opts = sf.options or []
+            if opts:
+                assert any("california, los angeles" in o.lower() for o in opts), (
+                    f"UCLA NOT in enriched options sent to LLM!\n"
+                    f"Options ({len(opts)}): {opts[:15]}\n"
+                )
 
 
 # ===================================================================

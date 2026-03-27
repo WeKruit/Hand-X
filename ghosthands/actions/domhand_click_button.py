@@ -814,7 +814,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                 )
 
                 await domhand_check_agreement(DomHandCheckAgreementParams(), browser_session)
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.5)
 
                 # Retry the button click after checking boxes
                 retry_json = await page.evaluate(_FIND_AND_CLICK_JS, label, True)
