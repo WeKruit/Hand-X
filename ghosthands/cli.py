@@ -1892,8 +1892,10 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     async def _on_step_start(ag: Agent) -> None:
         nonlocal _prefill_done
         from ghosthands.agent.hooks import infer_phase_from_goal
+        from ghosthands.agent.oracle_step_tuning import maybe_tighten_max_actions_for_oracle_focus
 
         await install_same_tab_guard(ag)
+        await maybe_tighten_max_actions_for_oracle_focus(ag)
         await install_final_submit_guard(ag, allow_submit=app_settings.submit_intent == "submit")
         step = ag.state.n_steps
         goal = ""
@@ -2631,7 +2633,10 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     )
 
     async def _on_step_start_human(ag: Agent) -> None:
+        from ghosthands.agent.oracle_step_tuning import maybe_tighten_max_actions_for_oracle_focus
+
         await install_same_tab_guard(ag)
+        await maybe_tighten_max_actions_for_oracle_focus(ag)
         await install_final_submit_guard(ag, allow_submit=app_settings.submit_intent == "submit")
 
     async def _on_step_end_human(ag: Agent) -> None:

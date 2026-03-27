@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from browser_use.agent.service import Agent
 
+from ghosthands.agent.oracle_step_tuning import maybe_tighten_max_actions_for_oracle_focus
 from ghosthands.cost_summary import build_cost_summary, get_stagehand_usage
 from ghosthands.step_trace import (
     attach_step_trace_context,
@@ -523,6 +524,7 @@ class StepHooks:
         browser_session = getattr(agent, "browser_session", None)
         attach_step_trace_context(browser_session, job_id=self.job_id)
         await install_same_tab_guard(agent)
+        await maybe_tighten_max_actions_for_oracle_focus(agent)
 
         current_url = ""
         if browser_session is not None:

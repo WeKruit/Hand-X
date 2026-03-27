@@ -21,6 +21,7 @@ from ghosthands.actions.views import (
     DomHandClosePopupParams,
     DomHandExpandParams,
     DomHandFillParams,
+    DomHandFillRepeatersParams,
     DomHandInteractControlParams,
     DomHandRecordExpectedValueParams,
     DomHandSelectParams,
@@ -49,6 +50,7 @@ def register_domhand_actions(tools: "Tools") -> None:
     from ghosthands.actions.domhand_close_popup import domhand_close_popup
     from ghosthands.actions.domhand_expand import domhand_expand
     from ghosthands.actions.domhand_fill import domhand_fill
+    from ghosthands.actions.domhand_fill_repeaters import domhand_fill_repeaters
     from ghosthands.actions.domhand_interact_control import domhand_interact_control
     from ghosthands.actions.domhand_record_expected_value import domhand_record_expected_value
     from ghosthands.actions.domhand_select import domhand_select
@@ -204,6 +206,20 @@ def register_domhand_actions(tools: "Tools") -> None:
         ),
         param_model=DomHandExpandParams,
         func=domhand_expand,
+    )
+
+    # ── domhand_fill_repeaters: End-to-end repeater orchestration ──
+    # Reads profile -> clicks Add N times -> fills each entry -> saves.
+    # Replaces N * (expand + fill + save) agent planner steps with ONE call.
+    _register_action(
+        description=(
+            "Fill ALL repeater entries for a section in one call (Education, Work Experience, "
+            "Skills, Languages, Licenses). Reads the user profile, counts existing entries, "
+            "clicks Add for each missing entry, fills the inline form, and commits. "
+            "PREFER this over manual domhand_expand + domhand_fill for repeater sections."
+        ),
+        param_model=DomHandFillRepeatersParams,
+        func=domhand_fill_repeaters,
     )
 
     # ── Stagehand Layer 1 tools ─────────────────────────────

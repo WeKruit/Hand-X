@@ -30,16 +30,29 @@ logger = structlog.get_logger(__name__)
 
 DOMHAND_RETRY_CAPPED = "domhand_retry_capped"
 
+# Fill executor reported success but DOM readback never matched the profile string within the
+# observable poll window (common on Oracle cx-select / address LOVs). We still count the fill as
+# successful so dom_failure_count does not drive the agent; browser-use vision should confirm UI.
+FILL_CONFIDENCE_FILLED_READBACK_UNVERIFIED = 0.55
+
+
+def is_fill_readback_unverified_confidence(fill_confidence: float | None) -> bool:
+    """True when ``_attempt_domhand_fill_with_retry_cap`` trusted executor success without readback match."""
+    return abs(float(fill_confidence or 0.0) - FILL_CONFIDENCE_FILLED_READBACK_UNVERIFIED) < 1e-6
+
 
 # ── Late-import delegates ────────────────────────────────────────────────
 
+
 def _preferred_field_label(field: FormField) -> str:
     from ghosthands.dom.fill_label_match import _preferred_field_label as _impl
+
     return _impl(field)
 
 
 def _fill_single_field(page: Any, field: FormField, value: str, *, browser_session: BrowserSession | None = None):
     from ghosthands.dom.fill_executor import _fill_single_field as _impl
+
     return _impl(page, field, value, browser_session=browser_session)
 
 
@@ -57,31 +70,37 @@ def _fill_single_field_outcome(
 
 def _checkbox_group_is_exclusive_choice(field: FormField) -> bool:
     from ghosthands.dom.fill_executor import _checkbox_group_is_exclusive_choice as _impl
+
     return _impl(field)
 
 
 def _read_binary_state(page: Any, field_id: str):
     from ghosthands.dom.fill_executor import _read_binary_state as _impl
+
     return _impl(page, field_id)
 
 
 def _read_group_selection(page: Any, field_id: str):
     from ghosthands.dom.fill_executor import _read_group_selection as _impl
+
     return _impl(page, field_id)
 
 
 def _read_multi_select_selection(page: Any, field_id: str):
     from ghosthands.dom.fill_executor import _read_multi_select_selection as _impl
+
     return _impl(page, field_id)
 
 
 def _field_has_validation_error(page: Any, field_id: str):
     from ghosthands.dom.fill_executor import _field_has_validation_error as _impl
+
     return _impl(page, field_id)
 
 
 def _read_field_value_for_field(page: Any, field: FormField):
     from ghosthands.actions.domhand_fill import _read_field_value_for_field as _impl
+
     return _impl(page, field)
 
 
@@ -91,11 +110,13 @@ def _field_value_matches_expected(
     matched_label: str | None = None,
 ) -> bool:
     from ghosthands.actions.domhand_fill import _field_value_matches_expected as _impl
+
     return _impl(current, expected, matched_label=matched_label)
 
 
 def _is_explicit_false(val: str | None) -> bool:
     from ghosthands.dom.fill_llm_answers import _is_explicit_false as _impl
+
     return _impl(val)
 
 
@@ -148,6 +169,7 @@ async def _is_workday_prompt_search_widget(page: Any, field: FormField) -> bool:
 
 # ── Retry identity helpers ───────────────────────────────────────────────
 
+
 def _domhand_retry_field_identity(field: FormField) -> str:
     return get_stable_field_key(field)
 
@@ -160,6 +182,7 @@ def _domhand_retry_message(field: FormField) -> str:
 
 
 # ── Skill widget verification helpers ───────────────────────────────────
+
 
 def _normalize_skill_list(raw_value: str | None) -> list[str]:
     values: list[str] = []
@@ -181,9 +204,7 @@ def _normalize_skill_list(raw_value: str | None) -> list[str]:
 async def _skill_select_matches_observed_tokens(page: Any, field: FormField, desired_value: str) -> bool:
     selection = await _read_multi_select_selection(page, field.field_id)
     observed_tokens = [
-        str(token or "").strip()
-        for token in (selection.get("tokens") or [])
-        if str(token or "").strip()
+        str(token or "").strip() for token in (selection.get("tokens") or []) if str(token or "").strip()
     ]
     if not observed_tokens:
         return False
@@ -198,10 +219,12 @@ async def _skill_select_matches_observed_tokens(page: Any, field: FormField, des
 
 # ── LLM escalation helpers ───────────────────────────────────────────────
 
+
 async def _llm_verify_if_available(page: Any, field: FormField, desired_value: str) -> bool | None:
     """Try LLM-based screenshot verification.  Returns True/False/None."""
     try:
         from ghosthands.dom.fill_llm_escalation import llm_verify_field_value
+
         return await llm_verify_field_value(page, field, desired_value)
     except Exception as exc:
         logger.debug("llm_escalation.verify_unavailable", error=str(exc))
@@ -276,6 +299,7 @@ async def _llm_escalate_fill(page: Any, field: FormField, desired_value: str) ->
             llm_execute_fill_suggestion,
             llm_suggest_fill_action,
         )
+
         suggestion = await llm_suggest_fill_action(page, field, desired_value)
         if not suggestion:
             return False
@@ -416,34 +440,60 @@ async def _attempt_domhand_fill_with_retry_cap(
     ):
         observed = await _read_observed_field_value(page, field)
 
-        llm_confirmed = await _llm_verify_if_available(page, field, desired_value)
-        if llm_confirmed is True:
-            fill_confidence = 0.8
+        # Tier 1: Try deterministic verification_engine match first (v3 parity).
+        # This covers country aliases, phone formatting, state abbreviations, etc.
+        # that the simple observable poll missed.
+        from ghosthands.dom.verification_engine import values_match as _ve_match
+
+        if observed and _ve_match(
+            observed,
+            desired_value,
+            field_type=field.field_type,
+            matched_label=fill_result.matched_label,
+        ):
+            fill_confidence = 1.0
             logger.info(
-                "domhand.fill.llm_verify_override",
+                "domhand.fill.verification_engine_match",
                 tool=tool_name,
                 field_label=_preferred_field_label(field),
                 desired_preview=str(desired_value)[:120],
                 observed_preview=str(observed)[:120],
             )
         else:
-            logger.warning(
-                "domhand.fill.observable_verify_failed",
-                tool=tool_name,
-                field_id=field.field_id,
-                field_label=_preferred_field_label(field),
-                field_type=field.field_type,
-                desired_preview=str(desired_value)[:120],
-                observed_preview=str(observed)[:120],
-                llm_verify_result=llm_confirmed,
-            )
-            success = False
+            # Tier 5 (last resort): LLM screenshot verify — only if deterministic failed
+            llm_confirmed = await _llm_verify_if_available(page, field, desired_value)
+            if llm_confirmed is True:
+                fill_confidence = 0.8
+                logger.info(
+                    "domhand.fill.llm_verify_override",
+                    tool=tool_name,
+                    field_label=_preferred_field_label(field),
+                    desired_preview=str(desired_value)[:120],
+                    observed_preview=str(observed)[:120],
+                )
+            else:
+                # Readback unverified — executor reported success but readback never matched.
+                # The verification_engine in domhand_fill will map this to review_status=unreadable.
+                fill_confidence = FILL_CONFIDENCE_FILLED_READBACK_UNVERIFIED
+                logger.info(
+                    "domhand.fill.observable_verify_unconfirmed",
+                    tool=tool_name,
+                    field_id=field.field_id,
+                    field_label=_preferred_field_label(field),
+                    field_type=field.field_type,
+                    desired_preview=str(desired_value)[:120],
+                    observed_preview=str(observed)[:120],
+                    llm_verify_result=llm_confirmed,
+                )
     elif success:
         fill_confidence = 1.0
 
     if not success and not skip_freeform_escalation:
         stagehand_rescued = await _stagehand_escalate_fill(
-            page, field, desired_value, browser_session=browser_session,
+            page,
+            field,
+            desired_value,
+            browser_session=browser_session,
         )
         if stagehand_rescued:
             fill_confidence = 0.6
@@ -498,9 +548,7 @@ async def _field_already_matches(
             current = await _read_group_selection(page, field.field_id)
             return _field_value_matches_expected(
                 current, value, matched_label=matched_label
-            ) and not await _field_has_validation_error(
-                page, field.field_id
-            )
+            ) and not await _field_has_validation_error(page, field.field_id)
         desired_checked = not _is_explicit_false(value)
         state = await _read_binary_state(page, field.field_id)
         return state is desired_checked and not await _field_has_validation_error(page, field.field_id)
@@ -512,13 +560,11 @@ async def _field_already_matches(
         current = await _read_group_selection(page, field.field_id)
         return _field_value_matches_expected(
             current, value, matched_label=matched_label
-        ) and not await _field_has_validation_error(
-            page, field.field_id
-        )
+        ) and not await _field_has_validation_error(page, field.field_id)
     if await _uses_multi_select_observation(page, field):
-        return await _skill_select_matches_observed_tokens(page, field, value) and not await _field_has_validation_error(
-            page, field.field_id
-        )
+        return await _skill_select_matches_observed_tokens(
+            page, field, value
+        ) and not await _field_has_validation_error(page, field.field_id)
     current = await _read_field_value_for_field(page, field)
     return _field_value_matches_expected(
         current,

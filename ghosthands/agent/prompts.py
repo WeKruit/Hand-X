@@ -165,7 +165,7 @@ def build_completion_detection_lines(platform: str) -> list[str]:
             "- On Workday, if the stepper/current page says `Review`, STOP immediately and call done(success=True). Never scroll that page and never click any button on Review."
         )
     lines.append(
-        "- Use domhand_assess_state as a checkpoint after the first domhand_fill on a page, before clicking Next/Continue/Save, and before calling done(). Do NOT turn it into a same-page reverification loop."
+        "- Before clicking Next/Continue/Save or calling done(), visually confirm the page: no red errors, no empty required fields, advance button enabled."
     )
     return lines
 
@@ -517,56 +517,44 @@ def build_system_prompt(
         "",
         "Action preference hierarchy (highest to lowest priority):",
         "1. domhand_fill — Fills ALL visible form fields in one call for",
-        "   near-zero cost.  Try this FIRST whenever you see a form.",
-        "2. domhand_assess_state — Classifies the page into advanceable,",
-        "   review, confirmation, or presubmit_single_page and reports",
-        "   unresolved required fields plus scroll bias. Use it before",
-        "   major scrolling, before clicking Next/Continue/Save, and before",
-        "   calling done().",
-        "3. domhand_close_popup — Dismisses blocking modals, newsletter",
-        "   prompts, promo dialogs, and interstitial overlays before you",
-        "   keep filling the form. Prefer this over blind Escape or",
-        "   coordinate clicks when the page is blocked by a popup.",
-        "4. domhand_interact_control — Resolves one exact non-text",
-        "   control by question label and desired value. Use this first",
-        "   for stubborn radios, checkboxes, toggles, button groups, and",
-        "   exact known select blockers after domhand_fill.",
-        "5. domhand_select — Selects dropdown options using",
-        "   platform-aware discovery. Use this for complex custom",
-        "   dropdown/combobox widgets that domhand_fill could not settle.",
-        "6. domhand_record_expected_value — After a raw manual click/input/",
-        "   select fallback changes one exact field, record the intended",
-        "   field/value here before reassessing the page.",
-        "7. domhand_upload — Uploads the applicant's resume file.  Use",
-        "   when you see a file-upload input.",
+        "   near-zero cost.  ALWAYS your FIRST action on any form page.",
+        "   Reports only what it filled — never directs your next step.",
+        "2. domhand_close_popup — Dismisses blocking modals, newsletter",
+        "   prompts, promo dialogs, and interstitial overlays.",
+        "3. domhand_interact_control — Resolves one specific non-text",
+        "   control by label and value. For radios, checkboxes, toggles,",
+        "   button groups, and select blockers remaining after domhand_fill.",
+        "4. domhand_select — Platform-aware dropdown/combobox selection.",
+        "   For complex custom widgets that domhand_fill could not settle.",
+        "5. domhand_record_expected_value — After a manual click/input/",
+        "   select changes a field, record the intended value.",
+        "6. domhand_upload — Uploads the resume file.",
+        "7. domhand_assess_state — Optional lightweight page-state check.",
+        "   Only use if you are genuinely unsure about page readiness",
+        "   after your own visual review.",
         "8. Generic browser-use actions (click, input_text, etc.) — Use",
-        "   ONLY as a fallback when DomHand actions fail, e.g. due to",
-        "   shadow DOM, custom widgets, or iframes that DomHand cannot",
-        "   reach.",
-        "9. Vision/screenshot-based reasoning — Use only as a bounded last",
-        "   fallback for the exact stuck field after DOM/manual actions fail.",
+        "   ONLY as a fallback when DomHand actions fail.",
+        "9. Vision/screenshot-based reasoning — Bounded last resort for",
+        "   stuck fields after DOM/manual actions fail.",
         "",
-        "After calling domhand_fill, inspect its result to see which fields",
-        "were filled and which remain unresolved.  Handle unresolved fields",
-        "individually with domhand_interact_control for exact boolean/select",
-        "blockers, domhand_select for dropdown widgets, generic input, or by skipping",
-        "ONLY optional fields the applicant profile does not cover.",
-        "When more than one blocker remains, resolve EXACTLY ONE field at a",
-        "time. Finish that field, verify its error cleared, then reassess",
-        "before touching the next blocker.",
-        "Prefer simpler radio/checkbox blockers before complex searchable",
-        "dropdowns when you have multiple unresolved fields.",
-        'If domhand_fill or domhand_select returns "domhand_retry_capped" for a field, do',
-        "NOT repeat that SAME DomHand strategy on that exact field/value pair in this run.",
-        "For radios, checkboxes, and button groups, switch to domhand_interact_control with the exact field_id/field_type",
-        "so it can use live exact-target recovery. After any recovery attempt, immediately reassess.",
-        "If the same exact field has already failed twice with DOM/manual",
-        "actions, take ONE screenshot/vision retry on that field, then",
-        "return to DOM/manual actions.",
-        "If an optional field is visible AND the applicant profile provides",
-        "a value (address, website, referral source, LinkedIn, etc.), you",
-        "SHOULD make a best-effort attempt to fill it only when the",
-        "field-to-profile mapping is high confidence.",
+        "DomHand is a deterministic fill tool. After filling, it reads back",
+        "every field from the DOM and reports structured verification truth:",
+        "  - 'verified': DOM readback confirmed the value was set correctly.",
+        "  - 'mismatch': DOM readback shows a different value than expected.",
+        "  - 'unreadable': DOM readback was empty or opaque (custom widget).",
+        "Trust domhand_fill's structured review for verified/mismatch status.",
+        "Use browser-use (screenshot, manual input) only for 'unreadable'",
+        "or 'mismatch' fields that need recovery.",
+        "",
+        "For remaining unfilled fields after domhand_fill:",
+        "- domhand_interact_control for radio/checkbox/toggle/button-group",
+        "- domhand_select for dropdown/combobox widgets",
+        "- browser-use manual input for text/date/tel fields",
+        "- Skip optional fields the applicant profile does not cover.",
+        "Resolve one blocker at a time. After fixing, visually confirm.",
+        'If domhand_fill or domhand_select returns "domhand_retry_capped",',
+        "do NOT repeat that same strategy on that field. Switch to manual.",
+        "If a field fails twice with DOM/manual, take ONE screenshot retry.",
         "</domhand_actions>",
         "",
         # ── Hard rules ─────────────────────────────────────────────
@@ -653,9 +641,8 @@ def build_system_prompt(
         "- Workday compensation/salary EXPECTATIONS textareas: if ONLY that field",
         "  stays red 'required' while text is visible, this is usually a commit/state",
         "  issue on one control — NOT a reason to refresh the whole application.",
-        "  Call domhand_assess_state, then domhand_fill AGAIN with target_section",
-        "  set to current_section and focus_fields set to that ONE label (exact",
-        "  unresolved name). Avoid full-page refresh as the first recovery.",
+        "  Focus the field, press Tab or Enter to commit, then visually confirm",
+        "  the red error clears. Avoid full-page refresh as the first recovery.",
         "- Safe to batch in one step: multiple text input fills, or",
         "  filling text + clicking a non-dropdown checkbox.",
         "",
@@ -671,12 +658,11 @@ def build_system_prompt(
         "- After any typed date input, blur or Tab away so Workday",
         "  re-validates the field before moving on.",
         "",
-        "READBACK VS ASSESS (custom dropdowns / react-select):",
-        "- domhand_assess_state uses DOM readback; custom selects often LOOK filled while",
-        "  readback stays empty (especially Greenhouse). Do not treat a long list of",
-        "  unresolved custom selects with empty current_value and NO visible_errors as",
-        "  proof the prefill failed — after domhand_fill + resume upload, prefer ONE",
-        "  reassess or generic input/click/select_dropdown on the specific visible gap.",
+        "READBACK VS VISUAL (custom dropdowns / react-select):",
+        "- Custom selects often LOOK filled while DOM readback stays empty",
+        "  (especially Greenhouse/Oracle). Trust your visual observation over DOM.",
+        "  If a field visually shows the correct value but has no red error,",
+        "  it is filled — move on.",
         "- After TWO failed DomHand retries on the SAME field label, stop calling",
         "  domhand_fill / domhand_select / domhand_interact_control for it; use standard",
         "  browser-use tools instead.",
@@ -694,15 +680,9 @@ def build_system_prompt(
         "  shorter/alternative term.",
         "",
         "STUBBORN CHECKBOX/TOGGLE RECOVERY:",
-        "- CRITICAL: Use domhand_assess_state as a blocker inventory, not as",
-        "  an absolute veto after browser-use/manual recovery. Do NOT advance",
-        "  while unresolved required fields, visible errors, opaque blockers,",
-        "  or a disabled Next/Continue control remain.",
-        "- Visual gate beats stale DOM optimism: before clicking Next/Continue/Save,",
-        "  inspect the current required section. If any red validation text such as",
-        "  'This info is required' is visible, or a required radio/button-group",
-        "  question still has no visibly selected option, do NOT advance even if",
-        "  domhand_assess_state says advanceable.",
+        "- Before advancing, visually inspect the page. Do NOT advance while",
+        "  red validation errors, empty required fields, or a disabled",
+        "  Next/Continue control are visible.",
         "- If a checkbox or toggle does not stick after 2 click attempts,",
         "  stop blind retries. Switch to one exact DOM/manual recovery",
         "  (label click, wrapper click, or browser-use manual click),",
@@ -782,53 +762,31 @@ def build_system_prompt(
         "     provided and you are stuck on an auth page.",
         "",
         "FORM PAGES (everything else):",
-        "  1. Your FIRST action MUST be domhand_fill.  Do NOT use click or",
+        "  1. Your FIRST action MUST be domhand_fill. Do NOT use click or",
         "     input_text before trying domhand_fill.",
-        "  2. After domhand_fill, call domhand_assess_state ONCE to learn",
-        "     whether advancement is allowed and which required blockers remain.",
-        "     If a field appeared in domhand_fill failures but is NOT in the",
-        "     latest assess_state unresolved list, do NOT touch it again unless",
-        "     it is still visibly empty or visibly invalid on the page.",
-        "  3. Treat domhand_fill as a page-level progressive conquer pass,",
-        "     not a same-page control loop. After the first domhand_fill on a",
-        "     page, do NOT keep calling domhand_fill again for ordinary text,",
-        "     tel, textarea, or standard select/combobox fields on that SAME",
-        "     page.",
-        "  4. After the first domhand_fill on a page, browser-use/manual",
-        "     recovery owns the remaining generic fields. Use typing, clicking,",
-        "     option selection, Enter/Tab blur, and normal browser-use actions",
-        "     for generic text/tel/date/search/select work. Use",
-        "     domhand_interact_control or domhand_select only for clear",
-        "     widget blockers that DomHand specifically specializes in",
-        "     (radios, checkboxes, toggles, button groups, non-searchable",
-        "     custom dropdowns), not for Workday searchable selectinput widgets.",
-        "     For optional fields, only retry when the applicant profile maps",
-        "     to that field with high confidence.",
-        "  4c. When a manual recovery visibly succeeds, call",
-        "      domhand_record_expected_value for that exact field/value so",
-        "      later checkpoint assess_state calls can suppress stale readback noise.",
-        "  4a. Do NOT jump straight to vision/screenshot fallback while",
-        "      DOM/manual takeover options are still available.",
-        "  4b. If the same exact blocker still fails after two DOM/manual",
-        "      attempts, take ONE screenshot/vision retry for that blocker,",
-        "      then go back to DOM/manual actions.",
+        "  2. After domhand_fill, REVIEW THE PAGE YOURSELF. Take a screenshot",
+        "     and visually inspect: are fields filled? Any red errors? Empty",
+        "     required fields? Your own eyes decide — not DomHand output.",
+        "  3. domhand_fill is a one-shot progressive pass per page. After",
+        "     the first domhand_fill, do NOT call it again on that SAME page.",
+        "  4. For remaining unfilled fields, use targeted tools:",
+        "     - domhand_interact_control for radios, checkboxes, toggles",
+        "     - domhand_select for dropdown/combobox widgets",
+        "     - browser-use manual input for text/tel/date/search fields",
+        "     - domhand_record_expected_value after manual recovery",
+        "  4a. Do NOT jump to vision/screenshot fallback while DOM/manual",
+        "      options are still available.",
+        "  4b. If a blocker fails twice with DOM/manual, take ONE screenshot",
+        "      retry, then go back to DOM/manual actions.",
         "  5. Check for agreement checkboxes and click any that are unchecked.",
-        "  6. Do NOT call domhand_assess_state after every single field.",
-        "     Use it again only right before 'Next' / 'Continue' /",
-        "     'Save & Continue', or when the current visible section is truly ambiguous.",
-        "  7. Click 'Next' / 'Continue' / 'Save & Continue' when the page has",
-        "     no unresolved required fields, no visible errors, no opaque",
-        "     blockers, and the advance control is enabled. Do NOT let",
-        "     mismatched/unverified readback noise alone block a visibly",
-        "     successful browser-use/manual recovery.",
-        "  8. On the new page, determine if it's an auth page or form page",
-        "     and follow the appropriate sequence above.",
+        "  6. Click 'Next' / 'Continue' / 'Save & Continue' when you can",
+        "     visually see that required fields are filled, no red errors",
+        "     are showing, and the advance button is enabled.",
+        "  7. On the new page, start over: domhand_fill first, then review.",
         "",
-        "CRITICAL: If the page still has unresolved required fields, visible",
-        "errors, opaque blockers, or a disabled advance control, you MUST NOT",
-        "click Next / Continue / Save & Continue yet.",
+        "CRITICAL: Before advancing, visually confirm: no red validation",
+        "errors, no empty required fields, advance button is enabled.",
         "Do NOT call done() while a real non-final advance step remains.",
-        "Use the completion-state model below to decide when to advance versus when to stop.",
         "</multi_page_flow>",
         "",
         "<transition_waiting>",
@@ -851,8 +809,16 @@ def build_system_prompt(
         # ── Repeater sections (Work Experience, Education, etc.) ──
         "<repeater_sections>",
         "Work Experience, Education, Skills, Language Skills, Licenses and",
-        "Certificates, and similar sections may use 'Add' buttons to create",
-        "inline repeater entries. Fill entries ONE AT A TIME with scoped data:",
+        "Certificates, and similar sections use 'Add' buttons to create",
+        "inline repeater entries.",
+        "",
+        "PREFERRED: Call domhand_fill_repeaters(section='Education') ONCE to",
+        "fill ALL entries for a section. It reads the user profile, clicks Add",
+        "for each missing entry, fills each inline form, and commits. Only fall",
+        "back to manual domhand_expand + domhand_fill if domhand_fill_repeaters",
+        "reports a failure for a specific entry.",
+        "",
+        "MANUAL FALLBACK — fill entries ONE AT A TIME with scoped data:",
         "",
         "  1. If the first empty entry is already visible, call domhand_fill",
         "     with heading_boundary set to that entry heading and entry_data set",
@@ -911,6 +877,11 @@ def build_system_prompt(
         "       Year are hard prerequisites for saving. Do NOT click 'Add Education'",
         "       until those Start Date fields are visibly populated and any required",
         "       validation on the current education editor has cleared.",
+        "  4bc. On Oracle / HCM education pages (School, College/University, GPA,",
+        "       degree search comboboxes): issue AT MOST ONE browser-use",
+        "       input/click/select per agent step on those widgets. Wait for",
+        "       suggestions; commit the value before another field. The runtime may",
+        "       force max_actions_per_step=1 on these pages automatically.",
         "  4c. On Oracle / HCM, 'Skill Type' is a local taxonomy/category control,",
         "      not a place to paste or synthesize the applicant's skills summary.",
         "      Do NOT fill 'Skill Type' with a joined skills string.",
@@ -1034,22 +1005,22 @@ def build_task_prompt(
         f"Go to {job_url} and fill out the job application form completely.\n"
         "\n"
         "CRITICAL -- Action Order:\n"
-        "1. After navigating to the page, LOOK for an 'Easy Apply' section or\n"
-        "   a resume upload area at the top of the form. If present, upload the\n"
-        f"   resume FIRST using domhand_upload with path: {resume_path}\n"
-        "   Easy Apply with resume upload is ALWAYS the preferred path — it\n"
-        "   auto-fills many fields and shortens the application.\n"
+        "1. When you first encounter the application form, look for an 'Easy Apply'\n"
+        "   section or a resume upload area. If present, upload the resume FIRST\n"
+        f"   using domhand_upload with path: {resume_path}\n"
+        "   Easy Apply with resume upload is ALWAYS the preferred path.\n"
+        "   After the resume is uploaded once, do NOT keep looking for resume\n"
+        "   upload on subsequent pages unless the page explicitly says the resume\n"
+        "   is missing or asks you to upload one.\n"
         "2. Then call domhand_fill to fill remaining visible form fields.\n"
-        "3. After domhand_fill completes, call domhand_assess_state ONCE to learn whether advancement is allowed and which required blockers remain.\n"
-        "   If a field appeared in domhand_fill failures but is NOT in the latest assess_state unresolved list, do NOT touch it again unless it is still visibly empty or invalid.\n"
-        "4. Treat domhand_fill as a page-level progressive conquer pass, not a same-page control loop. After the first domhand_fill on a page, do NOT keep calling domhand_fill again for ordinary text, tel, textarea, search, or standard select/combobox fields on that SAME page.\n"
-        "5. After the first domhand_fill on a page, prefer browser-use/manual recovery for remaining generic fields. "
-        "Use DomHand control tools only when the blocker is clearly a widget DomHand specializes in: radios, checkboxes, toggles, button groups, non-searchable custom dropdowns, or repeater-entry fills. "
-        "Workday searchable selectinput widgets are NOT DomHand-specialized beyond the first domhand_fill pass. "
-        "Manual recovery must target only the unresolved fields or fields that are still visibly empty/invalid on the page. Do NOT broadly re-enter nearby fields that already look settled. "
-        "You may fix adjacent visible fields in the same section together when the correction is obvious (for example Phone + Location, or address subfields). Do NOT let a stale primary-blocker notion stop you from fixing a clearly editable neighboring field. "
-        "When you know the exact field_id/field_type for a widget blocker, pass it to domhand_interact_control or domhand_record_expected_value instead of relying on label-only matching. "
-        "For manual recovery, first make sure the field visibly shows the value and its validation has cleared, then call domhand_record_expected_value for that exact field/value.\n"
+        "3. After domhand_fill, REVIEW THE PAGE YOURSELF — take a screenshot and visually check what is filled, what is empty, and what shows red errors. DomHand only reports what it filled. Your own page observation decides next steps.\n"
+        "4. domhand_fill is a one-shot progressive pass per page. After the first domhand_fill, do NOT call it again unless you clicked Next/Continue and the form content changed (even if the URL stayed the same — many ATS platforms are SPAs).\n"
+        "5. For remaining unfilled fields, use targeted small tools: "
+        "domhand_interact_control for radios/checkboxes/toggles/button-groups, "
+        "domhand_select for dropdown/combobox widgets, "
+        "browser-use manual input for text/tel/date/search fields. "
+        "Only target fields that are still visibly empty or have red errors. "
+        "For manual recovery, confirm the field visibly shows the value and validation cleared, then call domhand_record_expected_value.\n"
         "5a. Workday 'Type to Add Skills' must be handled ONE skill at a time, capped to the FIRST 15 profile skills on that page. Do NOT paste a comma-separated list of skills. Open the widget, clear any stale query, type ONE skill, then wait 2-3 seconds for results. Skills are the exception where Enter is often required: press Enter ONLY if the SAME exact skill is visibly present in the suggestion list or an exact highlighted result is ready to commit. After Enter, wait another 2-3 seconds and VERIFY that a chip/token for THAT SAME skill appears before treating it as done. If no chip appears, that skill is still unresolved. Then click or confirm the exact match for THAT SAME profile skill if needed. Clear the query before the next skill. If the exact profile skill returns 'No Items.' or has no exact result, you may try one or two deterministic SAME-SKILL aliases only (for example React -> ReactJS, ExpressJS -> Express, MySQLDB -> MySQL). If those same-skill aliases also miss, skip THAT SAME skill and continue to the next skill. Do NOT substitute a different skill. If the skills widget is visible and still empty, resolve it BEFORE clicking 'Add Another' or expanding another repeater.\n"
         "5aa. For searchable employer/school/skill/language widgets, the search must stay tied to the SAME user-provided value. NEVER switch to a different company, skill, school, or language just because the original search returned no results. For 'Name of Latest Employer', use the employer from the latest work experience only. If one search attempt finds no match, select 'Other' — the page instructs users to do this when their employer is not listed. Source/referral widgets are the exception: they are intentionally generous and may use safe alternatives like 'LinkedIn', 'Job Board/Social Media', 'Company Careers Page', 'Website', or 'Other'.\n"
         "5ab. Workday searchable selectinput widgets (Skills, School or University, Field of Study, employer search, language search, and similar prompt-search controls EXCEPT source/referral fields) get AT MOST ONE DomHand attempt during the initial page-level domhand_fill. If that first DomHand attempt misses, returns 'No Items.', or fails to commit a visible chip/value, STOP using domhand_fill, domhand_select, and domhand_interact_control on that SAME widget for the rest of the page. Switch strictly to browser-use/manual recovery.\n"
@@ -1061,11 +1032,11 @@ def build_task_prompt(
         "7. After that screenshot/vision retry, go back to concrete DOM/manual actions instead of staying in visual "
         "reasoning.\n"
         f"8. For other file uploads, use domhand_upload or upload_file action with path: {resume_path}\n"
-        "9. Do NOT call domhand_assess_state after every single manual correction. Finish the same-page manual/browser-use fixes first, then checkpoint once before advancing. After all fields on the current page are filled, click Next/Continue/Save when domhand_assess_state shows no unresolved required fields, no visible errors, no opaque blockers, and an enabled advance control. Do NOT let mismatched/unverified readback noise alone block a visibly successful manual recovery.\n"
-        "9a. Visual gate beats stale DOM optimism: before clicking Next/Continue/Save, inspect the current required section. If any red validation text such as 'This info is required' is visible, or a required radio/button-group question still has no visibly selected option, do NOT advance even if domhand_assess_state says advanceable.\n"
-        "9b. Proceed/advance is primarily a browser-use local decision, not a domhand_assess_state loop. Once the latest domhand_assess_state on the current page says advance_allowed=yes and you do not visibly see red validation errors or unselected required radio/button-group controls, stop calling domhand_fill/domhand_assess_state on that page and click Next/Continue/Save immediately.\n"
-        "9c. After typing into ANY interactive field, WAIT 2-3 seconds and CHECK if a dropdown/suggestion list appeared. If options are visible, CLICK the best matching option before moving to the next field. Typing without selecting from a visible dropdown wastes the attempt — the value will not commit.\n"
-        "10. On each new page, call domhand_fill AGAIN as the first action. Do NOT go searching again for another resume upload field on later pages unless the page visibly says the resume is missing or requires re-upload.\n"
+        "9. Advance decision is YOUR visual judgment. Before clicking Next/Continue/Save, "
+        "visually confirm: no red validation text ('This info is required'), no empty required fields, "
+        "no unselected required radio/button-group controls, and the advance button is enabled.\n"
+        "9a. After typing into ANY interactive field, WAIT 2-3 seconds and CHECK if a dropdown/suggestion list appeared. If options are visible, CLICK the best matching option before moving to the next field.\n"
+        "10. After clicking Next/Continue/Save and seeing new form content, call domhand_fill AGAIN as the FIRST action — even if the URL did not change (SPA). Do NOT look for resume upload again unless the page explicitly asks for one.\n"
         f"{workday_review_rule}"
         "11. Prefer short waits: use a short poll loop with wait(seconds=1) up to 3 times for auth transitions, "
         "resume-processing, and SPA loading. Reassess after each short wait instead of doing one long blind wait.\n"

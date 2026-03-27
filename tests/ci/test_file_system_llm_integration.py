@@ -422,7 +422,8 @@ class TestPageTransitionContext:
 			item.system_message and 'PAGE UPDATE:' in item.system_message for item in mm.state.agent_history_items
 		)
 
-	def test_domhand_assess_state_advance_allowed_injects_advance_now_note(self, tmp_path: Path):
+	def test_domhand_assess_state_does_not_inject_directive(self, tmp_path: Path):
+		"""DomHand tools are informational only — no directives injected into agent context."""
 		fs = FileSystem(tmp_path)
 		mm = MessageManager(task='test', system_message=SystemMessage(content='System'), file_system=fs)
 
@@ -443,16 +444,17 @@ class TestPageTransitionContext:
 			step_info=AgentStepInfo(step_number=1, max_steps=10),
 		)
 
-		assert 'ADVANCE NOW:' in mm.state.read_state_description
-		assert 'Do NOT call domhand_fill or domhand_assess_state again' in mm.state.read_state_description
+		assert 'ADVANCE NOW:' not in mm.state.read_state_description
+		assert 'REVIEW CURRENT PAGE:' not in mm.state.read_state_description
 
-	def test_same_page_advance_guard_injects_advance_now_note(self, tmp_path: Path):
+	def test_same_page_advance_guard_does_not_inject_directive(self, tmp_path: Path):
+		"""Same-page guards do not inject directive text into agent context."""
 		fs = FileSystem(tmp_path)
 		mm = MessageManager(task='test', system_message=SystemMessage(content='System'), file_system=fs)
 
 		result = [
 			ActionResult(
-				error='This SAME page was already assessed as advance_allowed=yes.',
+				error='DomHand: page already assessed as advance_allowed=yes; broad fill already completed.',
 				include_extracted_content_only_once=True,
 				metadata={
 					'tool': 'domhand_fill',
@@ -467,11 +469,10 @@ class TestPageTransitionContext:
 			step_info=AgentStepInfo(step_number=1, max_steps=10),
 		)
 
-		assert 'ADVANCE NOW:' in mm.state.read_state_description
-		assert 'same-page advance guard was just triggered' in mm.state.read_state_description
-		assert 'domhand_fill should NOT be used again on this page' in mm.state.read_state_description
+		assert 'ADVANCE NOW:' not in mm.state.read_state_description
 
-	def test_assess_state_blocked_page_injects_review_current_page_note(self, tmp_path: Path):
+	def test_assess_state_blocked_page_does_not_inject_directive(self, tmp_path: Path):
+		"""Blocked-page assess_state does not inject REVIEW CURRENT PAGE directives."""
 		fs = FileSystem(tmp_path)
 		mm = MessageManager(task='test', system_message=SystemMessage(content='System'), file_system=fs)
 
@@ -499,9 +500,8 @@ class TestPageTransitionContext:
 			step_info=AgentStepInfo(step_number=1, max_steps=10),
 		)
 
-		assert 'REVIEW CURRENT PAGE:' in mm.state.read_state_description
-		assert 'Do NOT run another broad domhand_fill on this same page' in mm.state.read_state_description
-		assert 'review the currently visible blockers one at a time' in mm.state.read_state_description
+		assert 'REVIEW CURRENT PAGE:' not in mm.state.read_state_description
+		assert 'ADVANCE NOW:' not in mm.state.read_state_description
 
 	@pytest.mark.asyncio
 	async def test_docx_end_to_end(self, tmp_path: Path):

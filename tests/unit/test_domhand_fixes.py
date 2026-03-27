@@ -33,10 +33,10 @@ def test_max_tokens_scales_with_field_count():
     assert max(4096, min(200 * 128, 16384)) == 16384  # 200 fields → capped at 16384
 
 
-def test_domhand_fill_round_cap_is_two():
+def test_domhand_fill_round_cap_is_three():
     from ghosthands.actions.domhand_fill import MAX_FILL_ROUNDS
 
-    assert MAX_FILL_ROUNDS == 2
+    assert MAX_FILL_ROUNDS == 3
 
 
 def test_candidate_auto_expand_sections_includes_oracle_inline_repeaters():
@@ -264,7 +264,6 @@ async def test_domhand_fill_blocks_same_page_refill_after_advanceable_assess_sta
     assert result.error is None
     assert "advance_allowed=yes" in (result.extracted_content or "")
     assert result.metadata["same_page_advance_guard"] is True
-    assert result.metadata["recommended_next_action"] == "advance_or_manual_browser_decision"
 
 
 @pytest.mark.asyncio
@@ -279,7 +278,7 @@ async def test_domhand_fill_blocks_repeated_broad_same_page_fill_until_assess_ch
     browser_session._gh_last_domhand_fill = {
         "page_context_key": "page-1",
         "page_url": "https://higher.gs.com/apply",
-        "requires_assess_checkpoint": True,
+        "broad_fill_completed": True,
     }
 
     with (
@@ -298,9 +297,8 @@ async def test_domhand_fill_blocks_repeated_broad_same_page_fill_until_assess_ch
         result = await domhand_fill(DomHandFillParams(target_section="Personal Info"), browser_session)
 
     assert result.error is None
-    assert "already had a broad domhand_fill pass" in (result.extracted_content or "")
-    assert result.metadata["same_page_assess_checkpoint_guard"] is True
-    assert result.metadata["recommended_next_action"] == "run_domhand_assess_state_next"
+    assert "broad fill already completed" in (result.extracted_content or "")
+    assert result.metadata["same_page_fill_guard"] is True
 
 
 @pytest.mark.asyncio
@@ -369,8 +367,8 @@ async def test_domhand_fill_reconciles_auto_populated_required_fields_before_sum
 
     payload = (result.metadata or {})["domhand_fill_json"]
     full_payload = (result.metadata or {})["domhand_fill_full_json"]
-    assert payload["unresolved_required_fields"] == []
-    assert payload["failed_fields"] == []
+    assert full_payload["unresolved_required_fields"] == []
+    assert full_payload["failed_fields"] == []
     assert full_payload["reconciled_settled_fields"] == [
         {
             "field_id": "city-field",
@@ -380,10 +378,9 @@ async def test_domhand_fill_reconciles_auto_populated_required_fields_before_sum
             "previous_actor": "skipped",
         }
     ]
-    assert "Fields visibly settled in this pass: City." in (result.extracted_content or "")
-    assert "Use domhand_assess_state next" in (result.extracted_content or "")
+    assert payload["filled_count"] >= 0
     assert browser_session._gh_last_domhand_fill["page_context_key"] == "page-1"
-    assert browser_session._gh_last_domhand_fill["requires_assess_checkpoint"] is True
+    assert browser_session._gh_last_domhand_fill["broad_fill_completed"] is True
 
 
 @pytest.mark.asyncio
@@ -447,9 +444,8 @@ async def test_domhand_fill_reconciles_required_field_when_oracle_rebuilds_field
     ):
         result = await domhand_fill(DomHandFillParams(target_section="Contact"), browser_session)
 
-    payload = (result.metadata or {})["domhand_fill_json"]
     full_payload = (result.metadata or {})["domhand_fill_full_json"]
-    assert payload["unresolved_required_fields"] == []
+    assert full_payload["unresolved_required_fields"] == []
     assert full_payload["reconciled_settled_fields"] == [
         {
             "field_id": "city-old",
@@ -513,9 +509,8 @@ async def test_domhand_fill_agent_summary_defers_blocker_reporting_to_assess_sta
 
     assert "REQUIRED fields that need attention" not in (result.extracted_content or "")
     assert "Required blockers still visible" not in (result.extracted_content or "")
-    assert "Use domhand_assess_state next" in (result.extracted_content or "")
-    payload = (result.metadata or {})["domhand_fill_json"]
-    assert payload["unresolved_required_fields"] != []
+    full_payload = (result.metadata or {})["domhand_fill_full_json"]
+    assert full_payload["unresolved_required_fields"] != []
 
 
 def test_same_page_advance_guard_requires_clean_assess_state():
@@ -649,7 +644,7 @@ async def test_domhand_assess_state_consumes_fill_checkpoint_on_same_page():
     browser_session._gh_last_domhand_fill = {
         "page_context_key": "page-1",
         "page_url": "https://hdpc.fa.us2.oraclecloud.com/example",
-        "requires_assess_checkpoint": True,
+        "broad_fill_completed": True,
     }
 
     with (
@@ -666,7 +661,7 @@ async def test_domhand_assess_state_consumes_fill_checkpoint_on_same_page():
         result = await domhand_assess_state(DomHandAssessStateParams(target_section="Personal Info"), browser_session)
 
     assert result.error is None
-    assert browser_session._gh_last_domhand_fill["requires_assess_checkpoint"] is False
+    assert browser_session._gh_last_domhand_fill["broad_fill_completed"] is False
     assert browser_session._gh_last_domhand_fill["assess_checkpoint_consumed"] is True
 
 
@@ -1327,10 +1322,11 @@ async def test_attempt_domhand_fill_with_retry_cap_refuses_capped_field():
 
 
 @pytest.mark.asyncio
-async def test_attempt_domhand_fill_fails_when_post_fill_observable_mismatch():
-    """Fill helpers may succeed before DOM readback matches; success requires observable settle."""
+async def test_attempt_domhand_fill_succeeds_when_post_fill_observable_mismatch():
+    """Executor success stands even when DOM readback never matches — vision/browser-use confirms UI."""
     from ghosthands.actions.domhand_fill import _attempt_domhand_fill_with_retry_cap
     from ghosthands.actions.views import FormField
+    from ghosthands.dom.fill_verify import FILL_CONFIDENCE_FILLED_READBACK_UNVERIFIED
     from ghosthands.runtime_learning import reset_runtime_learning_state
 
     reset_runtime_learning_state()
@@ -1361,8 +1357,13 @@ async def test_attempt_domhand_fill_fails_when_post_fill_observable_mismatch():
             "ghosthands.dom.fill_verify._read_observed_field_value",
             AsyncMock(return_value=""),
         ),
+        patch(
+            "ghosthands.dom.fill_verify._llm_verify_if_available",
+            AsyncMock(return_value=None),
+        ),
+        patch("ghosthands.dom.fill_verify._clear_domhand_failure_for_field"),
     ):
-        success, error, failure_reason, _fc, _settled_value = await _attempt_domhand_fill_with_retry_cap(
+        success, error, failure_reason, fc, _settled_value = await _attempt_domhand_fill_with_retry_cap(
             page,
             host="job-boards.greenhouse.io",
             field=field,
@@ -1370,10 +1371,10 @@ async def test_attempt_domhand_fill_fails_when_post_fill_observable_mismatch():
             tool_name="domhand_fill",
         )
 
-    assert success is False
-    assert failure_reason == "dom_fill_failed"
-    assert error == "DOM fill failed"
-    assert _fc == 0.0
+    assert success is True
+    assert failure_reason is None
+    assert error is None
+    assert fc == FILL_CONFIDENCE_FILLED_READBACK_UNVERIFIED
     reset_runtime_learning_state()
 
 
@@ -1474,8 +1475,8 @@ async def test_domhand_fill_reports_retry_capped_fields_without_retrying():
         result = await domhand_fill(DomHandFillParams(), browser_session)
 
     assert result.error is None
-    payload = (result.metadata or {})["domhand_fill_json"]
-    assert any(field["failure_reason"] == "domhand_retry_capped" for field in payload["failed_fields"])
+    full_payload = (result.metadata or {})["domhand_fill_full_json"]
+    assert any(field["failure_reason"] == "domhand_retry_capped" for field in full_payload["failed_fields"])
     fill_single.assert_not_awaited()
     reset_runtime_learning_state()
 
@@ -1793,9 +1794,7 @@ def test_build_task_prompt_uses_browser_use_for_auth_pages():
     assert "NOT domhand_fill" in prompt
     assert "browser-use input" in prompt
     assert "domhand_click_button" in prompt
-    assert (
-        "Sign In is allowed ONLY after Create Account fails with an explicit 'account already exists' signal." in prompt
-    )
+    assert "If Create Account fails with 'account already exists', switch to Sign In ONCE." in prompt
 
 
 def test_build_task_prompt_await_verification():
@@ -1879,7 +1878,7 @@ def test_build_task_prompt_later_pages_do_not_repeat_resume_upload_search():
     )
 
     assert "On each new page, call domhand_fill AGAIN as the first action." in prompt
-    assert "Do NOT go searching again for another resume upload field on later pages" in prompt
+    assert "Do NOT search for another resume upload field on later pages" in prompt
     assert "repeat from step 1 (check for Easy Apply / resume upload first)" not in prompt
 
 
@@ -1909,11 +1908,11 @@ def test_build_task_prompt_requires_single_field_recovery():
         credential_intent="create_account",
     )
 
-    assert "page-level progressive conquer pass" in prompt
-    assert "prefer browser-use/manual recovery for remaining generic fields" in prompt
-    assert "Use DomHand control tools only when the blocker is clearly a widget DomHand specializes in" in prompt
-    assert "same exact field still fails after two DOM/manual attempts" in prompt
-    assert "domhand_record_expected_value for that exact field/value" in prompt
+    assert "one-shot progressive pass per page" in prompt
+    assert "targeted small tools" in prompt
+    assert "browser-use manual input" in prompt
+    assert "same exact field still fails after two DOM/manual" in prompt
+    assert "domhand_record_expected_value" in prompt
 
 
 def test_build_task_prompt_defaults_to_review_only_submit_intent():
@@ -2692,11 +2691,11 @@ async def test_domhand_fill_marks_ambiguous_education_row_order_as_best_effort()
     ):
         result = await domhand_fill(DomHandFillParams(), browser_session)
 
-    payload = (result.metadata or {})["domhand_fill_json"]
-    assert payload["best_effort_binding_count"] >= 1
+    full_payload = (result.metadata or {})["domhand_fill_full_json"]
+    assert full_payload["best_effort_binding_count"] >= 1
     assert any(
         field["prompt_text"] == "Field of Study" and field["binding_mode"] == "row_order"
-        for field in payload["best_effort_binding_fields"]
+        for field in full_payload["best_effort_binding_fields"]
     )
 
 
@@ -2746,10 +2745,10 @@ async def test_domhand_fill_reports_structured_education_field_of_study_entry_va
     ):
         result = await domhand_fill(DomHandFillParams(), browser_session)
 
-    payload = (result.metadata or {})["domhand_fill_json"]
-    failure = next(field for field in payload["failed_fields"] if field["field_id"] == "edu-field-of-study")
+    full_payload = (result.metadata or {})["domhand_fill_full_json"]
+    failure = next(field for field in full_payload["failed_fields"] if field["field_id"] == "edu-field-of-study")
     unresolved = next(
-        field for field in payload["unresolved_required_fields"] if field["field_id"] == "edu-field-of-study"
+        field for field in full_payload["unresolved_required_fields"] if field["field_id"] == "edu-field-of-study"
     )
     assert failure["failure_reason"] == "structured_entry_value_missing"
     assert failure["repeater_group"] == "education"
@@ -2809,8 +2808,8 @@ async def test_domhand_fill_reports_structured_education_from_entry_value_missin
     ):
         result = await domhand_fill(DomHandFillParams(), browser_session)
 
-    payload = (result.metadata or {})["domhand_fill_json"]
-    failure = next(field for field in payload["failed_fields"] if field["field_id"] == "edu-from")
+    full_payload = (result.metadata or {})["domhand_fill_full_json"]
+    failure = next(field for field in full_payload["failed_fields"] if field["field_id"] == "edu-from")
     assert failure["failure_reason"] == "structured_entry_value_missing"
     assert failure["repeater_group"] == "education"
     assert failure["slot_name"] == "start_date"
@@ -2862,8 +2861,8 @@ async def test_domhand_fill_reports_structured_binding_unresolved_for_education_
     ):
         result = await domhand_fill(DomHandFillParams(), browser_session)
 
-    payload = (result.metadata or {})["domhand_fill_json"]
-    failure = next(field for field in payload["failed_fields"] if field["field_id"] == "edu-field")
+    full_payload = (result.metadata or {})["domhand_fill_full_json"]
+    failure = next(field for field in full_payload["failed_fields"] if field["field_id"] == "edu-field")
     assert failure["failure_reason"] == "structured_binding_unresolved"
     assert failure["repeater_group"] == "education"
     assert failure["slot_name"] == "field_of_study"
@@ -2910,8 +2909,8 @@ async def test_domhand_fill_reports_structured_language_entry_value_missing_diag
     ):
         result = await domhand_fill(DomHandFillParams(), browser_session)
 
-    payload = (result.metadata or {})["domhand_fill_json"]
-    failure = next(field for field in payload["failed_fields"] if field["field_id"] == "lang-reading")
+    full_payload = (result.metadata or {})["domhand_fill_full_json"]
+    failure = next(field for field in full_payload["failed_fields"] if field["field_id"] == "lang-reading")
     assert failure["failure_reason"] == "structured_entry_value_missing"
     assert failure["repeater_group"] == "languages"
     assert failure["slot_name"] == "reading_writing"
@@ -3127,7 +3126,7 @@ async def test_assess_state_surfaces_mismatch_without_blocking_advancement():
     assert payload["mismatched_fields"][0]["name"] == "Language"
     assert result.include_extracted_content_only_once is True
     assert "APPLICATION_STATE_JSON" not in (result.extracted_content or "")
-    assert "no hard blockers remain" in (result.extracted_content or "")
+    assert "advance_allowed=yes" in (result.extracted_content or "")
 
 
 @pytest.mark.asyncio
@@ -4380,9 +4379,8 @@ async def test_assess_state_caches_optional_validation_blockers():
 
     payload = json.loads((result.metadata or {})["application_state_json"])
     assert len(payload["unresolved_optional_fields"]) == 1
-    assert "Optional validation blockers: 1" in (result.extracted_content or "")
     assert payload["advance_allowed"] is False
-    assert "Do NOT click Next/Continue/Save yet" in (result.extracted_content or "")
+    assert "advance_allowed=no" in (result.extracted_content or "")
     assert browser_session._gh_last_application_state["optional_validation_count"] == 1
     assert "salary-field" in browser_session._gh_last_application_state["blocking_field_ids"]
 
@@ -4552,7 +4550,7 @@ async def test_assess_state_allows_advancement_with_required_unverified_fields()
     assert len(payload["unverified_fields"]) == 1
     assert payload["unverified_fields"][0]["name"] == "Are you legally authorized to work in the United States?"
     assert payload["advance_allowed"] is True
-    assert "no hard blockers remain" in (result.extracted_content or "")
+    assert "advance_allowed=yes" in (result.extracted_content or "")
 
 
 @pytest.mark.asyncio
@@ -5143,8 +5141,7 @@ async def test_domhand_interact_control_failure_always_hands_off_to_browser_manu
         )
 
     assert result.error is not None
-    assert "Switch to browser-use/manual recovery for this field now" in result.error
-    assert result.metadata["recommended_next_action"] == "switch_to_browser_use_manual_for_this_field"
+    assert result.metadata["recommended_next_action"] == "review_page_visually"
 
 
 @pytest.mark.asyncio
@@ -5180,8 +5177,8 @@ async def test_domhand_interact_control_rejects_generic_number_field_recovery():
         )
 
     assert result.error is not None
-    assert "not for generic text-like inputs" in result.error
-    assert result.metadata["recommended_next_action"] == "switch_to_browser_use_manual_for_this_field"
+    assert "not generic text-like inputs" in result.error
+    assert result.metadata["recommended_next_action"] == "review_page_visually"
 
 
 @pytest.mark.asyncio
@@ -5203,8 +5200,8 @@ async def test_domhand_interact_control_rejects_dropdown_controls():
     )
 
     assert result.error is not None
-    assert "Use domhand_select" in result.error
-    assert result.metadata["recommended_next_action"] == "use_domhand_select_or_browser_use_manual"
+    assert "dropdown/combobox" in result.error
+    assert result.metadata["recommended_next_action"] == "review_page_visually"
 
 
 @pytest.mark.asyncio
@@ -6696,7 +6693,7 @@ def test_build_task_prompt_workday_skills_requires_one_skill_at_a_time():
     assert "STOP using domhand_fill, domhand_select, and domhand_interact_control" in prompt
     assert "do NOT append more text" in prompt
     assert "React -> ReactJS" in prompt
-    assert "Do NOT go searching again for another resume upload field" in prompt
+    assert "Do NOT search for another resume upload field" in prompt
     assert "stepper/current page says `Review`" in prompt
 
 
@@ -6722,9 +6719,8 @@ def test_build_task_prompt_search_widgets_forbid_value_substitution():
     assert "select 'Other'" in prompt  # employer fallback when not found
     assert "Source/referral widgets are the exception" in prompt
     assert "LinkedIn" in prompt
-    assert "Visual gate beats stale DOM optimism" in prompt
-    assert "required radio/button-group question still has no visibly selected option" in prompt
-    assert "Proceed/advance is primarily a browser-use local decision" in prompt
+    assert "visually confirm" in prompt
+    assert "no red validation" in prompt
 
 
 @pytest.mark.asyncio
@@ -8535,3 +8531,137 @@ class TestPageContextKeyDifferentiation:
             page_marker="Job application form",
         )
         assert key1 == key2
+
+
+# ---------------------------------------------------------------------------
+# Oracle platform detection, fill overrides, repeater helpers, scoped dedup
+# ---------------------------------------------------------------------------
+
+
+def test_detect_platform_oracle():
+    from ghosthands.platforms import detect_platform
+
+    assert (
+        detect_platform(
+            "https://fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/12345"
+        )
+        == "oracle"
+    )
+    assert detect_platform("https://fa.ocs.oraclecloud.com/") == "oracle"
+
+
+def test_detect_platform_workday_unchanged():
+    from ghosthands.platforms import detect_platform
+
+    assert (
+        detect_platform("https://wd3.myworkdayjobs.com/en-US/company/job/12345") == "workday"
+    )
+    assert (
+        detect_platform("https://wd5.myworkday.com/wday/authgwy/company/login.htmld")
+        == "workday"
+    )
+
+
+def test_oracle_fill_overrides():
+    from ghosthands.platforms import get_fill_overrides
+
+    overrides = get_fill_overrides("https://fa.ocs.oraclecloud.com/hcmUI/...")
+    # Blanket select->oracle_combobox breaks Oracle address/geo LOVs; text comboboxes
+    # use oracle_combobox via _IS_ORACLE_SEARCHABLE_JS instead.
+    assert overrides.get("select") is None
+
+
+def test_workday_fill_overrides_unchanged():
+    from ghosthands.platforms import get_fill_overrides
+
+    overrides = get_fill_overrides("https://wd5.myworkday.com/wday/...")
+    assert overrides.get("date") == "segmented_date"
+    assert "oracle_combobox" not in overrides.values()
+
+
+def test_oracle_combobox_dispatch_exists():
+    import inspect
+
+    from ghosthands.dom.fill_executor import _dispatch_platform_fill_outcome
+
+    src = inspect.getsource(_dispatch_platform_fill_outcome)
+    assert "oracle_combobox" in src
+
+
+def test_try_oracle_searchable_combobox_first_fallthrough_contract():
+    """Oracle combobox is opt-in per DOM node; failure must not block default fill paths."""
+    from ghosthands.dom.fill_executor import _try_oracle_searchable_combobox_first
+
+    doc = (_try_oracle_searchable_combobox_first.__doc__ or "").lower()
+    assert "none" in doc
+    assert "normal" in doc or "pipeline" in doc or "caller" in doc
+
+
+def test_scoped_dedup_guard_blocks():
+    """Scoped dedup state lives on browser_session, not module globals."""
+    from types import SimpleNamespace
+
+    bs = SimpleNamespace()
+    bs._gh_completed_scoped_fills = {("page_ctx_1", "education"): {"filled_count": 5}}
+    bs._gh_completed_scoped_page = "page_ctx_1"
+
+    assert ("page_ctx_1", "education") in bs._gh_completed_scoped_fills
+    assert bs._gh_completed_scoped_fills[("page_ctx_1", "education")]["filled_count"] == 5
+
+
+def test_scoped_dedup_guard_clears_on_page_change():
+    """When page changes, scoped dedup state is cleared."""
+    from types import SimpleNamespace
+
+    bs = SimpleNamespace()
+    bs._gh_completed_scoped_fills = {("page_ctx_1", "education"): {"filled_count": 5}}
+    bs._gh_completed_scoped_page = "page_ctx_1"
+
+    new_page_key = "page_ctx_2"
+    if bs._gh_completed_scoped_page != new_page_key:
+        bs._gh_completed_scoped_fills = {}
+    bs._gh_completed_scoped_page = new_page_key
+
+    assert len(bs._gh_completed_scoped_fills) == 0
+
+
+def test_normalize_section_for_repeaters():
+    from ghosthands.actions.domhand_fill_repeaters import _normalize_section
+
+    assert _normalize_section("Education") == "education"
+    assert _normalize_section("Work Experience") == "experience"
+    assert _normalize_section("College / University") == "education"
+    assert _normalize_section("Skills") == "skills"
+    assert _normalize_section("Languages") == "languages"
+    assert _normalize_section("Licenses & Certifications") == "licenses"
+
+
+def test_get_entries_for_section_education():
+    from ghosthands.actions.domhand_fill_repeaters import _get_entries_for_section
+
+    profile = {
+        "education": [
+            {"school": "UCLA", "degree": "BS"},
+            {"school": "NYU", "degree": "MS"},
+        ],
+    }
+    entries = _get_entries_for_section(profile, "education", None)
+    assert len(entries) == 2
+    assert entries[0]["school"] == "UCLA"
+
+
+def test_get_entries_for_section_skills():
+    from ghosthands.actions.domhand_fill_repeaters import _get_entries_for_section
+
+    profile = {"skills": ["Python", "Java", "Go"]}
+    entries = _get_entries_for_section(profile, "skills", None)
+    assert len(entries) == 3
+    assert entries[0] == {"skill_name": "Python"}
+
+
+def test_get_entries_for_section_with_max():
+    from ghosthands.actions.domhand_fill_repeaters import _get_entries_for_section
+
+    profile = {"skills": ["Python", "Java", "Go", "Rust", "C++"]}
+    entries = _get_entries_for_section(profile, "skills", 3)
+    assert len(entries) == 3

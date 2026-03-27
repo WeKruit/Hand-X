@@ -198,6 +198,21 @@ class DomHandUploadParams(BaseModel):
     file_type: str = Field(default="resume", description="Type: 'resume' or 'cover_letter'")
 
 
+class DomHandFillRepeatersParams(BaseModel):
+    """Fill all repeater entries for a section in one call."""
+
+    section: str = Field(
+        description=(
+            "Repeater section to fill: 'Education', 'Work Experience', "
+            "'Skills', 'Languages', or 'Licenses'."
+        ),
+    )
+    max_entries: int | None = Field(
+        None,
+        description="Optional cap on entries to fill. Defaults to all from user profile.",
+    )
+
+
 class DomHandExpandParams(BaseModel):
     """Click "Add More" buttons to expand repeater sections."""
 

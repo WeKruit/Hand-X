@@ -984,6 +984,8 @@ async def _dispatch_platform_fill_outcome(
             return _fill_outcome(await _fill_grouped_date_field(page, field, value, tag))
         case "searchable_dropdown":
             return await _fill_searchable_dropdown_outcome(page, field, value, tag)
+        case "oracle_combobox":
+            return await _fill_oracle_combobox_outcome(page, field, value, tag)
         case "playwright_fill":
             return _fill_outcome(await _fill_text_field(page, field, value, tag))
         case _:
@@ -1033,11 +1035,16 @@ async def _fill_single_field_outcome(
     except Exception:
         pass
 
+    page_url = ""
+    try:
+        page_url = str(await page.evaluate("() => location.href") or "")
+    except Exception:
+        pass
+
     fill_strategy: str | None = None
     try:
         from ghosthands.platforms import get_fill_overrides
 
-        page_url = await page.evaluate("() => location.href")
         overrides = get_fill_overrides(page_url)
         fill_strategy = overrides.get(field.field_type)
         if fill_strategy:
@@ -1068,6 +1075,12 @@ async def _fill_single_field_outcome(
         )
         if result is not None:
             return result
+
+    oracle_first = await _try_oracle_searchable_combobox_first(
+        page, field, value, tag, page_url=page_url
+    )
+    if oracle_first is not None:
+        return oracle_first
 
     match field.field_type:
         case "text" | "email" | "tel" | "url" | "number" | "password" | "search":
@@ -1220,6 +1233,208 @@ async def _fill_searchable_dropdown_outcome(
 
 async def _fill_searchable_dropdown(page: Any, field: FormField, value: str, tag: str) -> bool:
     return (await _fill_searchable_dropdown_outcome(page, field, value, tag)).success
+
+
+# ---------------------------------------------------------------------------
+# Oracle Cloud HCM combobox strategy
+# ---------------------------------------------------------------------------
+# Oracle's cx-select combobox requires real keyboard events — JS value injection
+# is silently rejected by the framework. This strategy:
+#   1. Focuses the input, clears it
+#   2. Types with press_sequentially (real key events, 30ms delay)
+#   3. Waits 1.0s for the suggestion dropdown to populate
+#   4. Clicks the best matching option from the dropdown
+#   5. Waits 1.2s for post-fill stability (Oracle can async-reject values)
+#   6. Re-reads the committed value — if cleared, reports failure
+
+_IS_ORACLE_SEARCHABLE_JS = r"""
+(ffId) => {
+    var el = window.__ff ? window.__ff.byId(ffId) : null;
+    if (!el) return false;
+    if (el.getAttribute('aria-autocomplete') === 'list' ||
+        el.getAttribute('aria-autocomplete') === 'both') return true;
+    if (el.getAttribute('role') === 'combobox') return true;
+    if (el.getAttribute('aria-haspopup') === 'listbox' &&
+        el.tagName === 'INPUT') return true;
+    if (el.getAttribute('aria-haspopup') === 'grid' &&
+        el.tagName === 'INPUT') return true;
+    var container = el.closest('.cx-select-container');
+    if (container) return true;
+    return false;
+}
+"""
+
+
+_ORACLE_COMBOBOX_CLICK_BEST_OPTION_JS = r"""
+(ffId, desired) => {
+    var el = window.__ff ? window.__ff.byId(ffId) : null;
+    if (!el) return JSON.stringify({clicked: false, reason: 'element_not_found'});
+    var controlsId = el.getAttribute('aria-controls');
+    var dropdown = controlsId ? document.getElementById(controlsId) : null;
+    if (!dropdown) {
+        var container = el.closest('.cx-select-container') || el.closest('.input-field-container');
+        if (container) dropdown = container.querySelector('.cx-select-dropdown, [role="grid"], [role="listbox"]');
+    }
+    if (!dropdown) {
+        var allListboxes = document.querySelectorAll('[role="listbox"], [role="grid"]');
+        for (var i = 0; i < allListboxes.length; i++) {
+            var s = getComputedStyle(allListboxes[i]);
+            if (s.display !== 'none' && s.visibility !== 'hidden') { dropdown = allListboxes[i]; break; }
+        }
+    }
+    if (!dropdown) return JSON.stringify({clicked: false, reason: 'no_dropdown'});
+    var rows = dropdown.querySelectorAll('[role="row"]:not([data-empty-row="true"]), [role="option"]');
+    var visible = [];
+    for (var j = 0; j < rows.length; j++) {
+        var rs = getComputedStyle(rows[j]);
+        if (rs.display !== 'none' && rs.visibility !== 'hidden') visible.push(rows[j]);
+    }
+    if (!visible.length) return JSON.stringify({clicked: false, reason: 'no_visible_options'});
+    var dl = desired.toLowerCase().trim();
+    var best = null; var matchedText = '';
+    for (var k = 0; k < visible.length; k++) {
+        var rv = (visible[k].getAttribute('data-value') || '').toLowerCase().trim();
+        var rt = (visible[k].textContent || '').toLowerCase().trim();
+        if (rv === dl || rt === dl) { best = visible[k]; matchedText = visible[k].getAttribute('data-value') || visible[k].textContent; break; }
+    }
+    if (!best) {
+        for (var m = 0; m < visible.length; m++) {
+            var combined = ((visible[m].getAttribute('data-value') || '') + ' ' + (visible[m].textContent || '')).toLowerCase();
+            if (combined.indexOf(dl) !== -1) { best = visible[m]; matchedText = visible[m].getAttribute('data-value') || visible[m].textContent; break; }
+        }
+    }
+    if (!best) return JSON.stringify({clicked: false, reason: 'no_match', visible_count: visible.length});
+    best.click(); return JSON.stringify({clicked: true, text: (matchedText || '').substring(0, 120)});
+    return JSON.stringify({clicked: false, reason: 'no_match'});
+}
+"""
+
+_ORACLE_COMBOBOX_READ_VALUE_JS = r"""
+(ffId) => {
+    var el = window.__ff ? window.__ff.byId(ffId) : null;
+    if (!el) return JSON.stringify({value: '', committed: ''});
+    return JSON.stringify({value: el.value || '', committed: el.dataset ? (el.dataset.committedValue || '') : ''});
+}
+"""
+
+
+async def _fill_oracle_combobox_outcome(
+    page: Any,
+    field: FormField,
+    value: str,
+    tag: str,
+) -> FieldFillOutcome:
+    """Fill an Oracle cx-select combobox using real keyboard events.
+
+    Oracle's React/Fusion framework ignores values set via JS — it requires
+    actual keystrokes to trigger the autocomplete and commit the selection.
+    Uses page.evaluate() + _type_text_compat() (compatible with browser-use).
+    """
+    ff_id = field.field_id
+    if not value:
+        logger.debug(f"skip {tag} (oracle combobox, no answer)")
+        return _fill_outcome(False)
+
+    try:
+        exists_raw = await page.evaluate(_ELEMENT_EXISTS_JS, ff_id, field.field_type)
+        exists = json.loads(exists_raw) if isinstance(exists_raw, str) else exists_raw
+        if not (isinstance(exists, dict) and exists.get("exists")):
+            logger.debug(f"skip {tag} (oracle combobox, element not found)")
+            return _fill_outcome(False)
+
+        await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
+        await asyncio.sleep(0.15)
+
+        await _type_text_compat(page, value, delay=30)
+        await asyncio.sleep(1.0)
+
+        click_raw = await page.evaluate(_ORACLE_COMBOBOX_CLICK_BEST_OPTION_JS, ff_id, value)
+        click_result = json.loads(click_raw) if isinstance(click_raw, str) else click_raw
+        matched_label: str | None = None
+        if isinstance(click_result, dict) and click_result.get("clicked"):
+            matched_label = click_result.get("text")
+            await asyncio.sleep(0.3)
+
+        await asyncio.sleep(1.2)
+
+        val_raw = await page.evaluate(_ORACLE_COMBOBOX_READ_VALUE_JS, ff_id)
+        val_result = json.loads(val_raw) if isinstance(val_raw, str) else val_raw
+        current_val = (val_result.get("value") or "") if isinstance(val_result, dict) else ""
+        committed = (val_result.get("committed") or "") if isinstance(val_result, dict) else ""
+        effective = committed or current_val
+
+        if not effective.strip():
+            logger.warning(
+                "domhand.oracle_combobox_rejected",
+                field_label=field.name,
+                attempted=value[:60],
+            )
+            return _fill_outcome(False)
+
+        if await _field_has_validation_error(page, ff_id):
+            return _fill_outcome(False)
+
+        logger.debug(
+            "domhand.oracle_combobox_ok",
+            field_label=field.name,
+            value=effective[:60],
+            matched_label=(matched_label or "")[:60],
+        )
+        return _fill_outcome(True, matched_label=matched_label)
+
+    except Exception as exc:
+        logger.warning(
+            "domhand.oracle_combobox_error",
+            field_label=field.name,
+            error=str(exc),
+        )
+        return _fill_outcome(False)
+
+
+_ORACLE_COMBOBOX_TRY_FIRST_TYPES = frozenset(
+    {"text", "email", "tel", "url", "number", "password", "search", "select"}
+)
+
+
+async def _try_oracle_searchable_combobox_first(
+    page: Any,
+    field: FormField,
+    value: str,
+    tag: str,
+    *,
+    page_url: str,
+) -> FieldFillOutcome | None:
+    """Oracle only: if the DOM node matches searchable-combobox signals, try ``oracle_combobox``.
+
+    Returns a successful ``FieldFillOutcome`` only when the keyboard + pick path commits.
+    Otherwise returns ``None`` so the caller continues with the normal pipeline
+    (``_fill_select_field_outcome`` / ``_fill_text_field`` / searchable dropdown, etc.).
+    This avoids blanket ``fill_overrides`` that force every ``select`` down one path.
+    """
+    if field.field_type not in _ORACLE_COMBOBOX_TRY_FIRST_TYPES:
+        return None
+    try:
+        from ghosthands.platforms import detect_platform
+
+        if detect_platform(page_url) != "oracle":
+            return None
+    except Exception:
+        return None
+    try:
+        searchable = await page.evaluate(_IS_ORACLE_SEARCHABLE_JS, field.field_id)
+        if not searchable:
+            return None
+    except Exception:
+        return None
+    outcome = await _fill_oracle_combobox_outcome(page, field, value, tag)
+    if outcome.success:
+        return outcome
+    logger.debug(
+        "domhand.oracle_combobox_fallthrough",
+        field_label=field.name,
+        field_type=field.field_type,
+    )
+    return None
 
 
 async def _open_grouped_date_picker(page: Any, field: FormField) -> bool:

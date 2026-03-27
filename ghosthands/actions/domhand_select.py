@@ -1191,21 +1191,13 @@ def _failover_prefix(widget_kind: str) -> str:
 
 
 def _native_select_failover_hint(index: int) -> str:
-    """Return the exact native-select fallback instructions for the agent."""
-    return (
-        f"STOP — do NOT retry domhand_select for this field. This is a native <select>. Use dropdown_options(index={index}) to inspect "
-        f"the exact option text/value, then call select_dropdown(index={index}, text=...) "
-        "with the exact text/value string. Do NOT use click on this element."
-    )
+    """Return native-select factual type hint for the agent."""
+    return f"Widget is a native <select> at index={index}."
 
 
 def _custom_widget_failover_hint() -> str:
-    """Return the fallback instructions for custom dropdown widgets."""
-    return (
-        "Open the widget manually, type/search if supported, click the option directly, "
-        "follow any secondary menu to the final leaf option, and only continue once the "
-        "field visibly changes."
-    )
+    """Return custom widget factual type hint."""
+    return "Widget is a custom dropdown."
 
 
 def _build_failover_message(
@@ -1226,7 +1218,6 @@ def _build_failover_message(
     if widget_kind == "native_select":
         parts.append(_native_select_failover_hint(index))
     else:
-        parts.append("STOP — do NOT retry domhand_select for this field.")
         parts.append(_custom_widget_failover_hint())
     return " ".join(parts)
 
@@ -1274,8 +1265,7 @@ def _select_failover_or_retry_cap_message(
             widget_kind,
             index,
             reason=(
-                f"domhand_retry_capped: DomHand retry cap reached after {count or DOMHAND_RETRY_CAP} failed attempts. "
-                "Do not use domhand_select on this field again in this run."
+                f"domhand_retry_capped: retry cap reached after {count or DOMHAND_RETRY_CAP} attempts."
             ),
             current_value=current_value,
         )
@@ -1834,7 +1824,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                 "strategy": "domhand_select",
                 "state_change": "no_state_change",
                 "retry_capped": True,
-                "recommended_next_action": "switch_to_browser_use_manual_for_this_field",
+                "recommended_next_action": "review_page_visually",
             },
         )
 
@@ -1875,7 +1865,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             retry_capped=is_domhand_retry_capped(host=page_host, field_key=field_key, desired_value=params.value),
             success=False,
             state_change="no_state_change",
-            recommended_next_action="switch_to_browser_use_manual_for_this_field",
+            recommended_next_action="review_page_visually",
         )
         await publish_browser_session_trace(
             browser_session,
@@ -1894,7 +1884,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                     host=page_host, field_key=field_key, desired_value=params.value
                 ),
                 "state_change": "no_state_change",
-                "recommended_next_action": "switch_to_browser_use_manual_for_this_field",
+                "recommended_next_action": "review_page_visually",
             },
         )
         return ActionResult(
@@ -1988,7 +1978,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                 "strategy": "wrong_dropdown_phone_country",
                 "state_change": "no_state_change",
                 "retry_capped": False,
-                "recommended_next_action": "locate correct referral/source control; do not retry same index",
+                "recommended_next_action": "review_page_visually",
             },
         )
 
@@ -2213,7 +2203,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                 "retry_capped": is_domhand_retry_capped(
                     host=page_host, field_key=field_key, desired_value=params.value
                 ),
-                "recommended_next_action": "switch_to_browser_use_manual_for_this_field",
+                "recommended_next_action": "review_page_visually",
             },
         )
 

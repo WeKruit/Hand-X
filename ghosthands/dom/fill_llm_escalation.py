@@ -1,4 +1,4 @@
-"""LLM escalation layer for DomHand — lightweight Haiku-based verification and fill guidance.
+"""LLM escalation layer for DomHand — lightweight verification and fill guidance.
 
 Graduated cost model inspired by GHOST-HANDS v3 tiers:
   - Layer 1: DOM-first fill ($0) — handled by ``fill_executor``
@@ -7,6 +7,10 @@ Graduated cost model inspired by GHOST-HANDS v3 tiers:
   - Layer 3: browser-use vision fallback (~$0.005+/call) — handled by the agent
 
 Only triggered on failure paths — the happy path (DOM fill + verify) costs $0.
+
+The escalation model is configurable via ``GH_DOMHAND_MODEL`` (defaults to
+``gemini-3-flash-preview``).  It uses ``get_chat_model()`` from the LLM client
+so any supported provider (Google, Anthropic, OpenAI) works transparently.
 """
 
 from __future__ import annotations
@@ -21,9 +25,13 @@ from ghosthands.actions.views import FormField
 
 logger = structlog.get_logger(__name__)
 
-ESCALATION_MODEL = "claude-haiku-4-5-20251001"
-_VERIFY_MAX_TOKENS = 50
-_FILL_GUIDE_MAX_TOKENS = 300
+
+def _get_escalation_model() -> Any:
+    """Build a LangChain chat model for escalation calls."""
+    from ghosthands.config.settings import settings
+    from ghosthands.llm.client import get_chat_model
+
+    return get_chat_model(settings.domhand_model, disable_google_thinking=True)
 
 
 async def _capture_field_screenshot(page: Any, field: FormField) -> str | None:
@@ -46,9 +54,19 @@ async def _capture_field_screenshot(page: Any, field: FormField) -> str | None:
         return None
 
 
-def _get_anthropic_client():
-    from ghosthands.llm.client import get_anthropic_client
-    return get_anthropic_client()
+def _build_image_message(screenshot_b64: str, prompt: str) -> Any:
+    """Build a multimodal HumanMessage with an image + text prompt."""
+    from langchain_core.messages import HumanMessage
+
+    return HumanMessage(
+        content=[
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+            },
+            {"type": "text", "text": prompt},
+        ]
+    )
 
 
 async def llm_verify_field_value(
@@ -56,13 +74,11 @@ async def llm_verify_field_value(
     field: FormField,
     desired_value: str,
 ) -> bool | None:
-    """Ask Haiku whether the field visibly shows the desired value.
+    """Ask the escalation model whether the field visibly shows the desired value.
 
     Returns ``True`` if the LLM confirms the value is present,
     ``False`` if the LLM says it does not match,
     or ``None`` if the check could not be performed (no screenshot, API error, etc.).
-
-    Cost: ~$0.001 per call (image + short prompt to Haiku).
     """
     screenshot_b64 = await _capture_field_screenshot(page, field)
     if not screenshot_b64:
@@ -76,28 +92,10 @@ async def llm_verify_field_value(
     )
 
     try:
-        client = _get_anthropic_client()
-        response = await client.messages.create(
-            model=ESCALATION_MODEL,
-            max_tokens=_VERIFY_MAX_TOKENS,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": screenshot_b64,
-                            },
-                        },
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ],
-        )
-        text = response.content[0].text.strip()
+        model = _get_escalation_model()
+        message = _build_image_message(screenshot_b64, prompt)
+        response = await model.ainvoke([message])
+        text = (response.content if isinstance(response.content, str) else str(response.content)).strip()
         logger.debug(
             "llm_escalation.verify_response",
             field_label=label,
@@ -116,15 +114,13 @@ async def llm_suggest_fill_action(
     field: FormField,
     desired_value: str,
 ) -> dict[str, Any] | None:
-    """Ask Haiku how to fill a field that DOM-first methods couldn't handle.
+    """Ask the escalation model how to fill a field that DOM-first methods couldn't handle.
 
     Returns a dict with suggested actions, e.g.::
 
         {"strategy": "click_then_type", "selector": "...", "steps": [...]}
 
     or ``None`` if guidance could not be obtained.
-
-    Cost: ~$0.002 per call (image + longer prompt to Haiku).
     """
     screenshot_b64 = await _capture_field_screenshot(page, field)
     if not screenshot_b64:
@@ -148,28 +144,10 @@ async def llm_suggest_fill_action(
     )
 
     try:
-        client = _get_anthropic_client()
-        response = await client.messages.create(
-            model=ESCALATION_MODEL,
-            max_tokens=_FILL_GUIDE_MAX_TOKENS,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": screenshot_b64,
-                            },
-                        },
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ],
-        )
-        text = response.content[0].text.strip()
+        model = _get_escalation_model()
+        message = _build_image_message(screenshot_b64, prompt)
+        response = await model.ainvoke([message])
+        text = (response.content if isinstance(response.content, str) else str(response.content)).strip()
         logger.debug(
             "llm_escalation.fill_guide_response",
             field_label=label,

@@ -31,6 +31,10 @@ from browser_use.utils import match_url_with_domain_pattern, time_execution_sync
 logger = logging.getLogger(__name__)
 
 
+# DomHand tools: keep <read_state> lean (Premise 3 / no duplicate huge blobs) but the planner
+# still needs factual outcomes in history. Those tools set ``long_term_memory`` to the same
+# factual summary as ``extracted_content`` so ``_update_agent_history_description`` appends it
+# to per-step ``action_results`` (see elif-chain: long_term_memory wins over extracted_content).
 _READ_STATE_SUPPRESSED_TOOLS = frozenset({"domhand_fill", "domhand_assess_state"})
 
 
@@ -189,7 +193,17 @@ class MessageManager:
 	def _page_identity(self, browser_state_summary: BrowserStateSummary) -> str:
 		url = (browser_state_summary.url or '').strip()
 		title = (browser_state_summary.title or '').strip()
-		return f'{title}\n{url}'
+		# Include interactive element count as a fingerprint hint so SPA page
+		# transitions (same URL, same title, different form content) are detected.
+		elem_count = 0
+		try:
+			if browser_state_summary.dom_state and browser_state_summary.dom_state.selector_map:
+				elem_count = len(browser_state_summary.dom_state.selector_map)
+		except Exception:
+			pass
+		# Bucket element count (±5 tolerance) so minor DOM churn doesn't trigger
+		elem_bucket = (elem_count // 5) * 5
+		return f'{title}\n{url}\n{elem_bucket}'
 
 	def _build_page_transition_note(self, previous_identity: str, current_identity: str) -> str:
 		prev_title, _, prev_url = previous_identity.partition('\n')
@@ -203,50 +217,9 @@ class MessageManager:
 		)
 
 	def _build_assess_guidance_note(self, result: list[ActionResult]) -> str:
-		for action_result in reversed(result):
-			metadata = action_result.metadata or {}
-			if bool(metadata.get('same_page_advance_guard')):
-				tool_name = str(metadata.get('tool') or '').strip() or 'domhand tool'
-				return (
-					'ADVANCE NOW: A same-page advance guard was just triggered.\n'
-					f'The current page was already judged advanceable, so {tool_name} should NOT be used again on this page.\n'
-					'Proceed/advance is now a browser-use local decision. If the current page does not visibly show red validation '
-					'errors or unselected required radio/button-group controls, click Next/Continue/Save immediately.\n'
-					'Do NOT call domhand_fill or domhand_assess_state again on this same page before trying to advance.'
-				)
-			if str(metadata.get('tool') or '').strip() != 'domhand_assess_state':
-				continue
-			raw_state = metadata.get('application_state_json')
-			if not raw_state:
-				return ''
-			try:
-				state = json.loads(raw_state) if isinstance(raw_state, str) else raw_state
-			except Exception:
-				return ''
-			if not isinstance(state, dict):
-				return ''
-			if not bool(state.get('advance_allowed')):
-				unresolved = int(state.get('unresolved_required_count') or 0)
-				optional_validation = int(state.get('optional_validation_count') or 0)
-				visible_errors = int(state.get('visible_error_count') or 0)
-				hard_blockers = unresolved + optional_validation + visible_errors
-				if hard_blockers <= 0:
-					return ''
-				return (
-					'REVIEW CURRENT PAGE: The latest domhand_assess_state on this SAME page says advance_allowed=no.\n'
-					f'There are still {hard_blockers} hard blocker(s) on the current page '
-					f'(required={unresolved}, validation={optional_validation}, visible_errors={visible_errors}).\n'
-					'Do NOT run another broad domhand_fill on this same page.\n'
-					'Use browser-use to review the currently visible blockers one at a time on this page. '
-					'Prefer local/manual recovery for sticky radio/button-group/combobox widgets. '
-					'After a meaningful repair, reassess once.'
-				)
-			return (
-				'ADVANCE NOW: The latest domhand_assess_state on this SAME page says advance_allowed=yes.\n'
-				'Proceed/advance is now a browser-use local decision. If the current page does not visibly show red validation '
-				'errors or unselected required radio/button-group controls, click Next/Continue/Save immediately.\n'
-				'Do NOT call domhand_fill or domhand_assess_state again on this same page before trying to advance.'
-			)
+		# DomHand tools are informational only — they report what they did.
+		# They never inject directives into the agent's context.
+		# Browser-use agent decides next steps by reviewing the actual page.
 		return ''
 
 	def _apply_page_transition_context(self, browser_state_summary: BrowserStateSummary) -> None:

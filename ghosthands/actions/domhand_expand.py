@@ -380,23 +380,20 @@ async def domhand_expand(params: DomHandExpandParams, browser_session: BrowserSe
 	# ── Build result ──────────────────────────────────────────
 	if new_fields > 0:
 		memory = (
-			f'Expanded "{params.section}" by clicking "{button_text}". '
-			f'{new_fields} new field(s) appeared (total: {fields_after}). '
-			f'Now call domhand_fill to fill the new entry fields.'
+			f'DomHand expand: expanded "{params.section}" via "{button_text}". '
+			f'{new_fields} new field(s) appeared (total: {fields_after}).'
 		)
-		logger.info(f'DomHand expand: {memory}')
+		logger.info(memory)
 		return ActionResult(
 			extracted_content=memory,
 			include_extracted_content_only_once=False,
 		)
 	else:
 		memory = (
-			f'Clicked "{button_text}" in "{params.section}". '
-			f'Fields before: {fields_before}, after: {fields_after}. '
-			f'The new entry may have expanded off-screen — call domhand_fill '
-			f'to fill any new fields that appeared.'
+			f'DomHand expand: clicked "{button_text}" in "{params.section}". '
+			f'Fields before: {fields_before}, after: {fields_after}.'
 		)
-		logger.warning(f'DomHand expand: {memory}')
+		logger.warning(memory)
 		return ActionResult(
 			extracted_content=memory,
 			include_extracted_content_only_once=False,

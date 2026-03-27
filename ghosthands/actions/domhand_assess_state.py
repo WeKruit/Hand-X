@@ -1032,14 +1032,14 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         isinstance(last_fill, dict)
         and str(last_fill.get("page_context_key") or "") == page_context_key
         and str(last_fill.get("page_url") or "") == current_url
-        and bool(last_fill.get("requires_assess_checkpoint"))
+        and bool(last_fill.get("broad_fill_completed"))
     ):
         setattr(
             browser_session,
             "_gh_last_domhand_fill",
             {
                 **last_fill,
-                "requires_assess_checkpoint": False,
+                "broad_fill_completed": False,
                 "assess_checkpoint_consumed": True,
             },
         )
@@ -1051,13 +1051,11 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         and _last_state_is_cleanly_advanceable(last_state)
     ):
         agent_summary = (
-            "DomHand assess_state: same page already assessed as advance_allowed=yes.\n"
-            "Next action: do NOT call domhand_assess_state again on this same page. "
-            "Proceed/advance is now a browser-use local decision: inspect the current page, and if you do not visibly see red validation text "
-            "or unselected required radio/button-group controls, click Next/Continue/Save immediately."
+            "DomHand assess_state: same page already assessed as advance_allowed=yes."
         )
         return ActionResult(
             extracted_content=agent_summary,
+            long_term_memory=agent_summary,
             include_extracted_content_only_once=True,
             metadata={
                 "tool": "domhand_assess_state",
@@ -1407,15 +1405,28 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                 )
                 continue
 
-            if _field_uses_semantic_verification(field):
+            # Unified verification via verification_engine (shared with domhand_fill)
+            from ghosthands.dom.verification_engine import values_match as _ve_values_match
+
+            _use_semantic = _field_uses_semantic_verification(field)
+            if _use_semantic:
                 has_error = await _field_has_validation_error(page, field.field_id)
                 if not has_error and (
                     field.field_type == "textarea"
-                    or _semantic_text_values_match(field.current_value, expected.expected_value)
+                    or _ve_values_match(
+                        field.current_value,
+                        expected.expected_value,
+                        field_type=field.field_type,
+                        semantic=True,
+                    )
                 ):
                     continue
 
-            if not _field_value_matches_expected(field.current_value, expected.expected_value):
+            if not _ve_values_match(
+                field.current_value,
+                expected.expected_value,
+                field_type=field.field_type,
+            ):
                 mismatched_attempt.append(
                     _verification_issue_for_field(
                         field,
@@ -1735,19 +1746,16 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
     if application_state.platform_hint:
         summary_lines.append(f"Platform hint: {application_state.platform_hint}")
     if application_state.advance_allowed:
-        summary_lines.append("Next action: All visible blockers are clear on this page. Do not refill fields; click Next/Continue/Save now.")
+        summary_lines.append("All visible blockers clear on this page.")
     if application_state.advance_allowed and (application_state.mismatched_fields or application_state.unverified_fields):
         summary_lines.append(
             "Advisory: mismatched/unverified readback noise was detected, but no hard blockers remain; do not let that stop advancement."
         )
     if not application_state.advance_allowed:
         summary_lines.append(
-            "Next action: Do NOT click Next/Continue/Save yet. Resolve visible required or validation blockers first."
+            f"Unresolved blockers remain: {len(application_state.unresolved_required_fields)} required, "
+            f"{len(application_state.visible_errors)} visible errors."
         )
-        if application_state.visible_errors:
-            summary_lines.append(
-                "Gate rule: any visible red validation text such as 'This info is required' is a hard blocker even if the page otherwise looks advanceable."
-            )
     if application_state.unresolved_required_fields:
         summary_lines.append("Required field issues:")
         for issue in application_state.unresolved_required_fields[:10]:
@@ -1787,39 +1795,13 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                 f"{error_suffix}"
             )
     summary = "\n".join(summary_lines)
-    concise_lines = [
-        (
-            "DomHand assess_state: "
-            f"state={application_state.terminal_state}; "
-            f"advance_allowed={'yes' if application_state.advance_allowed else 'no'}; "
-            f"unresolved_required={len(application_state.unresolved_required_fields)}; "
-            f"optional_validation={len(optional_validation_blockers)}; "
-            f"visible_errors={len(application_state.visible_errors)}; "
-            f"unverified={len(application_state.unverified_fields)}."
-        ),
-        f"Optional validation blockers: {len(optional_validation_blockers)}",
-    ]
-    if application_state.advance_allowed:
-        concise_lines.append(
-            "Next action: no hard blockers remain; if the page still visibly shows red required errors or unselected required controls, trust the page and do not advance."
-        )
-    else:
-        concise_lines.append("Next action: Do NOT click Next/Continue/Save yet.")
-    if application_state.unresolved_required_fields:
-        blocker_labels = ", ".join(
-            _agent_display_truncate(issue.name, 48)
-            for issue in application_state.unresolved_required_fields[:3]
-            if issue.name.strip()
-        )
-        if blocker_labels:
-            concise_lines.append(f"Required blockers: {blocker_labels}.")
-    if application_state.visible_errors:
-        error_preview = "; ".join(
-            _agent_display_truncate(error_text, 80) for error_text in application_state.visible_errors[:2]
-        )
-        if error_preview:
-            concise_lines.append(f"Visible errors: {error_preview}")
-    agent_summary = "\n".join(concise_lines)
+    agent_summary = (
+        "DomHand assess_state: "
+        f"state={application_state.terminal_state}; "
+        f"advance_allowed={'yes' if application_state.advance_allowed else 'no'}; "
+        f"unresolved_required={len(application_state.unresolved_required_fields)}; "
+        f"visible_errors={len(application_state.visible_errors)}."
+    )
 
     logger.debug(
         "domhand.assess_state.full_state_json %s",
@@ -1828,6 +1810,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
     logger.debug(summary)
     return ActionResult(
         extracted_content=agent_summary,
+        long_term_memory=agent_summary,
         include_extracted_content_only_once=True,
         metadata={
             "tool": "domhand_assess_state",

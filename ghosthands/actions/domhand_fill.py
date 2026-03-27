@@ -18,7 +18,7 @@ job application form filling.  It:
    - Date fields          -> direct set or Workday-style keyboard fill
    - Checkboxes/toggles   -> click to toggle state
 5. Re-extracts to verify fills and catch newly revealed conditional fields
-6. Repeats for up to ``MAX_FILL_ROUNDS`` rounds
+6. Repeats for up to ``MAX_FILL_ROUNDS`` rounds (extra round for conditional reveals)
 7. Returns ``ActionResult`` with filled/failed/unfilled counts
 """
 
@@ -313,8 +313,9 @@ def _ensure_field_fingerprint(field: FormField, *, name_attr_hint: str = "") -> 
 
 # ── Constants ────────────────────────────────────────────────────────
 
-MAX_FILL_ROUNDS = 2
+MAX_FILL_ROUNDS = 3
 PRE_LLM_OPTION_ENRICHMENT_POLLS = 12
+
 PRE_LLM_OPTION_ENRICHMENT_POLL_SECONDS = 0.22
 PRE_LLM_OPTION_ENRICHMENT_SETTLE_MATCHES = 2
 MAX_CONDITIONAL_PASSES = 3
@@ -837,8 +838,7 @@ def _candidate_auto_expand_sections(
             continue
         for section in candidate_sections:
             if requested_scope and not (
-                _section_matches_scope(section, target_section)
-                or _section_matches_scope(target_section, section)
+                _section_matches_scope(section, target_section) or _section_matches_scope(target_section, section)
             ):
                 continue
             section_key = normalize_name(section)
@@ -1574,13 +1574,30 @@ _EXTRACT_BUTTON_GROUPS_JS = (
 			var normalizedLabel = normalize(questionLabel.replace(/\*\s*$/, ''));
 			var currentValue = getCurrentValue(group.buttons);
 
+			var detectRequired = function(label, gc, cc, rw) {
+				if (/\*/.test(label)) return true;
+				var containers = [gc, cc, rw].filter(Boolean);
+				for (var ci = 0; ci < containers.length; ci++) {
+					var c = containers[ci];
+					if (c.getAttribute && c.getAttribute('aria-required') === 'true') return true;
+					if (c.getAttribute && /\brequired\b/i.test(c.getAttribute('class') || '')) return true;
+					var reqIcon = c.querySelector && c.querySelector('[class*="required-icon"], [class*="required_icon"], [class*="requiredIcon"], .oj-required-inline-icon, abbr[title="required"], span.required');
+					if (reqIcon) return true;
+					var labels = c.querySelectorAll ? c.querySelectorAll('label, legend, [class*="label"], [class*="question"]') : [];
+					for (var li = 0; li < labels.length; li++) {
+						if (/\*/.test(labels[li].textContent || '')) return true;
+					}
+				}
+				return false;
+			};
+
 		results.push({
 			field_id: groupKey,
 			name: normalizedLabel || 'Button group choice',
 			field_type: 'button-group',
 			section: ff.getSection(controlContainer),
 			name_attr: normalizedLabel || controlContainer.getAttribute('name') || '',
-			required: /\*/.test(questionLabel),
+			required: detectRequired(questionLabel, groupContainer, controlContainer, row),
 			options: [],
 			choices: choiceTexts,
 			accept: null,
@@ -1711,8 +1728,13 @@ def _same_page_advance_guard_error(
     *,
     page_context_key: str,
     page_url: str,
+    current_field_ids: set[str] | None = None,
 ) -> str | None:
-    """Block same-page DomHand refill after assess_state already marked the page advanceable."""
+    """Block same-page DomHand refill after assess_state already marked the page advanceable.
+
+    SPA-aware: also compares current field IDs against the last fill's fields.
+    If < 30% overlap, the page changed even if URL/context key didn't.
+    """
     last_state = getattr(browser_session, "_gh_last_application_state", None)
     if not isinstance(last_state, dict):
         return None
@@ -1722,16 +1744,20 @@ def _same_page_advance_guard_error(
         return None
     if not _last_assess_state_has_no_hard_blockers(last_state):
         return None
-    return (
-        "This SAME page was already assessed as advance_allowed=yes. "
-        "Do NOT call domhand_fill again here. "
-        "Proceed/advance is now a browser-use local decision: inspect the current page, and if you do not visibly see red validation text "
-        "or unselected required radio/button-group controls, click Next/Continue/Save immediately. "
-        "If the page visibly disagrees, recover the remaining blocker manually with browser-use actions instead of re-running domhand_fill."
-    )
+    # SPA guard: if current fields are mostly different from last fill, it's a new page
+    if current_field_ids:
+        last_fill = getattr(browser_session, "_gh_last_domhand_fill", None)
+        if isinstance(last_fill, dict):
+            last_field_ids = set(last_fill.get("field_ids") or [])
+            if last_field_ids:
+                overlap = current_field_ids & last_field_ids
+                total = max(len(current_field_ids), len(last_field_ids))
+                if total > 0 and len(overlap) / total < 0.3:
+                    return None  # Different fields — SPA page transition, allow fill
+    return "DomHand: page already assessed as advance_allowed=yes; broad fill already completed."
 
 
-def _same_page_assess_checkpoint_guard_error(
+def _same_page_fill_guard_error(
     browser_session: BrowserSession,
     *,
     page_context_key: str,
@@ -1739,8 +1765,14 @@ def _same_page_assess_checkpoint_guard_error(
     heading_boundary: str | None,
     focus_fields: list[str] | None,
     entry_data: dict[str, Any] | None,
+    current_field_ids: set[str] | None = None,
 ) -> str | None:
-    """Block repeated broad same-page domhand_fill before a fresh assess_state checkpoint."""
+    """Block repeated broad same-page domhand_fill. One fill pass per page.
+
+    SPA-aware: also compares current field IDs against the last fill's fields.
+    If < 30% overlap, the page changed even if the URL didn't (common in SPAs
+    like Goldman Sachs, Greenhouse, etc.).
+    """
     if heading_boundary or focus_fields or entry_data:
         return None
     last_fill = getattr(browser_session, "_gh_last_domhand_fill", None)
@@ -1750,14 +1782,17 @@ def _same_page_assess_checkpoint_guard_error(
         return None
     if str(last_fill.get("page_url") or "") != page_url:
         return None
-    if not bool(last_fill.get("requires_assess_checkpoint")):
+    if not bool(last_fill.get("broad_fill_completed")):
         return None
-    return (
-        "This SAME page already had a broad domhand_fill pass. "
-        "Do NOT call domhand_fill again yet. "
-        "Run domhand_assess_state ONCE next to determine remaining blockers or whether the page can advance. "
-        "Only use another domhand_fill on this page for a narrow repeater/editor scope (focus_fields or heading_boundary), not for a broad page refill."
-    )
+    # SPA guard: if current fields are mostly different from last fill, it's a new page
+    if current_field_ids:
+        last_field_ids = set(last_fill.get("field_ids") or [])
+        if last_field_ids:
+            overlap = current_field_ids & last_field_ids
+            total = max(len(current_field_ids), len(last_field_ids))
+            if total > 0 and len(overlap) / total < 0.3:
+                return None  # Different fields — SPA page transition, allow fill
+    return "DomHand: broad fill already completed on this page."
 
 
 def _get_auth_override_data(enabled: bool) -> dict[str, str] | None:
@@ -2157,6 +2192,31 @@ _AUTHORITATIVE_TEXT_DEFAULTS: dict[str, str] = {
     "source of application": "LinkedIn",
 }
 
+# Neutral / decline patterns for EEO button-group choices. Ordered by
+# preference — first match wins.  Used when the hardcoded EEO default text
+# doesn't exactly match any choice on the page.
+_NEUTRAL_EEO_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"(?:i\s+)?prefer\s+not\s+(?:to\s+)?(?:say|answer|disclose|respond)", re.IGNORECASE),
+    re.compile(r"(?:i\s+)?decline\s+(?:to\s+)?(?:self[- ]?identify|answer|disclose)", re.IGNORECASE),
+    re.compile(r"(?:i\s+)?(?:do\s+not|don'?t)\s+wish\s+to\s+answer", re.IGNORECASE),
+    re.compile(r"(?:i\s+)?choose\s+not\s+to\s+(?:disclose|answer|respond)", re.IGNORECASE),
+    re.compile(r"^prefer\s+not\s+to\s+say$", re.IGNORECASE),
+    re.compile(r"^not\s+(?:applicable|specified)$", re.IGNORECASE),
+]
+
+
+def _find_neutral_eeo_choice(field: FormField) -> str | None:
+    """Find the most neutral/decline choice from a constrained-choice EEO field."""
+    choices = [str(c).strip() for c in (field.options or field.choices or []) if str(c).strip()]
+    if not choices:
+        return None
+    for pattern in _NEUTRAL_EEO_PATTERNS:
+        for choice in choices:
+            if pattern.search(choice):
+                return choice
+    return None
+
+
 # EEO / demographic fields — "decline to self-identify" defaults when profile
 # data is empty.  Prevents required EEO fields from triggering HITL.
 _EEO_DECLINE_DEFAULTS: dict[str, str] = {
@@ -2173,6 +2233,9 @@ _EEO_DECLINE_DEFAULTS: dict[str, str] = {
     "disability status": "I do not wish to answer",
     "sexual orientation": "I decline to self-identify",
     "lgbtq": "I decline to self-identify",
+    "hispanic": "Prefer not to say",
+    "latino": "Prefer not to say",
+    "hispanic or latino": "Prefer not to say",
 }
 
 
@@ -2235,17 +2298,36 @@ def _match_answer(
             if norm_name in _AUTHORITATIVE_TEXT_DEFAULTS:
                 return _AUTHORITATIVE_TEXT_DEFAULTS[norm_name]
 
-    # ── EEO "decline" defaults — only for required fields with no profile data ──
-    if field.required:
+    # ── EEO "decline" defaults — for required fields or constrained-choice
+    # controls (button-group, radio-group) where we can safely pick a
+    # "decline" option rather than leaving the field empty and forcing
+    # the agent to waste steps filling them one at a time.
+    _has_constrained_choices = bool(field.choices or field.options) and field.field_type in {
+        "button-group", "radio-group", "radio", "checkbox-group",
+    }
+    if field.required or _has_constrained_choices:
         for norm_name in candidate_norms:
             if norm_name in _EEO_DECLINE_DEFAULTS:
-                return _EEO_DECLINE_DEFAULTS[norm_name]
+                eeo_default = _EEO_DECLINE_DEFAULTS[norm_name]
+                if _has_constrained_choices:
+                    eeo_default = _coerce_answer_to_field(field, eeo_default)
+                    if not eeo_default:
+                        eeo_default = _find_neutral_eeo_choice(field)
+                    if not eeo_default:
+                        continue
+                return eeo_default
             for eeo_key, eeo_value in sorted(
                 _EEO_DECLINE_DEFAULTS.items(),
                 key=lambda item: len(item[0]),
                 reverse=True,
             ):
                 if eeo_key and eeo_key in norm_name:
+                    if _has_constrained_choices:
+                        eeo_value = _coerce_answer_to_field(field, eeo_value)
+                        if not eeo_value:
+                            eeo_value = _find_neutral_eeo_choice(field)
+                        if not eeo_value:
+                            continue
                     return eeo_value
 
     return None
@@ -2709,46 +2791,121 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         page,
         fallback_marker=params.target_section or params.heading_boundary,
     )
+    logger.info(
+        "domhand.fill.ENTER",
+        extra={
+            "page_context_key": page_context_key,
+            "page_url": page_url[:120],
+            "target_section": params.target_section or "",
+            "heading_boundary": params.heading_boundary or "",
+            "focus_fields": list(params.focus_fields or [])[:5],
+            "is_scoped": bool(params.heading_boundary or params.entry_data or params.focus_fields),
+        },
+    )
     # Scoped fills (heading_boundary, entry_data, focus_fields) bypass the
     # advance guard — repeater sections are expanded AFTER the initial
     # assessment and need a fresh fill pass.
     is_scoped_fill = bool(params.heading_boundary or params.entry_data or params.focus_fields)
+
+    completed_scoped: dict[tuple[str, str], dict] = getattr(browser_session, "_gh_completed_scoped_fills", {})
+    completed_scoped_page: str = getattr(browser_session, "_gh_completed_scoped_page", "")
+    if completed_scoped_page and completed_scoped_page != page_context_key:
+        completed_scoped = {}
+    browser_session._gh_completed_scoped_fills = completed_scoped
+    browser_session._gh_completed_scoped_page = page_context_key
+
+    if is_scoped_fill and params.heading_boundary and not params.focus_fields:
+        _scope_key = (page_context_key, (params.heading_boundary or "").strip().lower())
+        prev = completed_scoped.get(_scope_key)
+        if prev:
+            _scoped_msg = (
+                f"DomHand: section {params.heading_boundary!r} already filled "
+                f"({prev.get('filled_count', 0)} fields) on this page."
+            )
+            return ActionResult(
+                extracted_content=_scoped_msg,
+                long_term_memory=_scoped_msg,
+                include_extracted_content_only_once=True,
+                metadata={
+                    "tool": "domhand_fill",
+                    "scoped_dedup_guard": True,
+                    "page_context_key": page_context_key,
+                    "heading_boundary": params.heading_boundary,
+                },
+            )
+
+    # Quick field ID snapshot for SPA-aware guard (detects page transitions
+    # when URL stays the same but form content changes, e.g. Goldman Sachs).
+    # Must run BEFORE both guards so they can use it for SPA detection.
+    # Inject __ff first so extract_visible_form_fields works on SPA page 2.
+    _guard_field_ids: set[str] | None = None
+    try:
+        with contextlib.suppress(Exception):
+            await page.evaluate(_build_inject_helpers_js())
+        _guard_snapshot = await _visible_field_id_snapshot(page)
+        _guard_field_ids = set(_guard_snapshot) if _guard_snapshot else None
+    except Exception:
+        pass
     same_page_advance_guard = (
-        None if is_scoped_fill
+        None
+        if is_scoped_fill
         else _same_page_advance_guard_error(
             browser_session,
             page_context_key=page_context_key,
             page_url=page_url,
+            current_field_ids=_guard_field_ids,
         )
     )
     if same_page_advance_guard:
+        logger.info(
+            "domhand.fill.advance_guard_blocked",
+            extra={
+                "page_context_key": page_context_key,
+                "page_url": page_url,
+                "guard_field_count": len(_guard_field_ids) if _guard_field_ids else 0,
+                "last_fill_field_count": len((getattr(browser_session, "_gh_last_domhand_fill", {}) or {}).get("field_ids", [])),
+                "message": same_page_advance_guard,
+            },
+        )
         return ActionResult(
             extracted_content=same_page_advance_guard,
+            long_term_memory=same_page_advance_guard,
             include_extracted_content_only_once=True,
             metadata={
                 "tool": "domhand_fill",
                 "same_page_advance_guard": True,
-                "recommended_next_action": "advance_or_manual_browser_decision",
+                "recommended_next_action": "review_page_visually",
                 "page_context_key": page_context_key,
                 "page_url": page_url,
             },
         )
-    same_page_assess_guard = _same_page_assess_checkpoint_guard_error(
+    same_page_guard = _same_page_fill_guard_error(
         browser_session,
         page_context_key=page_context_key,
         page_url=page_url,
         heading_boundary=params.heading_boundary,
         focus_fields=params.focus_fields,
         entry_data=entry_data,
+        current_field_ids=_guard_field_ids,
     )
-    if same_page_assess_guard:
+    if same_page_guard:
+        logger.info(
+            "domhand.fill.same_page_guard_blocked",
+            extra={
+                "page_context_key": page_context_key,
+                "page_url": page_url,
+                "guard_field_count": len(_guard_field_ids) if _guard_field_ids else 0,
+                "last_fill_field_count": len((getattr(browser_session, "_gh_last_domhand_fill", {}) or {}).get("field_ids", [])),
+                "guard_message": same_page_guard,
+            },
+        )
         return ActionResult(
-            extracted_content=same_page_assess_guard,
+            extracted_content=same_page_guard,
+            long_term_memory=same_page_guard,
             include_extracted_content_only_once=True,
             metadata={
                 "tool": "domhand_fill",
-                "same_page_assess_checkpoint_guard": True,
-                "recommended_next_action": "run_domhand_assess_state_next",
+                "same_page_fill_guard": True,
                 "page_context_key": page_context_key,
                 "page_url": page_url,
             },
@@ -2763,6 +2920,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
     fields_skipped: set[str] = set()  # Fields with no profile data — don't retry
     fields_capped: set[str] = set()
     settled_fields: dict[str, float] = {}  # field_key -> fill_confidence (>= 0.8 means done)
+    total_already_filled_count = 0
 
     for round_num in range(1, MAX_FILL_ROUNDS + 1):
         logger.info(f"DomHand fill round {round_num}/{MAX_FILL_ROUNDS}")
@@ -2864,6 +3022,18 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 continue
             fillable_fields.append(f)
         fillable_fields = _prioritize_fillable_fields(fillable_fields, page_host=page_host)
+        logger.info(
+            "domhand.fill.field_triage",
+            extra={
+                "round": round_num,
+                "extracted_total": len(fields),
+                "fillable_count": len(fillable_fields),
+                "fillable_types": dict(
+                    __import__("collections").Counter(f.field_type for f in fillable_fields)
+                ) if fillable_fields else {},
+                "page_context_key": page_context_key,
+            },
+        )
 
         if not fillable_fields:
             open_inline_forms = await _visible_open_profile_inline_form_count(page)
@@ -2895,10 +3065,13 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 if auto_expanded:
                     continue
             if round_num == 1:
+                _empty_fields_msg = "No fillable form fields found on the page."
                 return ActionResult(
-                    extracted_content="No fillable form fields found on the page.",
+                    extracted_content=_empty_fields_msg,
+                    long_term_memory=_empty_fields_msg,
                     include_extracted_content_only_once=True,
                     metadata={
+                        "tool": "domhand_fill",
                         "step_cost": total_step_cost,
                         "input_tokens": total_input_tokens,
                         "output_tokens": total_output_tokens,
@@ -2920,12 +3093,14 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         # Do NOT skip them — the value may be in the DOM but not registered by the
         # ATS framework (e.g. Workday React state).
         _force_refill = bool(params.focus_fields)
+        already_filled_count = 0
         for f in fillable_fields:
             has_effective_value = _field_has_effective_value(f)
             has_validation_error = False
             if has_effective_value:
                 has_validation_error = await _field_has_validation_error(page, f.field_id)
             if has_effective_value and not has_validation_error and not _force_refill:
+                already_filled_count += 1
                 fields_seen.add(get_stable_field_key(f))
                 continue
             auth_val = _known_auth_override_for_field(f, auth_overrides)
@@ -3271,7 +3446,10 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 fields_seen.add(key)
                 fields_skipped.add(key)
                 continue
-            minimum_confidence = "medium" if f.required else "strong"
+            _has_constrained_choices = bool(f.choices or f.options) and f.field_type in {
+                "button-group", "radio-group", "radio", "checkbox-group",
+            }
+            minimum_confidence = "medium" if (f.required or _has_constrained_choices) else "strong"
             resolved_profile_value = _resolve_known_profile_value_for_field(
                 f,
                 evidence,
@@ -3283,6 +3461,21 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 resolved_values[f.field_id] = resolved_profile_value
                 continue
             needs_llm.append(f)
+
+        total_already_filled_count += already_filled_count
+        logger.info(
+            "domhand.fill.round_triage",
+            extra={
+                "round": round_num,
+                "direct_fills": len(direct_fills),
+                "needs_llm": len(needs_llm),
+                "needs_llm_types": dict(
+                    __import__("collections").Counter(f.field_type for f in needs_llm)
+                ) if needs_llm else {},
+                "already_filled": already_filled_count,
+                "skipped": len(fields_skipped),
+            },
+        )
 
         answers: dict[str, str] = {}
         if needs_llm:
@@ -3327,6 +3520,17 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             key = get_stable_field_key(f)
             if f.field_id in direct_fills:
                 value = direct_fills[f.field_id]
+
+                if _force_refill and _field_has_effective_value(f):
+                    current_val = str(f.current_value or "").strip()
+                    if current_val and current_val.lower() == value.strip().lower():
+                        has_val_error = await _field_has_validation_error(page, f.field_id)
+                        if not has_val_error:
+                            already_filled_count += 1
+                            total_already_filled_count += 1
+                            fields_seen.add(key)
+                            continue
+
                 resolved_value = resolved_values.get(
                     f.field_id,
                     _resolved_field_value(
@@ -3640,73 +3844,23 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         for r in reconciled_results
         if not r.success and r.actor == "dom"
     ]
-    summary_lines = [
-        f"DomHand fill complete: {filled_count} filled, {failed_count} DOM failures, {skipped_count} skipped (no data), {unfilled_count} unfilled.",
+    # ── Log-only summary (verbose, for debugging; never shown to the agent) ──
+    summary_lines: list[str] = [
+        f"DomHand fill complete: {filled_count} filled, {failed_count} DOM failures, "
+        f"{total_already_filled_count} already correct, {skipped_count} skipped (no data), {unfilled_count} unfilled.",
         f"LLM calls: {llm_calls} (input: {total_input_tokens} tokens, output: {total_output_tokens} tokens)",
     ]
-    if required_skipped:
-        summary_lines.append("REQUIRED fields that need attention (fill these using click/select):")
-        summary_lines.extend(required_skipped[:20])
-    if optional_skipped:
-        summary_lines.append("Skipped optional fields (no confident profile match):")
-        summary_lines.extend(optional_skipped[:20])
-        if len(optional_skipped) > 20:
-            summary_lines.append(f"  ... and {len(optional_skipped) - 20} more")
     if failed_descriptions:
-        summary_lines.append("Failed fields (retry even if optional when profile data exists):")
+        summary_lines.append("Failed fields (log only):")
         summary_lines.extend(failed_descriptions[:20])
-    if best_effort_results:
-        summary_lines.append("Best-effort guesses used (review these answers before submit):")
-        summary_lines.extend(
-            [f'  - "{r.name}"' + (f" [{r.section}]" if r.section else "") for r in best_effort_results[:20]]
-        )
-    if best_effort_binding_results:
-        summary_lines.append("Best-effort repeater bindings used (review these answers before submit):")
-        summary_lines.extend(
-            [
-                f'  - "{r.name}"'
-                + (f" [{r.section}]" if r.section else "")
-                + (f" via {r.binding_mode}" if r.binding_mode else "")
-                for r in best_effort_binding_results[:20]
-            ]
-        )
-    if cleared_stale_results:
-        summary_lines.append("Live DOM reconciliation cleared stale blockers after dependent fields settled:")
-        summary_lines.extend(
-            [
-                f'  - "{item["name"]}"'
-                + (f' [{item["section"]}]' if item["section"] else "")
-                + (f' -> "{item["current_value"]}"' if item["current_value"] else "")
-                for item in cleared_stale_results[:20]
-            ]
-        )
-
-    confident_fields = [r for r in reconciled_results if r.success and r.fill_confidence >= 0.8]
-    if confident_fields:
-        summary_lines.append(
-            f"Confidently filled fields ({len(confident_fields)}) — DO NOT re-fill or re-verify these:"
-        )
-        summary_lines.extend(
-            [f'  - "{r.name}"' + (f" [{r.section}]" if r.section else "") for r in confident_fields[:30]]
-        )
-
-    low_confidence_fields = [
-        r for r in reconciled_results if not r.success or (r.success and r.fill_confidence < 0.4)
-    ]
-    if low_confidence_fields:
-        summary_lines.append(
-            f"Low-confidence fields ({len(low_confidence_fields)}) — may need Stagehand or manual intervention:"
-        )
-        summary_lines.extend(
-            [
-                f'  - "{r.name}" (confidence={r.fill_confidence:.1f}, error={r.error or "none"})'
-                for r in low_confidence_fields[:15]
-            ]
-        )
+    if required_skipped:
+        summary_lines.append("Required skipped (log only):")
+        summary_lines.extend(required_skipped[:20])
 
     _failed_all = [r for r in reconciled_results if not r.success]
     structured_summary_full = {
         "filled_count": filled_count,
+        "already_filled_count": total_already_filled_count,
         "dom_failure_count": failed_count,
         "skipped_count": skipped_count,
         "unfilled_count": unfilled_count,
@@ -3743,81 +3897,135 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         json.dumps(structured_summary_full, ensure_ascii=True),
     )
 
-    _agent_failed = [_fill_result_summary_entry_for_agent(r) for r in _failed_all][:_AGENT_FILL_MAX_FAILED_FIELDS]
     structured_summary_agent = {
         "filled_count": filled_count,
+        "already_filled_count": total_already_filled_count,
         "dom_failure_count": failed_count,
-        "skipped_count": skipped_count,
         "unfilled_count": unfilled_count,
-        "best_effort_guess_count": len(best_effort_results),
-        "best_effort_binding_count": len(best_effort_binding_results),
-        "best_effort_guess_fields": [
-            {
-                "field_id": r.field_id,
-                "prompt_text": _truncate_agent_fill_text(r.name, _AGENT_FILL_NAME_MAX_LEN),
-                "section_label": _truncate_agent_fill_text(r.section, _AGENT_FILL_SECTION_MAX_LEN) or None,
-                "required": r.required,
-            }
-            for r in best_effort_results[:25]
-        ],
-        "best_effort_binding_fields": [
-            {
-                "field_id": r.field_id,
-                "prompt_text": _truncate_agent_fill_text(r.name, _AGENT_FILL_NAME_MAX_LEN),
-                "section_label": _truncate_agent_fill_text(r.section, _AGENT_FILL_SECTION_MAX_LEN) or None,
-                "binding_mode": r.binding_mode,
-                "binding_confidence": r.binding_confidence,
-                "best_effort_guess": r.best_effort_guess,
-            }
-            for r in best_effort_binding_results[:25]
-        ],
-        "reconciled_settled_fields": [
-            {
-                "field_id": item["field_id"],
-                "name": _truncate_agent_fill_text(item["name"], _AGENT_FILL_NAME_MAX_LEN),
-                "section": _truncate_agent_fill_text(item["section"], _AGENT_FILL_SECTION_MAX_LEN),
-            }
-            for item in cleared_stale_results[:25]
-        ],
-        "unresolved_required_fields": [
-            _fill_result_summary_entry_for_agent(r) for r in reconciled_results if not r.success and r.required
-        ][:25],
-        "failed_fields": _agent_failed,
-        "failed_fields_total": len(_failed_all),
     }
-    if len(_failed_all) > _AGENT_FILL_MAX_FAILED_FIELDS:
-        structured_summary_agent["failed_fields_truncated"] = len(_failed_all) - _AGENT_FILL_MAX_FAILED_FIELDS
 
     summary = "\n".join(summary_lines)
     logger.info(summary)
-    concise_lines = [
-        (
-            "DomHand fill result: "
-            f'filled={filled_count}, best_effort_guesses={len(best_effort_results)}, '
-            f'best_effort_bindings={len(best_effort_binding_results)}.'
-        )
-    ]
-    settled_labels = ", ".join(
-        _truncate_agent_fill_text(r.name, 40)
-        for r in reconciled_results[:10]
-        if r.success and r.name.strip()
+
+    # ── Verification engine review (v3 parity) ───────────────────────
+    #
+    # Build structured per-field review using the unified verification engine.
+    # Two-axis contract: execution_status x review_status.
+    # The 0.55 readback_unverified path becomes review_status=unreadable.
+    from ghosthands.dom.verification_engine import (
+        FieldReviewResult,
+        build_agent_digest,
+        build_agent_prose,
+        build_review_summary,
     )
-    if settled_labels:
-        concise_lines.append(f"Fields visibly settled in this pass: {settled_labels}.")
-    if cleared_stale_results:
-        cleared_labels = ", ".join(
-            _truncate_agent_fill_text(item["name"], 48) for item in cleared_stale_results[:3] if item["name"].strip()
+
+    _fill_confidence_to_review: list[FieldReviewResult] = []
+    for r in reconciled_results:
+        if r.actor == "skipped":
+            _fill_confidence_to_review.append(
+                FieldReviewResult(
+                    field_id=r.field_id,
+                    label=(r.name or "")[:50],
+                    field_type=r.control_kind or "",
+                    required=r.required,
+                    execution_status="not_attempted",
+                    review_status="unsupported",
+                    reason=r.error or "skipped (no profile data)",
+                )
+            )
+        elif r.actor == "unfilled":
+            _fill_confidence_to_review.append(
+                FieldReviewResult(
+                    field_id=r.field_id,
+                    label=(r.name or "")[:50],
+                    field_type=r.control_kind or "",
+                    required=r.required,
+                    execution_status="not_attempted",
+                    review_status="unsupported",
+                    reason=r.error or "unfilled",
+                )
+            )
+        elif not r.success:
+            _exec = "retry_capped" if r.failure_reason == "domhand_retry_capped" else "execution_failed"
+            _fill_confidence_to_review.append(
+                FieldReviewResult(
+                    field_id=r.field_id,
+                    label=(r.name or "")[:50],
+                    field_type=r.control_kind or "",
+                    required=r.required,
+                    execution_status=_exec,
+                    review_status="mismatch",
+                    reason=r.error or "fill failed",
+                )
+            )
+        elif r.fill_confidence >= 0.9:
+            # DOM verified or reconciliation verified
+            _fill_confidence_to_review.append(
+                FieldReviewResult(
+                    field_id=r.field_id,
+                    label=(r.name or "")[:50],
+                    field_type=r.control_kind or "",
+                    required=r.required,
+                    execution_status="executed",
+                    review_status="verified",
+                    reason="DOM readback matches expected",
+                )
+            )
+        elif abs(r.fill_confidence - 0.55) < 0.01:
+            # THE FIX: readback_unverified → review_status=unreadable, NEVER verified
+            _fill_confidence_to_review.append(
+                FieldReviewResult(
+                    field_id=r.field_id,
+                    label=(r.name or "")[:50],
+                    field_type=r.control_kind or "",
+                    required=r.required,
+                    execution_status="executed",
+                    review_status="unreadable",
+                    reason="executor succeeded but DOM readback did not match within poll window",
+                )
+            )
+        else:
+            # 0.6 (Stagehand) or 0.8 (LLM) — treat as verified (escalation succeeded)
+            _fill_confidence_to_review.append(
+                FieldReviewResult(
+                    field_id=r.field_id,
+                    label=(r.name or "")[:50],
+                    field_type=r.control_kind or "",
+                    required=r.required,
+                    execution_status="executed",
+                    review_status="verified",
+                    reason=f"verified via escalation (confidence={r.fill_confidence})",
+                )
+            )
+
+    # Add already-filled fields as already_settled
+    for _ in range(total_already_filled_count):
+        _fill_confidence_to_review.append(
+            FieldReviewResult(
+                field_id="",
+                label="",
+                field_type="",
+                required=False,
+                execution_status="already_settled",
+                review_status="verified",
+                reason="field already had correct value",
+            )
         )
-        if cleared_labels:
-            concise_lines.append(f"Live DOM cleared stale blocker noise for: {cleared_labels}.")
-    if best_effort_results or best_effort_binding_results:
-        concise_lines.append(
-            "Best-effort guesses/bindings were used; trust the visible page state before advancing."
-        )
-    concise_lines.append(
-        "Use domhand_assess_state next to determine any remaining blockers and whether the page can advance."
+
+    _review_summary = build_review_summary(_fill_confidence_to_review)
+    _agent_digest_json = build_agent_digest(_review_summary)
+    _agent_prose = build_agent_prose(_review_summary)
+
+    # ── Agent-facing text summary ─────────────────────────────────────
+    #
+    # Use the verification engine prose as primary summary.
+    # Append filled field labels for agent context.
+    filled_labels = ", ".join(
+        _truncate_agent_fill_text(r.name, 40) for r in reconciled_results[:15] if r.success and r.name.strip()
     )
-    agent_summary = "\n".join(concise_lines)
+    agent_summary = _agent_prose
+    if filled_labels:
+        agent_summary += f" Fields: {filled_labels}."
     if browser_session is not None:
         setattr(
             browser_session,
@@ -3828,13 +4036,36 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 "target_section": params.target_section or "",
                 "heading_boundary": params.heading_boundary or "",
                 "focus_fields": list(params.focus_fields or []),
-                "requires_assess_checkpoint": not bool(
-                    params.heading_boundary or params.focus_fields or entry_data
-                ),
+                "broad_fill_completed": not bool(params.heading_boundary or params.focus_fields or entry_data),
+                "field_ids": [r.field_id for r in reconciled_results if r.field_id][:50],
             },
         )
+        if params.heading_boundary and (filled_count > 0 or total_already_filled_count > 0):
+            _scope_key = (page_context_key, (params.heading_boundary or "").strip().lower())
+            completed_scoped[_scope_key] = {
+                "filled_count": filled_count,
+                "already_filled_count": total_already_filled_count,
+            }
+
+    # long_term_memory: prose + capped JSON digest (≤1500 chars, PII-redacted)
+    _long_term = f"{agent_summary}\n{_agent_digest_json}"
+
+    logger.info(
+        "domhand.fill.EXIT",
+        extra={
+            "page_context_key": page_context_key,
+            "filled_count": filled_count,
+            "failed_count": failed_count,
+            "skipped_count": skipped_count,
+            "already_filled_count": total_already_filled_count,
+            "total_results": len(reconciled_results),
+            "llm_calls": llm_calls,
+        },
+    )
+
     return ActionResult(
         extracted_content=agent_summary,
+        long_term_memory=_long_term,
         include_extracted_content_only_once=True,
         metadata={
             "tool": "domhand_fill",
@@ -3847,6 +4078,21 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             "domhand_fill_full_json": structured_summary_full,
             "domhand_fill_agent_summary": agent_summary,
             "domhand_fill_log_summary": summary,
+            "domhand_fill_review": [
+                {
+                    "field_id": r.field_id,
+                    "label": r.label,
+                    "field_type": r.field_type,
+                    "required": r.required,
+                    "execution_status": r.execution_status,
+                    "review_status": r.review_status,
+                    "reason": r.reason,
+                    "actual_read": r.actual_read,
+                    "has_validation_error": r.has_validation_error,
+                }
+                for r in _fill_confidence_to_review
+                if r.field_id  # skip the placeholder already_settled entries
+            ],
         },
     )
 

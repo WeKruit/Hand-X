@@ -217,27 +217,27 @@ async def domhand_interact_control(
         return ActionResult(
             error=(
                 "domhand_interact_control only handles binary/group widgets "
-                "(radio, checkbox, toggle, button-group). Use domhand_select "
-                "for dropdowns/comboboxes."
+                "(radio, checkbox, toggle, button-group). "
+                "Field is a dropdown/combobox."
             ),
             metadata={
                 "tool": "domhand_interact_control",
                 "state_change": "no_state_change",
                 "retry_capped": False,
-                "recommended_next_action": "use_domhand_select_or_browser_use_manual",
+                "recommended_next_action": "review_page_visually",
             },
         )
     if requested_type in _GENERIC_INPUT_FIELD_TYPES:
         return ActionResult(
             error=(
-                "domhand_interact_control is not for generic text-like inputs. "
-                "Use browser-use/manual input actions for this field."
+                "domhand_interact_control handles binary/group widgets only — "
+                "not generic text-like inputs."
             ),
             metadata={
                 "tool": "domhand_interact_control",
                 "state_change": "no_state_change",
                 "retry_capped": False,
-                "recommended_next_action": "switch_to_browser_use_manual_for_this_field",
+                "recommended_next_action": "review_page_visually",
             },
         )
 
@@ -367,9 +367,8 @@ async def domhand_interact_control(
             if unsupported.field_type in _DROPDOWN_FIELD_TYPES:
                 return ActionResult(
                     error=(
-                        f'"{_preferred_field_label(unsupported)}" is a dropdown/combobox. '
-                        "Use domhand_select or browser-use/manual recovery instead of "
-                        "domhand_interact_control."
+                        f'"{_preferred_field_label(unsupported)}" is a dropdown/combobox — '
+                        "not a binary/group widget."
                     ),
                     metadata={
                         "tool": "domhand_interact_control",
@@ -378,15 +377,14 @@ async def domhand_interact_control(
                         "strategy": "unsupported_dropdown",
                         "state_change": "no_state_change",
                         "retry_capped": False,
-                        "recommended_next_action": "use_domhand_select_or_browser_use_manual",
+                        "recommended_next_action": "review_page_visually",
                     },
                 )
             if unsupported.field_type in _GENERIC_INPUT_FIELD_TYPES:
                 return ActionResult(
                     error=(
-                        f'"{_preferred_field_label(unsupported)}" is a generic input. '
-                        "Use browser-use/manual input actions instead of "
-                        "domhand_interact_control."
+                        f'"{_preferred_field_label(unsupported)}" is a generic input — '
+                        "not a binary/group widget."
                     ),
                     metadata={
                         "tool": "domhand_interact_control",
@@ -395,7 +393,7 @@ async def domhand_interact_control(
                         "strategy": "unsupported_generic_input",
                         "state_change": "no_state_change",
                         "retry_capped": False,
-                        "recommended_next_action": "switch_to_browser_use_manual_for_this_field",
+                        "recommended_next_action": "review_page_visually",
                     },
                 )
         available_labels = sorted({_preferred_field_label(field) for field in scoped_supported_fields if _preferred_field_label(field)})
@@ -652,9 +650,9 @@ async def domhand_interact_control(
     if screenshot_path:
         details += f" Screenshot captured: {screenshot_path}."
     if failure_reason == DOMHAND_RETRY_CAPPED:
-        details += " Do not repeat the same DomHand strategy on this field/value pair in this run."
+        details += " Retry cap reached for this field/value pair."
     retry_capped = failure_reason == DOMHAND_RETRY_CAPPED
-    recommended_next_action = "switch_to_browser_use_manual_for_this_field"
+    recommended_next_action = "review_page_visually"
     update_blocker_attempt_state(
         browser_session,
         field_key=get_stable_field_key(target),

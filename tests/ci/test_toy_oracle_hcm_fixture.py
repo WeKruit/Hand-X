@@ -1231,3 +1231,269 @@ async def test_oracle_hcm_radio_disability(httpserver, toy_html: str) -> None:
         assert result["found"], "No radio buttons found on page 4"
         assert result["checked"], "Radio should be checked after click"
         assert result["total"] >= 3, f"Expected >= 3 radio options, got {result['total']}"
+
+
+# ---------------------------------------------------------------------------
+# 10. DomHand executor + platform smoke (Oracle toy fixture)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_oracle_combobox_fills_searchable_selects_via_keyboard(httpserver, toy_html: str) -> None:
+    """`_fill_oracle_combobox_outcome` should commit a cx-select Degree value on the toy fixture."""
+    httpserver.expect_request("/index.html").respond_with_data(
+        toy_html, content_type="text/html; charset=utf-8"
+    )
+    url = httpserver.url_for("/index.html")
+
+    from typing import Any
+
+    from playwright.async_api import ElementHandle, async_playwright
+    from playwright.async_api import Error as PlaywrightError
+
+    from ghosthands.actions.views import FormField as ActionFormField
+    from ghosthands.dom.fill_executor import _fill_oracle_combobox_outcome
+
+    async def _element_handle_press_sequentially(
+        self: ElementHandle,
+        text: str,
+        delay: int = 0,
+        **_kw: Any,
+    ) -> None:
+        await self.type(text, delay=float(delay) if delay else None)
+
+    # Playwright `ElementHandle` exposes `type()`; DomHand calls `press_sequentially` (Locator API).
+    _prev_ps = getattr(ElementHandle, "press_sequentially", None)
+    ElementHandle.press_sequentially = _element_handle_press_sequentially  # type: ignore[method-assign]
+
+    # `_fill_oracle_combobox_outcome` uses Playwright element APIs (`query_selector`, `press_sequentially`).
+    try:
+        async with async_playwright() as pw:
+            try:
+                browser = await pw.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                pytest.skip(f"Playwright Chromium not installed or not runnable: {exc}")
+
+            page = await browser.new_page()
+            try:
+                await page.goto(url, wait_until="domcontentloaded")
+
+                await page.evaluate("""() => {
+                    document.querySelectorAll('.apply-flow-page').forEach(p => { p.style.display = 'none'; });
+                    const p3 = document.getElementById('page-3');
+                    if (p3) p3.style.display = 'block';
+                }""")
+                await page.evaluate("""() => {
+                    const btn = document.querySelector(
+                        '#education-container .apply-flow-profile-item-tile__new-tile[data-profile-type="education"]'
+                    );
+                    if (btn) btn.click();
+                }""")
+                for _ in range(30):
+                    visible = await page.evaluate(
+                        """() => !!document.querySelector(
+                            '.profile-inline-form[data-profile-type="education"] input#degree-1'
+                        )"""
+                    )
+                    if visible:
+                        break
+                    await asyncio.sleep(0.1)
+                assert await page.evaluate(
+                    """() => !!document.querySelector(
+                        '.profile-inline-form[data-profile-type="education"]'
+                    )"""
+                ), "Education inline form did not open"
+
+                field = ActionFormField(
+                    field_id="degree-1",
+                    name="Degree",
+                    field_type="select",
+                    section="",
+                    required=True,
+                    options=[
+                        "Bachelor's",
+                        "Bachelor of Science",
+                        "Master's",
+                        "Master of Science",
+                        "PhD",
+                        "Associate's",
+                        "High School Diploma",
+                    ],
+                    current_value="",
+                    is_native=False,
+                    is_multi_select=False,
+                    has_calendar_trigger=False,
+                )
+                outcome = await _fill_oracle_combobox_outcome(
+                    page, field, "Bachelor of Science", "toy-oracle-degree"
+                )
+                assert outcome.success, f"Expected combobox fill success, got {outcome}"
+
+                await asyncio.sleep(2.0)
+                persisted = await _eval(
+                    page,
+                    """() => {
+                        const el = document.querySelector('#degree-1');
+                        if (!el) return JSON.stringify({ found: false });
+                        const v = (el.value || '').trim();
+                        const c = (el.dataset.committedValue || '').trim();
+                        return JSON.stringify({ found: true, value: v, committed: c });
+                    }""",
+                )
+                assert persisted["found"]
+                effective = (persisted.get("committed") or persisted.get("value") or "").strip()
+                assert "bachelor" in effective.lower() and "science" in effective.lower(), persisted
+            finally:
+                await browser.close()
+    finally:
+        if _prev_ps is None:
+            delattr(ElementHandle, "press_sequentially")
+        else:
+            ElementHandle.press_sequentially = _prev_ps  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_scoped_fill_dedup_blocks_repeat_calls(httpserver, toy_html: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Second domhand_fill with the same heading_boundary should hit the scoped dedup guard."""
+    monkeypatch.setenv("GH_USER_PROFILE_PATH", str(_PROFILE))
+    httpserver.expect_request("/index.html").respond_with_data(
+        toy_html, content_type="text/html; charset=utf-8"
+    )
+    url = httpserver.url_for("/index.html")
+
+    from unittest.mock import AsyncMock, patch
+
+    from ghosthands.actions.domhand_fill import domhand_fill
+    from ghosthands.actions.views import DomHandFillParams
+
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        await tools.navigate(url=url, new_tab=False, browser_session=browser_session)
+
+        browser_session._gh_completed_scoped_fills = {("test_ctx", "education"): {"filled_count": 2}}  # type: ignore[attr-defined]
+        browser_session._gh_completed_scoped_page = "test_ctx"  # type: ignore[attr-defined]
+
+        with patch(
+            "ghosthands.actions.domhand_fill._get_page_context_key",
+            new_callable=AsyncMock,
+            return_value="test_ctx",
+        ):
+            result = await domhand_fill(
+                DomHandFillParams(heading_boundary="education"),
+                browser_session,
+            )
+
+    blob = (result.extracted_content or "") + (result.error or "")
+    assert "already" in blob.lower() or "COMPLETE" in blob
+
+
+@pytest.mark.asyncio
+async def test_already_filled_returns_complete_message(
+    httpserver,
+    toy_html: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When visible fields already match the profile, summary should report section COMPLETE."""
+    prof = json.loads(_PROFILE.read_text(encoding="utf-8"))
+    prof["address"] = {
+        "street": "1 New York Plaza",
+        "city": "New York",
+        "state": "NY",
+        "zip": "10004",
+        "country": "United States",
+    }
+    profile_path = tmp_path / "aligned_profile.json"
+    profile_path.write_text(json.dumps(prof), encoding="utf-8")
+    monkeypatch.setenv("GH_USER_PROFILE_PATH", str(profile_path))
+
+    httpserver.expect_request("/index.html").respond_with_data(
+        toy_html, content_type="text/html; charset=utf-8"
+    )
+    url = httpserver.url_for("/index.html")
+
+    from unittest.mock import AsyncMock, patch
+
+    from ghosthands.actions.domhand_fill import domhand_fill
+    from ghosthands.actions.views import DomHandFillParams
+
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        await tools.navigate(url=url, new_tab=False, browser_session=browser_session)
+        page = await browser_session.get_current_page()
+        assert page is not None
+
+        await page.evaluate("""() => {
+            document.querySelectorAll('.apply-flow-page').forEach(p => { p.style.display = 'none'; });
+            const p1 = document.getElementById('page-1');
+            if (p1) p1.style.display = 'block';
+        }""")
+
+        await ensure_helpers(page)
+        await page.evaluate(_build_inject_helpers_js())
+
+        await page.evaluate("""() => {
+            function setCx(el, text) {
+                if (!el) return;
+                el.value = text;
+                el.dataset.committedValue = text;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.setAttribute('aria-invalid', 'false');
+            }
+            const mr = Array.from(
+                document.querySelectorAll('.cx-select-pills-container .cx-select-pill-section')
+            ).find(p => p.textContent.trim() === 'Mr');
+            if (mr) mr.click();
+
+            const setText = (id, v) => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.value = v;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            };
+            setText('legal-first-name', 'Ruiyang');
+            setText('legal-middle-name', '');
+            setText('legal-last-name', 'Chen');
+            setText('preferred-first-name', 'Ringo');
+            setText('preferred-last-name', 'Chen');
+            setText('email-field', 'rc5663@nyu.edu');
+            setText('phone-number', '6466789391');
+
+            setCx(document.getElementById('country-input'), 'United States');
+            setCx(document.getElementById('addr-line1'), '1 New York Plaza');
+            setCx(document.getElementById('zip-input'), '10004');
+            setCx(document.getElementById('city-input'), 'New York');
+            setCx(document.getElementById('state-input'), 'New York');
+
+            document.querySelectorAll('.input-row--invalid').forEach(row => {
+                row.classList.remove('input-row--invalid');
+            });
+            document.querySelectorAll('.input-row__validation').forEach(v => {
+                v.style.display = 'none';
+            });
+        }""")
+
+        with patch("ghosthands.actions.domhand_fill._generate_answers", new_callable=AsyncMock) as gen_mock:
+            gen_mock.return_value = ({}, 0, 0, 0.0, None)
+            result = await domhand_fill(DomHandFillParams(), browser_session)
+
+    meta = result.metadata or {}
+    log_summary = str(meta.get("domhand_fill_log_summary") or "")
+    concise = (result.extracted_content or "") + (result.error or "")
+    combined = concise + "\n" + log_summary
+    assert "COMPLETE" in combined or "already have correct values" in combined.lower(), combined[:2000]
+
+
+def test_oracle_platform_detected_from_fixture_url() -> None:
+    """URL-based platform detection for Oracle HCM and Workday."""
+    from ghosthands.platforms import detect_platform
+
+    assert (
+        detect_platform(
+            "https://fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/12345"
+        )
+        == "oracle"
+    )
+    assert detect_platform("https://wd5.myworkday.com/wday/authgwy/company/login.htmld") == "workday"

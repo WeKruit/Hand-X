@@ -228,7 +228,12 @@ def _resolve_llm_answer_for_field(
     if any(_is_non_guess_name_fragment(label) for label in label_candidates):
         return None
     candidate_norms = [_normalize_match_label(label) for label in label_candidates if _normalize_match_label(label)]
-    minimum_confidence = "medium" if field.required else "strong"
+    # Button-groups with explicit choices are constrained (answer must be one of the
+    # listed options), so use "medium" confidence even for optional fields.
+    _has_explicit_choices = bool(field.choices or field.options) and field.field_type in {
+        "button-group", "radio-group", "radio", "checkbox-group",
+    }
+    minimum_confidence = "medium" if (field.required or _has_explicit_choices) else "strong"
 
     _ASK = _AUTHORITATIVE_SELECT_KEYS_getter()
     _ASD = _AUTHORITATIVE_SELECT_DEFAULTS_getter()
@@ -639,7 +644,7 @@ Rules:
 - If the profile has NO relevant data for an OPTIONAL field, return "" (empty string). NEVER make up data or use placeholder values like "N/A", "None", "Not applicable", etc.
 - If the profile has NO direct answer for a REQUIRED field: first use a saved survey/profile answer, then a semantically equivalent QA-bank answer, then the closest structured education/experience value, then a deterministic default when one exists, and finally your best-effort guess. NEVER return "[NEEDS_USER_INPUT]".
 - NEVER fabricate personal identifiers or social handles/URLs not explicitly in the profile. If missing: return "" (empty string) for optional fields, and omit the field if you still cannot infer a safe answer.
-- For dropdowns/radio groups with listed options, pick the EXACT text of one of the available options.
+- For dropdowns/radio groups/button-groups with listed options, pick the EXACT text of one of the available options.
 - For hierarchical dropdown options (format "Category > SubOption"), pick the EXACT full path including the " > " separator.
 - Use the section, current field value, sibling field names, and listed options together to infer meaning for short or generic labels.
 - If a label is generic (for example "Overall", "Type", "Status", or "Source"), do NOT rely on label matching alone. Use section context plus the available options to choose the best answer.

@@ -512,14 +512,14 @@ def test_same_page_fill_checkpoint_rejects_repeated_broad_domhand_fill():
         {
             "page_context_key": "page-1",
             "page_url": "https://example.com/apply",
-            "requires_assess_checkpoint": True,
+            "broad_fill_completed": True,
         },
         [{"action": "domhand_fill", "params": {}}],
     )
 
     assert decision is not None
-    assert decision["reason"] == "same_page_assess_checkpoint_required"
-    assert decision["recommended_next_action"] == "run_domhand_assess_state_next"
+    assert decision["reason"] == "same_page_fill_already_done"
+    assert decision["recommended_next_action"] == "review_page_visually"
 
 
 def test_same_page_fill_checkpoint_treats_target_section_only_as_broad_fill():
@@ -527,13 +527,13 @@ def test_same_page_fill_checkpoint_treats_target_section_only_as_broad_fill():
         {
             "page_context_key": "page-1",
             "page_url": "https://example.com/apply",
-            "requires_assess_checkpoint": True,
+            "broad_fill_completed": True,
         },
         [{"action": "domhand_fill", "params": {"target_section": "Personal Info"}}],
     )
 
     assert decision is not None
-    assert decision["reason"] == "same_page_assess_checkpoint_required"
+    assert decision["reason"] == "same_page_fill_already_done"
 
 
 def test_same_page_advance_decision_rejects_broad_domhand_fill_after_clean_assess():
@@ -622,9 +622,12 @@ async def test_execute_actions_turns_same_page_fill_checkpoint_into_advisory_res
     browser_session._gh_last_domhand_fill = {
         "page_context_key": "page-1",
         "page_url": "https://example.com/apply",
-        "requires_assess_checkpoint": True,
+        "broad_fill_completed": True,
     }
     browser_session._gh_last_application_state = None
+    mock_page = AsyncMock()
+    mock_page.url = "https://example.com/apply"
+    browser_session.get_current_page = AsyncMock(return_value=mock_page)
     agent = Agent(task="Test task", llm=llm, browser_session=browser_session)
     agent.multi_act = AsyncMock(return_value=[ActionResult(extracted_content="should not execute")])
     agent.state.last_model_output = cast(
@@ -643,7 +646,7 @@ async def test_execute_actions_turns_same_page_fill_checkpoint_into_advisory_res
     agent.multi_act.assert_not_awaited()
     assert agent.state.last_result is not None
     assert agent.state.last_result[0].error is None
-    assert (agent.state.last_result[0].metadata or {})["same_page_assess_checkpoint_guard"] is True
+    assert (agent.state.last_result[0].metadata or {})["same_page_fill_guard"] is True
 
 
 @pytest.mark.asyncio

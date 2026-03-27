@@ -582,8 +582,8 @@ def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
     }:
         return text
 
-    # Radio / checkbox groups: Yes/No passes through — DOM fill can click the right control.
-    if field.field_type in {"radio-group", "radio", "checkbox-group", "checkbox", "toggle"} and _is_binary_value_text(
+    # Radio / checkbox / button groups: Yes/No passes through — DOM fill can click the right control.
+    if field.field_type in {"radio-group", "radio", "checkbox-group", "checkbox", "toggle", "button-group"} and _is_binary_value_text(
         text
     ):
         return text
