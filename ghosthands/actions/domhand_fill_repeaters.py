@@ -320,10 +320,21 @@ async def domhand_fill_repeaters(
             },
         )
 
+    # Cap skills to avoid timeout — Oracle combobox fill is slow per entry
+    _MAX_SKILL_ENTRIES = 10
+    if canonical == "skills" and len(entries) > _MAX_SKILL_ENTRIES:
+        logger.info(
+            "domhand.fill_repeaters.skills_capped",
+            original_count=len(entries),
+            capped_to=_MAX_SKILL_ENTRIES,
+        )
+        entries = entries[:_MAX_SKILL_ENTRIES]
+
     expand_names = _EXPAND_SECTION_NAMES.get(canonical, [params.section])
     results: list[str] = []
     filled_count = 0
     failed_entries: list[str] = []
+    consecutive_same_value_count = 0
 
     for i in range(existing_count, len(entries)):
         entry = entries[i]
@@ -372,6 +383,31 @@ async def domhand_fill_repeaters(
         fill_meta = (fill_result.metadata or {}).get("domhand_fill_json", {})
         entry_filled = fill_meta.get("filled_count", 0) if isinstance(fill_meta, dict) else 0
         entry_failed = fill_meta.get("dom_failure_count", 0) if isinstance(fill_meta, dict) else 0
+
+        # Detect stuck loop: if fill found nothing new (all already_filled),
+        # the entry_data isn't reaching the combobox.  Break to avoid looping forever.
+        already_filled = fill_meta.get("already_filled_count", 0) if isinstance(fill_meta, dict) else 0
+        if entry_filled == 0 and entry_failed == 0 and already_filled > 0:
+            consecutive_same_value_count += 1
+            logger.warning(
+                "domhand.fill_repeaters.stuck_no_new_fields",
+                section=canonical,
+                entry_index=i,
+                entry_label=entry_label,
+                already_filled=already_filled,
+                consecutive=consecutive_same_value_count,
+            )
+            if consecutive_same_value_count >= 2:
+                logger.warning(
+                    "domhand.fill_repeaters.breaking_stuck_loop",
+                    section=canonical,
+                    entry_index=i,
+                    reason="consecutive entries filled nothing new — combobox not accepting entry_data",
+                )
+                break
+            continue
+        else:
+            consecutive_same_value_count = 0
 
         # Do NOT save/commit when fields failed — entry is incomplete
         if entry_failed > 0:

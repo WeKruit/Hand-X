@@ -115,10 +115,45 @@ def _log_dropdown_diag(event: str, **kwargs: Any) -> None:
 _DROPDOWN_MENU_OPEN_SETTLE_S = 0.55
 _DROPDOWN_CDP_POLL_TICK_S = 0.22
 _DROPDOWN_CDP_POLL_MAX_TICKS = 14
-_WORKDAY_SKILL_RESULT_SETTLE_S = 2.2
-_WORKDAY_SKILL_POST_ENTER_SETTLE_S = 2.3
+_WORKDAY_SKILL_RESULT_SETTLE_S = 3.0
+_WORKDAY_SKILL_POST_ENTER_SETTLE_S = 3.0
 _WORKDAY_REFERRAL_RESULT_SETTLE_S = 2.3
 _WORKDAY_REFERRAL_POST_ENTER_SETTLE_S = 2.3
+
+_TAG_SKILL_INPUT_JS = r"""(ffId) => {
+    var old = document.querySelector('[data-dh-skill-input]');
+    if (old) old.removeAttribute('data-dh-skill-input');
+    var ff = window.__ff;
+    var el = ff ? ff.byId(ffId) : null;
+    if (!el) return false;
+    var inputs = el.querySelectorAll('input[type="text"], input:not([type])');
+    for (var i = 0; i < inputs.length; i++) {
+        var inp = inputs[i];
+        if (inp.offsetWidth > 0 && inp.offsetHeight > 0) {
+            inp.setAttribute('data-dh-skill-input', 'true');
+            return true;
+        }
+    }
+    return false;
+}"""
+
+
+async def _clear_skill_input(page: Any, ff_id: str) -> None:
+    """Clear a Workday skill search input by pressing Backspace repeatedly.
+
+    Workday React inputs ignore JS value setters, Ctrl+A, and Playwright fill('').
+    Brute-force Backspace is the only reliable method.
+    """
+    with contextlib.suppress(Exception):
+        await page.evaluate(_FOCUS_FIELD_JS, ff_id)
+    await asyncio.sleep(0.05)
+    # Press End to ensure cursor is at the end, then Backspace 40 times
+    with contextlib.suppress(Exception):
+        await _press_key_compat(page, "End")
+    for _ in range(40):
+        with contextlib.suppress(Exception):
+            await _press_key_compat(page, "Backspace")
+    await asyncio.sleep(0.1)
 
 _WORKDAY_SKILL_ALIAS_MAP: dict[str, tuple[str, ...]] = {
     "react": ("ReactJS", "React.js"),
@@ -394,6 +429,26 @@ def _is_workday_url(url: str) -> bool:
             "myworkday.com",
             "myworkdaysite.com",
             "workday.com",
+        )
+    )
+
+
+def _is_workday_prompt_search_field(field: FormField) -> bool:
+    """Detect Workday prompt-search single-select widgets (School, Field of Study, etc.).
+
+    These require Enter after typing to trigger the search — unlike regular dropdowns.
+    """
+    if field.field_type not in ("select",):
+        return False
+    label = normalize_name(_preferred_field_label(field))
+    return any(
+        needle in label
+        for needle in (
+            "school or university",
+            "school",
+            "university",
+            "field of study",
+            "college",
         )
     )
 
@@ -2516,6 +2571,9 @@ async def _fill_select_field_outcome(
     if _is_workday_url(page_url) and _is_workday_referral_source_field(field):
         return await _fill_workday_referral_source_select(page, field, value, tag)
 
+    if _is_workday_url(page_url) and _is_workday_prompt_search_field(field):
+        return await _fill_workday_prompt_search(page, field, value, tag)
+
     if field.is_multi_select or await _uses_workday_skill_multiselect(page, field):
         values = [v.strip() for v in value.split(",") if v.strip()]
         return _fill_outcome(await _fill_multi_select(page, field, values, tag))
@@ -2595,9 +2653,7 @@ async def _fill_multi_select(page: Any, field: FormField, values: list[str], tag
             if clicked.get("clicked"):
                 await _settle_dropdown_selection(page)
                 committed = await _wait_for_multi_select_commit(
-                    page,
-                    field,
-                    val,
+                    page, field, val,
                     previous_selection=before_selection,
                     matched_label=clicked.get("text"),
                 )
@@ -2612,9 +2668,7 @@ async def _fill_multi_select(page: Any, field: FormField, values: list[str], tag
             await asyncio.sleep(0.3)
             await _settle_dropdown_selection(page)
             committed = await _wait_for_multi_select_commit(
-                page,
-                field,
-                val,
+                page, field, val,
                 previous_selection=before_selection,
             )
             if committed.get("committed"):
@@ -2672,20 +2726,42 @@ async def _fill_workday_skill_multiselect(
             before_selection = await _read_multi_select_selection(page, ff_id)
             # Open/focus (like main's click-to-open but via combobox helper)
             await _try_open_combobox_menu(page, ff_id, tag=tag)
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.3)
+
+            # Clear stale query — JS React setter + keyboard fallback
+            with contextlib.suppress(Exception):
+                await _clear_skill_input(page, ff_id)
             await _clear_dropdown_search(page, ff_id)
             with contextlib.suppress(Exception):
                 await page.evaluate(_FOCUS_FIELD_JS, ff_id)
-            await asyncio.sleep(0.08)
+            await asyncio.sleep(0.15)
 
-            # Type the skill (main used JS fill + events; keyboard is more
-            # reliable for Workday's React search input)
+            # Type the skill (keyboard is more reliable for Workday React search)
             await _type_text_compat(page, val, delay=55)
-            await asyncio.sleep(0.45)
 
-            # Poll click (like main)
+            # Workday skill: press Enter after typing — many Workday skill widgets
+            # are freeform and commit on Enter without showing a dropdown.
+            await asyncio.sleep(1.0)
+            with contextlib.suppress(Exception):
+                await _press_key_compat(page, "Enter")
+            await asyncio.sleep(_WORKDAY_SKILL_POST_ENTER_SETTLE_S)
+
+            # Check if Enter committed a chip
+            committed = await _wait_for_multi_select_commit(
+                page, field, val,
+                previous_selection=before_selection,
+            )
+            if committed.get("committed"):
+                picked_count += 1
+                # Clear input after commit — Workday keeps stale text
+                with contextlib.suppress(Exception):
+                    await _clear_skill_input(page, ff_id)
+                await _clear_dropdown_search(page, ff_id)
+                continue
+
+            # Enter didn't commit — try poll+click for dropdown-based widgets
             clicked = await _poll_click_dropdown_option(
-                page, val, field_id=ff_id, max_wait_s=2.4,
+                page, val, field_id=ff_id, max_wait_s=2.0,
             )
             if clicked.get("clicked"):
                 await _settle_dropdown_selection(page)
@@ -2696,21 +2772,12 @@ async def _fill_workday_skill_multiselect(
                 )
                 if committed.get("committed"):
                     picked_count += 1
-                    await asyncio.sleep(0.2)
+                    # Clear input after commit
+                    with contextlib.suppress(Exception):
+                        await _clear_skill_input(page, ff_id)
+                    await _clear_dropdown_search(page, ff_id)
                     continue
 
-            # Enter fallback (like main) — verify commit before counting
-            with contextlib.suppress(Exception):
-                await _press_key_compat(page, "Enter")
-            await asyncio.sleep(0.3)
-            await _settle_dropdown_selection(page)
-            committed = await _wait_for_multi_select_commit(
-                page, field, val,
-                previous_selection=before_selection,
-            )
-            if committed.get("committed"):
-                picked_count += 1
-                continue
             logger.debug(f'workday skill multi-select {tag} option "{val}" not committed')
 
         # Dismiss (like main)
@@ -2725,6 +2792,203 @@ async def _fill_workday_skill_multiselect(
     except Exception as exc:
         logger.debug(f"workday skill multi-select {tag} failed: {str(exc)[:60]}")
     return False
+
+
+_TAG_WORKDAY_CHIP_DELETE_JS = r"""(ffId) => {
+    var old = document.querySelector('[data-dh-chip-delete]');
+    if (old) old.removeAttribute('data-dh-chip-delete');
+
+    var ff = window.__ff;
+    var el = ff ? ff.byId(ffId) : null;
+    if (!el) return JSON.stringify({found: false, reason: 'no_element'});
+
+    // Find pill/chip elements
+    var pills = el.querySelectorAll('[role="option"], [data-automation-id*="pill"], [id*="pill"]');
+    for (var p of pills) {
+        if (p.offsetWidth <= 0 || p.offsetHeight <= 0) continue;
+        // Look for the × delete button inside the chip
+        var del = p.querySelector('button[aria-label*="elete"], button[aria-label*="emove"], [data-automation-id="delete"]');
+        if (!del) {
+            // Try any small button/span inside the pill
+            var candidates = p.querySelectorAll('button, span[role="button"], [role="button"]');
+            for (var c of candidates) {
+                var t = (c.textContent || '').trim();
+                if (t === '×' || t === 'x' || t === '✕' || c.offsetWidth < 30) {
+                    del = c;
+                    break;
+                }
+            }
+        }
+        if (del) {
+            del.setAttribute('data-dh-chip-delete', 'true');
+            del.scrollIntoView({block: 'center', behavior: 'instant'});
+            return JSON.stringify({found: true, chip_text: (p.textContent||'').trim().slice(0,80)});
+        }
+        // No × found — tag the pill itself
+        p.setAttribute('data-dh-chip-delete', 'true');
+        p.scrollIntoView({block: 'center', behavior: 'instant'});
+        return JSON.stringify({found: true, chip_text: (p.textContent||'').trim().slice(0,80), tagged_pill: true});
+    }
+    return JSON.stringify({found: false, reason: 'no_chips'});
+}"""
+
+
+async def _fill_workday_prompt_search(
+    page: Any,
+    field: FormField,
+    value: str,
+    tag: str,
+) -> FieldFillOutcome:
+    """Fill a Workday prompt-search single-select widget (School, Field of Study).
+
+    Workday prompt-search widgets require Enter after typing to trigger search.
+    Flow: remove wrong chip (if any) → clear → type → Enter → wait → click result.
+    """
+    ff_id = field.field_id
+    desired = str(value or "").strip()
+    if not desired:
+        return _fill_outcome(False)
+
+    logger.info(
+        "domhand.workday_prompt_search.enter",
+        field_label=field.name,
+        field_id=ff_id,
+        value=desired[:60],
+    )
+
+    try:
+        # Step 1: Remove wrong autofill chip(s) via Playwright click on × button
+        # JS tags the × button, Playwright clicks it (trusted event for React)
+        for _chip_attempt in range(3):  # max 3 chips to remove
+            try:
+                tag_raw = await page.evaluate(_TAG_WORKDAY_CHIP_DELETE_JS, ff_id)
+                tag_result = json.loads(tag_raw) if isinstance(tag_raw, str) else tag_raw
+            except Exception:
+                break
+
+            if not tag_result.get("found"):
+                break
+
+            logger.info(
+                "domhand.workday_prompt_search.removing_chip",
+                field_label=field.name,
+                chip_text=tag_result.get("chip_text", ""),
+            )
+
+            try:
+                btn = page.locator('[data-dh-chip-delete="true"]')
+                await btn.click(timeout=3000)
+                await asyncio.sleep(0.5)
+            except Exception:
+                # Fallback: keyboard Backspace
+                await _clear_skill_input(page, ff_id)
+                with contextlib.suppress(Exception):
+                    await _press_key_compat(page, "Backspace")
+                await asyncio.sleep(0.3)
+            finally:
+                with contextlib.suppress(Exception):
+                    await page.evaluate(
+                        'var e=document.querySelector("[data-dh-chip-delete]");'
+                        'if(e)e.removeAttribute("data-dh-chip-delete")'
+                    )
+
+        # Step 2: Ensure input is focused and clear
+        await _try_open_combobox_menu(page, ff_id, tag=tag)
+        await asyncio.sleep(0.3)
+        await _clear_skill_input(page, ff_id)
+        with contextlib.suppress(Exception):
+            await page.evaluate(_FOCUS_FIELD_JS, ff_id)
+        await asyncio.sleep(0.15)
+
+        # Step 4: Type search term + Enter to trigger search
+        # Use partial fragments for better matching
+        search_terms = _workday_school_search_terms(desired)
+
+        for term in search_terms:
+            # Clear before each attempt
+            await _clear_skill_input(page, ff_id)
+            with contextlib.suppress(Exception):
+                await page.evaluate(_FOCUS_FIELD_JS, ff_id)
+            await asyncio.sleep(0.1)
+
+            await _type_text_compat(page, term, delay=55)
+            await asyncio.sleep(0.5)
+
+            # Press Enter to trigger Workday search
+            with contextlib.suppress(Exception):
+                await _press_key_compat(page, "Enter")
+            await asyncio.sleep(3.0)
+
+            # Step 5: Poll for matching result
+            clicked = await _poll_click_dropdown_option(
+                page, desired, field_id=ff_id, max_wait_s=2.0,
+            )
+            if clicked.get("clicked"):
+                await asyncio.sleep(0.5)
+                logger.info(
+                    "domhand.workday_prompt_search.committed",
+                    field_label=field.name,
+                    search_term=term,
+                    clicked_text=clicked.get("text", ""),
+                )
+                return _fill_outcome(True, clicked.get("text") or desired)
+
+            logger.debug(
+                f"workday prompt-search {tag}: no match for term '{term}'"
+            )
+
+        logger.warning(
+            "domhand.workday_prompt_search.no_match",
+            field_label=field.name,
+            value=desired[:60],
+            terms_tried=len(search_terms),
+        )
+        return _fill_outcome(False)
+
+    except Exception as exc:
+        logger.warning(
+            "domhand.workday_prompt_search.failed",
+            field_label=field.name,
+            error=str(exc)[:120],
+        )
+        return _fill_outcome(False)
+
+
+def _workday_school_search_terms(full_name: str) -> list[str]:
+    """Generate search fragments for Workday school/university lookup."""
+    full = re.sub(r"\s+", " ", str(full_name or "").strip())
+    if not full:
+        return []
+
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def add(t: str) -> None:
+        key = t.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            terms.append(t.strip())
+
+    # Full name first
+    add(full)
+
+    # Without parenthetical (UCLA) suffix
+    no_paren = re.sub(r"\s*\([^)]*\)\s*$", "", full).strip()
+    if no_paren != full:
+        add(no_paren)
+
+    # Abbreviation in parentheses
+    paren_match = re.search(r"\(([^)]+)\)", full)
+    if paren_match:
+        add(paren_match.group(1))
+
+    # Last significant word (city/campus name)
+    words = [w for w in full.split() if len(w) > 2 and w.lower() not in
+             ("of", "the", "and", "at", "in", "for", "university", "college", "institute")]
+    if words:
+        add(words[-1])
+
+    return terms[:4]
 
 
 async def _fill_workday_referral_source_select(
