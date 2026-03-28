@@ -20,6 +20,7 @@ _PLATFORM_REGISTRY: dict[str, PlatformConfig] = {
         WORKDAY_CONFIG,
         GREENHOUSE_CONFIG,
         LEVER_CONFIG,
+        PHENOM_CONFIG,
         SMARTRECRUITERS_CONFIG,
         ORACLE_CONFIG,
         GENERIC_CONFIG,
@@ -57,6 +58,14 @@ _URL_PATTERNS: list[tuple[list[str], str]] = [
             "lever.co",
         ],
         "lever",
+    ),
+    # Phenom
+    (
+        [
+            "phenom.com",
+            "phenompeople.com",
+        ],
+        "phenom",
     ),
     # SmartRecruiters
     (

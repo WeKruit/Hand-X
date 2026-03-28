@@ -1356,6 +1356,13 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                     if (field.widget_kind or "") == "grouped_date"
                     else await _read_field_value(page, field.field_id)
                 )
+                if platform_hint == "phenom":
+                    _phenom_label = _preferred_field_label(field)
+                    logger.info(
+                        f"domhand.assess_state.phenom_debug.select_read "
+                        f"field={field.field_id} label={_phenom_label!r} "
+                        f"current={field.current_value!r} expected={expected.expected_value!r}",
+                    )
             elif field.field_type in {"checkbox", "toggle"}:
                 binary_state = await _read_binary_state(page, field.field_id)
                 field.current_value = "checked" if binary_state else ""
@@ -1572,7 +1579,25 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             else "changed"
         )
 
-    blocker_signature = json.dumps(blocker_states, sort_keys=True, ensure_ascii=True)
+    # Phenom dropdowns can cause volatile current_value reads between
+    # assessments (DOM re-renders, whitespace fluctuation), resetting the
+    # stale-blocker counter before it reaches the override threshold.
+    # Use a stable signature based on field identity + reason only so that
+    # the same mismatch reliably accumulates toward the threshold.
+    if platform_hint == "phenom":
+        stable_blocker_identity = {
+            k: {
+                "field_id": v["field_id"],
+                "field_type": v["field_type"],
+                "field_section": v["field_section"],
+                "field_fingerprint": v["field_fingerprint"],
+                "reason": v["reason"],
+            }
+            for k, v in blocker_states.items()
+        }
+        blocker_signature = json.dumps(stable_blocker_identity, sort_keys=True, ensure_ascii=True)
+    else:
+        blocker_signature = json.dumps(blocker_states, sort_keys=True, ensure_ascii=True)
     previous_signature = previous_state.get("blocking_signature") if isinstance(previous_state, dict) else None
     previous_repeat_count = int(previous_state.get("same_blocker_signature_count") or 0) if isinstance(previous_state, dict) else 0
     same_blocker_signature_count = (

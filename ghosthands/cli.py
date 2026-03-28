@@ -1847,14 +1847,19 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     # -- Browser ------------------------------------------------------------
     cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
+    cdp_target_id = os.environ.get("GH_TARGET_ID")
     desktop_owns_browser = cdp_url is not None
 
     if cdp_url:
         # Desktop-owned browser: connect to existing browser via CDP URL.
         # Do not launch a new browser; headless flag is irrelevant here.
+        # If GH_TARGET_ID is set, attach to that specific tab (shared-browser mode).
         browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains)
-        browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
-        emit_status("Connecting to Desktop-owned browser via CDP", job_id=job_id)
+        browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url, target_id=cdp_target_id)
+        if cdp_target_id:
+            emit_status(f"Connecting to Desktop-owned browser via CDP (target: {cdp_target_id[:8]}...)", job_id=job_id)
+        else:
+            emit_status("Connecting to Desktop-owned browser via CDP", job_id=job_id)
     else:
         browser_profile = BrowserProfile(
             headless=args.headless,
