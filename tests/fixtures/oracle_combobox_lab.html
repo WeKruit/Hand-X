@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <title>Oracle HCM — Searchable Combobox Lab</title>
+  <!--
+    Purpose
+    -------
+    Playwright fixture to exercise the Oracle HCM searchable combobox pattern:
+    type-to-search → wait for suggestions → click to commit.
+
+    Simulates Oracle's cx-select combobox with:
+    - aria-autocomplete="list" / role="combobox" attributes
+    - Type-to-filter with debounced suggestion dropdown
+    - Click to commit (value stored in dataset.committedValue)
+    - Large option sets (2000+ universities) requiring search
+    - Employer combobox with "Other" fallback
+    - Degree and Field of Study comboboxes
+
+    The page loads universities.json for the school combobox and has
+    hardcoded lists for other fields.
+
+    Automated use:
+      uv run pytest tests/ci/test_oracle_combobox_lab.py -v
+
+    Manual use:
+      cd tests/fixtures && python -m http.server 8765
+      → http://127.0.0.1:8765/oracle_combobox_lab.html
+  -->
+  <style>
+    :root { font-family: system-ui, sans-serif; line-height: 1.5; }
+    body { max-width: 700px; margin: 0 auto; padding: 1rem 1.25rem 3rem; background: #f5f5f5; }
+    h1 { font-size: 1.3rem; color: #1a1a2e; }
+    h2 { font-size: 1rem; margin-top: 1.5rem; border-bottom: 1px solid #ccc; padding-bottom: 0.25rem; }
+    .card { background: #fff; border-radius: 8px; padding: 1.25rem; margin: 1rem 0; box-shadow: 0 1px 4px rgba(0,0,0,0.1); }
+    .form-group { margin-bottom: 1rem; }
+    label { display: block; font-weight: 600; font-size: 0.9rem; margin-bottom: 0.3rem; }
+    label .required { color: #d00; }
+
+    /* Oracle cx-select combobox styling */
+    .cx-select-container {
+      position: relative;
+      display: inline-block;
+      width: 100%;
+    }
+    .cx-select-container input {
+      width: 100%;
+      padding: 0.5rem 2rem 0.5rem 0.5rem;
+      border: 1px solid #999;
+      border-radius: 4px;
+      font-size: 0.9rem;
+    }
+    .cx-select-container input:focus { border-color: #0066cc; outline: none; }
+    .cx-select-container input.has-error { border-color: #d00; }
+    .cx-select-container .toggle {
+      position: absolute;
+      right: 4px;
+      top: 50%;
+      transform: translateY(-50%);
+      cursor: pointer;
+      font-size: 0.8rem;
+      color: #666;
+      padding: 4px;
+    }
+    .cx-select-dropdown {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      max-height: 200px;
+      overflow-y: auto;
+      background: #fff;
+      border: 1px solid #ccc;
+      border-top: none;
+      border-radius: 0 0 4px 4px;
+      z-index: 100;
+      display: none;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+    }
+    .cx-select-dropdown.open { display: block; }
+    .cx-select-dropdown .option {
+      padding: 0.4rem 0.6rem;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    .cx-select-dropdown .option:hover { background: #e3f2fd; }
+    .cx-select-dropdown .option.highlighted { background: #bbdefb; }
+    .cx-select-dropdown .no-results {
+      padding: 0.6rem;
+      color: #999;
+      font-style: italic;
+      font-size: 0.85rem;
+    }
+
+    /* Committed value display */
+    .committed-display {
+      font-size: 0.8rem;
+      color: #666;
+      margin-top: 0.25rem;
+    }
+    .committed-display .value { color: #0066cc; font-weight: 600; }
+
+    /* Log panel */
+    .log {
+      position: sticky;
+      bottom: 0;
+      background: #111;
+      color: #e8e8e8;
+      padding: 0.75rem;
+      font-size: 0.75rem;
+      max-height: 8rem;
+      overflow: auto;
+      border-radius: 6px;
+      margin-top: 2rem;
+      white-space: pre-wrap;
+      font-family: monospace;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Oracle HCM — Education &amp; Experience (Combobox Lab)</h1>
+<p style="font-size:0.85rem;color:#555;">
+  Simulates Oracle cx-select searchable comboboxes. Type to search, click to commit.
+</p>
+
+<div class="card">
+  <h2>Education — College / University</h2>
+
+  <!-- School combobox: loads from universities.json -->
+  <div class="form-group">
+    <label>School <span class="required">*</span></label>
+    <div class="cx-select-container" id="school-container">
+      <input type="text"
+             id="ff-school"
+             data-ff-id="ff-school"
+             role="combobox"
+             aria-autocomplete="list"
+             aria-haspopup="listbox"
+             aria-expanded="false"
+             aria-controls="school-listbox"
+             autocomplete="off"
+             placeholder="Search for a school..." />
+      <span class="toggle" data-toggle="ff-school">▼</span>
+      <div class="cx-select-dropdown" id="school-listbox" role="listbox" aria-label="School options">
+      </div>
+    </div>
+    <div class="committed-display">Committed: <span class="value" id="school-committed">—</span></div>
+  </div>
+
+  <!-- Degree combobox -->
+  <div class="form-group">
+    <label>Degree <span class="required">*</span></label>
+    <div class="cx-select-container" id="degree-container">
+      <input type="text"
+             id="ff-degree"
+             data-ff-id="ff-degree"
+             role="combobox"
+             aria-autocomplete="list"
+             aria-haspopup="listbox"
+             aria-expanded="false"
+             aria-controls="degree-listbox"
+             autocomplete="off"
+             placeholder="Search for a degree..." />
+      <span class="toggle" data-toggle="ff-degree">▼</span>
+      <div class="cx-select-dropdown" id="degree-listbox" role="listbox" aria-label="Degree options">
+      </div>
+    </div>
+    <div class="committed-display">Committed: <span class="value" id="degree-committed">—</span></div>
+  </div>
+
+  <!-- Field of Study combobox -->
+  <div class="form-group">
+    <label>Field of Study</label>
+    <div class="cx-select-container" id="fos-container">
+      <input type="text"
+             id="ff-fos"
+             data-ff-id="ff-fos"
+             role="combobox"
+             aria-autocomplete="list"
+             aria-haspopup="listbox"
+             aria-expanded="false"
+             aria-controls="fos-listbox"
+             autocomplete="off"
+             placeholder="Search for a field of study..." />
+      <span class="toggle" data-toggle="ff-fos">▼</span>
+      <div class="cx-select-dropdown" id="fos-listbox" role="listbox" aria-label="Field of Study options">
+      </div>
+    </div>
+    <div class="committed-display">Committed: <span class="value" id="fos-committed">—</span></div>
+  </div>
+
+  <!-- GPA native select (NOT a combobox — stays in direct_fills) -->
+  <div class="form-group">
+    <label>GPA</label>
+    <select id="ff-gpa" data-ff-id="ff-gpa">
+      <option value="">Select GPA</option>
+    </select>
+    <div class="committed-display">Selected: <span class="value" id="gpa-committed">—</span></div>
+  </div>
+
+  <!-- Country combobox -->
+  <div class="form-group">
+    <label>Country</label>
+    <div class="cx-select-container" id="country-container">
+      <input type="text"
+             id="ff-edu-country"
+             data-ff-id="ff-edu-country"
+             role="combobox"
+             aria-autocomplete="list"
+             aria-haspopup="listbox"
+             aria-expanded="false"
+             aria-controls="edu-country-listbox"
+             autocomplete="off"
+             placeholder="Search country..." />
+      <span class="toggle" data-toggle="ff-edu-country">▼</span>
+      <div class="cx-select-dropdown" id="edu-country-listbox" role="listbox">
+      </div>
+    </div>
+    <div class="committed-display">Committed: <span class="value" id="edu-country-committed">—</span></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Work Experience</h2>
+
+  <!-- Employer combobox -->
+  <div class="form-group">
+    <label>Name of Latest Employer</label>
+    <div class="cx-select-container" id="employer-container">
+      <input type="text"
+             id="ff-employer"
+             data-ff-id="ff-employer"
+             role="combobox"
+             aria-autocomplete="list"
+             aria-haspopup="listbox"
+             aria-expanded="false"
+             aria-controls="employer-listbox"
+             autocomplete="off"
+             placeholder="Search for employer..." />
+      <span class="toggle" data-toggle="ff-employer">▼</span>
+      <div class="cx-select-dropdown" id="employer-listbox" role="listbox">
+      </div>
+    </div>
+    <div class="committed-display">Committed: <span class="value" id="employer-committed">—</span></div>
+  </div>
+</div>
+
+<div class="log" id="log">Oracle Combobox Lab loaded.\n</div>
+
+<script>
+// =========================================================================
+// Data sets
+// =========================================================================
+
+// Universities loaded from external JSON (2000+ entries)
+let UNIVERSITIES = [];
+
+// Degrees (fixed list)
+const DEGREES = [
+  "Associate of Arts (AA)", "Associate of Science (AS)",
+  "Bachelor of Arts (BA)", "Bachelor of Science (BS)",
+  "Bachelor of Business Administration (BBA)",
+  "Bachelor of Engineering (BE)", "Bachelor of Fine Arts (BFA)",
+  "Master of Arts (MA)", "Master of Science (MS)",
+  "Master of Business Administration (MBA)",
+  "Master of Engineering (ME)", "Master of Fine Arts (MFA)",
+  "Master of Public Administration (MPA)", "Master of Public Health (MPH)",
+  "Doctor of Philosophy (PhD)", "Doctor of Medicine (MD)",
+  "Doctor of Jurisprudence (JD)", "Doctor of Education (EdD)",
+  "Doctor of Business Administration (DBA)",
+  "High School Diploma", "GED",
+  "Certificate", "Professional Certificate",
+  "Postgraduate Diploma", "Postdoctoral Fellowship"
+];
+
+// Fields of Study (large list to exercise search)
+const FIELDS_OF_STUDY = [
+  "Accounting", "Aerospace Engineering", "African Studies",
+  "Agricultural Science", "American Studies", "Anthropology",
+  "Applied Mathematics", "Architecture", "Art History",
+  "Artificial Intelligence", "Astronomy", "Astrophysics",
+  "Biochemistry", "Bioengineering", "Biology",
+  "Biomedical Engineering", "Biophysics", "Business Administration",
+  "Chemical Engineering", "Chemistry", "Civil Engineering",
+  "Classics", "Cognitive Science", "Communication",
+  "Comparative Literature", "Computer Engineering", "Computer Science",
+  "Creative Writing", "Criminal Justice", "Cybersecurity",
+  "Data Science", "Dentistry", "Design",
+  "East Asian Studies", "Ecology", "Economics",
+  "Education", "Electrical Engineering", "English",
+  "Entrepreneurship", "Environmental Engineering", "Environmental Science",
+  "Epidemiology", "Ethics", "Ethnic Studies",
+  "Film Studies", "Finance", "Food Science",
+  "Forensic Science", "French", "Gender Studies",
+  "Genetics", "Geography", "Geology",
+  "German", "Global Studies", "Graphic Design",
+  "Health Administration", "Health Sciences", "History",
+  "Human Resources", "Humanities", "Industrial Engineering",
+  "Information Science", "Information Systems", "Information Technology",
+  "International Business", "International Relations", "Italian",
+  "Japanese", "Journalism", "Kinesiology",
+  "Latin American Studies", "Law", "Liberal Arts",
+  "Linguistics", "Management", "Marine Biology",
+  "Marketing", "Materials Science", "Mathematics",
+  "Mechanical Engineering", "Media Studies", "Medicine",
+  "Microbiology", "Middle Eastern Studies", "Military Science",
+  "Molecular Biology", "Music", "Nanotechnology",
+  "Natural Resources", "Neuroscience", "Nuclear Engineering",
+  "Nursing", "Nutrition", "Operations Management",
+  "Optometry", "Organizational Behavior", "Paralegal Studies",
+  "Petroleum Engineering", "Pharmacology", "Pharmacy",
+  "Philosophy", "Photography", "Physical Therapy",
+  "Physics", "Political Science", "Psychology",
+  "Public Health", "Public Policy", "Public Relations",
+  "Real Estate", "Religious Studies", "Robotics",
+  "Russian", "Social Work", "Sociology",
+  "Software Engineering", "Spanish", "Speech Pathology",
+  "Sports Management", "Statistics", "Supply Chain Management",
+  "Surgery", "Sustainability", "Systems Engineering",
+  "Theater", "Theology", "Urban Planning",
+  "Veterinary Science", "Visual Arts", "Women's Studies",
+  "Zoology"
+];
+
+// Employers (large enough to require search, includes "Other")
+const EMPLOYERS = [
+  "Other",
+  "Accenture", "Adobe", "Airbnb", "Alibaba", "Alphabet Inc.",
+  "Amazon", "AMD", "American Express", "Apple", "AT&T",
+  "Bank of America", "Bain & Company", "Baidu", "BCG",
+  "BlackRock", "Bloomberg", "Boeing", "ByteDance",
+  "Capital One", "Chevron", "Cisco", "Citigroup", "Coinbase",
+  "Comcast", "Costco", "CVS Health",
+  "Deloitte", "Dell Technologies", "Disney", "DoorDash", "Dropbox",
+  "eBay", "EY (Ernst & Young)", "Exxon Mobil",
+  "Facebook (Meta)", "FedEx", "Fidelity Investments", "Ford Motor",
+  "General Electric", "General Motors", "Goldman Sachs", "Google",
+  "HCA Healthcare", "Hewlett Packard Enterprise", "Home Depot", "Honda", "HP Inc.", "HSBC",
+  "IBM", "Intel", "Intuit",
+  "Johnson & Johnson", "JPMorgan Chase",
+  "Kellogg", "KeyBank", "KPMG",
+  "LinkedIn", "Lockheed Martin", "Lyft",
+  "Mastercard", "McKinsey & Company", "Meta Platforms", "Microsoft", "Morgan Stanley",
+  "Netflix", "Nike", "Nintendo", "Northrop Grumman", "Nvidia",
+  "Oracle", "Palantir Technologies", "PayPal", "Pepsi", "Pfizer",
+  "Pinterest", "Procter & Gamble", "PwC",
+  "Qualcomm",
+  "Raytheon", "Riot Games", "Robinhood",
+  "Salesforce", "Samsung", "SAP", "Shell", "Shopify", "Siemens",
+  "Slack", "Snap Inc.", "Sony", "Spotify", "Square (Block)",
+  "Stripe", "Starbucks",
+  "Target", "Tesla", "Texas Instruments", "TikTok", "T-Mobile",
+  "Toyota", "Twitter (X)", "Twilio",
+  "Uber", "UBS", "United Airlines", "UnitedHealth Group",
+  "Verizon", "Visa", "VMware",
+  "Walmart", "Walt Disney Company", "Warner Bros. Discovery",
+  "Wells Fargo", "Workday",
+  "Xerox",
+  "Yahoo", "Zillow", "Zoom Video Communications"
+];
+
+// Countries
+const COUNTRIES = [
+  "Afghanistan", "Albania", "Algeria", "Andorra", "Angola",
+  "Argentina", "Armenia", "Australia", "Austria", "Azerbaijan",
+  "Bahamas", "Bahrain", "Bangladesh", "Barbados", "Belarus",
+  "Belgium", "Belize", "Benin", "Bhutan", "Bolivia",
+  "Bosnia and Herzegovina", "Botswana", "Brazil", "Brunei", "Bulgaria",
+  "Burkina Faso", "Burundi", "Cambodia", "Cameroon", "Canada",
+  "Central African Republic", "Chad", "Chile", "China", "Colombia",
+  "Comoros", "Congo", "Costa Rica", "Croatia", "Cuba",
+  "Cyprus", "Czech Republic", "Denmark", "Djibouti", "Dominica",
+  "Dominican Republic", "East Timor", "Ecuador", "Egypt", "El Salvador",
+  "Equatorial Guinea", "Eritrea", "Estonia", "Eswatini", "Ethiopia",
+  "Fiji", "Finland", "France", "Gabon", "Gambia",
+  "Georgia", "Germany", "Ghana", "Greece", "Grenada",
+  "Guatemala", "Guinea", "Guinea-Bissau", "Guyana", "Haiti",
+  "Honduras", "Hungary", "Iceland", "India", "Indonesia",
+  "Iran", "Iraq", "Ireland", "Israel", "Italy",
+  "Jamaica", "Japan", "Jordan", "Kazakhstan", "Kenya",
+  "Kiribati", "Korea, North", "Korea, South", "Kosovo", "Kuwait",
+  "Kyrgyzstan", "Laos", "Latvia", "Lebanon", "Lesotho",
+  "Liberia", "Libya", "Liechtenstein", "Lithuania", "Luxembourg",
+  "Madagascar", "Malawi", "Malaysia", "Maldives", "Mali",
+  "Malta", "Marshall Islands", "Mauritania", "Mauritius", "Mexico",
+  "Micronesia", "Moldova", "Monaco", "Mongolia", "Montenegro",
+  "Morocco", "Mozambique", "Myanmar", "Namibia", "Nauru",
+  "Nepal", "Netherlands", "New Zealand", "Nicaragua", "Niger",
+  "Nigeria", "North Macedonia", "Norway", "Oman", "Pakistan",
+  "Palau", "Panama", "Papua New Guinea", "Paraguay", "Peru",
+  "Philippines", "Poland", "Portugal", "Qatar", "Romania",
+  "Russia", "Rwanda", "Saint Kitts and Nevis", "Saint Lucia",
+  "Saint Vincent and the Grenadines", "Samoa", "San Marino",
+  "Saudi Arabia", "Senegal", "Serbia", "Seychelles", "Sierra Leone",
+  "Singapore", "Slovakia", "Slovenia", "Solomon Islands", "Somalia",
+  "South Africa", "South Sudan", "Spain", "Sri Lanka", "Sudan",
+  "Suriname", "Sweden", "Switzerland", "Syria", "Taiwan",
+  "Tajikistan", "Tanzania", "Thailand", "Togo", "Tonga",
+  "Trinidad and Tobago", "Tunisia", "Turkey", "Turkmenistan", "Tuvalu",
+  "Uganda", "Ukraine", "United Arab Emirates", "United Kingdom",
+  "United States", "Uruguay", "Uzbekistan", "Vanuatu", "Vatican City",
+  "Venezuela", "Vietnam", "Yemen", "Zambia", "Zimbabwe"
+];
+
+// GPA values for native select
+const GPA_VALUES = [];
+for (let i = 0; i <= 43; i++) {
+  GPA_VALUES.push((i / 10).toFixed(1));
+}
+
+// =========================================================================
+// Logging
+// =========================================================================
+const logEl = document.getElementById('log');
+function log(msg) {
+  const ts = new Date().toISOString().slice(11, 23);
+  logEl.textContent += `[${ts}] ${msg}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// =========================================================================
+// Populate GPA native select
+// =========================================================================
+const gpaSelect = document.getElementById('ff-gpa');
+GPA_VALUES.forEach(v => {
+  const opt = document.createElement('option');
+  opt.value = v;
+  opt.textContent = v;
+  gpaSelect.appendChild(opt);
+});
+gpaSelect.addEventListener('change', () => {
+  document.getElementById('gpa-committed').textContent = gpaSelect.value || '—';
+  log(`GPA selected: ${gpaSelect.value}`);
+});
+
+// =========================================================================
+// Oracle cx-select Combobox Engine
+// =========================================================================
+class OracleCombobox {
+  constructor(inputId, listboxId, committedId, options, { maxVisible = 10, debounceMs = 150 } = {}) {
+    this.input = document.getElementById(inputId);
+    this.listbox = document.getElementById(listboxId);
+    this.committedEl = document.getElementById(committedId);
+    this.allOptions = options;
+    this.maxVisible = maxVisible;
+    this.debounceMs = debounceMs;
+    this.committedValue = '';
+    this.debounceTimer = null;
+    this.highlightIndex = -1;
+    this.filteredOptions = [];
+
+    this._setupEvents();
+    log(`Combobox "${inputId}" initialized with ${options.length} options`);
+  }
+
+  _setupEvents() {
+    // Type-to-filter with debounce (simulates Oracle async)
+    this.input.addEventListener('input', () => {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = setTimeout(() => this._filter(), this.debounceMs);
+    });
+
+    // Keyboard navigation
+    this.input.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        this._moveHighlight(1);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        this._moveHighlight(-1);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (this.highlightIndex >= 0 && this.filteredOptions[this.highlightIndex]) {
+          this._commitOption(this.filteredOptions[this.highlightIndex]);
+        }
+      } else if (e.key === 'Escape') {
+        this._close();
+      }
+    });
+
+    // Focus opens dropdown
+    this.input.addEventListener('focus', () => {
+      if (this.input.value.trim()) {
+        this._filter();
+      } else {
+        this._showAll();
+      }
+    });
+
+    // Toggle button
+    const toggle = this.input.parentElement.querySelector('.toggle');
+    if (toggle) {
+      toggle.addEventListener('click', () => {
+        if (this.listbox.classList.contains('open')) {
+          this._close();
+        } else {
+          this._showAll();
+          this.input.focus();
+        }
+      });
+    }
+
+    // Close on outside click
+    document.addEventListener('click', (e) => {
+      if (!this.input.parentElement.contains(e.target)) {
+        this._close();
+      }
+    });
+  }
+
+  _filter() {
+    const query = this.input.value.trim().toLowerCase();
+    if (!query) {
+      this._showAll();
+      return;
+    }
+    // Filter: substring match, prioritize starts-with
+    const startsWith = [];
+    const contains = [];
+    for (const opt of this.allOptions) {
+      const lower = opt.toLowerCase();
+      if (lower.startsWith(query)) {
+        startsWith.push(opt);
+      } else if (lower.includes(query)) {
+        contains.push(opt);
+      }
+    }
+    this.filteredOptions = [...startsWith, ...contains].slice(0, this.maxVisible);
+    this._renderOptions();
+    this._open();
+    log(`Filter "${query}" → ${startsWith.length + contains.length} matches, showing ${this.filteredOptions.length}`);
+  }
+
+  _showAll() {
+    // Show first N options alphabetically (like Oracle's default)
+    this.filteredOptions = this.allOptions.slice(0, this.maxVisible);
+    this._renderOptions();
+    this._open();
+  }
+
+  _renderOptions() {
+    this.listbox.innerHTML = '';
+    this.highlightIndex = -1;
+    if (this.filteredOptions.length === 0) {
+      const noResults = document.createElement('div');
+      noResults.className = 'no-results';
+      noResults.textContent = 'No results found';
+      this.listbox.appendChild(noResults);
+      return;
+    }
+    this.filteredOptions.forEach((opt, idx) => {
+      const div = document.createElement('div');
+      div.className = 'option';
+      div.setAttribute('role', 'option');
+      div.setAttribute('data-value', opt);
+      div.textContent = opt;
+      div.addEventListener('click', () => this._commitOption(opt));
+      div.addEventListener('mouseenter', () => {
+        this.highlightIndex = idx;
+        this._updateHighlight();
+      });
+      this.listbox.appendChild(div);
+    });
+  }
+
+  _moveHighlight(delta) {
+    if (this.filteredOptions.length === 0) return;
+    this.highlightIndex = Math.max(0, Math.min(this.filteredOptions.length - 1, this.highlightIndex + delta));
+    this._updateHighlight();
+  }
+
+  _updateHighlight() {
+    this.listbox.querySelectorAll('.option').forEach((el, idx) => {
+      el.classList.toggle('highlighted', idx === this.highlightIndex);
+    });
+  }
+
+  _commitOption(value) {
+    this.input.value = value;
+    this.committedValue = value;
+    this.input.dataset.committedValue = value;
+    this.committedEl.textContent = value;
+    this._close();
+    // Dispatch events Oracle-style
+    this.input.dispatchEvent(new Event('input', { bubbles: true }));
+    this.input.dispatchEvent(new Event('change', { bubbles: true }));
+    log(`Committed: "${value}"`);
+  }
+
+  _open() {
+    this.listbox.classList.add('open');
+    this.input.setAttribute('aria-expanded', 'true');
+  }
+
+  _close() {
+    this.listbox.classList.remove('open');
+    this.input.setAttribute('aria-expanded', 'false');
+    this.highlightIndex = -1;
+  }
+
+  // Expose for __ff integration
+  get value() { return this.committedValue; }
+}
+
+// =========================================================================
+// Initialize __ff bridge (DomHand field framework)
+// =========================================================================
+window.__ff = window.__ff || {
+  _fields: {},
+  register(id, el) { this._fields[id] = el; },
+  byId(id) { return this._fields[id] || document.querySelector(`[data-ff-id="${id}"]`); }
+};
+
+// Register all ff fields
+document.querySelectorAll('[data-ff-id]').forEach(el => {
+  window.__ff.register(el.getAttribute('data-ff-id'), el);
+});
+
+// =========================================================================
+// Load universities and initialize comboboxes
+// =========================================================================
+async function initComboboxes() {
+  // Try loading universities from JSON file
+  try {
+    const resp = await fetch('universities.json');
+    if (resp.ok) {
+      UNIVERSITIES = await resp.json();
+      log(`Loaded ${UNIVERSITIES.length} universities from JSON`);
+    } else {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+  } catch (e) {
+    log(`Failed to load universities.json (${e.message}), using fallback list`);
+    // Fallback: small list for when JSON not available
+    UNIVERSITIES = [
+      "1st Medical Institute of Leningrad - Russia",
+      "9 Eylul University",
+      "A B Siddhartha College",
+      "A I M R - U S A",
+      "A K College of Arts & Science",
+      "A Plus Computer Education",
+      "Bharathi Womens College",
+      "California Institute of Technology",
+      "Columbia University",
+      "Cornell University",
+      "Duke University",
+      "Georgia Institute of Technology",
+      "Georgia State University",
+      "Harvard University",
+      "Johns Hopkins University",
+      "Massachusetts Institute of Technology",
+      "New York University",
+      "Northwestern University",
+      "Princeton University",
+      "Stanford University",
+      "University of California, Berkeley",
+      "University of California, Los Angeles",
+      "University of California, San Diego",
+      "University of Chicago",
+      "University of Michigan",
+      "University of Pennsylvania",
+      "University of Southern California",
+      "University of Texas at Austin",
+      "University of Virginia",
+      "Yale University"
+    ];
+  }
+
+  // Initialize all comboboxes
+  window._comboboxes = {
+    school: new OracleCombobox('ff-school', 'school-listbox', 'school-committed', UNIVERSITIES, { maxVisible: 10 }),
+    degree: new OracleCombobox('ff-degree', 'degree-listbox', 'degree-committed', DEGREES, { maxVisible: 10 }),
+    fos: new OracleCombobox('ff-fos', 'fos-listbox', 'fos-committed', FIELDS_OF_STUDY, { maxVisible: 10 }),
+    country: new OracleCombobox('ff-edu-country', 'edu-country-listbox', 'edu-country-committed', COUNTRIES, { maxVisible: 10 }),
+    employer: new OracleCombobox('ff-employer', 'employer-listbox', 'employer-committed', EMPLOYERS, { maxVisible: 10 }),
+  };
+
+  log('All comboboxes initialized');
+}
+
+initComboboxes();
+</script>
+
+</body>
+</html>

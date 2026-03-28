@@ -113,8 +113,8 @@ _FIND_ADD_BUTTON_HEADING_FIRST_JS = r"""
 	if (lastHeadingIndex !== -1) {
 		// Starting after the heading, find the first Add button.
 		// Stop if we hit a heading for a DIFFERENT section.
-		var knownSections = ['work experience', 'education', 'skills', 'websites',
-			'certifications', 'references', 'languages', 'social', 'experience'];
+		var knownSections = ['work experience', 'education', 'technical skills', 'language skills',
+			'skills', 'websites', 'certifications', 'references', 'languages', 'social', 'experience'];
 		for (var j = lastHeadingIndex + 1; j < elements.length; j++) {
 			var el = elements[j];
 			if (!isButtonEl(el)) {
@@ -272,6 +272,29 @@ async def domhand_expand(params: DomHandExpandParams, browser_session: BrowserSe
 	if not page:
 		return ActionResult(error='No active page found in browser session')
 
+	try:
+		open_inline_forms = await page.evaluate("""() => {
+			const visible = (el) => {
+				if (!el) return false;
+				const style = window.getComputedStyle(el);
+				if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+				const rect = el.getBoundingClientRect();
+				return rect.width > 0 && rect.height > 0;
+			};
+			return Array.from(document.querySelectorAll('.profile-inline-form'))
+				.filter((el) => visible(el))
+				.length;
+		}""")
+	except Exception:
+		open_inline_forms = 0
+	if int(open_inline_forms or 0) > 0:
+		return ActionResult(
+			error=(
+				'A profile inline editor is already open. Finish the current entry and wait for its '
+				'saved tile before clicking another Add button.'
+			),
+		)
+
 	# ── Step 1: Count fields before expansion ─────────────────
 	try:
 		raw_before = await page.evaluate(_COUNT_FIELDS_JS, params.section)
@@ -357,23 +380,20 @@ async def domhand_expand(params: DomHandExpandParams, browser_session: BrowserSe
 	# ── Build result ──────────────────────────────────────────
 	if new_fields > 0:
 		memory = (
-			f'Expanded "{params.section}" by clicking "{button_text}". '
-			f'{new_fields} new field(s) appeared (total: {fields_after}). '
-			f'Now call domhand_fill to fill the new entry fields.'
+			f'DomHand expand: expanded "{params.section}" via "{button_text}". '
+			f'{new_fields} new field(s) appeared (total: {fields_after}).'
 		)
-		logger.info(f'DomHand expand: {memory}')
+		logger.info(memory)
 		return ActionResult(
 			extracted_content=memory,
 			include_extracted_content_only_once=False,
 		)
 	else:
 		memory = (
-			f'Clicked "{button_text}" in "{params.section}". '
-			f'Fields before: {fields_before}, after: {fields_after}. '
-			f'The new entry may have expanded off-screen — call domhand_fill '
-			f'to fill any new fields that appeared.'
+			f'DomHand expand: clicked "{button_text}" in "{params.section}". '
+			f'Fields before: {fields_before}, after: {fields_after}.'
 		)
-		logger.warning(f'DomHand expand: {memory}')
+		logger.warning(memory)
 		return ActionResult(
 			extracted_content=memory,
 			include_extracted_content_only_once=False,

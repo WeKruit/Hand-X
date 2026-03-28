@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from browser_use.agent.service import Agent
 
+from ghosthands.agent.oracle_step_tuning import maybe_tighten_max_actions_for_oracle_focus
+from ghosthands.cost_summary import build_cost_summary, get_stagehand_usage
 from ghosthands.step_trace import (
     attach_step_trace_context,
     publish_browser_session_trace,
@@ -34,6 +36,7 @@ from ghosthands.step_trace import (
 
 logger = logging.getLogger(__name__)
 _SAME_TAB_GUARD_INSTALLED: set[int] = set()
+_FINAL_SUBMIT_GUARD_INSTALLED: set[int] = set()
 
 _SAME_TAB_GUARD_JS = r"""(() => {
 	if (window.__ghSameTabGuardInstalled) {
@@ -53,28 +56,71 @@ _SAME_TAB_GUARD_JS = r"""(() => {
 		} catch (e) {}
 	}
 
+	function navigateSameTab(url) {
+		if (typeof url !== 'string' || !url || url === 'about:blank') return;
+		try {
+			window.location.assign(url);
+		} catch (e) {}
+	}
+
 	var originalOpen = typeof window.open === 'function' ? window.open.bind(window) : null;
 	window.open = function(url) {
-		try {
-			if (typeof url === 'string' && url && url !== 'about:blank') {
-				window.location.assign(url);
-			}
-		} catch (e) {}
+		navigateSameTab(url);
 		return window;
 	};
 	window.__ghOriginalWindowOpen = originalOpen;
 
 	document.addEventListener('click', function(event) {
-		var el = event.target && event.target.closest ? event.target.closest('a[target], area[target]') : null;
-		if (el) {
-			try { el.removeAttribute('target'); } catch (e) {}
+		var el = event.target && event.target.closest ? event.target.closest('a[href], area[href]') : null;
+		if (!el) {
+			return;
 		}
+		var target = '';
+		try {
+			target = String(el.getAttribute('target') || '').trim().toLowerCase();
+		} catch (e) {}
+		try { el.removeAttribute('target'); } catch (e) {}
+		if (!target || target === '_self') {
+			return;
+		}
+		var href = '';
+		try {
+			href = String(el.href || el.getAttribute('href') || '').trim();
+		} catch (e) {}
+		if (!href || href.charAt(0) === '#' || href.toLowerCase().indexOf('javascript:') === 0) {
+			return;
+		}
+		try { event.preventDefault(); } catch (e) {}
+		try { event.stopImmediatePropagation(); } catch (e) {}
+		try { event.stopPropagation(); } catch (e) {}
+		navigateSameTab(href);
 	}, true);
 
 	document.addEventListener('submit', function(event) {
 		var form = event.target;
-		if (form && form.removeAttribute) {
-			try { form.removeAttribute('target'); } catch (e) {}
+		if (!form || !form.removeAttribute) {
+			return;
+		}
+		var target = '';
+		try {
+			target = String(form.getAttribute('target') || '').trim().toLowerCase();
+		} catch (e) {}
+		try { form.removeAttribute('target'); } catch (e) {}
+		if (target && target !== '_self') {
+			try { event.preventDefault(); } catch (e) {}
+			try { event.stopImmediatePropagation(); } catch (e) {}
+			try { event.stopPropagation(); } catch (e) {}
+			setTimeout(function() {
+				try {
+					if (typeof form.requestSubmit === 'function') {
+						form.requestSubmit();
+						return;
+					}
+				} catch (e) {}
+				try {
+					HTMLFormElement.prototype.submit.call(form);
+				} catch (e) {}
+			}, 0);
 		}
 	}, true);
 
@@ -104,6 +150,165 @@ _SAME_TAB_GUARD_JS = r"""(() => {
 	stripTargets(document);
 })();"""
 
+_FINAL_SUBMIT_GUARD_JS = r"""(() => {
+	if (window.__ghFinalSubmitGuardInstalled) return;
+	window.__ghFinalSubmitGuardInstalled = true;
+	window.__ghFinalSubmitGuardState = window.__ghFinalSubmitGuardState || { blocked: false, label: "", text: "", count: 0 };
+
+	function normalize(text) {
+		return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+	}
+
+	function getText(el) {
+		if (!el) return '';
+		return [
+			el.getAttribute && el.getAttribute('aria-label'),
+			el.getAttribute && el.getAttribute('title'),
+			el.value,
+			el.innerText,
+			el.textContent,
+		].filter(Boolean).join(' ');
+	}
+
+	function isVisible(el) {
+		if (!el || !(el instanceof Element)) return false;
+		const style = window.getComputedStyle(el);
+		if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+		const rect = el.getBoundingClientRect();
+		return rect.width > 0 && rect.height > 0;
+	}
+
+	function hasPasswordField(form) {
+		try {
+			return !!(form && form.querySelector && form.querySelector('input[type="password"]'));
+		} catch (e) {
+			return false;
+		}
+	}
+
+	function recordBlock(el) {
+		const text = normalize(getText(el));
+		window.__ghFinalSubmitGuardState = {
+			blocked: true,
+			label: text || 'submit',
+			text: getText(el) || '',
+			count: Number((window.__ghFinalSubmitGuardState && window.__ghFinalSubmitGuardState.count) || 0) + 1,
+		};
+	}
+
+	function looksLikeFinalSubmit(el) {
+		const control = el && el.closest ? el.closest('button, input[type="submit"], input[type="button"], [role="button"]') : null;
+		if (!control || !isVisible(control)) return false;
+		if (control.disabled) return false;
+		if (String(control.getAttribute && control.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return false;
+
+		const form = control.form || (control.closest ? control.closest('form') : null);
+		if (hasPasswordField(form)) return false;
+
+		const text = normalize(getText(control));
+		if (!text) return false;
+		if (
+			text.includes('sign in') ||
+			text.includes('log in') ||
+			text.includes('login') ||
+			text.includes('create account') ||
+			text.includes('register') ||
+			text.includes('save and continue') ||
+			text === 'next' ||
+			text === 'continue' ||
+			text.includes('continue to review') ||
+			text.includes('apply with resume') ||
+			text === 'apply'
+		) {
+			return false;
+		}
+
+		return (
+			text === 'submit' ||
+			text.includes('submit application') ||
+			text.includes('review and submit') ||
+			text.includes('finish and submit') ||
+			text.includes('complete application') ||
+			text.includes('confirm and submit') ||
+			text.includes('send application')
+		);
+	}
+
+	function shouldBlockFormSubmit(form, candidate) {
+		if (hasPasswordField(form)) return false;
+		if (candidate && looksLikeFinalSubmit(candidate)) return candidate.closest('button, input[type="submit"], input[type="button"], [role="button"]');
+		try {
+			const controls = Array.from(form.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'));
+			return controls.find(looksLikeFinalSubmit) || null;
+		} catch (e) {
+			return null;
+		}
+	}
+
+	document.addEventListener('click', function(event) {
+		const control = event.target && event.target.closest ? event.target.closest('button, input[type="submit"], input[type="button"], [role="button"]') : null;
+		if (!control || !looksLikeFinalSubmit(control)) return;
+		recordBlock(control);
+		try { event.preventDefault(); } catch (e) {}
+		try { event.stopImmediatePropagation(); } catch (e) {}
+		try { event.stopPropagation(); } catch (e) {}
+	}, true);
+
+	document.addEventListener('keydown', function(event) {
+		const active = document.activeElement;
+		if (!active || !looksLikeFinalSubmit(active)) return;
+		if (event.key === 'Enter' || event.key === ' ') {
+			recordBlock(active);
+			try { event.preventDefault(); } catch (e) {}
+			try { event.stopImmediatePropagation(); } catch (e) {}
+			try { event.stopPropagation(); } catch (e) {}
+		}
+	}, true);
+
+	document.addEventListener('submit', function(event) {
+		const form = event.target;
+		const submitter = event.submitter || document.activeElement;
+		const blockedControl = shouldBlockFormSubmit(form, submitter);
+		if (!blockedControl) return;
+		recordBlock(blockedControl);
+		try { event.preventDefault(); } catch (e) {}
+		try { event.stopImmediatePropagation(); } catch (e) {}
+		try { event.stopPropagation(); } catch (e) {}
+	}, true);
+
+	const nativeRequestSubmit = HTMLFormElement.prototype.requestSubmit;
+	HTMLFormElement.prototype.requestSubmit = function(submitter) {
+		const blockedControl = shouldBlockFormSubmit(this, submitter || document.activeElement);
+		if (blockedControl) {
+			recordBlock(blockedControl);
+			return;
+		}
+		return nativeRequestSubmit.call(this, submitter);
+	};
+
+	const nativeSubmit = HTMLFormElement.prototype.submit;
+	HTMLFormElement.prototype.submit = function() {
+		const blockedControl = shouldBlockFormSubmit(this, document.activeElement);
+		if (blockedControl) {
+			recordBlock(blockedControl);
+			return;
+		}
+		return nativeSubmit.call(this);
+	};
+})();"""
+
+_READ_AND_CLEAR_FINAL_SUBMIT_BLOCK_JS = r"""(() => {
+	const state = window.__ghFinalSubmitGuardState || null;
+	if (!state || !state.blocked) return null;
+	window.__ghFinalSubmitGuardState = {
+		blocked: false,
+		label: '',
+		text: '',
+		count: Number(state.count || 0),
+	};
+	return state;
+})();"""
+
 
 async def install_same_tab_guard(agent: "Agent") -> None:
 	"""Prevent sites from opening new tabs during job-application flows.
@@ -125,11 +330,66 @@ async def install_same_tab_guard(agent: "Agent") -> None:
 			except Exception as exc:
 				logger.debug("step.same_tab_guard_init_failed", extra={"error": str(exc)})
 
-		page = await browser_session.get_current_page()
-		if page:
+		pages = []
+		try:
+			pages = list(await browser_session.get_pages())
+		except Exception:
+			pages = []
+		if not pages:
+			page = await browser_session.get_current_page()
+			if page:
+				pages = [page]
+		for page in pages:
 			await page.evaluate(_SAME_TAB_GUARD_JS)
 	except Exception as exc:
 		logger.debug("step.same_tab_guard_apply_failed", extra={"error": str(exc)})
+
+
+async def install_final_submit_guard(agent: "Agent", *, allow_submit: bool) -> None:
+	"""Install a runtime guard that blocks final application submission by default."""
+	if allow_submit:
+		return
+	try:
+		browser_session = getattr(agent, "browser_session", None)
+		if browser_session is None:
+			return
+
+		session_key = id(browser_session)
+		if session_key not in _FINAL_SUBMIT_GUARD_INSTALLED:
+			try:
+				await browser_session._cdp_add_init_script(_FINAL_SUBMIT_GUARD_JS)
+				_FINAL_SUBMIT_GUARD_INSTALLED.add(session_key)
+			except Exception as exc:
+				logger.debug("step.final_submit_guard_init_failed", extra={"error": str(exc)})
+
+		pages = []
+		try:
+			pages = list(await browser_session.get_pages())
+		except Exception:
+			pages = []
+		if not pages:
+			page = await browser_session.get_current_page()
+			if page:
+				pages = [page]
+		for page in pages:
+			await page.evaluate(_FINAL_SUBMIT_GUARD_JS)
+	except Exception as exc:
+		logger.debug("step.final_submit_guard_apply_failed", extra={"error": str(exc)})
+
+
+async def consume_blocked_final_submit(agent: "Agent") -> dict[str, Any] | None:
+	"""Return and clear the latest blocked final-submit attempt, if any."""
+	try:
+		browser_session = getattr(agent, "browser_session", None)
+		if browser_session is None:
+			return None
+		page = await browser_session.get_current_page()
+		if page is None:
+			return None
+		state = await page.evaluate(_READ_AND_CLEAR_FINAL_SUBMIT_BLOCK_JS)
+		return state if isinstance(state, dict) else None
+	except Exception:
+		return None
 
 PHASE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"upload.*resume|resume.*upload|attach.*resume", re.IGNORECASE), "Uploading resume"),
@@ -232,7 +492,16 @@ class StepHooks:
         self.max_budget = max_budget
         self.on_status_update = on_status_update
         self._cumulative_cost: float = 0.0
-        self._metadata_cost_total: float = 0.0
+        self._browser_use_cost: float = 0.0
+        self._browser_use_prompt_tokens: int = 0
+        self._browser_use_completion_tokens: int = 0
+        self._domhand_cost_total: float = 0.0
+        self._domhand_input_tokens_total: int = 0
+        self._domhand_output_tokens_total: int = 0
+        self._domhand_llm_calls_total: int = 0
+        self._domhand_models: set[str] = set()
+        self._stagehand_sources: set[str] = set()
+        self._stagehand_calls: int = 0
         self._last_phase: str | None = None
 
     # ------------------------------------------------------------------
@@ -255,6 +524,7 @@ class StepHooks:
         browser_session = getattr(agent, "browser_session", None)
         attach_step_trace_context(browser_session, job_id=self.job_id)
         await install_same_tab_guard(agent)
+        await maybe_tighten_max_actions_for_oracle_focus(agent)
 
         current_url = ""
         if browser_session is not None:
@@ -311,6 +581,9 @@ class StepHooks:
             browser_use_cost = usage.total_cost or 0.0
             usage_input_tokens = usage.total_prompt_tokens or 0
             usage_output_tokens = usage.total_completion_tokens or 0
+        self._browser_use_cost = browser_use_cost
+        self._browser_use_prompt_tokens = usage_input_tokens
+        self._browser_use_completion_tokens = usage_output_tokens
 
         last_entry = agent.history.history[-1] if agent.history.history else None
         step_cost: float | None = None
@@ -351,18 +624,27 @@ class StepHooks:
 
             if has_step_metadata:
                 step_cost = step_cost_total
-                self._metadata_cost_total += step_cost_total
+                self._domhand_cost_total += step_cost_total
                 if has_input_tokens:
                     step_input_tokens = step_input_total
+                    self._domhand_input_tokens_total += step_input_total
                 if has_output_tokens:
                     step_output_tokens = step_output_total
+                    self._domhand_output_tokens_total += step_output_total
                 if has_llm_calls:
                     step_llm_calls = step_llm_call_total
+                    self._domhand_llm_calls_total += step_llm_call_total
+                if step_model:
+                    self._domhand_models.add(step_model)
 
         # Planner cost from browser-use TokenCost (LiteLLM pricing) + DomHand tool LLM
         # from ActionResult.metadata step_cost (ghosthands.config.models.estimate_cost).
         # Totals are estimates; reconcile with provider/VALET billing separately.
-        self._cumulative_cost = browser_use_cost + self._metadata_cost_total
+        stagehand_usage = get_stagehand_usage(browser_session)
+        self._stagehand_sources.update(stagehand_usage["sources"])
+        self._stagehand_calls = int(stagehand_usage["calls"])
+        cost_summary = self.cost_summary
+        self._cumulative_cost = float(cost_summary["total_tracked_cost_usd"])
 
         if self._cumulative_cost >= self.max_budget:
             logger.warning(
@@ -399,6 +681,7 @@ class StepHooks:
                 "step": step,
                 "step_cost": round(step_cost, 6) if step_cost is not None else None,
                 "cost_usd": round(self._cumulative_cost, 6),
+                "cost_summary": cost_summary,
                 "is_done": agent.history.is_done(),
                 "page_url": current_url,
                 "actions": _summarize_actions(agent),
@@ -466,3 +749,20 @@ class StepHooks:
     def cumulative_cost(self) -> float:
         """Return the cumulative LLM cost tracked so far."""
         return self._cumulative_cost
+
+    @property
+    def cost_summary(self) -> dict[str, Any]:
+        """Return the unified tracked-cost summary for the current run."""
+        return build_cost_summary(
+            browser_use_cost_usd=self._browser_use_cost,
+            browser_use_prompt_tokens=self._browser_use_prompt_tokens,
+            browser_use_completion_tokens=self._browser_use_completion_tokens,
+            domhand_cost_usd=self._domhand_cost_total,
+            domhand_prompt_tokens=self._domhand_input_tokens_total,
+            domhand_completion_tokens=self._domhand_output_tokens_total,
+            domhand_llm_calls=self._domhand_llm_calls_total,
+            domhand_models=sorted(self._domhand_models),
+            stagehand_used=bool(self._stagehand_sources),
+            stagehand_calls=self._stagehand_calls,
+            stagehand_sources=sorted(self._stagehand_sources),
+        ).to_dict()

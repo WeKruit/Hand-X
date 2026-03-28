@@ -5,7 +5,7 @@ from urllib.parse import parse_qs, urlparse
 from ghosthands.platforms.generic import GENERIC_CONFIG
 from ghosthands.platforms.greenhouse import GREENHOUSE_CONFIG
 from ghosthands.platforms.lever import LEVER_CONFIG
-from ghosthands.platforms.phenom import PHENOM_CONFIG
+from ghosthands.platforms.oracle import ORACLE_CONFIG
 from ghosthands.platforms.smartrecruiters import SMARTRECRUITERS_CONFIG
 from ghosthands.platforms.views import PlatformConfig
 from ghosthands.platforms.workday import WORKDAY_CONFIG
@@ -22,6 +22,7 @@ _PLATFORM_REGISTRY: dict[str, PlatformConfig] = {
         LEVER_CONFIG,
         PHENOM_CONFIG,
         SMARTRECRUITERS_CONFIG,
+        ORACLE_CONFIG,
         GENERIC_CONFIG,
     ]
 }
@@ -73,6 +74,14 @@ _URL_PATTERNS: list[tuple[list[str], str]] = [
             "smartrecruiters.com",
         ],
         "smartrecruiters",
+    ),
+    # Oracle Cloud HCM
+    (
+        [
+            "oraclecloud.com",
+            "fa.ocs.oraclecloud.com",
+        ],
+        "oracle",
     ),
 ]
 
@@ -159,7 +168,7 @@ def detect_platform_from_signals(
 def detect_platform(url: str) -> str:
     """Detect ATS platform from URL.
 
-    Returns: 'workday' | 'greenhouse' | 'lever' | 'phenom' | 'smartrecruiters' | 'generic'
+    Returns: 'workday' | 'greenhouse' | 'lever' | 'smartrecruiters' | 'oracle' | 'generic'
     """
     normalized = url.lower()
     for patterns, platform_name in _URL_PATTERNS:
@@ -182,16 +191,34 @@ def get_config_by_name(name: str) -> PlatformConfig:
     return _PLATFORM_REGISTRY.get(name, GENERIC_CONFIG)
 
 
+def get_fill_strategy(url: str) -> str:
+    """Return the preferred form-filling strategy for the platform at *url*."""
+    return get_platform_config(url).form_strategy
+
+
+def get_automation_id_map(url: str) -> dict[str, str]:
+    """Return platform-specific automation-id selectors for the platform at *url*."""
+    return get_platform_config(url).automation_id_map
+
+
+def get_fill_overrides(url: str) -> dict[str, str]:
+    """Return per-control-type fill strategy overrides for the platform at *url*."""
+    return get_platform_config(url).fill_overrides
+
+
 __all__ = [
     "GENERIC_CONFIG",
     "GREENHOUSE_CONFIG",
     "LEVER_CONFIG",
-    "PHENOM_CONFIG",
+    "ORACLE_CONFIG",
     "SMARTRECRUITERS_CONFIG",
     "WORKDAY_CONFIG",
     "PlatformConfig",
     "detect_platform",
     "detect_platform_from_signals",
+    "get_automation_id_map",
     "get_config_by_name",
+    "get_fill_overrides",
+    "get_fill_strategy",
     "get_platform_config",
 ]

@@ -280,6 +280,148 @@ class TestAccountCreatedMarkerInference:
         assert marker[0] == "pending_verification"
         assert marker[2] == "auth_marker_pending_verification"
 
+    @pytest.mark.asyncio
+    async def test_stabilize_account_created_marker_treats_native_login_as_active(self, monkeypatch):
+        from ghosthands.cli import _stabilize_account_created_marker
+
+        monkeypatch.setattr(
+            "ghosthands.cli._probe_generated_auth_state",
+            AsyncMock(return_value="native_login"),
+        )
+        agent = types.SimpleNamespace(browser_session=object())
+
+        marker = await _stabilize_account_created_marker(
+            agent,
+            "pending_verification",
+            "Account likely exists, but email verification is still required.",
+            "heuristic_pending_verification",
+        )
+
+        assert marker[0] == "active"
+        assert marker[2] == "auth_marker_native_login_after_create"
+
+    @pytest.mark.asyncio
+    async def test_false_verification_blocker_resumes_on_native_login(self, monkeypatch):
+        from ghosthands.cli import _should_resume_from_false_verification_blocker
+
+        monkeypatch.setattr(
+            "ghosthands.cli._probe_generated_auth_state",
+            AsyncMock(return_value="native_login"),
+        )
+        app_settings = types.SimpleNamespace(
+            credential_source="user",
+            credential_intent="create_account",
+        )
+
+        should_resume = await _should_resume_from_false_verification_blocker(
+            "blocker: email verification required — user must verify email then retry",
+            platform="workday",
+            app_settings=app_settings,
+            browser_session=object(),
+        )
+
+        assert should_resume is True
+
+    def test_workday_verification_banner_with_signin_form_is_not_pure_blocker(self):
+        from ghosthands.cli import _workday_is_pure_verification_blocker
+
+        state = {
+            "verificationBanner": True,
+            "verificationCodeRequired": False,
+            "emailCount": 1,
+            "passwordCount": 1,
+            "confirmPasswordVisible": False,
+            "applicationSignals": False,
+        }
+
+        assert _workday_is_pure_verification_blocker(state) is False
+
+    def test_workday_verification_code_without_signin_form_is_pure_blocker(self):
+        from ghosthands.cli import _workday_is_pure_verification_blocker
+
+        state = {
+            "verificationBanner": True,
+            "verificationCodeRequired": True,
+            "emailCount": 0,
+            "passwordCount": 0,
+            "confirmPasswordVisible": False,
+            "applicationSignals": False,
+        }
+
+        assert _workday_is_pure_verification_blocker(state) is True
+
+    def test_current_page_continuation_task_disables_reauth_navigation(self):
+        from ghosthands.cli import _build_current_page_continuation_task
+
+        original = (
+            "Go to https://example.wd5.myworkdayjobs.com/job/foo and fill out the job application form completely.\n"
+            "\nCRITICAL -- Action Order:\n1. ..."
+        )
+        rewritten = _build_current_page_continuation_task(
+            original,
+            platform="workday",
+            stage="auth_page",
+        )
+
+        assert "WORKDAY START FLOW HAS ALREADY REACHED THE NATIVE AUTH PAGE" in rewritten
+        assert "Continue from the CURRENT page" in rewritten
+        assert "Go to https://example.wd5.myworkdayjobs.com" not in rewritten
+
+    def test_derive_workday_state_from_browser_text_detects_start_dialog(self):
+        from ghosthands.cli import _derive_workday_state_from_browser_text
+
+        snapshot = """
+        [45]<button />
+            Decline
+        [46]<button />
+            Accept Cookies
+        [50]<a role=button />
+            Apply
+        """
+
+        state = _derive_workday_state_from_browser_text(snapshot)
+
+        assert state["hasAcceptCookies"] is True
+        assert state["hasApply"] is True
+
+    def test_derive_workday_state_from_browser_text_detects_signin_verification_combo(self):
+        from ghosthands.cli import _derive_workday_state_from_browser_text
+
+        snapshot = """
+        Sign In
+        An email has been sent to you. Please verify your account.
+        Email Address
+        Password
+        [17]<button />
+            Sign In
+        [18]<button />
+            Create Account
+        """
+
+        state = _derive_workday_state_from_browser_text(snapshot)
+
+        assert state["signInSignals"] is True
+        assert state["verificationBanner"] is True
+        assert state["emailCount"] == 1
+        assert state["passwordCount"] >= 1
+
+    def test_derive_workday_state_from_browser_text_keeps_resume_autofill_separate(self):
+        from ghosthands.cli import _derive_workday_state_from_browser_text
+
+        snapshot = """
+        Create Account/Sign In
+        Autofill with Resume
+        Upload a file
+        Resume/CV
+        Drop files here
+        Select files
+        """
+
+        state = _derive_workday_state_from_browser_text(snapshot)
+
+        assert state["resumeAutofillSignals"] is True
+        assert state["applicationSignals"] is False
+
     def test_url_omitted_when_empty(self):
         from ghosthands.output.jsonl import emit_account_created
 
@@ -884,6 +1026,59 @@ class TestProfileLoadingEnvFallback:
 
         assert result == flag_data
 
+    def test_user_id_loader_takes_precedence_over_test_data(self):
+        from ghosthands.cli import _load_profile
+
+        args = argparse.Namespace(
+            profile=None,
+            test_data="examples/apply_to_job_sample_data.json",
+            user_id="user-123",
+            resume_id="resume-456",
+        )
+
+        with patch("ghosthands.cli._load_profile_from_user_resume", return_value={"source": "db"}) as mocked:
+            result = _load_profile(args)
+
+        mocked.assert_called_once_with("user-123", "resume-456")
+        assert result == {"source": "db"}
+
+    @pytest.mark.asyncio
+    async def test_async_user_id_loader_takes_precedence_over_test_data(self):
+        from ghosthands.cli import _load_profile_async
+
+        args = argparse.Namespace(
+            profile=None,
+            test_data="examples/apply_to_job_sample_data.json",
+            user_id="user-123",
+            resume_id="resume-456",
+        )
+
+        with patch(
+            "ghosthands.cli._load_profile_from_user_resume_async",
+            new=AsyncMock(return_value={"source": "db"}),
+        ) as mocked:
+            result = await _load_profile_async(args)
+
+        mocked.assert_awaited_once_with("user-123", "resume-456")
+        assert result == {"source": "db"}
+
+    def test_resume_id_requires_user_id(self):
+        from ghosthands.cli import _load_profile
+
+        args = argparse.Namespace(profile=None, test_data=None, user_id=None, resume_id="resume-456")
+
+        with pytest.raises(ValueError, match="--resume-id requires --user-id"):
+            _load_profile(args)
+
+    @pytest.mark.asyncio
+    async def test_async_resume_id_requires_user_id(self):
+        from ghosthands.cli import _load_profile_async
+
+        args = argparse.Namespace(profile=None, test_data=None, user_id=None, resume_id="resume-456")
+
+        with pytest.raises(ValueError, match="--resume-id requires --user-id"):
+            await _load_profile_async(args)
+
 
 # ---------------------------------------------------------------------------
 # Test 6 — normalize_profile_defaults
@@ -1343,10 +1538,11 @@ class TestCredentialExtraction:
     """_resolve_sensitive_data must extract credentials from embedded profile data."""
 
     @staticmethod
-    def _make_settings(email="", password=""):
+    def _make_settings(email="", password="", credential_source=""):
         settings = MagicMock()
         settings.email = email
         settings.password = password
+        settings.credential_source = credential_source
         return settings
 
     def test_platform_specific_creds_take_priority(self):
@@ -1398,6 +1594,23 @@ class TestCredentialExtraction:
 
         result = _resolve_sensitive_data(settings, embedded_credentials=creds)
         assert result == {"email": "embedded@test.com", "password": "embedPass"}
+
+    def test_user_provided_env_creds_override_embedded_profile_creds(self):
+        """Fresh-account local auth must use GH_EMAIL/GH_PASSWORD, not applicant profile creds."""
+        from ghosthands.cli import _resolve_sensitive_data
+
+        settings = self._make_settings(
+            email="fresh@test.com",
+            password="freshPass",
+            credential_source="user",
+        )
+
+        creds = {
+            "generic": {"email": "embedded@test.com", "password": "embedPass"},
+        }
+
+        result = _resolve_sensitive_data(settings, embedded_credentials=creds)
+        assert result == {"email": "fresh@test.com", "password": "freshPass"}
 
     def test_returns_none_when_no_credentials_anywhere(self):
         """Should return None when no credentials are available from any source."""

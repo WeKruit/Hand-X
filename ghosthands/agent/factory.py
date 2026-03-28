@@ -163,6 +163,7 @@ async def create_job_agent(
         max_actions_per_step=settings.agent_max_actions_per_step,
         max_failures=5,
         use_thinking=True,
+        step_timeout=300,
     )
 
     logger.info(
@@ -216,7 +217,8 @@ async def run_job_agent(
     -------
     dict
             ``{"success": bool, "steps": int, "cost_usd": float,
-              "extracted_text": str | None, "blocker": str | None}``
+              "cost_summary": dict[str, Any], "extracted_text": str | None,
+              "blocker": str | None}``
     """
     if max_steps is None:
         max_steps = settings.max_steps_per_job
@@ -268,7 +270,8 @@ async def run_job_agent(
         return {
             "success": success,
             "steps": agent.state.n_steps,
-            "cost_usd": round(hooks.cumulative_cost, 6),
+            "cost_usd": round(float(hooks.cost_summary["total_tracked_cost_usd"]), 6),
+            "cost_summary": hooks.cost_summary,
             "extracted_text": extracted_text,
             "blocker": blocker,
         }

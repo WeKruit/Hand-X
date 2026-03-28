@@ -21,6 +21,7 @@ from ghosthands.actions.views import (
     DomHandClosePopupParams,
     DomHandExpandParams,
     DomHandFillParams,
+    DomHandFillRepeatersParams,
     DomHandInteractControlParams,
     DomHandRecordExpectedValueParams,
     DomHandSelectParams,
@@ -49,6 +50,7 @@ def register_domhand_actions(tools: "Tools") -> None:
     from ghosthands.actions.domhand_close_popup import domhand_close_popup
     from ghosthands.actions.domhand_expand import domhand_expand
     from ghosthands.actions.domhand_fill import domhand_fill
+    from ghosthands.actions.domhand_fill_repeaters import domhand_fill_repeaters
     from ghosthands.actions.domhand_interact_control import domhand_interact_control
     from ghosthands.actions.domhand_record_expected_value import domhand_record_expected_value
     from ghosthands.actions.domhand_select import domhand_select
@@ -131,11 +133,12 @@ def register_domhand_actions(tools: "Tools") -> None:
 
     _register_action(
         description=(
-            "Interact with one exact non-text control by field label and desired value. "
-            "Use this for stubborn radios, checkboxes, toggles, button groups, and selects "
-            "when domhand_fill did not clear a required blocker. Resolves the real control "
-            "by question label, applies the desired option/value, verifies the committed state, "
-            "and captures diagnostics if the control still does not stick."
+            "Interact with one exact binary/group control by field label and desired value. "
+            "Use this for stubborn radios, checkboxes, toggles, and button groups when "
+            "domhand_fill did not clear a required blocker. Do NOT use this for dropdowns "
+            "or generic text inputs. Resolves the real control by question label, applies "
+            "the desired option/value, verifies the committed state, and captures diagnostics "
+            "if the control still does not stick."
         ),
         param_model=DomHandInteractControlParams,
         func=domhand_interact_control,
@@ -144,8 +147,8 @@ def register_domhand_actions(tools: "Tools") -> None:
     _register_action(
         description=(
             "Record the expected visible value for one field after a raw manual recovery action. "
-            "Use this immediately after a fallback click/input/select that changed a specific field, "
-            "then call domhand_assess_state before any unrelated action."
+            "Use this immediately after a fallback click/input/select that changed a specific field. "
+            "This suppresses stale readback noise on later checkpoints."
         ),
         param_model=DomHandRecordExpectedValueParams,
         func=domhand_record_expected_value,
@@ -205,8 +208,56 @@ def register_domhand_actions(tools: "Tools") -> None:
         func=domhand_expand,
     )
 
+    # ── domhand_fill_repeaters: End-to-end repeater orchestration ──
+    # Reads profile -> clicks Add N times -> fills each entry -> saves.
+    # Replaces N * (expand + fill + save) agent planner steps with ONE call.
+    _register_action(
+        description=(
+            "Fill ALL repeater entries for a section in one call (Education, Work Experience, "
+            "Skills, Languages, Licenses). Reads the user profile, counts existing entries, "
+            "clicks Add for each missing entry, fills the inline form, and commits. "
+            "PREFER this over manual domhand_expand + domhand_fill for repeater sections."
+        ),
+        param_model=DomHandFillRepeatersParams,
+        func=domhand_fill_repeaters,
+    )
+
+    # ── Stagehand Layer 1 tools ─────────────────────────────
+    # Expose Stagehand's semantic fill and observation to the agent so it
+    # can explicitly request Layer 1 assistance for stubborn fields.
+    from ghosthands.actions.stagehand_tools import (
+        StagehandFillParams,
+        StagehandObserveParams,
+        stagehand_fill_field,
+        stagehand_observe_fields,
+    )
+
+    _register_action(
+        description=(
+            "Use Stagehand (AI semantic layer) to fill a specific form field that DomHand "
+            "could not handle. Stagehand uses AI vision to understand the page and interact "
+            "with elements semantically. Use this for dropdowns, custom widgets, or any field "
+            "that DomHand reported as failed. Cheaper than manual click/type sequences."
+        ),
+        param_model=StagehandFillParams,
+        func=stagehand_fill_field,
+    )
+
+    _register_action(
+        description=(
+            "Use Stagehand (AI semantic layer) to observe and list all interactive form "
+            "elements on the page. Use this to cross-reference with DomHand's field extraction "
+            "when you suspect fields were missed, or to understand custom widget structure."
+        ),
+        param_model=StagehandObserveParams,
+        func=stagehand_observe_fields,
+    )
+
     # Log what was registered
-    registered = [name for name in tools.registry.registry.actions if name.startswith("domhand_")]
+    registered = [
+        name for name in tools.registry.registry.actions
+        if name.startswith("domhand_") or name.startswith("stagehand_")
+    ]
     logger.info(
         f"domhand.actions_registered count={len(registered)} actions={registered}",
         extra={"count": len(registered), "actions": registered},

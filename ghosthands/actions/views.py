@@ -19,7 +19,7 @@ class FormField(BaseModel):
     options: list[str] = Field(default_factory=list, description="Available options for select/radio/checkbox fields")
     choices: list[str] = Field(default_factory=list, description="Alternative choice list (some ATS platforms)")
     accept: str | None = Field(default=None, description="Accepted file types for file inputs")
-    is_native: bool = Field(default=True, description="Whether this is a native HTML element vs custom widget")
+    is_native: bool = Field(default=False, description="Whether this is a native HTML element vs custom widget")
     is_multi_select: bool = Field(default=False, description="Whether multiple selections are allowed")
     visible: bool = Field(default=True, description="Whether the field is currently visible")
     raw_label: str | None = Field(default=None, description="Original label text before cleanup")
@@ -35,7 +35,22 @@ class FormField(BaseModel):
         default=False,
         description="True when the grouped widget exposes a visible calendar/date trigger affordance",
     )
+    placeholder: str = Field(
+        default="",
+        description="Visible placeholder text captured from extraction for routing and matching.",
+    )
     format_hint: str | None = Field(default=None, description="Optional visible format/placeholder hint")
+    name_attr: str = Field(
+        default="",
+        description="HTML name attribute from extraction (used for label/focus matching when ARIA name is camelCase)",
+    )
+    oracle_freeform_combobox_answer: bool = Field(
+        default=False,
+        description=(
+            "When True, LLM answers for this field skip option-list coercion (Oracle type-ahead comboboxes "
+            "where match_dropdown word-overlap would rewrite the correct school name)."
+        ),
+    )
 
 
 class FillFieldResult(BaseModel):
@@ -44,6 +59,7 @@ class FillFieldResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     field_id: str
+    field_key: str = ""
     name: str
     success: bool
     actor: str = Field(description="Outcome owner: 'dom', 'skipped', or 'unfilled'")
@@ -55,6 +71,13 @@ class FillFieldResult(BaseModel):
     source: str | None = None
     answer_mode: str | None = None
     confidence: float | None = None
+    fill_confidence: float = Field(
+        default=0.0,
+        description=(
+            "How confident we are the value actually committed to the DOM. "
+            "1.0=DOM verified, 0.8=LLM verified, 0.6=Stagehand verified, 0.0=failed."
+        ),
+    )
     state: str | None = None
     failure_reason: str | None = None
     takeover_suggestion: str | None = None
@@ -105,12 +128,19 @@ class DomHandFillParams(BaseModel):
             "(email, password, confirm password) instead of the applicant profile."
         ),
     )
+    strict_scope: bool = Field(
+        False,
+        description="When true, do NOT fall back to all visible fields if target_section has no matches. Return empty instead.",
+    )
 
 
 class DomHandSelectParams(BaseModel):
     """Select a dropdown option using platform-aware discovery."""
 
-    index: int = Field(description="Element index of the dropdown trigger")
+    index: int | None = Field(
+        default=None,
+        description="Optional element index of the dropdown trigger when already known.",
+    )
     value: str = Field(description="Value or text to select")
     field_id: str | None = Field(
         default=None,
@@ -179,6 +209,21 @@ class DomHandUploadParams(BaseModel):
     file_type: str = Field(default="resume", description="Type: 'resume' or 'cover_letter'")
 
 
+class DomHandFillRepeatersParams(BaseModel):
+    """Fill all repeater entries for a section in one call."""
+
+    section: str = Field(
+        description=(
+            "Repeater section to fill: 'Education', 'Work Experience', "
+            "'Skills', 'Languages', or 'Licenses'."
+        ),
+    )
+    max_entries: int | None = Field(
+        None,
+        description="Optional cap on entries to fill. Defaults to all from user profile.",
+    )
+
+
 class DomHandExpandParams(BaseModel):
     """Click "Add More" buttons to expand repeater sections."""
 
@@ -186,6 +231,7 @@ class DomHandExpandParams(BaseModel):
 
 
 ApplicationTerminalState = Literal[
+    "editing",
     "advanceable",
     "review",
     "confirmation",
@@ -296,7 +342,8 @@ _PLACEHOLDER_RE = re.compile(
     r"|choose\.{0,3}|choose…|please\s+choose(\s+one)?|choose\s+one|pick"
     r"|start\s+typing|enter\s+(your|an?)\s+\S+"
     r"|type\s+here|--+\s*(select|choose)?\s*--*|—"
-    r"|no\s+response|no\s+answer|not\s+provided|not\s+specified|not\s+entered|not\s+supplied)$",
+    r"|no\s+response|no\s+answer|not\s+provided|not\s+specified|not\s+entered|not\s+supplied"
+    r"|month|year|day|mm|dd|yyyy)$",
     re.IGNORECASE,
 )
 
@@ -307,8 +354,8 @@ def is_placeholder_value(value: str) -> bool:
 
 
 def normalize_name(s: str) -> str:
-    """Normalize a field name for comparison: strip asterisks/underscores, collapse whitespace, lowercase."""
-    return re.sub(r"\s+", " ", s.replace("*", "").replace("_", " ")).strip().lower()
+    """Normalize a field name for comparison: strip asterisks/underscores/apostrophes, collapse whitespace, lowercase."""
+    return re.sub(r"\s+", " ", s.replace("*", "").replace("_", " ").replace("'", "").replace("\u2019", "")).strip().lower()
 
 
 def split_dropdown_value_hierarchy(value: str) -> list[str]:
@@ -328,7 +375,30 @@ def generate_dropdown_search_terms(value: str) -> list[str]:
 
     seen: set[str] = set()
     terms: list[str] = []
-    stop_words = {"of", "and", "in", "the", "a", "an", "for", "to", "with", "or", "at", "by"}
+    stop_words = {
+        "of",
+        "and",
+        "in",
+        "the",
+        "a",
+        "an",
+        "for",
+        "to",
+        "with",
+        "or",
+        "at",
+        "by",
+        # EEO / decline phrases: never type these alone into react-select (e.g. "answer").
+        "answer",
+        "wish",
+        "disclose",
+        "identify",
+        "self",
+        "provided",
+        "supplied",
+        "decline",
+        "prefer",
+    }
     # Do not expand the Mobile/Cell cluster when the value is clearly a phone *number* — typing
     # "Mobile" into the number input is a common failure mode for react-select phone widgets.
     digit_count = sum(1 for ch in raw if ch.isdigit())
@@ -359,9 +429,12 @@ def generate_dropdown_search_terms(value: str) -> list[str]:
         add(part)
         words = [word for word in re.split(r"\s+", part) if len(word) > 1]
         meaningful_words = [word for word in words if word.lower() not in stop_words]
+        # Only add word shards when they are long enough to be useful search tokens;
+        # short words like "do", "not" pollute react-select filters.
         if len(meaningful_words) > 1:
             for word in meaningful_words:
-                add(word)
+                if len(word) >= 4:
+                    add(word)
 
     return terms
 

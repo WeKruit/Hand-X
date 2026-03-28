@@ -1,14 +1,33 @@
 """Tests for action loop detection — behavioral cycle breaking (PR #4)."""
 
-from browser_use.agent.service import Agent
-from browser_use.agent.service import _blocker_guard_decision
+from typing import Any, cast
+from unittest.mock import AsyncMock
+
+import pytest
+
+from browser_use.agent.service import (
+    Agent,
+    _blocker_guard_decision,
+    _same_page_advance_decision,
+    _same_page_fill_checkpoint_decision,
+)
 from browser_use.agent.views import (
     ActionLoopDetector,
+    ActionResult,
+    AgentOutput,
     PageFingerprint,
     compute_action_hash,
 )
 from browser_use.llm.messages import UserMessage
 from tests.ci.conftest import create_mock_llm
+
+
+class _ModelActionStub:
+    def __init__(self, data: dict[str, Any]):
+        self._data = data
+
+    def model_dump(self, exclude_unset: bool = True) -> dict[str, Any]:
+        return self._data
 
 
 def _get_context_messages(agent: Agent) -> list[str]:
@@ -363,13 +382,13 @@ async def test_loop_nudge_includes_latest_blocker_context():
 
     llm = create_mock_llm()
     agent = Agent(task="Test task", llm=llm)
-    agent.browser_session = SimpleNamespace(
+    cast(Any, agent).browser_session = SimpleNamespace(
         id="test-browser-session",
         agent_focus_target_id=None,
         _gh_last_application_state={
             "blocking_field_keys": ["text|salary", "select|relocation"],
             "same_blocker_signature_count": 2,
-        }
+        },
     )
 
     for _ in range(5):
@@ -389,13 +408,13 @@ async def test_blocker_state_does_not_inject_context_without_real_loop():
 
     llm = create_mock_llm()
     agent = Agent(task="Test task", llm=llm)
-    agent.browser_session = SimpleNamespace(
+    cast(Any, agent).browser_session = SimpleNamespace(
         id="test-browser-session",
         agent_focus_target_id=None,
         _gh_last_application_state={
             "blocking_field_keys": ["text|salary"],
             "same_blocker_signature_count": 2,
-        }
+        },
     )
 
     agent._inject_loop_detection_nudge()
@@ -403,7 +422,7 @@ async def test_blocker_state_does_not_inject_context_without_real_loop():
     assert _get_context_messages(agent) == []
 
 
-def test_blocker_guard_rejects_unrelated_action_when_single_blocker_active():
+def test_blocker_guard_allows_unrelated_action_when_single_blocker_active():
     decision = _blocker_guard_decision(
         {
             "blocking_field_keys": ["radio-group|ff-3"],
@@ -423,8 +442,7 @@ def test_blocker_guard_rejects_unrelated_action_when_single_blocker_active():
         {},
     )
 
-    assert decision is not None
-    assert decision["reason"] == "unrelated_action_with_single_blocker"
+    assert decision is None
 
 
 def test_blocker_guard_rejects_same_strategy_after_no_state_change():
@@ -462,6 +480,207 @@ def test_blocker_guard_rejects_same_strategy_after_no_state_change():
 
     assert decision is not None
     assert decision["reason"] == "same_strategy_no_state_change"
+
+
+def test_blocker_guard_rejects_broad_domhand_fill_when_hard_blockers_remain():
+    decision = _blocker_guard_decision(
+        {
+            "advance_allowed": False,
+            "unresolved_required_count": 2,
+            "optional_validation_count": 0,
+            "visible_error_count": 1,
+            "blocking_field_keys": ["button-group|ff-60", "button-group|ff-83"],
+            "single_active_blocker": {
+                "field_key": "button-group|ff-60",
+                "field_id": "ff-60",
+                "field_label": "Please indicate your gender.",
+                "field_type": "button-group",
+                "reason": "required_missing_value",
+            },
+        },
+        [{"action": "domhand_fill", "params": {}}],
+        {},
+    )
+
+    assert decision is not None
+    assert decision["reason"] == "broad_refill_with_active_blockers"
+    assert decision["strategy"] == "page_local_review"
+
+
+def test_same_page_fill_checkpoint_rejects_repeated_broad_domhand_fill():
+    decision = _same_page_fill_checkpoint_decision(
+        {
+            "page_context_key": "page-1",
+            "page_url": "https://example.com/apply",
+            "broad_fill_completed": True,
+        },
+        [{"action": "domhand_fill", "params": {}}],
+    )
+
+    assert decision is not None
+    assert decision["reason"] == "same_page_fill_already_done"
+    assert decision["recommended_next_action"] == "review_page_visually"
+
+
+def test_same_page_fill_checkpoint_treats_target_section_only_as_broad_fill():
+    decision = _same_page_fill_checkpoint_decision(
+        {
+            "page_context_key": "page-1",
+            "page_url": "https://example.com/apply",
+            "broad_fill_completed": True,
+        },
+        [{"action": "domhand_fill", "params": {"target_section": "Personal Info"}}],
+    )
+
+    assert decision is not None
+    assert decision["reason"] == "same_page_fill_already_done"
+
+
+def test_same_page_advance_decision_rejects_broad_domhand_fill_after_clean_assess():
+    decision = _same_page_advance_decision(
+        {
+            "advance_allowed": True,
+            "unresolved_required_count": 0,
+            "optional_validation_count": 0,
+            "visible_error_count": 0,
+            "opaque_count": 0,
+            "unverified_count": 1,
+        },
+        [{"action": "domhand_fill", "params": {}}],
+    )
+
+    assert decision is not None
+    assert decision["reason"] == "same_page_advance_allowed"
+    assert decision["strategy"] == "advance_or_manual_browser_decision"
+
+
+def test_same_page_advance_decision_treats_target_section_only_as_broad_fill():
+    decision = _same_page_advance_decision(
+        {
+            "advance_allowed": True,
+            "unresolved_required_count": 0,
+            "optional_validation_count": 0,
+            "visible_error_count": 0,
+            "opaque_count": 0,
+        },
+        [{"action": "domhand_fill", "params": {"target_section": "Personal Info"}}],
+    )
+
+    assert decision is not None
+    assert decision["reason"] == "same_page_advance_allowed"
+
+
+@pytest.mark.asyncio
+async def test_execute_actions_does_not_turn_advisory_blockers_into_failures():
+    llm = create_mock_llm()
+    browser_session = AsyncMock()
+    browser_session._gh_last_application_state = {
+        "blocking_field_keys": ["select|ff-21"],
+        "blocking_field_labels": ["What location do you intend to work out of?"],
+        "blocking_field_state_changes": {"select|ff-21": "new"},
+        "single_active_blocker": {
+            "field_key": "select|ff-21",
+            "field_id": "ff-21",
+            "field_label": "What location do you intend to work out of?",
+            "field_type": "select",
+            "reason": "required_missing_value",
+        },
+    }
+    agent = Agent(task="Test task", llm=llm, browser_session=browser_session)
+    agent.multi_act = AsyncMock(return_value=[ActionResult(extracted_content="typed phone number")])
+    AgentOutputWithActions = AgentOutput.type_with_custom_actions(agent.ActionModel)
+    agent.state.last_model_output = AgentOutputWithActions.model_validate_json(
+        """
+        {
+            "thinking": null,
+            "evaluation_previous_goal": "Need to continue filling the page",
+            "memory": "A single blocker exists but phone still needs repair",
+            "next_goal": "Repair the phone field first",
+            "action": [
+                {
+                    "input": {
+                        "index": 3,
+                        "text": "5555551212",
+                        "clear": true
+                    }
+                }
+            ]
+        }
+        """
+    )
+
+    await agent._execute_actions()
+
+    agent.multi_act.assert_awaited_once()
+    assert agent.state.last_result == [ActionResult(extracted_content="typed phone number")]
+
+
+@pytest.mark.asyncio
+async def test_execute_actions_turns_same_page_fill_checkpoint_into_advisory_result():
+    llm = create_mock_llm()
+    browser_session = AsyncMock()
+    browser_session._gh_last_domhand_fill = {
+        "page_context_key": "page-1",
+        "page_url": "https://example.com/apply",
+        "broad_fill_completed": True,
+    }
+    browser_session._gh_last_application_state = None
+    mock_page = AsyncMock()
+    mock_page.url = "https://example.com/apply"
+    browser_session.get_current_page = AsyncMock(return_value=mock_page)
+    agent = Agent(task="Test task", llm=llm, browser_session=browser_session)
+    agent.multi_act = AsyncMock(return_value=[ActionResult(extracted_content="should not execute")])
+    agent.state.last_model_output = cast(
+        Any,
+        type(
+            "ModelOutputStub",
+            (),
+            {
+                "action": [_ModelActionStub({"domhand_fill": {}})],
+            },
+        )(),
+    )
+
+    await agent._execute_actions()
+
+    agent.multi_act.assert_not_awaited()
+    assert agent.state.last_result is not None
+    assert agent.state.last_result[0].error is None
+    assert (agent.state.last_result[0].metadata or {})["same_page_fill_guard"] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_actions_turns_same_page_advance_guard_into_advisory_result():
+    llm = create_mock_llm()
+    browser_session = AsyncMock()
+    browser_session._gh_last_domhand_fill = None
+    browser_session._gh_last_application_state = {
+        "advance_allowed": True,
+        "unresolved_required_count": 0,
+        "optional_validation_count": 0,
+        "visible_error_count": 0,
+        "opaque_count": 0,
+        "unverified_count": 1,
+    }
+    agent = Agent(task="Test task", llm=llm, browser_session=browser_session)
+    agent.multi_act = AsyncMock(return_value=[ActionResult(extracted_content="should not execute")])
+    agent.state.last_model_output = cast(
+        Any,
+        type(
+            "ModelOutputStub",
+            (),
+            {
+                "action": [_ModelActionStub({"domhand_fill": {}})],
+            },
+        )(),
+    )
+
+    await agent._execute_actions()
+
+    agent.multi_act.assert_not_awaited()
+    assert agent.state.last_result is not None
+    assert agent.state.last_result[0].error is None
+    assert (agent.state.last_result[0].metadata or {})["same_page_advance_guard"] is True
 
 
 async def test_no_loop_nudge_when_disabled():

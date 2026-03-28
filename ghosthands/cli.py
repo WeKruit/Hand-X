@@ -67,7 +67,11 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 # Suppress browser-use's own logging setup so we control stderr exclusively
 os.environ["BROWSER_USE_SETUP_LOGGING"] = "false"
 
-from ghosthands.agent.hooks import install_same_tab_guard
+from ghosthands.agent.hooks import (
+    consume_blocked_final_submit,
+    install_final_submit_guard,
+    install_same_tab_guard,
+)
 
 logger = structlog.get_logger()
 
@@ -96,42 +100,504 @@ async def _stabilize_account_created_marker(
     marker_evidence: str | None,
 ) -> tuple[str | None, str | None, str | None]:
     """Downgrade overly optimistic account-created markers until auth success is proven."""
+    auth_state = await _probe_generated_auth_state(getattr(agent, "browser_session", None))
+    if auth_state == "authenticated_or_application_resumed":
+        return "active", marker_note, marker_evidence
+
+    if auth_state == "native_login":
+        return (
+            "active",
+            "Create Account succeeded and the page is now on the native Sign In form. "
+            "This is the expected next step, not email verification.",
+            "auth_marker_native_login_after_create",
+        )
+
+    if auth_state == "verification_required":
+        return (
+            "pending_verification",
+            "Account likely exists, but email verification is still required.",
+            "auth_marker_pending_verification",
+        )
+
     if marker_status != "active":
         return marker_status, marker_note, marker_evidence
 
-    auth_state = None
-    try:
-        from ghosthands.button_attempts import capture_button_state
-
-        snapshot = await capture_button_state(agent.browser_session)
-        auth_state = str(snapshot.get("auth_state") or "unknown_pending")
-    except Exception:
-        logger.debug("cli.account_created_auth_state_probe_failed", exc_info=True)
-        auth_state = None
-
-    if auth_state == "authenticated_or_application_resumed":
-        return marker_status, marker_note, marker_evidence
-
-    if auth_state in {
-        "native_login",
-        "still_create_account",
-        "verification_required",
-        "explicit_auth_error",
-        "unknown_pending",
-    }:
+    if auth_state in {"still_create_account", "explicit_auth_error", "unknown_pending"}:
         logger.info(
             "cli.account_created_marker_downgraded",
             extra={"auth_state": auth_state, "from_status": marker_status},
         )
-        if auth_state == "native_login":
-            note = "Account creation reached the native sign-in page, but sign-in success is not confirmed yet."
-        elif auth_state == "verification_required":
-            note = "Account likely exists, but email verification is still required."
-        else:
-            note = "Account creation signals were observed, but the run has not proven a post-auth success state yet."
+        note = "Account creation signals were observed, but the run has not proven a post-auth success state yet."
         return "pending_verification", note, "auth_marker_pending_post_auth_confirmation"
 
     return marker_status, marker_note, marker_evidence
+
+
+async def _probe_generated_auth_state(browser_session) -> str | None:
+    """Probe the current auth page to distinguish native sign-in from verification."""
+    if browser_session is None:
+        return None
+    try:
+        page = await browser_session.get_current_page()
+        if page is None:
+            return None
+        state = await page.evaluate(
+            r"""() => {
+                const normalize = (text) => String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                const textNodes = Array.from(
+                    document.querySelectorAll('h1, h2, h3, button, a, [role="button"], label, p, span, div')
+                )
+                    .map((el) => normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || ''))
+                    .filter(Boolean);
+                const hasText = (patterns) => textNodes.some((text) => patterns.some((pattern) => pattern.test(text)));
+
+                const passwordCount = document.querySelectorAll('input[type="password"]').length;
+                const emailCount = document.querySelectorAll(
+                    'input[type="email"], input[name*="email" i], input[id*="email" i]'
+                ).length;
+                const confirmPasswordVisible =
+                    passwordCount >= 2 ||
+                    document.querySelector('[data-automation-id="verifyPassword"]') !== null;
+                const verificationSignals = hasText([
+                    /\bverify your account\b/,
+                    /\bverification email\b/,
+                    /\bconfirm your email\b/,
+                    /\bcheck your inbox\b/,
+                    /\bcheck your spam\b/,
+                    /\bverify your email address\b/,
+                    /\bverification code\b/,
+                    /\bsecurity code\b/,
+                    /\benter the code sent to\b/,
+                ]);
+                const explicitAuthError = hasText([
+                    /\binvalid\b/,
+                    /\bincorrect\b/,
+                    /\bwrong email\b/,
+                    /\bwrong password\b/,
+                    /\baccount.*locked\b/,
+                    /\bsign in failed\b/,
+                ]);
+                const signInSignals = hasText([/\bsign in\b/, /\blog in\b/, /\blogin\b/]);
+                const createAccountSignals = hasText([/\bcreate account\b/, /\bregister\b/, /\bsign up\b/]);
+                const applicationSignals = hasText([
+                    /\bmy information\b/,
+                    /\bmy experience\b/,
+                    /\bapplication questions\b/,
+                    /\bvoluntary disclosures\b/,
+                    /\bself identify\b/,
+                    /\breview\b/,
+                    /\bsave and continue\b/,
+                    /\bautofill with resume\b/,
+                ]);
+
+                let authState = 'unknown_pending';
+                if (applicationSignals) {
+                    authState = 'authenticated_or_application_resumed';
+                } else if (verificationSignals) {
+                    authState = 'verification_required';
+                } else if (confirmPasswordVisible || createAccountSignals) {
+                    authState = 'still_create_account';
+                } else if (emailCount >= 1 && passwordCount >= 1 && signInSignals) {
+                    authState = 'native_login';
+                } else if (explicitAuthError) {
+                    authState = 'explicit_auth_error';
+                }
+
+                return authState;
+            }"""
+        )
+        return str(state or "unknown_pending")
+    except Exception:
+        logger.debug("cli.generated_auth_state_probe_failed", exc_info=True)
+        return None
+
+
+def _derive_workday_state_from_browser_text(browser_text: str) -> dict[str, Any]:
+    """Derive Workday start/auth signals from BrowserSession's DOM snapshot text."""
+    text = re.sub(r"\s+", " ", str(browser_text or "")).strip().lower()
+    if not text:
+        return {}
+
+    def _has(patterns: list[str]) -> bool:
+        return any(re.search(pattern, text) for pattern in patterns)
+
+    def _has_button_label(label: str) -> bool:
+        escaped = re.escape(label.lower())
+        return bool(
+            re.search(rf"\[\d+\]<button[^>]*>\s*{escaped}\b", text)
+            or re.search(rf"\[\d+\]<a[^>]*role=button[^>]*>\s*{escaped}\b", text)
+        )
+
+    password_hits = len(re.findall(r"\bpassword\b", text))
+    email_hits = len(re.findall(r"\bemail(?: address)?\b", text))
+
+    return {
+        "hasAcceptCookies": _has_button_label("Accept Cookies"),
+        "hasApply": _has_button_label("Apply"),
+        "hasAutofillWithResume": _has_button_label("Autofill with Resume"),
+        "hasApplyWithResume": _has_button_label("Apply with Resume"),
+        "resumeAutofillSignals": _has(
+            [
+                r"\bautofill with resume\b",
+                r"\bapply with resume\b",
+                r"\bupload resume\b",
+                r"\bresume/cv\b",
+                r"\bdrop files here\b",
+                r"\bselect files\b",
+            ]
+        ),
+        "emailCount": 1 if email_hits else 0,
+        "passwordCount": min(password_hits, 2),
+        "confirmPasswordVisible": _has([r"\bconfirm password\b", r"\bverify password\b"]),
+        "signInSignals": _has([r"\bsign in\b", r"\blog in\b", r"\blogin\b"]),
+        "createAccountSignals": _has([r"\bcreate account\b", r"\bregister\b", r"\bsign up\b"]),
+        "verificationBanner": _has(
+            [
+                r"\ban email has been sent to you\b",
+                r"\bplease verify your account\b",
+                r"\bverification email\b",
+                r"\bconfirm your email\b",
+                r"\bcheck your inbox\b",
+                r"\bcheck your spam\b",
+                r"\bverify your email address\b",
+            ]
+        ),
+        "verificationCodeRequired": _has(
+            [
+                r"\bverification code\b",
+                r"\bsecurity code\b",
+                r"\benter the code sent to\b",
+                r"\bone time passcode\b",
+                r"\botp\b",
+            ]
+        ),
+        "explicitAuthError": _has(
+            [
+                r"\binvalid\b",
+                r"\bincorrect\b",
+                r"\bwrong email\b",
+                r"\bwrong password\b",
+                r"\baccount.*locked\b",
+                r"\bsign in failed\b",
+                r"\bthere was an error\b",
+            ]
+        ),
+        "applicationSignals": _has(
+            [
+                r"\bmy information\b",
+                r"\bmy experience\b",
+                r"\bapplication questions\b",
+                r"\bvoluntary disclosures\b",
+                r"\bself identify\b",
+                r"\breview\b",
+                r"\bsave and continue\b",
+            ]
+        ),
+    }
+
+
+async def _inspect_workday_runtime_state(browser_session, page) -> dict[str, Any]:
+    """Inspect lightweight Workday page state for deterministic auth handling."""
+    derived_from_browser_text: dict[str, Any] = {}
+    with contextlib.suppress(Exception):
+        derived_from_browser_text = _derive_workday_state_from_browser_text(
+            await browser_session.get_state_as_text()
+        )
+    try:
+        state = await page.evaluate(
+            r"""() => {
+                const normalize = (text) => String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                const textFrom = (el) => normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+                const allText = Array.from(document.querySelectorAll('h1, h2, h3, button, a, [role="button"], label, p, span, div'))
+                    .map(textFrom)
+                    .filter(Boolean);
+                const buttonTexts = Array.from(document.querySelectorAll('button, a, [role="button"]'))
+                    .map(textFrom)
+                    .filter(Boolean);
+                const hasText = (patterns) => allText.some((text) => patterns.some((pattern) => pattern.test(text)));
+                const hasButton = (patterns) => buttonTexts.some((text) => patterns.some((pattern) => pattern.test(text)));
+
+                const passwordCount = document.querySelectorAll('input[type="password"]').length;
+                const emailCount = document.querySelectorAll(
+                    'input[type="email"], input[name*="email" i], input[id*="email" i]'
+                ).length;
+                const confirmPasswordVisible =
+                    passwordCount >= 2 ||
+                    document.querySelector('[data-automation-id="verifyPassword"]') !== null;
+                const signInSignals = hasText([/\bsign in\b/, /\blog in\b/, /\blogin\b/]);
+                const createAccountSignals = hasText([/\bcreate account\b/, /\bregister\b/, /\bsign up\b/]);
+                const verificationBanner = hasText([
+                    /\ban email has been sent to you\b/,
+                    /\bplease verify your account\b/,
+                    /\bverification email\b/,
+                    /\bconfirm your email\b/,
+                    /\bcheck your inbox\b/,
+                    /\bcheck your spam\b/,
+                    /\bverify your email address\b/,
+                ]);
+                const verificationCodeRequired =
+                    hasText([/\bverification code\b/, /\bsecurity code\b/, /\benter the code sent to\b/, /\bone time passcode\b/, /\botp\b/]) ||
+                    document.querySelector('input[inputmode="numeric"], input[autocomplete="one-time-code"]') !== null;
+                const explicitAuthError = hasText([
+                    /\binvalid\b/,
+                    /\bincorrect\b/,
+                    /\bwrong email\b/,
+                    /\bwrong password\b/,
+                    /\baccount.*locked\b/,
+                    /\bsign in failed\b/,
+                    /\bthere was an error\b/,
+                ]);
+                const applicationSignals = hasText([
+                    /\bmy information\b/,
+                    /\bmy experience\b/,
+                    /\bapplication questions\b/,
+                    /\bvoluntary disclosures\b/,
+                    /\bself identify\b/,
+                    /\breview\b/,
+                    /\bsave and continue\b/,
+                ]);
+                const resumeAutofillSignals =
+                    hasText([/\bautofill with resume\b/, /\bapply with resume\b/, /\bupload resume\b/, /\bresume\/cv\b/, /\bdrop files here\b/, /\bselect files\b/]) ||
+                    document.querySelector('input[type="file"]') !== null;
+
+                return {
+                    hasAcceptCookies: hasButton([/\baccept cookies\b/]),
+                    hasApply: hasButton([/^\bapply\b$/, /^\bapply now\b$/]),
+                    hasAutofillWithResume: hasButton([/\bautofill with resume\b/]),
+                    hasApplyWithResume: hasButton([/\bapply with resume\b/]),
+                    resumeAutofillSignals,
+                    emailCount,
+                    passwordCount,
+                    confirmPasswordVisible,
+                    signInSignals,
+                    createAccountSignals,
+                    verificationBanner,
+                    verificationCodeRequired,
+                    explicitAuthError,
+                    applicationSignals,
+                };
+            }"""
+        )
+        state = state if isinstance(state, dict) else {}
+        for key, value in derived_from_browser_text.items():
+            if isinstance(value, bool):
+                state[key] = bool(state.get(key)) or value
+            elif isinstance(value, int):
+                state[key] = max(int(state.get(key) or 0), value)
+        return state
+    except Exception:
+        logger.debug("cli.inspect_workday_runtime_state_failed", exc_info=True)
+        return derived_from_browser_text
+
+
+async def _poll_workday_runtime_state(
+    browser_session,
+    page,
+    *,
+    attempts: int = 5,
+    sleep_seconds: float = 1.0,
+) -> dict[str, Any]:
+    """Wait briefly for Workday page signals before falling back to the agent loop."""
+    last_state: dict[str, Any] = {}
+    signal_keys = (
+        "hasAcceptCookies",
+        "hasApply",
+        "hasAutofillWithResume",
+        "hasApplyWithResume",
+        "emailCount",
+        "passwordCount",
+        "confirmPasswordVisible",
+        "verificationBanner",
+        "verificationCodeRequired",
+        "applicationSignals",
+        "explicitAuthError",
+    )
+    for attempt in range(max(1, attempts)):
+        last_state = await _inspect_workday_runtime_state(browser_session, page)
+        if any(bool(last_state.get(key)) for key in signal_keys):
+            return last_state
+        if attempt + 1 < max(1, attempts):
+            await asyncio.sleep(sleep_seconds)
+    return last_state
+
+
+def _workday_is_pure_verification_blocker(state: dict[str, Any]) -> bool:
+    """True only when Workday requires verification without an actionable sign-in form."""
+    if not state:
+        return False
+    if bool(state.get("applicationSignals")):
+        return False
+    has_signin_form = int(state.get("emailCount") or 0) >= 1 and int(state.get("passwordCount") or 0) >= 1
+    if has_signin_form and not bool(state.get("confirmPasswordVisible")):
+        return False
+    return bool(state.get("verificationCodeRequired")) or bool(state.get("verificationBanner"))
+
+
+async def _fill_first_matching_input(page, selectors: list[str], value: str) -> bool:
+    for selector in selectors:
+        try:
+            elements = await page.get_elements_by_css_selector(selector)
+        except Exception:
+            elements = []
+        if not elements:
+            continue
+        try:
+            await elements[0].fill(value, clear=True)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+async def _fill_password_fields(page, password: str, *, count: int = 1) -> bool:
+    """Fill up to ``count`` visible password fields on the current page."""
+    try:
+        elements = await page.get_elements_by_css_selector('input[type="password"]')
+    except Exception:
+        elements = []
+    if not elements:
+        return False
+
+    filled = 0
+    for element in elements[: max(1, count)]:
+        try:
+            await element.fill(password, clear=True)
+            filled += 1
+        except Exception:
+            continue
+    return filled >= max(1, count)
+
+
+async def _click_button_label_if_present(browser_session, label: str) -> bool:
+    from ghosthands.actions.domhand_click_button import DomHandClickButtonParams, domhand_click_button
+
+    result = await domhand_click_button(DomHandClickButtonParams(button_label=label), browser_session)
+    return bool(result and not result.error)
+
+
+def _build_current_page_continuation_task(
+    original_task: str,
+    *,
+    platform: str,
+    stage: str = "current_page",
+) -> str:
+    """Rewrite the task so the agent continues from the current authenticated page."""
+    replacement = (
+        "Continue from the CURRENT page and fill out the job application from here. "
+        "Do NOT navigate back to the original job URL or repeat the auth/start-dialog flow.\n"
+    )
+    rewritten = re.sub(
+        r"^Go to .*? and fill out the job application form completely\.\n",
+        replacement,
+        original_task,
+        count=1,
+        flags=re.DOTALL,
+    )
+    if rewritten == original_task:
+        rewritten = f"{replacement}\n{original_task}"
+    if platform == "workday":
+        if stage == "auth_complete":
+            prefix = "WORKDAY AUTH IS ALREADY COMPLETE FOR THIS RUN. Stay on the CURRENT page.\n"
+        elif stage == "auth_page":
+            prefix = (
+                "WORKDAY START FLOW HAS ALREADY REACHED THE NATIVE AUTH PAGE FOR THIS RUN. "
+                "Stay on the CURRENT page and continue from there.\n"
+            )
+        elif stage == "resume_autofill":
+            prefix = (
+                "WORKDAY START FLOW IS ALREADY OPEN ON THE AUTOFILL WITH RESUME PAGE. "
+                "Stay on the CURRENT page and continue from there.\n"
+            )
+        else:
+            prefix = "WORKDAY START FLOW IS ALREADY OPEN FOR THIS RUN. Stay on the CURRENT page.\n"
+        rewritten = prefix + rewritten
+    return rewritten
+
+
+async def _run_workday_auth_preface(
+    browser_session,
+    *,
+    job_url: str,
+    app_settings,
+    platform: str,
+) -> tuple[str, str]:
+    """Deterministically execute Workday auth/start-dialog steps before the agent loop.
+
+    Returns (status, message):
+    - ("continue", msg): browser is positioned on the post-auth/current application page
+    - ("blocker", msg): deterministic blocker reached before form filling
+    - ("noop", msg): no deterministic preface action was applicable
+    """
+    if not app_settings or platform != "workday":
+        return "noop", "non-workday"
+    if not app_settings.email or not app_settings.password:
+        return "noop", "missing_credentials"
+
+    page = await browser_session.get_current_page()
+    if page is None:
+        page = await browser_session.new_page(job_url)
+    else:
+        current = ""
+        with contextlib.suppress(Exception):
+            current = await page.get_url()
+        if not current or current == "about:blank":
+            await page.goto(job_url)
+    state = await _poll_workday_runtime_state(browser_session, page, attempts=8)
+
+    if state.get("hasAcceptCookies"):
+        await _click_button_label_if_present(browser_session, "Accept Cookies")
+        state = await _poll_workday_runtime_state(browser_session, page, attempts=8)
+
+    if state.get("hasApply"):
+        await _click_button_label_if_present(browser_session, "Apply")
+        state = await _poll_workday_runtime_state(browser_session, page, attempts=8)
+
+    if state.get("hasAutofillWithResume"):
+        await _click_button_label_if_present(browser_session, "Autofill with Resume")
+        state = await _poll_workday_runtime_state(browser_session, page, attempts=12)
+    elif state.get("hasApplyWithResume"):
+        await _click_button_label_if_present(browser_session, "Apply with Resume")
+        state = await _poll_workday_runtime_state(browser_session, page, attempts=12)
+
+    if bool(state.get("resumeAutofillSignals")) and not (
+        int(state.get("emailCount") or 0) >= 1 or int(state.get("passwordCount") or 0) >= 1
+    ):
+        return "continue_resume_autofill", "workday preface reached the Autofill with Resume page"
+    if (
+        bool(state.get("createAccountSignals"))
+        or bool(state.get("signInSignals"))
+        or bool(state.get("confirmPasswordVisible"))
+        or int(state.get("emailCount") or 0) >= 1
+        or int(state.get("passwordCount") or 0) >= 1
+    ):
+        return "continue_auth_page", "workday preface reached the native auth page"
+    if bool(state.get("applicationSignals")):
+        return "continue_auth_complete", "workday auth preface completed"
+    return "noop", "no deterministic workday preface transition"
+
+
+async def _should_resume_from_false_verification_blocker(
+    final_result: str,
+    *,
+    platform: str,
+    app_settings,
+    browser_session,
+) -> bool:
+    """Return True when a verification blocker is false and the page is native sign-in."""
+    if platform != "workday":
+        return False
+    if not (
+        app_settings
+        and (
+            app_settings.credential_source == "generated"
+            or (app_settings.credential_source == "user" and app_settings.credential_intent == "create_account")
+        )
+    ):
+        return False
+    if "email verification required" not in str(final_result or "").lower():
+        return False
+    auth_state = await _probe_generated_auth_state(browser_session)
+    return auth_state == "native_login"
 
 
 # ── Argument parsing ──────────────────────────────────────────────────
@@ -161,6 +627,12 @@ def parse_args() -> argparse.Namespace:
     # Profile source (one of these is required)
     parser.add_argument("--profile", default=None, help="Applicant profile as JSON string or @filepath")
     parser.add_argument("--test-data", default=None, help="Path to applicant data JSON file")
+    parser.add_argument("--user-id", default=None, help="VALET user UUID for DB-backed profile loading")
+    parser.add_argument(
+        "--resume-id",
+        default=None,
+        help="Specific VALET resume UUID to use when loading a DB-backed profile",
+    )
 
     # Optional
     parser.add_argument("--resume", default=None, help="Path to resume PDF")
@@ -169,6 +641,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=None, help="LLM model override")
     parser.add_argument("--max-steps", type=int, default=50, help="Max agent steps (default: 50)")
     parser.add_argument("--max-budget", type=float, default=0.50, help="Max LLM budget USD")
+    parser.add_argument(
+        "--submit-intent",
+        choices=["review", "submit"],
+        default=None,
+        help="Whether to stop at review (default) or explicitly allow final submit",
+    )
     parser.add_argument("--headless", action="store_true", help="Run browser headless")
     parser.add_argument(
         "--output-format",
@@ -265,14 +743,15 @@ def _setup_logging() -> None:
 # ── Profile loading ───────────────────────────────────────────────────
 
 
-def _load_profile(args: argparse.Namespace) -> dict:
-    """Load applicant profile from --profile or --test-data."""
+def _validate_profile_object(profile: Any) -> dict:
+    """Assert the parsed value is a JSON object (dict), not a list or scalar."""
+    if not isinstance(profile, dict):
+        raise ValueError("Profile must be a JSON object")
+    return profile
 
-    def _validate_profile(profile: Any) -> dict:
-        """Assert the parsed value is a JSON object (dict), not a list or scalar."""
-        if not isinstance(profile, dict):
-            raise ValueError("Profile must be a JSON object")
-        return profile
+
+async def _load_profile_async(args: argparse.Namespace) -> dict:
+    """Load applicant profile from CLI/env sources for async callers."""
 
     # --profile takes precedence (inline JSON or @filepath)
     if args.profile:
@@ -281,8 +760,15 @@ def _load_profile(args: argparse.Namespace) -> dict:
             path = Path(raw[1:])
             if not path.exists():
                 raise FileNotFoundError(f"Profile file not found: {path}")
-            return _validate_profile(json.loads(path.read_text()))
-        return _validate_profile(json.loads(raw))
+            return _validate_profile_object(json.loads(path.read_text()))
+        return _validate_profile_object(json.loads(raw))
+
+    user_id = getattr(args, "user_id", None)
+    resume_id = getattr(args, "resume_id", None)
+    if resume_id and not user_id:
+        raise ValueError("--resume-id requires --user-id")
+    if user_id:
+        return _validate_profile_object(await _load_profile_from_user_resume_async(user_id, resume_id))
 
     # --test-data: load from JSON file
     if args.test_data:
@@ -295,23 +781,59 @@ def _load_profile(args: argparse.Namespace) -> dict:
         try:
             from ghosthands.integrations.resume_loader import load_resume_from_file
 
-            return _validate_profile(load_resume_from_file(str(path)))
+            return _validate_profile_object(load_resume_from_file(str(path)))
         except Exception:
-            return _validate_profile(data)
+            return _validate_profile_object(data)
 
     # File-based profile (preferred — avoids /proc/pid/environ exposure)
     profile_path = os.environ.get("GH_USER_PROFILE_PATH", "")
     if profile_path:
         p = Path(profile_path)
         if p.is_file():
-            return _validate_profile(json.loads(p.read_text(encoding="utf-8")))
+            return _validate_profile_object(json.loads(p.read_text(encoding="utf-8")))
 
     # Environment variable fallback (for backwards compat with desktop bridge)
     profile_text = os.environ.get("GH_USER_PROFILE_TEXT", "")
     if profile_text:
-        return _validate_profile(json.loads(profile_text))
+        return _validate_profile_object(json.loads(profile_text))
 
     raise ValueError("Either --profile, --test-data, GH_USER_PROFILE_PATH, or GH_USER_PROFILE_TEXT env var is required")
+
+
+def _load_profile(args: argparse.Namespace) -> dict:
+    """Load applicant profile from CLI/env sources for sync callers."""
+    user_id = getattr(args, "user_id", None)
+    resume_id = getattr(args, "resume_id", None)
+    if resume_id and not user_id:
+        raise ValueError("--resume-id requires --user-id")
+    if user_id:
+        return _validate_profile_object(_load_profile_from_user_resume(user_id, resume_id))
+    return asyncio.run(_load_profile_async(args))
+
+
+async def _load_profile_from_user_resume_async(
+    user_id: str,
+    resume_id: str | None = None,
+) -> dict[str, Any]:
+    """Load a runtime profile from VALET's database using user/resume IDs."""
+    database_url = os.environ.get("GH_DATABASE_URL", "").strip()
+    if not database_url:
+        raise ValueError("GH_DATABASE_URL is required when using --user-id / --resume-id")
+
+    from ghosthands.integrations.database import Database
+    from ghosthands.integrations.resume_loader import load_runtime_profile
+
+    db = Database(database_url)
+    await db.connect()
+    try:
+        return await load_runtime_profile(db, user_id=user_id, resume_id=resume_id)
+    finally:
+        await db.close()
+
+
+def _load_profile_from_user_resume(user_id: str, resume_id: str | None = None) -> dict[str, Any]:
+    """Load a runtime profile from VALET's database using user/resume IDs."""
+    return asyncio.run(_load_profile_from_user_resume_async(user_id, resume_id))
 
 
 def _apply_runtime_env(
@@ -325,6 +847,8 @@ def _apply_runtime_env(
         os.environ["GH_LLM_RUNTIME_GRANT"] = args.runtime_grant
     if args.browsers_path:
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = args.browsers_path
+    if getattr(args, "submit_intent", None):
+        os.environ["GH_SUBMIT_INTENT"] = args.submit_intent
 
     # Write profile to temp file instead of env var (avoids /proc/pid/environ exposure)
     profile_fd, profile_path = tempfile.mkstemp(prefix="gh_profile_", suffix=".json")
@@ -366,11 +890,16 @@ def _resolve_sensitive_data(
     embedded_credentials: dict[str, Any] | None = None,
     platform: str = "generic",
 ) -> dict[str, str] | None:
-    """Resolve credentials with priority: profile creds > env vars.
+    """Resolve credentials with priority: user-provided env creds > profile creds > env vars.
 
     When the Desktop app embeds a ``credentials`` key in the profile JSON,
     we resolve platform-specific credentials first, then fall back to
     ``generic``, then ``GH_EMAIL``/``GH_PASSWORD`` env vars.
+
+    Exception: when ``credential_source == "user"``, the local GH_EMAIL /
+    GH_PASSWORD override is authoritative and must win over any embedded
+    profile credentials. This is required for fresh-account testing where the
+    applicant profile email differs from the auth email.
 
     Parameters
     ----------
@@ -404,9 +933,15 @@ def _resolve_sensitive_data(
         if creds_email and not creds_password:
             creds_password = embedded_credentials.get("application_password", "")
 
-    # Priority 3: env vars (GH_EMAIL / GH_PASSWORD via app_settings)
-    email = creds_email or app_settings.email or ""
-    password = creds_password or app_settings.password or ""
+    prefer_user_env = str(getattr(app_settings, "credential_source", "") or "").strip().lower() == "user"
+
+    if prefer_user_env:
+        email = app_settings.email or creds_email or ""
+        password = app_settings.password or creds_password or ""
+    else:
+        # Priority 3: env vars (GH_EMAIL / GH_PASSWORD via app_settings)
+        email = creds_email or app_settings.email or ""
+        password = creds_password or app_settings.password or ""
 
     if email and password:
         return {"email": email, "password": password}
@@ -1165,6 +1700,7 @@ def _handle_review_result(
 
 async def run_agent_jsonl(args: argparse.Namespace) -> None:
     """Run the agent with JSONL event output on stdout."""
+    from ghosthands.cost_summary import summarize_history_cost
     from ghosthands.output.jsonl import (
         emit_account_created,
         emit_awaiting_review,
@@ -1194,7 +1730,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     # -- Load profile -------------------------------------------------------
     try:
-        profile = _load_profile(args)
+        profile = await _load_profile_async(args)
     except (json.JSONDecodeError, OSError, ValueError) as e:
         logger.error("profile_load_failed", error=str(e))
         emit_error("Failed to load applicant profile", fatal=True)
@@ -1344,6 +1880,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         sensitive_data,
         credential_source=app_settings.credential_source,
         credential_intent=app_settings.credential_intent,
+        submit_intent=app_settings.submit_intent,
         platform=platform,
     )
 
@@ -1360,8 +1897,11 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     async def _on_step_start(ag: Agent) -> None:
         nonlocal _prefill_done
         from ghosthands.agent.hooks import infer_phase_from_goal
+        from ghosthands.agent.oracle_step_tuning import maybe_tighten_max_actions_for_oracle_focus
 
         await install_same_tab_guard(ag)
+        await maybe_tighten_max_actions_for_oracle_focus(ag)
+        await install_final_submit_guard(ag, allow_submit=app_settings.submit_intent == "submit")
         step = ag.state.n_steps
         goal = ""
         if ag.state.last_model_output:
@@ -1403,24 +1943,45 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             except Exception as exc:
                 logger.warning("auto_prefill.failed", error=str(exc))
 
+    last_cost_summary: dict[str, Any] = {}
+
     async def _on_step_end(ag: Agent) -> None:
-        nonlocal account_created_emitted
+        nonlocal account_created_emitted, last_cost_summary
+        from browser_use.agent.views import ActionResult
+
+        if app_settings.submit_intent != "submit":
+            blocked_submit = await consume_blocked_final_submit(ag)
+            if blocked_submit:
+                label = str(blocked_submit.get("label") or "submit")
+                ag.state.last_result = [
+                    ActionResult(
+                        extracted_content=(
+                            f"Runtime blocked final submit control '{label}' because submit_intent=review. "
+                            "This run must stop before final submission. Use done(success=True) when the form is ready for user review."
+                        ),
+                        include_extracted_content_only_once=True,
+                    )
+                ]
 
         usage = ag.history.usage
-        if usage:
+        cost_summary = summarize_history_cost(ag.history, ag.browser_session)
+        last_cost_summary = cost_summary
+        tracked_cost = float(cost_summary["total_tracked_cost_usd"])
+        if usage or tracked_cost:
             emit_cost(
-                total_usd=usage.total_cost or 0.0,
-                prompt_tokens=usage.total_prompt_tokens or 0,
-                completion_tokens=usage.total_completion_tokens or 0,
+                total_usd=tracked_cost,
+                prompt_tokens=int(cost_summary["total_tracked_prompt_tokens"]),
+                completion_tokens=int(cost_summary["total_tracked_completion_tokens"]),
+                cost_summary=cost_summary,
             )
 
         # Budget check
-        if usage and usage.total_cost and usage.total_cost >= args.max_budget:
+        if tracked_cost >= args.max_budget:
             ag.state.stopped = True
             emit_error("Budget exceeded", fatal=False, job_id=job_id)
 
         # Pre-step budget guard: stop if less than estimated step cost remaining
-        if usage and usage.total_cost and (args.max_budget - usage.total_cost) < _STEP_COST_ESTIMATE:
+        if (args.max_budget - tracked_cost) < _STEP_COST_ESTIMATE:
             ag.state.stopped = True
 
         # ── Account creation detection ──
@@ -1525,8 +2086,42 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 job_id=job_id,
             )
 
+        workday_preface_status = "noop"
+        workday_preface_message = ""
+        if platform == "workday":
+            workday_preface_status, workday_preface_message = await _run_workday_auth_preface(
+                browser,
+                job_url=args.job_url,
+                app_settings=app_settings,
+                platform=platform,
+            )
+            logger.info(
+                "cli.workday_auth_preface",
+                extra={"status": workday_preface_status, "message": workday_preface_message},
+            )
+            if workday_preface_status == "blocker":
+                emit_error(workday_preface_message, fatal=False, job_id=job_id)
+                emit_done(
+                    success=False,
+                    text=workday_preface_message,
+                    job_id=job_id,
+                    browser_open=True,
+                )
+                return
+
         # -- Create agent ---------------------------------------------------
         available_files = [resume_path] if resume_path else []
+        initial_task = task
+        directly_open_url = True
+        if workday_preface_status.startswith("continue"):
+            if workday_preface_status == "continue_auth_complete":
+                workday_stage = "auth_complete"
+            elif workday_preface_status == "continue_auth_page":
+                workday_stage = "auth_page"
+            else:
+                workday_stage = "resume_autofill"
+            initial_task = _build_current_page_continuation_task(task, platform=platform, stage=workday_stage)
+            directly_open_url = False
 
         async def _run_agent_once(current_task: str) -> tuple[Any, bool]:
             agent = Agent(
@@ -1538,9 +2133,11 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 sensitive_data=sensitive_data,
                 available_file_paths=available_files or None,
                 use_vision="auto",
-                max_actions_per_step=5,
+                max_actions_per_step=app_settings.agent_max_actions_per_step,
+                max_history_items=app_settings.agent_max_history_items,
                 calculate_cost=True,
                 use_judge=False,
+                directly_open_url=directly_open_url,
             )
 
             reset_hitl_state()
@@ -1566,7 +2163,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         total_cost = 0.0
         total_steps = 0
         cancelled = False
-        hitl_recovery_task = task
+        resumed_after_false_verification = False
+        hitl_recovery_task = initial_task
         # Single run — never restart the agent from scratch. Restarting loses all
         # form progress (the new agent navigates back to the job URL). If the agent
         # dies from consecutive failures, accept the result rather than wasting a
@@ -1574,16 +2172,51 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         history, cancelled = await _run_agent_once(hitl_recovery_task)
         is_done = history.is_done()
         final_result = history.final_result() or ""
-        total_cost += history.usage.total_cost if history.usage else 0.0
+        cost_summary = summarize_history_cost(history, browser)
+        total_cost += float(cost_summary["total_tracked_cost_usd"])
         total_steps += len(history.history) if history.history else 0
 
         # Final cost event
-        if history and history.usage:
+        if history:
             emit_cost(
                 total_usd=total_cost,
-                prompt_tokens=history.usage.total_prompt_tokens or 0,
-                completion_tokens=history.usage.total_completion_tokens or 0,
+                prompt_tokens=int(cost_summary["total_tracked_prompt_tokens"]),
+                completion_tokens=int(cost_summary["total_tracked_completion_tokens"]),
+                cost_summary=cost_summary,
             )
+
+        if await _should_resume_from_false_verification_blocker(
+            final_result,
+            platform=platform,
+            app_settings=app_settings,
+            browser_session=browser,
+        ):
+            resumed_after_false_verification = True
+            emit_status(
+                "False verification blocker detected; continuing from native Sign In",
+                job_id=job_id,
+            )
+            directly_open_url = False
+            continuation_task = (
+                "Continue from the CURRENT page without navigating back to the job URL. "
+                "Create Account already succeeded and Workday is now on the native Sign In page. "
+                "This is NOT email verification. Sign in ONCE with the SAME email/password, then continue the application. "
+                "Only report email verification if the page explicitly shows inbox/code/verify-email text."
+            )
+            history, second_cancelled = await _run_agent_once(continuation_task)
+            cancelled = cancelled or second_cancelled
+            is_done = history.is_done()
+            final_result = history.final_result() or ""
+            cost_summary = summarize_history_cost(history, browser)
+            total_cost += float(cost_summary["total_tracked_cost_usd"])
+            total_steps += len(history.history) if history.history else 0
+            if history:
+                emit_cost(
+                    total_usd=total_cost,
+                    prompt_tokens=int(cost_summary["total_tracked_prompt_tokens"]),
+                    completion_tokens=int(cost_summary["total_tracked_completion_tokens"]),
+                    cost_summary=cost_summary,
+                )
 
         # Get real field counts and successful field provenance from DomHand callback
         from ghosthands.output.field_events import get_field_counts, get_filled_field_records
@@ -1622,6 +2255,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                     "success": False,
                     "steps": total_steps,
                     "costUsd": round(total_cost, 6),
+                    "costSummary": cost_summary,
                     "finalResult": final_result,
                     "blocker": None,
                     "platform": platform,
@@ -1644,14 +2278,21 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         if final_result and "blocker:" in final_result.lower():
             blocker = final_result
             success = False
+        if app_settings.submit_intent != "submit" and final_result:
+            final_lower = final_result.lower()
+            if "application submitted" in final_lower or "submitted successfully" in final_lower:
+                blocker = "guard breach: application was submitted despite submit_intent=review"
+                success = False
 
         result_data = {
             "success": success,
             "steps": total_steps,
             "costUsd": round(total_cost, 6),
+            "costSummary": cost_summary,
             "finalResult": final_result,
             "blocker": blocker,
             "platform": platform,
+            "resumedAfterFalseVerification": resumed_after_false_verification,
             "best_effort_guess_count": best_effort_guess_count,
             "best_effort_guess_fields": best_effort_guess_fields,
         }
@@ -1719,6 +2360,13 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     except Exception as e:
         logger.error("agent_run_failed", error=str(e))
+        if last_cost_summary:
+            emit_cost(
+                total_usd=float(last_cost_summary.get("total_tracked_cost_usd") or 0.0),
+                prompt_tokens=int(last_cost_summary.get("total_tracked_prompt_tokens") or 0),
+                completion_tokens=int(last_cost_summary.get("total_tracked_completion_tokens") or 0),
+                cost_summary=last_cost_summary,
+            )
         runtime_error = _classify_runtime_error(
             e,
             proxy_mode=bool(args.proxy_url or (app_settings and app_settings.llm_proxy_url)),
@@ -1759,15 +2407,69 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 # ── Human-readable agent run ─────────────────────────────────────────
 
 
+def _print_cost_breakdown(cost_summary: dict[str, Any]) -> None:
+    """Print a per-subsystem cost breakdown for human-mode output."""
+    total = float(cost_summary.get("total_tracked_cost_usd") or 0.0)
+    bu_cost = float(cost_summary.get("browser_use_cost_usd") or 0.0)
+    dh_cost = float(cost_summary.get("domhand_cost_usd") or 0.0)
+    sh_calls = int(cost_summary.get("stagehand_calls") or 0)
+    sh_used = bool(cost_summary.get("stagehand_used"))
+
+    print(f"  Cost:    ${total:.4f}")
+    print(
+        f"    browser-use  ${bu_cost:.4f}  "
+        f"({int(cost_summary.get('browser_use_prompt_tokens') or 0)} in / "
+        f"{int(cost_summary.get('browser_use_completion_tokens') or 0)} out)"
+    )
+    print(
+        f"    domhand      ${dh_cost:.4f}  "
+        f"({int(cost_summary.get('domhand_prompt_tokens') or 0)} in / "
+        f"{int(cost_summary.get('domhand_completion_tokens') or 0)} out, "
+        f"{int(cost_summary.get('domhand_llm_calls') or 0)} calls)"
+    )
+    if sh_used:
+        print(f"    stagehand    (untracked, {sh_calls} calls)")
+    if cost_summary.get("untracked_cost_possible"):
+        reasons = ", ".join(cost_summary.get("untracked_reasons") or []) or "unknown"
+        print(f"  Note:    Additional untracked cost possible ({reasons})")
+
+
+def _print_human_result_summary(
+    history: Any,
+    cost_summary: dict[str, Any],
+    *,
+    interrupted: bool = False,
+) -> None:
+    """Print the human-mode result summary for completed or interrupted runs."""
+    title = "  RESULT (interrupted)" if interrupted else "  RESULT"
+    steps = len(getattr(history, "history", None) or [])
+    result = history.final_result() if history else None
+    done = bool(history.is_done()) if history else False
+
+    print()
+    print("=" * 60)
+    print(title)
+    print("=" * 60)
+    print(f"  Done:    {done}")
+    print(f"  Steps:   {steps}")
+    _print_cost_breakdown(cost_summary)
+    if result:
+        print(f"  Output:  {str(result)[:500]}")
+    print("=" * 60)
+    print()
+
+
 async def run_agent_human(args: argparse.Namespace) -> None:
     """Run the agent with human-readable terminal output.
 
     This replicates the examples/apply_to_job.py experience for developers
     who want to test from the command line without parsing JSONL.
     """
+    from ghosthands.cost_summary import summarize_history_cost
+
     # -- Load profile -------------------------------------------------------
     try:
-        profile = _load_profile(args)
+        profile = await _load_profile_async(args)
     except (json.JSONDecodeError, OSError, ValueError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1861,23 +2563,8 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         sensitive_data,
         credential_source=app_settings.credential_source,
         credential_intent=app_settings.credential_intent,
+        submit_intent=app_settings.submit_intent,
         platform=platform,
-    )
-
-    # -- Agent --------------------------------------------------------------
-    available_files = [resume_path] if resume_path else []
-    agent = Agent(
-        task=task,
-        llm=llm,
-        browser_session=browser,
-        tools=tools,
-        extend_system_message=system_ext or None,
-        sensitive_data=sensitive_data,
-        available_file_paths=available_files or None,
-        use_vision="auto",
-        max_actions_per_step=5,
-        calculate_cost=True,
-        use_judge=False,
     )
 
     print()
@@ -1894,22 +2581,109 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     print("=" * 60)
     print()
 
-    history = await agent.run(max_steps=args.max_steps)
+    print("Starting browser...")
+    await asyncio.wait_for(browser.start(), timeout=60)
 
-    print()
-    print("=" * 60)
-    print("  RESULT")
-    print("=" * 60)
-    print(f"  Done:    {history.is_done()}")
-    print(f"  Steps:   {len(history.history) if history.history else 0}")
-    if history.usage:
-        print(f"  Cost:    ${history.usage.total_cost:.4f}")
-        print(f"  Tokens:  {history.usage.total_prompt_tokens} in / {history.usage.total_completion_tokens} out")
-    result = history.final_result()
-    if result:
-        print(f"  Output:  {result[:500]}")
-    print("=" * 60)
-    print()
+    workday_preface_status = "noop"
+    workday_preface_message = ""
+    directly_open_url = True
+    initial_task = task
+    if platform == "workday":
+        workday_preface_status, workday_preface_message = await _run_workday_auth_preface(
+            browser,
+            job_url=args.job_url,
+            app_settings=app_settings,
+            platform=platform,
+        )
+        logger.info(
+            "cli.workday_auth_preface_human",
+            extra={"status": workday_preface_status, "message": workday_preface_message},
+        )
+        if workday_preface_status == "blocker":
+            print(f"Workday auth blocker: {workday_preface_message}")
+            print("Browser is still open for inspection. Press Ctrl+C to close when done.")
+            print()
+            try:
+                while True:
+                    await asyncio.sleep(1)
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                print("\nClosing browser...")
+                await _cleanup_browser(browser, desktop_owns_browser)
+                return
+        if workday_preface_status.startswith("continue"):
+            if workday_preface_status == "continue_auth_complete":
+                workday_stage = "auth_complete"
+            elif workday_preface_status == "continue_auth_page":
+                workday_stage = "auth_page"
+            else:
+                workday_stage = "resume_autofill"
+            directly_open_url = False
+            initial_task = _build_current_page_continuation_task(task, platform=platform, stage=workday_stage)
+
+    # -- Agent --------------------------------------------------------------
+    available_files = [resume_path] if resume_path else []
+    agent = Agent(
+        task=initial_task,
+        llm=llm,
+        browser_session=browser,
+        tools=tools,
+        extend_system_message=system_ext or None,
+        sensitive_data=sensitive_data,
+        available_file_paths=available_files or None,
+        use_vision="auto",
+        max_actions_per_step=app_settings.agent_max_actions_per_step,
+        calculate_cost=True,
+        use_judge=False,
+        directly_open_url=directly_open_url,
+    )
+
+    async def _on_step_start_human(ag: Agent) -> None:
+        from ghosthands.agent.oracle_step_tuning import maybe_tighten_max_actions_for_oracle_focus
+
+        await install_same_tab_guard(ag)
+        await maybe_tighten_max_actions_for_oracle_focus(ag)
+        await install_final_submit_guard(ag, allow_submit=app_settings.submit_intent == "submit")
+
+    async def _on_step_end_human(ag: Agent) -> None:
+        from browser_use.agent.views import ActionResult
+
+        if app_settings.submit_intent != "submit":
+            blocked_submit = await consume_blocked_final_submit(ag)
+            if blocked_submit:
+                label = str(blocked_submit.get("label") or "submit")
+                ag.state.last_result = [
+                    ActionResult(
+                        extracted_content=(
+                            f"Runtime blocked final submit control '{label}' because submit_intent=review. "
+                            "Stop at review; do not submit."
+                        ),
+                        include_extracted_content_only_once=True,
+                    )
+                ]
+
+    try:
+        history = await agent.run(
+            max_steps=args.max_steps,
+            on_step_start=_on_step_start_human,
+            on_step_end=_on_step_end_human,
+        )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        history = getattr(agent, "history", None)
+        cost_summary = summarize_history_cost(history, browser)
+        _print_human_result_summary(history, cost_summary, interrupted=True)
+        print("Closing browser...")
+        await _cleanup_browser(browser, desktop_owns_browser)
+        raise
+
+    try:
+        cost_summary = summarize_history_cost(history, browser)
+    except Exception as e:
+        print(f"\n  [ERROR] Cost summary failed: {e}", file=sys.stderr)
+        cost_summary = {"total_tracked_cost_usd": 0, "browser_use_cost_usd": 0,
+                        "domhand_cost_usd": 0, "stagehand_calls": 0, "stagehand_used": False,
+                        "total_tracked_prompt_tokens": 0, "total_tracked_completion_tokens": 0,
+                        "untracked_cost_possible": True, "untracked_reasons": [str(e)]}
+    _print_human_result_summary(history, cost_summary)
     print("  Browser is still open -- review the application before submitting.")
     print("  Press Ctrl+C to close when done.")
     print()

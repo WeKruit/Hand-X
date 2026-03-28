@@ -3,6 +3,7 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, patch
 
 from pytest_httpserver import HTTPServer
 
@@ -32,18 +33,20 @@ from ghosthands.actions.domhand_fill import (
     _match_answer,
     _parse_profile_evidence,
     extract_visible_form_fields,
+    domhand_fill,
 )
 from ghosthands.actions.domhand_interact_control import domhand_interact_control
-from ghosthands.actions.domhand_select import domhand_select
 from ghosthands.actions.domhand_select import (
     FAIL_OVER_CUSTOM_WIDGET,
     FAIL_OVER_NATIVE_SELECT,
     _build_failover_message,
     _selection_matches_value,
+    domhand_select,
 )
 from ghosthands.actions.views import (
     DomHandAssessStateParams,
     DomHandClosePopupParams,
+    DomHandFillParams,
     DomHandInteractControlParams,
     DomHandSelectParams,
     FormField,
@@ -56,6 +59,7 @@ from ghosthands.agent.prompts import (
     build_completion_detection_lines,
     build_system_prompt,
 )
+from ghosthands.dom.fill_executor import _fill_select_field
 from ghosthands.dom.shadow_helpers import ensure_helpers
 from ghosthands.integrations.resume_loader import _map_to_profile
 from ghosthands.platforms import detect_platform, detect_platform_from_signals, get_config_by_name
@@ -142,6 +146,554 @@ RESET_REQUIRED_BUTTON_GROUP_HTML = """
 </html>
 """
 
+ADJACENT_PILL_GROUPS_HTML = """
+<!DOCTYPE html>
+<html>
+<body>
+	<div class="apply-flow-block__form-list">
+		<form-builder>
+			<div class="input-row input-row--has-picker">
+				<div>How many years of relevant work experience do you have (after receiving your undergraduate degree)? *</div>
+				<div class="input-row__control-container reset-z-index">
+					<div>
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section">None</button></li>
+							<li><button type="button" class="cx-select-pill-section">&lt; 1 year</button></li>
+							<li><button type="button" class="cx-select-pill-section">1-2 years</button></li>
+							<li><button type="button" class="cx-select-pill-section">2-3 years</button></li>
+							<li><button type="button" class="cx-select-pill-section">3+ years</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div class="input-row input-row--has-picker">
+				<div>Please indicate your gender. *</div>
+				<div class="input-row__control-container reset-z-index">
+					<div>
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section">Female</button></li>
+							<li><button type="button" class="cx-select-pill-section">Male</button></li>
+							<li><button type="button" class="cx-select-pill-section">Non-binary</button></li>
+							<li><button type="button" class="cx-select-pill-section">Other</button></li>
+							<li><button type="button" class="cx-select-pill-section">Prefer not to say</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div class="input-row input-row--has-picker">
+				<div>Are you Hispanic or Latino? *</div>
+				<div class="input-row__control-container reset-z-index">
+					<div>
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section">Yes</button></li>
+							<li><button type="button" class="cx-select-pill-section">No</button></li>
+							<li><button type="button" class="cx-select-pill-section">Prefer not to say</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+		</form-builder>
+	</div>
+</body>
+</html>
+"""
+
+HARSH_PILL_GROUPS_HTML = """
+<!DOCTYPE html>
+<html>
+<body>
+	<div class="apply-flow-block__form-list">
+		<div>Application Questions</div>
+		<div>Please answer the following questions.</div>
+		<form-builder>
+			<div>EXPERIENCE</div>
+			<div class="input-row input-row--has-picker">
+				<div>How many years of relevant work experience do you have (after receiving your undergraduate degree)? *</div>
+				<div class="input-row__control-container reset-z-index">
+					<div>
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section">None</button></li>
+							<li><button type="button" class="cx-select-pill-section">&lt; 1 year</button></li>
+							<li><button type="button" class="cx-select-pill-section">1-2 years</button></li>
+							<li><button type="button" class="cx-select-pill-section">2-3 years</button></li>
+							<li><button type="button" class="cx-select-pill-section">3+ years</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+
+			<div>SELF IDENTIFICATION DETAILS</div>
+			<div>Completing this section is voluntary and will not affect your application.</div>
+			<div class="input-row input-row--has-picker">
+				<div>CONSENT: I hereby consent that Goldman Sachs can use and/or internally disclose my self-identified Sexual Orientation and Gender identity data. *</div>
+				<div class="input-row__control-container reset-z-index">
+					<div>
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section">I consent</button></li>
+							<li><button type="button" class="cx-select-pill-section">I do not consent</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div class="input-row input-row--has-picker">
+				<div>Please indicate your gender. *</div>
+				<div class="input-row__control-container reset-z-index">
+					<div>
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section">Female</button></li>
+							<li><button type="button" class="cx-select-pill-section">Male</button></li>
+							<li><button type="button" class="cx-select-pill-section">Non-binary</button></li>
+							<li><button type="button" class="cx-select-pill-section">Other</button></li>
+							<li><button type="button" class="cx-select-pill-section">Prefer not to say</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div class="input-row input-row--has-picker">
+				<div>Are you Hispanic or Latino? *</div>
+				<div class="input-row__control-container reset-z-index">
+					<div>
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section">Yes</button></li>
+							<li><button type="button" class="cx-select-pill-section">No</button></li>
+							<li><button type="button" class="cx-select-pill-section">Prefer not to say</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+
+			<div>WORK AUTHORIZATION</div>
+			<div>Please read the following questions carefully and answer to the best of your knowledge.</div>
+			<div class="input-row input-row--has-picker">
+				<div>Are you legally authorized to work in the United States? In other words, do you currently hold or can you obtain valid US work authorization? *</div>
+				<div class="input-row__control-container reset-z-index">
+					<div>
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section">Yes</button></li>
+							<li><button type="button" class="cx-select-pill-section">No</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div class="input-row input-row--has-picker">
+				<div>Are you a current contingent worker at Goldman Sachs? *</div>
+				<div class="input-row__control-container reset-z-index">
+					<div>
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section">Yes</button></li>
+							<li><button type="button" class="cx-select-pill-section">No</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+		</form-builder>
+	</div>
+</body>
+</html>
+"""
+
+HARSH_ORACLE_STEP3_HTML = """
+<!DOCTYPE html>
+<html>
+<body>
+	<div class="apply-flow-block__form-list">
+		<form-builder>
+			<div class="input-row">
+				<div id="latest-employer-field" data-automation-id="formField" aria-invalid="true">
+					<div data-automation-id="fieldLabel">Name of Latest Employer *</div>
+					<div class="input-field-container">
+						<input
+							id="latest-employer-combobox"
+							name="Name of Latest Employer"
+							data-ff-id="ff-latest-employer"
+							role="combobox"
+							data-uxi-widget-type="selectinput"
+							aria-label="Name of Latest Employer"
+							aria-autocomplete="list"
+							aria-haspopup="grid"
+							aria-controls="latest-employer-listbox"
+							aria-expanded="false"
+							aria-required="true"
+							value=""
+						/>
+						<div id="latest-employer-listbox" role="grid" hidden>
+							<div role="row"><div tabindex="-1" role="gridcell">Goldman Sachs</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">Google</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">Other</div></div>
+						</div>
+					</div>
+					<div id="latest-employer-error" class="error">This info is required.</div>
+				</div>
+			</div>
+			<div class="input-row">
+				<div id="degree-field" data-automation-id="formField" aria-invalid="true">
+					<div data-automation-id="fieldLabel">Degree *</div>
+					<div class="input-field-container">
+						<input
+							id="degree-combobox"
+							name="Degree"
+							data-ff-id="ff-degree"
+							role="combobox"
+							data-uxi-widget-type="selectinput"
+							aria-label="Degree"
+							aria-haspopup="listbox"
+							aria-controls="degree-listbox"
+							aria-expanded="false"
+							aria-required="true"
+							value="Bachelors"
+						/>
+						<div id="degree-listbox" role="grid" hidden>
+							<div role="row"><div tabindex="-1" role="gridcell">Associates</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">Bachelors</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">Masters</div></div>
+						</div>
+					</div>
+					<div id="degree-error" class="error">This info is required.</div>
+				</div>
+			</div>
+			<div class="input-row input-row--has-picker">
+				<div>Cumulative GPA (Grading System) *</div>
+				<div class="input-row__control-container reset-z-index">
+					<div>
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section">Alphabetical (A+ to P)</button></li>
+							<li><button type="button" class="cx-select-pill-section">GPA (out of 100)/Percentage</button></li>
+							<li><button type="button" class="cx-select-pill-section">GPA/Grade (out of 12)</button></li>
+							<li><button type="button" class="cx-select-pill-section">GPA/Grade (out of 10)</button></li>
+							<li><button type="button" class="cx-select-pill-section">GPA/Grade (out of 5)</button></li>
+							<li><button type="button" class="cx-select-pill-section">GPA/Grade (out of 4)</button></li>
+							<li><button type="button" class="cx-select-pill-section" aria-pressed="true">Honors/(High Pass; Satisfactory+)/(Pass,Satisfactory)/Low Pass</button></li>
+							<li><button type="button" class="cx-select-pill-section">Other</button></li>
+							<li><button type="button" class="cx-select-pill-section">Pass/Fail</button></li>
+							<li><button type="button" class="cx-select-pill-section">Grade (1st Class Honors to Fail)</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div class="input-row input-row--has-picker">
+				<div>Are you authorized to work in the United States? *</div>
+				<div class="input-row__control-container reset-z-index">
+					<div>
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section">Yes</button></li>
+							<li><button type="button" class="cx-select-pill-section">No</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div class="input-row input-row--has-picker">
+				<div>Please identify your race/ethnicity. *</div>
+				<div class="input-row__control-container reset-z-index">
+					<div>
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section">Asian</button></li>
+							<li><button type="button" class="cx-select-pill-section">Black or African American</button></li>
+							<li><button type="button" class="cx-select-pill-section">Hispanic or Latino</button></li>
+							<li><button type="button" class="cx-select-pill-section">White</button></li>
+							<li><button type="button" class="cx-select-pill-section">Prefer not to say</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+		</form-builder>
+	</div>
+	<script>
+		window.__latestEmployerSelected = '';
+		window.__degreeSelected = '';
+
+		function bindOracleCombobox(fieldId, listboxId, invalidFieldId, errorId, setter) {
+			const input = document.getElementById(fieldId);
+			const listbox = document.getElementById(listboxId);
+			const field = document.getElementById(invalidFieldId);
+			const error = document.getElementById(errorId);
+			input.addEventListener('click', (event) => {
+				if (!event.isTrusted) return;
+				input.setAttribute('aria-expanded', 'true');
+				listbox.hidden = false;
+			});
+			Array.from(listbox.querySelectorAll('[role="gridcell"]')).forEach((option) => {
+				option.addEventListener('click', (event) => {
+					if (!event.isTrusted) return;
+					const value = event.currentTarget.textContent.trim();
+					input.value = value;
+					input.setAttribute('aria-expanded', 'false');
+					listbox.hidden = true;
+					field.setAttribute('aria-invalid', 'false');
+					error.textContent = '';
+					setter(value);
+				});
+			});
+		}
+
+		bindOracleCombobox(
+			'latest-employer-combobox',
+			'latest-employer-listbox',
+			'latest-employer-field',
+			'latest-employer-error',
+			(value) => { window.__latestEmployerSelected = value; }
+		);
+		bindOracleCombobox(
+			'degree-combobox',
+			'degree-listbox',
+			'degree-field',
+			'degree-error',
+			(value) => { window.__degreeSelected = value; }
+		);
+	</script>
+</body>
+</html>
+"""
+
+HARSH_ORACLE_STEP2_HTML = """
+<!DOCTYPE html>
+<html>
+<body>
+	<div class="apply-flow-block__form-list">
+		<form-builder>
+			<div>Application Questions</div>
+			<div>Please answer the following questions.</div>
+			<div>EXPERIENCE</div>
+			<div class="input-row input-row--has-picker">
+				<div class="input-row__control-container reset-z-index" data-ff-id="ff-exp-wrapper">
+					<div class="oracle-question-label">How many years of relevant work experience do you have (after receiving your undergraduate degree)? *</div>
+					<div class="oracle-pill-group" data-group-id="experience-years">
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-exp-0" aria-pressed="false">None</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-exp-1" aria-pressed="false">&lt; 1 year</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-exp-2" aria-pressed="false">1-2 years</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-exp-3" aria-pressed="false">2-3 years</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-exp-4" aria-pressed="false">3+ years</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+
+			<div>SELF IDENTIFICATION DETAILS</div>
+			<div>Completing this section is voluntary and will not affect your application.</div>
+			<div class="input-row input-row--has-picker">
+				<div class="input-row__control-container reset-z-index" data-ff-id="ff-consent-wrapper">
+					<div class="oracle-question-label">CONSENT: I hereby consent that Goldman Sachs can use and/or internally disclose my self-identified Sexual Orientation and Gender identity data. *</div>
+					<div class="oracle-pill-group" data-group-id="consent">
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-consent-yes" aria-pressed="false">I consent</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-consent-no" aria-pressed="false">I do not consent</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div class="input-row input-row--has-picker">
+				<div class="input-row__control-container reset-z-index" data-ff-id="ff-gender-wrapper">
+					<div class="oracle-question-label">Please indicate your gender. *</div>
+					<div class="oracle-pill-group" data-group-id="gender">
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-gender-1" aria-pressed="false">Female</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-gender-2" aria-pressed="false">Male</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-gender-3" aria-pressed="false">Non-binary</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-gender-4" aria-pressed="false">Other</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-gender-5" aria-pressed="false">Prefer not to say</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div class="input-row input-row--has-picker">
+				<div class="input-row__control-container reset-z-index" data-ff-id="ff-trans-wrapper">
+					<div class="oracle-question-label">Please indicate if you identify as Transgender. *</div>
+					<div class="oracle-pill-group" data-group-id="transgender">
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-trans-1" aria-pressed="false">Yes</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-trans-2" aria-pressed="false">No</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-trans-3" aria-pressed="false">I prefer not to say</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div class="input-row input-row--has-picker">
+				<div class="input-row__control-container reset-z-index" data-ff-id="ff-orient-wrapper">
+					<div class="oracle-question-label">Please indicate your sexual orientation. *</div>
+					<div class="oracle-pill-group" data-group-id="orientation">
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-orient-1" aria-pressed="false">Bisexual</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-orient-2" aria-pressed="false">Gay</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-orient-3" aria-pressed="false">Lesbian</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-orient-4" aria-pressed="false">Heterosexual/Straight</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-orient-5" aria-pressed="false">Other</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-orient-6" aria-pressed="false">Prefer not to say</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div class="input-row input-row--has-picker">
+				<div class="input-row__control-container reset-z-index" data-ff-id="ff-pronoun-wrapper">
+					<div class="oracle-question-label">Please indicate your pronouns. *</div>
+					<div class="oracle-pill-group" data-group-id="pronouns">
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-pronoun-1" aria-pressed="false">He / Him</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-pronoun-2" aria-pressed="false">She / Her</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-pronoun-3" aria-pressed="false">They / Them</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-pronoun-4" aria-pressed="false">Other</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-pronoun-5" aria-pressed="false">Prefer Not To Say</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+
+			<div>RACE/ETHNICITY</div>
+			<div class="input-row input-row--has-picker">
+				<div class="input-row__control-container reset-z-index" data-ff-id="ff-hisp-wrapper">
+					<div class="oracle-question-label">Are you Hispanic or Latino? *</div>
+					<div class="oracle-pill-group" data-group-id="hispanic">
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-hisp-1" aria-pressed="false">Yes</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-hisp-2" aria-pressed="false">No</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-hisp-3" aria-pressed="false">Prefer not to say</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div class="input-row input-row--has-picker">
+				<div class="input-row__control-container reset-z-index" data-ff-id="ff-race-wrapper">
+					<div class="oracle-question-label">Please identify your race/ethnicity. *</div>
+					<div class="oracle-pill-group" data-group-id="race">
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-race-1" aria-pressed="false">Asian</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-race-2" aria-pressed="false">Black or African American</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-race-3" aria-pressed="false">Hispanic or Latino</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-race-4" aria-pressed="false">White</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-race-5" aria-pressed="false">Prefer not to say</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+
+			<div>WORK AUTHORIZATION</div>
+			<div>Please read the following questions carefully and answer to the best of your knowledge.</div>
+			<div class="input-row input-row--has-picker">
+				<div class="input-row__control-container reset-z-index" data-ff-id="ff-work-auth-wrapper">
+					<div class="oracle-question-label">Are you legally authorized to work in the United States? In other words, do you currently hold or can you obtain valid US work authorization? *</div>
+					<div class="oracle-pill-group" data-group-id="work-auth">
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-auth-1" aria-pressed="false">Yes</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-auth-2" aria-pressed="false">No</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div class="input-row input-row--has-picker">
+				<div class="input-row__control-container reset-z-index" data-ff-id="ff-cw-wrapper">
+					<div class="oracle-question-label">Are you a current contingent worker at Goldman Sachs? *</div>
+					<div class="oracle-pill-group" data-group-id="contingent-worker">
+						<ul class="cx-select-pills-container">
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-cw-1" aria-pressed="false">Yes</button></li>
+							<li><button type="button" class="cx-select-pill-section" data-ff-id="ff-cw-2" aria-pressed="false">No</button></li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div
+				id="visa-row"
+				class="input-row input-row--has-picker"
+				style="display:none;"
+			>
+				<div class="input-row__control-container reset-z-index" data-ff-id="ff-visa-wrapper">
+					<div class="oracle-question-label">If you currently hold or can obtain valid work authorization, please indicate your current visa type or basis for employment authorization in the United States: (e.g., N/A, E-1, E-2, E-3, F-1, G-3, G-4, H-1B, H- 1B1, H-4, J-1, J-2, L-1, L-2, TN, Adjustment of Status (AOS) Applicant, Other). Please choose N/A if none of these apply to you.</div>
+					<div class="oracle-pill-group" data-group-id="visa-type">
+						<input
+							id="visa-combobox"
+							name="300005831674178"
+							data-ff-id="ff-100"
+							role="combobox"
+							aria-autocomplete="list"
+							aria-haspopup="grid"
+							aria-controls="visa-listbox"
+							aria-expanded="false"
+							aria-required="true"
+							value=""
+						/>
+						<div id="visa-listbox" role="grid" hidden>
+							<div role="row"><div tabindex="-1" role="gridcell">N/A</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">E-1</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">E-2</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">E-3</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">F-1</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">G-3</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">G-4</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">H-1B</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">H-1B1</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">H-4</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">J-1</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">J-2</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">L-1</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">L-2</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">TN</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">Adjustment of Status (AOS) Applicant</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">OPT</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">CPT</div></div>
+							<div role="row"><div tabindex="-1" role="gridcell">Other</div></div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</form-builder>
+	</div>
+	<script>
+		window.__selectedMap = {};
+		window.__visaSelected = '';
+		const groupButtons = Array.from(document.querySelectorAll('.oracle-pill-group .cx-select-pill-section[data-ff-id]'));
+		const visaRow = document.getElementById('visa-row');
+		const visaCombobox = document.getElementById('visa-combobox');
+		const visaListbox = document.getElementById('visa-listbox');
+
+		function setVisaVisible(visible) {
+			visaRow.style.display = visible ? '' : 'none';
+			if (!visible) {
+				visaCombobox.value = '';
+				visaCombobox.setAttribute('aria-expanded', 'false');
+				visaListbox.hidden = true;
+				window.__visaSelected = '';
+			}
+		}
+
+		groupButtons.forEach((button) => {
+			button.addEventListener('click', (event) => {
+				if (!event.isTrusted) return;
+				const group = event.currentTarget.closest('.oracle-pill-group');
+				if (!group) return;
+				const groupId = group.getAttribute('data-group-id') || '';
+				group.querySelectorAll('.cx-select-pill-section').forEach((candidate) => {
+					candidate.setAttribute('aria-pressed', 'false');
+					candidate.classList.remove('cx-select-pill-section--selected');
+				});
+				event.currentTarget.setAttribute('aria-pressed', 'true');
+				event.currentTarget.classList.add('cx-select-pill-section--selected');
+				const selectedText = event.currentTarget.textContent.trim();
+				window.__selectedMap[groupId] = selectedText;
+				if (groupId === 'work-auth') {
+					setVisaVisible(selectedText === 'Yes');
+				}
+			});
+		});
+
+		visaCombobox.addEventListener('click', (event) => {
+			if (!event.isTrusted) return;
+			visaCombobox.setAttribute('aria-expanded', 'true');
+			visaListbox.hidden = false;
+		});
+
+		Array.from(visaListbox.querySelectorAll('[role="gridcell"]')).forEach((option) => {
+			option.addEventListener('click', (event) => {
+				if (!event.isTrusted) return;
+				const value = event.currentTarget.textContent.trim();
+				visaCombobox.value = value;
+				visaCombobox.setAttribute('aria-expanded', 'false');
+				visaListbox.hidden = true;
+				window.__visaSelected = value;
+			});
+		});
+	</script>
+</body>
+</html>
+"""
+
 TRUSTED_CHECKBOX_HTML = """
 <!DOCTYPE html>
 <html>
@@ -188,6 +740,7 @@ WORKDAY_INTERACTIVE_BLOCKERS_HTML = """
 	<div
 		id="source-field"
 		data-automation-id="formField"
+		aria-invalid="true"
 		style="display:flex;flex-direction:column;gap:8px;width:520px;margin-bottom:20px;"
 	>
 		<label for="source--source">How Did You Hear About Us?*</label>
@@ -347,6 +900,97 @@ ALREADY_SELECTED_INVALID_SOURCE_WITH_OPTIONS_HTML = """
 			field.setAttribute('aria-invalid', 'false');
 			pill.textContent = 'LinkedIn';
 			window.__selectedSource = 'LinkedIn';
+		});
+	</script>
+</body>
+</html>
+"""
+
+GREENHOUSE_TRUSTED_TOGGLE_SELECT_HTML = """
+<!DOCTYPE html>
+<html>
+<body>
+	<div
+		id="source-field"
+		data-automation-id="formField"
+		style="display:flex;flex-direction:column;gap:8px;width:520px;margin-bottom:20px;"
+	>
+		<label for="source--source">How Did You Hear About Us?*</label>
+		<div class="select__control" style="display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid #bbb;padding:8px;">
+			<div class="select__value-container" style="display:flex;align-items:center;gap:8px;flex:1;">
+				<div id="source-pill" data-automation-id="selectedItem" class="selected-pill">Select...</div>
+				<input
+					id="source--source"
+					data-ff-id="source--source"
+					role="combobox"
+					aria-label="How Did You Hear About Us?"
+					aria-haspopup="listbox"
+					aria-expanded="false"
+					aria-invalid="true"
+					value=""
+					style="flex:1;border:0;outline:none;"
+				/>
+			</div>
+			<button type="button" id="source-toggle" aria-label="Toggle flyout">Toggle</button>
+		</div>
+	</div>
+
+	<div
+		id="source-menu"
+		role="listbox"
+		hidden
+		style="border:1px solid #aaa;padding:8px;width:320px;background:#fff;"
+	>
+		<div role="option" id="linkedin-option">LinkedIn</div>
+		<div role="option" id="job-board-option">Job Board</div>
+	</div>
+
+	<script>
+		window.__selectedSource = '';
+		const input = document.getElementById('source--source');
+		const toggle = document.getElementById('source-toggle');
+		const menu = document.getElementById('source-menu');
+		const pill = document.getElementById('source-pill');
+		const linkedin = document.getElementById('linkedin-option');
+		const jobBoard = document.getElementById('job-board-option');
+
+		function openMenu() {
+			menu.hidden = false;
+			input.setAttribute('aria-expanded', 'true');
+		}
+
+		function closeMenu() {
+			menu.hidden = true;
+			input.setAttribute('aria-expanded', 'false');
+		}
+
+		toggle.addEventListener('click', (event) => {
+			if (!event.isTrusted) return;
+			openMenu();
+			input.focus();
+		});
+
+		input.addEventListener('click', (event) => {
+			if (!event.isTrusted) return;
+			openMenu();
+		});
+
+		linkedin.addEventListener('click', () => {
+			window.__selectedSource = 'LinkedIn';
+			pill.textContent = 'LinkedIn';
+			input.value = 'LinkedIn';
+			input.setAttribute('aria-invalid', 'false');
+			document.getElementById('source-field').setAttribute('aria-invalid', 'false');
+			closeMenu();
+		});
+
+		jobBoard.addEventListener('click', () => {
+			window.__selectedSource = 'Job Board';
+			pill.textContent = 'Job Board';
+			input.value = 'Job Board';
+			input.setAttribute('aria-invalid', 'false');
+			document.getElementById('source-field').setAttribute('aria-invalid', 'false');
+			closeMenu();
 		});
 	</script>
 </body>
@@ -655,6 +1299,537 @@ async def test_extract_visible_form_fields_groups_radios_even_when_sections_matc
     assert fields[0].choices == ["Yes", "No"]
 
 
+async def test_extract_visible_form_fields_keeps_adjacent_pill_groups_scoped_to_own_questions(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/adjacent-pill-groups").respond_with_data(
+            ADJACENT_PILL_GROUPS_HTML,
+            content_type="text/html",
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/adjacent-pill-groups"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+
+        page = await browser_session.get_current_page()
+        assert page is not None
+        await page.evaluate(_build_inject_helpers_js())
+
+        fields = await extract_visible_form_fields(page)
+        button_groups = [field for field in fields if field.field_type == "button-group"]
+
+        assert [field.name for field in button_groups] == [
+            "How many years of relevant work experience do you have (after receiving your undergraduate degree)?",
+            "Please indicate your gender.",
+            "Are you Hispanic or Latino?",
+        ]
+        assert button_groups[0].choices == ["None", "< 1 year", "1-2 years", "2-3 years", "3+ years"]
+        assert button_groups[1].choices == ["Female", "Male", "Non-binary", "Other", "Prefer not to say"]
+        assert button_groups[2].choices == ["Yes", "No", "Prefer not to say"]
+        assert all(field.required for field in button_groups)
+        assert all(field.name != "Button group choice" for field in button_groups)
+        assert len({field.field_fingerprint for field in button_groups}) == 3
+
+
+async def test_extract_visible_form_fields_handles_harsh_adjacent_reused_yes_no_groups(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/harsh-pill-groups").respond_with_data(
+            HARSH_PILL_GROUPS_HTML,
+            content_type="text/html",
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/harsh-pill-groups"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+
+        page = await browser_session.get_current_page()
+        assert page is not None
+        await page.evaluate(_build_inject_helpers_js())
+
+        fields = await extract_visible_form_fields(page)
+        button_groups = [field for field in fields if field.field_type == "button-group"]
+
+        assert [field.name for field in button_groups] == [
+            "How many years of relevant work experience do you have (after receiving your undergraduate degree)?",
+            "CONSENT: I hereby consent that Goldman Sachs can use and/or internally disclose my self-identified Sexual Orientation and Gender identity data.",
+            "Please indicate your gender.",
+            "Are you Hispanic or Latino?",
+            "Are you legally authorized to work in the United States? In other words, do you currently hold or can you obtain valid US work authorization?",
+            "Are you a current contingent worker at Goldman Sachs?",
+        ]
+        assert button_groups[0].choices == ["None", "< 1 year", "1-2 years", "2-3 years", "3+ years"]
+        assert button_groups[1].choices == ["I consent", "I do not consent"]
+        assert button_groups[2].choices == ["Female", "Male", "Non-binary", "Other", "Prefer not to say"]
+        assert button_groups[3].choices == ["Yes", "No", "Prefer not to say"]
+        assert button_groups[4].choices == ["Yes", "No"]
+        assert button_groups[5].choices == ["Yes", "No"]
+        assert all(field.name != "Button group choice" for field in button_groups)
+        assert len({field.field_fingerprint for field in button_groups}) == 6
+
+
+async def test_extract_visible_form_fields_handles_oracle_combobox_and_long_pill_groups(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/oracle-step3").respond_with_data(
+            HARSH_ORACLE_STEP3_HTML,
+            content_type="text/html",
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/oracle-step3"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+
+        page = await browser_session.get_current_page()
+        assert page is not None
+        await page.evaluate(_build_inject_helpers_js())
+
+        fields = await extract_visible_form_fields(page)
+        select_fields = [field for field in fields if field.field_type == "select"]
+        assert len(select_fields) == 2
+        degree = next(field for field in select_fields if "degree" in field.name.lower())
+        latest_employer = next(field for field in select_fields if "latest employer" in field.name.lower())
+        assert degree.field_type == "select"
+        assert degree.current_value == "Bachelors"
+        assert latest_employer.field_type == "select"
+        assert latest_employer.current_value == ""
+
+        by_name = {field.name: field for field in fields}
+        grading = by_name["Cumulative GPA (Grading System)"]
+        assert grading.field_type == "button-group"
+        assert grading.current_value == "Honors/(High Pass; Satisfactory+)/(Pass,Satisfactory)/Low Pass"
+        assert grading.choices == [
+            "Alphabetical (A+ to P)",
+            "GPA (out of 100)/Percentage",
+            "GPA/Grade (out of 12)",
+            "GPA/Grade (out of 10)",
+            "GPA/Grade (out of 5)",
+            "GPA/Grade (out of 4)",
+            "Honors/(High Pass; Satisfactory+)/(Pass,Satisfactory)/Low Pass",
+            "Other",
+            "Pass/Fail",
+            "Grade (1st Class Honors to Fail)",
+        ]
+
+
+async def test_domhand_fill_leaves_latest_employer_unresolved_when_company_missing_from_options(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/oracle-step3-latest-employer").respond_with_data(
+            HARSH_ORACLE_STEP3_HTML,
+            content_type="text/html",
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/oracle-step3-latest-employer"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+
+        with (
+            patch("ghosthands.actions.domhand_fill._get_profile_text", return_value="profile text"),
+            patch("ghosthands.actions.domhand_fill._get_profile_data", return_value={"current_company": "WeKruit"}),
+            patch("ghosthands.actions.domhand_fill._get_auth_override_data", return_value={}),
+            patch("ghosthands.actions.domhand_fill._infer_entry_data_from_scope", return_value=None),
+            patch("ghosthands.actions.domhand_fill._parse_profile_evidence", return_value={}),
+            patch(
+                "ghosthands.actions.domhand_fill._safe_page_url",
+                AsyncMock(return_value="https://hdpc.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/LateralHiring/job/162133/apply/section/3"),
+            ),
+            patch("ghosthands.actions.domhand_fill._get_page_context_key", AsyncMock(return_value="ctx")),
+            patch("ghosthands.actions.domhand_fill._semantic_profile_value_for_field", AsyncMock(return_value=None)),
+            patch("ghosthands.actions.domhand_fill._generate_answers", AsyncMock(side_effect=AssertionError("LLM should not be called"))),
+            patch("ghosthands.actions.domhand_fill._record_expected_value_if_settled", AsyncMock(return_value=True)),
+            patch("ghosthands.actions.domhand_fill._stagehand_observe_cross_reference", AsyncMock(return_value=None)),
+        ):
+            result = await domhand_fill(
+                DomHandFillParams(focus_fields=["Name of Latest Employer"]),
+                browser_session,
+            )
+
+        assert result.error is None
+        page = await browser_session.get_current_page()
+        assert page is not None
+        assert await page.evaluate("() => window.__latestEmployerSelected") in (None, "")
+        assert await page.evaluate("() => document.getElementById('latest-employer-field').getAttribute('aria-invalid')") == "true"
+
+
+async def test_domhand_fill_reselects_invalid_prefilled_degree_on_oracle_step3(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/oracle-step3-invalid-degree").respond_with_data(
+            HARSH_ORACLE_STEP3_HTML,
+            content_type="text/html",
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/oracle-step3-invalid-degree"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+
+        with (
+            patch("ghosthands.actions.domhand_fill._get_profile_text", return_value="profile text"),
+            patch("ghosthands.actions.domhand_fill._get_profile_data", return_value={"education": [{"degree": "B.S."}]}),
+            patch("ghosthands.actions.domhand_fill._get_auth_override_data", return_value={}),
+            patch("ghosthands.actions.domhand_fill._infer_entry_data_from_scope", return_value=None),
+            patch("ghosthands.actions.domhand_fill._parse_profile_evidence", return_value={}),
+            patch(
+                "ghosthands.actions.domhand_fill._safe_page_url",
+                AsyncMock(return_value="https://hdpc.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/LateralHiring/job/162133/apply/section/3"),
+            ),
+            patch("ghosthands.actions.domhand_fill._get_page_context_key", AsyncMock(return_value="ctx")),
+            patch("ghosthands.actions.domhand_fill._semantic_profile_value_for_field", AsyncMock(return_value=None)),
+            patch("ghosthands.actions.domhand_fill._generate_answers", AsyncMock(side_effect=AssertionError("LLM should not be called"))),
+            patch("ghosthands.actions.domhand_fill._record_expected_value_if_settled", AsyncMock(return_value=True)),
+            patch("ghosthands.actions.domhand_fill._stagehand_observe_cross_reference", AsyncMock(return_value=None)),
+        ):
+            result = await domhand_fill(
+                DomHandFillParams(focus_fields=["Degree"]),
+                browser_session,
+            )
+
+        assert result.error is None
+        page = await browser_session.get_current_page()
+        assert page is not None
+        assert await page.evaluate("() => window.__degreeSelected") == "Bachelors"
+        assert await page.evaluate("() => document.getElementById('degree-field').getAttribute('aria-invalid')") == "false"
+
+
+async def test_fill_button_groups_keeps_adjacent_oracle_groups_isolated_in_realistic_mock(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/oracle-step2-harsh").respond_with_data(
+            HARSH_ORACLE_STEP2_HTML,
+            content_type="text/html",
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/oracle-step2-harsh"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+
+        page = await browser_session.get_current_page()
+        assert page is not None
+        await page.evaluate(_build_inject_helpers_js())
+
+        fields = await extract_visible_form_fields(page)
+        button_groups = {field.name: field for field in fields if field.field_type == "button-group"}
+
+        desired_answers = {
+            "How many years of relevant work experience do you have (after receiving your undergraduate degree)?": "None",
+            "CONSENT: I hereby consent that Goldman Sachs can use and/or internally disclose my self-identified Sexual Orientation and Gender identity data.": "I consent",
+            "Please indicate your gender.": "Male",
+            "Please indicate if you identify as Transgender.": "I prefer not to say",
+            "Please indicate your sexual orientation.": "Heterosexual/Straight",
+            "Please indicate your pronouns.": "He / Him",
+            "Are you Hispanic or Latino?": "No",
+            "Please identify your race/ethnicity.": "Asian",
+            "Are you legally authorized to work in the United States? In other words, do you currently hold or can you obtain valid US work authorization?": "Yes",
+            "Are you a current contingent worker at Goldman Sachs?": "No",
+        }
+
+        for field_name, desired_value in desired_answers.items():
+            assert field_name in button_groups
+            success = await _fill_button_group(page, button_groups[field_name], desired_value, f"[{field_name}]")
+            assert success is True
+
+        selected_map_raw = await page.evaluate("() => window.__selectedMap")
+        selected_map = json.loads(selected_map_raw) if isinstance(selected_map_raw, str) else selected_map_raw
+        assert selected_map == {
+            "experience-years": "None",
+            "consent": "I consent",
+            "gender": "Male",
+            "transgender": "I prefer not to say",
+            "orientation": "Heterosexual/Straight",
+            "pronouns": "He / Him",
+            "hispanic": "No",
+            "race": "Asian",
+            "work-auth": "Yes",
+            "contingent-worker": "No",
+        }
+
+
+async def test_domhand_interact_control_without_field_id_does_not_drift_to_first_oracle_group(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/oracle-step2-harsh-interact-control").respond_with_data(
+            HARSH_ORACLE_STEP2_HTML,
+            content_type="text/html",
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/oracle-step2-harsh-interact-control"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+
+        result = await domhand_interact_control(
+            DomHandInteractControlParams(
+                field_label="Please indicate your pronouns.",
+                desired_value="He / Him",
+                target_section="Application Questions",
+                field_type="button-group",
+            ),
+            browser_session,
+        )
+
+        assert result.error is None
+
+        page = await browser_session.get_current_page()
+        assert page is not None
+        selected_map_raw = await page.evaluate("() => window.__selectedMap")
+        selected_map = json.loads(selected_map_raw) if isinstance(selected_map_raw, str) else selected_map_raw
+        assert selected_map == {
+            "pronouns": "He / Him",
+        }
+
+
+async def test_oracle_work_authorization_reveals_follow_up_visa_field_without_cross_group_drift(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/oracle-step2-harsh-reveal").respond_with_data(
+            HARSH_ORACLE_STEP2_HTML,
+            content_type="text/html",
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/oracle-step2-harsh-reveal"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+
+        page = await browser_session.get_current_page()
+        assert page is not None
+        await page.evaluate(_build_inject_helpers_js())
+
+        initial_fields = await extract_visible_form_fields(page)
+        initial_by_name = {field.name: field for field in initial_fields}
+        visa_prompt = (
+            "If you currently hold or can obtain valid work authorization, please indicate your current visa type or basis for employment authorization in the United States: (e.g., N/A, E-1, E-2, E-3, F-1, G-3, G-4, H-1B, H- 1B1, H-4, J-1, J-2, L-1, L-2, TN, Adjustment of Status (AOS) Applicant, Other). Please choose N/A if none of these apply to you."
+        )
+        assert visa_prompt not in initial_by_name
+
+        work_auth = initial_by_name[
+            "Are you legally authorized to work in the United States? In other words, do you currently hold or can you obtain valid US work authorization?"
+        ]
+        contingent_worker = initial_by_name["Are you a current contingent worker at Goldman Sachs?"]
+
+        assert await _fill_button_group(page, work_auth, "Yes", "[work-auth]") is True
+        assert await _fill_button_group(page, contingent_worker, "No", "[contingent-worker]") is True
+
+        await asyncio.sleep(0.2)
+        fields_after_reveal = await extract_visible_form_fields(page)
+        by_name_after_reveal = {field.name: field for field in fields_after_reveal}
+        visa_fields = [
+            field
+            for field in fields_after_reveal
+            if field.field_id == "ff-100" or "visa" in field.name.lower()
+        ]
+        assert len(visa_fields) == 1
+        assert visa_fields[0].field_type == "select"
+
+        selected_map_raw = await page.evaluate("() => window.__selectedMap")
+        selected_map = json.loads(selected_map_raw) if isinstance(selected_map_raw, str) else selected_map_raw
+        assert selected_map["work-auth"] == "Yes"
+        assert selected_map["contingent-worker"] == "No"
+
+
+async def test_oracle_revealed_visa_field_is_rejected_by_interact_control_and_left_to_select_path(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/oracle-step2-harsh-interact-stale-field-id").respond_with_data(
+            HARSH_ORACLE_STEP2_HTML,
+            content_type="text/html",
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/oracle-step2-harsh-interact-stale-field-id"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+
+        page = await browser_session.get_current_page()
+        assert page is not None
+        await page.evaluate(_build_inject_helpers_js())
+
+        initial_fields = await extract_visible_form_fields(page)
+        initial_by_name = {field.name: field for field in initial_fields}
+        work_auth = initial_by_name[
+            "Are you legally authorized to work in the United States? In other words, do you currently hold or can you obtain valid US work authorization?"
+        ]
+        contingent_worker = initial_by_name["Are you a current contingent worker at Goldman Sachs?"]
+
+        assert await _fill_button_group(page, work_auth, "Yes", "[work-auth]") is True
+        assert await _fill_button_group(page, contingent_worker, "No", "[contingent-worker]") is True
+
+        await asyncio.sleep(0.2)
+        fields_after_reveal = await extract_visible_form_fields(page)
+        visa_field = next(
+            field
+            for field in fields_after_reveal
+            if field.field_id == "ff-100" or "visa" in field.name.lower()
+        )
+
+        result = await domhand_interact_control(
+            DomHandInteractControlParams(
+                field_label=visa_field.name,
+                desired_value="F-1 OPT",
+                field_id="ff-visa-type-stale",
+                field_type="select",
+                target_section=visa_field.section,
+            ),
+            browser_session,
+        )
+
+        assert result.error is not None
+        assert "Use domhand_select" in result.error
+        assert result.metadata["recommended_next_action"] == "use_domhand_select_or_browser_use_manual"
+        assert await page.evaluate("() => document.querySelector('[data-ff-id=\"ff-100\"]').value") == ""
+
+
+async def test_domhand_select_can_resolve_revealed_oracle_visa_combobox_by_field_id(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/oracle-step2-harsh-select-by-field-id").respond_with_data(
+            HARSH_ORACLE_STEP2_HTML,
+            content_type="text/html",
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/oracle-step2-harsh-select-by-field-id"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+
+        page = await browser_session.get_current_page()
+        assert page is not None
+        await page.evaluate(_build_inject_helpers_js())
+
+        initial_fields = await extract_visible_form_fields(page)
+        work_auth = next(
+            field
+            for field in initial_fields
+            if field.name
+            == "Are you legally authorized to work in the United States? In other words, do you currently hold or can you obtain valid US work authorization?"
+        )
+        assert await _fill_button_group(page, work_auth, "Yes", "[work-auth]") is True
+        await asyncio.sleep(0.2)
+        await browser_session.get_browser_state_summary()
+
+        result = await domhand_select(
+            DomHandSelectParams(
+                value="N/A",
+                field_id="ff-100",
+                field_label=(
+                    "If you currently hold or can obtain valid work authorization, please indicate your current visa type "
+                    "or basis for employment authorization in the United States: (e.g., N/A, E-1, E-2, E-3, F-1, G-3, "
+                    "G-4, H-1B, H- 1B1, H-4, J-1, J-2, L-1, L-2, TN, Adjustment of Status (AOS) Applicant, Other). "
+                    "Please choose N/A if none of these apply to you."
+                ),
+                target_section="Job Application Questions",
+            ),
+            browser_session,
+        )
+
+        assert result.error is None
+        assert await page.evaluate("() => document.querySelector('[data-ff-id=\"ff-100\"]').value") == "N/A"
+
+
+async def test_domhand_select_uses_live_index_when_prior_field_id_is_stale_after_reveal(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/oracle-step2-harsh-select-stale-field-id").respond_with_data(
+            HARSH_ORACLE_STEP2_HTML,
+            content_type="text/html",
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/oracle-step2-harsh-select-stale-field-id"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+
+        page = await browser_session.get_current_page()
+        assert page is not None
+        await page.evaluate(_build_inject_helpers_js())
+
+        initial_fields = await extract_visible_form_fields(page)
+        work_auth = next(
+            field
+            for field in initial_fields
+            if field.name
+            == "Are you legally authorized to work in the United States? In other words, do you currently hold or can you obtain valid US work authorization?"
+        )
+        assert await _fill_button_group(page, work_auth, "Yes", "[work-auth]") is True
+        await asyncio.sleep(0.2)
+        await browser_session.get_browser_state_summary()
+
+        selector_map = await browser_session.get_selector_map()
+        visa_index = next(
+            idx for idx, element in selector_map.items() if (element.attributes or {}).get("data-ff-id") == "ff-100"
+        )
+
+        result = await domhand_select(
+            DomHandSelectParams(
+                index=visa_index,
+                value="F-1 OPT",
+                field_id="ff-visa-type-stale",
+                field_label=(
+                    "If you currently hold or can obtain valid work authorization, please indicate your current visa type "
+                    "or basis for employment authorization in the United States: (e.g., N/A, E-1, E-2, E-3, F-1, G-3, "
+                    "G-4, H-1B, H- 1B1, H-4, J-1, J-2, L-1, L-2, TN, Adjustment of Status (AOS) Applicant, Other). "
+                    "Please choose N/A if none of these apply to you."
+                ),
+                target_section="Job Application Questions",
+            ),
+            browser_session,
+        )
+
+        assert result.error is None
+        assert await page.evaluate("() => document.querySelector('[data-ff-id=\"ff-100\"]').value") == "F-1 OPT"
+
+
 def test_known_entry_value_matches_work_experience_fields():
     entry = {
         "title": "Staff Software Engineer",
@@ -761,7 +1936,16 @@ def test_workday_prompt_mentions_scoped_domhand_fill_for_repeaters():
     assert "heading_boundary" in prompt
     assert "entry_data" in prompt
     assert "Work Experience 2" in prompt
-    assert "Only the final leaf clears the validation error." in prompt
+    assert "Add Skill" in prompt
+    assert "Add Language" in prompt
+    assert "Add License" in prompt
+    assert "domhand_click_button" in prompt
+    assert "Fill and SAVE each entry BEFORE expanding the next one." in prompt
+    assert "NEVER substitute a different skill" in prompt
+    assert "leave it unresolved for browser/manual fallback" in prompt
+    assert "that field to 'Other'" in prompt
+    assert "This info is required" in prompt
+    assert "no visibly selected option" in prompt
 
 
 def test_workday_prompt_prefers_same_site_resume_apply_flow():
@@ -1069,6 +2253,47 @@ async def test_fill_checkbox_uses_gui_fallback_for_untrusted_dom_clicks(
         ]
 
 
+async def test_fill_select_field_uses_trusted_click_for_greenhouse_toggle(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/greenhouse-trusted-toggle").respond_with_data(
+            GREENHOUSE_TRUSTED_TOGGLE_SELECT_HTML,
+            content_type="text/html",
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/greenhouse-trusted-toggle"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+
+        page = await browser_session.get_current_page()
+        assert page is not None
+        await page.evaluate(_build_inject_helpers_js())
+
+        field = FormField(
+            field_id="source--source",
+            name="How Did You Hear About Us?",
+            field_type="select",
+            section="Application Questions",
+            is_native=False,
+        )
+
+        success = await _fill_select_field(
+            page,
+            field,
+            "LinkedIn",
+            "[How Did You Hear About Us?]",
+            browser_session=browser_session,
+        )
+
+        assert success is True
+        assert await page.evaluate("() => window.__selectedSource") == "LinkedIn"
+
+
 async def test_domhand_interact_control_uses_gui_fallback_for_trusted_radio_wrappers(
     httpserver: HTTPServer,
 ):
@@ -1175,9 +2400,7 @@ async def test_domhand_select_short_circuits_when_value_already_selected(
         await browser_session.get_browser_state_summary()
         selector_map = await browser_session.get_selector_map()
         source_index = next(
-            idx
-            for idx, element in selector_map.items()
-            if (element.attributes or {}).get("id") == "source--source"
+            idx for idx, element in selector_map.items() if (element.attributes or {}).get("id") == "source--source"
         )
 
         result = await domhand_select(
@@ -1208,9 +2431,7 @@ async def test_domhand_select_does_not_short_circuit_when_selected_value_is_inva
         await browser_session.get_browser_state_summary()
         selector_map = await browser_session.get_selector_map()
         source_index = next(
-            idx
-            for idx, element in selector_map.items()
-            if (element.attributes or {}).get("id") == "source--source"
+            idx for idx, element in selector_map.items() if (element.attributes or {}).get("id") == "source--source"
         )
 
         result = await domhand_select(
@@ -1221,7 +2442,44 @@ async def test_domhand_select_does_not_short_circuit_when_selected_value_is_inva
         assert result.error is None
         assert "already showed" not in (result.extracted_content or "")
         page = await browser_session.get_current_page()
-        assert await page.evaluate("() => document.getElementById('source-field').getAttribute('aria-invalid')") == "false"
+        assert (
+            await page.evaluate("() => document.getElementById('source-field').getAttribute('aria-invalid')") == "false"
+        )
+
+
+async def test_domhand_select_uses_trusted_click_for_greenhouse_toggle(
+    httpserver: HTTPServer,
+):
+    async with managed_browser_session() as browser_session:
+        tools = Tools()
+        httpserver.expect_request("/greenhouse-trusted-toggle-select").respond_with_data(
+            GREENHOUSE_TRUSTED_TOGGLE_SELECT_HTML,
+            content_type="text/html",
+        )
+
+        await tools.navigate(
+            url=httpserver.url_for("/greenhouse-trusted-toggle-select"),
+            new_tab=False,
+            browser_session=browser_session,
+        )
+        await asyncio.sleep(0.3)
+        await browser_session.get_browser_state_summary()
+        selector_map = await browser_session.get_selector_map()
+        source_index = next(
+            idx
+            for idx, element in selector_map.items()
+            if (element.attributes or {}).get("data-ff-id") == "source--source"
+        )
+
+        result = await domhand_select(
+            DomHandSelectParams(index=source_index, value="LinkedIn"),
+            browser_session,
+        )
+
+        assert result.error is None
+        page = await browser_session.get_current_page()
+        assert page is not None
+        assert await page.evaluate("() => window.__selectedSource") == "LinkedIn"
 
 
 async def test_fill_text_field_commits_exact_name_with_enter(
@@ -1336,6 +2594,11 @@ def test_infer_entry_data_from_scope_uses_profile_lists():
 
     assert _infer_entry_data_from_scope(profile, "Work Experience 2", None) == {"title": "Engineer 2"}
     assert _infer_entry_data_from_scope(profile, "Education 1", "Education") == {"school": "RIT"}
+    # Oracle uses "College / University" as heading, not "Education"
+    assert _infer_entry_data_from_scope(profile, "College / University", "Experience") == {"school": "RIT"}
+    assert _infer_entry_data_from_scope(profile, "University", None) == {"school": "RIT"}
+    assert _infer_entry_data_from_scope(profile, None, "School") == {"school": "RIT"}
+    assert _infer_entry_data_from_scope(profile, "Degree", None) == {"school": "RIT"}
 
 
 def test_known_profile_value_matches_optional_address_fields():
@@ -1754,6 +3017,4 @@ async def test_domhand_assess_state_prefers_visible_transition_section_over_stal
         state = json.loads((result.metadata or {})["application_state_json"])
 
         assert state["current_section"] == "Application Questions"
-        assert state["unresolved_required_fields"][0]["name"].startswith(
-            "Please tell us your current year in school"
-        )
+        assert state["unresolved_required_fields"][0]["name"].startswith("Please tell us your current year in school")

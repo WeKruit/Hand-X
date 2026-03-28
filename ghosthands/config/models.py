@@ -15,7 +15,7 @@ class ModelConfig:
 
 
 MODEL_CATALOG: dict[str, ModelConfig] = {
-    # Anthropic
+    # ── Anthropic ──────────────────────────────────────────────────
     "claude-sonnet-4-20250514": ModelConfig(
         model_id="claude-sonnet-4-20250514",
         provider="anthropic",
@@ -26,38 +26,67 @@ MODEL_CATALOG: dict[str, ModelConfig] = {
     "claude-haiku-4-5-20251001": ModelConfig(
         model_id="claude-haiku-4-5-20251001",
         provider="anthropic",
-        input_cost_per_1k=0.0008,
-        output_cost_per_1k=0.004,
+        input_cost_per_1k=0.001,
+        output_cost_per_1k=0.005,
         max_context=200_000,
     ),
-    # OpenAI
-    "gpt-4o": ModelConfig(
-        model_id="gpt-4o",
+    # ── OpenAI (current gen) ──────────────────────────────────────
+    "gpt-5.4": ModelConfig(
+        model_id="gpt-5.4",
         provider="openai",
         input_cost_per_1k=0.0025,
-        output_cost_per_1k=0.01,
-        max_context=128_000,
+        output_cost_per_1k=0.015,
+        max_context=1_050_000,
     ),
-    "gpt-4o-mini": ModelConfig(
-        model_id="gpt-4o-mini",
+    "gpt-5.4-mini": ModelConfig(
+        model_id="gpt-5.4-mini",
         provider="openai",
-        input_cost_per_1k=0.00015,
-        output_cost_per_1k=0.0006,
-        max_context=128_000,
+        input_cost_per_1k=0.00075,
+        output_cost_per_1k=0.0045,
+        max_context=1_050_000,
     ),
-    # Google
+    "gpt-5.4-nano": ModelConfig(
+        model_id="gpt-5.4-nano",
+        provider="openai",
+        input_cost_per_1k=0.0002,
+        output_cost_per_1k=0.00125,
+        max_context=1_050_000,
+    ),
+    # ── OpenAI (legacy, still in use) ─────────────────────────────
+    "gpt-4.1": ModelConfig(
+        model_id="gpt-4.1",
+        provider="openai",
+        input_cost_per_1k=0.002,
+        output_cost_per_1k=0.008,
+        max_context=1_047_576,
+    ),
+    "gpt-4.1-mini": ModelConfig(
+        model_id="gpt-4.1-mini",
+        provider="openai",
+        input_cost_per_1k=0.0004,
+        output_cost_per_1k=0.0016,
+        max_context=1_047_576,
+    ),
+    "gpt-4.1-nano": ModelConfig(
+        model_id="gpt-4.1-nano",
+        provider="openai",
+        input_cost_per_1k=0.0001,
+        output_cost_per_1k=0.0004,
+        max_context=1_047_576,
+    ),
+    # ── Google ────────────────────────────────────────────────────
+    "gemini-3-flash-preview": ModelConfig(
+        model_id="gemini-3-flash-preview",
+        provider="google",
+        input_cost_per_1k=0.0003,
+        output_cost_per_1k=0.0025,
+        max_context=1_048_576,
+    ),
     "gemini-3.1-flash-lite-preview": ModelConfig(
         model_id="gemini-3.1-flash-lite-preview",
         provider="google",
         input_cost_per_1k=0.000075,
         output_cost_per_1k=0.0003,
-        max_context=1_048_576,
-    ),
-    "gemini-3-flash-preview": ModelConfig(
-        model_id="gemini-3-flash-preview",
-        provider="google",
-        input_cost_per_1k=0.0001,
-        output_cost_per_1k=0.0004,
         max_context=1_048_576,
     ),
 }

@@ -401,6 +401,78 @@ class DefaultActionWatchdog(BaseWatchdog):
 		except Exception:
 			raise
 
+	async def _maybe_reroute_same_tab_navigation(self, element_node, cdp_session, session_id, backend_node_id) -> dict | None:
+		"""Route target=_blank and window.open click targets into the current tab."""
+		try:
+			result = await cdp_session.cdp_client.send.DOM.resolveNode(
+				params={'backendNodeId': backend_node_id},
+				session_id=session_id,
+			)
+			assert 'object' in result and 'objectId' in result['object'], 'Failed to resolve node for same-tab reroute'
+			object_id = result['object']['objectId']
+			target_info = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+				params={
+					'functionDeclaration': """
+						function() {
+							function toAbsolute(url) {
+								if (typeof url !== 'string' || !url.trim()) return '';
+								try {
+									return new URL(url, window.location.href).toString();
+								} catch (e) {
+									return '';
+								}
+							}
+
+							function windowOpenTarget(node) {
+								if (!node || typeof node.getAttribute !== 'function') return null;
+								const onclick = String(node.getAttribute('onclick') || '').trim();
+								if (!onclick) return null;
+								const match = onclick.match(/window\\.open\\((['"`])([^'"`]+)\\1/i);
+								if (!match) return null;
+								const url = toAbsolute(match[2]);
+								return url ? {url, reason: 'window_open'} : null;
+							}
+
+							const node = this;
+							const anchor = node && node.closest ? node.closest('a[href], area[href]') : null;
+							if (anchor) {
+								const target = String(anchor.getAttribute('target') || '').trim().toLowerCase();
+								const href = toAbsolute(anchor.getAttribute('href') || anchor.href || '');
+								if (href && target && target !== '_self') {
+									return {url: href, reason: 'anchor_target'};
+								}
+							}
+
+							const form = node && node.form ? node.form : (node && node.closest ? node.closest('form') : null);
+							if (form) {
+								const target = String(form.getAttribute('target') || '').trim().toLowerCase();
+								const action = toAbsolute(form.getAttribute('action') || form.action || window.location.href);
+								if (action && target && target !== '_self') {
+									return {url: action, reason: 'form_target'};
+								}
+							}
+
+							return windowOpenTarget(node) || windowOpenTarget(anchor) || windowOpenTarget(form) || null;
+						}
+					""",
+					'objectId': object_id,
+					'returnByValue': True,
+				},
+				session_id=session_id,
+			)
+			value = ((target_info or {}).get('result') or {}).get('value')
+			if not isinstance(value, dict):
+				return None
+			url = str(value.get('url') or '').strip()
+			if not url:
+				return None
+			reason = str(value.get('reason') or 'same_tab_reroute').strip() or 'same_tab_reroute'
+			await self.browser_session.navigate_to(url, new_tab=False)
+			return {'same_tab_navigation_url': url, 'same_tab_navigation_reason': reason}
+		except Exception as e:
+			self.logger.debug(f'⚠️ Same-tab reroute inspection failed: {type(e).__name__}: {e}')
+			return None
+
 	def _is_create_account_first_run(self) -> bool:
 		"""Return whether this auth flow must stay on Create Account until proven otherwise."""
 		source = os.getenv('GH_CREDENTIAL_SOURCE', '').strip().lower()
@@ -440,15 +512,30 @@ class DefaultActionWatchdog(BaseWatchdog):
 		)
 
 	async def _guard_advance_click_requires_assessment(self, element_node: EnhancedDOMTreeNode) -> str | None:
-		"""Block navigation clicks while the latest assessment still forbids advancing."""
+		"""Block navigation clicks only for hard page blockers from the latest assessment."""
 		if not self._is_advance_navigation_target(element_node):
 			return None
 
 		last_state = getattr(self.browser_session, '_gh_last_application_state', None)
 		if not isinstance(last_state, dict):
 			return None
+		unresolved_required_count = int(last_state.get('unresolved_required_count') or 0)
 		optional_validation_count = int(last_state.get('optional_validation_count') or 0)
-		if last_state.get('advance_allowed') is True and optional_validation_count == 0:
+		visible_error_count = int(last_state.get('visible_error_count') or 0)
+		opaque_count = int(last_state.get('opaque_count') or 0)
+		advance_disabled = bool(last_state.get('advance_disabled'))
+		if (
+			unresolved_required_count == 0
+			and optional_validation_count == 0
+			and visible_error_count == 0
+			and opaque_count == 0
+			and not advance_disabled
+		):
+			return None
+
+		# After 3+ same blocker assessments, let the page's own validation handle it
+		same_blocker_count = int(last_state.get('same_blocker_signature_count') or 0)
+		if same_blocker_count >= 2:
 			return None
 
 		page = await self.browser_session.get_current_page()
@@ -464,14 +551,18 @@ class DefaultActionWatchdog(BaseWatchdog):
 		if current_url and last_state.get('page_url') and current_url != last_state.get('page_url'):
 			return None
 
+		current_section = str(last_state.get('current_section') or '').strip().lower()
+		if current_section in {'create account', 'sign in', 'login', 'log in', 'autofill with resume'}:
+			return None
+
 		return (
-			'Latest domhand_assess_state still reports unresolved blockers for advancement. '
+			'Latest domhand_assess_state still reports hard blockers for advancement. '
 			f"Current section: {last_state.get('current_section') or '(unknown)'}. "
-			f"Unresolved required: {last_state.get('unresolved_required_count', 0)}, "
+			f"Unresolved required: {unresolved_required_count}, "
 			f"optional validation: {optional_validation_count}, "
-			f"mismatches: {last_state.get('mismatched_count', 0)}, "
-			f"opaque: {last_state.get('opaque_count', 0)}, "
-			f"unverified: {last_state.get('unverified_count', 0)}. "
+			f"visible errors: {visible_error_count}, "
+			f"opaque: {opaque_count}, "
+			f"advance disabled: {advance_disabled}. "
 			'Do not click Next / Continue / Save yet.'
 		)
 
@@ -1003,6 +1094,15 @@ class DefaultActionWatchdog(BaseWatchdog):
 			layout_metrics = await cdp_session.cdp_client.send.Page.getLayoutMetrics(session_id=session_id)
 			viewport_width = layout_metrics['layoutViewport']['clientWidth']
 			viewport_height = layout_metrics['layoutViewport']['clientHeight']
+
+			same_tab_navigation = await self._maybe_reroute_same_tab_navigation(
+				element_node,
+				cdp_session,
+				session_id,
+				backend_node_id,
+			)
+			if same_tab_navigation is not None:
+				return same_tab_navigation
 
 			# Scroll element into view FIRST before getting coordinates
 			try:
@@ -3068,6 +3168,59 @@ class DefaultActionWatchdog(BaseWatchdog):
 
 				// Function to check if an element is a dropdown and extract options
 				function checkDropdownElement(element) {
+					const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+					const visible = (node) => {
+						if (!node) return false;
+						const style = window.getComputedStyle(node);
+						if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+						const rect = node.getBoundingClientRect();
+						return rect.width > 0 && rect.height > 0;
+					};
+					const readPopupOptions = (anchor) => {
+						const anchorRect = (anchor || element).getBoundingClientRect();
+						const popupSelectors = [
+							'[role="listbox"]',
+							'[role="menu"]',
+							'[role="grid"]',
+							'[class*="popup"]',
+							'[class*="dropdown-menu"]',
+							'[class*="options-list"]'
+						];
+						const scored = [];
+						for (const selector of popupSelectors) {
+							for (const popup of document.querySelectorAll(selector)) {
+								if (!visible(popup)) continue;
+								const rect = popup.getBoundingClientRect();
+								const overlapX = Math.max(0, Math.min(rect.right, anchorRect.right) - Math.max(rect.left, anchorRect.left));
+								const distanceY = Math.min(
+									Math.abs(rect.top - anchorRect.bottom),
+									Math.abs(anchorRect.top - rect.bottom)
+								);
+								let score = 0;
+								if (overlapX > 0) score += 20;
+								if (distanceY < 120) score += 10;
+								score -= Math.floor(distanceY / 10);
+								scored.push({ popup, score });
+							}
+						}
+						scored.sort((a, b) => b.score - a.score);
+						for (const entry of scored) {
+							const options = Array.from(
+								entry.popup.querySelectorAll('[role="option"], [role="menuitem"], [role="gridcell"], [role="listitem"], li, [class*="option"], [data-value]')
+							).filter(visible).map((item, idx) => {
+								const text = clean(item.textContent || item.getAttribute('aria-label') || '');
+								if (!text) return null;
+								return {
+									text,
+									value: item.getAttribute('data-value') || text,
+									index: idx,
+									selected: item.getAttribute('aria-selected') === 'true' || item.classList.contains('selected') || item.classList.contains('active')
+								};
+							}).filter(Boolean);
+							if (options.length > 0) return options;
+						}
+						return [];
+					};
 					// Check if it's a native select element
 					if (element.tagName.toLowerCase() === 'select') {
 						return {
@@ -3138,6 +3291,32 @@ class DefaultActionWatchdog(BaseWatchdog):
 								source: 'target'
 							};
 						}
+					}
+
+					// Check button-style custom dropdown triggers (Workday / Oracle / headless custom widgets)
+					const tag = element.tagName.toLowerCase();
+					const role = (element.getAttribute('role') || '').toLowerCase();
+					const buttonText = clean(element.getAttribute('data-committed-value') || element.textContent || element.getAttribute('aria-label') || '');
+					const className = clean(element.getAttribute('class') || '');
+					const ariaHasPopup = (element.getAttribute('aria-haspopup') || '').toLowerCase();
+					const looksLikeSelectButton = (tag === 'button' || role === 'button') && (
+						ariaHasPopup === 'listbox'
+						|| ariaHasPopup === 'menu'
+						|| !!element.getAttribute('aria-controls')
+						|| !!element.getAttribute('aria-owns')
+						|| /^(select one|choose one|please select)$/i.test(buttonText)
+						|| /select|dropdown|option|choice|combobox|css-/i.test(className)
+					);
+					if (looksLikeSelectButton) {
+						const anchor = element.closest('[data-automation-id="formField"], [data-automation-id*="formField"], .form-group, .field, [role="group"]') || element.parentElement || element;
+						const options = readPopupOptions(anchor);
+						return {
+							type: 'custom_button_trigger',
+							options: options,
+							id: element.id || '',
+							name: element.getAttribute('aria-label') || buttonText || '',
+							source: 'target'
+						};
 					}
 
 					return null;

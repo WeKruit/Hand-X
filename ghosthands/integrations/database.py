@@ -11,6 +11,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import asyncpg
 import structlog
@@ -85,11 +86,20 @@ class Database:
 
 	async def connect(self) -> None:
 		"""Create the connection pool."""
+		pool_kwargs: dict[str, Any] = {
+			"min_size": 2,
+			"max_size": 10,
+			"command_timeout": 30,
+		}
+		if _dsn_uses_pgbouncer_transaction_pool(self.database_url):
+			# Supabase/pgBouncer transaction poolers do not support asyncpg's
+			# prepared-statement cache. Disable it so the direct profile loader
+			# works against the app-runtime DSN used by apply.sh.
+			pool_kwargs["statement_cache_size"] = 0
+
 		self.pool = await asyncpg.create_pool(
 			self.database_url,
-			min_size=2,
-			max_size=10,
-			command_timeout=30,
+			**pool_kwargs,
 		)
 		logger.info("database.connected", dsn=_redact_dsn(self.database_url))
 
@@ -357,6 +367,139 @@ class Database:
 			"raw_text": row["raw_text"],
 		}
 
+	async def load_resume_profile_by_id(self, user_id: str, resume_id: str) -> dict[str, Any]:
+		"""Load a specific parsed resume by ``resume_id`` for the given user."""
+		pool = self._require_pool()
+
+		row = await pool.fetchrow(
+			"""
+			SELECT id, user_id, file_key, parsed_data, parsing_confidence, raw_text
+			FROM resumes
+			WHERE user_id = $1::uuid
+				AND id = $2::uuid
+				AND status = 'parsed'
+			LIMIT 1
+			""",
+			uuid.UUID(user_id) if isinstance(user_id, str) else user_id,
+			uuid.UUID(resume_id) if isinstance(resume_id, str) else resume_id,
+		)
+
+		if row is None:
+			raise ValueError(
+				f"No parsed resume found for user_id={user_id} and resume_id={resume_id}. "
+				"Ensure the resume exists and has completed parsing in VALET."
+			)
+
+		parsed_data = row["parsed_data"]
+		if parsed_data is None:
+			raise ValueError(
+				f"Resume {row['id']} exists but has no parsed_data. It may still be parsing."
+			)
+
+		if isinstance(parsed_data, str):
+			parsed_data = json.loads(parsed_data)
+
+		return {
+			"resume_id": str(row["id"]),
+			"user_id": str(row["user_id"]),
+			"file_key": row["file_key"],
+			"parsed_data": parsed_data,
+			"parsing_confidence": row["parsing_confidence"],
+			"raw_text": row["raw_text"],
+		}
+
+	async def load_user_profile(self, user_id: str) -> dict[str, Any] | None:
+		"""Load scalar user profile data from VALET's ``users`` table."""
+		pool = self._require_pool()
+		row = await pool.fetchrow(
+			"""
+			SELECT id, email, name, phone, location, linkedin_url, portfolio_url, skills
+			FROM users
+			WHERE id = $1::uuid
+				AND deleted_at IS NULL
+			LIMIT 1
+			""",
+			uuid.UUID(user_id) if isinstance(user_id, str) else user_id,
+		)
+		if row is None:
+			return None
+
+		skills = row["skills"]
+		if isinstance(skills, str):
+			skills = json.loads(skills)
+
+		return {
+			"id": str(row["id"]),
+			"email": row["email"],
+			"name": row["name"],
+			"phone": row["phone"],
+			"location": row["location"],
+			"linkedin_url": row["linkedin_url"],
+			"portfolio_url": row["portfolio_url"],
+			"skills": skills,
+		}
+
+	async def load_user_application_profile(self, user_id: str) -> dict[str, Any] | None:
+		"""Load global application-profile overrides for a user."""
+		pool = self._require_pool()
+		row = await pool.fetchrow(
+			"""
+			SELECT *
+			FROM user_application_profiles
+			WHERE user_id = $1::uuid
+			LIMIT 1
+			""",
+			uuid.UUID(user_id) if isinstance(user_id, str) else user_id,
+		)
+		if row is None:
+			return None
+		data = dict(row)
+		languages = data.get("languages")
+		if isinstance(languages, str):
+			data["languages"] = json.loads(languages)
+		return data
+
+	async def load_resume_application_profile(
+		self,
+		user_id: str,
+		resume_id: str,
+	) -> dict[str, Any] | None:
+		"""Load per-resume application-profile overrides."""
+		pool = self._require_pool()
+		row = await pool.fetchrow(
+			"""
+			SELECT *
+			FROM resume_application_profiles
+			WHERE user_id = $1::uuid
+				AND resume_id = $2::uuid
+			LIMIT 1
+			""",
+			uuid.UUID(user_id) if isinstance(user_id, str) else user_id,
+			uuid.UUID(resume_id) if isinstance(resume_id, str) else resume_id,
+		)
+		if row is None:
+			return None
+		data = dict(row)
+		languages = data.get("languages")
+		if isinstance(languages, str):
+			data["languages"] = json.loads(languages)
+		return data
+
+	async def load_answer_bank(self, user_id: str) -> list[dict[str, Any]]:
+		"""Load always-use QA bank entries for the user."""
+		pool = self._require_pool()
+		rows = await pool.fetch(
+			"""
+			SELECT question, answer, canonical_question, intent_tag, usage_mode, source, confidence, synonyms
+			FROM qa_bank
+			WHERE user_id = $1::uuid
+				AND usage_mode = 'always_use'
+			ORDER BY updated_at DESC NULLS LAST, created_at DESC
+			""",
+			uuid.UUID(user_id) if isinstance(user_id, str) else user_id,
+		)
+		return [dict(row) for row in rows]
+
 	# ── LISTEN/NOTIFY for HITL signals ────────────────────────────────
 
 	async def listen_for_signals(
@@ -426,3 +569,14 @@ def _redact_dsn(dsn: str) -> str:
 		return re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", dsn)
 	except Exception:
 		return "<redacted>"
+
+
+def _dsn_uses_pgbouncer_transaction_pool(dsn: str) -> bool:
+	"""Return True when the DSN explicitly targets a pgBouncer pooler."""
+	try:
+		query = parse_qs(urlsplit(dsn).query)
+	except Exception:
+		return False
+
+	enabled = query.get("pgbouncer", [])
+	return any(str(value).strip().lower() == "true" for value in enabled)

@@ -1,0 +1,1518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <title>Toy — Workday ATS Application Form</title>
+  <!--
+    DomHand test fixture: Workday ATS (myworkdayjobs.com)
+    =====================================================
+    Faithfully reproduces the DOM structure, data-automation-id attributes,
+    data-uxi-widget-type attributes, ARIA roles, and nesting patterns found
+    on real Workday application pages (e.g. Intel, Salesforce, Amazon).
+
+    Workday uses React + CSS-in-JS with hashed class names (css-*) that are
+    NOT stable across builds. All DomHand selectors target data-automation-id,
+    data-uxi-widget-type, data-fkit-id, and standard ARIA attributes instead.
+
+    Sections (matches real Workday multi-page application flow):
+      1. My Information   (visible by default)
+      2. My Experience    (hidden — toggled via progress bar)
+      3. Application Questions (hidden)
+      4. Voluntary Disclosures (hidden)
+
+    Key patterns exercised:
+      - data-automation-id="formField-*" text inputs with labels
+      - Dropdown: button[aria-haspopup="listbox"] + popup with role="listbox" > role="option"
+      - data-automation-id="responsiveMonikerPrompt" popup rendering
+      - Multiselect search: data-uxi-widget-type="multiselect" + selectinput + pills
+      - Date spinbutton: role="spinbutton" with dateSectionMonth/Year-input
+      - Checkbox: input[type="checkbox"] with aria-checked
+      - File upload: data-automation-id="file-upload-drop-zone"
+      - Repeating sections: role="group" + Add Another button
+      - Progress bar: data-automation-id="progressBar" with step states
+      - Footer nav: pageFooterBackButton / pageFooterNextButton
+
+    Manual:
+      cd examples/toy-workday && python -m http.server 8768
+      open http://127.0.0.1:8768/
+
+    CI: tests/ci/test_toy_workday_fixture.py (when written)
+
+    See also:
+      - ghosthands/platforms/workday.py   (WORKDAY_SELECTORS)
+      - .planning/notes/2026-03-25-workday-fixture-todo.md
+  -->
+  <style>
+    :root { font-family: "Workday Sans", system-ui, -apple-system, sans-serif; line-height: 1.5; color: #1a1a1a; }
+    body { max-width: 52rem; margin: 0 auto; padding: 1rem 1.5rem 5rem; background: #f2f2f2; }
+    h1 { font-size: 1.3rem; color: #1d1d1d; margin-bottom: 0.25rem; }
+    h3 { font-size: 1.05rem; color: #333; margin: 1.5rem 0 0.75rem; border-bottom: 1px solid #ddd; padding-bottom: 0.4rem; }
+    h5 { font-size: 0.95rem; color: #444; margin: 1rem 0 0.5rem; }
+
+    /* Form field wrapper */
+    .wd-formfield { margin: 0.75rem 0; position: relative; }
+    .wd-formfield label { display: block; font-weight: 600; font-size: 0.875rem; margin-bottom: 0.25rem; color: #333; }
+    .wd-formfield label abbr { color: #c62828; text-decoration: none; margin-left: 2px; }
+    .wd-formfield input[type="text"],
+    .wd-formfield input[type="email"],
+    .wd-formfield input[type="tel"],
+    .wd-formfield input[type="url"],
+    .wd-formfield textarea {
+      display: block; width: 100%; box-sizing: border-box;
+      padding: 0.45rem 0.6rem; border: 1px solid #bbb; border-radius: 4px;
+      font: inherit; font-size: 0.9rem; background: #fff;
+    }
+    .wd-formfield input:focus, .wd-formfield textarea:focus { outline: 2px solid #0875e1; border-color: #0875e1; }
+    .wd-formfield textarea { min-height: 4rem; resize: vertical; }
+
+    /* Dropdown */
+    .wd-dropdown { position: relative; display: inline-flex; align-items: center; width: 100%; }
+    .wd-dropdown button {
+      display: block; width: 100%; box-sizing: border-box; text-align: left;
+      padding: 0.45rem 2rem 0.45rem 0.6rem; border: 1px solid #bbb; border-radius: 4px;
+      font: inherit; font-size: 0.9rem; background: #fff; cursor: pointer; color: #555;
+    }
+    .wd-dropdown button:focus { outline: 2px solid #0875e1; border-color: #0875e1; }
+    .wd-hidden-value { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; }
+    .menu-icon { position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%); pointer-events: none; color: #666; }
+    .menu-icon svg { width: 12px; height: 12px; fill: currentColor; }
+
+    /* Dropdown popup */
+    .wd-popup { display: none; position: absolute; z-index: 100; left: 0; top: 100%; width: 100%;
+      max-height: 200px; overflow-y: auto; background: #fff; border: 1px solid #ccc;
+      border-radius: 4px; box-shadow: 0 4px 12px rgba(0,0,0,.15); margin-top: 2px; }
+    .wd-popup.open { display: block; }
+    .wd-popup [role="option"] { padding: 0.45rem 0.7rem; cursor: pointer; font-size: 0.9rem; }
+    .wd-popup [role="option"]:hover, .wd-popup [role="option"][aria-selected="true"] { background: #e8f0fe; }
+    .wd-popup [role="option"][aria-selected="true"] { font-weight: 600; }
+
+    /* Multiselect */
+    .wd-multiselect { position: relative; }
+    .wd-multiselect-input-container {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 0.3rem;
+      border: 1px solid #bbb; border-radius: 4px; padding: 0.3rem 0.5rem; background: #fff; min-height: 2rem;
+    }
+    .wd-multiselect-input-container:focus-within { outline: 2px solid #0875e1; border-color: #0875e1; }
+    .wd-multiselect-input-container input {
+      border: none; outline: none; flex: 1; min-width: 80px; font: inherit; font-size: 0.9rem; padding: 0.15rem 0;
+    }
+    .wd-multiselect-input-container .wd-search-icon,
+    .wd-multiselect-input-container .wd-icon-button {
+      color: #4b5563;
+      cursor: pointer;
+      flex-shrink: 0;
+      border: none;
+      background: transparent;
+      font: inherit;
+      padding: 0.1rem 0.2rem;
+      line-height: 1;
+    }
+    .wd-multiselect-input-container .wd-icon-button[hidden] { display: none; }
+    .wd-pill { display: inline-flex; align-items: center; gap: 0.25rem;
+      background: #e8f0fe; border: 1px solid #c4d7f2; border-radius: 14px; padding: 0.15rem 0.5rem;
+      font-size: 0.82rem; color: #1a56db; }
+    .wd-pill [data-automation-id="DELETE_charm"] { cursor: pointer; font-weight: bold; color: #666; font-size: 0.9rem; }
+    .wd-pill [data-automation-id="DELETE_charm"]:hover { color: #c62828; }
+
+    /* Date spinbutton */
+    .wd-date-wrapper { display: inline-flex; align-items: center; gap: 0; border: 1px solid #bbb; border-radius: 4px; background: #fff; padding: 0.3rem 0.5rem; }
+    .wd-date-wrapper:focus-within { outline: 2px solid #0875e1; border-color: #0875e1; }
+    .wd-date-segment { position: relative; text-align: center; }
+    .wd-date-segment [aria-hidden="true"] { font-size: 0.85rem; color: #999; position: absolute; top: 0; left: 0; right: 0; pointer-events: none; }
+    .wd-date-segment input[role="spinbutton"] {
+      width: 2.5rem; border: none; outline: none; text-align: center; font: inherit; font-size: 0.9rem;
+      padding: 0.15rem 0; background: transparent; -moz-appearance: textfield;
+    }
+    .wd-date-segment input[role="spinbutton"]::-webkit-inner-spin-button { -webkit-appearance: none; }
+    .wd-date-sep { color: #999; margin: 0 0.1rem; user-select: none; }
+    .wd-date-calendar { cursor: pointer; color: #0875e1; margin-left: 0.3rem; font-size: 0.9rem; }
+
+    /* Checkbox */
+    .wd-checkbox-wrapper { display: flex; align-items: center; gap: 0.4rem; margin: 0.5rem 0; }
+    .wd-checkbox-wrapper input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+    .wd-checkbox-wrapper label { font-weight: 400; cursor: pointer; }
+
+    /* File upload */
+    .wd-file-upload-zone {
+      border: 2px dashed #bbb; border-radius: 6px; padding: 1.5rem; text-align: center;
+      background: #fafafa; margin: 0.75rem 0; transition: border-color 0.2s;
+    }
+    .wd-file-upload-zone:hover { border-color: #0875e1; }
+    .wd-file-upload-zone button { margin-top: 0.5rem; padding: 0.4rem 1rem; border: 1px solid #0875e1;
+      border-radius: 4px; background: #fff; color: #0875e1; cursor: pointer; font: inherit; }
+    .wd-file-upload-zone input[type="file"] { display: none; }
+    .wd-file-upload-item { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0.75rem;
+      background: #f0f7f0; border: 1px solid #a5d6a7; border-radius: 4px; margin: 0.5rem 0; }
+    .wd-file-upload-item [data-automation-id="file-upload-item-name"] { font-weight: 600; flex: 1; }
+    .wd-file-upload-item [data-automation-id="file-upload-successful"] { color: #2e7d32; font-size: 0.85rem; }
+    .wd-file-upload-item button { border: none; background: none; cursor: pointer; color: #c62828; font-size: 0.9rem; }
+
+    /* Repeating section */
+    .wd-repeating-group { border: 1px solid #e0e0e0; border-radius: 6px; padding: 0.75rem 1rem; margin: 0.75rem 0; background: #fff; }
+    .wd-repeating-group h5 { display: flex; align-items: center; justify-content: space-between; margin: 0 0 0.5rem; }
+    .wd-repeating-group .wd-delete-btn { border: none; background: none; cursor: pointer; color: #c62828; padding: 0.2rem; }
+    .wd-add-another { display: inline-flex; align-items: center; gap: 0.3rem; border: 1px solid #0875e1;
+      border-radius: 4px; padding: 0.4rem 0.9rem; background: #fff; color: #0875e1; cursor: pointer;
+      font: inherit; font-size: 0.9rem; margin: 0.5rem 0; }
+    .wd-add-another:hover { background: #e8f0fe; }
+
+    /* Progress bar */
+    .wd-progress-bar { list-style: none; display: flex; gap: 0; padding: 0; margin: 0 0 1.5rem;
+      border-bottom: 2px solid #e0e0e0; }
+    .wd-progress-bar li { flex: 1; text-align: center; padding: 0.6rem 0.3rem; font-size: 0.82rem;
+      cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -2px; transition: all 0.15s; color: #888; }
+    .wd-progress-bar li[data-automation-id="progressBarActiveStep"] { border-bottom-color: #0875e1; color: #0875e1; font-weight: 600; }
+    .wd-progress-bar li[data-automation-id="progressBarCompletedStep"] { border-bottom-color: #2e7d32; color: #2e7d32; }
+    .wd-progress-bar li[data-automation-id="progressBarInactiveStep"] { color: #aaa; }
+    .wd-progress-bar li:hover { color: #0875e1; }
+
+    /* Footer */
+    .wd-page-footer { display: flex; justify-content: space-between; align-items: center;
+      padding: 0.75rem 0; margin-top: 2rem; border-top: 1px solid #ddd; }
+    .wd-page-footer button { padding: 0.5rem 1.5rem; border: 1px solid #0875e1; border-radius: 4px;
+      font: inherit; font-size: 0.9rem; cursor: pointer; }
+    .wd-page-footer .wd-btn-back { background: #fff; color: #0875e1; }
+    .wd-page-footer .wd-btn-next { background: #0875e1; color: #fff; border-color: #0875e1; }
+    .wd-page-footer .wd-btn-next:hover { background: #065bb5; }
+    .wd-page-footer .wd-btn-back:hover { background: #e8f0fe; }
+    .wd-back-to-posting { display: inline-block; margin-bottom: 1rem; font-size: 0.85rem; color: #0875e1;
+      background: none; border: none; cursor: pointer; padding: 0; text-decoration: underline; }
+
+    /* Section visibility */
+    .wd-section { display: none; }
+    .wd-section.active { display: block; }
+
+    /* Misc */
+    .wd-icon-check { color: #2e7d32; margin-right: 0.3rem; }
+    .wd-search-results-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.45rem 0.7rem 0.25rem;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #374151;
+    }
+    .wd-skill-option {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+    }
+    .wd-skill-option-box {
+      width: 0.9rem;
+      height: 0.9rem;
+      border: 1px solid #c7cdd7;
+      border-radius: 2px;
+      background: #fff;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+
+<!-- Back to job posting link -->
+<button data-automation-id="backToJobPosting" role="link" class="wd-back-to-posting">&#8592; Back to Job Posting</button>
+
+<h1 data-automation-id="pageHeader">Apply for Software Engineer, Backend</h1>
+
+<!-- ======================== PROGRESS BAR ======================== -->
+<nav>
+  <ol data-automation-id="progressBar" class="wd-progress-bar">
+    <li data-automation-id="progressBarActiveStep" data-step="0">
+      My Information
+    </li>
+    <li data-automation-id="progressBarInactiveStep" data-step="1">
+      My Experience
+    </li>
+    <li data-automation-id="progressBarInactiveStep" data-step="2">
+      Application Questions
+    </li>
+    <li data-automation-id="progressBarInactiveStep" data-step="3">
+      Voluntary Disclosures
+    </li>
+  </ol>
+</nav>
+
+<!-- ======================== SECTION 1: MY INFORMATION ======================== -->
+<div class="wd-section active" id="section-0" data-automation-id="myInformationPage">
+  <h3 data-automation-id="stepTitle">My Information</h3>
+
+  <!-- First Name (required) -->
+  <div data-automation-id="formField-legalNameSection_firstName" data-fkit-id="legalNameSection--firstName" class="wd-formfield">
+    <label for="legalNameSection--firstName"><span>First Name<abbr aria-hidden="true">*</abbr></span></label>
+    <div><input type="text" id="legalNameSection--firstName" name="firstName" aria-required="true" value=""></div>
+  </div>
+
+  <!-- Last Name (required) -->
+  <div data-automation-id="formField-legalNameSection_lastName" data-fkit-id="legalNameSection--lastName" class="wd-formfield">
+    <label for="legalNameSection--lastName"><span>Last Name<abbr aria-hidden="true">*</abbr></span></label>
+    <div><input type="text" id="legalNameSection--lastName" name="lastName" aria-required="true" value=""></div>
+  </div>
+
+  <!-- Address Line 1 -->
+  <div data-automation-id="formField-addressSection_addressLine1" data-fkit-id="addressSection--addressLine1" class="wd-formfield">
+    <label for="addressSection--addressLine1"><span>Address Line 1</span></label>
+    <div><input type="text" id="addressSection--addressLine1" name="addressLine1" value=""></div>
+  </div>
+
+  <!-- City -->
+  <div data-automation-id="formField-addressSection_city" data-fkit-id="addressSection--city" class="wd-formfield">
+    <label for="addressSection--city"><span>City</span></label>
+    <div><input type="text" id="addressSection--city" name="city" value=""></div>
+  </div>
+
+  <!-- Country (dropdown, required) -->
+  <div data-automation-id="formField-country" data-fkit-id="addressSection--country" class="wd-formfield">
+    <label for="addressSection--country"><span>Country<abbr aria-hidden="true">*</abbr></span></label>
+    <div>
+      <div class="wd-dropdown" data-dropdown="country">
+        <button aria-haspopup="listbox" type="button" id="addressSection--country" name="country"
+                aria-label="Country Select One Required">Select One</button>
+        <input type="text" class="wd-hidden-value" value="">
+        <span class="menu-icon"><svg class="wd-icon-caret-down-small" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></span>
+      </div>
+      <!-- Popup rendered on click -->
+      <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt" data-for="country">
+        <div data-uxi-widget-type="multiselectlist" role="listbox">
+          <div role="option" data-automation-id="menuItem" aria-selected="false">United States of America</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Canada</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">United Kingdom</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Germany</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">France</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">India</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Australia</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Japan</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- State (dropdown) -->
+  <div data-automation-id="formField-addressSection_countryRegion" data-fkit-id="addressSection--state" class="wd-formfield">
+    <label for="addressSection--state"><span>State</span></label>
+    <div>
+      <div class="wd-dropdown" data-dropdown="state">
+        <button aria-haspopup="listbox" type="button" id="addressSection--state" name="state"
+                aria-label="State Select One">Select One</button>
+        <input type="text" class="wd-hidden-value" value="">
+        <span class="menu-icon"><svg class="wd-icon-caret-down-small" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></span>
+      </div>
+      <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt" data-for="state">
+        <div data-uxi-widget-type="multiselectlist" role="listbox">
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Alabama</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">California</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">New York</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Texas</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Washington</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Oregon</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Massachusetts</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Illinois</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Postal Code -->
+  <div data-automation-id="formField-addressSection_postalCode" data-fkit-id="addressSection--postalCode" class="wd-formfield">
+    <label for="addressSection--postalCode"><span>Postal Code</span></label>
+    <div><input type="text" id="addressSection--postalCode" name="postalCode" value=""></div>
+  </div>
+
+  <!-- Email Address -->
+  <div data-automation-id="formField-email" data-fkit-id="contactInformation--email" class="wd-formfield">
+    <label for="contactInformation--email"><span>Email Address</span></label>
+    <div><input type="text" id="contactInformation--email" name="email" value=""></div>
+  </div>
+
+  <!-- Phone Number -->
+  <div data-automation-id="formField-phone" data-fkit-id="contactInformation--phone" class="wd-formfield">
+    <label for="contactInformation--phone"><span>Phone Number</span></label>
+    <div><input type="text" id="contactInformation--phone" name="phone" value=""></div>
+  </div>
+</div>
+
+<!-- ======================== SECTION 2: MY EXPERIENCE ======================== -->
+<div class="wd-section" id="section-1" data-automation-id="myExperiencePage">
+  <h3 data-automation-id="stepTitle">My Experience</h3>
+
+  <!-- -------- Work Experience (repeating) -------- -->
+  <div role="group" aria-labelledby="Work-Experience-section" data-automation-id="workExperienceSection">
+    <h4 id="Work-Experience-section">Work Experience</h4>
+
+    <div id="work-experience-entries">
+      <div class="wd-repeating-group" role="group" aria-labelledby="Work-Experience-1-panel" data-entry-type="work" data-entry-index="1">
+        <h5 id="Work-Experience-1-panel">
+          <span>Work Experience 1</span>
+          <button class="wd-delete-btn" aria-label="Delete Work Experience 1" onclick="deleteEntry(this)">
+            <svg class="wd-icon-trash" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+          </button>
+        </h5>
+
+        <!-- Job Title (required) -->
+        <div data-automation-id="formField-jobTitle" data-fkit-id="workExperience-1--jobTitle" class="wd-formfield">
+          <label for="workExperience-1--jobTitle"><span>Job Title<abbr aria-hidden="true">*</abbr></span></label>
+          <div><input type="text" id="workExperience-1--jobTitle" name="jobTitle" aria-required="true" value=""></div>
+        </div>
+
+        <!-- Company (required) -->
+        <div data-automation-id="formField-company" data-fkit-id="workExperience-1--company" class="wd-formfield">
+          <label for="workExperience-1--company"><span>Company<abbr aria-hidden="true">*</abbr></span></label>
+          <div><input type="text" id="workExperience-1--company" name="company" aria-required="true" value=""></div>
+        </div>
+
+        <!-- Location -->
+        <div data-automation-id="formField-location" data-fkit-id="workExperience-1--location" class="wd-formfield">
+          <label for="workExperience-1--location"><span>Location</span></label>
+          <div><input type="text" id="workExperience-1--location" name="location" value=""></div>
+        </div>
+
+        <!-- I currently work here (checkbox) -->
+        <div class="wd-checkbox-wrapper">
+          <input type="checkbox" id="workExperience-1--currentlyWorkHere" name="currentlyWorkHere"
+                 aria-checked="false" onchange="toggleCurrentlyWorkHere(this)">
+          <label for="workExperience-1--currentlyWorkHere">I currently work here</label>
+        </div>
+
+        <!-- From date (required) -->
+        <div data-automation-id="formField-startDate" data-fkit-id="workExperience-1--startDate" class="wd-formfield">
+          <label><span>From<abbr aria-hidden="true">*</abbr></span></label>
+          <div data-automation-id="dateInputWrapper" role="group" class="wd-date-wrapper">
+            <div class="wd-date-segment">
+              <div data-automation-id="dateSectionMonth-display" aria-hidden="true">MM</div>
+              <input role="spinbutton" aria-label="Month" aria-valuemax="12" aria-valuemin="1" aria-valuenow=""
+                     data-automation-id="dateSectionMonth-input" value="" placeholder="MM">
+            </div>
+            <div class="wd-date-sep">/</div>
+            <div class="wd-date-segment">
+              <input role="spinbutton" aria-label="Year" aria-valuemax="9999" aria-valuemin="1" aria-valuenow=""
+                     data-automation-id="dateSectionYear-input" value="" placeholder="YYYY">
+            </div>
+            <div data-automation-id="dateIcon" role="button" aria-label="Calendar" class="wd-date-calendar">&#128197;</div>
+          </div>
+        </div>
+
+        <!-- To date (required, hidden when "currently work here" is checked) -->
+        <div data-automation-id="formField-endDate" data-fkit-id="workExperience-1--endDate" class="wd-formfield" data-end-date>
+          <label><span>To<abbr aria-hidden="true">*</abbr></span></label>
+          <div data-automation-id="dateInputWrapper" role="group" class="wd-date-wrapper">
+            <div class="wd-date-segment">
+              <div data-automation-id="dateSectionMonth-display" aria-hidden="true">MM</div>
+              <input role="spinbutton" aria-label="Month" aria-valuemax="12" aria-valuemin="1" aria-valuenow=""
+                     data-automation-id="dateSectionMonth-input" value="" placeholder="MM">
+            </div>
+            <div class="wd-date-sep">/</div>
+            <div class="wd-date-segment">
+              <input role="spinbutton" aria-label="Year" aria-valuemax="9999" aria-valuemin="1" aria-valuenow=""
+                     data-automation-id="dateSectionYear-input" value="" placeholder="YYYY">
+            </div>
+            <div data-automation-id="dateIcon" role="button" aria-label="Calendar" class="wd-date-calendar">&#128197;</div>
+          </div>
+        </div>
+
+        <!-- Role Description (textarea) -->
+        <div data-automation-id="formField-description" data-fkit-id="workExperience-1--description" class="wd-formfield">
+          <label for="workExperience-1--description"><span>Role Description</span></label>
+          <div><textarea id="workExperience-1--description" name="description"></textarea></div>
+        </div>
+      </div>
+    </div>
+
+    <button data-automation-id="add-button" class="wd-add-another" onclick="addWorkExperience()">
+      + Add Another
+    </button>
+  </div>
+
+  <!-- -------- Education (repeating) -------- -->
+  <div role="group" aria-labelledby="Education-section" data-automation-id="educationSection">
+    <h4 id="Education-section">Education</h4>
+
+    <div id="education-entries">
+      <div class="wd-repeating-group" role="group" aria-labelledby="Education-1-panel" data-entry-type="education" data-entry-index="1">
+        <h5 id="Education-1-panel">
+          <span>Education 1</span>
+          <button class="wd-delete-btn" aria-label="Delete Education 1" onclick="deleteEntry(this)">
+            <svg class="wd-icon-trash" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+          </button>
+        </h5>
+
+        <!-- School or University (multiselect search, required) -->
+        <div data-automation-id="formField-school" data-fkit-id="education-1--school" class="wd-formfield">
+          <label><span>School or University<abbr aria-hidden="true">*</abbr></span></label>
+          <div data-uxi-widget-type="multiselect" data-automation-id="multiSelectContainer" class="wd-multiselect" data-multiselect="school-1">
+            <div data-automation-id="multiselectInputContainer" class="wd-multiselect-input-container">
+              <input data-uxi-widget-type="selectinput" placeholder="Search" aria-required="true" id="education-1--school"
+                     autocomplete="off" data-search-options="MIT,Stanford University,Harvard University,UCLA,UC Berkeley,Yale University,Princeton University,Columbia University,Carnegie Mellon University,Georgia Institute of Technology">
+              <span data-automation-id="promptSearchButton" data-uxi-widget-type="selectinputicon" class="wd-search-icon">&#128269;</span>
+            </div>
+            <ul role="listbox" data-automation-id="selectedItemList" style="list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:0.3rem;"></ul>
+            <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt"></div>
+          </div>
+        </div>
+
+        <!-- Degree (dropdown, required) -->
+        <div data-automation-id="formField-degree" data-fkit-id="education-1--degree" class="wd-formfield">
+          <label for="education-1--degree"><span>Degree<abbr aria-hidden="true">*</abbr></span></label>
+          <div>
+            <div class="wd-dropdown" data-dropdown="degree-1">
+              <button aria-haspopup="listbox" type="button" id="education-1--degree" name="degree"
+                      aria-label="Degree Select One Required" aria-required="true">Select One</button>
+              <input type="text" class="wd-hidden-value" value="">
+              <span class="menu-icon"><svg class="wd-icon-caret-down-small" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></span>
+            </div>
+            <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt" data-for="degree-1">
+              <div data-uxi-widget-type="multiselectlist" role="listbox">
+                <div role="option" data-automation-id="menuItem" aria-selected="false">High School Diploma</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">Associate's Degree</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">Bachelor's Degree</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">Master's Degree</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">Doctorate (PhD)</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">JD (Juris Doctor)</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">MBA</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Field of Study (multiselect search) -->
+        <div data-automation-id="formField-fieldOfStudy" data-fkit-id="education-1--fieldOfStudy" class="wd-formfield">
+          <label><span>Field of Study</span></label>
+          <div data-uxi-widget-type="multiselect" data-automation-id="multiSelectContainer" class="wd-multiselect" data-multiselect="fieldOfStudy-1">
+            <div data-automation-id="multiselectInputContainer" class="wd-multiselect-input-container">
+              <input data-uxi-widget-type="selectinput" placeholder="Search" id="education-1--fieldOfStudy"
+                     autocomplete="off" data-search-options="Computer Science,Electrical Engineering,Mathematics,Physics,Business Administration,Economics,Data Science,Information Technology,Mechanical Engineering,Biology">
+              <span data-automation-id="promptSearchButton" data-uxi-widget-type="selectinputicon" class="wd-search-icon">&#128269;</span>
+            </div>
+            <ul role="listbox" data-automation-id="selectedItemList" style="list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:0.3rem;"></ul>
+            <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt"></div>
+          </div>
+        </div>
+
+        <!-- Overall Result (GPA) -->
+        <div data-automation-id="formField-gpa" data-fkit-id="education-1--gpa" class="wd-formfield">
+          <label for="education-1--gpa"><span>Overall Result (GPA)</span></label>
+          <div><input type="text" id="education-1--gpa" name="gpa" value=""></div>
+        </div>
+      </div>
+    </div>
+
+    <button data-automation-id="add-button" class="wd-add-another" onclick="addEducation()">
+      + Add Another
+    </button>
+  </div>
+
+  <!-- -------- Languages (repeating) -------- -->
+  <div role="group" aria-labelledby="Languages-section" data-automation-id="languagesSection">
+    <h4 id="Languages-section">Languages</h4>
+
+    <div id="language-entries">
+      <div class="wd-repeating-group" role="group" aria-labelledby="Language-1-panel" data-entry-type="language" data-entry-index="1">
+        <h5 id="Language-1-panel">
+          <span>Language 1</span>
+          <button class="wd-delete-btn" aria-label="Delete Language 1" onclick="deleteEntry(this)">
+            <svg class="wd-icon-trash" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+          </button>
+        </h5>
+
+        <!-- Language (dropdown, required) -->
+        <div data-automation-id="formField-language" data-fkit-id="language-1--language" class="wd-formfield">
+          <label for="language-1--language"><span>Language<abbr aria-hidden="true">*</abbr></span></label>
+          <div>
+            <div class="wd-dropdown" data-dropdown="language-1">
+              <button aria-haspopup="listbox" type="button" id="language-1--language" name="language"
+                      aria-label="Language Select One Required" aria-required="true">Select One</button>
+              <input type="text" class="wd-hidden-value" value="">
+              <span class="menu-icon"><svg class="wd-icon-caret-down-small" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></span>
+            </div>
+            <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt" data-for="language-1">
+              <div data-uxi-widget-type="multiselectlist" role="listbox">
+                <div role="option" data-automation-id="menuItem" aria-selected="false">English</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">Spanish</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">French</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">German</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">Mandarin Chinese</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">Japanese</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">Korean</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">Portuguese</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">Hindi</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">Arabic</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- I am fluent (checkbox) -->
+        <div class="wd-checkbox-wrapper">
+          <input type="checkbox" id="language-1--fluent" name="fluent" aria-checked="false">
+          <label for="language-1--fluent">I am fluent</label>
+        </div>
+
+        <!-- Proficiency dropdowns (all required) -->
+        <div data-automation-id="formField-comprehension" data-fkit-id="language-1--comprehension" class="wd-formfield">
+          <label for="language-1--comprehension"><span>Comprehension<abbr aria-hidden="true">*</abbr></span></label>
+          <div>
+            <div class="wd-dropdown" data-dropdown="comprehension-1">
+              <button aria-haspopup="listbox" type="button" id="language-1--comprehension" name="comprehension"
+                      aria-label="Comprehension Select One Required" aria-required="true">Select One</button>
+              <input type="text" class="wd-hidden-value" value="">
+              <span class="menu-icon"><svg class="wd-icon-caret-down-small" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></span>
+            </div>
+            <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt" data-for="comprehension-1">
+              <div data-uxi-widget-type="multiselectlist" role="listbox">
+                <div role="option" data-automation-id="menuItem" aria-selected="false">1 - Basic</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">2 - Conversational</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">3 - Professional Working</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">4 - Advanced Professional</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">5 - Fluent</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div data-automation-id="formField-overall" data-fkit-id="language-1--overall" class="wd-formfield">
+          <label for="language-1--overall"><span>Overall<abbr aria-hidden="true">*</abbr></span></label>
+          <div>
+            <div class="wd-dropdown" data-dropdown="overall-1">
+              <button aria-haspopup="listbox" type="button" id="language-1--overall" name="overall"
+                      aria-label="Overall Select One Required" aria-required="true">Select One</button>
+              <input type="text" class="wd-hidden-value" value="">
+              <span class="menu-icon"><svg class="wd-icon-caret-down-small" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></span>
+            </div>
+            <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt" data-for="overall-1">
+              <div data-uxi-widget-type="multiselectlist" role="listbox">
+                <div role="option" data-automation-id="menuItem" aria-selected="false">1 - Basic</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">2 - Conversational</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">3 - Professional Working</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">4 - Advanced Professional</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">5 - Fluent</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div data-automation-id="formField-reading" data-fkit-id="language-1--reading" class="wd-formfield">
+          <label for="language-1--reading"><span>Reading<abbr aria-hidden="true">*</abbr></span></label>
+          <div>
+            <div class="wd-dropdown" data-dropdown="reading-1">
+              <button aria-haspopup="listbox" type="button" id="language-1--reading" name="reading"
+                      aria-label="Reading Select One Required" aria-required="true">Select One</button>
+              <input type="text" class="wd-hidden-value" value="">
+              <span class="menu-icon"><svg class="wd-icon-caret-down-small" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></span>
+            </div>
+            <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt" data-for="reading-1">
+              <div data-uxi-widget-type="multiselectlist" role="listbox">
+                <div role="option" data-automation-id="menuItem" aria-selected="false">1 - Basic</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">2 - Conversational</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">3 - Professional Working</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">4 - Advanced Professional</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">5 - Fluent</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div data-automation-id="formField-speaking" data-fkit-id="language-1--speaking" class="wd-formfield">
+          <label for="language-1--speaking"><span>Speaking<abbr aria-hidden="true">*</abbr></span></label>
+          <div>
+            <div class="wd-dropdown" data-dropdown="speaking-1">
+              <button aria-haspopup="listbox" type="button" id="language-1--speaking" name="speaking"
+                      aria-label="Speaking Select One Required" aria-required="true">Select One</button>
+              <input type="text" class="wd-hidden-value" value="">
+              <span class="menu-icon"><svg class="wd-icon-caret-down-small" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></span>
+            </div>
+            <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt" data-for="speaking-1">
+              <div data-uxi-widget-type="multiselectlist" role="listbox">
+                <div role="option" data-automation-id="menuItem" aria-selected="false">1 - Basic</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">2 - Conversational</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">3 - Professional Working</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">4 - Advanced Professional</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">5 - Fluent</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div data-automation-id="formField-writing" data-fkit-id="language-1--writing" class="wd-formfield">
+          <label for="language-1--writing"><span>Writing<abbr aria-hidden="true">*</abbr></span></label>
+          <div>
+            <div class="wd-dropdown" data-dropdown="writing-1">
+              <button aria-haspopup="listbox" type="button" id="language-1--writing" name="writing"
+                      aria-label="Writing Select One Required" aria-required="true">Select One</button>
+              <input type="text" class="wd-hidden-value" value="">
+              <span class="menu-icon"><svg class="wd-icon-caret-down-small" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></span>
+            </div>
+            <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt" data-for="writing-1">
+              <div data-uxi-widget-type="multiselectlist" role="listbox">
+                <div role="option" data-automation-id="menuItem" aria-selected="false">1 - Basic</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">2 - Conversational</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">3 - Professional Working</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">4 - Advanced Professional</div>
+                <div role="option" data-automation-id="menuItem" aria-selected="false">5 - Fluent</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <button data-automation-id="add-button" class="wd-add-another" onclick="addLanguage()">
+      + Add Another
+    </button>
+  </div>
+
+  <!-- -------- Skills (multiselect) -------- -->
+  <div data-automation-id="skillsSection">
+    <h4 id="Skills-section">Skills</h4>
+    <div data-automation-id="formField-skills" class="wd-formfield">
+      <label for="skills--skills"><span>Type to Add Skills</span></label>
+      <div data-uxi-widget-type="multiselect" data-automation-id="multiSelectContainer" class="wd-multiselect" data-multiselect="skills">
+        <div data-automation-id="multiselectInputContainer" class="wd-multiselect-input-container">
+          <input data-uxi-widget-type="selectinput" placeholder="Search" id="skills--skills"
+                 role="combobox" aria-expanded="false" aria-controls="skills--popup-listbox"
+                 autocomplete="off" data-search-options="Python,Python (Programming Language),Python NumPy,Java,JavaScript,HTML,C,C++,Sybase Unwired Platform (SUP),Vercel,React,Node.js,AWS,Docker,Kubernetes,Machine Learning,Databases,SQL,Git,AI,REST APIs,GraphQL,TypeScript,OpenSim">
+          <button type="button" data-automation-id="clearSearchButton" class="wd-icon-button wd-clear-icon" aria-label="Clear search" hidden>&#10005;</button>
+          <span data-automation-id="promptIcon" data-uxi-widget-type="selectinputicon" class="wd-icon-button wd-search-icon" role="button" tabindex="0" aria-label="Search skills">&#9776;</span>
+        </div>
+        <ul role="listbox" data-automation-id="selectedItemList" style="list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:0.3rem;"></ul>
+        <div class="wd-popup" id="skills--popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- -------- Resume/CV (file upload) -------- -->
+  <div data-automation-id="resumeSection">
+    <h4>Resume/CV</h4>
+    <div data-automation-id="file-upload-drop-zone" class="wd-file-upload-zone">
+      <div>Drop files here</div>
+      <button data-automation-id="select-files" type="button" onclick="this.nextElementSibling.click()">Select files</button>
+      <input type="file" data-automation-id="file-upload-input-ref" multiple accept=".pdf,.doc,.docx,.txt,.rtf">
+    </div>
+    <div id="uploaded-files"></div>
+  </div>
+
+  <!-- -------- Websites (repeating URL inputs) -------- -->
+  <div role="group" aria-labelledby="Websites-section" data-automation-id="websitesSection">
+    <h4 id="Websites-section">Websites</h4>
+
+    <div id="website-entries">
+      <div class="wd-repeating-group" role="group" aria-labelledby="Website-1-panel" data-entry-type="website" data-entry-index="1">
+        <h5 id="Website-1-panel">
+          <span>Website 1</span>
+          <button class="wd-delete-btn" aria-label="Delete Website 1" onclick="deleteEntry(this)">
+            <svg class="wd-icon-trash" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+          </button>
+        </h5>
+
+        <div data-automation-id="formField-websiteUrl" data-fkit-id="website-1--url" class="wd-formfield">
+          <label for="website-1--url"><span>URL</span></label>
+          <div><input type="url" id="website-1--url" name="websiteUrl" value="" placeholder="https://"></div>
+        </div>
+      </div>
+    </div>
+
+    <button data-automation-id="add-button" class="wd-add-another" onclick="addWebsite()">
+      + Add Another
+    </button>
+  </div>
+</div>
+
+<!-- ======================== SECTION 3: APPLICATION QUESTIONS ======================== -->
+<div class="wd-section" id="section-2" data-automation-id="applicationQuestionsPage">
+  <h3 data-automation-id="stepTitle">Application Questions</h3>
+
+  <div data-automation-id="formField-yearsOfExperience" data-fkit-id="questions--yearsOfExperience" class="wd-formfield">
+    <label for="questions--yearsOfExperience"><span>How many years of relevant experience do you have?<abbr aria-hidden="true">*</abbr></span></label>
+    <div><input type="text" id="questions--yearsOfExperience" name="yearsOfExperience" aria-required="true" value=""></div>
+  </div>
+
+  <div data-automation-id="formField-sponsorship" data-fkit-id="questions--sponsorship" class="wd-formfield">
+    <label for="questions--sponsorship"><span>Will you now or in the future require sponsorship for employment visa status?<abbr aria-hidden="true">*</abbr></span></label>
+    <div>
+      <div class="wd-dropdown" data-dropdown="sponsorship">
+        <button aria-haspopup="listbox" type="button" id="questions--sponsorship" name="sponsorship"
+                aria-label="Sponsorship Select One Required" aria-required="true">Select One</button>
+        <input type="text" class="wd-hidden-value" value="">
+        <span class="menu-icon"><svg class="wd-icon-caret-down-small" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></span>
+      </div>
+      <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt" data-for="sponsorship">
+        <div data-uxi-widget-type="multiselectlist" role="listbox">
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Yes</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">No</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div data-automation-id="formField-workAuthorization" data-fkit-id="questions--workAuthorization" class="wd-formfield">
+    <label for="questions--workAuthorization"><span>Are you legally authorized to work in the United States?<abbr aria-hidden="true">*</abbr></span></label>
+    <div>
+      <div class="wd-dropdown" data-dropdown="workAuthorization">
+        <button aria-haspopup="listbox" type="button" id="questions--workAuthorization" name="workAuthorization"
+                aria-label="Work Authorization Select One Required" aria-required="true">Select One</button>
+        <input type="text" class="wd-hidden-value" value="">
+        <span class="menu-icon"><svg class="wd-icon-caret-down-small" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></span>
+      </div>
+      <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt" data-for="workAuthorization">
+        <div data-uxi-widget-type="multiselectlist" role="listbox">
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Yes</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">No</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div data-automation-id="formField-salary" data-fkit-id="questions--salary" class="wd-formfield">
+    <label for="questions--salary"><span>What is your desired salary range?</span></label>
+    <div><input type="text" id="questions--salary" name="salary" value=""></div>
+  </div>
+
+  <div data-automation-id="formField-startDate" data-fkit-id="questions--startDate" class="wd-formfield">
+    <label for="questions--startDate"><span>What is your earliest available start date?</span></label>
+    <div><input type="text" id="questions--startDate" name="startDate" value=""></div>
+  </div>
+
+  <div data-automation-id="formField-referral" data-fkit-id="questions--referral" class="wd-formfield">
+    <label for="questions--referral"><span>How did you hear about this position?</span></label>
+    <div><input type="text" id="questions--referral" name="referral" value=""></div>
+  </div>
+</div>
+
+<!-- ======================== SECTION 4: VOLUNTARY DISCLOSURES ======================== -->
+<div class="wd-section" id="section-3" data-automation-id="voluntaryDisclosuresPage">
+  <h3 data-automation-id="stepTitle">Voluntary Disclosures</h3>
+  <p style="font-size:0.85rem;color:#666;margin-bottom:1rem;">
+    This information is voluntary and will not affect your application. It is collected for federal reporting purposes.
+  </p>
+
+  <!-- Gender -->
+  <div data-automation-id="formField-gender" data-fkit-id="disclosures--gender" class="wd-formfield">
+    <label for="disclosures--gender"><span>Gender</span></label>
+    <div>
+      <div class="wd-dropdown" data-dropdown="gender">
+        <button aria-haspopup="listbox" type="button" id="disclosures--gender" name="gender"
+                aria-label="Gender Select One">Select One</button>
+        <input type="text" class="wd-hidden-value" value="">
+        <span class="menu-icon"><svg class="wd-icon-caret-down-small" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></span>
+      </div>
+      <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt" data-for="gender">
+        <div data-uxi-widget-type="multiselectlist" role="listbox">
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Male</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Female</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Decline to Self Identify</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Ethnicity -->
+  <div data-automation-id="formField-ethnicity" data-fkit-id="disclosures--ethnicity" class="wd-formfield">
+    <label for="disclosures--ethnicity"><span>Ethnicity</span></label>
+    <div>
+      <div class="wd-dropdown" data-dropdown="ethnicity">
+        <button aria-haspopup="listbox" type="button" id="disclosures--ethnicity" name="ethnicity"
+                aria-label="Ethnicity Select One">Select One</button>
+        <input type="text" class="wd-hidden-value" value="">
+        <span class="menu-icon"><svg class="wd-icon-caret-down-small" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></span>
+      </div>
+      <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt" data-for="ethnicity">
+        <div data-uxi-widget-type="multiselectlist" role="listbox">
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Hispanic or Latino</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">White (Not Hispanic or Latino)</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Black or African American (Not Hispanic or Latino)</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Asian (Not Hispanic or Latino)</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">American Indian or Alaska Native (Not Hispanic or Latino)</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Native Hawaiian or Other Pacific Islander (Not Hispanic or Latino)</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Two or More Races (Not Hispanic or Latino)</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">Decline to Self Identify</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Veteran Status -->
+  <div data-automation-id="formField-veteranStatus" data-fkit-id="disclosures--veteranStatus" class="wd-formfield">
+    <label for="disclosures--veteranStatus"><span>Veteran Status</span></label>
+    <div>
+      <div class="wd-dropdown" data-dropdown="veteranStatus">
+        <button aria-haspopup="listbox" type="button" id="disclosures--veteranStatus" name="veteranStatus"
+                aria-label="Veteran Status Select One">Select One</button>
+        <input type="text" class="wd-hidden-value" value="">
+        <span class="menu-icon"><svg class="wd-icon-caret-down-small" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></span>
+      </div>
+      <div class="wd-popup" data-automation-id="responsiveMonikerPrompt" data-uxi-widget-type="prompt" data-for="veteranStatus">
+        <div data-uxi-widget-type="multiselectlist" role="listbox">
+          <div role="option" data-automation-id="menuItem" aria-selected="false">I am not a protected veteran</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">I identify as one or more of the classifications of a protected veteran</div>
+          <div role="option" data-automation-id="menuItem" aria-selected="false">I don't wish to answer</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================== FOOTER NAVIGATION ======================== -->
+<div data-automation-id="pageFooter" class="wd-page-footer">
+  <button data-automation-id="pageFooterBackButton" class="wd-btn-back" type="button" onclick="navigateStep(-1)">Back</button>
+  <button data-automation-id="pageFooterNextButton" class="wd-btn-next" type="button" onclick="navigateStep(1)">Save and Continue</button>
+</div>
+
+<script>
+/* =========================================================================
+   Workday Fixture — Interactive Behavior
+   ========================================================================= */
+
+let currentStep = 0;
+const totalSteps = 4;
+
+// ---- Section navigation ----
+function navigateStep(direction) {
+  const nextStep = currentStep + direction;
+  if (nextStep < 0 || nextStep >= totalSteps) return;
+  showStep(nextStep);
+}
+
+function showStep(step) {
+  // Update section visibility
+  document.querySelectorAll('.wd-section').forEach((s, i) => {
+    s.classList.toggle('active', i === step);
+  });
+  // Update progress bar
+  const steps = document.querySelectorAll('[data-automation-id="progressBar"] li');
+  steps.forEach((li, i) => {
+    if (i < step) {
+      li.setAttribute('data-automation-id', 'progressBarCompletedStep');
+      li.innerHTML = '<span class="wd-icon-check">&#10003;</span> ' + li.textContent.replace(/^\s*\u2713\s*/, '').trim();
+    } else if (i === step) {
+      li.setAttribute('data-automation-id', 'progressBarActiveStep');
+    } else {
+      li.setAttribute('data-automation-id', 'progressBarInactiveStep');
+    }
+  });
+  currentStep = step;
+}
+
+// Progress bar click navigation
+document.querySelectorAll('[data-automation-id="progressBar"] li').forEach((li) => {
+  li.addEventListener('click', () => {
+    const step = parseInt(li.getAttribute('data-step'), 10);
+    if (!isNaN(step)) showStep(step);
+  });
+});
+
+// ---- Dropdown behavior ----
+// Click trigger button -> open popup; click option -> select + close
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.wd-dropdown button[aria-haspopup="listbox"]');
+  if (btn) {
+    e.stopPropagation();
+    const dropdown = btn.closest('.wd-dropdown');
+    const key = dropdown.getAttribute('data-dropdown');
+    const popup = dropdown.parentElement.querySelector('.wd-popup[data-for="' + key + '"]');
+    if (!popup) return;
+    // Close all other popups first
+    document.querySelectorAll('.wd-popup.open').forEach(p => { if (p !== popup) p.classList.remove('open'); });
+    popup.classList.toggle('open');
+    return;
+  }
+
+  const option = e.target.closest('.wd-popup [role="option"]');
+  if (option) {
+    const popup = option.closest('.wd-popup');
+    const forKey = popup.getAttribute('data-for');
+    const dropdown = document.querySelector('.wd-dropdown[data-dropdown="' + forKey + '"]');
+    if (!dropdown) return;
+    const triggerBtn = dropdown.querySelector('button[aria-haspopup="listbox"]');
+    const hiddenInput = dropdown.querySelector('.wd-hidden-value');
+    // Deselect siblings
+    popup.querySelectorAll('[role="option"]').forEach(o => o.setAttribute('aria-selected', 'false'));
+    option.setAttribute('aria-selected', 'true');
+    triggerBtn.textContent = option.textContent;
+    triggerBtn.style.color = '#1a1a1a';
+    if (hiddenInput) hiddenInput.value = option.textContent.trim().toLowerCase().replace(/\s+/g, '_');
+    popup.classList.remove('open');
+    return;
+  }
+
+  // Close all popups on outside click
+  document.querySelectorAll('.wd-popup.open').forEach(p => p.classList.remove('open'));
+});
+
+// ---- Multiselect search behavior ----
+document.querySelectorAll('[data-uxi-widget-type="multiselect"]').forEach(container => {
+  const input = container.querySelector('[data-uxi-widget-type="selectinput"]');
+  const popup = container.querySelector('.wd-popup');
+  const clearBtn = container.querySelector('[data-automation-id="clearSearchButton"]');
+  const promptBtn = container.querySelector('[data-uxi-widget-type="selectinputicon"], [data-automation-id="promptSearchButton"], [data-automation-id="promptIcon"]');
+  const optionsStr = input ? input.getAttribute('data-search-options') || '' : '';
+  const allOptions = optionsStr.split(',').filter(Boolean);
+  const isSkills = container.getAttribute('data-multiselect') === 'skills';
+  let searchModeOpen = false;
+  let queryCommitted = false;
+
+  if (!input || !popup) return;
+
+  function getSelectedList() {
+    let list = container.querySelector('[data-automation-id="selectedItemList"]');
+    if (!list) {
+      list = document.createElement('ul');
+      list.setAttribute('role', 'listbox');
+      list.setAttribute('data-automation-id', 'selectedItemList');
+      list.style.listStyle = 'none';
+      list.style.margin = '0';
+      list.style.padding = '0';
+      list.style.display = 'flex';
+      list.style.flexWrap = 'wrap';
+      list.style.gap = '0.3rem';
+      popup.parentElement.insertBefore(list, popup);
+    }
+    return list;
+  }
+
+  function getSelected() {
+    const selectedList = getSelectedList();
+    return Array.from(selectedList.querySelectorAll('[data-automation-id="selectedItem"]')).map(el => el.getAttribute('title'));
+  }
+
+  function syncClearButton() {
+    if (!clearBtn) return;
+    clearBtn.hidden = !input.value;
+  }
+
+  function renderNoItems() {
+    popup.innerHTML =
+      '<div class="wd-search-results-header"><span>Search Results</span><span>(0)</span></div>' +
+      '<div data-uxi-widget-type="multiselectlist" role="listbox" id="skills--popup-listbox">' +
+      '<div role="option" data-automation-id="menuItem" aria-selected="false">No Items.</div>' +
+      '</div>';
+    popup.classList.add('open');
+    input.setAttribute('aria-expanded', 'true');
+  }
+
+  function isBlobQuery(filter) {
+    const trimmed = String(filter || '').trim();
+    if (!trimmed) return false;
+    if (trimmed.includes(',')) return true;
+    return trimmed.split(/\s+/).filter(Boolean).length > 3;
+  }
+
+  function renderPopup(filter) {
+    if (isSkills && !searchModeOpen) {
+      popup.classList.remove('open');
+      input.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    if (isSkills && !queryCommitted) {
+      popup.classList.remove('open');
+      input.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    const normalizedFilter = String(filter || '').trim();
+    if (isSkills && isBlobQuery(normalizedFilter)) {
+      renderNoItems();
+      return;
+    }
+    const selected = getSelected();
+    const filtered = allOptions.filter(o => {
+      const matchesFilter = !normalizedFilter || o.toLowerCase().includes(normalizedFilter.toLowerCase());
+      const notSelected = !selected.includes(o);
+      return matchesFilter && notSelected;
+    });
+    if (filtered.length === 0) {
+      renderNoItems();
+      return;
+    }
+    popup.innerHTML =
+      (isSkills
+        ? '<div class="wd-search-results-header"><span>Search Results</span><span>(' + filtered.length + ')</span></div>'
+        : '') +
+      '<div data-uxi-widget-type="multiselectlist" role="listbox" id="skills--popup-listbox">' +
+      filtered.map(o => (
+        isSkills
+          ? '<div role="option" data-automation-id="menuItem" aria-selected="false"><div class="wd-skill-option"><span class="wd-skill-option-box" aria-hidden="true"></span><span class="wd-skill-option-text">' + o + '</span></div></div>'
+          : '<div role="option" data-automation-id="menuItem" aria-selected="false">' + o + '</div>'
+      )).join('') +
+      '</div>';
+    popup.classList.add('open');
+    input.setAttribute('aria-expanded', 'true');
+  }
+
+  function addPill(text) {
+    const selectedList = getSelectedList();
+    const li = document.createElement('li');
+    li.innerHTML = '<div role="option" data-automation-id="selectedItem" title="' + text + '">' +
+      '<div data-automation-id="DELETE_charm" role="presentation">&#10005;</div>' +
+      '<p data-automation-id="promptOption">' + text + '</p>' +
+      '</div>';
+    selectedList.appendChild(li);
+  }
+
+  input.addEventListener('input', () => {
+    syncClearButton();
+    if (isSkills) queryCommitted = false;
+    renderPopup(input.value);
+  });
+  input.addEventListener('focus', () => {
+    syncClearButton();
+    renderPopup(input.value);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (isSkills && !searchModeOpen) searchModeOpen = true;
+      if (isSkills) queryCommitted = true;
+      renderPopup(input.value);
+    }
+  });
+
+  popup.addEventListener('click', (e) => {
+    const option = e.target.closest('[role="option"]');
+    if (!option) return;
+    if (option.textContent.trim() === 'No Items.') return;
+    addPill(option.textContent.trim());
+    input.value = '';
+    queryCommitted = false;
+    syncClearButton();
+    popup.classList.remove('open');
+    input.setAttribute('aria-expanded', 'false');
+  });
+
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      input.value = '';
+      queryCommitted = false;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      syncClearButton();
+      input.focus();
+    });
+  }
+  if (promptBtn) {
+    promptBtn.addEventListener('click', () => {
+      if (isSkills) {
+        if (popup.classList.contains('open')) {
+          searchModeOpen = false;
+          queryCommitted = false;
+          popup.classList.remove('open');
+          input.setAttribute('aria-expanded', 'false');
+          return;
+        }
+        searchModeOpen = true;
+      }
+      if (popup.classList.contains('open') && !isSkills) {
+        popup.classList.remove('open');
+        input.setAttribute('aria-expanded', 'false');
+        return;
+      }
+      input.focus();
+      renderPopup(input.value);
+    });
+  }
+
+  container.addEventListener('click', (e) => {
+    const charm = e.target.closest('[data-automation-id="DELETE_charm"]');
+    if (!charm) return;
+    const li = charm.closest('li');
+    if (li) li.remove();
+  });
+});
+
+// Close multiselect popups on outside click
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('[data-uxi-widget-type="multiselect"]')) {
+    document.querySelectorAll('[data-uxi-widget-type="multiselect"] .wd-popup.open').forEach(p => p.classList.remove('open'));
+    document.querySelectorAll('[data-uxi-widget-type="multiselect"] [data-uxi-widget-type="selectinput"]').forEach(input => {
+      input.setAttribute('aria-expanded', 'false');
+    });
+  }
+});
+
+// ---- Date spinbutton behavior ----
+document.querySelectorAll('input[role="spinbutton"]').forEach(input => {
+  const min = parseInt(input.getAttribute('aria-valuemin'), 10);
+  const max = parseInt(input.getAttribute('aria-valuemax'), 10);
+  const displayEl = input.parentElement.querySelector('[aria-hidden="true"]');
+
+  function updateDisplay(val) {
+    input.setAttribute('aria-valuenow', val);
+    input.value = val;
+    if (displayEl) {
+      displayEl.textContent = String(val).padStart(2, '0');
+    }
+  }
+
+  input.addEventListener('keydown', (e) => {
+    let current = parseInt(input.getAttribute('aria-valuenow'), 10) || min;
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      current = current >= max ? min : current + 1;
+      updateDisplay(current);
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      current = current <= min ? max : current - 1;
+      updateDisplay(current);
+    }
+  });
+
+  input.addEventListener('input', () => {
+    let val = parseInt(input.value, 10);
+    if (!isNaN(val)) {
+      val = Math.max(min, Math.min(max, val));
+      updateDisplay(val);
+    }
+  });
+
+  input.addEventListener('blur', () => {
+    let val = parseInt(input.value, 10);
+    if (isNaN(val)) {
+      input.value = '';
+      input.setAttribute('aria-valuenow', '');
+      if (displayEl) displayEl.textContent = input.placeholder || 'MM';
+    }
+  });
+});
+
+// ---- Checkbox behavior ----
+document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+  cb.addEventListener('change', () => {
+    cb.setAttribute('aria-checked', cb.checked ? 'true' : 'false');
+  });
+});
+
+function toggleCurrentlyWorkHere(cb) {
+  const group = cb.closest('.wd-repeating-group');
+  if (!group) return;
+  const endDateField = group.querySelector('[data-end-date]');
+  if (endDateField) {
+    endDateField.style.display = cb.checked ? 'none' : '';
+  }
+}
+
+// ---- File upload behavior ----
+const fileInput = document.querySelector('[data-automation-id="file-upload-input-ref"]');
+if (fileInput) {
+  fileInput.addEventListener('change', () => {
+    const container = document.getElementById('uploaded-files');
+    Array.from(fileInput.files).forEach(file => {
+      const item = document.createElement('div');
+      item.className = 'wd-file-upload-item';
+      item.setAttribute('data-automation-id', 'file-upload-item');
+      item.innerHTML =
+        '<div data-automation-id="file-upload-item-name">' + file.name + '</div>' +
+        '<div data-automation-id="file-upload-successful">Successfully Uploaded!</div>' +
+        '<button data-automation-id="delete-file" aria-label="Delete ' + file.name + '" onclick="this.parentElement.remove()">&#10005;</button>';
+      container.appendChild(item);
+    });
+  });
+}
+
+// ---- Repeating section: Add Another ----
+let workCount = 1;
+let educationCount = 1;
+let languageCount = 1;
+let websiteCount = 1;
+
+function addWorkExperience() {
+  workCount++;
+  const container = document.getElementById('work-experience-entries');
+  const tpl = container.querySelector('.wd-repeating-group');
+  const clone = tpl.cloneNode(true);
+
+  clone.setAttribute('aria-labelledby', 'Work-Experience-' + workCount + '-panel');
+  clone.setAttribute('data-entry-index', workCount);
+  const header = clone.querySelector('h5');
+  header.id = 'Work-Experience-' + workCount + '-panel';
+  header.querySelector('span').textContent = 'Work Experience ' + workCount;
+  header.querySelector('button').setAttribute('aria-label', 'Delete Work Experience ' + workCount);
+
+  // Reset inputs
+  clone.querySelectorAll('input[type="text"], textarea').forEach(inp => { inp.value = ''; inp.id = inp.id.replace(/\d+/, workCount); });
+  clone.querySelectorAll('input[type="checkbox"]').forEach(cb => { cb.checked = false; cb.setAttribute('aria-checked', 'false'); cb.id = cb.id.replace(/\d+/, workCount); });
+  clone.querySelectorAll('input[role="spinbutton"]').forEach(sp => { sp.value = ''; sp.setAttribute('aria-valuenow', ''); });
+  clone.querySelectorAll('[data-end-date]').forEach(ed => { ed.style.display = ''; });
+  clone.querySelectorAll('[data-fkit-id]').forEach(el => { el.setAttribute('data-fkit-id', el.getAttribute('data-fkit-id').replace(/\d+/, workCount)); });
+  clone.querySelectorAll('label[for]').forEach(lbl => { lbl.setAttribute('for', lbl.getAttribute('for').replace(/\d+/, workCount)); });
+
+  container.appendChild(clone);
+  initSpinbuttons(clone);
+}
+
+function addEducation() {
+  educationCount++;
+  const container = document.getElementById('education-entries');
+  const tpl = container.querySelector('.wd-repeating-group');
+  const clone = tpl.cloneNode(true);
+
+  clone.setAttribute('aria-labelledby', 'Education-' + educationCount + '-panel');
+  clone.setAttribute('data-entry-index', educationCount);
+  const header = clone.querySelector('h5');
+  header.id = 'Education-' + educationCount + '-panel';
+  header.querySelector('span').textContent = 'Education ' + educationCount;
+  header.querySelector('button').setAttribute('aria-label', 'Delete Education ' + educationCount);
+
+  // Reset inputs and update IDs
+  clone.querySelectorAll('input[type="text"]').forEach(inp => { inp.value = ''; inp.id = inp.id.replace(/\d+/, educationCount); });
+  clone.querySelectorAll('.wd-dropdown').forEach(dd => {
+    const key = dd.getAttribute('data-dropdown');
+    dd.setAttribute('data-dropdown', key.replace(/\d+/, educationCount));
+    const btn = dd.querySelector('button');
+    if (btn) { btn.textContent = 'Select One'; btn.style.color = '#555'; btn.id = btn.id.replace(/\d+/, educationCount); }
+    const hid = dd.querySelector('.wd-hidden-value');
+    if (hid) hid.value = '';
+  });
+  clone.querySelectorAll('.wd-popup[data-for]').forEach(p => {
+    p.setAttribute('data-for', p.getAttribute('data-for').replace(/\d+/, educationCount));
+    p.classList.remove('open');
+    p.querySelectorAll('[role="option"]').forEach(o => o.setAttribute('aria-selected', 'false'));
+  });
+  clone.querySelectorAll('[data-multiselect]').forEach(ms => {
+    ms.setAttribute('data-multiselect', ms.getAttribute('data-multiselect').replace(/\d+/, educationCount));
+    const selList = ms.querySelector('[data-automation-id="selectedItemList"]');
+    if (selList) selList.innerHTML = '';
+    const msInput = ms.querySelector('[data-uxi-widget-type="selectinput"]');
+    if (msInput) { msInput.value = ''; msInput.id = msInput.id.replace(/\d+/, educationCount); }
+  });
+  clone.querySelectorAll('[data-fkit-id]').forEach(el => { el.setAttribute('data-fkit-id', el.getAttribute('data-fkit-id').replace(/\d+/, educationCount)); });
+  clone.querySelectorAll('label[for]').forEach(lbl => { lbl.setAttribute('for', lbl.getAttribute('for').replace(/\d+/, educationCount)); });
+
+  container.appendChild(clone);
+  initMultiselects(clone);
+}
+
+function addLanguage() {
+  languageCount++;
+  const container = document.getElementById('language-entries');
+  const tpl = container.querySelector('.wd-repeating-group');
+  const clone = tpl.cloneNode(true);
+
+  clone.setAttribute('aria-labelledby', 'Language-' + languageCount + '-panel');
+  clone.setAttribute('data-entry-index', languageCount);
+  const header = clone.querySelector('h5');
+  header.id = 'Language-' + languageCount + '-panel';
+  header.querySelector('span').textContent = 'Language ' + languageCount;
+  header.querySelector('button').setAttribute('aria-label', 'Delete Language ' + languageCount);
+
+  clone.querySelectorAll('.wd-dropdown').forEach(dd => {
+    const key = dd.getAttribute('data-dropdown');
+    dd.setAttribute('data-dropdown', key.replace(/\d+/, languageCount));
+    const btn = dd.querySelector('button');
+    if (btn) { btn.textContent = 'Select One'; btn.style.color = '#555'; btn.id = btn.id.replace(/\d+/, languageCount); }
+    const hid = dd.querySelector('.wd-hidden-value');
+    if (hid) hid.value = '';
+  });
+  clone.querySelectorAll('.wd-popup[data-for]').forEach(p => {
+    p.setAttribute('data-for', p.getAttribute('data-for').replace(/\d+/, languageCount));
+    p.classList.remove('open');
+    p.querySelectorAll('[role="option"]').forEach(o => o.setAttribute('aria-selected', 'false'));
+  });
+  clone.querySelectorAll('input[type="checkbox"]').forEach(cb => { cb.checked = false; cb.setAttribute('aria-checked', 'false'); cb.id = cb.id.replace(/\d+/, languageCount); });
+  clone.querySelectorAll('[data-fkit-id]').forEach(el => { el.setAttribute('data-fkit-id', el.getAttribute('data-fkit-id').replace(/\d+/, languageCount)); });
+  clone.querySelectorAll('label[for]').forEach(lbl => { lbl.setAttribute('for', lbl.getAttribute('for').replace(/\d+/, languageCount)); });
+
+  container.appendChild(clone);
+}
+
+function addWebsite() {
+  websiteCount++;
+  const container = document.getElementById('website-entries');
+  const tpl = container.querySelector('.wd-repeating-group');
+  const clone = tpl.cloneNode(true);
+
+  clone.setAttribute('aria-labelledby', 'Website-' + websiteCount + '-panel');
+  clone.setAttribute('data-entry-index', websiteCount);
+  const header = clone.querySelector('h5');
+  header.id = 'Website-' + websiteCount + '-panel';
+  header.querySelector('span').textContent = 'Website ' + websiteCount;
+  header.querySelector('button').setAttribute('aria-label', 'Delete Website ' + websiteCount);
+
+  clone.querySelectorAll('input').forEach(inp => { inp.value = ''; inp.id = inp.id.replace(/\d+/, websiteCount); });
+  clone.querySelectorAll('[data-fkit-id]').forEach(el => { el.setAttribute('data-fkit-id', el.getAttribute('data-fkit-id').replace(/\d+/, websiteCount)); });
+  clone.querySelectorAll('label[for]').forEach(lbl => { lbl.setAttribute('for', lbl.getAttribute('for').replace(/\d+/, websiteCount)); });
+
+  container.appendChild(clone);
+}
+
+function deleteEntry(btn) {
+  const group = btn.closest('.wd-repeating-group');
+  const container = group.parentElement;
+  // Don't delete if it's the only entry
+  if (container.querySelectorAll('.wd-repeating-group').length > 1) {
+    group.remove();
+  }
+}
+
+// ---- Re-init helpers for cloned elements ----
+function initSpinbuttons(root) {
+  root.querySelectorAll('input[role="spinbutton"]').forEach(input => {
+    const min = parseInt(input.getAttribute('aria-valuemin'), 10);
+    const max = parseInt(input.getAttribute('aria-valuemax'), 10);
+    const displayEl = input.parentElement.querySelector('[aria-hidden="true"]');
+
+    function updateDisplay(val) {
+      input.setAttribute('aria-valuenow', val);
+      input.value = val;
+      if (displayEl) displayEl.textContent = String(val).padStart(2, '0');
+    }
+
+    input.addEventListener('keydown', (e) => {
+      let current = parseInt(input.getAttribute('aria-valuenow'), 10) || min;
+      if (e.key === 'ArrowUp') { e.preventDefault(); current = current >= max ? min : current + 1; updateDisplay(current); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); current = current <= min ? max : current - 1; updateDisplay(current); }
+    });
+    input.addEventListener('input', () => {
+      let val = parseInt(input.value, 10);
+      if (!isNaN(val)) { val = Math.max(min, Math.min(max, val)); updateDisplay(val); }
+    });
+    input.addEventListener('blur', () => {
+      let val = parseInt(input.value, 10);
+      if (isNaN(val)) { input.value = ''; input.setAttribute('aria-valuenow', ''); if (displayEl) displayEl.textContent = input.placeholder || 'MM'; }
+    });
+  });
+}
+
+function initMultiselects(root) {
+  root.querySelectorAll('[data-uxi-widget-type="multiselect"]').forEach(container => {
+    const input = container.querySelector('[data-uxi-widget-type="selectinput"]');
+    const popup = container.querySelector('.wd-popup');
+    const clearBtn = container.querySelector('[data-automation-id="clearSearchButton"]');
+  const promptBtn = container.querySelector('[data-uxi-widget-type="selectinputicon"], [data-automation-id="promptSearchButton"], [data-automation-id="promptIcon"]');
+    const optionsStr = input ? input.getAttribute('data-search-options') || '' : '';
+    const allOptions = optionsStr.split(',').filter(Boolean);
+    const isSkills = container.getAttribute('data-multiselect') === 'skills';
+    let searchModeOpen = false;
+    let queryCommitted = false;
+
+    if (!input || !popup) return;
+
+    function getSelectedList() {
+      let list = container.querySelector('[data-automation-id="selectedItemList"]');
+      if (!list) {
+        list = document.createElement('ul');
+        list.setAttribute('role', 'listbox');
+        list.setAttribute('data-automation-id', 'selectedItemList');
+        list.style.listStyle = 'none';
+        list.style.margin = '0';
+        list.style.padding = '0';
+        list.style.display = 'flex';
+        list.style.flexWrap = 'wrap';
+        list.style.gap = '0.3rem';
+        popup.parentElement.insertBefore(list, popup);
+      }
+      return list;
+    }
+
+    function getSelected() {
+      const selectedList = getSelectedList();
+      return Array.from(selectedList.querySelectorAll('[data-automation-id="selectedItem"]')).map(el => el.getAttribute('title'));
+    }
+
+    function syncClearButton() {
+      if (!clearBtn) return;
+      clearBtn.style.display = input.value ? '' : 'none';
+    }
+
+    function renderNoItems() {
+      popup.innerHTML = '<div data-uxi-widget-type="multiselectlist" role="listbox">' +
+        '<div role="option" data-automation-id="menuItem" aria-selected="false">No Items.</div>' +
+        '</div>';
+      popup.classList.add('open');
+    }
+
+    function renderPopup(filter) {
+      if (isSkills && (!searchModeOpen || !queryCommitted)) {
+        popup.classList.remove('open');
+        return;
+      }
+      const normalizedFilter = String(filter || '').trim();
+      if (isSkills && (normalizedFilter.includes(',') || normalizedFilter.split(/\s+/).filter(Boolean).length > 3)) {
+        renderNoItems();
+        return;
+      }
+      const selected = getSelected();
+      const filtered = allOptions.filter(o => {
+        const matchesFilter = !normalizedFilter || o.toLowerCase().includes(normalizedFilter.toLowerCase());
+        return matchesFilter && !selected.includes(o);
+      });
+      if (filtered.length === 0) { renderNoItems(); return; }
+      popup.innerHTML =
+        (isSkills ? '<div class="wd-search-results-header">Search Results</div>' : '') +
+        '<div data-uxi-widget-type="multiselectlist" role="listbox">' +
+        filtered.map(o => '<div role="option" data-automation-id="menuItem" aria-selected="false">' + o + '</div>').join('') +
+        '</div>';
+      popup.classList.add('open');
+    }
+
+    function addPill(text) {
+      const selectedList = getSelectedList();
+      const li = document.createElement('li');
+      li.innerHTML = '<div role="option" data-automation-id="selectedItem" title="' + text + '">' +
+        '<div data-automation-id="DELETE_charm" role="presentation">&#10005;</div>' +
+        '<p data-automation-id="promptOption">' + text + '</p></div>';
+      selectedList.appendChild(li);
+    }
+
+    input.addEventListener('input', () => {
+      syncClearButton();
+      if (isSkills) queryCommitted = false;
+      renderPopup(input.value);
+    });
+    input.addEventListener('focus', () => {
+      syncClearButton();
+      renderPopup(input.value);
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      if (isSkills && !searchModeOpen) searchModeOpen = true;
+      if (isSkills) queryCommitted = true;
+      renderPopup(input.value);
+    });
+    popup.addEventListener('click', (e) => {
+      const option = e.target.closest('[role="option"]');
+      if (!option) return;
+      if (option.textContent.trim() === 'No Items.') return;
+      addPill(option.textContent.trim());
+      input.value = '';
+      queryCommitted = false;
+      syncClearButton();
+      popup.classList.remove('open');
+    });
+    if (clearBtn) {
+      clearBtn.addEventListener('click', () => {
+        input.value = '';
+        queryCommitted = false;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        popup.classList.remove('open');
+        syncClearButton();
+        input.focus();
+      });
+    }
+    if (promptBtn) {
+      promptBtn.addEventListener('click', () => {
+        if (isSkills) {
+          if (popup.classList.contains('open')) {
+            searchModeOpen = false;
+            queryCommitted = false;
+            popup.classList.remove('open');
+            return;
+          }
+          searchModeOpen = true;
+        }
+        if (popup.classList.contains('open') && !isSkills) {
+          popup.classList.remove('open');
+          return;
+        }
+        input.focus();
+        renderPopup(input.value);
+      });
+    }
+    container.addEventListener('click', (e) => {
+      const charm = e.target.closest('[data-automation-id="DELETE_charm"]');
+      if (!charm) return;
+      const li = charm.closest('li');
+      if (li) li.remove();
+    });
+  });
+}
+</script>
+</body>
+</html>

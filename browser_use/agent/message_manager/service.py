@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Literal
 
@@ -28,6 +29,13 @@ from browser_use.observability import observe_debug
 from browser_use.utils import match_url_with_domain_pattern, time_execution_sync
 
 logger = logging.getLogger(__name__)
+
+
+# DomHand tools: keep <read_state> lean (Premise 3 / no duplicate huge blobs) but the planner
+# still needs factual outcomes in history. Those tools set ``long_term_memory`` to the same
+# factual summary as ``extracted_content`` so ``_update_agent_history_description`` appends it
+# to per-step ``action_results`` (see elif-chain: long_term_memory wins over extracted_content).
+_READ_STATE_SUPPRESSED_TOOLS = frozenset({"domhand_fill", "domhand_assess_state"})
 
 
 # ========== Logging Helper Functions ==========
@@ -104,7 +112,7 @@ class MessageManager:
 		task: str,
 		system_message: SystemMessage,
 		file_system: FileSystem,
-		state: MessageManagerState = MessageManagerState(),
+		state: MessageManagerState | None = None,
 		use_thinking: bool = True,
 		include_attributes: list[str] | None = None,
 		sensitive_data: dict[str, str | dict[str, str]] | None = None,
@@ -117,7 +125,7 @@ class MessageManager:
 		max_clickable_elements_length: int = 40000,
 	):
 		self.task = task
-		self.state = state
+		self.state = state or MessageManagerState()
 		self.system_prompt = system_message
 		self.file_system = file_system
 		self.sensitive_data_description = ''
@@ -182,6 +190,55 @@ class MessageManager:
 		task_update_item = HistoryItem(system_message=new_task)
 		self.state.agent_history_items.append(task_update_item)
 
+	def _page_identity(self, browser_state_summary: BrowserStateSummary) -> str:
+		url = (browser_state_summary.url or '').strip()
+		title = (browser_state_summary.title or '').strip()
+		# Include interactive element count as a fingerprint hint so SPA page
+		# transitions (same URL, same title, different form content) are detected.
+		elem_count = 0
+		try:
+			if browser_state_summary.dom_state and browser_state_summary.dom_state.selector_map:
+				elem_count = len(browser_state_summary.dom_state.selector_map)
+		except Exception:
+			pass
+		# Bucket element count (±5 tolerance) so minor DOM churn doesn't trigger
+		elem_bucket = (elem_count // 5) * 5
+		return f'{title}\n{url}\n{elem_bucket}'
+
+	def _build_page_transition_note(self, previous_identity: str, current_identity: str) -> str:
+		prev_title, _, prev_url = previous_identity.partition('\n')
+		curr_title, _, curr_url = current_identity.partition('\n')
+		return (
+			'PAGE UPDATE: You are on a new page/context now.\n'
+			f'Previous page: {prev_title or "(unknown)"} | {prev_url or "(unknown url)"}\n'
+			f'Current page: {curr_title or "(unknown)"} | {curr_url or "(unknown url)"}\n'
+			'Any unresolved blockers, repeater editors, or fallback plans from the previous page are stale '
+			'unless they are still visibly present in the current browser state. Re-plan from the current page only.'
+		)
+
+	def _build_assess_guidance_note(self, result: list[ActionResult]) -> str:
+		# DomHand tools are informational only — they report what they did.
+		# They never inject directives into the agent's context.
+		# Browser-use agent decides next steps by reviewing the actual page.
+		return ''
+
+	def _apply_page_transition_context(self, browser_state_summary: BrowserStateSummary) -> None:
+		current_identity = self._page_identity(browser_state_summary)
+		previous_identity = (self.state.last_page_identity or '').strip()
+		self.state.last_page_identity = current_identity
+
+		if not previous_identity or previous_identity == current_identity:
+			return
+
+		note = self._build_page_transition_note(previous_identity, current_identity)
+		history_note = HistoryItem(system_message=f'<sys>{note}</sys>')
+		self.state.agent_history_items.append(history_note)
+		# Clear stale read_state from previous page — old fill results are useless
+		self.state.read_state_description = note
+
+		# Force compaction at next step so old-page context is pruned
+		self.state.last_compaction_step = 0
+
 	def prepare_step_state(
 		self,
 		browser_state_summary: BrowserStateSummary,
@@ -193,6 +250,13 @@ class MessageManager:
 		"""Prepare state for the next LLM call without building the final state message."""
 		self.state.history.context_messages.clear()
 		self._update_agent_history_description(model_output, result, step_info)
+		self._apply_page_transition_context(browser_state_summary)
+
+		# Cap read_state_description to prevent context bloat on SPAs
+		# (Oracle Cloud HCM never changes URL/title across steps)
+		_READ_STATE_MAX_CHARS = 6000
+		if len(self.state.read_state_description) > _READ_STATE_MAX_CHARS:
+			self.state.read_state_description = self.state.read_state_description[-_READ_STATE_MAX_CHARS:]
 
 		effective_sensitive_data = sensitive_data if sensitive_data is not None else self.sensitive_data
 		if effective_sensitive_data is not None:
@@ -303,12 +367,21 @@ class MessageManager:
 		read_state_idx = 0
 
 		for idx, action_result in enumerate(result):
-			if action_result.include_extracted_content_only_once and action_result.extracted_content:
+			tool_name = str((action_result.metadata or {}).get('tool') or '').strip()
+			suppress_read_state = tool_name in _READ_STATE_SUPPRESSED_TOOLS
+
+			if (
+				action_result.include_extracted_content_only_once
+				and action_result.extracted_content
+				and not suppress_read_state
+			):
 				self.state.read_state_description += (
 					f'<read_state_{read_state_idx}>\n{action_result.extracted_content}\n</read_state_{read_state_idx}>\n'
 				)
 				read_state_idx += 1
 				logger.debug(f'Added extracted_content to read_state_description: {action_result.extracted_content}')
+			elif suppress_read_state and action_result.extracted_content:
+				logger.debug(f'Skipped read_state_description for suppressed tool: {tool_name}')
 
 			# Store images for one-time inclusion in the next message
 			if action_result.images:
@@ -331,6 +404,13 @@ class MessageManager:
 				logger.debug(f'Added error to action_results: {error_text}')
 
 		# Simple 60k character limit for read_state_description
+		assess_guidance_note = self._build_assess_guidance_note(result)
+		if assess_guidance_note:
+			if self.state.read_state_description:
+				self.state.read_state_description = f'{assess_guidance_note}\n\n{self.state.read_state_description}'
+			else:
+				self.state.read_state_description = assess_guidance_note
+
 		MAX_CONTENT_SIZE = 60000
 		if len(self.state.read_state_description) > MAX_CONTENT_SIZE:
 			self.state.read_state_description = (

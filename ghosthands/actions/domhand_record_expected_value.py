@@ -35,8 +35,10 @@ def _match_exact_field(
 ) -> FormField | None:
     requested_id = str(field_id or "").strip()
     requested_type = str(field_type or "").strip().lower()
+    if not requested_id:
+        return None
     for field in fields:
-        if requested_id and field.field_id != requested_id:
+        if field.field_id != requested_id:
             continue
         if requested_type and field.field_type.lower() != requested_type:
             continue
@@ -217,7 +219,7 @@ async def domhand_record_expected_value(
         retry_capped=False,
         success=True,
         state_change="changed",
-        recommended_next_action="call domhand_assess_state",
+        recommended_next_action="continue_current_recovery",
     )
     await publish_browser_session_trace(
         browser_session,
@@ -231,7 +233,7 @@ async def domhand_record_expected_value(
             "expected_value": params.expected_value,
             "observed_value": observed_value,
             "state_change": "changed",
-            "recommended_next_action": "call domhand_assess_state",
+            "recommended_next_action": "continue_current_recovery",
         },
     )
 
@@ -255,8 +257,7 @@ async def domhand_record_expected_value(
     return ActionResult(
         extracted_content=(
             f'Recorded expected value "{params.expected_value}" for '
-            f'"{_preferred_field_label(target)}" ({target.field_type}). '
-            "Immediately call domhand_assess_state before any unrelated action."
+            f'"{_preferred_field_label(target)}" ({target.field_type}).'
         ),
         include_extracted_content_only_once=False,
         metadata={
@@ -266,6 +267,6 @@ async def domhand_record_expected_value(
             "strategy": "domhand_record_expected_value",
             "state_change": "changed",
             "retry_capped": False,
-            "recommended_next_action": "call domhand_assess_state",
+            "recommended_next_action": "continue_current_recovery",
         },
     )

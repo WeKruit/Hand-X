@@ -319,4 +319,8 @@ WORKDAY_CONFIG = PlatformConfig(
     content_marker_min_hits=2,
     navigation_hints=WORKDAY_NAVIGATION,
     form_strategy="dom_first",
+    automation_id_map=WORKDAY_SELECTORS,
+    fill_overrides={
+        "date": "segmented_date",
+    },
 )

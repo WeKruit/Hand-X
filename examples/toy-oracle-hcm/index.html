@@ -1,0 +1,1689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <title>Toy — Oracle Cloud HCM Application Form (Goldman Sachs style)</title>
+  <!--
+    DomHand test fixture: Oracle Cloud HCM (Candidate Experience / Fusion)
+    ======================================================================
+    Faithfully reproduces the DOM structure, CSS classes, ARIA roles, and
+    nesting patterns found on real Oracle Cloud HCM application pages
+    (e.g. Goldman Sachs Candidate Experience).
+
+    Sections:
+      1. Personal Info  (visible by default)
+      2. Application Questions  (hidden)
+      3. Experience  (hidden)
+      4. More About You  (hidden)
+
+    Key patterns exercised:
+      - cx-select-pills (prefix, experience, gender, work auth, hispanic)
+      - cx-select combobox with role="grid" > role="row" > role="gridcell"
+      - geo-hierarchy-form-element (Country -> Addr1 auto-suggest -> ZIP -> City -> State)
+      - composite phone (country code combobox + tel input)
+      - attachment-upload-button / file input
+      - apply-flow-input-radio (disability)
+      - apply-flow-profile-item-tile (add experience/education/skill/language/license)
+      - apply-flow-pagination with page dots + Back/Next
+      - input-row validation with role="alert"
+
+    Manual:
+      cd examples/toy-oracle-hcm && python -m http.server 8767
+      open http://127.0.0.1:8767/
+
+    CI: tests/ci/test_toy_oracle_hcm_fixture.py (when written)
+  -->
+  <style>
+    :root { font-family: "Oracle Sans", system-ui, -apple-system, sans-serif; line-height: 1.5; color: #1a1a1a; }
+    body { max-width: 48rem; margin: 0 auto; padding: 1rem 1.5rem 5rem; background: #f7f7f7; }
+    h1 { font-size: 1.2rem; color: #312d2a; margin-bottom: 0.25rem; }
+    .page-subtitle { font-size: 0.9rem; color: #555; margin-bottom: 1.5rem; }
+
+    /* apply-flow layout */
+    .apply-flow-block { margin-bottom: 1.5rem; }
+    .apply-flow-section { padding: 0; }
+    .apply-flow-page { transition: none; }
+    .apply-flow-page[style*="display: none"] { display: none !important; }
+
+    /* input-row */
+    .input-row { margin: 0.75rem 0; position: relative; }
+    .input-row--filled .input-row__control { border-color: #4caf50; }
+    .input-row--invalid .input-row__control,
+    .input-row--invalid .input-row__control-container { border-color: #c62828; }
+    .input-row--has-picker { /* marker class */ }
+    .input-row--noresponse { margin: 1rem 0 0.25rem; }
+    .input-row__label { display: block; font-weight: 600; font-size: 0.875rem; margin-bottom: 0.3rem; color: #312d2a; }
+    .input-row__label--required::after { content: " *"; color: #c62828; }
+    .input-row__label--disabled { color: #757575; font-weight: 700; text-transform: uppercase; font-size: 0.8rem; letter-spacing: 0.05em; }
+    .input-row__linebreak { display: block; }
+    .input-row__control {
+      display: block; width: 100%; box-sizing: border-box;
+      padding: 0.45rem 0.6rem; border: 1px solid #bbb; border-radius: 4px;
+      font: inherit; font-size: 0.9rem; background: #fff;
+    }
+    .input-row__control:focus { outline: 2px solid #0572ec; border-color: #0572ec; }
+    .input-row__control[readonly] { background: #f0f0f0; color: #555; }
+    .input-row__control-container {
+      display: flex; align-items: center; border: 1px solid #bbb;
+      border-radius: 4px; background: #fff; overflow: hidden;
+    }
+    .input-row__control-container .input-row__control { border: none; flex: 1; }
+    .input-row__validation {
+      display: none; color: #c62828; font-size: 0.8rem; margin-top: 0.2rem; padding: 0.15rem 0;
+    }
+    .input-row--invalid .input-row__validation { display: block; }
+
+    /* cx-select-pills */
+    .cx-select-pills-container {
+      list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.4rem;
+    }
+    .cx-select-pills-container li { margin: 0; }
+    .cx-select-pill-section {
+      display: inline-flex; align-items: center; padding: 0.35rem 0.85rem;
+      border: 1px solid #aaa; border-radius: 20px; background: #fff;
+      cursor: pointer; font-size: 0.85rem; color: #333; transition: all 0.15s;
+    }
+    .cx-select-pill-section:hover { border-color: #666; }
+    .cx-select-pill-section[aria-pressed="true"],
+    .cx-select-pill-section--active {
+      background: #0572ec; border-color: #0572ec; color: #fff;
+    }
+    .cx-select-pill-name { pointer-events: none; }
+
+    /* cx-select combobox */
+    .cx-select-container { position: relative; }
+    .cx-select-input {
+      display: block; width: 100%; box-sizing: border-box;
+      padding: 0.45rem 2.2rem 0.45rem 0.6rem; border: 1px solid #bbb;
+      border-radius: 4px; font: inherit; font-size: 0.9rem; background: #fff;
+    }
+    .cx-select-input:focus { outline: 2px solid #0572ec; border-color: #0572ec; }
+    .cx-select-input--auto-suggest { /* marker for auto-suggest mode */ }
+    .input-field-container { position: relative; }
+    .cx-select-toggle {
+      position: absolute; right: 0.25rem; top: 50%; transform: translateY(-50%);
+      border: none; background: transparent; cursor: pointer; padding: 0.3rem;
+      font-size: 1rem; color: #555; line-height: 1;
+    }
+    .cx-select-dropdown {
+      display: none; position: absolute; z-index: 100; left: 0; right: 0;
+      max-height: 12rem; overflow: auto; background: #fff;
+      border: 1px solid #888; border-radius: 4px; margin-top: 2px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+    .cx-select-dropdown[data-open="true"] { display: block; }
+    .cx-select-dropdown [role="row"] { display: flex; cursor: pointer; border-bottom: 1px solid #eee; }
+    .cx-select-dropdown [role="row"]:hover { background: #e3f2fd; }
+    .cx-select-dropdown [role="gridcell"] { padding: 0.4rem 0.6rem; flex: 1; font-size: 0.875rem; }
+    .cx-select-dropdown__empty {
+      display: none; cursor: default; color: #6b7280; font-style: italic; background: #fff;
+    }
+    .cx-select-dropdown__empty:hover { background: #fff; }
+
+    /* geo-hierarchy */
+    .geo-hierarchy-form-element { border: 1px solid #ddd; border-radius: 6px; padding: 0.75rem; margin: 0.75rem 0; background: #fafafa; }
+    .geo-hierarchy-form-element .input-row { margin: 0.5rem 0; }
+
+    /* phone row */
+    .phone-row { display: flex; gap: 0.5rem; align-items: flex-end; }
+    .phone-row .cx-select-container { width: 7rem; flex-shrink: 0; }
+    .phone-row .input-row { flex: 1; margin: 0; }
+
+    /* file upload */
+    .file-form-element { border: 2px dashed #bbb; border-radius: 6px; padding: 1rem; text-align: center; margin: 0.5rem 0; background: #fafafa; transition: border-color 0.2s; }
+    .file-form-element--filled { border-color: #4caf50; border-style: solid; background: #f1f8e9; }
+    .file-form-element__input { display: none; }
+    .attachment-upload-button {
+      display: inline-block; padding: 0.5rem 1.2rem; background: #0572ec; color: #fff;
+      border: none; border-radius: 4px; cursor: pointer; font-size: 0.85rem;
+    }
+    .attachment-upload-button:hover { background: #045cb5; }
+    .file-form-element__label { display: block; font-size: 0.8rem; color: #666; margin-top: 0.5rem; }
+    .file-form-element__filename { display: none; font-size: 0.85rem; color: #2e7d32; margin-top: 0.4rem; font-weight: 600; }
+    .file-form-element--filled .file-form-element__filename { display: block; }
+
+    /* radio (Oracle custom) */
+    .apply-flow-input-radio {
+      display: flex; align-items: center; gap: 0.5rem; cursor: pointer;
+      padding: 0.35rem 0; font-size: 0.9rem;
+    }
+    .apply-flow-input-radio-control { position: absolute; opacity: 0; width: 0; height: 0; }
+    .apply-flow-input-radio__button {
+      display: inline-block; width: 18px; height: 18px; border: 2px solid #888;
+      border-radius: 50%; position: relative; flex-shrink: 0;
+    }
+    .apply-flow-input-radio-control:checked + .apply-flow-input-radio__button {
+      border-color: #0572ec;
+    }
+    .apply-flow-input-radio-control:checked + .apply-flow-input-radio__button::after {
+      content: ""; position: absolute; top: 3px; left: 3px; width: 8px; height: 8px;
+      background: #0572ec; border-radius: 50%;
+    }
+    .apply-flow-input-radio__label { color: #333; }
+
+    /* profile item tiles */
+    .profile-add-item { margin: 0.75rem 0; }
+    .profile-add-item--disabled .apply-flow-profile-item-tile__new-tile { opacity: 0.55; cursor: not-allowed; }
+    .profile-item-list { display: grid; gap: 0.5rem; margin-bottom: 0.6rem; }
+    .apply-flow-profile-item-tile {
+      position: relative; display: flex; justify-content: space-between; gap: 0.75rem;
+      border: 1px solid #cfd8dc; border-radius: 6px; background: #fff; padding: 0.7rem 0.9rem;
+    }
+    .apply-flow-profile-item-tile__summary { min-width: 0; flex: 1; }
+    .apply-flow-profile-item-tile__summary-title { font-weight: 700; color: #24323d; }
+    .apply-flow-profile-item-tile__summary-subtitle { font-size: 0.82rem; color: #546e7a; margin-top: 0.15rem; }
+    .apply-flow-profile-item-tile__actions {
+      display: inline-flex; align-items: center; gap: 0.25rem; opacity: 0; pointer-events: none;
+      transition: opacity 0.15s ease;
+    }
+    .apply-flow-profile-item-tile:hover .apply-flow-profile-item-tile__actions,
+    .apply-flow-profile-item-tile:focus-within .apply-flow-profile-item-tile__actions,
+    .apply-flow-profile-item-tile--show-actions .apply-flow-profile-item-tile__actions {
+      opacity: 1; pointer-events: auto;
+    }
+    .apply-flow-profile-item-tile__action {
+      width: 1.8rem; height: 1.8rem; border: none; border-radius: 999px;
+      background: #eef4ff; color: #0572ec; cursor: pointer; font-size: 0.9rem; font-weight: 700;
+    }
+    .apply-flow-profile-item-tile__action--remove {
+      background: #f7f7f7; color: #334155;
+    }
+    .apply-flow-profile-item-tile__new-tile {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      padding: 0.6rem 1rem; border: 2px dashed #0572ec; border-radius: 6px;
+      background: #fff; color: #0572ec; cursor: pointer; font-size: 0.875rem; font-weight: 600;
+    }
+    .apply-flow-profile-item-tile__new-tile:hover { background: #e8f0fe; }
+    .profile-inline-form { margin: 0.5rem 0 0.5rem 1rem; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; background: #fff; }
+    .profile-inline-form .input-row { margin: 0.4rem 0; }
+    .profile-inline-form__footer { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.75rem; }
+    .profile-inline-form__footer button {
+      padding: 0.45rem 0.9rem; border-radius: 4px; border: 1px solid #0572ec; background: #fff; color: #0572ec; cursor: pointer;
+    }
+    .profile-inline-form__footer .profile-inline-form__save {
+      background: #0572ec; color: #fff;
+    }
+
+    /* pagination */
+    .apply-flow-pagination {
+      display: flex; align-items: center; justify-content: center; gap: 0.75rem;
+      padding: 1rem 0; margin-top: 1.5rem; border-top: 1px solid #ddd;
+    }
+    .apply-flow-pagination button {
+      padding: 0.45rem 1.2rem; border: 1px solid #0572ec; border-radius: 4px;
+      background: #0572ec; color: #fff; cursor: pointer; font-size: 0.875rem;
+    }
+    .apply-flow-pagination button:hover { background: #045cb5; }
+    .apply-flow-pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .apply-flow-navigation-pages { display: flex; gap: 0.35rem; }
+    .apply-flow-navigation-pages__link {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 2rem; height: 2rem; border-radius: 50%; text-decoration: none;
+      font-size: 0.85rem; color: #555; border: 1px solid #ccc; background: #fff; cursor: pointer;
+    }
+    .apply-flow-navigation-pages__link:hover { border-color: #0572ec; color: #0572ec; }
+    .apply-flow-navigation-pages__link--current {
+      background: #0572ec; color: #fff; border-color: #0572ec; font-weight: 700;
+    }
+
+    /* e-signature */
+    .e-signature-block { border: 1px solid #ddd; border-radius: 6px; padding: 1rem; background: #fffde7; margin: 0.75rem 0; }
+    .e-signature-block p { font-size: 0.85rem; color: #555; margin: 0 0 0.5rem; }
+
+    /* edit button for readonly */
+    .edit-btn { margin-left: 0.5rem; font-size: 0.8rem; color: #0572ec; border: none; background: transparent; cursor: pointer; text-decoration: underline; }
+
+    /* log */
+    #log {
+      position: fixed; bottom: 0; left: 0; right: 0; max-height: 6rem; overflow: auto;
+      background: #111; color: #9ccc65; font: 12px/1.4 ui-monospace, monospace;
+      padding: 0.5rem 0.75rem; z-index: 9999;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Goldman Sachs — Oracle Cloud HCM Application</h1>
+  <p class="page-subtitle">DomHand test fixture reproducing Oracle Candidate Experience DOM structure</p>
+
+  <!-- ============================================================
+       SECTION 1: Personal Info (visible by default)
+       ============================================================ -->
+  <div class="apply-flow-page" id="page-1" style="display: block;" data-page="1">
+    <div class="apply-flow-block">
+      <div class="apply-flow-section" aria-label="Personal Information">
+
+        <!-- File Upload (Resume) -->
+        <div class="input-row" data-field="resume">
+          <label class="input-row__label">
+            <span class="input-row__linebreak">Resume / CV</span>
+          </label>
+          <div class="file-form-element" id="file-drop-zone" data-state="WAITING">
+            <input type="file" class="file-form-element__input" id="resume-file-input" accept=".pdf,.doc,.docx" />
+            <button type="button" class="attachment-upload-button" id="resume-upload-btn">Upload Resume</button>
+            <div class="file-form-element__label">or drag and drop your file here (PDF, DOC, DOCX)</div>
+            <div class="file-form-element__filename" id="resume-filename"></div>
+          </div>
+        </div>
+
+        <!-- Prefix (cx-select-pills) -->
+        <div class="input-row" data-field="prefix">
+          <label class="input-row__label">
+            <span class="input-row__linebreak">Prefix</span>
+          </label>
+          <ul class="cx-select-pills-container" role="listbox" aria-label="Prefix">
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="Dr"><span class="cx-select-pill-name">Dr</span></button></li>
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="Miss"><span class="cx-select-pill-name">Miss</span></button></li>
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="Mr"><span class="cx-select-pill-name">Mr</span></button></li>
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="Mrs"><span class="cx-select-pill-name">Mrs</span></button></li>
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="Ms"><span class="cx-select-pill-name">Ms</span></button></li>
+          </ul>
+        </div>
+
+        <!-- Legal First Name (required) -->
+        <div class="input-row" data-field="legalFirstName">
+          <label class="input-row__label input-row__label--required" for="legal-first-name">
+            <span class="input-row__linebreak">Legal First Name</span>
+          </label>
+          <input type="text" class="input-row__control" id="legal-first-name" name="legalFirstName" required autocomplete="given-name" />
+          <div class="input-row__validation" role="alert">Legal First Name is required.</div>
+        </div>
+
+        <!-- Legal Middle Name -->
+        <div class="input-row" data-field="legalMiddleName">
+          <label class="input-row__label" for="legal-middle-name">
+            <span class="input-row__linebreak">Legal Middle Name</span>
+          </label>
+          <input type="text" class="input-row__control" id="legal-middle-name" name="legalMiddleName" autocomplete="additional-name" />
+        </div>
+
+        <!-- Legal Last Name (required) -->
+        <div class="input-row" data-field="legalLastName">
+          <label class="input-row__label input-row__label--required" for="legal-last-name">
+            <span class="input-row__linebreak">Legal Last Name</span>
+          </label>
+          <input type="text" class="input-row__control" id="legal-last-name" name="legalLastName" required autocomplete="family-name" />
+          <div class="input-row__validation" role="alert">Legal Last Name is required.</div>
+        </div>
+
+        <!-- Preferred First Name (required) -->
+        <div class="input-row" data-field="preferredFirstName">
+          <label class="input-row__label input-row__label--required" for="preferred-first-name">
+            <span class="input-row__linebreak">Preferred First Name</span>
+          </label>
+          <input type="text" class="input-row__control" id="preferred-first-name" name="preferredFirstName" required />
+          <div class="input-row__validation" role="alert">Preferred First Name is required.</div>
+        </div>
+
+        <!-- Preferred Last Name (required) -->
+        <div class="input-row" data-field="preferredLastName">
+          <label class="input-row__label input-row__label--required" for="preferred-last-name">
+            <span class="input-row__linebreak">Preferred Last Name</span>
+          </label>
+          <input type="text" class="input-row__control" id="preferred-last-name" name="preferredLastName" required />
+          <div class="input-row__validation" role="alert">Preferred Last Name is required.</div>
+        </div>
+
+        <!-- Readonly Email -->
+        <div class="input-row input-row--filled" data-field="email">
+          <label class="input-row__label" for="email-field">
+            <span class="input-row__linebreak">Email Address</span>
+          </label>
+          <div class="input-row__control-container">
+            <input type="email" class="input-row__control" id="email-field" name="email" value="applicant@example.com" readonly />
+            <button type="button" class="edit-btn" aria-label="Edit email address">Edit</button>
+          </div>
+        </div>
+
+        <!-- Composite Phone -->
+        <div class="input-row" data-field="phone">
+          <label class="input-row__label" id="lbl-phone">
+            <span class="input-row__linebreak">Phone Number</span>
+          </label>
+          <div class="phone-row" role="group" aria-labelledby="lbl-phone">
+            <!-- Country code combobox -->
+            <div class="cx-select-container" data-field="phoneCountryCode">
+              <div class="input-field-container">
+                <input
+                  type="text"
+                  class="cx-select-input"
+                  id="phone-country-code"
+                  role="combobox"
+                  autocomplete="off"
+                  aria-haspopup="grid"
+                  aria-expanded="false"
+                  aria-controls="phone-country-dropdown"
+                  aria-label="Country Code"
+                  value="+1 (US)"
+                  readonly
+                />
+                <button type="button" class="cx-select-toggle" aria-label="Toggle country code list" data-toggle-for="phone-country-dropdown">&#9662;</button>
+              </div>
+              <div class="cx-select-dropdown" id="phone-country-dropdown" role="grid" aria-label="Country codes" data-open="false">
+                <div role="row" data-value="+1 (US)"><div role="gridcell">+1 (US)</div></div>
+                <div role="row" data-value="+1 (CA)"><div role="gridcell">+1 (CA)</div></div>
+                <div role="row" data-value="+44 (UK)"><div role="gridcell">+44 (UK)</div></div>
+                <div role="row" data-value="+91 (IN)"><div role="gridcell">+91 (IN)</div></div>
+                <div role="row" data-value="+86 (CN)"><div role="gridcell">+86 (CN)</div></div>
+                <div role="row" data-value="+81 (JP)"><div role="gridcell">+81 (JP)</div></div>
+                <div role="row" data-value="+49 (DE)"><div role="gridcell">+49 (DE)</div></div>
+              </div>
+            </div>
+            <!-- National number -->
+            <div class="input-row" style="flex:1; margin:0;">
+              <input type="tel" class="input-row__control" id="phone-number" name="phoneNumber" placeholder="(555) 123-4567" aria-label="Phone number" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Geo-hierarchy Address -->
+        <div class="geo-hierarchy-form-element" data-field="address" aria-label="Home Address">
+
+          <!-- Country -->
+          <div class="input-row input-row--has-picker" data-field="country">
+            <label class="input-row__label input-row__label--required" id="lbl-country">
+              <span class="input-row__linebreak">Country</span>
+            </label>
+            <div class="cx-select-container">
+              <div class="input-field-container">
+                <input
+                  type="text"
+                  class="cx-select-input"
+                  id="country-input"
+                  role="combobox"
+                  autocomplete="off"
+                  aria-haspopup="grid"
+                  aria-expanded="false"
+                  aria-controls="country-dropdown"
+                  aria-labelledby="lbl-country"
+                  placeholder="Select country"
+                />
+                <button type="button" class="cx-select-toggle" aria-label="Toggle country list" data-toggle-for="country-dropdown">&#9662;</button>
+              </div>
+              <div class="cx-select-dropdown" id="country-dropdown" role="grid" aria-label="Countries" data-open="false">
+                <div role="row" data-value="United States"><div role="gridcell">United States</div></div>
+                <div role="row" data-value="Canada"><div role="gridcell">Canada</div></div>
+                <div role="row" data-value="United Kingdom"><div role="gridcell">United Kingdom</div></div>
+                <div role="row" data-value="India"><div role="gridcell">India</div></div>
+                <div role="row" data-value="Germany"><div role="gridcell">Germany</div></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Address Line 1 (auto-suggest combobox) -->
+          <div class="input-row input-row--has-picker" data-field="addressLine1">
+            <label class="input-row__label input-row__label--required" id="lbl-addr1">
+              <span class="input-row__linebreak">Address Line 1</span>
+            </label>
+            <div class="cx-select-container">
+              <div class="input-field-container">
+                <input
+                  type="text"
+                  class="cx-select-input cx-select-input--auto-suggest"
+                  id="addr-line1"
+                  role="combobox"
+                  autocomplete="off"
+                  aria-haspopup="grid"
+                  aria-expanded="false"
+                  aria-controls="addr1-dropdown"
+                  aria-labelledby="lbl-addr1"
+                  placeholder="Start typing your address"
+                />
+                <button type="button" class="cx-select-toggle" aria-label="Toggle address suggestions" data-toggle-for="addr1-dropdown">&#9662;</button>
+              </div>
+              <div class="cx-select-dropdown" id="addr1-dropdown" role="grid" aria-label="Address suggestions" data-open="false">
+                <div role="row" data-value="200 West Street" data-zip="10282" data-city="New York" data-state="New York"><div role="gridcell">200 West Street, New York, NY 10282</div></div>
+                <div role="row" data-value="30 Hudson Street" data-zip="07302" data-city="Jersey City" data-state="New Jersey"><div role="gridcell">30 Hudson Street, Jersey City, NJ 07302</div></div>
+                <div role="row" data-value="1 New York Plaza" data-zip="10004" data-city="New York" data-state="New York"><div role="gridcell">1 New York Plaza, New York, NY 10004</div></div>
+                <div role="row" data-value="555 California Street" data-zip="94104" data-city="San Francisco" data-state="California"><div role="gridcell">555 California Street, San Francisco, CA 94104</div></div>
+              </div>
+            </div>
+            <div class="input-row__validation" role="alert">Address Line 1 is required.</div>
+          </div>
+
+          <!-- Address Line 2 (plain text) -->
+          <div class="input-row" data-field="addressLine2">
+            <label class="input-row__label" for="addr-line2">
+              <span class="input-row__linebreak">Address Line 2</span>
+            </label>
+            <input type="text" class="input-row__control" id="addr-line2" name="addressLine2" placeholder="Apt, Suite, Floor (optional)" />
+          </div>
+
+          <!-- ZIP Code (combobox, required) -->
+          <div class="input-row input-row--has-picker input-row--invalid" data-field="zipCode">
+            <label class="input-row__label input-row__label--required" id="lbl-zip">
+              <span class="input-row__linebreak">ZIP Code</span>
+            </label>
+            <div class="cx-select-container">
+              <div class="input-field-container">
+                <input
+                  type="text"
+                  class="cx-select-input"
+                  id="zip-input"
+                  role="combobox"
+                  autocomplete="off"
+                  aria-haspopup="grid"
+                  aria-expanded="false"
+                  aria-controls="zip-dropdown"
+                  aria-labelledby="lbl-zip"
+                  aria-invalid="true"
+                  placeholder=""
+                />
+                <button type="button" class="cx-select-toggle" aria-label="Toggle ZIP codes" data-toggle-for="zip-dropdown">&#9662;</button>
+              </div>
+              <div class="cx-select-dropdown" id="zip-dropdown" role="grid" aria-label="ZIP Codes" data-open="false">
+                <div role="row" data-value="10282"><div role="gridcell">10282</div></div>
+                <div role="row" data-value="10004"><div role="gridcell">10004</div></div>
+                <div role="row" data-value="10005"><div role="gridcell">10005</div></div>
+                <div role="row" data-value="07302"><div role="gridcell">07302</div></div>
+                <div role="row" data-value="94104"><div role="gridcell">94104</div></div>
+              </div>
+            </div>
+            <div class="input-row__validation" role="alert">ZIP Code is required.</div>
+          </div>
+
+          <!-- City (combobox, required) -->
+          <div class="input-row input-row--has-picker input-row--invalid" data-field="city">
+            <label class="input-row__label input-row__label--required" id="lbl-city">
+              <span class="input-row__linebreak">City</span>
+            </label>
+            <div class="cx-select-container">
+              <div class="input-field-container">
+                <input
+                  type="text"
+                  class="cx-select-input"
+                  id="city-input"
+                  role="combobox"
+                  autocomplete="off"
+                  aria-haspopup="grid"
+                  aria-expanded="false"
+                  aria-controls="city-dropdown"
+                  aria-labelledby="lbl-city"
+                  aria-invalid="true"
+                  placeholder=""
+                />
+                <button type="button" class="cx-select-toggle" aria-label="Toggle cities" data-toggle-for="city-dropdown">&#9662;</button>
+              </div>
+              <div class="cx-select-dropdown" id="city-dropdown" role="grid" aria-label="Cities" data-open="false">
+                <div role="row" data-value="New York"><div role="gridcell">New York</div></div>
+                <div role="row" data-value="Jersey City"><div role="gridcell">Jersey City</div></div>
+                <div role="row" data-value="San Francisco"><div role="gridcell">San Francisco</div></div>
+                <div role="row" data-value="Los Angeles"><div role="gridcell">Los Angeles</div></div>
+              </div>
+            </div>
+            <div class="input-row__validation" role="alert">City is required.</div>
+          </div>
+
+          <!-- State (combobox, required) -->
+          <div class="input-row input-row--has-picker input-row--invalid" data-field="state">
+            <label class="input-row__label input-row__label--required" id="lbl-state">
+              <span class="input-row__linebreak">State</span>
+            </label>
+            <div class="cx-select-container">
+              <div class="input-field-container">
+                <input
+                  type="text"
+                  class="cx-select-input"
+                  id="state-input"
+                  role="combobox"
+                  autocomplete="off"
+                  aria-haspopup="grid"
+                  aria-expanded="false"
+                  aria-controls="state-dropdown"
+                  aria-labelledby="lbl-state"
+                  aria-invalid="true"
+                  placeholder=""
+                />
+                <button type="button" class="cx-select-toggle" aria-label="Toggle states" data-toggle-for="state-dropdown">&#9662;</button>
+              </div>
+              <div class="cx-select-dropdown" id="state-dropdown" role="grid" aria-label="States" data-open="false">
+                <div role="row" data-value="New York"><div role="gridcell">New York</div></div>
+                <div role="row" data-value="New Jersey"><div role="gridcell">New Jersey</div></div>
+                <div role="row" data-value="California"><div role="gridcell">California</div></div>
+                <div role="row" data-value="Texas"><div role="gridcell">Texas</div></div>
+                <div role="row" data-value="Illinois"><div role="gridcell">Illinois</div></div>
+              </div>
+            </div>
+            <div class="input-row__validation" role="alert">State is required.</div>
+          </div>
+
+        </div><!-- /geo-hierarchy-form-element -->
+
+      </div><!-- /apply-flow-section -->
+    </div><!-- /apply-flow-block -->
+  </div><!-- /page-1 -->
+
+
+  <!-- ============================================================
+       SECTION 2: Application Questions (hidden)
+       ============================================================ -->
+  <div class="apply-flow-page" id="page-2" style="display: none;" data-page="2">
+    <div class="apply-flow-block">
+      <div class="apply-flow-section" aria-label="Application Questions">
+
+        <!-- Section header: EXPERIENCE -->
+        <div class="input-row input-row--noresponse">
+          <label class="input-row__label input-row__label--disabled">
+            <span class="input-row__linebreak">EXPERIENCE</span>
+          </label>
+        </div>
+
+        <!-- How many years of experience? (pills, required) -->
+        <div class="input-row input-row--invalid" data-field="yearsExperience">
+          <label class="input-row__label input-row__label--required">
+            <span class="input-row__linebreak">How many years of relevant work experience do you have?</span>
+          </label>
+          <ul class="cx-select-pills-container" role="listbox" aria-label="Years of experience">
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="None"><span class="cx-select-pill-name">None</span></button></li>
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="< 1 year"><span class="cx-select-pill-name">&lt; 1 year</span></button></li>
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="1-2 years"><span class="cx-select-pill-name">1-2 years</span></button></li>
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="2-3 years"><span class="cx-select-pill-name">2-3 years</span></button></li>
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="3+ years"><span class="cx-select-pill-name">3+ years</span></button></li>
+          </ul>
+          <div class="input-row__validation" role="alert">This field is required.</div>
+        </div>
+
+        <!-- Gender (pills) -->
+        <div class="input-row" data-field="gender">
+          <label class="input-row__label">
+            <span class="input-row__linebreak">Gender</span>
+          </label>
+          <ul class="cx-select-pills-container" role="listbox" aria-label="Gender">
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="Female"><span class="cx-select-pill-name">Female</span></button></li>
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="Male"><span class="cx-select-pill-name">Male</span></button></li>
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="Non-binary"><span class="cx-select-pill-name">Non-binary</span></button></li>
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="Other"><span class="cx-select-pill-name">Other</span></button></li>
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="Prefer not to say"><span class="cx-select-pill-name">Prefer not to say</span></button></li>
+          </ul>
+        </div>
+
+        <!-- Work Authorization (pills) -->
+        <div class="input-row" data-field="workAuthorization">
+          <label class="input-row__label input-row__label--required">
+            <span class="input-row__linebreak">Are you legally authorized to work in the United States?</span>
+          </label>
+          <ul class="cx-select-pills-container" role="listbox" aria-label="Work Authorization">
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="Yes"><span class="cx-select-pill-name">Yes</span></button></li>
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="No"><span class="cx-select-pill-name">No</span></button></li>
+          </ul>
+          <div class="input-row__validation" role="alert">This field is required.</div>
+        </div>
+
+        <!-- Hispanic/Latino (pills) -->
+        <div class="input-row" data-field="hispanicLatino">
+          <label class="input-row__label">
+            <span class="input-row__linebreak">Are you Hispanic or Latino?</span>
+          </label>
+          <ul class="cx-select-pills-container" role="listbox" aria-label="Hispanic or Latino">
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="Yes"><span class="cx-select-pill-name">Yes</span></button></li>
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="No"><span class="cx-select-pill-name">No</span></button></li>
+            <li><button type="button" class="cx-select-pill-section" aria-pressed="false" data-value="Prefer not to say"><span class="cx-select-pill-name">Prefer not to say</span></button></li>
+          </ul>
+        </div>
+
+        <!-- Name of Latest Employer (cx-select combobox) -->
+        <div class="input-row input-row--has-picker" data-field="latestEmployer">
+          <label class="input-row__label" id="lbl-employer">
+            <span class="input-row__linebreak">Name of Latest Employer</span>
+          </label>
+          <div class="cx-select-container">
+            <div class="input-field-container">
+              <input
+                type="text"
+                class="cx-select-input"
+                id="employer-input"
+                role="combobox"
+                autocomplete="off"
+                aria-haspopup="grid"
+                aria-expanded="false"
+                aria-controls="employer-dropdown"
+                aria-labelledby="lbl-employer"
+                placeholder="Type or select employer"
+              />
+              <button type="button" class="cx-select-toggle" aria-label="Toggle employer list" data-toggle-for="employer-dropdown">&#9662;</button>
+            </div>
+            <div class="cx-select-dropdown" id="employer-dropdown" role="grid" aria-label="Employers" data-open="false">
+              <div role="row" data-value="Goldman Sachs"><div role="gridcell">Goldman Sachs</div></div>
+              <div role="row" data-value="JPMorgan Chase"><div role="gridcell">JPMorgan Chase</div></div>
+              <div role="row" data-value="Morgan Stanley"><div role="gridcell">Morgan Stanley</div></div>
+              <div role="row" data-value="Google"><div role="gridcell">Google</div></div>
+              <div role="row" data-value="Amazon"><div role="gridcell">Amazon</div></div>
+              <div role="row" data-value="Other"><div role="gridcell">Other</div></div>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /apply-flow-section -->
+    </div><!-- /apply-flow-block -->
+  </div><!-- /page-2 -->
+
+
+  <!-- ============================================================
+       SECTION 3: Experience (hidden)
+       ============================================================ -->
+  <div class="apply-flow-page" id="page-3" style="display: none;" data-page="3">
+    <div class="apply-flow-block">
+      <div class="apply-flow-section" aria-label="Experience">
+
+        <!-- Add Work Experience -->
+        <div class="input-row" data-field="work-experience">
+          <label class="input-row__label">
+            <span class="input-row__linebreak">Work Experience</span>
+          </label>
+          <div class="profile-add-item" id="experience-container">
+            <button type="button" class="apply-flow-profile-item-tile__new-tile" data-profile-type="experience">
+              &#43; Add Experience
+            </button>
+          </div>
+        </div>
+
+        <!-- Add Education -->
+        <div class="input-row" data-field="education">
+          <label class="input-row__label">
+            <span class="input-row__linebreak">Education</span>
+          </label>
+          <div class="profile-add-item" id="education-container">
+            <button type="button" class="apply-flow-profile-item-tile__new-tile" data-profile-type="education">
+              &#43; Add Education
+            </button>
+          </div>
+        </div>
+
+        <!-- Add Skill -->
+        <div class="input-row" data-field="skills">
+          <label class="input-row__label">
+            <span class="input-row__linebreak">Skills</span>
+          </label>
+          <div class="profile-add-item" id="skills-container">
+            <button type="button" class="apply-flow-profile-item-tile__new-tile" data-profile-type="skill">
+              &#43; Add Skill
+            </button>
+          </div>
+        </div>
+
+        <!-- Add Language -->
+        <div class="input-row" data-field="languages">
+          <label class="input-row__label">
+            <span class="input-row__linebreak">Languages</span>
+          </label>
+          <div class="profile-add-item" id="languages-container">
+            <button type="button" class="apply-flow-profile-item-tile__new-tile" data-profile-type="language">
+              &#43; Add Language
+            </button>
+          </div>
+        </div>
+
+        <!-- Add License -->
+        <div class="input-row" data-field="licenses">
+          <label class="input-row__label">
+            <span class="input-row__linebreak">Licenses &amp; Certifications</span>
+          </label>
+          <div class="profile-add-item" id="licenses-container">
+            <button type="button" class="apply-flow-profile-item-tile__new-tile" data-profile-type="license">
+              &#43; Add License
+            </button>
+          </div>
+        </div>
+
+      </div><!-- /apply-flow-section -->
+    </div><!-- /apply-flow-block -->
+  </div><!-- /page-3 -->
+
+
+  <!-- ============================================================
+       SECTION 4: More About You (hidden)
+       ============================================================ -->
+  <div class="apply-flow-page" id="page-4" style="display: none;" data-page="4">
+    <div class="apply-flow-block">
+      <div class="apply-flow-section" aria-label="More About You">
+
+        <!-- Veteran Status (cx-select combobox) -->
+        <div class="input-row input-row--has-picker" data-field="veteranStatus">
+          <label class="input-row__label" id="lbl-veteran">
+            <span class="input-row__linebreak">Veteran Status</span>
+          </label>
+          <div class="cx-select-container">
+            <div class="input-field-container">
+              <input
+                type="text"
+                class="cx-select-input"
+                id="veteran-input"
+                role="combobox"
+                autocomplete="off"
+                aria-haspopup="grid"
+                aria-expanded="false"
+                aria-controls="veteran-dropdown"
+                aria-labelledby="lbl-veteran"
+                placeholder="Select veteran status"
+              />
+              <button type="button" class="cx-select-toggle" aria-label="Toggle veteran status list" data-toggle-for="veteran-dropdown">&#9662;</button>
+            </div>
+            <div class="cx-select-dropdown" id="veteran-dropdown" role="grid" aria-label="Veteran statuses" data-open="false">
+              <div role="row" data-value="I am not a protected veteran"><div role="gridcell">I am not a protected veteran</div></div>
+              <div role="row" data-value="I identify as one or more of the classifications of a protected veteran"><div role="gridcell">I identify as one or more of the classifications of a protected veteran</div></div>
+              <div role="row" data-value="I don't wish to answer"><div role="gridcell">I don't wish to answer</div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Disability (radio group — Oracle custom pattern) -->
+        <div class="input-row" data-field="disability">
+          <label class="input-row__label" id="lbl-disability">
+            <span class="input-row__linebreak">Disability Status</span>
+          </label>
+          <div role="radiogroup" aria-labelledby="lbl-disability">
+            <label class="apply-flow-input-radio">
+              <input type="radio" class="apply-flow-input-radio-control" name="disability" value="yes" />
+              <span class="apply-flow-input-radio__button"></span>
+              <span class="apply-flow-input-radio__label">Yes, I have a disability (or previously had a disability)</span>
+            </label>
+            <label class="apply-flow-input-radio">
+              <input type="radio" class="apply-flow-input-radio-control" name="disability" value="no" />
+              <span class="apply-flow-input-radio__button"></span>
+              <span class="apply-flow-input-radio__label">No, I don't have a disability</span>
+            </label>
+            <label class="apply-flow-input-radio">
+              <input type="radio" class="apply-flow-input-radio-control" name="disability" value="prefer-not" />
+              <span class="apply-flow-input-radio__button"></span>
+              <span class="apply-flow-input-radio__label">I don't wish to answer</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- E-Signature -->
+        <div class="e-signature-block" data-field="eSignature">
+          <p>By typing your full name below, you certify that the information provided is accurate and complete to the best of your knowledge.</p>
+          <div class="input-row">
+            <label class="input-row__label input-row__label--required" for="e-signature-input">
+              <span class="input-row__linebreak">Full Name (E-Signature)</span>
+            </label>
+            <input type="text" class="input-row__control" id="e-signature-input" name="eSignature" required placeholder="Type your full legal name" />
+            <div class="input-row__validation" role="alert">E-Signature is required to submit your application.</div>
+          </div>
+        </div>
+
+      </div><!-- /apply-flow-section -->
+    </div><!-- /apply-flow-block -->
+  </div><!-- /page-4 -->
+
+
+  <!-- ============================================================
+       NAVIGATION / PAGINATION
+       ============================================================ -->
+  <div class="apply-flow-pagination" id="pagination">
+    <button type="button" id="btn-back" disabled>Back</button>
+    <div class="apply-flow-navigation-pages" id="page-dots">
+      <a class="apply-flow-navigation-pages__link apply-flow-navigation-pages__link--current" href="#" data-page="1">1</a>
+      <a class="apply-flow-navigation-pages__link" href="#" data-page="2">2</a>
+      <a class="apply-flow-navigation-pages__link" href="#" data-page="3">3</a>
+      <a class="apply-flow-navigation-pages__link" href="#" data-page="4">4</a>
+    </div>
+    <button type="button" id="btn-next">Next</button>
+  </div>
+
+  <pre id="log"></pre>
+
+  <!-- ============================================================
+       JAVASCRIPT
+       ============================================================ -->
+  <script>
+  (function () {
+    'use strict';
+
+    var logEl = document.getElementById('log');
+    function log(msg) {
+      var t = new Date().toISOString().slice(11, 23);
+      logEl.textContent = '[' + t + '] ' + msg + '\n' + logEl.textContent;
+    }
+
+    // ---- Pagination ----
+    var currentPage = 1;
+    var totalPages = 4;
+    var btnBack = document.getElementById('btn-back');
+    var btnNext = document.getElementById('btn-next');
+    var pageDots = document.getElementById('page-dots');
+
+    function showPage(n) {
+      if (n < 1 || n > totalPages) return;
+      currentPage = n;
+      for (var i = 1; i <= totalPages; i++) {
+        var page = document.getElementById('page-' + i);
+        if (page) page.style.display = (i === n) ? 'block' : 'none';
+      }
+      // Update page dots
+      var links = pageDots.querySelectorAll('.apply-flow-navigation-pages__link');
+      links.forEach(function (link) {
+        var p = parseInt(link.getAttribute('data-page'), 10);
+        if (p === n) {
+          link.classList.add('apply-flow-navigation-pages__link--current');
+        } else {
+          link.classList.remove('apply-flow-navigation-pages__link--current');
+        }
+      });
+      btnBack.disabled = (n === 1);
+      btnNext.textContent = (n === totalPages) ? 'Submit' : 'Next';
+      log('Navigate to page ' + n);
+    }
+
+    btnBack.addEventListener('click', function () { showPage(currentPage - 1); });
+    btnNext.addEventListener('click', function () {
+      if (currentPage < totalPages) {
+        showPage(currentPage + 1);
+      } else {
+        log('SUBMIT clicked — application would be submitted');
+      }
+    });
+    pageDots.addEventListener('click', function (e) {
+      var link = e.target.closest('.apply-flow-navigation-pages__link');
+      if (!link) return;
+      e.preventDefault();
+      var p = parseInt(link.getAttribute('data-page'), 10);
+      showPage(p);
+    });
+
+    // ---- cx-select-pills ----
+    document.addEventListener('click', function (e) {
+      var pill = e.target.closest('.cx-select-pill-section');
+      if (!pill) return;
+      var container = pill.closest('.cx-select-pills-container');
+      if (!container) return;
+      // Deselect siblings
+      container.querySelectorAll('.cx-select-pill-section').forEach(function (p) {
+        p.setAttribute('aria-pressed', 'false');
+        p.classList.remove('cx-select-pill-section--active');
+      });
+      // Select this one
+      pill.setAttribute('aria-pressed', 'true');
+      pill.classList.add('cx-select-pill-section--active');
+      var val = pill.getAttribute('data-value');
+      log('Pill selected: ' + val);
+      // Clear validation if parent is invalid
+      var row = pill.closest('.input-row');
+      if (row && row.classList.contains('input-row--invalid')) {
+        row.classList.remove('input-row--invalid');
+      }
+    });
+
+    // ---- cx-select combobox (toggle + dropdown) ----
+    // Toggle button opens/closes the dropdown
+    document.addEventListener('click', function (e) {
+      var toggleBtn = e.target.closest('.cx-select-toggle');
+      if (!toggleBtn) return;
+      var dropdownId = toggleBtn.getAttribute('data-toggle-for');
+      var dropdown = document.getElementById(dropdownId);
+      if (!dropdown) return;
+      var isOpen = dropdown.getAttribute('data-open') === 'true';
+      closeAllDropdowns();
+      if (!isOpen) {
+        dropdown.setAttribute('data-open', 'true');
+        var input = toggleBtn.closest('.input-field-container').querySelector('[role="combobox"]');
+        if (input) {
+          input.setAttribute('aria-expanded', 'true');
+          filterDropdownRows(dropdown, input.value);
+        }
+        log('Dropdown opened: ' + dropdownId);
+      }
+    });
+
+    // Clicking a gridcell row selects it
+    document.addEventListener('click', function (e) {
+      var row = e.target.closest('.cx-select-dropdown [role="row"]');
+      if (!row) return;
+      if (row.getAttribute('data-empty-row') === 'true') return;
+      var dropdown = row.closest('.cx-select-dropdown');
+      if (!dropdown) return;
+      var val = row.getAttribute('data-value');
+      var container = dropdown.closest('.cx-select-container');
+      var input = container ? container.querySelector('[role="combobox"]') : null;
+      if (input) {
+        input.value = val;
+        input.dataset.committedValue = val;
+        input.setAttribute('aria-expanded', 'false');
+        input.setAttribute('aria-invalid', 'false');
+        // Trigger input event for any listeners
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      dropdown.setAttribute('data-open', 'false');
+      log('Combobox selected: ' + val);
+
+      // Clear validation on the parent input-row
+      var inputRow = container ? container.closest('.input-row') : null;
+      if (inputRow) {
+        inputRow.classList.remove('input-row--invalid');
+      }
+
+      // Address Line 1 auto-fill: backfill ZIP, City, State
+      if (dropdown.id === 'addr1-dropdown') {
+        var zip = row.getAttribute('data-zip');
+        var city = row.getAttribute('data-city');
+        var state = row.getAttribute('data-state');
+        if (zip) {
+          document.getElementById('zip-input').value = zip;
+          document.querySelector('[data-field="zipCode"]').classList.remove('input-row--invalid');
+          document.getElementById('zip-input').setAttribute('aria-invalid', 'false');
+        }
+        if (city) {
+          document.getElementById('city-input').value = city;
+          document.querySelector('[data-field="city"]').classList.remove('input-row--invalid');
+          document.getElementById('city-input').setAttribute('aria-invalid', 'false');
+        }
+        if (state) {
+          document.getElementById('state-input').value = state;
+          document.querySelector('[data-field="state"]').classList.remove('input-row--invalid');
+          document.getElementById('state-input').setAttribute('aria-invalid', 'false');
+        }
+        log('Address auto-filled: ZIP=' + zip + ' City=' + city + ' State=' + state);
+      }
+    });
+
+    // Close dropdowns when clicking outside
+    document.addEventListener('click', function (e) {
+      if (!e.target.closest('.cx-select-container')) {
+        closeAllDropdowns();
+      }
+    });
+
+    function closeAllDropdowns() {
+      document.querySelectorAll('.cx-select-dropdown[data-open="true"]').forEach(function (dd) {
+        dd.setAttribute('data-open', 'false');
+        var container = dd.closest('.cx-select-container');
+        if (container) {
+          var input = container.querySelector('[role="combobox"]');
+          if (input) input.setAttribute('aria-expanded', 'false');
+        }
+      });
+    }
+
+    function ensureDropdownEmptyRow(dropdown) {
+      var emptyRow = dropdown.querySelector('.cx-select-dropdown__empty');
+      if (emptyRow) return emptyRow;
+      emptyRow = document.createElement('div');
+      emptyRow.className = 'cx-select-dropdown__empty';
+      emptyRow.setAttribute('role', 'row');
+      emptyRow.setAttribute('data-empty-row', 'true');
+      var cell = document.createElement('div');
+      cell.setAttribute('role', 'gridcell');
+      cell.textContent = 'No results were found.';
+      emptyRow.appendChild(cell);
+      dropdown.appendChild(emptyRow);
+      return emptyRow;
+    }
+
+    function buildDropdownRow(value) {
+      var row = document.createElement('div');
+      row.setAttribute('role', 'row');
+      row.setAttribute('data-value', value);
+      var cell = document.createElement('div');
+      cell.setAttribute('role', 'gridcell');
+      cell.textContent = value;
+      row.appendChild(cell);
+      return row;
+    }
+
+    function syncDropdownEmptyState(dropdown) {
+      var emptyRow = ensureDropdownEmptyRow(dropdown);
+      var visibleRows = Array.from(dropdown.querySelectorAll('[role="row"]')).filter(function (row) {
+        return row !== emptyRow && row.style.display !== 'none';
+      });
+      emptyRow.style.display = visibleRows.length === 0 ? '' : 'none';
+    }
+
+    function filterDropdownRows(dropdown, query) {
+      var normalizedQuery = String(query || '').toLowerCase().trim();
+      Array.from(dropdown.querySelectorAll('[role="row"]')).forEach(function (row) {
+        if (row.getAttribute('data-empty-row') === 'true') return;
+        var cellText = row.querySelector('[role="gridcell"]').textContent.toLowerCase();
+        row.style.display = (!normalizedQuery || cellText.indexOf(normalizedQuery) !== -1) ? '' : 'none';
+      });
+      syncDropdownEmptyState(dropdown);
+    }
+
+    function getProfileFieldOptions(fieldDef, form, index) {
+      if (fieldDef.optionsByValue) {
+        var dependency = form.querySelector('#' + fieldDef.dependsOn + '-' + index);
+        var dependencyValue = dependency
+          ? String(dependency.dataset.committedValue || dependency.value || '').trim()
+          : '';
+        return fieldDef.optionsByValue[dependencyValue] || [];
+      }
+      return fieldDef.options || [];
+    }
+
+    function populateProfileComboboxOptions(form, index, fieldDef, input, dropdown, query) {
+      var previousValue = String(input.value || '').trim();
+      var options = getProfileFieldOptions(fieldDef, form, index);
+      Array.from(dropdown.querySelectorAll('[role="row"]')).forEach(function (row) { row.remove(); });
+      options.forEach(function (opt) { dropdown.appendChild(buildDropdownRow(opt)); });
+      ensureDropdownEmptyRow(dropdown);
+      filterDropdownRows(dropdown, query);
+      if (previousValue && options.indexOf(previousValue) === -1) {
+        input.value = '';
+        input.dataset.committedValue = '';
+      }
+    }
+
+    // Combobox input typing: filter visible rows in its dropdown
+    document.querySelectorAll('.cx-select-input').forEach(function (input) {
+      input.addEventListener('input', function () {
+        var container = input.closest('.cx-select-container');
+        if (!container) return;
+        var dropdown = container.querySelector('.cx-select-dropdown');
+        if (!dropdown) return;
+        if (input.dataset.committedValue && input.value.trim() !== input.dataset.committedValue) {
+          input.dataset.committedValue = '';
+        }
+        dropdown.setAttribute('data-open', 'true');
+        input.setAttribute('aria-expanded', 'true');
+        filterDropdownRows(dropdown, input.value);
+      });
+      input.addEventListener('focus', function () {
+        if (input.classList.contains('cx-select-input--auto-suggest')) {
+          var container = input.closest('.cx-select-container');
+          var dropdown = container ? container.querySelector('.cx-select-dropdown') : null;
+          if (dropdown) {
+            dropdown.setAttribute('data-open', 'true');
+            input.setAttribute('aria-expanded', 'true');
+            filterDropdownRows(dropdown, input.value);
+          }
+        }
+      });
+    });
+
+    // ---- File Upload ----
+    var fileInput = document.getElementById('resume-file-input');
+    var uploadBtn = document.getElementById('resume-upload-btn');
+    var dropZone = document.getElementById('file-drop-zone');
+    var filenameDisplay = document.getElementById('resume-filename');
+
+    uploadBtn.addEventListener('click', function () {
+      fileInput.click();
+    });
+
+    fileInput.addEventListener('change', function () {
+      if (fileInput.files && fileInput.files.length > 0) {
+        var fname = fileInput.files[0].name;
+        filenameDisplay.textContent = fname;
+        dropZone.classList.add('file-form-element--filled');
+        dropZone.setAttribute('data-state', 'FILLED');
+        log('File uploaded: ' + fname);
+      }
+    });
+
+    // Drag-and-drop visual feedback (no actual processing)
+    dropZone.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      dropZone.style.borderColor = '#0572ec';
+    });
+    dropZone.addEventListener('dragleave', function () {
+      if (!dropZone.classList.contains('file-form-element--filled')) {
+        dropZone.style.borderColor = '';
+      }
+    });
+    dropZone.addEventListener('drop', function (e) {
+      e.preventDefault();
+      dropZone.style.borderColor = '';
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        var fname = e.dataTransfer.files[0].name;
+        filenameDisplay.textContent = fname;
+        dropZone.classList.add('file-form-element--filled');
+        dropZone.setAttribute('data-state', 'FILLED');
+        log('File dropped: ' + fname);
+      }
+    });
+
+    // ---- Validation on text inputs ----
+    document.querySelectorAll('.input-row__control[required]').forEach(function (input) {
+      input.addEventListener('blur', function () {
+        var row = input.closest('.input-row');
+        if (!row) return;
+        if (input.value.trim() === '') {
+          row.classList.add('input-row--invalid');
+        } else {
+          row.classList.remove('input-row--invalid');
+          row.classList.add('input-row--filled');
+        }
+      });
+      input.addEventListener('input', function () {
+        var row = input.closest('.input-row');
+        if (!row) return;
+        if (input.value.trim() !== '') {
+          row.classList.remove('input-row--invalid');
+        }
+      });
+    });
+
+    // ---- Profile item tiles (Add Education/Skill/Language/License) ----
+    var MONTH_OPTIONS = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    var YEAR_OPTIONS = [];
+    for (var year = 2010; year <= 2035; year++) YEAR_OPTIONS.push(String(year));
+
+    var SKILL_OPTIONS_BY_TYPE = {
+      Technical: [
+        'Python', 'Rust', 'Java', 'JavaScript', 'C/C++', 'TypeScript', 'Node.js',
+        'React', 'Express', 'PyTorch', 'FastAPI', 'PostgreSQL', 'MongoDB', 'GCP',
+        'Linux', 'Docker', 'Kubernetes', 'SQL', 'Tailwind CSS', 'MediaPipe', 'OpenSim'
+      ],
+      Research: ['MATLAB', 'PyTorch', 'OpenSim', 'SuperCollider'],
+      Language: ['English', 'Spanish', 'Mandarin', 'French', 'German', 'Japanese'],
+      Other: ['Other'],
+    };
+
+    var PROFILE_FIELDS = {
+      experience: {
+        label: 'Experience',
+        fields: [
+          { type: 'text', label: 'Job Title', id: 'job-title', required: true },
+          { type: 'text', label: 'Company', id: 'company', required: true },
+          { type: 'text', label: 'Location', id: 'location' },
+          { type: 'combobox', label: 'Employment Type', id: 'employment-type', options: ['Full Time', 'Internship', 'Contract', 'Part Time'] }
+        ]
+      },
+      education: {
+        label: 'Education',
+        fields: [
+          {
+            type: 'combobox',
+            label: 'Degree',
+            id: 'degree',
+            required: true,
+            options: [
+              "Bachelor's",
+              'Bachelor of Science',
+              "Master's",
+              'Master of Science',
+              'PhD',
+              "Associate's",
+              'High School Diploma'
+            ]
+          },
+          {
+            type: 'combobox',
+            label: 'School / University',
+            id: 'school',
+            required: true,
+            options: [
+              'New York University',
+              'University of California, Los Angeles',
+              'University of California, Los Angeles (UCLA)',
+              'School One',
+              'School Two',
+              'Adelphi University',
+              'Massachusetts Institute of Technology',
+              'University of Southern California'
+            ]
+          },
+          { type: 'text', label: 'Field of Study', id: 'field-of-study' },
+          { type: 'combobox', label: 'Start Date Month', id: 'start-date-month', required: true, options: MONTH_OPTIONS },
+          { type: 'combobox', label: 'Start Date Year', id: 'start-date-year', required: true, options: YEAR_OPTIONS },
+          { type: 'combobox', label: 'End Date Month', id: 'end-date-month', options: MONTH_OPTIONS },
+          { type: 'combobox', label: 'End Date Year', id: 'end-date-year', options: YEAR_OPTIONS }
+        ]
+      },
+      skill: {
+        label: 'Skill',
+        fields: [
+          {
+            type: 'combobox',
+            label: 'Skill Type',
+            id: 'skill-type',
+            required: true,
+            options: ['Technical', 'Research', 'Language', 'Other']
+          },
+          {
+            type: 'combobox',
+            label: 'Skill',
+            id: 'skill-name',
+            required: true,
+            dependsOn: 'skill-type',
+            optionsByValue: SKILL_OPTIONS_BY_TYPE
+          },
+          { type: 'combobox', label: 'Proficiency', id: 'proficiency', options: ['Beginner', 'Intermediate', 'Advanced', 'Expert'] }
+        ]
+      },
+      language: {
+        label: 'Language',
+        fields: [
+          { type: 'combobox', label: 'Language', id: 'language-name', required: true, options: ['English', 'Spanish', 'Mandarin', 'French', 'German', 'Japanese', 'Hindi', 'Arabic'] },
+          { type: 'combobox', label: 'Proficiency Level', id: 'lang-proficiency', options: ['Basic', 'Conversational', 'Professional', 'Native'] }
+        ]
+      },
+      license: {
+        label: 'License',
+        fields: [
+          { type: 'text', label: 'License / Certification Name', id: 'license-name', required: true },
+          { type: 'text', label: 'Issuing Organization', id: 'issuing-org' }
+        ]
+      }
+    };
+
+    var profileCounters = {};
+    var profileSummaries = {
+      experience: function (values) {
+        return {
+          title: values['job-title'] || 'Unnamed Experience',
+          subtitle: values['company'] ? values['company'] + (values['location'] ? ' — ' + values['location'] : '') : ''
+        };
+      },
+      education: function (values) {
+        return {
+          title: values['school'] || 'Unnamed Education',
+          subtitle: values['degree'] ? values['degree'] + (values['field-of-study'] ? ' — ' + values['field-of-study'] : '') : ''
+        };
+      },
+      skill: function (values) {
+        return {
+          title: values['skill-name'] || 'Unnamed Skill',
+          subtitle: values['proficiency'] || ''
+        };
+      },
+      language: function (values) {
+        return {
+          title: values['language-name'] || 'Unnamed Language',
+          subtitle: values['lang-proficiency'] || ''
+        };
+      },
+      license: function (values) {
+        return {
+          title: values['license-name'] || 'Unnamed License',
+          subtitle: values['issuing-org'] || ''
+        };
+      }
+    };
+
+    function setProfileAddEnabled(container, enabled) {
+      if (!container) return;
+      var btn = container.querySelector('.apply-flow-profile-item-tile__new-tile');
+      if (btn) btn.disabled = !enabled;
+      container.classList.toggle('profile-add-item--disabled', !enabled);
+    }
+
+    function collectProfileValues(form) {
+      var values = {};
+      form.querySelectorAll('input').forEach(function (input) {
+        var baseId = (input.id || '').replace(/-\d+$/, '');
+        values[baseId] = input.value || '';
+      });
+      return values;
+    }
+
+    function markProfileValidation(form, config) {
+      var missing = false;
+      config.fields.forEach(function (fieldDef) {
+        if (!fieldDef.required) return;
+        var input = form.querySelector('#' + fieldDef.id + '-' + form.getAttribute('data-profile-index'));
+        var row = input ? input.closest('.input-row') : null;
+        var hasValue = !!(input && String(input.value || '').trim());
+        if (hasValue && fieldDef.type === 'combobox') {
+          hasValue = (input.dataset.committedValue || '') === String(input.value || '').trim();
+        }
+        if (row) row.classList.toggle('input-row--invalid', !hasValue);
+        if (!hasValue) missing = true;
+      });
+      return !missing;
+    }
+
+    function ensureProfileItemList(container) {
+      var list = container.querySelector('.profile-item-list');
+      if (list) return list;
+      list = document.createElement('div');
+      list.className = 'profile-item-list';
+      container.insertBefore(list, container.firstChild);
+      return list;
+    }
+
+    function appendProfileSummaryTile(container, profileType, values, profileIndex, existingTile) {
+      var summaryBuilder = profileSummaries[profileType];
+      var summary = summaryBuilder ? summaryBuilder(values) : { title: 'Saved Item', subtitle: '' };
+      var list = ensureProfileItemList(container);
+      var tile = existingTile || document.createElement('article');
+      tile.className = 'apply-flow-profile-item-tile apply-flow-profile-item-tile--saved';
+      tile.setAttribute('data-profile-type', profileType);
+      tile.setAttribute('data-profile-index', String(profileIndex));
+      tile.id = tile.id || ('profile-tile-' + profileType + '-' + profileIndex);
+      tile.dataset.profileValues = JSON.stringify(values || {});
+      tile.innerHTML =
+        '<div class="apply-flow-profile-item-tile__summary">' +
+          '<div class="apply-flow-profile-item-tile__summary-title"></div>' +
+          '<div class="apply-flow-profile-item-tile__summary-subtitle"></div>' +
+        '</div>' +
+        '<div class="apply-flow-profile-item-tile__actions">' +
+          '<button type="button" class="apply-flow-profile-item-tile__action apply-flow-profile-item-tile__action--edit" aria-label="Edit ' + profileType + '">&#9998;</button>' +
+          '<button type="button" class="apply-flow-profile-item-tile__action apply-flow-profile-item-tile__action--remove" aria-label="Remove ' + profileType + '">&times;</button>' +
+        '</div>';
+      tile.querySelector('.apply-flow-profile-item-tile__summary-title').textContent = summary.title || 'Saved Item';
+      tile.querySelector('.apply-flow-profile-item-tile__summary-subtitle').textContent = summary.subtitle || '';
+      tile.style.display = '';
+      tile.querySelector('.apply-flow-profile-item-tile__action--edit').addEventListener('click', function (event) {
+        event.stopPropagation();
+        openProfileTileEditor(tile);
+      });
+      tile.querySelector('.apply-flow-profile-item-tile__action--remove').addEventListener('click', function (event) {
+        event.stopPropagation();
+        removeProfileTile(tile);
+      });
+      if (!existingTile) list.appendChild(tile);
+      return tile;
+    }
+
+    function openProfileTileEditor(tile) {
+      var editContainer = tile ? tile.closest('.profile-add-item') : null;
+      if (!tile || !editContainer || editContainer.querySelector('.profile-inline-form')) return;
+      var editType = tile.getAttribute('data-profile-type');
+      var editIndex = Number(tile.getAttribute('data-profile-index') || '0') || 1;
+      var editValues = {};
+      try {
+        editValues = JSON.parse(tile.dataset.profileValues || '{}');
+      } catch (error) {}
+      createProfileInlineForm(editContainer, editType, editIndex, editValues, tile);
+    }
+
+    function removeProfileTile(tile) {
+      if (!tile) return;
+      tile.remove();
+      log('Removed saved tile');
+    }
+
+    function createProfileInlineForm(container, profileType, index, initialValues, existingTile) {
+      var config = PROFILE_FIELDS[profileType];
+      if (!config) return null;
+      if (container.querySelector('.profile-inline-form')) return null;
+
+      var form = document.createElement('div');
+      var comboboxes = [];
+      form.className = 'profile-inline-form';
+      form.setAttribute('data-profile-instance', profileType + '-' + index);
+      form.setAttribute('data-profile-type', profileType);
+      form.setAttribute('data-profile-index', String(index));
+      if (existingTile) {
+        form.setAttribute('data-existing-tile-id', existingTile.id);
+        existingTile.style.display = 'none';
+      }
+
+      config.fields.forEach(function (fieldDef) {
+        var row = document.createElement('div');
+        row.className = 'input-row';
+
+        var label = document.createElement('label');
+        label.className = 'input-row__label' + (fieldDef.required ? ' input-row__label--required' : '');
+        var fieldId = fieldDef.id + '-' + index;
+        label.setAttribute('for', fieldId);
+        var span = document.createElement('span');
+        span.className = 'input-row__linebreak';
+        span.textContent = fieldDef.label;
+        label.appendChild(span);
+        row.appendChild(label);
+
+        var initialValue = initialValues && initialValues[fieldDef.id] ? initialValues[fieldDef.id] : '';
+        if (fieldDef.type === 'text') {
+          var input = document.createElement('input');
+          input.type = 'text';
+          input.className = 'input-row__control';
+          input.id = fieldId;
+          input.name = fieldId;
+          if (fieldDef.required) input.required = true;
+          input.value = initialValue;
+          row.appendChild(input);
+        } else if (fieldDef.type === 'combobox') {
+          var cxContainer = document.createElement('div');
+          cxContainer.className = 'cx-select-container';
+
+          var fieldContainer = document.createElement('div');
+          fieldContainer.className = 'input-field-container';
+
+          var cxInput = document.createElement('input');
+          cxInput.type = 'text';
+          cxInput.className = 'cx-select-input';
+          cxInput.id = fieldId;
+          cxInput.setAttribute('role', 'combobox');
+          cxInput.setAttribute('autocomplete', 'off');
+          cxInput.setAttribute('aria-haspopup', 'grid');
+          cxInput.setAttribute('aria-expanded', 'false');
+          if (fieldDef.required) cxInput.required = true;
+          var ddId = fieldId + '-dropdown';
+          cxInput.setAttribute('aria-controls', ddId);
+          fieldContainer.appendChild(cxInput);
+
+          var toggleBtn = document.createElement('button');
+          toggleBtn.type = 'button';
+          toggleBtn.className = 'cx-select-toggle';
+          toggleBtn.setAttribute('aria-label', 'Toggle ' + fieldDef.label);
+          toggleBtn.setAttribute('data-toggle-for', ddId);
+          toggleBtn.innerHTML = '&#9662;';
+          fieldContainer.appendChild(toggleBtn);
+
+          cxContainer.appendChild(fieldContainer);
+
+          var dd = document.createElement('div');
+          dd.className = 'cx-select-dropdown';
+          dd.id = ddId;
+          dd.setAttribute('role', 'grid');
+          dd.setAttribute('aria-label', fieldDef.label + ' options');
+          dd.setAttribute('data-open', 'false');
+          ensureDropdownEmptyRow(dd);
+          cxContainer.appendChild(dd);
+          row.appendChild(cxContainer);
+
+          cxInput.addEventListener('input', function () {
+            if (cxInput.dataset.committedValue && cxInput.value.trim() !== cxInput.dataset.committedValue) {
+              cxInput.dataset.committedValue = '';
+            }
+            dd.setAttribute('data-open', 'true');
+            cxInput.setAttribute('aria-expanded', 'true');
+            if (fieldDef.optionsByValue) {
+              populateProfileComboboxOptions(form, index, fieldDef, cxInput, dd, cxInput.value);
+            } else {
+              filterDropdownRows(dd, cxInput.value);
+            }
+          });
+
+          cxInput.addEventListener('focus', function () {
+            dd.setAttribute('data-open', 'true');
+            cxInput.setAttribute('aria-expanded', 'true');
+            if (fieldDef.optionsByValue) {
+              populateProfileComboboxOptions(form, index, fieldDef, cxInput, dd, cxInput.value);
+            } else {
+              filterDropdownRows(dd, cxInput.value);
+            }
+          });
+
+          comboboxes.push({
+            fieldDef: fieldDef,
+            input: cxInput,
+            dropdown: dd,
+            initialValue: initialValue,
+          });
+        }
+
+        form.appendChild(row);
+      });
+
+      comboboxes.forEach(function (combo) {
+        if (!combo.fieldDef.optionsByValue) {
+          Array.from(combo.dropdown.querySelectorAll('[role="row"]')).forEach(function (row) { row.remove(); });
+          (combo.fieldDef.options || []).forEach(function (opt) {
+            combo.dropdown.appendChild(buildDropdownRow(opt));
+          });
+          ensureDropdownEmptyRow(combo.dropdown);
+        }
+      });
+
+      comboboxes.forEach(function (combo) {
+        if (combo.fieldDef.dependsOn) {
+          var dependency = form.querySelector('#' + combo.fieldDef.dependsOn + '-' + index);
+          if (dependency) {
+            var refresh = function () {
+              populateProfileComboboxOptions(form, index, combo.fieldDef, combo.input, combo.dropdown, combo.input.value);
+            };
+            dependency.addEventListener('input', refresh);
+            dependency.addEventListener('change', refresh);
+            refresh();
+          }
+        } else {
+          filterDropdownRows(combo.dropdown, combo.input.value);
+        }
+      });
+
+      comboboxes.forEach(function (combo) {
+        if (!combo.initialValue) return;
+        if (combo.fieldDef.optionsByValue) {
+          populateProfileComboboxOptions(form, index, combo.fieldDef, combo.input, combo.dropdown, combo.initialValue);
+        }
+        combo.input.value = combo.initialValue;
+        combo.input.dataset.committedValue = combo.initialValue;
+        combo.input.setAttribute('aria-invalid', 'false');
+        filterDropdownRows(combo.dropdown, combo.initialValue);
+      });
+
+      var footer = document.createElement('div');
+      footer.className = 'profile-inline-form__footer';
+
+      var cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'profile-inline-form__cancel';
+      cancelBtn.textContent = 'Cancel';
+      footer.appendChild(cancelBtn);
+
+      var saveBtn = document.createElement('button');
+      saveBtn.type = 'button';
+      saveBtn.className = 'profile-inline-form__save';
+      saveBtn.textContent = (existingTile ? 'Update ' : 'Add ') + config.label;
+      footer.appendChild(saveBtn);
+
+      form.appendChild(footer);
+      var insertionTarget = existingTile || container.querySelector('.apply-flow-profile-item-tile__new-tile');
+      var insertionParent = existingTile && existingTile.parentNode ? existingTile.parentNode : container;
+      insertionParent.insertBefore(form, insertionTarget);
+      setProfileAddEnabled(container, false);
+      log((existingTile ? 'Editing' : 'Added') + ' inline form: ' + config.label + ' #' + index);
+      return form;
+    }
+
+    document.addEventListener('click', function (e) {
+      var tileBtn = e.target.closest('.apply-flow-profile-item-tile__new-tile');
+      if (!tileBtn) return;
+      if (tileBtn.disabled) return;
+      var profileType = tileBtn.getAttribute('data-profile-type');
+      var config = PROFILE_FIELDS[profileType];
+      if (!config) return;
+
+      if (!profileCounters[profileType]) profileCounters[profileType] = 0;
+      profileCounters[profileType]++;
+      var idx = profileCounters[profileType];
+      createProfileInlineForm(tileBtn.closest('.profile-add-item'), profileType, idx, {}, null);
+    });
+
+    document.addEventListener('click', function (e) {
+      var editBtn = e.target.closest('.apply-flow-profile-item-tile__action--edit');
+      if (editBtn) {
+        openProfileTileEditor(editBtn.closest('.apply-flow-profile-item-tile'));
+        return;
+      }
+
+      var removeBtn = e.target.closest('.apply-flow-profile-item-tile__action--remove');
+      if (removeBtn) {
+        removeProfileTile(removeBtn.closest('.apply-flow-profile-item-tile'));
+        return;
+      }
+
+      var cancelBtn = e.target.closest('.profile-inline-form__cancel');
+      if (cancelBtn) {
+        var cancelForm = cancelBtn.closest('.profile-inline-form');
+        var cancelContainer = cancelForm ? cancelForm.closest('.profile-add-item') : null;
+        var cancelType = cancelForm ? cancelForm.getAttribute('data-profile-type') : '';
+        var existingTileId = cancelForm ? cancelForm.getAttribute('data-existing-tile-id') : '';
+        var existingTile = existingTileId ? document.getElementById(existingTileId) : null;
+        if (cancelForm) cancelForm.remove();
+        if (existingTile) existingTile.style.display = '';
+        setProfileAddEnabled(cancelContainer, true);
+        log('Canceled inline form: ' + cancelType);
+        return;
+      }
+
+      var saveBtn = e.target.closest('.profile-inline-form__save');
+      if (!saveBtn) return;
+      var saveForm = saveBtn.closest('.profile-inline-form');
+      if (!saveForm) return;
+      var saveType = saveForm.getAttribute('data-profile-type');
+      var saveContainer = saveForm.closest('.profile-add-item');
+      var saveConfig = PROFILE_FIELDS[saveType];
+      if (!saveConfig) return;
+      if (!markProfileValidation(saveForm, saveConfig)) {
+        log('Validation failed for inline form: ' + saveConfig.label);
+        return;
+      }
+      var values = collectProfileValues(saveForm);
+      var existingTileId = saveForm.getAttribute('data-existing-tile-id');
+      var existingTile = existingTileId ? document.getElementById(existingTileId) : null;
+      appendProfileSummaryTile(
+        saveContainer,
+        saveType,
+        values,
+        saveForm.getAttribute('data-profile-index'),
+        existingTile
+      );
+      saveForm.remove();
+      setProfileAddEnabled(saveContainer, true);
+      log('Saved inline form: ' + saveConfig.label);
+    });
+
+    document.addEventListener('mouseover', function (e) {
+      var hoverTile = e.target.closest('.apply-flow-profile-item-tile--saved');
+      if (!hoverTile) return;
+      hoverTile.classList.add('apply-flow-profile-item-tile--show-actions');
+      var actions = hoverTile.querySelector('.apply-flow-profile-item-tile__actions');
+      if (actions) {
+        actions.style.opacity = '1';
+        actions.style.pointerEvents = 'auto';
+      }
+    });
+
+    document.addEventListener('mouseout', function (e) {
+      var hoverTile = e.target.closest('.apply-flow-profile-item-tile--saved');
+      if (!hoverTile) return;
+      if (hoverTile.contains(e.relatedTarget)) return;
+      hoverTile.classList.remove('apply-flow-profile-item-tile--show-actions');
+      var actions = hoverTile.querySelector('.apply-flow-profile-item-tile__actions');
+      if (actions) {
+        actions.style.opacity = '';
+        actions.style.pointerEvents = '';
+      }
+    });
+
+    // ---- Radio group (Oracle custom radio) ----
+    document.querySelectorAll('.apply-flow-input-radio-control').forEach(function (radio) {
+      radio.addEventListener('change', function () {
+        log('Radio selected: ' + radio.name + ' = ' + radio.value);
+      });
+    });
+
+    // ---- Edit button for readonly email ----
+    document.querySelector('.edit-btn').addEventListener('click', function () {
+      var emailInput = document.getElementById('email-field');
+      if (emailInput.hasAttribute('readonly')) {
+        emailInput.removeAttribute('readonly');
+        emailInput.focus();
+        this.textContent = 'Save';
+        log('Email field unlocked for editing');
+      } else {
+        emailInput.setAttribute('readonly', '');
+        this.textContent = 'Edit';
+        log('Email field saved: ' + emailInput.value);
+      }
+    });
+
+    window.__toyOracleFixture = {
+      openProfileTileEditor: openProfileTileEditor,
+      removeProfileTile: removeProfileTile,
+    };
+
+    log('Oracle Cloud HCM fixture ready — 4 pages, navigate with dots or Back/Next');
+  })();
+  </script>
+
+</body>
+</html>

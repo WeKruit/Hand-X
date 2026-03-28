@@ -136,6 +136,8 @@ def detect_platform_from_url(url: str | None) -> str:
         return "lever"
     if "smartrecruiters" in host:
         return "smartrecruiters"
+    if "oraclecloud" in host:
+        return "oracle"
     if "ashby" in host:
         return "ashby"
     if "bamboohr" in host:

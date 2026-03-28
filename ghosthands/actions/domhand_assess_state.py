@@ -21,6 +21,7 @@ from ghosthands.actions.domhand_fill import (
     _grouped_date_is_complete,
     _is_effectively_unset_field_value,
     _is_navigation_field,
+    _is_upload_like_field,
     _preferred_field_label,
     _read_binary_state,
     _read_checkbox_group_value,
@@ -31,6 +32,8 @@ from ghosthands.actions.domhand_fill import (
     _section_matches_scope,
     _value_shape_is_compatible,
     extract_visible_form_fields,
+    _get_profile_data,
+    _profile_skill_values,
 )
 from ghosthands.actions.views import (
     ApplicationFieldIssue,
@@ -525,6 +528,97 @@ _SCAN_PAGE_STATE_JS = r"""() => {
 
 	const submitButtons = buttons.filter((item) => /\b(submit|finish application|send application)\b/.test(item.lower));
 	const advanceButtons = buttons.filter((item) => isAdvanceControl(item.lower));
+	const repeaterConfigs = [
+		{ group: 'experience', label: 'Work Experience', addPattern: /\badd experience\b/i, headingPattern: /\bwork experience\b/i },
+		{ group: 'education', label: 'Education', addPattern: /\badd education\b/i, headingPattern: /\b(college\s*\/\s*university|education)\b/i },
+		{ group: 'skills', label: 'Technical Skills', addPattern: /\badd skill\b/i, headingPattern: /\b(technical skills|skills)\b/i },
+		{ group: 'languages', label: 'Language Skills', addPattern: /\badd language\b/i, headingPattern: /\b(language skills|languages)\b/i },
+		{ group: 'licenses', label: 'Licenses and Certificates', addPattern: /\badd license\b/i, headingPattern: /\b(licenses? (and|&) (certificates|certifications)|licenses?)\b/i },
+	];
+
+	const interactiveSelector = 'input, textarea, select, [role="combobox"], [role="textbox"]';
+	const candidateRootSelector = '.profile-add-item, .input-row, .apply-flow-profile-item, .apply-flow-block__form-list, .apply-flow-section, .apply-flow-block, section, article, form';
+	const dedupeRoot = (nodes) => {
+		const unique = [];
+		for (const node of nodes) {
+			if (!node || unique.includes(node)) continue;
+			if (unique.some((existing) => existing.contains(node))) continue;
+			for (let i = unique.length - 1; i >= 0; i--) {
+				if (node.contains(unique[i])) unique.splice(i, 1);
+			}
+			unique.push(node);
+		}
+		return unique;
+	};
+	const sectionRoots = dedupeRoot(
+		Array.from(document.querySelectorAll(candidateRootSelector)).filter((el) => visible(el))
+	);
+	const findSectionRoot = (config, addNode, headingNode) => {
+		const candidateNodes = [];
+		if (addNode) {
+			candidateNodes.push(addNode.closest(candidateRootSelector));
+			candidateNodes.push(addNode.parentElement);
+		}
+		if (headingNode) {
+			candidateNodes.push(headingNode.closest(candidateRootSelector));
+			candidateNodes.push(headingNode.parentElement);
+		}
+		for (const node of candidateNodes) {
+			if (!node || !visible(node)) continue;
+			const text = norm(node.innerText || node.getAttribute('aria-label') || '');
+			if (config.headingPattern.test(text) || config.addPattern.test(text)) return node;
+		}
+		for (const node of sectionRoots) {
+			const text = norm(node.innerText || node.getAttribute('aria-label') || '');
+			if (config.headingPattern.test(text) || config.addPattern.test(text)) return node;
+		}
+		return null;
+	};
+	const findButtonNode = (pattern) =>
+		Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], a, [role="button"]'))
+			.filter((el) => visible(el))
+			.find((el) => pattern.test(norm(el.innerText || el.value || el.getAttribute('aria-label') || '')));
+	const findHeadingNode = (pattern) =>
+		Array.from(document.querySelectorAll('h1, h2, h3, h4, [role="heading"], label, .input-row__label, .input-row__linebreak, .apply-flow-block__title'))
+			.filter((el) => visible(el))
+			.find((el) => pattern.test(norm(el.innerText || el.getAttribute('aria-label') || '')));
+	const repeaterSections = repeaterConfigs.map((config) => {
+		const addNode = findButtonNode(config.addPattern) || null;
+		const headingNode = findHeadingNode(config.headingPattern) || null;
+		const root = findSectionRoot(config, addNode, headingNode);
+		const searchRoot = root || document;
+		const savedTitleCount = Array.from(searchRoot.querySelectorAll('.apply-flow-profile-item-tile__summary-title'))
+			.filter((el) => visible(el))
+			.length;
+		const savedTileCount = Math.max(
+			savedTitleCount,
+			Array.from(searchRoot.querySelectorAll('.apply-flow-profile-item-tile--saved'))
+				.filter((el) => visible(el))
+				.length
+		);
+		const openInlineFormCount = Array.from(searchRoot.querySelectorAll('.profile-inline-form'))
+			.filter((el) => visible(el))
+			.length;
+		const activeControlCount = Array.from(searchRoot.querySelectorAll(interactiveSelector))
+			.filter((el) => {
+				if (!visible(el)) return false;
+				if (el.closest('.apply-flow-pagination')) return false;
+				if (el.closest('.apply-flow-profile-item-tile--saved')) return false;
+				return true;
+			})
+			.length;
+		const sectionText = root ? norm(root.innerText || root.getAttribute('aria-label') || '') : '';
+		return {
+			group: config.group,
+			label: config.label,
+			add_visible: !!addNode,
+			add_disabled: !!(addNode && (addNode.disabled || addNode.getAttribute('aria-disabled') === 'true')),
+			saved_tile_count: savedTileCount,
+			open_inline_form_count: openInlineFormCount,
+			active_control_count: activeControlCount,
+			section_text: sectionText,
+		};
+	});
 
 	const markerNodes = Array.from(document.querySelectorAll('[id], [class], script[src]')).slice(0, 300);
 	const markers = [];
@@ -551,9 +645,109 @@ _SCAN_PAGE_STATE_JS = r"""() => {
 		advance_visible: advanceButtons.some((item) => !/\bsubmit\b/.test(item.lower)),
 		advance_disabled: advanceButtons.length > 0 && advanceButtons.every((item) => item.disabled),
 		error_texts: errorTexts,
+		repeater_sections: repeaterSections,
 		markers,
 	});
 }"""
+
+_PROFILE_REPEATER_LABELS: dict[str, str] = {
+    "experience": "Work Experience",
+    "education": "Education",
+    "skills": "Technical Skills",
+    "languages": "Language Skills",
+    "licenses": "Licenses and Certificates",
+}
+
+
+def _profile_repeater_expected_count(profile_data: dict[str, Any] | None, repeater_group: str) -> int:
+    data = profile_data or {}
+    if repeater_group in {"experience", "education", "languages"}:
+        entries = data.get(repeater_group)
+        if not isinstance(entries, list):
+            return 0
+        return sum(1 for entry in entries if entry not in (None, "", {}))
+    if repeater_group == "skills":
+        return len(_profile_skill_values(data))
+    if repeater_group == "licenses":
+        for key in (
+            "certifications",
+            "licenses",
+            "certifications_licenses",
+            "licenses_certifications",
+        ):
+            value = data.get(key)
+            if isinstance(value, list):
+                return sum(1 for item in value if item not in (None, "", {}))
+            if isinstance(value, str):
+                normalized = [part.strip() for part in re.split(r"[,;\n]+", value) if part.strip()]
+                if len(normalized) == 1 and normalize_name(normalized[0]) in {"none", "n a", "na"}:
+                    return 0
+                return len(normalized)
+        return 0
+    return 0
+
+
+def _profile_backed_repeater_issues(
+    page_scan: dict[str, Any],
+    profile_data: dict[str, Any] | None,
+) -> list[ApplicationFieldIssue]:
+    profile = profile_data or {}
+    raw_sections = page_scan.get("repeater_sections")
+    if not isinstance(raw_sections, list):
+        return []
+
+    issues: list[ApplicationFieldIssue] = []
+    for section in raw_sections:
+        if not isinstance(section, dict):
+            continue
+        repeater_group = normalize_name(section.get("group") or "")
+        expected_count = _profile_repeater_expected_count(profile, repeater_group)
+        if expected_count <= 0:
+            continue
+        saved_tile_count = max(0, int(section.get("saved_tile_count") or 0))
+        open_inline_form_count = max(0, int(section.get("open_inline_form_count") or 0))
+        active_control_count = max(0, int(section.get("active_control_count") or 0))
+        section_text = str(section.get("section_text") or "").strip()
+        section_is_live = bool(
+            section.get("add_visible")
+            or saved_tile_count
+            or open_inline_form_count
+            or section_text
+        )
+        if not section_is_live:
+            continue
+        if saved_tile_count >= expected_count and open_inline_form_count == 0:
+            continue
+        label = str(section.get("label") or _PROFILE_REPEATER_LABELS.get(repeater_group) or repeater_group).strip()
+        status_fragments = [f"saved={saved_tile_count}/{expected_count}"]
+        if open_inline_form_count:
+            status_fragments.append(f"open_inline_forms={open_inline_form_count}")
+        if active_control_count:
+            status_fragments.append(f"active_controls={active_control_count}")
+        question_text = f"Complete the {label} repeater entries before advancing."
+        if open_inline_form_count:
+            question_text = (
+                f"The {label} inline editor is still open. Finish the current entry, "
+                "fill any required date fields such as Start Date Month/Year, click the visible "
+                f"commit button, and wait for the saved {label} tile before touching another section."
+            )
+        issues.append(
+            ApplicationFieldIssue(
+                field_id=f"repeater:{repeater_group}",
+                name=label,
+                field_type="repeater",
+                section=label,
+                section_path=label,
+                required=True,
+                reason="profile_backed_repeater_incomplete",
+                relative_position="in_view" if bool(section.get("add_visible")) else "unknown",
+                takeover_suggestion="browser_use_takeover",
+                question_text=question_text,
+                current_value="; ".join(status_fragments),
+                options=[],
+            )
+        )
+    return issues
 
 
 def _group_form_fields(raw_fields: list[dict[str, Any]], button_groups: list[dict[str, Any]]) -> list[FormField]:
@@ -618,11 +812,39 @@ def _group_form_fields(raw_fields: list[dict[str, Any]], button_groups: list[dic
 
 
 def _field_is_empty(field: FormField) -> bool:
+    if _is_upload_like_field(field):
+        attachment_texts = [
+            field.current_value,
+            _preferred_field_label(field),
+            field.name,
+            field.raw_label,
+            *(field.choices or []),
+            *(field.options or []),
+        ]
+        joined = " | ".join(str(text or "").strip() for text in attachment_texts if str(text or "").strip())
+        if re.search(r"\b[\w .()-]+\.(pdf|doc|docx|rtf|txt)\b", joined, re.IGNORECASE):
+            return False
     if field.field_type in {"checkbox", "checkbox-group", "radio", "radio-group", "toggle", "button-group"}:
         return not bool((field.current_value or "").strip())
     if (field.widget_kind or "") == "grouped_date":
         return not _grouped_date_is_complete(field.current_value)
     return _is_effectively_unset_field_value(field.current_value)
+
+
+def _last_state_is_cleanly_advanceable(last_state: dict[str, Any] | None) -> bool:
+    if not isinstance(last_state, dict):
+        return False
+    if not bool(last_state.get("advance_allowed")):
+        return False
+    clean_counts = (
+        "unresolved_required_count",
+        "optional_validation_count",
+        "visible_error_count",
+        "mismatched_count",
+        "opaque_count",
+        "unverified_count",
+    )
+    return all(int(last_state.get(key) or 0) == 0 for key in clean_counts)
 
 
 def _maybe_suppress_custom_select_readback_false_positives(
@@ -666,7 +888,8 @@ def _maybe_suppress_custom_select_readback_false_positives(
                 field_key=fk,
             )
             ev = str(getattr(expected, "expected_value", None) or "").strip()
-            if expected is not None and ev:
+            source = str(getattr(expected, "source", "") or "").strip()
+            if expected is not None and ev and source == "domhand_unverified":
                 dropped += 1
                 continue
         kept.append(issue)
@@ -765,8 +988,6 @@ def _classify_terminal_state(
         r"\b(thank you for applying|application submitted|application received|successfully submitted)\b", body_norm
     ):
         return "confirmation"
-    if advance_visible and not advance_disabled:
-        return "advanceable"
     if not has_editable_fields and submit_visible:
         return "review"
     if (
@@ -777,7 +998,9 @@ def _classify_terminal_state(
         and not visible_errors
     ):
         return "presubmit_single_page"
-    return "advanceable"
+    if advance_visible and not advance_disabled and not unresolved_required and not visible_errors:
+        return "advanceable"
+    return "editing"
 
 
 async def domhand_assess_state(params: DomHandAssessStateParams, browser_session: BrowserSession) -> ActionResult:
@@ -794,6 +1017,55 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         pass
 
     await page.evaluate(_build_inject_helpers_js())
+    current_url = await _safe_page_url(page)
+
+    # Clear stale application state when URL changes (SPA hash routing, etc.)
+    _prev_state = getattr(browser_session, "_gh_last_application_state", None)
+    if isinstance(_prev_state, dict):
+        prev_url = str(_prev_state.get("page_url") or "")
+        if prev_url and prev_url != current_url:
+            delattr(browser_session, "_gh_last_application_state")
+
+    page_context_key = await _get_page_context_key(page, fallback_marker=params.target_section)
+    last_fill = getattr(browser_session, "_gh_last_domhand_fill", None)
+    if (
+        isinstance(last_fill, dict)
+        and str(last_fill.get("page_context_key") or "") == page_context_key
+        and str(last_fill.get("page_url") or "") == current_url
+        and bool(last_fill.get("broad_fill_completed"))
+    ):
+        setattr(
+            browser_session,
+            "_gh_last_domhand_fill",
+            {
+                **last_fill,
+                "broad_fill_completed": False,
+                "assess_checkpoint_consumed": True,
+            },
+        )
+    last_state = getattr(browser_session, "_gh_last_application_state", None)
+    if (
+        isinstance(last_state, dict)
+        and str(last_state.get("page_context_key") or "") == page_context_key
+        and str(last_state.get("page_url") or "") == current_url
+        and _last_state_is_cleanly_advanceable(last_state)
+    ):
+        agent_summary = (
+            "DomHand assess_state: same page already assessed as advance_allowed=yes."
+        )
+        return ActionResult(
+            extracted_content=agent_summary,
+            long_term_memory=agent_summary,
+            include_extracted_content_only_once=True,
+            metadata={
+                "tool": "domhand_assess_state",
+                "application_state_json": json.dumps({"advance_allowed": True}),
+                "domhand_assess_state_summary": agent_summary,
+                "same_page_advance_guard": True,
+                "page_context_key": page_context_key,
+                "page_url": current_url,
+            },
+        )
 
     fields = await extract_visible_form_fields(page)
     logger.info(
@@ -828,6 +1100,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
 
     page_scan_raw = await page.evaluate(_SCAN_PAGE_STATE_JS)
     page_scan = json.loads(page_scan_raw) if isinstance(page_scan_raw, str) else page_scan_raw or {}
+    profile_data = _get_profile_data()
 
     field_ids = [field.field_id for field in fields]
     layout_raw = await page.evaluate(_FIELD_LAYOUT_JS, field_ids)
@@ -835,7 +1108,6 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
 
     button_texts = page_scan.get("button_texts", [])
     body_text = page_scan.get("body_text", "")
-    current_url = await _safe_page_url(page)
     page_host = detect_host_from_url(current_url)
     platform_hint = detect_platform_from_signals(
         str(current_url or ""),
@@ -1012,6 +1284,12 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         page_host=page_host,
         page_context_key=page_context_key,
     )
+    repeater_issues = _profile_backed_repeater_issues(page_scan, profile_data)
+    if repeater_issues:
+        unresolved_by_id = {issue.field_id: issue for issue in unresolved_required}
+        for issue in repeater_issues:
+            unresolved_by_id.setdefault(issue.field_id, issue)
+        unresolved_required = list(unresolved_by_id.values())
 
     verification_failures: tuple[list[ApplicationFieldIssue], list[ApplicationFieldIssue], list[ApplicationFieldIssue]] = (
         [],
@@ -1134,23 +1412,28 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                 )
                 continue
 
-            if _field_uses_semantic_verification(field):
+            # Unified verification via verification_engine (shared with domhand_fill)
+            from ghosthands.dom.verification_engine import values_match as _ve_values_match
+
+            _use_semantic = _field_uses_semantic_verification(field)
+            if _use_semantic:
                 has_error = await _field_has_validation_error(page, field.field_id)
                 if not has_error and (
                     field.field_type == "textarea"
-                    or _semantic_text_values_match(field.current_value, expected.expected_value)
+                    or _ve_values_match(
+                        field.current_value,
+                        expected.expected_value,
+                        field_type=field.field_type,
+                        semantic=True,
+                    )
                 ):
                     continue
 
-            if not _field_value_matches_expected(field.current_value, expected.expected_value):
-                if platform_hint == "phenom":
-                    logger.info(
-                        f"domhand.assess_state.phenom_debug.MISMATCH "
-                        f"field={field.field_id} label={_preferred_field_label(field)!r} "
-                        f"type={field.field_type} attempt={attempt_index} "
-                        f"current={field.current_value!r} expected={expected.expected_value!r} "
-                        f"source={expected.source}",
-                    )
+            if not _ve_values_match(
+                field.current_value,
+                expected.expected_value,
+                field_type=field.field_type,
+            ):
                 mismatched_attempt.append(
                     _verification_issue_for_field(
                         field,
@@ -1250,9 +1533,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             not unresolved_required
             and not optional_validation_blockers
             and not visible_errors
-            and not mismatched_fields
             and not opaque_fields
-            and not unverified_fields
             and not (bool(page_scan.get("advance_visible")) and bool(page_scan.get("advance_disabled")))
         ),
         platform_hint=platform_hint,
@@ -1261,9 +1542,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
     active_blocker_issues = (
         application_state.unresolved_required_fields
         + optional_validation_blockers
-        + application_state.mismatched_fields
         + application_state.opaque_fields
-        + application_state.unverified_fields
     )
     blocker_states: dict[str, dict[str, str]] = {}
     for issue in active_blocker_issues:
@@ -1381,6 +1660,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             "advance_disabled": application_state.advance_disabled,
             "unresolved_required_count": len(application_state.unresolved_required_fields),
             "optional_validation_count": len(optional_validation_blockers),
+            "visible_error_count": len(application_state.visible_errors),
             "mismatched_count": len(application_state.mismatched_fields),
             "opaque_count": len(application_state.opaque_fields),
             "unverified_count": len(application_state.unverified_fields),
@@ -1449,6 +1729,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             "advance_disabled": application_state.advance_disabled,
             "unresolved_required_count": len(application_state.unresolved_required_fields),
             "optional_validation_count": len(optional_validation_blockers),
+            "visible_error_count": len(application_state.visible_errors),
             "mismatched_count": len(application_state.mismatched_fields),
             "opaque_count": len(application_state.opaque_fields),
             "unverified_count": len(application_state.unverified_fields),
@@ -1490,7 +1771,16 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
     if application_state.platform_hint:
         summary_lines.append(f"Platform hint: {application_state.platform_hint}")
     if application_state.advance_allowed:
-        summary_lines.append("Next action: All visible blockers are clear on this page. Do not refill fields; click Next/Continue/Save now.")
+        summary_lines.append("All visible blockers clear on this page.")
+    if application_state.advance_allowed and (application_state.mismatched_fields or application_state.unverified_fields):
+        summary_lines.append(
+            "Advisory: mismatched/unverified readback noise was detected, but no hard blockers remain; do not let that stop advancement."
+        )
+    if not application_state.advance_allowed:
+        summary_lines.append(
+            f"Unresolved blockers remain: {len(application_state.unresolved_required_fields)} required, "
+            f"{len(application_state.visible_errors)} visible errors."
+        )
     if application_state.unresolved_required_fields:
         summary_lines.append("Required field issues:")
         for issue in application_state.unresolved_required_fields[:10]:
@@ -1529,11 +1819,14 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                 f"{current_suffix}"
                 f"{error_suffix}"
             )
-    summary_lines.append(
-        "APPLICATION_STATE_JSON: omitted here to save tokens; full JSON is in debug log "
-        "domhand.assess_state.full_state_json"
-    )
     summary = "\n".join(summary_lines)
+    agent_summary = (
+        "DomHand assess_state: "
+        f"state={application_state.terminal_state}; "
+        f"advance_allowed={'yes' if application_state.advance_allowed else 'no'}; "
+        f"unresolved_required={len(application_state.unresolved_required_fields)}; "
+        f"visible_errors={len(application_state.visible_errors)}."
+    )
 
     logger.debug(
         "domhand.assess_state.full_state_json %s",
@@ -1541,11 +1834,14 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
     )
     logger.debug(summary)
     return ActionResult(
-        extracted_content=summary,
-        include_extracted_content_only_once=False,
+        extracted_content=agent_summary,
+        long_term_memory=agent_summary,
+        include_extracted_content_only_once=True,
         metadata={
             "tool": "domhand_assess_state",
             # Full state for tests / tooling; not intended for planner prompts (see extracted_content).
             "application_state_json": application_state.model_dump_json(),
+            "domhand_assess_state_summary": agent_summary,
+            "domhand_assess_state_log_summary": summary,
         },
     )
