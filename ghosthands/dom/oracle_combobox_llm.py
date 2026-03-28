@@ -240,6 +240,65 @@ Reply with ONLY JSON: {{"matched_index": <integer or null>}}
         return None
 
 
+async def dropdown_pick_option_llm(
+    desired_value: str,
+    options: list[str],
+    *,
+    context: str = "skill",
+) -> int | None:
+    """Generic LLM option picker — GPT-5.4-nano picks the best matching dropdown option.
+
+    Works for skills, schools, fields of study, etc. Returns 0-based index or None.
+    """
+    desired = " ".join(str(desired_value or "").split()).strip()
+    if not desired or not options or _oracle_school_llm_disabled():
+        return None
+
+    lines = []
+    for i, opt in enumerate(options[:_MAX_OPTION_LINES]):
+        label = " ".join(str(opt or "").split()).strip()
+        if not label:
+            continue
+        lines.append(f"{i}: {label[:180]}")
+    if not lines:
+        return None
+
+    body = "\n".join(lines)
+    prompt = f"""Dropdown option matching. The user wants to select:
+\"\"\"{desired}\"\"\"
+
+Context: {context}
+
+Visible options (index: label):
+{body}
+
+Task: Pick the ONE option index that is the SAME thing as the desired value. For skills, "React" = "React.js" = "ReactJS" (same technology), but "Java" ≠ "JavaScript" and "C" ≠ "C++". If no option matches, reply with null.
+
+Reply with ONLY JSON: {{"matched_index": <integer or null>}}
+"""
+    try:
+        text = await _completion_text(prompt, max_tokens=128)
+        data = _extract_json_object(text)
+        payload = _PickPayload.model_validate(data)
+        idx = payload.matched_index
+        logger.info(
+            "domhand.dropdown_llm_pick",
+            desired=desired[:60],
+            context=context,
+            option_count=len(lines),
+            matched_index=idx,
+            llm_raw=text[:200] if text else "",
+        )
+        if idx is None:
+            return None
+        if idx >= len(options) or idx < 0:
+            return None
+        return idx
+    except Exception as exc:
+        logger.warning("domhand.dropdown_llm_pick_failed", error=str(exc)[:120])
+        return None
+
+
 async def oracle_combobox_verify_commit_llm(
     canonical_school: str,
     committed_ui_text: str,

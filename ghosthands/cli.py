@@ -2675,15 +2675,23 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         await _cleanup_browser(browser, desktop_owns_browser)
         raise
 
+    sys.stdout.flush()
+    sys.stderr.flush()
     try:
         cost_summary = summarize_history_cost(history, browser)
     except Exception as e:
         print(f"\n  [ERROR] Cost summary failed: {e}", file=sys.stderr)
+        sys.stderr.flush()
         cost_summary = {"total_tracked_cost_usd": 0, "browser_use_cost_usd": 0,
                         "domhand_cost_usd": 0, "stagehand_calls": 0, "stagehand_used": False,
                         "total_tracked_prompt_tokens": 0, "total_tracked_completion_tokens": 0,
                         "untracked_cost_possible": True, "untracked_reasons": [str(e)]}
-    _print_human_result_summary(history, cost_summary)
+    try:
+        _print_human_result_summary(history, cost_summary)
+    except Exception as e:
+        print(f"\n  [ERROR] Result summary failed: {e}", file=sys.stderr)
+        sys.stderr.flush()
+    sys.stdout.flush()
     print("  Browser is still open -- review the application before submitting.")
     print("  Press Ctrl+C to close when done.")
     print()

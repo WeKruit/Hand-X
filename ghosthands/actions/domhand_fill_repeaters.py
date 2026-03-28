@@ -9,7 +9,7 @@ Supported sections: Education, Work Experience, Skills, Languages, Licenses.
 
 import asyncio
 import json
-import logging
+import structlog
 import os
 import re
 from typing import Any
@@ -24,7 +24,7 @@ from ghosthands.actions.views import (
     normalize_name,
 )
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 _SECTION_ALIASES: dict[str, str] = {
     "education": "education",
