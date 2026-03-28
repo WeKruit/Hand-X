@@ -2759,24 +2759,34 @@ async def _fill_workday_skill_multiselect(
                 await _clear_dropdown_search(page, ff_id)
                 continue
 
-            # Enter didn't commit — try poll+click for dropdown-based widgets
-            clicked = await _poll_click_dropdown_option(
-                page, val, field_id=ff_id, max_wait_s=2.0,
-            )
-            if clicked.get("clicked"):
-                await _settle_dropdown_selection(page)
-                committed = await _wait_for_multi_select_commit(
-                    page, field, val,
-                    previous_selection=before_selection,
-                    matched_label=clicked.get("text"),
-                )
-                if committed.get("committed"):
-                    picked_count += 1
-                    # Clear input after commit
-                    with contextlib.suppress(Exception):
-                        await _clear_skill_input(page, ff_id)
-                    await _clear_dropdown_search(page, ff_id)
-                    continue
+            # Enter didn't commit — scan visible options and use LLM to pick
+            from ghosthands.dom.oracle_combobox_llm import dropdown_pick_option_llm
+
+            try:
+                raw_options = await page.evaluate(SCAN_VISIBLE_OPTIONS_JS)
+                visible_opts = json.loads(raw_options) if isinstance(raw_options, str) else raw_options
+                opt_labels = [str(o.get("text", "")).strip() for o in (visible_opts or []) if o.get("text", "").strip()]
+            except Exception:
+                opt_labels = []
+
+            if opt_labels:
+                llm_idx = await dropdown_pick_option_llm(val, opt_labels, context="skill")
+                if llm_idx is not None:
+                    # Click the LLM-picked option by index
+                    clicked = await _click_dropdown_option_by_index(page, llm_idx)
+                    if clicked:
+                        await _settle_dropdown_selection(page)
+                        committed = await _wait_for_multi_select_commit(
+                            page, field, val,
+                            previous_selection=before_selection,
+                            matched_label=opt_labels[llm_idx] if llm_idx < len(opt_labels) else None,
+                        )
+                        if committed.get("committed"):
+                            picked_count += 1
+                            with contextlib.suppress(Exception):
+                                await _clear_skill_input(page, ff_id)
+                            await _clear_dropdown_search(page, ff_id)
+                            continue
 
             logger.debug(f'workday skill multi-select {tag} option "{val}" not committed')
 
@@ -3441,6 +3451,35 @@ async def _poll_click_workday_skill_option(
                 return result
         await asyncio.sleep(interval_s)
     return {"clicked": False}
+
+
+_CLICK_OPTION_BY_INDEX_JS = r"""(targetIndex) => {
+    var selectors = '[role="option"], [role="menuitem"], [role="treeitem"], [role="listitem"], [data-automation-id*="promptOption"], [data-automation-id*="selectOption"]';
+    var els = document.querySelectorAll(selectors);
+    var visibleIdx = 0;
+    for (var i = 0; i < els.length; i++) {
+        var rect = els[i].getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        var t = (els[i].textContent || '').trim();
+        if (!t) continue;
+        if (visibleIdx === targetIndex) {
+            els[i].click();
+            return JSON.stringify({clicked: true, text: t, index: targetIndex});
+        }
+        visibleIdx++;
+    }
+    return JSON.stringify({clicked: false, reason: 'index_out_of_range'});
+}"""
+
+
+async def _click_dropdown_option_by_index(page: Any, index: int) -> bool:
+    """Click a visible dropdown option by its 0-based index among visible options."""
+    try:
+        raw = await page.evaluate(_CLICK_OPTION_BY_INDEX_JS, index)
+        result = json.loads(raw) if isinstance(raw, str) else raw
+        return bool(result.get("clicked"))
+    except Exception:
+        return False
 
 
 async def _click_dropdown_option(page: Any, text: str, *, field_id: str | None = None) -> dict[str, Any]:

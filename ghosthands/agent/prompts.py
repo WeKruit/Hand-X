@@ -809,11 +809,18 @@ def build_system_prompt(
         "Certificates, and similar sections use 'Add' buttons to create",
         "inline repeater entries.",
         "",
-        "PREFERRED: Call domhand_fill_repeaters(section='Education') ONCE to",
-        "fill ALL entries for a section. It reads the user profile, clicks Add",
-        "for each missing entry, fills each inline form, and commits. Only fall",
-        "back to manual domhand_expand + domhand_fill if domhand_fill_repeaters",
-        "reports a failure for a specific entry.",
+        "MANDATORY: For ANY repeater section (Education, Work Experience, Skills,",
+        "Languages, Licenses, Certificates, etc.), you MUST call domhand_fill_repeaters — NOT",
+        "domhand_fill. First scan the page for visible 'Add' buttons or repeater",
+        "headings to discover which sections exist, then call",
+        "domhand_fill_repeaters(section=<name>) ONCE per section. It reads the",
+        "user profile, clicks Add for each missing entry, fills each inline form,",
+        "and commits. Do NOT use bare domhand_fill for repeater sections.",
+        "Sections are dynamic — not every page has Work Experience or Skills.",
+        "Only call domhand_fill_repeaters for sections that actually have an 'Add'",
+        "button visible on the page. If a section has no Add button, skip it.",
+        "Only fall back to manual domhand_expand + domhand_fill if",
+        "domhand_fill_repeaters reports a failure for a specific entry.",
         "",
         "MANUAL FALLBACK — fill entries ONE AT A TIME with scoped data:",
         "",
@@ -1035,9 +1042,10 @@ def build_task_prompt(
         "visually confirm: no red validation text ('This info is required'), no empty required fields, "
         "no unselected required radio/button-group controls, and the advance button is enabled.\n"
         "9a. After typing into ANY interactive field, WAIT 2-3 seconds and CHECK if a dropdown/suggestion list appeared. If options are visible, CLICK the best matching option before moving to the next field.\n"
-        "9b. Do NOT scroll just to 'look around' or 'review'. Scroll ONLY when you need to reach a specific button (Next/Submit) or field that is below the viewport. After scrolling, take a CONCRETE ACTION (click, input, select) on what you see — do not scroll again without a concrete action first. Repeated scroll-without-action wastes steps. If you have scrolled twice without a concrete action, STOP scrolling and take the next concrete action (click Next, fill a field, etc.).\n"
+        "9b. STRICT SCROLL RULES: (1) NEVER scroll more than 1 page at a time. NEVER use pages=10, pages=5, or any large scroll. Max is pages=1.0. (2) Do NOT scroll to 'look around', 'review', or 'find errors'. Scroll ONLY to reach a specific button or field below the viewport. (3) After scrolling, take a CONCRETE ACTION (click, input, select) on what you see — do not scroll again without acting first. (4) If you have scrolled twice without a concrete action, STOP scrolling immediately. (5) NEVER scroll up unless you specifically need a field/button that is above you. Scrolling up 'to check' wastes steps.\n"
         "9c. After domhand_fill completes with 0 failures and 0 skipped required fields, click Next/Continue immediately. Do NOT call domhand_assess_state — it causes false positives and loops. domhand_fill already verified the fields via DOM readback.\n"
         "9d. NEVER use the evaluate action to call domhand functions via JavaScript (e.g. domhand.fill()). domhand_fill, domhand_select, domhand_interact_control etc. are registered ACTIONS — call them as actions, not as JS code.\n"
+        "9e. OPTIONAL SECTIONS: Some repeater sections (Work Experience, Licenses, Certificates, Languages) may NOT appear on every application or may appear as read-only labels with no 'Add' button. If you search for a section and find text but NO interactive 'Add' button or fillable fields after 2 attempts, the section is OPTIONAL or not required — skip it and move on. Do NOT loop searching for Work Experience if there is no Add button. Proceed to Skills, Languages, or click Next.\n"
         "10. After clicking Next/Continue/Save and seeing new form content, call domhand_fill AGAIN as the FIRST action — even if the URL did not change (SPA). Do NOT look for resume upload again unless the page explicitly asks for one.\n"
         f"{workday_review_rule}"
         "11. Prefer short waits: use a short poll loop with wait(seconds=1) up to 3 times for auth transitions, "
