@@ -437,6 +437,7 @@ async def _run_agent(
 CRITICAL — Action Order:
 1. If a popup, modal, interstitial, or newsletter prompt is visibly blocking the form, call domhand_close_popup first. Use Escape or coordinate clicks only if domhand_close_popup fails.
 2. After navigating to the page, your FIRST action MUST be domhand_fill. It fills ALL visible form fields in one call via DOM manipulation. Do NOT use click or input actions before trying domhand_fill.
+2a. REPEATER SECTIONS: On pages with repeater sections (Education, Work Experience, Skills, Languages, Licenses and Certificates — any section with an 'Add' button), you MUST use domhand_fill_repeaters(section=<name>) instead of domhand_fill for those sections. Call it ONCE per section. It handles expanding, filling, and committing all entries automatically. If a section has no visible 'Add' button or fields, skip it — it is optional on this application. Do NOT loop searching for a section that has no interactive elements.
 3. After domhand_fill completes, call domhand_assess_state ONCE to learn whether advancement is allowed and which required blockers remain.
    If a field appeared in domhand_fill failures but is NOT in the latest domhand_assess_state unresolved list, do NOT touch it again unless it is still visibly empty or visibly invalid on the page.
 4. Treat domhand_fill as a page-level progressive conquer pass, not a same-page control loop. After the first domhand_fill on a page, do NOT keep calling domhand_fill again for ordinary text, tel, textarea, search, or standard select/combobox fields on that SAME page.
