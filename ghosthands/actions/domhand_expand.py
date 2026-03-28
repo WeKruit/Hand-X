@@ -113,8 +113,8 @@ _FIND_ADD_BUTTON_HEADING_FIRST_JS = r"""
 	if (lastHeadingIndex !== -1) {
 		// Starting after the heading, find the first Add button.
 		// Stop if we hit a heading for a DIFFERENT section.
-		var knownSections = ['work experience', 'education', 'skills', 'websites',
-			'certifications', 'references', 'languages', 'social', 'experience'];
+		var knownSections = ['work experience', 'education', 'technical skills', 'language skills',
+			'skills', 'websites', 'certifications', 'references', 'languages', 'social', 'experience'];
 		for (var j = lastHeadingIndex + 1; j < elements.length; j++) {
 			var el = elements[j];
 			if (!isButtonEl(el)) {

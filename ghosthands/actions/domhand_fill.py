@@ -3088,6 +3088,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
     fields_capped: set[str] = set()
     settled_fields: dict[str, float] = {}  # field_key -> fill_confidence (>= 0.8 means done)
     total_already_filled_count = 0
+    _cached_school_location: dict[str, str] = {}  # Persists across rounds for State deferred to round 3
 
     for round_num in range(1, MAX_FILL_ROUNDS + 1):
         logger.info(f"DomHand fill round {round_num}/{MAX_FILL_ROUNDS}")
@@ -3114,6 +3115,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             target_section=params.target_section,
             heading_boundary=params.heading_boundary,
             focus_fields=params.focus_fields,
+            allow_all_visible_fallback=not params.strict_scope,
         )
         focus_selection = _resolve_focus_fields(fields, params.focus_fields)
         if params.focus_fields and focus_selection.ambiguous_labels:
@@ -3221,7 +3223,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         "open_inline_form_count": open_inline_forms,
                     },
                 )
-            if round_num == 1:
+            if round_num == 1 and not params.strict_scope:
+                # strict_scope means domhand_fill_repeaters handles its own expand
                 auto_expanded = await _maybe_auto_expand_profile_repeaters(
                     browser_session=browser_session,
                     profile_data=profile_data,
@@ -3767,6 +3770,41 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             llm_calls += 1
             if llm_model_name:
                 model_name = llm_model_name
+
+        # Override education location fields with school-specific LLM lookup.
+        # Haiku returns the user's home address; GPT-5.4-nano knows school locations.
+        if answers:
+            _school_answer = None
+            _edu_location_keys: dict[str, str] = {}  # answer_key → slot (city/state/country)
+            for f in needs_llm:
+                _f_label = _preferred_field_label(f)
+                _f_norm = normalize_name(_f_label)
+                _f_section = normalize_name(f.section or "")
+                if _f_norm in {"school", "university", "institution", "college"} or "school" in _f_norm:
+                    _school_answer = answers.get(_f_label, "")
+                if (
+                    _f_norm in {"country", "state", "city", "province", "region"}
+                    and any(tok in _f_section for tok in ("education", "college", "university"))
+                ):
+                    _edu_location_keys[_f_label] = _f_norm
+            # Use cached location from previous round, or look up fresh
+            if not _school_answer and _edu_location_keys and _cached_school_location:
+                for _key, _slot in _edu_location_keys.items():
+                    _loc_val = _cached_school_location.get(_slot, "")
+                    if _loc_val:
+                        answers[_key] = _loc_val
+            elif _school_answer and _edu_location_keys:
+                try:
+                    from ghosthands.dom.oracle_combobox_llm import oracle_school_location_llm
+                    _location = await oracle_school_location_llm(_school_answer)
+                    if _location:
+                        _cached_school_location.update(_location)
+                        for _key, _slot in _edu_location_keys.items():
+                            _loc_val = _location.get(_slot, "")
+                            if _loc_val:
+                                answers[_key] = _loc_val
+                except Exception:
+                    pass
 
         _llm_keys = list(answers.keys())[:20] if answers else []
         _llm_sample = (

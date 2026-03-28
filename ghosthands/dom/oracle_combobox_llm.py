@@ -281,3 +281,47 @@ Does the committed value refer to the SAME real-world institution as the canonic
     except Exception as exc:
         logger.warning("domhand.oracle_school_llm_verify_failed", error=str(exc)[:120])
         return False
+
+
+class _SchoolLocationPayload(BaseModel):
+    city: str = ""
+    state: str = ""
+    country: str = "United States"
+
+
+async def oracle_school_location_llm(school_name: str) -> dict[str, str]:
+    """Look up school city/state/country using GPT-5.4-nano. Returns dict with city, state, country."""
+    name = " ".join(str(school_name or "").split()).strip()
+    if not name or _oracle_school_llm_disabled():
+        return {}
+
+    prompt = f"""What is the city, state/province, and country of this school/university?
+
+School: \"\"\"{name[:200]}\"\"\"
+
+Reply with ONLY JSON: {{"city": "...", "state": "...", "country": "..."}}
+Use the full state name (e.g., "California" not "CA"). Use "United States" for US schools."""
+
+    try:
+        text = await _completion_text(prompt, max_tokens=128)
+        data = _extract_json_object(text)
+        payload = _SchoolLocationPayload.model_validate(data)
+        result = {}
+        if payload.city.strip():
+            result["city"] = payload.city.strip()
+        if payload.state.strip():
+            result["state"] = payload.state.strip()
+        if payload.country.strip():
+            result["country"] = payload.country.strip()
+        logger.info(
+            "domhand.oracle_school_location_llm",
+            school=name[:80],
+            city=result.get("city", ""),
+            state=result.get("state", ""),
+            country=result.get("country", ""),
+            llm_raw=text[:200] if text else "",
+        )
+        return result
+    except Exception as exc:
+        logger.warning("domhand.oracle_school_location_llm_failed", error=str(exc)[:120])
+        return {}

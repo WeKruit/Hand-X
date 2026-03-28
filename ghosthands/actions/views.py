@@ -128,6 +128,10 @@ class DomHandFillParams(BaseModel):
             "(email, password, confirm password) instead of the applicant profile."
         ),
     )
+    strict_scope: bool = Field(
+        False,
+        description="When true, do NOT fall back to all visible fields if target_section has no matches. Return empty instead.",
+    )
 
 
 class DomHandSelectParams(BaseModel):

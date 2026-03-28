@@ -34,8 +34,10 @@ _SECTION_ALIASES: dict[str, str] = {
     "experience": "experience",
     "skills": "skills",
     "skill": "skills",
+    "technical skills": "skills",
     "languages": "languages",
     "language": "languages",
+    "language skills": "languages",
     "licenses": "licenses",
     "license": "licenses",
     "licenses & certifications": "licenses",
@@ -53,8 +55,8 @@ _PROFILE_KEY_MAP: dict[str, str] = {
 _EXPAND_SECTION_NAMES: dict[str, list[str]] = {
     "education": ["Education", "education", "College / University"],
     "experience": ["Work Experience", "Experience", "experience", "work experience"],
-    "skills": ["Skills", "Skill", "skills"],
-    "languages": ["Languages", "Language", "languages"],
+    "skills": ["Technical Skills", "Skill", "Skills"],
+    "languages": ["Language Skills", "Language", "Languages"],
     "licenses": ["Licenses", "License", "licenses", "Licenses & Certifications"],
 }
 
@@ -86,7 +88,21 @@ _COUNT_OPEN_INLINE_FORMS_JS = r"""
 """
 
 _CLICK_SAVE_BUTTON_JS = r"""
-() => {
+(sectionHint) => {
+    var hint = (sectionHint || '').toLowerCase();
+    var diag = {hint: hint, phase: '', visible_buttons: []};
+
+    // Collect all visible button texts for diagnostics
+    var allPageBtns = document.querySelectorAll('button, [role="button"]');
+    for (var b = 0; b < allPageBtns.length && diag.visible_buttons.length < 20; b++) {
+        var bs = getComputedStyle(allPageBtns[b]);
+        if (bs.display !== 'none' && bs.visibility !== 'hidden') {
+            var bt = (allPageBtns[b].textContent || '').trim().slice(0, 40);
+            if (bt) diag.visible_buttons.push(bt);
+        }
+    }
+
+    // ── Phase 1: .profile-inline-form save (Greenhouse, Lever, etc.) ──
     const selectors = [
         '.profile-inline-form .profile-inline-form__save',
         '.profile-inline-form button[type="submit"]',
@@ -97,7 +113,8 @@ _CLICK_SAVE_BUTTON_JS = r"""
         const btn = document.querySelector(sel);
         if (btn) {
             btn.click();
-            return JSON.stringify({clicked: true, text: btn.textContent.trim()});
+            diag.phase = 'profile_inline_form';
+            return JSON.stringify({clicked: true, text: btn.textContent.trim(), diag: diag});
         }
     }
     const allBtns = document.querySelectorAll('.profile-inline-form button');
@@ -105,10 +122,51 @@ _CLICK_SAVE_BUTTON_JS = r"""
         const text = (btn.textContent || '').trim().toLowerCase();
         if (text === 'save' || text === 'ok' || text === 'done' || text === 'commit' || text.startsWith('save')) {
             btn.click();
-            return JSON.stringify({clicked: true, text: btn.textContent.trim()});
+            diag.phase = 'profile_inline_form_text';
+            return JSON.stringify({clicked: true, text: btn.textContent.trim(), diag: diag});
         }
     }
-    return JSON.stringify({clicked: false, reason: 'no_save_button_found'});
+
+    // ── Phase 2: Oracle section-specific commit button ──
+    var sectionCommitPattern = null;
+    if (hint === 'skills')     sectionCommitPattern = /^add\s+skill$/i;
+    if (hint === 'languages')  sectionCommitPattern = /^add\s+language$/i;
+    if (hint === 'licenses')   sectionCommitPattern = /^add\s+(certification|license)$/i;
+
+    var preferSave = (hint === 'education' || hint === 'experience');
+
+    var pageBtns = document.querySelectorAll('button, [role="button"]');
+
+    if (sectionCommitPattern) {
+        for (const btn of pageBtns) {
+            const text = (btn.textContent || '').trim();
+            if (sectionCommitPattern.test(text)) {
+                var s = getComputedStyle(btn);
+                if (s.display !== 'none' && s.visibility !== 'hidden') {
+                    btn.click();
+                    diag.phase = 'oracle_section_commit';
+                    return JSON.stringify({clicked: true, text: text, oracle_commit: true, diag: diag});
+                }
+            }
+        }
+    }
+
+    if (preferSave) {
+        for (const btn of pageBtns) {
+            const text = (btn.textContent || '').trim().toLowerCase();
+            if (text === 'save' || text === 'ok' || text === 'done') {
+                var s = getComputedStyle(btn);
+                if (s.display !== 'none' && s.visibility !== 'hidden') {
+                    btn.click();
+                    diag.phase = 'oracle_save';
+                    return JSON.stringify({clicked: true, text: btn.textContent.trim(), diag: diag});
+                }
+            }
+        }
+    }
+
+    diag.phase = 'none_found';
+    return JSON.stringify({clicked: false, reason: 'no_save_button_found', diag: diag});
 }
 """
 
@@ -306,18 +364,53 @@ async def domhand_fill_repeaters(
                 heading_boundary=None,
                 target_section=params.section,
                 entry_data=entry,
+                strict_scope=True,
             ),
             browser_session,
         )
 
         fill_meta = (fill_result.metadata or {}).get("domhand_fill_json", {})
         entry_filled = fill_meta.get("filled_count", 0) if isinstance(fill_meta, dict) else 0
+        entry_failed = fill_meta.get("dom_failure_count", 0) if isinstance(fill_meta, dict) else 0
+
+        # Do NOT save/commit when fields failed — entry is incomplete
+        if entry_failed > 0:
+            failed_entries.append(
+                f"{entry_label}: {entry_failed} field(s) failed to fill, skipping save"
+            )
+            logger.warning(
+                "domhand.fill_repeaters.skip_save_due_to_failures",
+                section=canonical,
+                entry_index=i,
+                filled=entry_filled,
+                failed=entry_failed,
+            )
+            continue
 
         try:
-            save_raw = await page.evaluate(_CLICK_SAVE_BUTTON_JS)
+            save_raw = await page.evaluate(_CLICK_SAVE_BUTTON_JS, canonical)
             save_result = json.loads(save_raw) if isinstance(save_raw, str) else save_raw
+            diag = save_result.get("diag", {})
             if save_result.get("clicked"):
+                logger.info(
+                    "domhand.fill_repeaters.commit_clicked",
+                    section=canonical,
+                    entry_index=i,
+                    button_text=save_result.get("text", ""),
+                    oracle_commit=save_result.get("oracle_commit", False),
+                    phase=diag.get("phase", ""),
+                    visible_buttons=diag.get("visible_buttons", [])[:10],
+                )
                 await asyncio.sleep(0.8)
+            else:
+                logger.warning(
+                    "domhand.fill_repeaters.no_commit_button",
+                    section=canonical,
+                    entry_index=i,
+                    reason=save_result.get("reason", ""),
+                    phase=diag.get("phase", ""),
+                    visible_buttons=diag.get("visible_buttons", [])[:10],
+                )
         except Exception:
             pass
 
