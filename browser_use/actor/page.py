@@ -298,6 +298,19 @@ class Page:
 		result = await self._client.send.Target.getTargetInfo(params)
 		return result['targetInfo']
 
+	@property
+	def url(self) -> str:
+		"""Sync URL property for Playwright Page compatibility.
+
+		Returns the last-known URL from the session manager target snapshot.
+		For an up-to-date URL (CDP round-trip), use ``await get_url()``.
+		"""
+		if self._browser_session.session_manager:
+			target = self._browser_session.session_manager.get_target(self._target_id)
+			if target:
+				return target.url or ''
+		return ''
+
 	async def get_url(self) -> str:
 		"""Get the current URL."""
 		info = await self.get_target_info()
@@ -362,6 +375,25 @@ class Page:
 
 		except Exception as e:
 			raise RuntimeError(f'Failed to navigate forward: {e}')
+
+	@property
+	def keyboard(self) -> '_KeyboardShim':
+		"""Playwright-compatible keyboard interface.
+
+		Delegates type() and press() to CDP Input.dispatchKeyEvent so that
+		code written for Playwright's page.keyboard works transparently in
+		CDP mode.
+		"""
+		return _KeyboardShim(self)
+
+	async def query_selector(self, selector: str) -> 'Element | None':
+		"""Playwright-compatible querySelector — returns first match or None."""
+		elements = await self.get_elements_by_css_selector(selector)
+		return elements[0] if elements else None
+
+	async def query_selector_all(self, selector: str) -> list['Element']:
+		"""Playwright-compatible querySelectorAll."""
+		return await self.get_elements_by_css_selector(selector)
 
 	# Element finding methods (these would need to be implemented based on DOM queries)
 	async def get_elements_by_css_selector(self, selector: str) -> list['Element']:
@@ -562,3 +594,33 @@ You will be given a query and the markdown of a webpage that has been filtered t
 
 		dom_service = self.dom_service
 		return await extract_clean_markdown(dom_service=dom_service, target_id=self._target_id, extract_links=extract_links)
+
+
+class _KeyboardShim:
+	"""Thin wrapper that exposes Playwright's page.keyboard.type() / .press()
+	interface on top of the CDP Page's existing press() method."""
+
+	def __init__(self, page: Page):
+		self._page = page
+
+	async def press(self, key: str) -> None:
+		await self._page.press(key)
+
+	async def type(self, text: str, *, delay: float | int = 0) -> None:
+		"""Type text character-by-character via CDP key events."""
+		import asyncio
+		session_id = await self._page._ensure_session()
+		for char in text:
+			params: 'DispatchKeyEventParameters' = {
+				'type': 'keyDown',
+				'key': char,
+				'text': char,
+			}
+			await self._page._client.send.Input.dispatchKeyEvent(params, session_id=session_id)
+			up_params: 'DispatchKeyEventParameters' = {
+				'type': 'keyUp',
+				'key': char,
+			}
+			await self._page._client.send.Input.dispatchKeyEvent(up_params, session_id=session_id)
+			if delay:
+				await asyncio.sleep(delay / 1000)

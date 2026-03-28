@@ -6,6 +6,7 @@ from ghosthands.platforms.generic import GENERIC_CONFIG
 from ghosthands.platforms.greenhouse import GREENHOUSE_CONFIG
 from ghosthands.platforms.lever import LEVER_CONFIG
 from ghosthands.platforms.oracle import ORACLE_CONFIG
+from ghosthands.platforms.phenom import PHENOM_CONFIG
 from ghosthands.platforms.smartrecruiters import SMARTRECRUITERS_CONFIG
 from ghosthands.platforms.views import PlatformConfig
 from ghosthands.platforms.workday import WORKDAY_CONFIG

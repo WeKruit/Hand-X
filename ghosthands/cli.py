@@ -1843,7 +1843,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     lockdown = DomainLockdown(job_url=args.job_url, platform=platform)
     lockdown.freeze()
-    allowed_domains = lockdown.get_allowed_domains()
+    allowed_domains: list[str] = []  # Disabled: ATS sites redirect across domains (e.g. Goldman→Oracle Cloud)
 
     # -- Browser ------------------------------------------------------------
     cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
@@ -2533,7 +2533,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
 
     lockdown = DomainLockdown(job_url=args.job_url, platform=platform)
     lockdown.freeze()
-    allowed_domains = lockdown.get_allowed_domains()
+    allowed_domains: list[str] = []  # Disabled: ATS sites redirect across domains (e.g. Goldman→Oracle Cloud)
 
     # -- Browser ------------------------------------------------------------
     cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")

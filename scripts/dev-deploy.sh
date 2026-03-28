@@ -44,7 +44,7 @@ if [ -n "${GH_DESKTOP_USER_DATA_PATH:-}" ]; then
   APP_DATA="$GH_DESKTOP_USER_DATA_PATH"
 else
   case "$PLATFORM" in
-    darwin) APP_DATA="$HOME/Library/Application Support/gh-desktop-app" ;;
+    darwin) APP_DATA="$HOME/Library/Application Support/Valet" ;;
     linux)  APP_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/gh-desktop-app" ;;
     win)    APP_DATA="${APPDATA}/gh-desktop-app" ;;
   esac
