@@ -85,6 +85,16 @@ class LocalBrowserWatchdog(BaseWatchdog):
 
 	async def on_BrowserStopEvent(self, event: BrowserStopEvent) -> None:
 		"""Listen for BrowserStopEvent and dispatch BrowserKillEvent without awaiting it."""
+		# Defense-in-depth: if the browser profile is keep_alive and this is not
+		# a forced stop, skip the kill so the browser survives for Desktop reconnect.
+		if (
+			not event.force
+			and getattr(self.browser_session, 'browser_profile', None)
+			and getattr(self.browser_session.browser_profile, 'keep_alive', False)
+		):
+			self.logger.debug('[LocalBrowserWatchdog] BrowserStopEvent ignored — keep_alive is True and not forced')
+			return
+
 		if self.browser_session.is_local and self._subprocess:
 			self.logger.debug('[LocalBrowserWatchdog] BrowserStopEvent received, dispatching BrowserKillEvent')
 			# Dispatch BrowserKillEvent without awaiting so it gets processed after all BrowserStopEvent handlers

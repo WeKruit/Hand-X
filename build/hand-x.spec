@@ -52,7 +52,10 @@ mcp_datas = [
 # but we declare it explicitly as a safety net.
 playwright_datas = collect_data_files("playwright")
 
-all_datas = system_prompt_datas + code_use_datas + mcp_datas + playwright_datas
+# Stagehand SEA binary (local server for mid-tier escalation)
+stagehand_datas = collect_data_files("stagehand", subdir="_sea")
+
+all_datas = system_prompt_datas + code_use_datas + mcp_datas + playwright_datas + stagehand_datas
 
 # ---------------------------------------------------------------------------
 # CDP protocol library (329 submodules — used by browser_use.browser.session)
@@ -139,6 +142,11 @@ hidden_imports = [
     "authlib",
     "cdp_use",
     "bubus",
+    "stagehand",
+    "stagehand.lib",
+    "stagehand.lib.sea_binary",
+    "stagehand.lib.sea_server",
+    "stagehand._sea",
     "cryptography",
     "cryptography.hazmat.primitives.ciphers",
     "cryptography.hazmat.primitives.ciphers.aead",

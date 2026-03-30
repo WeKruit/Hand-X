@@ -1931,7 +1931,7 @@ async def _fill_oracle_combobox_outcome(
     try:
         exists_raw = await page.evaluate(_ELEMENT_EXISTS_JS, ff_id, field.field_type)
         exists = json.loads(exists_raw) if isinstance(exists_raw, str) else exists_raw
-        if not (isinstance(exists, dict) and exists.get("exists")):
+        if not exists:
             logger.warning(
                 "domhand.oracle_combobox_element_not_found",
                 field_label=field.name,
@@ -1986,15 +1986,50 @@ async def _fill_oracle_combobox_outcome(
                     attempt=attempt_idx + 1,
                 )
 
-            # Try to click the best matching option — match against the
-            # ORIGINAL desired value, not the search term.
-            click_raw = await page.evaluate(
-                _ORACLE_COMBOBOX_CLICK_BEST_OPTION_JS, ff_id, value,
-            )
-            click_result = json.loads(click_raw) if isinstance(click_raw, str) else click_raw
-            if isinstance(click_result, dict) and click_result.get("clicked"):
-                matched_label = click_result.get("text")
-                await asyncio.sleep(0.3)
+            # When multiple options are visible, use LLM to pick the correct one
+            # (same pattern as school picker — JS substring is ambiguous for addresses,
+            # employers, etc. with many similar-looking options across cities/states).
+            if polled_options and len(polled_options) > 1:
+                try:
+                    from ghosthands.dom.oracle_combobox_llm import dropdown_pick_option_llm
+                    llm_idx = await dropdown_pick_option_llm(
+                        value, polled_options, context=field.name or "oracle_combobox",
+                    )
+                    if llm_idx is not None and 0 <= llm_idx < len(polled_options):
+                        logger.info(
+                            "domhand.oracle_combobox_llm_pick",
+                            field_label=field.name,
+                            search_term=term[:60],
+                            picked_index=llm_idx,
+                            picked_label=polled_options[llm_idx][:60],
+                            option_count=len(polled_options),
+                        )
+                        click_raw = await page.evaluate(
+                            _ORACLE_COMBOBOX_CLICK_INDEX_JS, ff_id, llm_idx,
+                        )
+                        click_result = json.loads(click_raw) if isinstance(click_raw, str) else click_raw
+                        if isinstance(click_result, dict) and click_result.get("clicked"):
+                            matched_label = click_result.get("text")
+                            await asyncio.sleep(0.3)
+                    else:
+                        logger.debug(
+                            "domhand.oracle_combobox_llm_pick_none",
+                            field_label=field.name,
+                            search_term=term[:60],
+                            option_count=len(polled_options),
+                        )
+                except Exception as exc:
+                    logger.debug("domhand.oracle_combobox_llm_pick_error", error=str(exc)[:120])
+
+            # Fallback: JS substring match when LLM pick didn't fire or didn't click
+            if not matched_label:
+                click_raw = await page.evaluate(
+                    _ORACLE_COMBOBOX_CLICK_BEST_OPTION_JS, ff_id, value,
+                )
+                click_result = json.loads(click_raw) if isinstance(click_raw, str) else click_raw
+                if isinstance(click_result, dict) and click_result.get("clicked"):
+                    matched_label = click_result.get("text")
+                    await asyncio.sleep(0.3)
 
             await asyncio.sleep(1.2)
 

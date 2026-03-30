@@ -20,9 +20,15 @@ from ghosthands.dom.oracle_combobox_llm import (
 
 
 def test_oracle_school_openai_base_url_with_proxy() -> None:
+    # GH_LLM_PROXY_URL is set by buildManagedAnthropicRuntime() to:
+    # "{brokerBase}/api/v1/local-workers/inference"
+    # The function should append "/openai/v1" (not "/inference/openai/v1")
+    # so that the final path matches the VALET route: .../inference/openai/*
     with patch("ghosthands.dom.oracle_combobox_llm.settings") as s:
-        s.llm_proxy_url = "https://api.example.com/api/v1/local-workers"
-        assert _oracle_school_openai_base_url() == ("https://api.example.com/api/v1/local-workers/inference/openai/v1")
+        s.llm_proxy_url = "https://api.example.com/api/v1/local-workers/inference"
+        assert _oracle_school_openai_base_url() == (
+            "https://api.example.com/api/v1/local-workers/inference/openai/v1"
+        )
 
 
 def test_is_oracle_school_llm_field_true_for_school() -> None:

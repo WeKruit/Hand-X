@@ -2391,7 +2391,20 @@ def _known_profile_value(
         kw in name
         for kw in ("address", "street address", "address line 1", "address 1", "street line 1", "mailing address")
     ):
-        return evidence.get("address")
+        street = evidence.get("address")
+        if not street:
+            return None
+        # For Oracle combobox (select) fields, enrich street with city+state so the
+        # LOV typeahead filters to the correct city (e.g. "1360 W 24th ST" alone
+        # matches Bryan TX, Lorain OH, etc. — adding "Los Angeles, CA" narrows it).
+        if field_type == "select":
+            city = (evidence.get("city") or "").strip()
+            state = (evidence.get("state") or "").strip()
+            if city and state:
+                return f"{street}, {city}, {state}"
+            if city:
+                return f"{street}, {city}"
+        return street
     if name == "city" or " city" in name:
         return evidence.get("city")
     if (

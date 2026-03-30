@@ -24,7 +24,7 @@ logger = structlog.get_logger(__name__)
 # Provider IDs for Stagehand ``sessions.start(model_name=...)`` (override with GH_STAGEHAND_MODEL).
 _DEFAULT_MODEL = "anthropic/claude-haiku-4-5-20251001"  # Haiku 4.5
 _GOOGLE_STAGEHAND_MODEL = "google/gemini-3-flash-preview"
-_OPENAI_STAGEHAND_MODEL = "openai/gpt-5.4-mini"
+_OPENAI_STAGEHAND_MODEL = "openai/gpt-5.4-nano"
 _ACT_TIMEOUT_MS = 30_000
 _DOM_SETTLE_TIMEOUT_MS = 3_000
 
@@ -71,7 +71,8 @@ def _resolve_model_api_key() -> str | None:
     """Key sent as ``x-model-api-key`` to the Stagehand API (see ``AsyncStagehand``).
 
     Order matches apply.sh: explicit ``MODEL_API_KEY``, then Anthropic (DomHand default),
-    then OpenAI, then Google. Set ``MODEL_API_KEY`` in .env to force a provider.
+    then OpenAI, then Google. Falls back to ``GH_LLM_RUNTIME_GRANT`` (VALET proxy token)
+    so the desktop DMG can use stagehand via the VALET OpenAI-compatible proxy.
     """
     for key in (
         os.environ.get("MODEL_API_KEY"),
@@ -80,22 +81,28 @@ def _resolve_model_api_key() -> str | None:
         os.environ.get("OPENAI_API_KEY"),
         os.environ.get("GH_OPENAI_API_KEY"),
         os.environ.get("GOOGLE_API_KEY"),
+        os.environ.get("GH_LLM_RUNTIME_GRANT"),
     ):
         if key and key.strip():
             return key.strip()
     return None
 
 
-def _resolve_openai_key_for_local_server() -> str | None:
-    """Local Stagehand binary uses ``local_openai_api_key`` — prefer real OpenAI keys when set."""
-    for key in (
-        os.environ.get("OPENAI_API_KEY"),
-        os.environ.get("GH_OPENAI_API_KEY"),
-        os.environ.get("MODEL_API_KEY"),
-    ):
-        if key and key.strip():
-            return key.strip()
-    return None
+def _resolve_local_proxy_config() -> tuple[int | None, str | None]:
+    """Return (local_proxy_port, runtime_grant) for the desktop stagehand proxy shim.
+
+    Desktop spawns a local HTTP proxy that forwards OpenAI-format requests to VALET.
+    ``GH_STAGEHAND_LOCAL_PROXY_PORT`` is the localhost port.
+    ``GH_LLM_RUNTIME_GRANT`` is the auth token (passed as Bearer to the local proxy).
+    """
+    port_str = (os.environ.get("GH_STAGEHAND_LOCAL_PROXY_PORT") or "").strip()
+    grant = (os.environ.get("GH_LLM_RUNTIME_GRANT") or "").strip()
+    if port_str and grant:
+        try:
+            return int(port_str), grant
+        except ValueError:
+            return None, None
+    return None, None
 
 
 def _stagehand_server_mode() -> str:
@@ -172,8 +179,12 @@ class StagehandLayer:
 
         install_sea_process_quiet()
 
+        # Check for local proxy shim (desktop mode — SEA talks to localhost, which
+        # forwards to VALET). This is the primary path for desktop DMG builds.
+        local_proxy_port, proxy_grant = _resolve_local_proxy_config()
+
         model_api_key = _resolve_model_api_key()
-        if not model_api_key:
+        if not model_api_key and not local_proxy_port:
             logger.warning(
                 "stagehand.start_skipped",
                 reason="missing_model_api_key",
@@ -185,7 +196,6 @@ class StagehandLayer:
             from stagehand import AsyncStagehand
 
             explicit = (os.environ.get("GH_STAGEHAND_MODEL") or "").strip()
-            model_name = model or (explicit if explicit else _infer_stagehand_model(model_api_key))
             mode = _stagehand_server_mode()
             bb_key = (os.environ.get("BROWSERBASE_API_KEY") or "").strip() or None
             bb_proj = (os.environ.get("BROWSERBASE_PROJECT_ID") or "").strip() or None
@@ -198,22 +208,31 @@ class StagehandLayer:
                 )
                 mode = "local"
 
-            if mode == "remote":
+            if local_proxy_port and proxy_grant:
+                # Desktop mode: SEA server inherits OPENAI_BASE_URL and OPENAI_API_KEY
+                # from os.environ, routing all LLM calls through the local proxy shim.
+                os.environ["OPENAI_BASE_URL"] = f"http://127.0.0.1:{local_proxy_port}/v1"
+                os.environ["OPENAI_API_KEY"] = proxy_grant
+                model_name = model or (explicit if explicit else _OPENAI_STAGEHAND_MODEL)
+                self._client = AsyncStagehand(
+                    model_api_key=proxy_grant,
+                    server="local",
+                    local_openai_api_key=proxy_grant,
+                )
+                logger.info("stagehand.local_proxy", port=local_proxy_port, model=model_name)
+            elif mode == "remote":
+                model_name = model or (explicit if explicit else _infer_stagehand_model(model_api_key or ""))
                 self._client = AsyncStagehand(
                     model_api_key=model_api_key,
                     browserbase_api_key=bb_key,
                     browserbase_project_id=bb_proj,
                 )
             else:
-                local_llm = _resolve_openai_key_for_local_server() or (
-                    os.environ.get("ANTHROPIC_API_KEY")
-                    or os.environ.get("GH_ANTHROPIC_API_KEY")
-                    or model_api_key
-                )
+                model_name = model or (explicit if explicit else _infer_stagehand_model(model_api_key or ""))
                 self._client = AsyncStagehand(
                     model_api_key=model_api_key,
                     server="local",
-                    local_openai_api_key=(str(local_llm).strip() if local_llm else None) or None,
+                    local_openai_api_key=model_api_key,
                 )
 
             logger.debug("stagehand.client_mode", mode=mode, model=model_name[:60])

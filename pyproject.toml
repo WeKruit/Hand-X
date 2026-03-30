@@ -45,6 +45,8 @@ dependencies = [
     # browser-use LLM providers (we only use Anthropic, but import paths need these):
     "openai>=1.50",
     "google-genai>=1.0",
+    # Stagehand — mid-tier escalation for domhand failures (before expensive LLM vision)
+    "stagehand>=3.19",
 ]
 
 [project.optional-dependencies]

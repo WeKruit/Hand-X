@@ -74,7 +74,10 @@ def _oracle_school_openai_base_url() -> str | None:
     raw = (settings.llm_proxy_url or "").strip().rstrip("/")
     if not raw:
         return None
-    return f"{raw}/inference/openai/v1"
+    # GH_LLM_PROXY_URL is set to "{brokerBase}/api/v1/local-workers/inference"
+    # by buildManagedAnthropicRuntime() in the desktop app. The VALET OpenAI
+    # proxy route is .../inference/openai/*, so we only append "/openai/v1".
+    return f"{raw}/openai/v1"
 
 
 def _oracle_school_llm_disabled() -> bool:
