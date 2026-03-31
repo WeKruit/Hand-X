@@ -2,17 +2,17 @@
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-03-24)
+See: .planning/PROJECT.md (updated 2026-03-31)
 
 **Core value:** A saved applicant identity can be applied accurately, repeatably, and safely across ATS flows without the user re-entering data.
-**Current focus:** Phase 1 — Runtime Contract In VALET
+**Current focus:** Milestone v1.1 — Generic Repeater Pre-fill Detection
 
 ## Current Position
 
-Phase: 1 of 4 (Runtime Contract In VALET)
-Plan: 1 of 3 in current phase
-Status: Ready to plan
-Last activity: 2026-03-24 — Initialized project planning artifacts for brownfield Hand-X
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-03-31 — Milestone v1.1 started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -37,10 +37,11 @@ Progress: [░░░░░░░░░░] 0%
 
 ### Decisions
 
-Decisions are logged in PROJECT.md Key Decisions table.
-Recent decisions affecting current work:
-
-- Initialization: Treat VALET as the future single source of truth for hydrated runtime profile delivery
+- `_COUNT_SAVED_TILES_JS` platform-specific counting breaks on Workday auto-fill (returns 0 → duplicates all entries)
+- `extract_visible_form_fields` already captures pre-filled field values — observation works, matching doesn't exist
+- `_section_matches_scope` fuzzy token overlap is reliable enough for section filtering
+- LLM batch matching (one GPT-5.4-nano call per section) chosen over per-entry matching for cost efficiency
+- Existing tile CSS selector kept as fallback for Greenhouse where saved entries aren't form fields
 
 ### Pending Todos
 
@@ -48,10 +49,10 @@ None yet.
 
 ### Blockers/Concerns
 
-- Current Hand-X and Desktop flows still duplicate runtime-profile assembly logic
+None.
 
 ## Session Continuity
 
-Last session: 2026-03-24
-Stopped at: Project initialized and ready for `$gsd-plan-phase 1`
+Last session: 2026-03-31
+Stopped at: Defining requirements for milestone v1.1
 Resume file: None

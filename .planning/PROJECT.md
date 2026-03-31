@@ -4,7 +4,7 @@
 
 Hand-X is a brownfield browser automation engine for job applications. It runs both as a desktop-invoked CLI and as a server-side worker, fills ATS flows across platforms like Workday and Greenhouse, and integrates with VALET and GH Desktop for profile data, progress reporting, and review.
 
-The current project focus is to remove runtime-profile drift between VALET, GH Desktop, and Hand-X by making VALET the single source of truth for the hydrated applicant runtime payload.
+The current project focus is generic repeater pre-fill detection — making the repeater system detect existing entries on any ATS platform using field observation and LLM matching, replacing platform-specific DOM selectors.
 
 ## Core Value
 
@@ -21,10 +21,22 @@ A saved applicant identity can be applied accurately, repeatably, and safely acr
 
 ### Active
 
-- [ ] VALET provides a single hydrated runtime-profile contract for selected applicant + resume context
-- [ ] Desktop, worker, and local Hand-X test flows consume the same runtime payload shape
-- [ ] Selected resume asset and platform credentials travel through the same contract instead of repo-local reconstruction
-- [ ] Contract parity is proven by regression tests, not inferred from duplicate merge logic
+- [ ] Repeater observation detects existing entries on any platform via `extract_visible_form_fields` + anchor field matching
+- [ ] LLM batch matching (one call per section) fuzzy-matches profile entries against page entries
+- [ ] Section-scoped anchor detection isolates observation per repeater type
+- [ ] Existing `_COUNT_SAVED_TILES_JS` kept as fallback for platforms where entries aren't form fields
+- [ ] Toy fixture tests validate pre-fill detection with simulated auto-fill scenarios
+
+## Current Milestone: v1.1 Generic Repeater Pre-fill Detection
+
+**Goal:** Replace platform-specific repeater entry counting with generic field observation + LLM matching so any ATS pre-fill is detected without per-platform selectors.
+
+**Target features:**
+- Generic pre-fill observation via `extract_visible_form_fields` + anchor field detection
+- LLM batch matching (one GPT-5.4-nano call per section) for fuzzy entity matching
+- Section-scoped filtering via `_section_matches_scope`
+- Graceful fallback to `_COUNT_SAVED_TILES_JS` when observation finds no anchor fields
+- Toy fixture tests with pre-fill simulation + unit tests
 
 ### Out of Scope
 
@@ -71,4 +83,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-03-24 after initialization*
+*Last updated: 2026-03-31 after milestone v1.1 start*
