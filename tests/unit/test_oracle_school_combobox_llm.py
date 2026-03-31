@@ -38,7 +38,7 @@ def test_is_oracle_school_llm_field_true_for_school() -> None:
         field_type="select",
         oracle_freeform_combobox_answer=True,
     )
-    assert fe._is_oracle_school_llm_field(f) is True
+    assert fe._is_school_combobox_field(f) is True
 
 
 def test_is_oracle_school_llm_field_false_for_major_with_same_flag() -> None:
@@ -48,7 +48,7 @@ def test_is_oracle_school_llm_field_false_for_major_with_same_flag() -> None:
         field_type="select",
         oracle_freeform_combobox_answer=True,
     )
-    assert fe._is_oracle_school_llm_field(f) is False
+    assert fe._is_school_combobox_field(f) is False
 
 
 def test_is_oracle_school_llm_field_false_for_field_of_study_with_same_flag() -> None:
@@ -59,7 +59,7 @@ def test_is_oracle_school_llm_field_false_for_field_of_study_with_same_flag() ->
         field_type="select",
         oracle_freeform_combobox_answer=True,
     )
-    assert fe._is_oracle_school_llm_field(f) is False
+    assert fe._is_school_combobox_field(f) is False
 
 
 def test_is_oracle_school_llm_field_true_for_institution() -> None:
@@ -69,7 +69,7 @@ def test_is_oracle_school_llm_field_true_for_institution() -> None:
         field_type="select",
         oracle_freeform_combobox_answer=True,
     )
-    assert fe._is_oracle_school_llm_field(f) is True
+    assert fe._is_school_combobox_field(f) is True
 
 
 def test_is_oracle_school_llm_field_false_random_label_with_flag() -> None:
@@ -79,12 +79,13 @@ def test_is_oracle_school_llm_field_false_random_label_with_flag() -> None:
         field_type="select",
         oracle_freeform_combobox_answer=True,
     )
-    assert fe._is_oracle_school_llm_field(f) is False
+    assert fe._is_school_combobox_field(f) is False
 
 
-def test_is_oracle_school_llm_field_false_without_flag() -> None:
+def test_is_school_combobox_field_true_without_flag() -> None:
+    """_is_school_combobox_field no longer depends on oracle_freeform_combobox_answer."""
     f = FormField(field_id="ff1", name="School *", field_type="select")
-    assert fe._is_oracle_school_llm_field(f) is False
+    assert fe._is_school_combobox_field(f) is True
 
 
 def test_merge_unique_terms_order_and_dedupe() -> None:

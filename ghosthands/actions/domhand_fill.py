@@ -80,6 +80,7 @@ from ghosthands.dom.fill_executor import (  # noqa: F401
     _confirm_text_like_value,
     _field_has_effective_value,
     _field_has_validation_error,
+    _read_multi_select_selection,
     _field_needs_blur_revalidation,
     _field_needs_enter_commit,
     _field_value_matches_expected,
@@ -1828,14 +1829,16 @@ def _same_page_fill_guard_error(
         return None
     if not bool(last_fill.get("broad_fill_completed")):
         return None
-    # SPA guard: if current fields are mostly different from last fill, it's a new page
-    if current_field_ids:
-        last_field_ids = set(last_fill.get("field_ids") or [])
-        if last_field_ids:
-            overlap = current_field_ids & last_field_ids
-            total = max(len(current_field_ids), len(last_field_ids))
-            if total > 0 and len(overlap) / total < 0.3:
-                return None  # Different fields — SPA page transition, allow fill
+    # SPA guard: if current fields are mostly different from last fill, it's a new page.
+    # If we can't compare field IDs (either side empty), allow the fill —
+    # blocking on incomplete data causes missed pages on Workday SPAs.
+    last_field_ids = set(last_fill.get("field_ids") or [])
+    if not current_field_ids or not last_field_ids:
+        return None  # Can't compare — allow fill rather than wrongly block
+    overlap = current_field_ids & last_field_ids
+    total = max(len(current_field_ids), len(last_field_ids))
+    if total > 0 and len(overlap) / total < 0.3:
+        return None  # Different fields — SPA page transition, allow fill
     return "DomHand: broad fill already completed on this page."
 
 
@@ -2906,6 +2909,9 @@ async def _stagehand_observe_cross_reference(
     Called once after the first fill round to log any interactive elements that
     Stagehand sees but DOM extraction missed.  This is informational — the data
     helps improve the DOM scanner over time without blocking the fill pipeline.
+
+    Stagehand start is gated in layer.py — if no desktop proxy or Browserbase
+    key, ``ensure_stagehand_for_session`` returns immediately (no SEA spawn).
     """
     try:
         from ghosthands.cost_summary import mark_stagehand_usage
@@ -2935,6 +2941,15 @@ async def _stagehand_observe_cross_reference(
 
 async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSession) -> ActionResult:
     """Fill all visible form fields using fast DOM manipulation."""
+    # If previous fill was killed by timeout, note what it did.
+    # This prefix goes into the ActionResult so the agent knows fields are likely done.
+    _prev = getattr(browser_session, "_gh_fill_partial", None)
+    _timeout_prefix = ""
+    if _prev and _prev[0] > 0:
+        _timeout_prefix = f"(Previous fill timed out after filling {_prev[0]} fields, {_prev[2]} already correct.) "
+        logger.info("domhand.fill.prev_timeout", filled=_prev[0], failed=_prev[1], already=_prev[2])
+    browser_session._gh_fill_partial = None
+
     page = await browser_session.get_current_page()
     if not page:
         return ActionResult(error="No active page found in browser session")
@@ -2973,6 +2988,27 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
     # advance guard — repeater sections are expanded AFTER the initial
     # assessment and need a fresh fill pass.
     is_scoped_fill = bool(params.heading_boundary or params.entry_data or params.focus_fields)
+
+    # Guard: block re-filling sections already completed by domhand_fill_repeaters.
+    # The agent may ignore the "section COMPLETE" message and call domhand_fill
+    # directly — this programmatic guard prevents duplicate entries and junk input.
+    _completed_repeaters: set[str] = getattr(browser_session, "_gh_completed_repeater_sections", set())
+    if _completed_repeaters and params.target_section:
+        _ts_norm = normalize_name(params.target_section).strip().lower()
+        for _done in _completed_repeaters:
+            if _done in _ts_norm or _ts_norm in _done:
+                logger.info(
+                    "domhand.fill.blocked_repeater_reentry",
+                    target_section=params.target_section,
+                    completed_by="domhand_fill_repeaters",
+                    matched=_done,
+                )
+                return ActionResult(
+                    extracted_content=(
+                        f"DomHand: {params.target_section} was already filled by domhand_fill_repeaters. "
+                        f"Do NOT re-enter this section. Move to the next section or click Next."
+                    ),
+                )
 
     completed_scoped: dict[tuple[str, str], dict] = getattr(browser_session, "_gh_completed_scoped_fills", {})
     completed_scoped_page: str = getattr(browser_session, "_gh_completed_scoped_page", "")
@@ -3088,7 +3124,13 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
     fields_capped: set[str] = set()
     settled_fields: dict[str, float] = {}  # field_key -> fill_confidence (>= 0.8 means done)
     total_already_filled_count = 0
+    _already_correct_field_labels: list[str] = []  # Track labels for agent context
     _cached_school_location: dict[str, str] = {}  # Persists across rounds for State deferred to round 3
+
+    # Lightweight partial progress — if step timeout kills us mid-fill,
+    # the next call sees what was done. Cleared on normal exit.
+    _partial = [0, 0, 0]  # [filled, failed, already_filled]
+    browser_session._gh_fill_partial = _partial
 
     for round_num in range(1, MAX_FILL_ROUNDS + 1):
         logger.info(f"DomHand fill round {round_num}/{MAX_FILL_ROUNDS}")
@@ -3185,8 +3227,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             has_validation_error = False
             if has_effective_value:
                 has_validation_error = await _field_has_validation_error(page, f.field_id)
-            if key in fields_seen and has_effective_value and not has_validation_error:
-                continue
+            if key in fields_seen:
+                continue  # Already attempted — don't retry with different LLM answer
             if _is_navigation_field(f):
                 continue
             fillable_fields.append(f)
@@ -3272,7 +3314,11 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 has_validation_error = await _field_has_validation_error(page, f.field_id)
             if has_effective_value and not has_validation_error and not _force_refill:
                 already_filled_count += 1
+                _partial[2] += 1
                 fields_seen.add(get_stable_field_key(f))
+                _lbl = _preferred_field_label(f).strip()
+                if _lbl and len(_already_correct_field_labels) < 30:
+                    _already_correct_field_labels.append(_lbl)
                 continue
             auth_val = _known_auth_override_for_field(f, auth_overrides)
             if auth_val:
@@ -3537,9 +3583,11 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 and f.field_type == "select"
                 and _is_school_label
             ):
-                # Force the skip for school on ANY Oracle page, not just FA hosts
+                # School comboboxes on ALL platforms need type-to-search → LLM select.
+                # Without this, the dropdown shows alphabetical options and fuzzy match
+                # picks the wrong school (e.g. "Aalborg University" instead of UCLA).
                 logger.info(
-                    "domhand.oracle_school_fallback_guard",
+                    "domhand.school_combobox_to_llm",
                     field_label=_preferred_field_label(f),
                     page_host=page_host[:60] if page_host else "EMPTY",
                 )
@@ -3623,14 +3671,14 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                     structured_education_diag.failure_stage = (
                         "binding_unresolved" if len(raw_education) > 1 else "entry_value_missing"
                     )
-            if (
-                skip_oracle_education_combobox_coercion
-                and entry_val
-                and str(entry_val).strip()
-            ):
-                hint = str(entry_val).strip()
+            if skip_oracle_education_combobox_coercion:
+                # School/field-of-study combobox → always needs_llm for type-to-search.
+                # If we have entry_val, pass it as a search hint. If not, LLM infers
+                # from profile education data.
+                hint = str(entry_val).strip() if entry_val else None
                 f_llm = f.model_copy(update={"oracle_freeform_combobox_answer": True})
-                oracle_combobox_search_hints[f_llm.field_id] = hint
+                if hint:
+                    oracle_combobox_search_hints[f_llm.field_id] = hint
                 _trace_structured_repeater_resolution(f, structured_education_diag)
                 needs_llm.append(f_llm)
                 continue
@@ -3935,6 +3983,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 fields_seen.add(key)
                 round_filled += 1 if success else 0
                 round_failed += 0 if success else 1
+                _partial[0 if success else 1] += 1
 
         _needs_llm_keys = _disambiguated_field_names(needs_llm)
         for _nli, f in enumerate(needs_llm):
@@ -4063,6 +4112,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             fields_seen.add(key)
             round_filled += 1 if success else 0
             round_failed += 0 if success else 1
+            _partial[0 if success else 1] += 1
 
         logger.info(f"Round {round_num}: filled={round_filled}, failed={round_failed}")
         if round_filled == 0:
@@ -4351,23 +4401,47 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
     filled_labels = ", ".join(
         _truncate_agent_fill_text(r.name, 40) for r in reconciled_results[:15] if r.success and r.name.strip()
     )
+    failed_labels = ", ".join(
+        _truncate_agent_fill_text(r.name, 40) for r in reconciled_results[:15]
+        if not r.success and r.actor == "dom" and r.name.strip()
+    )
+    skipped_labels = ", ".join(
+        _truncate_agent_fill_text(r.name, 40) for r in reconciled_results[:15]
+        if r.actor == "skipped" and r.name.strip()
+    )
     agent_summary = _agent_prose
     if filled_labels:
-        agent_summary += f" Fields: {filled_labels}."
-    if browser_session is not None:
-        setattr(
-            browser_session,
-            "_gh_last_domhand_fill",
-            {
-                "page_context_key": page_context_key,
-                "page_url": page_url,
-                "target_section": params.target_section or "",
-                "heading_boundary": params.heading_boundary or "",
-                "focus_fields": list(params.focus_fields or []),
-                "broad_fill_completed": not bool(params.heading_boundary or params.focus_fields or entry_data),
-                "field_ids": [r.field_id for r in reconciled_results if r.field_id][:50],
-            },
+        agent_summary += f" Filled: {filled_labels}."
+    if failed_labels:
+        agent_summary += f" Failed (do NOT retry): {failed_labels}."
+    if skipped_labels:
+        agent_summary += f" Skipped (no profile data, already attempted — do NOT retry): {skipped_labels}."
+    # Skill cap info from _fill_workday_skill_multiselect
+    _skill_info = getattr(page, "_gh_skill_fill_summary", None) if page else None
+    if _skill_info and _skill_info.get("total_profile", 0) > _skill_info.get("attempted", 0):
+        agent_summary += (
+            f" Skills capped to {_skill_info['attempted']} of {_skill_info['total_profile']}"
+            f" — remaining intentionally skipped, do NOT add more."
         )
+    _is_broad = not bool(params.heading_boundary or params.focus_fields or entry_data)
+    if browser_session is not None:
+        # Only broad fills update the guard state. Scoped fills (repeaters,
+        # focus_fields) must not overwrite it — otherwise the page-transition
+        # detector can't compare against the last broad fill's field IDs.
+        if _is_broad:
+            setattr(
+                browser_session,
+                "_gh_last_domhand_fill",
+                {
+                    "page_context_key": page_context_key,
+                    "page_url": page_url,
+                    "target_section": params.target_section or "",
+                    "heading_boundary": params.heading_boundary or "",
+                    "focus_fields": list(params.focus_fields or []),
+                    "broad_fill_completed": True,
+                    "field_ids": [r.field_id for r in reconciled_results if r.field_id][:50],
+                },
+            )
         if params.heading_boundary and (filled_count > 0 or total_already_filled_count > 0):
             _scope_key = (page_context_key, (params.heading_boundary or "").strip().lower())
             completed_scoped[_scope_key] = {
@@ -4375,8 +4449,22 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 "already_filled_count": total_already_filled_count,
             }
 
+    # Include verified/already-correct field labels so the agent knows which
+    # fields are confirmed good and should NOT be deleted or re-entered.
+    if _already_correct_field_labels:
+        _acl = ", ".join(
+            _truncate_agent_fill_text(lbl, 30) for lbl in _already_correct_field_labels[:20]
+        )
+        agent_summary += (
+            f" Already correct ({total_already_filled_count} fields verified by DOM readback"
+            f" — do NOT delete or modify): {_acl}."
+        )
+
     # long_term_memory: prose + capped JSON digest (≤1500 chars, PII-redacted)
     _long_term = f"{agent_summary}\n{_agent_digest_json}"
+
+    # Normal exit — clear partial so next call doesn't report false timeout.
+    browser_session._gh_fill_partial = None
 
     logger.info(
         "domhand.fill.EXIT",
@@ -4400,7 +4488,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             pass
 
     return ActionResult(
-        extracted_content=agent_summary,
+        extracted_content=_timeout_prefix + agent_summary,
         long_term_memory=_long_term,
         include_extracted_content_only_once=True,
         metadata={

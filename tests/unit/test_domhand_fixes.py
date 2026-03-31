@@ -7807,19 +7807,18 @@ def test_is_oracle_entity_no_fuzzy_fallback_excludes_non_entity():
     assert not _is_oracle_entity_no_fuzzy_fallback_field(_make_ff(name="Sponsorship Required"))
 
 
-def test_is_oracle_school_llm_field_gating():
-    from ghosthands.dom.fill_executor import _is_oracle_school_llm_field
+def test_is_school_combobox_field_gating():
+    from ghosthands.dom.fill_executor import _is_school_combobox_field
 
-    # School with oracle_freeform flag → True
-    assert _is_oracle_school_llm_field(_make_ff(name="School", oracle_freeform=True))
-    assert _is_oracle_school_llm_field(_make_ff(name="University Name", oracle_freeform=True))
-    # School without flag → False
-    assert not _is_oracle_school_llm_field(_make_ff(name="School", oracle_freeform=False))
-    # Major/field_of_study WITH flag → False (stays on deterministic path)
-    assert not _is_oracle_school_llm_field(_make_ff(name="Major", oracle_freeform=True))
-    assert not _is_oracle_school_llm_field(_make_ff(name="Field of Study", oracle_freeform=True))
-    # Employer WITH flag → False (not a school label)
-    assert not _is_oracle_school_llm_field(_make_ff(name="Latest Employer", oracle_freeform=True))
+    # School labels → True (no longer depends on oracle_freeform flag)
+    assert _is_school_combobox_field(_make_ff(name="School", oracle_freeform=True))
+    assert _is_school_combobox_field(_make_ff(name="University Name", oracle_freeform=True))
+    assert _is_school_combobox_field(_make_ff(name="School", oracle_freeform=False))
+    # Major/field_of_study → False (stays on deterministic path)
+    assert not _is_school_combobox_field(_make_ff(name="Major", oracle_freeform=True))
+    assert not _is_school_combobox_field(_make_ff(name="Field of Study", oracle_freeform=True))
+    # Employer → False (not a school label)
+    assert not _is_school_combobox_field(_make_ff(name="Latest Employer", oracle_freeform=True))
 
 
 @pytest.mark.asyncio

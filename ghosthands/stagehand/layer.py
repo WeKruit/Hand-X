@@ -184,6 +184,18 @@ class StagehandLayer:
         local_proxy_port, proxy_grant = _resolve_local_proxy_config()
 
         model_api_key = _resolve_model_api_key()
+        bb_key_present = bool((os.environ.get("BROWSERBASE_API_KEY") or "").strip())
+
+        # Stagehand requires either:
+        #   1. Desktop local proxy (GH_STAGEHAND_LOCAL_PROXY_PORT), or
+        #   2. Browserbase cloud (BROWSERBASE_API_KEY), or
+        #   3. Explicit opt-in (GH_STAGEHAND_SERVER=local)
+        # Without any of these, skip — don't spawn SEA just because an
+        # Anthropic/OpenAI key exists for DomHand LLM calls.
+        explicit_local = (os.environ.get("GH_STAGEHAND_SERVER") or "").strip().lower() == "local"
+        if not local_proxy_port and not bb_key_present and not explicit_local:
+            logger.debug("stagehand.start_skipped", reason="no_desktop_proxy_or_browserbase")
+            return False
         if not model_api_key and not local_proxy_port:
             logger.warning(
                 "stagehand.start_skipped",

@@ -2632,9 +2632,11 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         available_file_paths=available_files or None,
         use_vision="auto",
         max_actions_per_step=app_settings.agent_max_actions_per_step,
+        max_history_items=app_settings.agent_max_history_items,
         calculate_cost=True,
         use_judge=False,
         directly_open_url=directly_open_url,
+        step_timeout=300,
     )
 
     async def _on_step_start_human(ag: Agent) -> None:

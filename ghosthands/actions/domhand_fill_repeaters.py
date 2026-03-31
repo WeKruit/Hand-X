@@ -62,14 +62,37 @@ _EXPAND_SECTION_NAMES: dict[str, list[str]] = {
 
 _COUNT_SAVED_TILES_JS = r"""
 (profileType) => {
-    const tiles = document.querySelectorAll(
-        `.apply-flow-profile-item-tile--saved[data-profile-type="${profileType}"],` +
-        `.apply-flow-profile-item-tile--saved[data-profile-type="${profileType}s"]`
+    // ── Greenhouse/Lever: saved tile badges ──
+    var tiles = document.querySelectorAll(
+        '.apply-flow-profile-item-tile--saved[data-profile-type="' + profileType + '"],' +
+        '.apply-flow-profile-item-tile--saved[data-profile-type="' + profileType + 's"]'
     );
-    let count = 0;
-    for (const t of tiles) {
-        const style = window.getComputedStyle(t);
-        if (style.display !== 'none' && style.visibility !== 'hidden') count++;
+    var count = 0;
+    for (var i = 0; i < tiles.length; i++) {
+        var s = window.getComputedStyle(tiles[i]);
+        if (s.display !== 'none' && s.visibility !== 'hidden') count++;
+    }
+    if (count > 0) return count;
+
+    // ── Workday: count numbered section headings ──
+    // Workday pre-fills repeater entries with headings like
+    // "Work Experience 1", "Education 1", "Language 1".
+    // Map profileType to the heading prefix Workday uses.
+    var headingMap = {
+        'experience': 'Work Experience',
+        'education': 'Education',
+        'language': 'Language',
+        'skill': 'Skills',
+        'license': 'Certification'
+    };
+    var prefix = headingMap[profileType];
+    if (prefix) {
+        var pattern = new RegExp('^' + prefix + '\\s+\\d+$', 'i');
+        var headings = document.querySelectorAll('h2, h3, h4, [data-automation-id*="sectionHeader"], legend');
+        for (var j = 0; j < headings.length; j++) {
+            var text = (headings[j].textContent || '').trim();
+            if (pattern.test(text)) count++;
+        }
     }
     return count;
 }
@@ -115,13 +138,9 @@ _FIND_CANCEL_BUTTON_JS = r"""
         var s = getComputedStyle(btns[i]);
         if (s.display === 'none' || s.visibility === 'hidden') continue;
         if (text === 'cancel' || text === 'discard' || text === 'remove') {
-            var rect = btns[i].getBoundingClientRect();
-            return JSON.stringify({
-                found: true,
-                text: btns[i].textContent.trim(),
-                x: Math.round(rect.left + rect.width / 2),
-                y: Math.round(rect.top + rect.height / 2)
-            });
+            btns[i].setAttribute('data-dh-cancel-target', 'true');
+            btns[i].scrollIntoView({block: 'center', behavior: 'instant'});
+            return JSON.stringify({found: true, text: btns[i].textContent.trim()});
         }
     }
     return JSON.stringify({found: false});
@@ -143,13 +162,15 @@ _FIND_SAVE_BUTTON_JS = r"""
         }
     }
 
-    function btnRect(btn, phase, extra) {
-        var rect = btn.getBoundingClientRect();
+    function tagAndReturn(btn, phase, extra) {
+        // Tag the button for Playwright locator click (handles Oracle JET
+        // display:contents custom elements where getBoundingClientRect=0).
+        // Same pattern as domhand_expand's tagAndReturn.
+        btn.setAttribute('data-dh-commit-target', 'true');
+        btn.scrollIntoView({block: 'center', behavior: 'instant'});
         return JSON.stringify(Object.assign({
             found: true,
             text: btn.textContent.trim(),
-            x: Math.round(rect.left + rect.width / 2),
-            y: Math.round(rect.top + rect.height / 2),
             phase: phase,
             diag: diag
         }, extra || {}));
@@ -164,13 +185,13 @@ _FIND_SAVE_BUTTON_JS = r"""
     ];
     for (const sel of selectors) {
         const btn = document.querySelector(sel);
-        if (btn) return btnRect(btn, 'profile_inline_form');
+        if (btn) return tagAndReturn(btn, 'profile_inline_form');
     }
     const allBtns = document.querySelectorAll('.profile-inline-form button');
     for (const btn of allBtns) {
         const text = (btn.textContent || '').trim().toLowerCase();
         if (text === 'save' || text === 'ok' || text === 'done' || text === 'commit' || text.startsWith('save')) {
-            return btnRect(btn, 'profile_inline_form_text');
+            return tagAndReturn(btn, 'profile_inline_form_text');
         }
     }
 
@@ -192,7 +213,7 @@ _FIND_SAVE_BUTTON_JS = r"""
             if (sectionCommitPattern.test(text)) {
                 var s = getComputedStyle(btn);
                 if (s.display !== 'none' && s.visibility !== 'hidden') {
-                    return btnRect(btn, 'oracle_section_commit', {oracle_commit: true});
+                    return tagAndReturn(btn, 'oracle_section_commit', {oracle_commit: true});
                 }
             }
         }
@@ -204,7 +225,7 @@ _FIND_SAVE_BUTTON_JS = r"""
             if (text === 'save' || text === 'ok' || text === 'done') {
                 var s = getComputedStyle(btn);
                 if (s.display !== 'none' && s.visibility !== 'hidden') {
-                    return btnRect(btn, 'oracle_save');
+                    return tagAndReturn(btn, 'oracle_save');
                 }
             }
         }
@@ -217,13 +238,30 @@ _FIND_SAVE_BUTTON_JS = r"""
 
 
 async def _cdp_click_cancel(page) -> bool:
-    """Find cancel button via JS, click via CDP mouse for proper Oracle handling."""
+    """Find cancel button via JS tag, click via Playwright locator.
+
+    Same pattern as commit button — handles Oracle JET display:contents.
+    """
     try:
         raw = await page.evaluate(_FIND_CANCEL_BUTTON_JS)
         info = json.loads(raw) if isinstance(raw, str) else raw
-        if info.get("found"):
-            await page.mouse.click(info["x"], info["y"])
-            return True
+        if not info.get("found"):
+            return False
+        try:
+            btn = page.locator('[data-dh-cancel-target="true"]')
+            await btn.click(timeout=3000)
+        except Exception:
+            # Fallback: JS click
+            await page.evaluate("""() => {
+                var el = document.querySelector('[data-dh-cancel-target="true"]');
+                if (el) el.click();
+            }""")
+        with contextlib.suppress(Exception):
+            await page.evaluate("""() => {
+                var el = document.querySelector('[data-dh-cancel-target]');
+                if (el) el.removeAttribute('data-dh-cancel-target');
+            }""")
+        return True
     except Exception:
         pass
     return False
@@ -350,6 +388,14 @@ async def domhand_fill_repeaters(
         )
 
     entries = _get_entries_for_section(profile_data, canonical, params.max_entries)
+    logger.info(
+        "domhand.fill_repeaters.entries_check",
+        section=canonical,
+        entry_count=len(entries),
+        profile_keys=sorted(profile_data.keys())[:15],
+        raw_education_type=type(profile_data.get("education")).__name__,
+        raw_education_len=len(profile_data.get("education") or []),
+    )
     if not entries:
         return ActionResult(
             extracted_content=f"No {params.section} entries found in user profile. Section skipped."
@@ -454,10 +500,22 @@ async def domhand_fill_repeaters(
         fill_meta = (fill_result.metadata or {}).get("domhand_fill_json", {})
         entry_filled = fill_meta.get("filled_count", 0) if isinstance(fill_meta, dict) else 0
         entry_failed = fill_meta.get("dom_failure_count", 0) if isinstance(fill_meta, dict) else 0
+        already_filled = fill_meta.get("already_filled_count", 0) if isinstance(fill_meta, dict) else 0
+
+        # Guard: if domhand_fill found ZERO fields at all, the section is
+        # either pre-populated (Workday resume auto-fill) or not expandable.
+        # Stop immediately — clicking "Add" again just creates empty duplicates.
+        if entry_filled == 0 and entry_failed == 0 and already_filled == 0:
+            logger.info(
+                "domhand.fill_repeaters.zero_fields_detected",
+                section=canonical,
+                entry_index=i,
+                reason="section likely pre-filled or expand did not reveal fields",
+            )
+            break
 
         # Detect stuck loop: if fill found nothing new (all already_filled),
         # the entry_data isn't reaching the combobox.  Break to avoid looping forever.
-        already_filled = fill_meta.get("already_filled_count", 0) if isinstance(fill_meta, dict) else 0
         if entry_filled == 0 and entry_failed == 0 and already_filled > 0:
             consecutive_same_value_count += 1
             logger.warning(
@@ -542,14 +600,34 @@ async def domhand_fill_repeaters(
             continue
 
         try:
-            # Find button position via JS, then CDP mouse click for proper
-            # Oracle event handler firing (JS btn.click() doesn't commit).
+            # JS tags the commit button → Playwright locator click.
+            # Reuses domhand_expand pattern: handles Oracle JET display:contents
+            # custom elements where getBoundingClientRect() returns zero.
             find_raw = await page.evaluate(_FIND_SAVE_BUTTON_JS, canonical)
             save_result = json.loads(find_raw) if isinstance(find_raw, str) else find_raw
             diag = save_result.get("diag", {})
             if save_result.get("found"):
-                bx, by = save_result["x"], save_result["y"]
-                await page.mouse.click(bx, by)
+                commit_clicked = False
+                try:
+                    btn = page.locator('[data-dh-commit-target="true"]')
+                    await btn.click(timeout=3000)
+                    commit_clicked = True
+                except Exception:
+                    # Fallback: JS click if Playwright can't reach it
+                    try:
+                        await page.evaluate("""() => {
+                            var el = document.querySelector('[data-dh-commit-target="true"]');
+                            if (el) el.click();
+                        }""")
+                        commit_clicked = True
+                    except Exception:
+                        pass
+                # Clean up tag
+                with contextlib.suppress(Exception):
+                    await page.evaluate("""() => {
+                        var el = document.querySelector('[data-dh-commit-target]');
+                        if (el) el.removeAttribute('data-dh-commit-target');
+                    }""")
                 logger.info(
                     "domhand.fill_repeaters.commit_clicked",
                     section=canonical,
@@ -557,8 +635,7 @@ async def domhand_fill_repeaters(
                     button_text=save_result.get("text", ""),
                     oracle_commit=save_result.get("oracle_commit", False),
                     phase=diag.get("phase", ""),
-                    click_coords=f"{bx},{by}",
-                    visible_buttons=diag.get("visible_buttons", [])[:10],
+                    clicked=commit_clicked,
                 )
                 await asyncio.sleep(0.8)
             else:
@@ -568,7 +645,6 @@ async def domhand_fill_repeaters(
                     entry_index=i,
                     reason=save_result.get("reason", ""),
                     phase=diag.get("phase", ""),
-                    visible_buttons=diag.get("visible_buttons", [])[:10],
                 )
         except Exception:
             pass
@@ -601,8 +677,25 @@ async def domhand_fill_repeaters(
         f"call domhand_fill_repeaters for each before clicking Next."
     )
 
+    # Persist "section COMPLETE" in agent memory so it survives across steps.
+    # Without long_term_memory, include_extracted_content_only_once vanishes
+    # after 1 step — the agent forgets and retries.
+    _long_term = (
+        f"{params.section} section COMPLETE ({filled_count} filled"
+        f"{', ' + str(len(skills_taxonomy_miss_labels)) + ' skipped' if skills_taxonomy_miss_labels else ''}"
+        f"). Do NOT re-enter this section."
+    )
+
+    # Programmatic guard: write to session dedup state so domhand_fill
+    # blocks re-filling this section even if the agent ignores the message.
+    if browser_session is not None:
+        completed = getattr(browser_session, "_gh_completed_repeater_sections", set())
+        completed.add(canonical)
+        browser_session._gh_completed_repeater_sections = completed
+
     return ActionResult(
         extracted_content="\n".join(summary_parts),
+        long_term_memory=_long_term,
         include_extracted_content_only_once=True,
         metadata={
             "tool": "domhand_fill_repeaters",

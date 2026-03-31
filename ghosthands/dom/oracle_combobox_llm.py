@@ -129,6 +129,9 @@ def _oracle_school_chat_openai(*, max_completion_tokens: int) -> Any:
         api_key=api_key,
         base_url=base,
         default_headers=default_headers,
+        reasoning_models=[],  # gpt-5.4-nano is NOT a reasoning model — prevent
+        # substring match against 'gpt-5' in the default list which adds
+        # reasoning_effort and strips temperature, causing empty responses.
     )
 
 
@@ -281,6 +284,10 @@ Reply with ONLY JSON: {{"matched_index": <integer or null>}}
 """
     try:
         text = await _completion_text(prompt, max_tokens=128)
+        # Retry once on empty response (API returned content=None)
+        if not text:
+            logger.info("domhand.dropdown_llm_pick_empty_retry", desired=desired[:60], context=context)
+            text = await _completion_text(prompt, max_tokens=128)
         data = _extract_json_object(text)
         payload = _PickPayload.model_validate(data)
         idx = payload.matched_index

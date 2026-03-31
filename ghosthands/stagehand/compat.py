@@ -45,6 +45,8 @@ async def ensure_stagehand_for_session(
     """Get or initialize the StagehandLayer singleton, connecting to the browser-use browser.
 
     Safe to call repeatedly — only the first call initializes.
+    Start is gated in layer.py: without a desktop proxy or Browserbase key,
+    ``_do_start`` returns False immediately (no SEA binary spawn).
     """
     from ghosthands.stagehand.layer import get_stagehand_layer
 

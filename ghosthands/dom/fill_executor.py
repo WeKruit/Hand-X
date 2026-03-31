@@ -90,7 +90,6 @@ class FieldFillOutcome:
 
     success: bool
     matched_label: str | None = None
-
     def __bool__(self) -> bool:
         return self.success
 
@@ -115,8 +114,8 @@ def _log_dropdown_diag(event: str, **kwargs: Any) -> None:
 _DROPDOWN_MENU_OPEN_SETTLE_S = 0.55
 _DROPDOWN_CDP_POLL_TICK_S = 0.22
 _DROPDOWN_CDP_POLL_MAX_TICKS = 14
-_WORKDAY_SKILL_RESULT_SETTLE_S = 3.0
-_WORKDAY_SKILL_POST_ENTER_SETTLE_S = 3.0
+_WORKDAY_SKILL_RESULT_SETTLE_S = 2.0
+_WORKDAY_SKILL_POST_ENTER_SETTLE_S = 1.7
 _WORKDAY_REFERRAL_RESULT_SETTLE_S = 2.3
 _WORKDAY_REFERRAL_POST_ENTER_SETTLE_S = 2.3
 
@@ -1122,6 +1121,12 @@ async def _fill_single_field_outcome(
         # combobox override.
         if field.field_type == "select" and await _uses_workday_skill_multiselect(page, field):
             fill_strategy = None
+        # School comboboxes need type-to-search → LLM pick on ALL platforms.
+        # Platform override (e.g. Greenhouse react_select) opens dropdown without
+        # typing → alphabetical list → fuzzy match picks wrong school.
+        # Gate on field_type="select" so plain text school fields use normal fill.
+        if field.field_type == "select" and _is_school_combobox_field(field):
+            fill_strategy = None
 
     if fill_strategy:
         result = await _dispatch_platform_fill_outcome(
@@ -1136,7 +1141,9 @@ async def _fill_single_field_outcome(
             return result
 
     # School-only: bypass generic Oracle combobox path and use LLM search+pick.
-    if field.oracle_freeform_combobox_answer and _is_oracle_school_llm_field(field):
+    # No oracle_freeform_combobox_answer gate — school comboboxes on ALL platforms
+    # (Oracle cx-select, Greenhouse react-select) need type-to-search.
+    if field.field_type == "select" and _is_school_combobox_field(field):
         outcome = await _fill_oracle_school_combobox_llm_outcome(page, field, value, tag)
         if outcome.success:
             return outcome
@@ -1337,7 +1344,7 @@ _IS_ORACLE_SEARCHABLE_JS = r"""
 """
 
 
-_ORACLE_COMBOBOX_CLICK_BEST_OPTION_JS = r"""
+_ORACLE_COMBOBOX_FIND_BEST_OPTION_JS = r"""
 (ffId, desired) => {
     var el = window.__ff ? window.__ff.byId(ffId) : null;
     if (!el) return JSON.stringify({clicked: false, reason: 'element_not_found'});
@@ -1375,9 +1382,10 @@ _ORACLE_COMBOBOX_CLICK_BEST_OPTION_JS = r"""
             if (combined.indexOf(dl) !== -1) { best = visible[m]; matchedText = visible[m].getAttribute('data-value') || visible[m].textContent; break; }
         }
     }
-    if (!best) return JSON.stringify({clicked: false, reason: 'no_match', visible_count: visible.length});
-    best.click(); return JSON.stringify({clicked: true, text: (matchedText || '').substring(0, 120)});
-    return JSON.stringify({clicked: false, reason: 'no_match'});
+    if (!best) return JSON.stringify({matched: false, reason: 'no_match', visible_count: visible.length});
+    var bestIdx = -1;
+    for (var n = 0; n < visible.length; n++) { if (visible[n] === best) { bestIdx = n; break; } }
+    return JSON.stringify({matched: true, index: bestIdx, text: (matchedText || '').substring(0, 200)});
 }
 """
 
@@ -1455,9 +1463,10 @@ _ORACLE_COMBOBOX_CLICK_INDEX_JS = r"""
     }
     var row = visible[idx];
     var matchedText = (row.getAttribute('data-value') || row.textContent || '').replace(/\s+/g, ' ').trim();
-    // Oracle cx-select ignores simple el.click() — dispatch full mouse event sequence
-    // on the deepest text-bearing child (Oracle binds handlers on inner spans/cells).
-    var target = row.querySelector('[role="gridcell"] span, [role="gridcell"], span, a') || row;
+    // Dispatch JS synthetic events (Oracle cx-select needs these) AND return
+    // coordinates for CDP mouse click (Greenhouse react-select needs CDP).
+    // Both fire — one of them works on any platform.
+    var target = row.querySelector('[role="gridcell"] span, [role="gridcell"], [class*="option"], span, a') || row;
     var rect = target.getBoundingClientRect();
     var cx = rect.left + rect.width / 2;
     var cy = rect.top + rect.height / 2;
@@ -1465,13 +1474,44 @@ _ORACLE_COMBOBOX_CLICK_INDEX_JS = r"""
     target.dispatchEvent(new MouseEvent('mousedown', opts));
     target.dispatchEvent(new MouseEvent('mouseup', opts));
     target.dispatchEvent(new MouseEvent('click', opts));
-    return JSON.stringify({clicked: true, text: matchedText.substring(0, 200)});
+    return JSON.stringify({clicked: true, text: matchedText.substring(0, 200), x: cx, y: cy});
 }
 """
 
 
-def _is_oracle_school_llm_field(field: FormField) -> bool:
-    """Oracle education combobox: use GPT type → scan → LLM index pick.
+async def _click_combobox_option_by_index(
+    page: Any, ff_id: str, idx: int,
+) -> str | None:
+    """Click an Oracle/react-select combobox option by index.
+
+    Uses JS synthetic events first (Oracle needs them), then reads the value.
+    If JS didn't commit (Greenhouse react-select), falls back to CDP mouse click.
+
+    Returns the matched option text on success, None on failure.
+    Shared by both LLM pick and deterministic substring match paths.
+    """
+    click_raw = await page.evaluate(_ORACLE_COMBOBOX_CLICK_INDEX_JS, ff_id, idx)
+    click_result = json.loads(click_raw) if isinstance(click_raw, str) else click_raw
+    if not (isinstance(click_result, dict) and click_result.get("clicked")):
+        return None
+    matched_text = click_result.get("text")
+    await asyncio.sleep(0.3)
+    # Check if JS events committed the value.
+    # If not (e.g. Greenhouse react-select ignores JS events), CDP click fallback.
+    _post_val = await _read_field_value(page, ff_id)
+    if not _post_val or _is_effectively_unset_field_value(_post_val):
+        cx, cy = click_result.get("x"), click_result.get("y")
+        if cx is not None and cy is not None:
+            mouse = page.mouse
+            if hasattr(mouse, "__await__"):
+                mouse = await mouse
+            await mouse.click(float(cx), float(cy))
+            await asyncio.sleep(0.3)
+    return matched_text
+
+
+def _is_school_combobox_field(field: FormField) -> bool:
+    """education combobox: use GPT type → scan → LLM index pick.
 
     Detects school-like labels directly — does NOT depend on the triage flag
     ``oracle_freeform_combobox_answer`` because the triage may not set it when
@@ -1734,18 +1774,19 @@ async def _fill_oracle_school_combobox_llm_outcome(
             if idx is None:
                 continue
 
+            # Get option coordinates from JS, then CDP mouse click
             click_raw = await page.evaluate(_ORACLE_COMBOBOX_CLICK_INDEX_JS, ff_id, idx)
             click_result = json.loads(click_raw) if isinstance(click_raw, str) else click_raw
             if not (isinstance(click_result, dict) and click_result.get("clicked")):
                 reason = str((click_result or {}).get("reason", ""))[:40]
                 logger.info(
-                    "domhand.oracle_school_llm_click_failed",
+                    "domhand.school_combobox_click_failed",
                     field_label=field.name,
                     search_term=term[:60],
                     picked_index=idx,
                     reason=reason,
                 )
-                # Dropdown may have dismissed during LLM call — retype to reopen and retry click once
+                # Dropdown may have dismissed during LLM call — retype to reopen and retry
                 if reason in ("no_dropdown", "element_not_found"):
                     await page.evaluate(_FOCUS_AND_CLEAR_JS, ff_id)
                     await asyncio.sleep(0.1)
@@ -1755,42 +1796,44 @@ async def _fill_oracle_school_combobox_llm_outcome(
                     await _type_text_compat(page, term, delay=30)
                     retry_options = await _poll_oracle_combobox_options(page, ff_id)
                     if retry_options:
-                        click_raw2 = await page.evaluate(_ORACLE_COMBOBOX_CLICK_INDEX_JS, ff_id, idx)
-                        click_result2 = json.loads(click_raw2) if isinstance(click_raw2, str) else click_raw2
-                        if isinstance(click_result2, dict) and click_result2.get("clicked"):
-                            logger.info(
-                                "domhand.oracle_school_llm_click_retry_ok",
-                                field_label=field.name,
-                                search_term=term[:60],
-                                picked_index=idx,
-                            )
-                            # Fall through to value read + verify below
-                        else:
+                        click_raw = await page.evaluate(_ORACLE_COMBOBOX_CLICK_INDEX_JS, ff_id, idx)
+                        click_result = json.loads(click_raw) if isinstance(click_raw, str) else click_raw
+                        if not (isinstance(click_result, dict) and click_result.get("clicked")):
                             continue
                     else:
                         continue
                 else:
                     continue
-
             await asyncio.sleep(1.2)
             await _settle_dropdown_selection(page)
-
-            val_raw = await page.evaluate(_ORACLE_COMBOBOX_READ_VALUE_JS, ff_id)
-            val_result = json.loads(val_raw) if isinstance(val_raw, str) else val_raw
-            effective = ""
-            if isinstance(val_result, dict):
-                effective = str(val_result.get("committed") or val_result.get("value") or "").strip()
 
             picked_label = option_labels[idx] if 0 <= idx < len(option_labels) else str(
                 click_result.get("text") or ""
             ).strip()
 
+            # JS synthetic events fired in the JS. Read value.
+            effective = await _read_field_value(page, ff_id)
+
+            # If JS events didn't commit (e.g. Greenhouse react-select),
+            # try CDP click at the option coordinates and read again.
+            if not effective:
+                cx = click_result.get("x")
+                cy = click_result.get("y")
+                if cx is not None and cy is not None:
+                    mouse = page.mouse
+                    if hasattr(mouse, "__await__"):
+                        mouse = await mouse
+                    await mouse.click(float(cx), float(cy))
+                    await asyncio.sleep(1.0)
+                    await _settle_dropdown_selection(page)
+                    effective = await _read_field_value(page, ff_id)
+
             if not effective:
                 logger.info(
-                    "domhand.oracle_school_llm_empty_after_click",
+                    "domhand.school_combobox_empty_after_click",
                     field_label=field.name,
                     search_term=term[:60],
-                    val_raw=str(val_raw)[:120] if val_raw else "None",
+                    generic_read=effective,
                 )
                 continue
 
@@ -2007,7 +2050,7 @@ async def _fill_oracle_combobox_outcome(
         value = _gpa_val
 
     # ── School: LLM search+pick (before element-exists gate) ─────
-    is_school_llm = _is_oracle_school_llm_field(field)
+    is_school_llm = _is_school_combobox_field(field)
     if is_school_llm:
         logger.info(
             "domhand.oracle_combobox_path_decision",
@@ -2092,13 +2135,7 @@ async def _fill_oracle_combobox_outcome(
                             picked_label=polled_options[llm_idx][:60],
                             option_count=len(polled_options),
                         )
-                        click_raw = await page.evaluate(
-                            _ORACLE_COMBOBOX_CLICK_INDEX_JS, ff_id, llm_idx,
-                        )
-                        click_result = json.loads(click_raw) if isinstance(click_raw, str) else click_raw
-                        if isinstance(click_result, dict) and click_result.get("clicked"):
-                            matched_label = click_result.get("text")
-                            await asyncio.sleep(0.3)
+                        matched_label = await _click_combobox_option_by_index(page, ff_id, llm_idx)
                     else:
                         logger.debug(
                             "domhand.oracle_combobox_llm_pick_none",
@@ -2109,15 +2146,16 @@ async def _fill_oracle_combobox_outcome(
                 except Exception as exc:
                     logger.debug("domhand.oracle_combobox_llm_pick_error", error=str(exc)[:120])
 
-            # Fallback: JS substring match when LLM pick didn't fire or didn't click
+            # Fallback: deterministic substring match → reuse same click path
             if not matched_label:
-                click_raw = await page.evaluate(
-                    _ORACLE_COMBOBOX_CLICK_BEST_OPTION_JS, ff_id, value,
+                find_raw = await page.evaluate(
+                    _ORACLE_COMBOBOX_FIND_BEST_OPTION_JS, ff_id, value,
                 )
-                click_result = json.loads(click_raw) if isinstance(click_raw, str) else click_raw
-                if isinstance(click_result, dict) and click_result.get("clicked"):
-                    matched_label = click_result.get("text")
-                    await asyncio.sleep(0.3)
+                find_result = json.loads(find_raw) if isinstance(find_raw, str) else find_raw
+                if isinstance(find_result, dict) and find_result.get("matched"):
+                    best_idx = find_result.get("index", -1)
+                    if best_idx >= 0:
+                        matched_label = await _click_combobox_option_by_index(page, ff_id, best_idx)
 
             await asyncio.sleep(1.2)
 
@@ -2178,18 +2216,21 @@ async def _fill_oracle_combobox_outcome(
             await asyncio.sleep(0.15)
             await _type_text_compat(page, "Other", delay=30)
             await asyncio.sleep(1.0)
-            click_raw = await page.evaluate(
-                _ORACLE_COMBOBOX_CLICK_BEST_OPTION_JS, ff_id, "Other",
+            find_raw = await page.evaluate(
+                _ORACLE_COMBOBOX_FIND_BEST_OPTION_JS, ff_id, "Other",
             )
-            click_result = json.loads(click_raw) if isinstance(click_raw, str) else click_raw
-            if isinstance(click_result, dict) and click_result.get("clicked"):
-                matched_label = click_result.get("text")
-                await asyncio.sleep(1.2)
-                val_raw = await page.evaluate(_ORACLE_COMBOBOX_READ_VALUE_JS, ff_id)
-                val_result = json.loads(val_raw) if isinstance(val_raw, str) else val_raw
-                effective = (val_result.get("committed") or val_result.get("value") or "") if isinstance(val_result, dict) else ""
-                if effective.strip():
-                    return _fill_outcome(True, matched_label=matched_label)
+            find_result = json.loads(find_raw) if isinstance(find_raw, str) else find_raw
+            if isinstance(find_result, dict) and find_result.get("matched"):
+                other_idx = find_result.get("index", -1)
+                if other_idx >= 0:
+                    other_label = await _click_combobox_option_by_index(page, ff_id, other_idx)
+                    if other_label:
+                        await asyncio.sleep(1.0)
+                        val_raw = await page.evaluate(_ORACLE_COMBOBOX_READ_VALUE_JS, ff_id)
+                        val_result = json.loads(val_raw) if isinstance(val_raw, str) else val_raw
+                        effective = (val_result.get("committed") or val_result.get("value") or "") if isinstance(val_result, dict) else ""
+                        if effective.strip():
+                            return _fill_outcome(True, matched_label=other_label)
 
         # Clear the combobox input to prevent Oracle auto-committing the first
         # visible filtered option when focus leaves (the "A&M University" bug).
@@ -2777,6 +2818,16 @@ async def _fill_multi_select(page: Any, field: FormField, values: list[str], tag
         picked_count = 0
         for val in values:
             before_selection = await _read_multi_select_selection(page, ff_id)
+            # Dedup: skip if this value (or close match) is already a chip.
+            # Prevents stacking duplicate chips on retry (e.g. "I don't wish to answer" + "Man").
+            existing_tokens = [
+                str(t).strip().lower()
+                for t in (before_selection.get("tokens") or [])
+                if str(t).strip()
+            ]
+            if existing_tokens and val.strip().lower() in existing_tokens:
+                picked_count += 1  # Already present — count as success
+                continue
             await _try_open_combobox_menu(page, ff_id, tag=tag)
             await asyncio.sleep(0.2)
             await _clear_dropdown_search(page, ff_id)
@@ -2851,7 +2902,7 @@ async def _fill_workday_skill_multiselect(
             continue
         seen_values.add(key)
         normalized_values.append(skill)
-        if len(normalized_values) >= 15:
+        if len(normalized_values) >= 10:
             break
     if not normalized_values:
         return False
@@ -2961,8 +3012,25 @@ async def _fill_workday_skill_multiselect(
         except Exception:
             pass
 
+        # Surface cap/commit info so domhand_fill can tell the agent.
+        not_committed = [v for v in normalized_values if v not in {
+            str(t).strip() for t in (await _read_multi_select_selection(page, ff_id)).get("tokens", [])
+        }]
+        page._gh_skill_fill_summary = {
+            "committed": picked_count,
+            "attempted": len(normalized_values),
+            "total_profile": len(values),
+            "not_committed": not_committed[:10],
+        }
+
         if picked_count > 0:
-            logger.debug(f"workday skill multi-select {tag} -> {picked_count}/{len(normalized_values)} skills")
+            logger.info(
+                "domhand.workday_skill_summary",
+                committed=picked_count,
+                attempted=len(normalized_values),
+                total_profile=len(values),
+                not_committed=not_committed[:5],
+            )
             return True
     except Exception as exc:
         logger.debug(f"workday skill multi-select {tag} failed: {str(exc)[:60]}")

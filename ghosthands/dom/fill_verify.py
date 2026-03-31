@@ -237,10 +237,10 @@ async def _stagehand_escalate_fill(
     desired_value: str,
     browser_session: BrowserSession | None = None,
 ) -> bool:
-    """Try Stagehand act() to fill a field that DOM-first methods couldn't handle.
+    """Delegate to the optional fill-escalation callback on the session.
 
-    Returns True if Stagehand succeeded and DOM re-verify passes.
-    Stagehand is cheaper than a full browser-use agent step.
+    Stagehand start is gated in layer.py — if no desktop proxy or Browserbase
+    key, ``ensure_stagehand_for_session`` returns immediately (no SEA spawn).
     """
     try:
         from ghosthands.stagehand.compat import ensure_stagehand_for_session
