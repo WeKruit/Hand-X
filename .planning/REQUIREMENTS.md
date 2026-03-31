@@ -1,9 +1,38 @@
-# Requirements: Hand-X
+# Requirements: Hand-X Repeater Pre-fill Detection
 
-**Defined:** 2026-03-24
+**Defined:** 2026-03-31
 **Core Value:** A saved applicant identity can be applied accurately, repeatably, and safely across ATS flows without the user re-entering data.
 
-## v1 Requirements
+## v1.1 Requirements
+
+Requirements for generic repeater pre-fill detection. Each maps to roadmap phases.
+
+### Observation
+
+- [ ] **OBS-01**: Repeater extracts visible anchor fields per section using `extract_visible_form_fields` before expanding
+- [ ] **OBS-02**: Anchor fields are scoped to the target section via `_section_matches_scope`
+- [ ] **OBS-03**: Only fields with effective values (`_field_has_effective_value`) are counted as existing entries
+
+### Matching
+
+- [ ] **MATCH-01**: LLM batch matcher compares all profile anchors against all page anchors in one call per section
+- [ ] **MATCH-02**: Exact match after `normalize_name` skips LLM (fast path for trivial cases)
+- [ ] **MATCH-03**: LLM handles fuzzy entity matching (UCLA = University of California Los Angeles, Google = Alphabet/Google)
+
+### Integration
+
+- [ ] **INT-01**: `_observe_existing_entries` replaces `_COUNT_SAVED_TILES_JS` as primary detection in the repeater loop
+- [ ] **INT-02**: `_COUNT_SAVED_TILES_JS` kept as fallback when observation finds zero anchor fields
+- [ ] **INT-03**: Only unmatched profile entries are passed to the expand+fill loop
+
+### Testing
+
+- [ ] **TEST-01**: Unit tests validate anchor label matching, profile key extraction, and `ObservationResult` contract
+- [ ] **TEST-02**: CI browser tests use toy-workday fixture with JS-simulated pre-fill to test observation + matching
+- [ ] **TEST-03**: CI browser tests verify section scoping isolates education from experience fields
+- [ ] **TEST-04**: LLM integration tests validate fuzzy matching (abbreviations, variants) — skipped without API key
+
+## v1.0 Requirements (previous milestone)
 
 ### Runtime Profile Contract
 
@@ -17,55 +46,45 @@
 - [ ] **RUNT-02**: Platform auth credentials can be delivered to consumers without exposing secrets on CLI arguments
 - [ ] **RUNT-03**: The runtime contract distinguishes auth intent consistently, including existing-account and create-account flows
 
-### Consumer Integration
+## Future Requirements
 
-- [ ] **CONS-01**: GH Desktop and Hand-X consume the same runtime payload shape for applicant identity data
-- [ ] **CONS-02**: Worker mode and local deterministic testing can use the same runtime source-of-truth contract
-- [ ] **CONS-03**: Overriding login credentials for platform testing does not silently mutate applicant contact data in the profile
+### Extended Platform Support
 
-### Verification And Regression Safety
-
-- [ ] **QUAL-01**: Automated tests prove payload parity and merge precedence across global defaults, resume-specific overrides, and QA answers
-- [ ] **QUAL-02**: Missing required runtime data surfaces explicit blockers instead of silent fallback behavior
-- [ ] **QUAL-03**: Consumer migration preserves current desktop, worker, and CLI execution flows during the rollout
-
-## v2 Requirements
-
-### Broader Runtime Delivery
-
-- **NEXT-01**: Resume download and hydrated runtime profile can be fetched through one end-to-end API handoff instead of separate calls
-- **NEXT-02**: Stored platform credentials can be retrieved through the same VALET-owned contract with explicit authorization and auditability
+- **EXT-01**: Observation detects pre-filled skills shown as chips/badges (not form fields)
+- **EXT-02**: Observation reads Greenhouse saved tile text content for matching (beyond CSS counting)
 
 ## Out of Scope
 
 | Feature | Reason |
 |---------|--------|
-| Rebuilding ATS automation strategies | The current problem is runtime data ownership, not fill-engine capability |
-| Moving Hand-X to direct Supabase client/session auth | Hand-X should remain a consumer of server-owned runtime contracts |
-| Broad schema redesign of all applicant data models | Not required to establish one runtime interface and migrate consumers |
+| Non-repeater field pre-fill detection | Different problem — `domhand_fill` already handles individual field observation |
+| Rewriting `_COUNT_SAVED_TILES_JS` entirely | Kept as fallback — working for Greenhouse/Lever |
+| Per-entry LLM matching (one call per profile entry) | Batch matching is more cost-efficient |
+| Platform-specific anchor label overrides | Generic label matching sufficient for v1.1 |
 
 ## Traceability
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| PROF-01 | Phase 1 | Pending |
-| PROF-02 | Phase 1 | Pending |
-| PROF-03 | Phase 1 | Pending |
-| RUNT-01 | Phase 2 | Pending |
-| RUNT-02 | Phase 2 | Pending |
-| RUNT-03 | Phase 2 | Pending |
-| CONS-01 | Phase 3 | Pending |
-| CONS-02 | Phase 3 | Pending |
-| CONS-03 | Phase 3 | Pending |
-| QUAL-01 | Phase 4 | Pending |
-| QUAL-02 | Phase 4 | Pending |
-| QUAL-03 | Phase 4 | Pending |
+| OBS-01 | — | Pending |
+| OBS-02 | — | Pending |
+| OBS-03 | — | Pending |
+| MATCH-01 | — | Pending |
+| MATCH-02 | — | Pending |
+| MATCH-03 | — | Pending |
+| INT-01 | — | Pending |
+| INT-02 | — | Pending |
+| INT-03 | — | Pending |
+| TEST-01 | — | Pending |
+| TEST-02 | — | Pending |
+| TEST-03 | — | Pending |
+| TEST-04 | — | Pending |
 
 **Coverage:**
-- v1 requirements: 12 total
-- Mapped to phases: 12
-- Unmapped: 0 ✓
+- v1.1 requirements: 13 total
+- Mapped to phases: 0
+- Unmapped: 13
 
 ---
-*Requirements defined: 2026-03-24*
-*Last updated: 2026-03-24 after initialization*
+*Requirements defined: 2026-03-31*
+*Last updated: 2026-03-31 after initial definition*
