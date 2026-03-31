@@ -452,8 +452,12 @@ async def _observe_existing_entries(
             continue
         if not _field_has_effective_value(field):
             continue
-        normalized_value = normalize_name(str(field.current_value).strip())
-        if normalized_value:
+        raw_value = str(field.current_value).strip()
+        # Skip very short values (icons, single chars) — not real entry data
+        if len(raw_value) < 2:
+            continue
+        normalized_value = normalize_name(raw_value)
+        if normalized_value and len(normalized_value) >= 2:
             page_anchor_values.append(normalized_value)
 
     existing_count = len(page_anchor_values)
@@ -553,37 +557,66 @@ async def domhand_fill_repeaters(
             extracted_content=f"No {params.section} entries found in user profile. Section skipped."
         )
 
-    profile_type_map: dict[str, str] = {
-        "education": "education",
-        "experience": "experience",
-        "skills": "skill",
-        "languages": "language",
-        "licenses": "license",
-    }
-    profile_type = profile_type_map.get(canonical, canonical)
-
+    # --- Generic observation (primary) ---
     try:
-        existing_count = await page.evaluate(_COUNT_SAVED_TILES_JS, profile_type)
-    except Exception:
-        existing_count = 0
-    existing_count = int(existing_count or 0)
+        obs = await _observe_existing_entries(page, canonical, entries)
+    except Exception as exc:
+        logger.warning("domhand.fill_repeaters.observation_failed", error=str(exc)[:120])
+        obs = ObservationResult(existing_count=0, matched_profile_indices=[], unmatched_entries=list(entries), page_anchor_values=[])
 
-    needed = len(entries) - existing_count
-    if needed <= 0:
-        return ActionResult(
-            extracted_content=(
-                f"DomHand: {params.section} — all {len(entries)} entries already exist "
-                f"({existing_count} saved tiles)."
-            ),
-            metadata={
-                "tool": "domhand_fill_repeaters",
-                "section": canonical,
-                "entries_total": len(entries),
-                "existing_count": existing_count,
-                "entries_filled": 0,
-                "all_present": True,
-            },
-        )
+    if obs.page_anchor_values:
+        # Observation found anchor fields — use its results
+        existing_count = obs.existing_count
+        if not obs.unmatched_entries:
+            return ActionResult(
+                extracted_content=(
+                    f"DomHand: {params.section} — all {len(entries)} entries already on page "
+                    f"({existing_count} detected via field observation)."
+                ),
+                metadata={
+                    "tool": "domhand_fill_repeaters",
+                    "section": canonical,
+                    "entries_total": len(entries),
+                    "existing_count": existing_count,
+                    "entries_filled": 0,
+                    "all_present": True,
+                },
+            )
+        entries = obs.unmatched_entries
+    else:
+        # No anchor fields visible (Greenhouse tiles, etc.) — fallback to CSS counting
+        profile_type_map: dict[str, str] = {
+            "education": "education",
+            "experience": "experience",
+            "skills": "skill",
+            "languages": "language",
+            "licenses": "license",
+        }
+        profile_type = profile_type_map.get(canonical, canonical)
+
+        try:
+            existing_count = await page.evaluate(_COUNT_SAVED_TILES_JS, profile_type)
+        except Exception:
+            existing_count = 0
+        existing_count = int(existing_count or 0)
+
+        needed = len(entries) - existing_count
+        if needed <= 0:
+            return ActionResult(
+                extracted_content=(
+                    f"DomHand: {params.section} — all {len(entries)} entries already exist "
+                    f"({existing_count} saved tiles)."
+                ),
+                metadata={
+                    "tool": "domhand_fill_repeaters",
+                    "section": canonical,
+                    "entries_total": len(entries),
+                    "existing_count": existing_count,
+                    "entries_filled": 0,
+                    "all_present": True,
+                },
+            )
+        entries = entries[existing_count:]  # old behavior: skip first N
 
     # Cap skills to avoid timeout — Oracle combobox fill is slow per entry
     _MAX_SKILL_ENTRIES = 10
@@ -605,7 +638,7 @@ async def domhand_fill_repeaters(
     _MAX_CONSECUTIVE_SKILL_MISSES = 3
     consecutive_same_value_count = 0
 
-    for i in range(existing_count, len(entries)):
+    for i in range(len(entries)):
         entry = entries[i]
         entry_label = _entry_summary(canonical, entry, i + 1)
 

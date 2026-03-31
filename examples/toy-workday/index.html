@@ -1513,6 +1513,27 @@ function initMultiselects(root) {
     });
   });
 }
+
+// --- Pre-fill helpers for testing ---
+function prefillWorkExperience(entries) {
+  for (let i = 0; i < entries.length; i++) {
+    if (i > 0) addWorkExperience();
+    const idx = i + 1;
+    const companyInput = document.getElementById('workExperience-' + idx + '--company');
+    const titleInput = document.getElementById('workExperience-' + idx + '--jobTitle');
+    if (companyInput && entries[i].company) companyInput.value = entries[i].company;
+    if (titleInput && entries[i].jobTitle) titleInput.value = entries[i].jobTitle;
+  }
+}
+
+function prefillEducation(entries) {
+  for (let i = 0; i < entries.length; i++) {
+    if (i > 0) addEducation();
+    const idx = i + 1;
+    const schoolInput = document.getElementById('education-' + idx + '--school');
+    if (schoolInput && entries[i].school) schoolInput.value = entries[i].school;
+  }
+}
 </script>
 </body>
 </html>
