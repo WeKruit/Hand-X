@@ -394,3 +394,106 @@ Use the full state name (e.g., "California" not "CA"). Use "United States" for U
     except Exception as exc:
         logger.warning("domhand.oracle_school_location_llm_failed", error=str(exc)[:120])
         return {}
+
+
+class _BatchMatchPayload(BaseModel):
+    matches: list[int | None] = Field(default_factory=list)
+
+    @field_validator("matches", mode="before")
+    @classmethod
+    def _coerce_matches(cls, v: Any) -> list[int | None]:
+        if not isinstance(v, list):
+            return []
+        out: list[int | None] = []
+        for item in v:
+            if item is None or item == "null":
+                out.append(None)
+            elif isinstance(item, bool):
+                out.append(None)
+            elif isinstance(item, int):
+                out.append(item if item >= 0 else None)
+            elif isinstance(item, float):
+                i = int(item)
+                out.append(i if i >= 0 else None)
+            else:
+                try:
+                    i = int(str(item).strip())
+                    out.append(i if i >= 0 else None)
+                except (TypeError, ValueError):
+                    out.append(None)
+        return out
+
+
+async def batch_match_entries_llm(
+    profile_anchors: list[str],
+    page_anchors: list[str],
+    *,
+    context: str = "employer",
+) -> list[bool]:
+    """Batch-match profile entries against page entries in one LLM call.
+
+    Returns a list of bools parallel to profile_anchors: True if the profile
+    entry matched a page entry, False otherwise. One GPT-5.4-nano call per
+    section — cost ~$0.001.
+    """
+    if not profile_anchors or not page_anchors or _oracle_school_llm_disabled():
+        return [False] * len(profile_anchors)
+
+    page_lines = "\n".join(f"{i}: {val[:180]}" for i, val in enumerate(page_anchors))
+    profile_lines = []
+    labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    for i, val in enumerate(profile_anchors[:26]):
+        label = labels[i] if i < len(labels) else str(i)
+        profile_lines.append(f"{label}: {val[:180]}")
+    profile_body = "\n".join(profile_lines)
+
+    prompt = f"""You help detect duplicate entries in a job application form.
+
+The page already shows these entries (index: value):
+{page_lines}
+
+The user's profile has these entries to add:
+{profile_body}
+
+For each profile entry ({', '.join(labels[i] if i < len(labels) else str(i) for i in range(len(profile_anchors[:26])))}), reply with the page index it matches, or null if it's NOT already on the page.
+
+Same real-world entity = match. Examples:
+- "NASA" = "National Aeronautics and Space Administration"
+- "UCLA" = "University of California, Los Angeles"
+- "Google" = "Alphabet/Google"
+- "ReactJS" = "React" (same technology)
+But: "Java" != "JavaScript", "MIT" != "Michigan Institute of Technology"
+
+Context: {context}
+
+Reply ONLY JSON: {{"matches": [<int or null>, ...]}}
+"""
+    try:
+        text = await _completion_text(prompt, max_tokens=256)
+        if not text:
+            logger.info("domhand.batch_match_empty_retry", context=context)
+            text = await _completion_text(prompt, max_tokens=256)
+        data = _extract_json_object(text)
+        payload = _BatchMatchPayload.model_validate(data)
+
+        result: list[bool] = []
+        for i, idx in enumerate(payload.matches[:len(profile_anchors)]):
+            matched = idx is not None and 0 <= idx < len(page_anchors)
+            result.append(matched)
+
+        # Pad if LLM returned fewer results than profile entries
+        while len(result) < len(profile_anchors):
+            result.append(False)
+
+        logger.info(
+            "domhand.batch_match_entries",
+            context=context,
+            profile_count=len(profile_anchors),
+            page_count=len(page_anchors),
+            matched_count=sum(result),
+            llm_raw=text[:200] if text else "",
+        )
+        return result
+    except Exception as exc:
+        logger.warning("domhand.batch_match_entries_failed", error=str(exc)[:120])
+        return [False] * len(profile_anchors)

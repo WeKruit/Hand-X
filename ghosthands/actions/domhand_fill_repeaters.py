@@ -458,16 +458,37 @@ async def _observe_existing_entries(
 
     existing_count = len(page_anchor_values)
 
-    # Step 3: Match profile entries against page anchors (exact match after normalization)
+    # Step 3: Fast path — exact match after normalization
     matched_profile_indices: list[int] = []
-    unmatched_entries: list[dict[str, Any]] = []
+    needs_llm: list[tuple[int, str]] = []  # (original_index, anchor_value)
 
     for idx, entry in enumerate(profile_entries):
         profile_anchor = _extract_profile_anchor_value(canonical_section, entry)
         if profile_anchor and profile_anchor in page_anchor_values:
             matched_profile_indices.append(idx)
-        else:
-            unmatched_entries.append(entry)
+        elif profile_anchor and page_anchor_values:
+            needs_llm.append((idx, profile_anchor))
+        # else: no anchor or no page values — unmatched by default
+
+    # Step 4: LLM batch matching for remaining (one call per section)
+    if needs_llm and page_anchor_values:
+        from ghosthands.dom.oracle_combobox_llm import batch_match_entries_llm
+
+        llm_profile_anchors = [anchor for _, anchor in needs_llm]
+        llm_results = await batch_match_entries_llm(
+            llm_profile_anchors,
+            page_anchor_values,
+            context=canonical_section,
+        )
+        for j, (orig_idx, _) in enumerate(needs_llm):
+            if j < len(llm_results) and llm_results[j]:
+                matched_profile_indices.append(orig_idx)
+
+    # Build unmatched list
+    matched_set = set(matched_profile_indices)
+    unmatched_entries: list[dict[str, Any]] = [
+        entry for idx, entry in enumerate(profile_entries) if idx not in matched_set
+    ]
 
     logger.info(
         "domhand.observe_existing_entries",
