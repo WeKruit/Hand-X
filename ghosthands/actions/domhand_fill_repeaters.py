@@ -439,15 +439,19 @@ async def _observe_existing_entries(
 
     all_fields = await extract_visible_form_fields(page)
 
-    # Step 1: Filter fields to target section
+    # Step 1: Filter fields to target section (try scoped first, fall back to all)
     section_fields = [
         f for f in all_fields
         if _section_matches_scope(f.section, canonical_section)
     ]
+    # If section scoping found nothing, fall back to all fields.
+    # Anchor label matching (_is_anchor_field) already isolates per section type —
+    # "Company" won't match education, "School" won't match experience.
+    candidate_fields = section_fields if section_fields else all_fields
 
     # Step 2: Identify anchor fields with effective values
     page_anchor_values: list[str] = []
-    for field in section_fields:
+    for field in candidate_fields:
         if not _is_anchor_field(field.name, canonical_section):
             continue
         if not _field_has_effective_value(field):
@@ -499,6 +503,8 @@ async def _observe_existing_entries(
         section=canonical_section,
         total_fields=len(all_fields),
         section_fields=len(section_fields),
+        scope_fallback=len(section_fields) == 0,
+        candidate_fields=len(candidate_fields),
         anchor_fields_with_value=existing_count,
         page_anchors=page_anchor_values,
         matched_count=len(matched_profile_indices),
@@ -580,6 +586,35 @@ async def domhand_fill_repeaters(
                     "existing_count": existing_count,
                     "entries_filled": 0,
                     "all_present": True,
+                },
+            )
+        # If page has at least as many anchor values as profile entries,
+        # the entries EXIST but may have wrong values (mismatch).
+        # Don't add new entries — browser-use / domhand_fill can correct them.
+        if existing_count >= len(entries) and len(obs.matched_profile_indices) < len(entries):
+            mismatched = existing_count - len(obs.matched_profile_indices)
+            logger.info(
+                "domhand.fill_repeaters.mismatch_detected",
+                section=canonical,
+                existing_count=existing_count,
+                matched=len(obs.matched_profile_indices),
+                mismatched=mismatched,
+                page_anchors=obs.page_anchor_values,
+            )
+            return ActionResult(
+                extracted_content=(
+                    f"DomHand: {params.section} — {existing_count} entries on page, "
+                    f"{mismatched} have wrong values (mismatch). "
+                    f"Skipping add — correct existing entries instead."
+                ),
+                metadata={
+                    "tool": "domhand_fill_repeaters",
+                    "section": canonical,
+                    "entries_total": len(entries),
+                    "existing_count": existing_count,
+                    "entries_filled": 0,
+                    "mismatch_detected": True,
+                    "mismatched_count": mismatched,
                 },
             )
         entries = obs.unmatched_entries
