@@ -97,11 +97,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Observation results for education fields do not include experience fields visible elsewhere on the same page, and vice versa
   3. Only fields that have effective non-empty values (not just placeholder text or blank inputs) are counted as existing entries
   4. Unit tests pass for anchor label matching, profile key extraction, and the `ObservationResult` data contract
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 05-01: TBD
-- [ ] 05-02: TBD
+- [ ] 05-01-PLAN.md — Anchor definitions, ObservationResult dataclass, and _observe_existing_entries function
+- [ ] 05-02-PLAN.md — Unit tests for anchor matching, profile key extraction, and ObservationResult contract
 
 ### Phase 6: LLM Batch Matching
 **Goal**: Profile entries can be matched against observed page entries using a normalization fast-path for exact matches and a single LLM call per section for fuzzy matches.
@@ -144,6 +144,6 @@ Phases execute in numeric order: 5 -> 6 -> 7
 | 2. Runtime Asset And Credential Delivery | v1.0 | 0/3 | Deferred | - |
 | 3. Consumer Migration In Hand-X And Desktop | v1.0 | 0/3 | Deferred | - |
 | 4. Parity Verification And Cutover Safety | v1.0 | 0/3 | Deferred | - |
-| 5. Observation + Anchor Detection | v1.1 | 0/2 | Not started | - |
+| 5. Observation + Anchor Detection | v1.1 | 0/2 | Planned | - |
 | 6. LLM Batch Matching | v1.1 | 0/2 | Not started | - |
 | 7. Integration + End-to-End Testing | v1.1 | 0/2 | Not started | - |
