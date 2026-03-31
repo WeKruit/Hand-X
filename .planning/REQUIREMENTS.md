@@ -66,25 +66,25 @@ Requirements for generic repeater pre-fill detection. Each maps to roadmap phase
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| OBS-01 | — | Pending |
-| OBS-02 | — | Pending |
-| OBS-03 | — | Pending |
-| MATCH-01 | — | Pending |
-| MATCH-02 | — | Pending |
-| MATCH-03 | — | Pending |
-| INT-01 | — | Pending |
-| INT-02 | — | Pending |
-| INT-03 | — | Pending |
-| TEST-01 | — | Pending |
-| TEST-02 | — | Pending |
-| TEST-03 | — | Pending |
-| TEST-04 | — | Pending |
+| OBS-01 | Phase 5 | Pending |
+| OBS-02 | Phase 5 | Pending |
+| OBS-03 | Phase 5 | Pending |
+| MATCH-01 | Phase 6 | Pending |
+| MATCH-02 | Phase 6 | Pending |
+| MATCH-03 | Phase 6 | Pending |
+| INT-01 | Phase 7 | Pending |
+| INT-02 | Phase 7 | Pending |
+| INT-03 | Phase 7 | Pending |
+| TEST-01 | Phase 5 | Pending |
+| TEST-02 | Phase 7 | Pending |
+| TEST-03 | Phase 7 | Pending |
+| TEST-04 | Phase 6 | Pending |
 
 **Coverage:**
 - v1.1 requirements: 13 total
-- Mapped to phases: 0
-- Unmapped: 13
+- Mapped to phases: 13
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-31*
-*Last updated: 2026-03-31 after initial definition*
+*Last updated: 2026-03-31 after roadmap creation*
