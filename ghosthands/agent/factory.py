@@ -164,6 +164,7 @@ async def create_job_agent(
         max_failures=5,
         use_thinking=True,
         step_timeout=300,
+        llm_timeout=120,
     )
 
     logger.info(

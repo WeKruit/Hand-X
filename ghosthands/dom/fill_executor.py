@@ -1471,15 +1471,12 @@ _ORACLE_COMBOBOX_CLICK_INDEX_JS = r"""
 
 
 def _is_oracle_school_llm_field(field: FormField) -> bool:
-    """Oracle education combobox: use GPT type → scan → LLM index pick (not JS substring).
+    """Oracle education combobox: use GPT type → scan → LLM index pick.
 
-    Triage may set ``oracle_freeform_combobox_answer`` for both **school** and **field_of_study**
-    on Oracle FA to skip option-list coercion. Only **school-like** labels enter this LLM picker;
-    major / field-of-study / discipline labels stay on the generic Oracle combobox path
-    (``_fill_oracle_combobox_outcome`` with keyboard + JS row match).
+    Detects school-like labels directly — does NOT depend on the triage flag
+    ``oracle_freeform_combobox_answer`` because the triage may not set it when
+    ``entry_val`` is None (education entry binding failed).
     """
-    if not field.oracle_freeform_combobox_answer:
-        return False
     label = normalize_name(_preferred_field_label(field))
     if any(
         tok in label
@@ -1862,6 +1859,62 @@ async def _fill_oracle_school_combobox_llm_outcome(
     return _fill_outcome(False)
 
 
+_MONTH_NAMES = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+
+def _parse_oracle_date_component(label_lower: str, value: str) -> str | None:
+    """Parse date strings for Oracle Month/Year combobox fields.
+
+    "2025-09" + "start date month" → "September"
+    "2025-09" + "start date year"  → "2025"
+    Returns None if not a date component field or value isn't parseable.
+    """
+    is_month = "month" in label_lower and ("date" in label_lower or "start" in label_lower or "end" in label_lower)
+    is_year = "year" in label_lower and ("date" in label_lower or "start" in label_lower or "end" in label_lower)
+    if not (is_month or is_year):
+        return None
+    v = (value or "").strip()
+    if is_month and v.title() in _MONTH_NAMES:
+        return v.title()
+    if is_year and re.match(r"^\d{4}$", v):
+        return v
+    m = re.match(r"^(\d{4})-(\d{1,2})(?:-\d{1,2})?$", v)
+    if not m:
+        return None
+    year_str, month_str = m.group(1), m.group(2)
+    month_num = int(month_str)
+    if is_month and 1 <= month_num <= 12:
+        return _MONTH_NAMES[month_num - 1]
+    if is_year:
+        return year_str
+    return None
+
+
+def _parse_oracle_gpa_value(label_lower: str, value: str) -> str | None:
+    """Round GPA for Oracle combobox: "3.91" → "3.9", "3.50" → "3.5".
+
+    Oracle GPA dropdowns typically have values at 1 decimal place (3.9, 4.0).
+    Returns None if not a GPA field or value isn't a number.
+    """
+    if "gpa" not in label_lower and "grade" not in label_lower and "mark" not in label_lower:
+        return None
+    if "grading system" in label_lower or "scale" in label_lower:
+        return None
+    v = (value or "").strip()
+    try:
+        num = float(v)
+        # Round down to 1 decimal (3.91 → 3.9, not 4.0)
+        import math
+        rounded = math.floor(num * 10) / 10
+        return f"{rounded:.1f}".rstrip("0").rstrip(".")
+        # 3.9 → "3.9", 4.0 → "4", 3.0 → "3"
+    except (ValueError, TypeError):
+        return None
+
+
 def _oracle_combobox_search_terms(value: str) -> list[str]:
     """Generate progressively shorter search terms for Oracle combobox retry.
 
@@ -1928,10 +1981,56 @@ async def _fill_oracle_combobox_outcome(
         logger.debug(f"skip {tag} (oracle combobox, no answer)")
         return _fill_outcome(False)
 
+    # ── Parse date components: "2025-09" → "September" / "2025" ───
+    label_lower = normalize_name(_preferred_field_label(field))
+    _date_val = _parse_oracle_date_component(label_lower, value)
+    if _date_val:
+        logger.info(
+            "domhand.oracle_date_component",
+            field_label=field.name,
+            field_id=ff_id,
+            raw_value=value[:40],
+            parsed_value=_date_val,
+        )
+        value = _date_val
+
+    # ── GPA rounding: "3.91" → "3.9" ─────────────────────────────
+    _gpa_val = _parse_oracle_gpa_value(label_lower, value)
+    if _gpa_val and _gpa_val != value:
+        logger.info(
+            "domhand.oracle_gpa_rounded",
+            field_label=field.name,
+            field_id=ff_id,
+            raw_value=value[:20],
+            rounded_value=_gpa_val,
+        )
+        value = _gpa_val
+
+    # ── School: LLM search+pick (before element-exists gate) ─────
+    is_school_llm = _is_oracle_school_llm_field(field)
+    if is_school_llm:
+        logger.info(
+            "domhand.oracle_combobox_path_decision",
+            field_label=field.name,
+            field_id=ff_id,
+            is_school_llm=True,
+            oracle_freeform_flag=field.oracle_freeform_combobox_answer,
+            value=value[:80],
+        )
+        from ghosthands.dom.oracle_combobox_llm import _oracle_school_llm_disabled
+        if _oracle_school_llm_disabled():
+            logger.warning(
+                "domhand.oracle_school_llm_disabled",
+                field_label=field.name,
+                reason="no OpenAI API key or VALET proxy grant configured",
+            )
+        return await _fill_oracle_school_combobox_llm_outcome(page, field, value, tag)
+
+    # ── Element-exists gate ───────────────────────────────────────
     try:
         exists_raw = await page.evaluate(_ELEMENT_EXISTS_JS, ff_id, field.field_type)
         exists = json.loads(exists_raw) if isinstance(exists_raw, str) else exists_raw
-        if not exists:
+        if not (isinstance(exists, dict) and exists.get("exists")):
             logger.warning(
                 "domhand.oracle_combobox_element_not_found",
                 field_label=field.name,
@@ -1942,24 +2041,14 @@ async def _fill_oracle_combobox_outcome(
             )
             return _fill_outcome(False)
 
-        is_school_llm = _is_oracle_school_llm_field(field)
         logger.info(
             "domhand.oracle_combobox_path_decision",
             field_label=field.name,
             field_id=ff_id,
-            is_school_llm=is_school_llm,
+            is_school_llm=False,
             oracle_freeform_flag=field.oracle_freeform_combobox_answer,
             value=value[:80],
         )
-        if is_school_llm:
-            from ghosthands.dom.oracle_combobox_llm import _oracle_school_llm_disabled
-            if _oracle_school_llm_disabled():
-                logger.warning(
-                    "domhand.oracle_school_llm_disabled",
-                    field_label=field.name,
-                    reason="no OpenAI API key or VALET proxy grant configured",
-                )
-            return await _fill_oracle_school_combobox_llm_outcome(page, field, value, tag)
 
         # Build search terms: full value first, then shorter alternatives.
         search_terms = _oracle_combobox_search_terms(value)
@@ -1986,10 +2075,9 @@ async def _fill_oracle_combobox_outcome(
                     attempt=attempt_idx + 1,
                 )
 
-            # When multiple options are visible, use LLM to pick the correct one
-            # (same pattern as school picker — JS substring is ambiguous for addresses,
-            # employers, etc. with many similar-looking options across cities/states).
-            if polled_options and len(polled_options) > 1:
+            # Any options found → use LLM to pick (even 1 option needs
+            # verification: "C" typed but only "C++" shows → LLM rejects).
+            if polled_options and len(polled_options) >= 1:
                 try:
                     from ghosthands.dom.oracle_combobox_llm import dropdown_pick_option_llm
                     llm_idx = await dropdown_pick_option_llm(
@@ -2040,17 +2128,30 @@ async def _fill_oracle_combobox_outcome(
             effective = committed or current_val
 
             if effective.strip():
-                logger.debug(
-                    "domhand.oracle_combobox_ok",
-                    field_label=field.name,
-                    value=effective[:60],
-                    matched_label=(matched_label or "")[:60],
-                    search_term=term[:60],
-                    attempt=attempt_idx + 1,
-                )
-                if await _field_has_validation_error(page, ff_id):
-                    return _fill_outcome(False)
-                return _fill_outcome(True, matched_label=matched_label)
+                # Only count as filled if an option was actually clicked.
+                # Typed text alone (e.g. "September" visible but no dropdown
+                # option selected) is a false positive — Oracle won't commit it.
+                if not matched_label and polled_options:
+                    logger.info(
+                        "domhand.oracle_combobox_typed_but_no_click",
+                        field_label=field.name,
+                        typed_text=effective[:60],
+                        search_term=term[:60],
+                        option_count=len(polled_options),
+                    )
+                    # Don't return success — try next search term or fail
+                else:
+                    logger.debug(
+                        "domhand.oracle_combobox_ok",
+                        field_label=field.name,
+                        value=effective[:60],
+                        matched_label=(matched_label or "")[:60],
+                        search_term=term[:60],
+                        attempt=attempt_idx + 1,
+                    )
+                    if await _field_has_validation_error(page, ff_id):
+                        return _fill_outcome(False)
+                    return _fill_outcome(True, matched_label=matched_label)
 
             # No match with this term — log and try the next one.
             logger.debug(
@@ -2776,7 +2877,12 @@ async def _fill_workday_skill_multiselect(
 
             # Workday skill: press Enter after typing — many Workday skill widgets
             # are freeform and commit on Enter without showing a dropdown.
+            # Re-focus the skill input before Enter — if a Work Experience
+            # inline form is also open, React may have shifted focus away.
             await asyncio.sleep(1.0)
+            with contextlib.suppress(Exception):
+                await page.evaluate(_FOCUS_FIELD_JS, ff_id)
+            await asyncio.sleep(0.15)
             with contextlib.suppress(Exception):
                 await _press_key_compat(page, "Enter")
             await asyncio.sleep(_WORKDAY_SKILL_POST_ENTER_SETTLE_S)
@@ -2800,21 +2906,45 @@ async def _fill_workday_skill_multiselect(
             try:
                 raw_options = await page.evaluate(SCAN_VISIBLE_OPTIONS_JS)
                 visible_opts = json.loads(raw_options) if isinstance(raw_options, str) else raw_options
-                opt_labels = [str(o.get("text", "")).strip() for o in (visible_opts or []) if o.get("text", "").strip()]
+                # SCAN_VISIBLE_OPTIONS_JS returns plain strings, not dicts
+                opt_labels = []
+                for o in (visible_opts or []):
+                    text = (o.strip() if isinstance(o, str) else str(o.get("text", "")).strip()) if o else ""
+                    if text:
+                        opt_labels.append(text)
             except Exception:
                 opt_labels = []
+
+            logger.info(
+                "domhand.workday_skill_enter_no_commit",
+                skill=val[:40],
+                visible_options=len(opt_labels),
+                first_options=opt_labels[:5],
+            )
 
             if opt_labels:
                 llm_idx = await dropdown_pick_option_llm(val, opt_labels, context="skill")
                 if llm_idx is not None:
-                    # Click the LLM-picked option by index
+                    # Click the LLM-picked option via CDP mouse
                     clicked = await _click_dropdown_option_by_index(page, llm_idx)
+                    logger.info(
+                        "domhand.workday_skill_click_attempt",
+                        skill=val[:40],
+                        llm_picked_index=llm_idx,
+                        picked_label=opt_labels[llm_idx][:40] if llm_idx < len(opt_labels) else "OOB",
+                        click_success=clicked,
+                    )
                     if clicked:
                         await _settle_dropdown_selection(page)
                         committed = await _wait_for_multi_select_commit(
                             page, field, val,
                             previous_selection=before_selection,
                             matched_label=opt_labels[llm_idx] if llm_idx < len(opt_labels) else None,
+                        )
+                        logger.info(
+                            "domhand.workday_skill_commit_check",
+                            skill=val[:40],
+                            committed=committed.get("committed", False),
                         )
                         if committed.get("committed"):
                             picked_count += 1
@@ -2823,7 +2953,7 @@ async def _fill_workday_skill_multiselect(
                             await _clear_dropdown_search(page, ff_id)
                             continue
 
-            logger.debug(f'workday skill multi-select {tag} option "{val}" not committed')
+            logger.info(f"domhand.workday_skill_not_committed", skill=val[:40])
 
         # Dismiss (like main)
         try:
@@ -3488,32 +3618,57 @@ async def _poll_click_workday_skill_option(
     return {"clicked": False}
 
 
-_CLICK_OPTION_BY_INDEX_JS = r"""(targetIndex) => {
+_FIND_OPTION_BY_INDEX_JS = r"""(targetIndex) => {
     var selectors = '[role="option"], [role="menuitem"], [role="treeitem"], [role="listitem"], [data-automation-id*="promptOption"], [data-automation-id*="selectOption"]';
     var els = document.querySelectorAll(selectors);
+    var vh = window.innerHeight || document.documentElement.clientHeight;
+    var seen = {};
     var visibleIdx = 0;
     for (var i = 0; i < els.length; i++) {
         var rect = els[i].getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) continue;
+        if (rect.bottom < 0 || rect.top > vh) continue;
         var t = (els[i].textContent || '').trim();
         if (!t) continue;
+        var key = t.toLowerCase();
+        if (seen[key]) continue;
+        seen[key] = 1;
         if (visibleIdx === targetIndex) {
-            els[i].click();
-            return JSON.stringify({clicked: true, text: t, index: targetIndex});
+            return JSON.stringify({
+                found: true, text: t, index: targetIndex,
+                x: Math.round(rect.left + rect.width / 2),
+                y: Math.round(rect.top + rect.height / 2)
+            });
         }
         visibleIdx++;
     }
-    return JSON.stringify({clicked: false, reason: 'index_out_of_range'});
+    return JSON.stringify({found: false, reason: 'index_out_of_range'});
 }"""
 
 
 async def _click_dropdown_option_by_index(page: Any, index: int) -> bool:
-    """Click a visible dropdown option by its 0-based index among visible options."""
+    """Click a visible dropdown option by its 0-based index via CDP mouse click."""
     try:
-        raw = await page.evaluate(_CLICK_OPTION_BY_INDEX_JS, index)
+        raw = await page.evaluate(_FIND_OPTION_BY_INDEX_JS, index)
         result = json.loads(raw) if isinstance(raw, str) else raw
-        return bool(result.get("clicked"))
-    except Exception:
+        if not result.get("found"):
+            logger.info("domhand.click_option_by_index.not_found", index=index)
+            return False
+        x, y = result["x"], result["y"]
+        logger.info(
+            "domhand.click_option_by_index",
+            index=index,
+            text=result.get("text", "")[:40],
+            x=x,
+            y=y,
+        )
+        mouse = page.mouse
+        if hasattr(mouse, "__await__"):
+            mouse = await mouse
+        await mouse.click(x, y)
+        return True
+    except Exception as exc:
+        logger.info("domhand.click_option_by_index.error", index=index, error=str(exc)[:80])
         return False
 
 
@@ -4130,10 +4285,11 @@ async def _wait_for_multi_select_commit(
         current = await _read_multi_select_selection(page, field.field_id)
         last_selection = current
         tokens = [str(token).strip() for token in current.get("tokens", []) if str(token).strip()]
-        for token in tokens:
-            if _field_value_matches_expected(token, expected, matched_label=matched_label):
-                return {**current, "committed": True, "via": "token_match"}
-        if int(current.get("count", 0) or 0) > previous_count:
+        current_count = int(current.get("count", 0) or 0)
+        # Only signal: did a NEW chip appear? Don't text-match against
+        # existing chips — substring is unstable ("Java" ⊂ "JavaScript",
+        # "C" ⊂ "C++"). Count increase is the reliable commit signal.
+        if current_count > previous_count:
             return {**current, "committed": True, "via": "count_increase"}
         if any(token.lower() not in previous_tokens for token in tokens):
             return {**current, "committed": True, "via": "new_token"}

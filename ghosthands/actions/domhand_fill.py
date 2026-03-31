@@ -3285,8 +3285,29 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 )
                 continue
             if _is_skill_like(_preferred_field_label(f)):
+                # When called from repeater with entry_data, use the single skill
+                single_skill = (
+                    (entry_data.get("skill_name") or entry_data.get("skill") or "").strip()
+                    if isinstance(entry_data, dict) else ""
+                )
+                if single_skill:
+                    direct_fills[f.field_id] = single_skill
+                    resolved_values[f.field_id] = _resolved_field_value(
+                        single_skill,
+                        source="entry_data",
+                        answer_mode="profile_backed",
+                        confidence=1.0,
+                    )
+                    continue
                 skills = _profile_skill_values(profile_data)
                 if skills:
+                    # Oracle combobox selects need one skill at a time
+                    # (handled by domhand_fill_repeaters). Skip comma-join
+                    # only on Oracle FA hosts. Workday multi-select widgets
+                    # NEED the comma-join — the executor splits and fills
+                    # each skill via _fill_multi_select.
+                    if _is_searchable_combobox_on_oracle(f, page_host=page_host):
+                        continue
                     skill_value = ", ".join(skills)
                     direct_fills[f.field_id] = skill_value
                     resolved_values[f.field_id] = _resolved_field_value(
@@ -4049,7 +4070,9 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
 
         known_ids = {f.field_id for f in fillable_fields if f.field_id}
 
-        if browser_session and round_num == 1:
+        # Skip stagehand observe when called from repeaters (entry_data present).
+        # Repeater fills are single-field, cross-ref is wasteful (~12s + cost per call).
+        if browser_session and round_num == 1 and not params.entry_data:
             await _stagehand_observe_cross_reference(browser_session, known_ids | fields_seen, all_results)
 
         for cond_pass in range(1, MAX_CONDITIONAL_PASSES + 1):

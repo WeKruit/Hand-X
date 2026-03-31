@@ -87,7 +87,48 @@ _COUNT_OPEN_INLINE_FORMS_JS = r"""
 }
 """
 
-_CLICK_SAVE_BUTTON_JS = r"""
+_CLEAR_COMBOBOX_TEXT_JS = r"""
+() => {
+    var combos = document.querySelectorAll('[role="combobox"] input, input[aria-autocomplete]');
+    for (var i = 0; i < combos.length; i++) {
+        var el = combos[i];
+        var s = getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden') continue;
+        if (el.value && el.value.trim()) {
+            el.focus();
+            el.select();
+            document.execCommand('delete');
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+            return JSON.stringify({cleared: true, field: el.getAttribute('id') || ''});
+        }
+    }
+    return JSON.stringify({cleared: false});
+}
+"""
+
+_FIND_CANCEL_BUTTON_JS = r"""
+() => {
+    var btns = document.querySelectorAll('button, [role="button"]');
+    for (var i = 0; i < btns.length; i++) {
+        var text = (btns[i].textContent || '').trim().toLowerCase();
+        var s = getComputedStyle(btns[i]);
+        if (s.display === 'none' || s.visibility === 'hidden') continue;
+        if (text === 'cancel' || text === 'discard' || text === 'remove') {
+            var rect = btns[i].getBoundingClientRect();
+            return JSON.stringify({
+                found: true,
+                text: btns[i].textContent.trim(),
+                x: Math.round(rect.left + rect.width / 2),
+                y: Math.round(rect.top + rect.height / 2)
+            });
+        }
+    }
+    return JSON.stringify({found: false});
+}
+"""
+
+_FIND_SAVE_BUTTON_JS = r"""
 (sectionHint) => {
     var hint = (sectionHint || '').toLowerCase();
     var diag = {hint: hint, phase: '', visible_buttons: []};
@@ -102,6 +143,18 @@ _CLICK_SAVE_BUTTON_JS = r"""
         }
     }
 
+    function btnRect(btn, phase, extra) {
+        var rect = btn.getBoundingClientRect();
+        return JSON.stringify(Object.assign({
+            found: true,
+            text: btn.textContent.trim(),
+            x: Math.round(rect.left + rect.width / 2),
+            y: Math.round(rect.top + rect.height / 2),
+            phase: phase,
+            diag: diag
+        }, extra || {}));
+    }
+
     // ── Phase 1: .profile-inline-form save (Greenhouse, Lever, etc.) ──
     const selectors = [
         '.profile-inline-form .profile-inline-form__save',
@@ -111,19 +164,13 @@ _CLICK_SAVE_BUTTON_JS = r"""
     ];
     for (const sel of selectors) {
         const btn = document.querySelector(sel);
-        if (btn) {
-            btn.click();
-            diag.phase = 'profile_inline_form';
-            return JSON.stringify({clicked: true, text: btn.textContent.trim(), diag: diag});
-        }
+        if (btn) return btnRect(btn, 'profile_inline_form');
     }
     const allBtns = document.querySelectorAll('.profile-inline-form button');
     for (const btn of allBtns) {
         const text = (btn.textContent || '').trim().toLowerCase();
         if (text === 'save' || text === 'ok' || text === 'done' || text === 'commit' || text.startsWith('save')) {
-            btn.click();
-            diag.phase = 'profile_inline_form_text';
-            return JSON.stringify({clicked: true, text: btn.textContent.trim(), diag: diag});
+            return btnRect(btn, 'profile_inline_form_text');
         }
     }
 
@@ -132,6 +179,8 @@ _CLICK_SAVE_BUTTON_JS = r"""
     if (hint === 'skills')     sectionCommitPattern = /^add\s+skill$/i;
     if (hint === 'languages')  sectionCommitPattern = /^add\s+language$/i;
     if (hint === 'licenses')   sectionCommitPattern = /^add\s+(certification|license)$/i;
+    if (hint === 'education')  sectionCommitPattern = /^add\s+education$/i;
+    if (hint === 'experience') sectionCommitPattern = /^add\s+(work\s+)?experience$/i;
 
     var preferSave = (hint === 'education' || hint === 'experience');
 
@@ -143,9 +192,7 @@ _CLICK_SAVE_BUTTON_JS = r"""
             if (sectionCommitPattern.test(text)) {
                 var s = getComputedStyle(btn);
                 if (s.display !== 'none' && s.visibility !== 'hidden') {
-                    btn.click();
-                    diag.phase = 'oracle_section_commit';
-                    return JSON.stringify({clicked: true, text: text, oracle_commit: true, diag: diag});
+                    return btnRect(btn, 'oracle_section_commit', {oracle_commit: true});
                 }
             }
         }
@@ -157,18 +204,29 @@ _CLICK_SAVE_BUTTON_JS = r"""
             if (text === 'save' || text === 'ok' || text === 'done') {
                 var s = getComputedStyle(btn);
                 if (s.display !== 'none' && s.visibility !== 'hidden') {
-                    btn.click();
-                    diag.phase = 'oracle_save';
-                    return JSON.stringify({clicked: true, text: btn.textContent.trim(), diag: diag});
+                    return btnRect(btn, 'oracle_save');
                 }
             }
         }
     }
 
     diag.phase = 'none_found';
-    return JSON.stringify({clicked: false, reason: 'no_save_button_found', diag: diag});
+    return JSON.stringify({found: false, reason: 'no_save_button_found', diag: diag});
 }
 """
+
+
+async def _cdp_click_cancel(page) -> bool:
+    """Find cancel button via JS, click via CDP mouse for proper Oracle handling."""
+    try:
+        raw = await page.evaluate(_FIND_CANCEL_BUTTON_JS)
+        info = json.loads(raw) if isinstance(raw, str) else raw
+        if info.get("found"):
+            await page.mouse.click(info["x"], info["y"])
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _normalize_section(section: str) -> str:
@@ -217,11 +275,20 @@ def _get_entries_for_section(
         skills = profile_data.get("skills", [])
         if isinstance(skills, list):
             entries = []
+            seen: set[str] = set()
             for s in skills:
-                if isinstance(s, str) and s.strip():
-                    entries.append({"skill_name": s.strip()})
+                name = ""
+                if isinstance(s, str):
+                    name = s.strip()
                 elif isinstance(s, dict):
-                    entries.append(s)
+                    name = (s.get("skill_name") or s.get("skill") or s.get("name") or "").strip()
+                if not name:
+                    continue
+                key = name.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                entries.append({"skill_name": name})
             if max_entries:
                 entries = entries[:max_entries]
             return entries
@@ -332,8 +399,12 @@ async def domhand_fill_repeaters(
 
     expand_names = _EXPAND_SECTION_NAMES.get(canonical, [params.section])
     results: list[str] = []
+    committed_labels: list[str] = []
     filled_count = 0
     failed_entries: list[str] = []
+    skills_taxonomy_miss_labels: list[str] = []
+    consecutive_skill_misses = 0
+    _MAX_CONSECUTIVE_SKILL_MISSES = 3
     consecutive_same_value_count = 0
 
     for i in range(existing_count, len(entries)):
@@ -409,6 +480,48 @@ async def domhand_fill_repeaters(
         else:
             consecutive_same_value_count = 0
 
+        # Skills: check if the Skill combobox value was actually committed.
+        # If domhand_fill reported 0 new fills and the Skill field is in the
+        # failed or already_filled set, the combobox didn't accept this skill.
+        if canonical == "skills" and entry_filled == 0 and already_filled >= 1:
+            skill_name = entry.get("skill_name", "") if isinstance(entry, dict) else str(entry)
+            logger.info(
+                "domhand.fill_repeaters.skill_not_committed",
+                section=canonical,
+                entry_index=i,
+                skill_name=skill_name[:40],
+                entry_filled=entry_filled,
+                already_filled=already_filled,
+            )
+            skills_taxonomy_miss_labels.append(skill_name)
+            consecutive_skill_misses += 1
+            if consecutive_skill_misses >= _MAX_CONSECUTIVE_SKILL_MISSES:
+                logger.info(
+                    "domhand.fill_repeaters.skill_early_termination",
+                    section=canonical,
+                    entry_index=i,
+                    consecutive_misses=consecutive_skill_misses,
+                    reason="employer taxonomy likely doesn't have remaining profile skills",
+                )
+                # Clean up: clear stale combobox text and cancel the open form
+                # so the agent sees a clean state (no open skill editor).
+                try:
+                    await page.evaluate(_CLEAR_COMBOBOX_TEXT_JS)
+                    await asyncio.sleep(0.3)
+                    await _cdp_click_cancel(page)
+                    await asyncio.sleep(0.5)
+                except Exception:
+                    pass
+                break
+            # Clear the Skill combobox text so the form stays open
+            # (Skill Type already filled). Next iteration reuses the same form.
+            try:
+                await page.evaluate(_CLEAR_COMBOBOX_TEXT_JS)
+                await asyncio.sleep(0.3)
+            except Exception:
+                pass
+            continue
+
         # Do NOT save/commit when fields failed — entry is incomplete
         if entry_failed > 0:
             failed_entries.append(
@@ -421,13 +534,22 @@ async def domhand_fill_repeaters(
                 filled=entry_filled,
                 failed=entry_failed,
             )
+            try:
+                await _cdp_click_cancel(page)
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
             continue
 
         try:
-            save_raw = await page.evaluate(_CLICK_SAVE_BUTTON_JS, canonical)
-            save_result = json.loads(save_raw) if isinstance(save_raw, str) else save_raw
+            # Find button position via JS, then CDP mouse click for proper
+            # Oracle event handler firing (JS btn.click() doesn't commit).
+            find_raw = await page.evaluate(_FIND_SAVE_BUTTON_JS, canonical)
+            save_result = json.loads(find_raw) if isinstance(find_raw, str) else find_raw
             diag = save_result.get("diag", {})
-            if save_result.get("clicked"):
+            if save_result.get("found"):
+                bx, by = save_result["x"], save_result["y"]
+                await page.mouse.click(bx, by)
                 logger.info(
                     "domhand.fill_repeaters.commit_clicked",
                     section=canonical,
@@ -435,6 +557,7 @@ async def domhand_fill_repeaters(
                     button_text=save_result.get("text", ""),
                     oracle_commit=save_result.get("oracle_commit", False),
                     phase=diag.get("phase", ""),
+                    click_coords=f"{bx},{by}",
                     visible_buttons=diag.get("visible_buttons", [])[:10],
                 )
                 await asyncio.sleep(0.8)
@@ -452,22 +575,31 @@ async def domhand_fill_repeaters(
 
         if entry_filled > 0 or not fill_result.error:
             filled_count += 1
+            consecutive_skill_misses = 0  # reset on success
             results.append(f"{entry_label}: {entry_filled} fields filled")
+            # Track short name for the summary message
+            if canonical == "skills":
+                committed_labels.append(entry.get("skill_name", "") if isinstance(entry, dict) else str(entry))
+            else:
+                committed_labels.append(entry_label)
         else:
             failed_entries.append(f"{entry_label}: fill failed ({fill_result.error or 'unknown'})")
 
-    summary_parts = [
-        f"{params.section}: {filled_count}/{needed} entries filled "
-        f"(profile has {len(entries)}, {existing_count} already existed)."
-    ]
-    if results:
-        summary_parts.append("Filled entries:")
-        summary_parts.extend(f"  - {r}" for r in results)
+    # Build concise summary — keep it short to avoid context bloat for the LLM.
+    summary_parts = [f"{params.section}: {filled_count}/{needed} entries filled."]
+    if committed_labels:
+        summary_parts.append(f"Committed: {', '.join(committed_labels)}")
+    if skills_taxonomy_miss_labels:
+        summary_parts.append(
+            f"Skipped (not in employer taxonomy): {', '.join(skills_taxonomy_miss_labels)}"
+        )
     if failed_entries:
-        summary_parts.append(f"Failed entries: {len(failed_entries)}.")
-        summary_parts.extend(f"  - {f}" for f in failed_entries)
-    if not failed_entries:
-        summary_parts.append("All entries filled successfully.")
+        summary_parts.append(f"Failed: {'; '.join(failed_entries)}")
+    summary_parts.append(
+        f"{params.section} section is COMPLETE — do NOT call domhand_fill on this section again. "
+        f"If other repeater sections remain (Languages, Licenses, etc.), "
+        f"call domhand_fill_repeaters for each before clicking Next."
+    )
 
     return ActionResult(
         extracted_content="\n".join(summary_parts),

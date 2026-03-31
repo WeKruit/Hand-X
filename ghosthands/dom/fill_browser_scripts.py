@@ -1475,13 +1475,13 @@ _IS_SEARCHABLE_DROPDOWN_JS = r"""(ffId) => {
 _ELEMENT_EXISTS_JS = r"""(ffId, fieldType) => {
 	var ff = window.__ff;
 	var el = ff ? ff.byId(ffId) : null;
-	if (!el) return JSON.stringify(false);
-	if (ff.isVisible(el)) return JSON.stringify(true);
+	if (!el) return JSON.stringify({exists: false});
+	if (ff.isVisible(el)) return JSON.stringify({exists: true});
 	if (fieldType === 'file') {
 		var container = ff.closestCrossRoot(el, '[class*=upload], [class*=drop], .form-group, .field');
-		return JSON.stringify(container ? ff.isVisible(container) : false);
+		return JSON.stringify({exists: !!(container && ff.isVisible(container))});
 	}
-	return JSON.stringify(false);
+	return JSON.stringify({exists: false});
 }"""
 
 _REVEAL_SECTIONS_JS = r"""() => {

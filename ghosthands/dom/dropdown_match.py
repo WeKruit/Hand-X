@@ -298,11 +298,13 @@ SCAN_VISIBLE_OPTIONS_JS = r"""() => {
     }
     var selectors = '[role="option"], [role="menuitem"], [role="treeitem"], [role="listitem"], [data-automation-id*="promptOption"], [data-automation-id*="selectOption"]';
     var els = qAll(selectors);
+    var vh = window.innerHeight || document.documentElement.clientHeight;
     var seen = {};
     var results = [];
     for (var i = 0; i < els.length; i++) {
         var rect = els[i].getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) continue;
+        if (rect.bottom < 0 || rect.top > vh) continue;
         var t = (els[i].textContent || '').trim();
         if (!t) continue;
         var key = t.toLowerCase();
