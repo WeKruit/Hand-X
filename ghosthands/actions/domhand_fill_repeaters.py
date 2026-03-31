@@ -12,6 +12,7 @@ import json
 import structlog
 import os
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from browser_use.agent.views import ActionResult
@@ -59,6 +60,33 @@ _EXPAND_SECTION_NAMES: dict[str, list[str]] = {
     "languages": ["Language Skills", "Language", "Languages"],
     "licenses": ["Licenses", "License", "licenses", "Licenses & Certifications"],
 }
+
+_ANCHOR_LABELS: dict[str, list[str]] = {
+    "experience": ["company", "employer", "organization", "organisation"],
+    "education": ["school", "institution", "university", "college"],
+    "languages": ["language"],
+    "skills": ["skill", "skill name"],
+    "licenses": ["certification", "license", "credential"],
+}
+
+_PROFILE_ANCHOR_KEYS: dict[str, list[str]] = {
+    "experience": ["company", "employer", "organization", "company_name"],
+    "education": ["school", "institution", "university", "school_name"],
+    "languages": ["language", "language_name"],
+    "skills": ["skill_name", "skill", "name"],
+    "licenses": ["certification_name", "license_name", "credential_name", "name"],
+}
+
+
+@dataclass
+class ObservationResult:
+    """Result of observing existing repeater entries on the page."""
+
+    existing_count: int
+    matched_profile_indices: list[int]
+    unmatched_entries: list[dict[str, Any]]
+    page_anchor_values: list[str]
+
 
 _COUNT_SAVED_TILES_JS = r"""
 (profileType) => {
@@ -355,6 +383,109 @@ def _get_entries_for_section(
     if max_entries:
         entries = entries[:max_entries]
     return entries
+
+
+def _extract_profile_anchor_value(canonical_section: str, entry: dict[str, Any]) -> str:
+    """Extract the anchor value from a profile entry dict.
+
+    Tries keys from _PROFILE_ANCHOR_KEYS in order, returns the first
+    non-empty value after normalize_name. Returns "" if no anchor found.
+    """
+    keys = _PROFILE_ANCHOR_KEYS.get(canonical_section, [])
+    for key in keys:
+        raw = entry.get(key)
+        if raw and isinstance(raw, str):
+            normalized = normalize_name(raw.strip())
+            if normalized:
+                return normalized
+    return ""
+
+
+def _is_anchor_field(field_name: str, canonical_section: str) -> bool:
+    """Check if a field name matches any anchor label for the section.
+
+    Uses containment check: normalize_name(field_name) must contain
+    at least one anchor label substring from _ANCHOR_LABELS[section].
+    """
+    labels = _ANCHOR_LABELS.get(canonical_section, [])
+    if not labels:
+        return False
+    normalized = normalize_name(field_name)
+    if not normalized:
+        return False
+    return any(label in normalized for label in labels)
+
+
+async def _observe_existing_entries(
+    page: Any,
+    canonical_section: str,
+    profile_entries: list[dict[str, Any]],
+) -> ObservationResult:
+    """Observe existing repeater entries on the page by anchor field values.
+
+    1. Calls extract_visible_form_fields(page) to get all visible fields.
+    2. Filters to fields matching the target section via _section_matches_scope.
+    3. Identifies anchor fields using _is_anchor_field.
+    4. Keeps only anchor fields with effective values (_field_has_effective_value).
+    5. Extracts and normalizes anchor values from the page.
+    6. Matches profile entries against page anchors using normalize_name exact match.
+    7. Returns ObservationResult with counts, matched indices, unmatched entries, and page values.
+
+    NOTE: This phase uses normalize_name exact match only.
+    LLM fuzzy matching is added in Phase 6.
+    """
+    from ghosthands.dom.fill_executor import extract_visible_form_fields, _field_has_effective_value
+    from ghosthands.dom.fill_label_match import _section_matches_scope
+
+    all_fields = await extract_visible_form_fields(page)
+
+    # Step 1: Filter fields to target section
+    section_fields = [
+        f for f in all_fields
+        if _section_matches_scope(f.section, canonical_section)
+    ]
+
+    # Step 2: Identify anchor fields with effective values
+    page_anchor_values: list[str] = []
+    for field in section_fields:
+        if not _is_anchor_field(field.name, canonical_section):
+            continue
+        if not _field_has_effective_value(field):
+            continue
+        normalized_value = normalize_name(str(field.current_value).strip())
+        if normalized_value:
+            page_anchor_values.append(normalized_value)
+
+    existing_count = len(page_anchor_values)
+
+    # Step 3: Match profile entries against page anchors (exact match after normalization)
+    matched_profile_indices: list[int] = []
+    unmatched_entries: list[dict[str, Any]] = []
+
+    for idx, entry in enumerate(profile_entries):
+        profile_anchor = _extract_profile_anchor_value(canonical_section, entry)
+        if profile_anchor and profile_anchor in page_anchor_values:
+            matched_profile_indices.append(idx)
+        else:
+            unmatched_entries.append(entry)
+
+    logger.info(
+        "domhand.observe_existing_entries",
+        section=canonical_section,
+        total_fields=len(all_fields),
+        section_fields=len(section_fields),
+        anchor_fields_with_value=existing_count,
+        page_anchors=page_anchor_values,
+        matched_count=len(matched_profile_indices),
+        unmatched_count=len(unmatched_entries),
+    )
+
+    return ObservationResult(
+        existing_count=existing_count,
+        matched_profile_indices=matched_profile_indices,
+        unmatched_entries=unmatched_entries,
+        page_anchor_values=page_anchor_values,
+    )
 
 
 async def domhand_fill_repeaters(
