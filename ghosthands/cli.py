@@ -603,6 +603,21 @@ async def _should_resume_from_false_verification_blocker(
 # ── Argument parsing ──────────────────────────────────────────────────
 
 
+def _handle_smoke_test_import() -> None:
+    """Handle --smoke-test-import early, before argparse (which requires --job-url)."""
+    argv = sys.argv[1:]
+    if "--smoke-test-import" in argv:
+        idx = argv.index("--smoke-test-import")
+        if idx + 1 < len(argv):
+            module_name = argv[idx + 1]
+            try:
+                __import__(module_name)
+                sys.exit(0)
+            except ImportError:
+                sys.exit(1)
+        sys.exit(1)
+
+
 def parse_args() -> argparse.Namespace:
     # Strip optional "apply" subcommand for backwards compat:
     #   hand-x apply --job-url ...  AND  hand-x --job-url ...  both work.
@@ -2718,6 +2733,9 @@ def main() -> None:
         raise SystemExit(1)
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    # Handle --smoke-test-import before argparse (bypasses --job-url requirement)
+    _handle_smoke_test_import()
 
     args = parse_args()
 

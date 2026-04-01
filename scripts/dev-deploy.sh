@@ -100,8 +100,30 @@ if [ "$SKIP_BUILD" = false ]; then
     exit 1
   fi
 
+  # Deactivate any active venv/conda env to prevent interference
+  deactivate 2>/dev/null || true
+  unset VIRTUAL_ENV
+  unset CONDA_DEFAULT_ENV
+
   # Always activate project venv (overrides conda/system Python)
   source .venv/bin/activate
+
+  # Verify we got the right Python
+  ACTIVE_PYTHON="$(which python)"
+  EXPECTED_PYTHON="$REPO_ROOT/.venv/bin/python"
+  if [ "$ACTIVE_PYTHON" != "$EXPECTED_PYTHON" ]; then
+    echo "ERROR: Active Python is $ACTIVE_PYTHON, expected $EXPECTED_PYTHON"
+    echo "Conda or system Python may be interfering. Check your shell profile."
+    exit 1
+  fi
+
+  PYTHON_VERSION="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  if [ "$PYTHON_VERSION" != "3.12" ]; then
+    echo "ERROR: Python version is $PYTHON_VERSION, expected 3.12"
+    echo "Rebuild .venv: uv venv --python 3.12 && uv pip install -e '.[dev]'"
+    exit 1
+  fi
+  echo "Using Python $PYTHON_VERSION from $ACTIVE_PYTHON"
 
   # Install PyInstaller if missing
   if ! python -c "import PyInstaller" 2>/dev/null; then
@@ -140,16 +162,17 @@ if [ ! -f "$BUILD_BINARY" ]; then
   exit 1
 fi
 
-# Smoke test
+# ---------- Smoke test ----------
 echo ""
 echo "Smoke testing binary..."
 chmod +x "$BUILD_BINARY"
 # Remove macOS quarantine + provenance (Gatekeeper kills unsigned binaries)
 if [ "$PLATFORM" = "darwin" ]; then
   xattr -cr "$BUILD_BINARY" 2>/dev/null || true
-  # Re-sign adhoc after stripping xattrs
   codesign --force --sign - "$BUILD_BINARY" 2>/dev/null || true
 fi
+
+# Test --help works
 if "$BUILD_BINARY" --help >/dev/null 2>&1; then
   echo "  --help: OK"
 else
@@ -163,8 +186,45 @@ else
   fi
 fi
 
+# Test --version
 VERSION_OUTPUT=$("$BUILD_BINARY" --version 2>/dev/null || true)
 echo "  --version: $VERSION_OUTPUT"
+
+# Critical module import smoke test — runs INSIDE the binary's embedded Python
+# These are the modules that cause runtime crashes when missing
+SMOKE_IMPORTS=(
+  "openai"
+  "anthropic"
+  "google.genai"
+  "playwright"
+  "aiohttp"
+  "stagehand"
+  "httpx"
+  "pydantic"
+  "structlog"
+  "cryptography"
+)
+
+echo ""
+echo "Validating critical module imports inside binary..."
+IMPORT_FAILED=false
+for mod in "${SMOKE_IMPORTS[@]}"; do
+  if "$BUILD_BINARY" --smoke-test-import "$mod" 2>/dev/null; then
+    echo "  import $mod: OK"
+  else
+    echo "  import $mod: FAILED"
+    IMPORT_FAILED=true
+  fi
+done
+
+if [ "$IMPORT_FAILED" = true ]; then
+  echo ""
+  echo "FATAL: One or more critical imports failed in the built binary."
+  echo "The binary was NOT installed. Fix the PyInstaller spec (build/hand-x.spec)"
+  echo "to include the missing modules in hidden_imports."
+  exit 1
+fi
+echo "All critical imports OK."
 
 # Extract semver from --version output, fallback to __init__.py, fallback to git tag
 VERSION=$(echo "$VERSION_OUTPUT" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
