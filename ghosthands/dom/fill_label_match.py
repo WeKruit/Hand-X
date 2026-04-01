@@ -533,6 +533,33 @@ def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
         if normalize_name(choice) == text_norm:
             return choice
 
+    # EEO gender/identity aliases: profile stores "Male"/"Female" but ATS forms
+    # often use "Man"/"Woman" or vice versa.
+    _EEO_ALIASES: dict[str, set[str]] = {
+        "male": {"man", "male", "cis man", "cisgender man"},
+        "man": {"man", "male", "cis man", "cisgender man"},
+        "female": {"woman", "female", "cis woman", "cisgender woman"},
+        "woman": {"woman", "female", "cis woman", "cisgender woman"},
+        "asian": {"asian", "east asian", "south asian", "southeast asian"},
+        "east asian": {"asian", "east asian"},
+        "i decline to self-identify": {
+            "i dont wish to answer", "i don't wish to answer",
+            "i decline to self-identify", "prefer not to say",
+            "decline to answer", "prefer not to answer",
+            "i choose not to disclose",
+        },
+        "i don't wish to answer": {
+            "i dont wish to answer", "i don't wish to answer",
+            "i decline to self-identify", "prefer not to say",
+            "decline to answer", "prefer not to answer",
+        },
+    }
+    text_aliases = _EEO_ALIASES.get(text_norm, set())
+    if text_aliases:
+        for choice in choices:
+            if normalize_name(choice) in text_aliases:
+                return choice
+
     if degree_family_answer:
         for choice in choices:
             if _matches_degree_family_choice(choice, degree_family_answer):
