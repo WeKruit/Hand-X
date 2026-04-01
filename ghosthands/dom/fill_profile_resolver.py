@@ -508,6 +508,8 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
                 "work_authorization": _read_text("work_authorization", "workAuthorization", "authorized_to_work_in_us", "authorizedToWorkInUs"),
                 "visa_sponsorship": _read_text("visa_sponsorship", "visaSponsorship", "needs_visa_sponsorship", "needsVisaSponsorship"),
                 "citizenship_status": _read_text("citizenship_status", "citizenshipStatus"),
+                "citizenship_country": _read_text("citizenship_country", "citizenshipCountry"),
+                "visa_type": _read_text("visa_type", "visaType"),
                 "us_citizen": _read_text("us_citizen", "usCitizen", "US_citizen"),
                 "export_control_eligible": _read_text("export_control_eligible", "exportControlEligible"),
                 "available_start_date": _read_text("available_start_date", "availableStartDate"),
@@ -594,6 +596,8 @@ def _parse_profile_evidence(profile_text: str) -> dict[str, str | None]:
         "work_authorization": read_line("Work authorization") or read_line("Authorized to work in the U.S."),
         "visa_sponsorship": read_line("Visa sponsorship") or read_line("Needs visa sponsorship"),
         "citizenship_status": read_line("Citizenship status") or read_line("Citizenship"),
+        "citizenship_country": read_line("Country of citizenship") or read_line("Citizenship country"),
+        "visa_type": read_line("Visa type") or read_line("Visa classification"),
         "us_citizen": read_line("U.S. citizen") or read_line("US citizen"),
         "export_control_eligible": read_line("Export control eligible") or read_line("Export control eligibility"),
         "available_start_date": read_line("Available start date"),
@@ -1298,6 +1302,21 @@ def _build_profile_answer_map(
         "Citizenship status",
         "Immigration status",
         "What is your citizenship status?",
+    )
+    add(
+        canonical.get("citizenship_country"),
+        "Country of citizenship",
+        "Citizenship country",
+        "What is your country of citizenship?",
+        "What country are you a citizen of?",
+    )
+    add(
+        canonical.get("visa_type"),
+        "Visa type",
+        "What type of visa do you hold?",
+        "Visa classification",
+        "Immigration visa type",
+        "Current visa status",
     )
     add(
         canonical.get("us_citizen"),
