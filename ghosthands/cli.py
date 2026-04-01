@@ -1780,6 +1780,10 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 "visa_sponsorship": _profile_debug_preview(
                     profile.get("visa_sponsorship") or profile.get("needs_visa_sponsorship")
                 ),
+                "gender": _profile_debug_preview(profile.get("gender")),
+                "race_ethnicity": _profile_debug_preview(profile.get("race_ethnicity")),
+                "veteran_status": _profile_debug_preview(profile.get("veteran_status")),
+                "disability_status": _profile_debug_preview(profile.get("disability_status")),
                 "salary_expectation": _profile_debug_preview(profile.get("salary_expectation")),
                 "english_proficiency": _profile_debug_preview(profile.get("english_proficiency")),
                 "spoken_languages": _profile_debug_preview(profile.get("spoken_languages")),
