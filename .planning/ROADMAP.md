@@ -4,6 +4,7 @@
 
 - **v1.0 Runtime Profile Contract** - Phases 1-4 (deferred)
 - **v1.1 Generic Repeater Pre-fill Detection** - Phases 5-7 (in progress)
+- **v1.2 SPA Page Transition Detection** - Phases 8-9 (planned)
 
 ## Phases
 
@@ -86,6 +87,13 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 6: LLM Batch Matching** - Match profile entries against observed page entries using normalization fast-path and LLM fuzzy matching
 - [ ] **Phase 7: Integration + End-to-End Testing** - Wire observation into the repeater loop, keep tile-count fallback, and prove correctness with fixture tests
 
+### v1.2 SPA Page Transition Detection (Planned)
+
+**Milestone Goal:** Make the browser-use agent reliably detect SPA page transitions by enriching page identity fingerprinting with DOM content signals, so PAGE UPDATE fires on content changes even when the URL stays the same.
+
+- [ ] **Phase 8: Fingerprint Collection + Transition Detection** - Collect lightweight DOM fingerprints per step in browser_use and enrich page identity to detect SPA content changes
+- [ ] **Phase 9: Validation + Regression Testing** - Prove SPA transitions trigger domhand_fill on Workday, GS Oracle still works, and conditional reveals do not false-positive
+
 ## Phase Details
 
 ### Phase 5: Observation + Anchor Detection
@@ -133,10 +141,39 @@ Plans:
 - [ ] 07-01: TBD
 - [ ] 07-02: TBD
 
+### Phase 8: Fingerprint Collection + Transition Detection
+**Goal**: The browser-use agent collects a lightweight DOM fingerprint per step and uses it to detect SPA page transitions where the URL stays the same but the page content changes.
+**Depends on**: Nothing (first phase of v1.2; builds on existing `_page_identity()` and `_apply_page_transition_context()` in browser_use)
+**Requirements**: FPRINT-01, FPRINT-02, TRANS-01, TRANS-02
+**Success Criteria** (what must be TRUE):
+  1. After each agent step, `BrowserStateSummary` includes a fingerprint hash derived from page headings, buttons, and form count -- collected via a single JS eval taking less than 10ms
+  2. `_page_identity()` returns a different identity when SPA content changes (new headings, different buttons, different form count) even if URL and title remain the same
+  3. When page identity changes due to fingerprint delta, the existing PAGE UPDATE system note is injected, stale context is cleared, and forced compaction fires -- identical behavior to URL-based transitions
+  4. The fingerprint JS snippet and hash logic live in browser_use core (not ghosthands), so any browser_use consumer benefits from SPA detection
+**Plans**: TBD
+
+Plans:
+- [ ] 08-01: TBD
+- [ ] 08-02: TBD
+
+### Phase 9: Validation + Regression Testing
+**Goal**: SPA transition detection is proven correct on real ATS flows: Workday transitions trigger domhand_fill, GS Oracle URL-based transitions still work, and conditional field reveals do not cause false positives.
+**Depends on**: Phase 8
+**Requirements**: VAL-01, VAL-02, VAL-03
+**Success Criteria** (what must be TRUE):
+  1. On a Workday SPA flow (URL stays the same, content changes between sections), PAGE UPDATE fires and the agent calls domhand_fill on the new page content
+  2. On a GS Oracle flow (URL changes between sections), existing PAGE UPDATE behavior is unchanged -- no regression in transition detection or domhand_fill triggering
+  3. When a conditional field reveal occurs within a page (e.g., clicking a radio button reveals new fields), the fingerprint does NOT change enough to trigger a false page transition
+**Plans**: TBD
+
+Plans:
+- [ ] 09-01: TBD
+- [ ] 09-02: TBD
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 5 -> 6 -> 7
+Phases execute in numeric order: 5 -> 6 -> 7 -> 8 -> 9
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
@@ -147,3 +184,5 @@ Phases execute in numeric order: 5 -> 6 -> 7
 | 5. Observation + Anchor Detection | v1.1 | 0/2 | Planned | - |
 | 6. LLM Batch Matching | v1.1 | 0/2 | Not started | - |
 | 7. Integration + End-to-End Testing | v1.1 | 0/2 | Not started | - |
+| 8. Fingerprint Collection + Transition Detection | v1.2 | 0/2 | Not started | - |
+| 9. Validation + Regression Testing | v1.2 | 0/2 | Not started | - |

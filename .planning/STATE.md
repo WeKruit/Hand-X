@@ -5,14 +5,14 @@
 See: .planning/PROJECT.md (updated 2026-03-31)
 
 **Core value:** A saved applicant identity can be applied accurately, repeatably, and safely across ATS flows without the user re-entering data.
-**Current focus:** Milestone v1.2 — SPA Page Transition Detection
+**Current focus:** Milestone v1.2 -- SPA Page Transition Detection
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-03-31 — Milestone v1.2 started
+Phase: 8 of 9 (Fingerprint Collection + Transition Detection)
+Plan: 0 of TBD in current phase
+Status: Ready to plan
+Last activity: 2026-03-31 -- Roadmap created for v1.2
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -37,13 +37,13 @@ Progress: [░░░░░░░░░░] 0%
 
 ### Decisions
 
-- `_page_identity()` uses title+URL+element_count — unchanged on Workday SPA → no PAGE UPDATE → agent skips domhand_fill
-- `_PAGE_FINGERPRINT_JS` in domhand_click_button already captures headings+buttons+forms for before/after comparison
-- `_visible_field_id_snapshot()` in fill_executor captures field IDs for DOM comparison
-- field_ids overlap check in service.py:1470-1486 exists for same-page guard but doesn't feed into page transition detection
-- Hook-based ActionResult injection (tried in v1.1) creates noise — agent confused by extra messages
-- PAGE UPDATE + compaction mechanism works for URL changes (GS Oracle) — just needs SPA trigger
-- Conditional field reveals (radio → new fields) don't change headings/buttons → no false positive risk
+- `_page_identity()` uses title+URL+element_count -- unchanged on Workday SPA, so no PAGE UPDATE fires -- this is the root problem v1.2 solves
+- `_PAGE_FINGERPRINT_JS` in domhand_click_button.py:419-447 is the reference fingerprint structure (headings+buttons+forms)
+- `_page_identity()` in browser_use/agent/message_manager/service.py:193-206 is what gets enriched with fingerprint hash
+- `_apply_page_transition_context()` in service.py:225-240 already handles PAGE UPDATE when identity changes -- no new mechanism needed
+- All changes go in browser_use/ core (3 files: views.py, agent/service.py, message_manager/service.py) -- not ghosthands
+- Hook-based ActionResult injection (tried in v1.1) creates noise -- rejected approach
+- Conditional field reveals (radio -> new fields) don't change headings/buttons so no false positive risk with this fingerprint approach
 
 ### Pending Todos
 
@@ -56,5 +56,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-31
-Stopped at: Milestone v1.2 started, defining requirements
+Stopped at: Roadmap created for v1.2, ready to plan Phase 8
 Resume file: None
