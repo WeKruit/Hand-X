@@ -1058,6 +1058,13 @@ def _build_profile_answer_map(
         "Please indicate if you have a disability",
         "Please check one of the boxes below:",
     )
+    add(
+        canonical.get("sexual_orientation"),
+        "Sexual Orientation",
+        "How would you describe your sexual orientation",
+        "Please select your sexual orientation",
+        "sexual orientation",
+    )
     add(canonical.get("country"), "Country", "Country/Territory", "Country/Region")
     add(canonical.get("phone_device_type"), "Phone Device Type", "Phone Type")
     add(canonical.get("phone_country_code"), "Country Phone Code", "Phone Country Code")
@@ -1277,6 +1284,28 @@ def _build_profile_answer_map(
         "Legally authorized to work",
         "Are you legally permitted to work in the country where this job is located?",
         "Are you legally authorized to work in the country in which this job is located?",
+    )
+    add(
+        canonical.get("citizenship_status"),
+        "Citizenship status",
+        "Immigration status",
+        "What is your citizenship status?",
+    )
+    add(
+        canonical.get("us_citizen"),
+        "Are you a U.S. citizen",
+        "U.S. citizen or lawful permanent resident",
+        "Are you a U.S. citizen or lawful permanent resident?",
+        "Are you a United States citizen?",
+        "U.S. Person",
+    )
+    add(
+        canonical.get("export_control_eligible"),
+        "Export control",
+        "ITAR",
+        "EAR",
+        "Are you a U.S. Person as defined by ITAR?",
+        "Do you meet export control eligibility requirements?",
     )
 
     age_value = profile_data.get("age")
