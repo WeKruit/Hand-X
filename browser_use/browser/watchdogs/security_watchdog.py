@@ -100,15 +100,21 @@ class SecurityWatchdog(BaseWatchdog):
 
 		# In shared-browser mode, skip security checks for tabs that belong
 		# to other jobs (pre-existing tabs).
-		if is_shared_browser and agent_target and event.target_id != agent_target:
-			if not self._initialization_complete:
-				# Still during init — this is a pre-existing tab from another job
-				self._initial_target_ids.add(event.target_id)
+		if is_shared_browser and agent_target:
+			if event.target_id != agent_target:
+				if not self._initialization_complete:
+					# Still during init — this is a pre-existing tab from another job
+					self._initial_target_ids.add(event.target_id)
+					return
+				if event.target_id in self._initial_target_ids:
+					# Known pre-existing tab, leave it alone
+					return
+				# Genuinely new tab created during agent execution — enforce security below
+			elif not self._initialization_complete:
+				# Agent's own tab during init — Desktop placed us here intentionally
+				# (e.g. on the Valet idle page). Skip security check; the agent will
+				# navigate to the job URL momentarily.
 				return
-			if event.target_id in self._initial_target_ids:
-				# Known pre-existing tab, leave it alone
-				return
-			# Genuinely new tab created during agent execution — enforce security below
 
 		if not self._is_url_allowed(event.url):
 			self.logger.warning(f'⛔️ New tab created with disallowed URL: {event.url}')
