@@ -39,6 +39,8 @@ CAMEL_TO_SNAKE_SCALAR: dict[str, str] = {
     "authorizedToWorkInUs": "authorized_to_work_in_us",
     "needsVisaSponsorship": "needs_visa_sponsorship",
     "citizenshipStatus": "citizenship_status",
+    "citizenshipCountry": "citizenship_country",
+    "visaType": "visa_type",
     "usCitizen": "us_citizen",
     "exportControlEligible": "export_control_eligible",
     "raceEthnicity": "race_ethnicity",

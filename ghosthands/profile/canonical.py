@@ -337,6 +337,8 @@ def build_canonical_profile(
     register_profile_alias("authorized_to_work", ("authorized_to_work",), ("authorized_to_work_in_us",), ("US_citizen",), ("us_citizen",))
     register_profile_alias("sponsorship_needed", ("sponsorship_needed",), ("visa_sponsorship",), ("needs_visa_sponsorship",))
     register_profile_alias("citizenship_status", ("citizenship_status",), ("citizenshipStatus",))
+    register_profile_alias("citizenship_country", ("citizenship_country",), ("citizenshipCountry",))
+    register_profile_alias("visa_type", ("visa_type",), ("visaType",))
     register_profile_alias("us_citizen", ("us_citizen",), ("US_citizen",))
     register_profile_alias("export_control_eligible", ("export_control_eligible",), ("exportControlEligible",))
 
