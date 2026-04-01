@@ -2368,7 +2368,7 @@ def _match_answer(
     # "decline" option rather than leaving the field empty and forcing
     # the agent to waste steps filling them one at a time.
     _has_constrained_choices = bool(field.choices or field.options) and field.field_type in {
-        "button-group", "radio-group", "radio", "checkbox-group",
+        "button-group", "radio-group", "radio", "checkbox-group", "select",
     }
     if field.required or _has_constrained_choices:
         for norm_name in candidate_norms:

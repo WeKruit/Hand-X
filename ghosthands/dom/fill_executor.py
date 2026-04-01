@@ -2819,19 +2819,62 @@ async def _fill_multi_select(page: Any, field: FormField, values: list[str], tag
             workday_result = await _fill_workday_skill_multiselect(page, field, values, tag)
             if workday_result is not None:
                 return workday_result
-        picked_count = 0
-        for val in values:
+
+        # ── Check-before-act: compare existing chips vs desired values ──
+        initial_selection = await _read_multi_select_selection(page, ff_id)
+        existing_tokens_raw = [
+            str(t).strip()
+            for t in (initial_selection.get("tokens") or [])
+            if str(t).strip()
+        ]
+        existing_set = {t.lower() for t in existing_tokens_raw}
+        desired_set = {v.strip().lower() for v in values if v.strip()}
+
+        # Early return: existing chips already match desired set exactly
+        if existing_set == desired_set:
+            logger.debug(
+                f"multi-select {tag} already correct: {existing_tokens_raw}"
+            )
+            return True
+
+        # Identify stale chips (present but not desired) and missing values
+        stale_tokens = [
+            tok for tok in existing_tokens_raw
+            if tok.lower() not in desired_set
+        ]
+        missing_values = [
+            v for v in values
+            if v.strip().lower() not in existing_set
+        ]
+
+        # Remove stale chips before adding new ones
+        if stale_tokens:
+            logger.debug(
+                f"multi-select {tag} clearing stale chips: {stale_tokens}"
+            )
+            removed = await _remove_stale_multi_select_chips(
+                page, ff_id, stale_tokens, tag
+            )
+            logger.debug(
+                f"multi-select {tag} removed {removed}/{len(stale_tokens)} stale chips"
+            )
+            # Re-read after removal to update state
+            if removed > 0:
+                initial_selection = await _read_multi_select_selection(page, ff_id)
+                existing_set = {
+                    str(t).strip().lower()
+                    for t in (initial_selection.get("tokens") or [])
+                    if str(t).strip()
+                }
+
+        # Count chips that are already correct (present and desired)
+        picked_count = sum(
+            1 for v in values if v.strip().lower() in existing_set
+        )
+
+        # Only iterate over values still missing
+        for val in missing_values:
             before_selection = await _read_multi_select_selection(page, ff_id)
-            # Dedup: skip if this value (or close match) is already a chip.
-            # Prevents stacking duplicate chips on retry (e.g. "I don't wish to answer" + "Man").
-            existing_tokens = [
-                str(t).strip().lower()
-                for t in (before_selection.get("tokens") or [])
-                if str(t).strip()
-            ]
-            if existing_tokens and val.strip().lower() in existing_tokens:
-                picked_count += 1  # Already present — count as success
-                continue
             await _try_open_combobox_menu(page, ff_id, tag=tag)
             await asyncio.sleep(0.2)
             await _clear_dropdown_search(page, ff_id)
@@ -3078,6 +3121,161 @@ _TAG_WORKDAY_CHIP_DELETE_JS = r"""(ffId) => {
     }
     return JSON.stringify({found: false, reason: 'no_chips'});
 }"""
+
+
+# Tag one stale chip for removal inside a react-select or generic multi-select widget.
+# Accepts (ffId, staleTokenLower) — finds a chip whose visible text (case-insensitive)
+# matches staleTokenLower and tags its remove/× button with [data-dh-chip-delete].
+# Works for: react-select (__multi-value__remove, css-*-multiValue), Workday pills, generic chips.
+_TAG_MULTI_SELECT_CHIP_REMOVE_JS = r"""(ffId, staleTokenLower) => {
+    var old = document.querySelector('[data-dh-chip-delete]');
+    if (old) old.removeAttribute('data-dh-chip-delete');
+
+    var ff = window.__ff || null;
+    var el = ff ? ff.byId(ffId) : document.querySelector('[data-ff-id="' + ffId + '"]');
+    if (!el) return JSON.stringify({found: false, reason: 'no_element'});
+
+    var clean = function(t) { return (t || '').replace(/\s+/g, ' ').trim(); };
+    var visible = function(n) {
+        if (!n) return false;
+        var s = window.getComputedStyle(n);
+        if (!s || s.visibility === 'hidden' || s.display === 'none') return false;
+        var r = n.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    };
+
+    // Walk up to the react-select control or form-field wrapper
+    var wrapper =
+        (ff && ff.closestCrossRoot && (
+            ff.closestCrossRoot(el, '[class*="select__control"]') ||
+            ff.closestCrossRoot(el, '[class*="Select__control"]') ||
+            ff.closestCrossRoot(el, '[class*="css-"][class*="-control"]') ||
+            ff.closestCrossRoot(el, '[class*="react-select"]') ||
+            ff.closestCrossRoot(el, '[data-automation-id="formField"]') ||
+            ff.closestCrossRoot(el, '[data-automation-id="multiselectInputContainer"]') ||
+            ff.closestCrossRoot(el, '.input-field-container')
+        )) ||
+        el.closest('[class*="select__control"]') ||
+        el.closest('[class*="Select__control"]') ||
+        el.closest('[class*="css-"][class*="-control"]') ||
+        el.closest('[class*="react-select"]') ||
+        el.closest('[data-automation-id="formField"]') ||
+        el.parentElement ||
+        el;
+
+    // Selectors for chip/pill containers (react-select multi-value, Workday pills, generic)
+    var chipSelectors = [
+        '[class*="multi-value"], [class*="multiValue"], [class*="MultiValue"]',
+        '[role="option"], [data-automation-id*="pill"], [id*="pill"]',
+        '[class*="token"], [class*="Token"]',
+        '[class*="pill"], [class*="Pill"]',
+        '[class*="chip"], [class*="Chip"]',
+        '[class*="tag"]:not(style):not(script), [class*="Tag"]:not(style):not(script)'
+    ];
+
+    for (var si = 0; si < chipSelectors.length; si++) {
+        var chips = wrapper.querySelectorAll(chipSelectors[si]);
+        for (var ci = 0; ci < chips.length; ci++) {
+            var chip = chips[ci];
+            if (!visible(chip)) continue;
+            var chipText = clean(chip.textContent).toLowerCase();
+            if (chipText.indexOf(staleTokenLower) === -1 && staleTokenLower.indexOf(chipText) === -1) continue;
+            // Found matching chip — look for its remove/x button
+            var removeSelectors = [
+                '[class*="multi-value__remove"], [class*="multiValue__remove"], [class*="MultiValue__remove"]',
+                '[class*="remove"], [class*="Remove"]',
+                'button[aria-label*="elete" i], button[aria-label*="emove" i], [data-automation-id="delete"]'
+            ];
+            var del = null;
+            for (var ri = 0; ri < removeSelectors.length; ri++) {
+                del = chip.querySelector(removeSelectors[ri]);
+                if (del && visible(del)) break;
+                del = null;
+            }
+            if (!del) {
+                // Fallback: any small button/span with x-like text
+                var candidates = chip.querySelectorAll('button, span[role="button"], [role="button"], svg');
+                for (var k = 0; k < candidates.length; k++) {
+                    var t = clean(candidates[k].textContent);
+                    if (t === '\u00d7' || t === 'x' || t === '\u2715' || t === '\u2716' || candidates[k].offsetWidth < 30) {
+                        del = candidates[k];
+                        break;
+                    }
+                }
+            }
+            if (del) {
+                del.setAttribute('data-dh-chip-delete', 'true');
+                del.scrollIntoView({block: 'center', behavior: 'instant'});
+                return JSON.stringify({found: true, chip_text: clean(chip.textContent).slice(0, 80), via: 'remove_button'});
+            }
+            // No remove button — tag chip itself
+            chip.setAttribute('data-dh-chip-delete', 'true');
+            chip.scrollIntoView({block: 'center', behavior: 'instant'});
+            return JSON.stringify({found: true, chip_text: clean(chip.textContent).slice(0, 80), via: 'chip_itself'});
+        }
+    }
+    return JSON.stringify({found: false, reason: 'no_matching_chip'});
+}"""
+
+
+async def _remove_stale_multi_select_chips(
+    page: Any,
+    ff_id: str,
+    stale_tokens: list[str],
+    tag: str,
+) -> int:
+    """Remove specific stale chips from a multi-select widget.
+
+    For each stale token, uses JS to tag the chip's remove button, then
+    Playwright-clicks it (trusted event for React state updates).
+
+    Returns the number of chips successfully removed.
+    """
+    removed = 0
+    for token in stale_tokens:
+        token_lower = token.strip().lower()
+        if not token_lower:
+            continue
+        try:
+            tag_raw = await page.evaluate(
+                _TAG_MULTI_SELECT_CHIP_REMOVE_JS, ff_id, token_lower
+            )
+            tag_result = json.loads(tag_raw) if isinstance(tag_raw, str) else tag_raw
+        except Exception:
+            continue
+
+        if not tag_result.get("found"):
+            continue
+
+        logger.debug(
+            f"multi-select {tag} removing stale chip: "
+            f"{tag_result.get('chip_text', '')!r}"
+        )
+
+        try:
+            btn = page.locator('[data-dh-chip-delete="true"]')
+            await btn.click(timeout=3000)
+            await asyncio.sleep(0.4)
+            removed += 1
+        except Exception:
+            # Fallback: focus field and Backspace
+            with contextlib.suppress(Exception):
+                await page.evaluate(_FOCUS_FIELD_JS, ff_id)
+            with contextlib.suppress(Exception):
+                await _press_key_compat(page, "Backspace")
+            await asyncio.sleep(0.3)
+            # Check if it was actually removed
+            after = await _read_multi_select_selection(page, ff_id)
+            after_tokens = {str(t).strip().lower() for t in (after.get("tokens") or []) if str(t).strip()}
+            if token_lower not in after_tokens:
+                removed += 1
+        finally:
+            with contextlib.suppress(Exception):
+                await page.evaluate(
+                    'var e=document.querySelector("[data-dh-chip-delete]");'
+                    'if(e)e.removeAttribute("data-dh-chip-delete")'
+                )
+    return removed
 
 
 async def _fill_workday_prompt_search(

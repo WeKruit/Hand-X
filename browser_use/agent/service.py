@@ -87,8 +87,9 @@ from ghosthands.step_trace import get_blocker_attempt_state, publish_browser_ses
 logger = logging.getLogger(__name__)
 
 # Lightweight DOM fingerprint for SPA transition detection.
-# Captures headings, buttons, and form count — changes on page transitions
-# but stays stable during conditional field reveals within a page.
+# Captures headings and form count only — buttons excluded because
+# dropdown interactions (open/close/select) change visible button text,
+# causing false transitions within the same page.
 _SPA_FINGERPRINT_JS = r"""() => {
 	var ff = window.__ff || null;
 	function qsa(sel) {
@@ -102,7 +103,6 @@ _SPA_FINGERPRINT_JS = r"""() => {
 	}
 	return JSON.stringify({
 		h: texts('h1, h2, h3, [role="heading"]', 6),
-		b: texts('button, [role="button"], input[type="submit"]', 8),
 		f: qsa('form').length
 	});
 }"""
