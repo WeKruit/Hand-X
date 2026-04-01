@@ -93,10 +93,8 @@ if [ "$SKIP_BUILD" = false ]; then
     exit 1
   fi
 
-  # Activate venv if not already
-  if [ -z "${VIRTUAL_ENV:-}" ]; then
-    source .venv/bin/activate
-  fi
+  # Always activate project venv (overrides conda/system Python)
+  source .venv/bin/activate
 
   # Install PyInstaller if missing
   if ! python -c "import PyInstaller" 2>/dev/null; then
