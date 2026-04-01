@@ -5,14 +5,14 @@
 See: .planning/PROJECT.md (updated 2026-03-31)
 
 **Core value:** A saved applicant identity can be applied accurately, repeatably, and safely across ATS flows without the user re-entering data.
-**Current focus:** Milestone v1.1 — Generic Repeater Pre-fill Detection — Phase 5: Observation + Anchor Detection
+**Current focus:** Milestone v1.2 — SPA Page Transition Detection
 
 ## Current Position
 
-Phase: 5 of 7 (Observation + Anchor Detection)
-Plan: 0 of 2 in current phase
-Status: Ready to plan
-Last activity: 2026-03-31 — Roadmap created for v1.1 (phases 5-7)
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-03-31 — Milestone v1.2 started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -37,11 +37,13 @@ Progress: [░░░░░░░░░░] 0%
 
 ### Decisions
 
-- `_COUNT_SAVED_TILES_JS` platform-specific counting breaks on Workday auto-fill (returns 0 -> duplicates all entries)
-- `extract_visible_form_fields` already captures pre-filled field values -- observation works, matching doesn't exist yet
-- `_section_matches_scope` fuzzy token overlap is reliable enough for section filtering
-- LLM batch matching (one GPT-5.4-nano call per section) chosen over per-entry matching for cost efficiency
-- Existing tile CSS selector kept as fallback for Greenhouse where saved entries are not form fields
+- `_page_identity()` uses title+URL+element_count — unchanged on Workday SPA → no PAGE UPDATE → agent skips domhand_fill
+- `_PAGE_FINGERPRINT_JS` in domhand_click_button already captures headings+buttons+forms for before/after comparison
+- `_visible_field_id_snapshot()` in fill_executor captures field IDs for DOM comparison
+- field_ids overlap check in service.py:1470-1486 exists for same-page guard but doesn't feed into page transition detection
+- Hook-based ActionResult injection (tried in v1.1) creates noise — agent confused by extra messages
+- PAGE UPDATE + compaction mechanism works for URL changes (GS Oracle) — just needs SPA trigger
+- Conditional field reveals (radio → new fields) don't change headings/buttons → no false positive risk
 
 ### Pending Todos
 
@@ -54,5 +56,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-31
-Stopped at: Roadmap created for v1.1 milestone, ready to plan Phase 5
+Stopped at: Milestone v1.2 started, defining requirements
 Resume file: None

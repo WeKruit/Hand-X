@@ -4,7 +4,7 @@
 
 Hand-X is a brownfield browser automation engine for job applications. It runs both as a desktop-invoked CLI and as a server-side worker, fills ATS flows across platforms like Workday and Greenhouse, and integrates with VALET and GH Desktop for profile data, progress reporting, and review.
 
-The current project focus is generic repeater pre-fill detection — making the repeater system detect existing entries on any ATS platform using field observation and LLM matching, replacing platform-specific DOM selectors.
+The current project focus is SPA page transition detection — making the browser-use agent reliably call domhand_fill on SPA page transitions by enriching page identity fingerprinting to detect content changes even when the URL stays the same.
 
 ## Core Value
 
@@ -21,28 +21,28 @@ A saved applicant identity can be applied accurately, repeatably, and safely acr
 
 ### Active
 
-- [ ] Repeater observation detects existing entries on any platform via `extract_visible_form_fields` + anchor field matching
-- [ ] LLM batch matching (one call per section) fuzzy-matches profile entries against page entries
-- [ ] Section-scoped anchor detection isolates observation per repeater type
-- [ ] Existing `_COUNT_SAVED_TILES_JS` kept as fallback for platforms where entries aren't form fields
-- [ ] Toy fixture tests validate pre-fill detection with simulated auto-fill scenarios
+- [ ] Lightweight page fingerprint (headings + buttons + form count) collected per step in browser_use
+- [ ] `_page_identity()` includes fingerprint hash to detect SPA transitions
+- [ ] PAGE UPDATE + compaction fires on SPA content changes (not just URL changes)
+- [ ] Workday SPA transitions trigger domhand_fill on new page
+- [ ] No false positives from conditional field reveals within a page
 
-## Current Milestone: v1.1 Generic Repeater Pre-fill Detection
+## Current Milestone: v1.2 SPA Page Transition Detection
 
-**Goal:** Replace platform-specific repeater entry counting with generic field observation + LLM matching so any ATS pre-fill is detected without per-platform selectors.
+**Goal:** Make the browser-use agent reliably call domhand_fill on SPA page transitions by fixing page transition detection to use DOM fingerprinting instead of URL-only comparison.
 
 **Target features:**
-- Generic pre-fill observation via `extract_visible_form_fields` + anchor field detection
-- LLM batch matching (one GPT-5.4-nano call per section) for fuzzy entity matching
-- Section-scoped filtering via `_section_matches_scope`
-- Graceful fallback to `_COUNT_SAVED_TILES_JS` when observation finds no anchor fields
-- Toy fixture tests with pre-fill simulation + unit tests
+- Page fingerprint JS eval per step (headings + buttons + form count) — ~3-5ms
+- Fingerprint hash included in `_page_identity()` for SPA detection
+- Existing PAGE UPDATE + compaction fires on SPA transitions
+- All changes in browser_use core (generic, not ghosthands-specific)
 
 ### Out of Scope
 
-- Rewriting the browser automation engine — not required to eliminate profile drift
-- Replacing browser-use or the DOM-first fill stack — unrelated to the current source-of-truth problem
-- Introducing client-side Supabase session logic into Hand-X — Hand-X should consume a server-provided contract, not own auth/session resolution
+- Programmatically executing domhand_fill from hooks — too aggressive, creates noise
+- Per-action middleware intercepting every tool call — too aggressive
+- Forcing domhand_fill via agent loop modification — changes browser-use agent contract
+- Heading-only detection (h1/h2) — fragile, not generic enough
 
 ## Context
 
@@ -61,9 +61,10 @@ The current architectural gap is not ATS automation capability; it is ownership 
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Make VALET provide one hydrated runtime-profile interface | Eliminates duplicated merge logic and data drift between Desktop and Hand-X | — Pending |
-| Keep Hand-X as a consumer of applicant runtime data, not an owner of merge policy | Preserves a single source of truth and reduces cross-repo divergence | — Pending |
-| Treat selected resume asset and auth credentials as part of runtime delivery, not ad hoc local defaults | End-to-end parity requires identity, file, and auth context to move together | — Pending |
+| Use DOM fingerprint (headings+buttons+forms) not heading-only | Rich multi-signal comparison avoids false positives from conditional fields | v1.2 |
+| Changes in browser_use core, not ghosthands | Page transition detection is generic — any browser_use consumer benefits | v1.2 |
+| Reuse existing PAGE UPDATE mechanism | Already works for URL changes on GS Oracle — just extend trigger to SPA | v1.2 |
+| Rejected hook-per-step approach | Tried in v1.1, created noise — telling LLM what to do vs. giving it correct context | v1.2 |
 
 ## Evolution
 
@@ -83,4 +84,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-03-31 after milestone v1.1 start*
+*Last updated: 2026-03-31 after milestone v1.2 start*
