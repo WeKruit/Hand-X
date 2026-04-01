@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ghosthands"
-version = "0.1.18"
+version = "0.2.0"
 description = "GhostHands v2 — Job application automation agent built on browser-use"
 readme = "README.md"
 requires-python = ">=3.12"
