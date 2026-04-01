@@ -125,17 +125,21 @@ if [ "$SKIP_BUILD" = false ]; then
   fi
   echo "Using Python $PYTHON_VERSION from $ACTIVE_PYTHON"
 
-  # Install PyInstaller if missing
+  # Install PyInstaller into .venv if missing (use uv for uv-managed venvs)
   if ! python -c "import PyInstaller" 2>/dev/null; then
-    echo "Installing PyInstaller..."
-    pip install pyinstaller==6.13.0
+    echo "Installing PyInstaller into .venv..."
+    if command -v uv >/dev/null 2>&1; then
+      uv pip install pyinstaller==6.13.0
+    else
+      python -m pip install pyinstaller==6.13.0
+    fi
   fi
 
   # Skip browser download — Desktop manages browsers separately
   export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
-  # Build
-  pyinstaller build/hand-x.spec \
+  # Build (use python -m PyInstaller to ensure it uses .venv's Python and packages)
+  python -m PyInstaller build/hand-x.spec \
     --distpath "build/dist" \
     --workpath "build/work" \
     --noconfirm \
