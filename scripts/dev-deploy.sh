@@ -39,16 +39,23 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Desktop app userData path
+# Desktop app userData path — Desktop may use either "Valet" or "gh-desktop-app"
+# depending on build configuration. Install to both if both exist.
 if [ -n "${GH_DESKTOP_USER_DATA_PATH:-}" ]; then
   APP_DATA="$GH_DESKTOP_USER_DATA_PATH"
 else
   case "$PLATFORM" in
-    darwin) APP_DATA="$HOME/Library/Application Support/Valet" ;;
+    darwin) APP_DATA="$HOME/Library/Application Support/gh-desktop-app" ;;
     linux)  APP_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/gh-desktop-app" ;;
     win)    APP_DATA="${APPDATA}/gh-desktop-app" ;;
   esac
 fi
+
+# Secondary path (legacy or alternate app name)
+case "$PLATFORM" in
+  darwin) APP_DATA_ALT="$HOME/Library/Application Support/Valet" ;;
+  *)      APP_DATA_ALT="" ;;
+esac
 
 BIN_DIR="$APP_DATA/bin"
 BINARY_DEST="$BIN_DIR/$BINARY_NAME"
@@ -218,6 +225,21 @@ EOF
 echo "  Binary:  $BINARY_DEST"
 echo "  Version: $VERSION"
 echo "  SHA-256: ${SHA256:0:16}..."
+
+# Also install to alternate app data path if it exists
+if [ -n "${APP_DATA_ALT:-}" ] && [ -d "$APP_DATA_ALT" ]; then
+  ALT_BIN_DIR="$APP_DATA_ALT/bin"
+  mkdir -p "$ALT_BIN_DIR"
+  cat "$BUILD_BINARY" > "$ALT_BIN_DIR/$BINARY_NAME"
+  chmod 755 "$ALT_BIN_DIR/$BINARY_NAME"
+  if [ "$PLATFORM" = "darwin" ]; then
+    xattr -cr "$ALT_BIN_DIR/$BINARY_NAME" 2>/dev/null || true
+    codesign --force --sign - "$ALT_BIN_DIR/$BINARY_NAME" 2>/dev/null || true
+  fi
+  cp "$VERSION_STATE" "$ALT_BIN_DIR/hand-x-downloaded-version.json"
+  echo "  Also:    $ALT_BIN_DIR/$BINARY_NAME"
+fi
+
 echo ""
 echo "Done. Now run 'npm run dev' in GH-Desktop-App and trigger a job."
 echo "To revert: $0 --clean"
