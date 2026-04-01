@@ -1774,8 +1774,12 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 "postal_code": _profile_debug_preview(profile.get("postal_code") or profile.get("zip")),
                 "county": _profile_debug_preview(profile.get("county")),
                 "linkedin": _profile_debug_preview(profile.get("linkedin") or profile.get("linkedin_url")),
-                "work_authorization": _profile_debug_preview(profile.get("work_authorization")),
-                "visa_sponsorship": _profile_debug_preview(profile.get("visa_sponsorship")),
+                "work_authorization": _profile_debug_preview(
+                    profile.get("work_authorization") or profile.get("authorized_to_work_in_us")
+                ),
+                "visa_sponsorship": _profile_debug_preview(
+                    profile.get("visa_sponsorship") or profile.get("needs_visa_sponsorship")
+                ),
                 "salary_expectation": _profile_debug_preview(profile.get("salary_expectation")),
                 "english_proficiency": _profile_debug_preview(profile.get("english_proficiency")),
                 "spoken_languages": _profile_debug_preview(profile.get("spoken_languages")),
