@@ -179,11 +179,11 @@ Plans:
   2. The built binary can import openai, anthropic, google.genai, playwright, aiohttp, and stagehand without ModuleNotFoundError
   3. A smoke test runs automatically after build and before installation, blocking install if any critical import fails
   4. The binary is installed to `~/Library/Application Support/gh-desktop-app/bin/` and a version state JSON is written so Desktop's updater recognizes the dev build
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 10-01: TBD
-- [ ] 10-02: TBD
+- [ ] 10-01-PLAN.md -- Harden venv activation, add Python 3.12 version guard, add critical module import smoke test
+- [ ] 10-02-PLAN.md -- Audit PyInstaller spec, run full build pipeline, validate installation and version state
 
 ### Phase 11: End-to-End Validation
 **Goal**: A fresh binary built from current source is dispatched by Desktop and completes a job without module errors, with correct profile field names and working LLM proxy.
@@ -215,5 +215,5 @@ Phases execute in numeric order: 10 -> 11
 | 7. Integration + End-to-End Testing | v1.1 | 0/2 | Not started | - |
 | 8. Fingerprint Collection + Transition Detection | v1.2 | 0/1 | Planned | - |
 | 9. Validation + Regression Testing | v1.2 | 0/2 | Not started | - |
-| 10. Build Pipeline + Installation | v1.3 | 0/2 | Not started | - |
+| 10. Build Pipeline + Installation | v1.3 | 0/2 | Planning | - |
 | 11. End-to-End Validation | v1.3 | 0/2 | Not started | - |
