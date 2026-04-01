@@ -272,7 +272,7 @@ def build_canonical_profile(
     register_profile_alias("portfolio", ("portfolio",), ("website",), ("website_url",), ("personal_website",))
     register_profile_alias("github", ("github",), ("github_url",))
     register_profile_alias("twitter", ("twitter",), ("twitter_url",), ("x",), ("x_url",))
-    register_profile_alias("work_authorization", ("work_authorization",))
+    register_profile_alias("work_authorization", ("work_authorization",), ("authorized_to_work_in_us",))
     register_profile_alias("available_start_date", ("available_start_date",))
     register_profile_alias("availability_window", ("availability_window",), ("available_start_date",))
     register_profile_alias("notice_period", ("notice_period",))
@@ -333,8 +333,12 @@ def build_canonical_profile(
     register_profile_alias("race_ethnicity", ("race_ethnicity",), ("race",))
     register_profile_alias("veteran_status", ("veteran_status",), ("Veteran_status",))
     register_profile_alias("disability_status", ("disability_status",))
-    register_profile_alias("authorized_to_work", ("authorized_to_work",), ("US_citizen",))
-    register_profile_alias("sponsorship_needed", ("sponsorship_needed",), ("visa_sponsorship",))
+    register_profile_alias("sexual_orientation", ("sexual_orientation",))
+    register_profile_alias("authorized_to_work", ("authorized_to_work",), ("authorized_to_work_in_us",), ("US_citizen",), ("us_citizen",))
+    register_profile_alias("sponsorship_needed", ("sponsorship_needed",), ("visa_sponsorship",), ("needs_visa_sponsorship",))
+    register_profile_alias("citizenship_status", ("citizenship_status",), ("citizenshipStatus",))
+    register_profile_alias("us_citizen", ("us_citizen",), ("US_citizen",))
+    register_profile_alias("export_control_eligible", ("export_control_eligible",), ("exportControlEligible",))
 
     language_entries = canonical.languages
     if language_entries:
