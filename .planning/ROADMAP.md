@@ -150,11 +150,10 @@ Plans:
   2. `_page_identity()` returns a different identity when SPA content changes (new headings, different buttons, different form count) even if URL and title remain the same
   3. When page identity changes due to fingerprint delta, the existing PAGE UPDATE system note is injected, stale context is cleared, and forced compaction fires -- identical behavior to URL-based transitions
   4. The fingerprint JS snippet and hash logic live in browser_use core (not ghosthands), so any browser_use consumer benefits from SPA detection
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 08-01: TBD
-- [ ] 08-02: TBD
+- [ ] 08-01-PLAN.md — Add page_fingerprint field, JS collection in _prepare_context, identity enrichment in _page_identity, unit tests
 
 ### Phase 9: Validation + Regression Testing
 **Goal**: SPA transition detection is proven correct on real ATS flows: Workday transitions trigger domhand_fill, GS Oracle URL-based transitions still work, and conditional field reveals do not cause false positives.
@@ -184,5 +183,5 @@ Phases execute in numeric order: 5 -> 6 -> 7 -> 8 -> 9
 | 5. Observation + Anchor Detection | v1.1 | 0/2 | Planned | - |
 | 6. LLM Batch Matching | v1.1 | 0/2 | Not started | - |
 | 7. Integration + End-to-End Testing | v1.1 | 0/2 | Not started | - |
-| 8. Fingerprint Collection + Transition Detection | v1.2 | 0/2 | Not started | - |
+| 8. Fingerprint Collection + Transition Detection | v1.2 | 0/1 | Planned | - |
 | 9. Validation + Regression Testing | v1.2 | 0/2 | Not started | - |
