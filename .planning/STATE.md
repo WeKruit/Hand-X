@@ -2,17 +2,17 @@
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-03-31)
+See: .planning/PROJECT.md (updated 2026-04-01)
 
 **Core value:** A saved applicant identity can be applied accurately, repeatably, and safely across ATS flows without the user re-entering data.
-**Current focus:** Milestone v1.2 -- SPA Page Transition Detection
+**Current focus:** Milestone v1.3 -- Streamlined Desktop ↔ Hand-X Integration
 
 ## Current Position
 
-Phase: 8 of 9 (Fingerprint Collection + Transition Detection)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-03-31 -- Roadmap created for v1.2
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-04-01 — Milestone v1.3 started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -37,13 +37,15 @@ Progress: [░░░░░░░░░░] 0%
 
 ### Decisions
 
-- `_page_identity()` uses title+URL+element_count -- unchanged on Workday SPA, so no PAGE UPDATE fires -- this is the root problem v1.2 solves
-- `_PAGE_FINGERPRINT_JS` in domhand_click_button.py:419-447 is the reference fingerprint structure (headings+buttons+forms)
-- `_page_identity()` in browser_use/agent/message_manager/service.py:193-206 is what gets enriched with fingerprint hash
-- `_apply_page_transition_context()` in service.py:225-240 already handles PAGE UPDATE when identity changes -- no new mechanism needed
-- All changes go in browser_use/ core (3 files: views.py, agent/service.py, message_manager/service.py) -- not ghosthands
-- Hook-based ActionResult injection (tried in v1.1) creates noise -- rejected approach
-- Conditional field reveals (radio -> new fields) don't change headings/buttons so no false positive risk with this fingerprint approach
+- Binary at `~/Library/Application Support/Valet/bin/hand-x-darwin-arm64` is stale (dev-20260328), built with anaconda Python 3.11
+- Desktop reads from `~/Library/Application Support/gh-desktop-app/bin/` (primary) and `~/Library/Application Support/Valet/bin/` (alternate)
+- dev-deploy.sh had two bugs fixed in previous session: (1) conda VIRTUAL_ENV tricked venv activation skip, (2) installed to Valet instead of gh-desktop-app
+- apply.sh works because it runs Python source directly — all packages available
+- When Gemini returns bad JSON, browser-use error handler tries `import openai` → missing from binary → fatal crash
+- Profile fields renamed: work_authorization→authorized_to_work_in_us, visa_sponsorship→needs_visa_sponsorship — only in source, not binary
+- New fields added: citizenship_country, visa_type, citizenship_status, us_citizen, export_control_eligible — only in source
+- Timeout increases on LLM calls — only in source, not binary
+- PyInstaller spec (build/hand-x.spec) has hidden_imports for openai, anthropic, google.genai — but binary was built with wrong Python so deps weren't found
 
 ### Pending Todos
 
@@ -55,6 +57,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-31
-Stopped at: Roadmap created for v1.2, ready to plan Phase 8
+Last session: 2026-04-01
+Stopped at: Milestone v1.3 started, defining requirements
 Resume file: None
