@@ -203,6 +203,11 @@ class MessageManager:
 			pass
 		# Bucket element count (±5 tolerance) so minor DOM churn doesn't trigger
 		elem_bucket = (elem_count // 5) * 5
+		fp = (browser_state_summary.page_fingerprint or '').strip()
+		if fp:
+			# Fingerprint is the authoritative SPA signal — drop elem_bucket
+			# because selector_map size changes on scroll (elements enter/leave viewport)
+			return f'{title}\n{url}\n{fp}'
 		return f'{title}\n{url}\n{elem_bucket}'
 
 	def _build_page_transition_note(self, previous_identity: str, current_identity: str) -> str:
@@ -212,8 +217,10 @@ class MessageManager:
 			'PAGE UPDATE: You are on a new page/context now.\n'
 			f'Previous page: {prev_title or "(unknown)"} | {prev_url or "(unknown url)"}\n'
 			f'Current page: {curr_title or "(unknown)"} | {curr_url or "(unknown url)"}\n'
-			'Any unresolved blockers, repeater editors, or fallback plans from the previous page are stale '
-			'unless they are still visibly present in the current browser state. Re-plan from the current page only.'
+			'MANDATORY: Call domhand_fill as your NEXT action — it scans the FULL page DOM (not just the viewport) '
+			'and discovers all sections, fields, and repeaters in one pass. Do NOT scroll or search_page to find sections — '
+			'domhand_fill already sees everything regardless of scroll position.\n'
+			'Any unresolved blockers or fallback plans from the previous page are stale. Re-plan from current page only.'
 		)
 
 	def _build_assess_guidance_note(self, result: list[ActionResult]) -> str:
@@ -227,9 +234,20 @@ class MessageManager:
 		previous_identity = (self.state.last_page_identity or '').strip()
 		self.state.last_page_identity = current_identity
 
+		fp = (browser_state_summary.page_fingerprint or '').strip()
+		logger.info(
+			'spa_transition_check prev_hash=%s curr_hash=%s fingerprint=%s same=%s',
+			(previous_identity or '(none)')[-20:],
+			current_identity[-20:],
+			fp or '(empty)',
+			previous_identity == current_identity,
+		)
+
 		if not previous_identity or previous_identity == current_identity:
 			return
 
+		logger.info('spa_transition_detected PAGE_UPDATE fired — clearing stale context and forcing compaction')
+		self.state.spa_transition_fired = True
 		note = self._build_page_transition_note(previous_identity, current_identity)
 		history_note = HistoryItem(system_message=f'<sys>{note}</sys>')
 		self.state.agent_history_items.append(history_note)
@@ -238,6 +256,7 @@ class MessageManager:
 
 		# Force compaction at next step so old-page context is pruned
 		self.state.last_compaction_step = 0
+
 
 	def prepare_step_state(
 		self,

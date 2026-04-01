@@ -1736,6 +1736,8 @@ async def _fill_oracle_school_combobox_llm_outcome(
             await _press_key_compat(page, "Backspace")
             await asyncio.sleep(0.1)
             await _type_text_compat(page, term, delay=30)
+            await _press_key_compat(page, "Enter")
+            await asyncio.sleep(0.3)
 
             option_labels = await _poll_oracle_combobox_options(page, ff_id)
             if option_labels:
@@ -1794,6 +1796,8 @@ async def _fill_oracle_school_combobox_llm_outcome(
                     await _press_key_compat(page, "Backspace")
                     await asyncio.sleep(0.1)
                     await _type_text_compat(page, term, delay=30)
+                    await _press_key_compat(page, "Enter")
+                    await asyncio.sleep(0.3)
                     retry_options = await _poll_oracle_combobox_options(page, ff_id)
                     if retry_options:
                         click_raw = await page.evaluate(_ORACLE_COMBOBOX_CLICK_INDEX_JS, ff_id, idx)

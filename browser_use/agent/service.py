@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import hashlib
 import inspect
 import json
 import logging
@@ -84,6 +85,27 @@ from browser_use.utils import (
 from ghosthands.step_trace import get_blocker_attempt_state, publish_browser_session_trace
 
 logger = logging.getLogger(__name__)
+
+# Lightweight DOM fingerprint for SPA transition detection.
+# Captures headings, buttons, and form count — changes on page transitions
+# but stays stable during conditional field reveals within a page.
+_SPA_FINGERPRINT_JS = r"""() => {
+	var ff = window.__ff || null;
+	function qsa(sel) {
+		if (ff && ff.queryAll) return ff.queryAll(sel);
+		return Array.from(document.querySelectorAll(sel));
+	}
+	function texts(sel, n) {
+		return qsa(sel)
+			.map(el => (el.textContent || '').replace(/\s+/g, ' ').trim())
+			.filter(Boolean).slice(0, n);
+	}
+	return JSON.stringify({
+		h: texts('h1, h2, h3, [role="heading"]', 6),
+		b: texts('button, [role="button"], input[type="submit"]', 8),
+		f: qsa('form').length
+	});
+}"""
 
 
 def _truncate_log_text(text: str | None, limit: int | None = None) -> str:
@@ -1345,6 +1367,20 @@ class Agent(Generic[Context, AgentStructuredOutput]):
         self._log_step_context(browser_state_summary)
         await self._check_stop_or_pause()
 
+        # Collect lightweight DOM fingerprint for SPA transition detection
+        try:
+            _fp_page = await self.browser_session.get_current_page()
+            if _fp_page:
+                from ghosthands.dom.shadow_helpers import ensure_helpers
+                await ensure_helpers(_fp_page)
+                _fp_raw = await _fp_page.evaluate(_SPA_FINGERPRINT_JS)
+                if _fp_raw:
+                    _fp_hash = hashlib.md5(_fp_raw.encode()).hexdigest()[:12]
+                    browser_state_summary.page_fingerprint = _fp_hash
+                    logger.debug("spa_fingerprint step=%s hash=%s raw=%s", self.state.n_steps, _fp_hash, _fp_raw[:200])
+        except Exception:
+            pass  # page_fingerprint stays '' — identity falls back to URL+title+elem_count
+
         # Update action models with page-specific actions
         self.logger.debug(f"📝 Step {self.state.n_steps}: Updating action models...")
         await self._update_action_models_for_page(browser_state_summary.url)
@@ -1370,6 +1406,14 @@ class Agent(Generic[Context, AgentStructuredOutput]):
             step_info=step_info,
             sensitive_data=self.sensitive_data,
         )
+
+        # If fingerprint-based page transition detected, clear domhand fill guard
+        # so domhand_fill can run fresh on the new SPA page (same URL, different content)
+        if self._message_manager.state.spa_transition_fired:
+            self._message_manager.state.spa_transition_fired = False
+            if self.browser_session and hasattr(self.browser_session, '_gh_last_domhand_fill'):
+                logger.info('spa_transition: clearing _gh_last_domhand_fill for new page')
+                self.browser_session._gh_last_domhand_fill = None
 
         await self._maybe_compact_messages(step_info)
 

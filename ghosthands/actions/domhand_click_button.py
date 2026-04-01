@@ -658,7 +658,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                 )
             if state_changed:
                 return ActionResult(
-                    extracted_content=f"DomHand click: clicked '{label}' via JS event sequence. Page content changed (same-page transition). Check if auth succeeded.",
+                    extracted_content=f"DomHand click: clicked '{label}' via JS event sequence. Page content changed (same-page transition). Call domhand_fill as your NEXT action to fill the new page.",
                     include_in_memory=True,
                 )
 
@@ -693,7 +693,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                     )
                 if state_changed:
                     return ActionResult(
-                        extracted_content=f"DomHand click: clicked '{label}' via CDP Element.click(). Page content changed (same-page transition). Check if auth succeeded.",
+                        extracted_content=f"DomHand click: clicked '{label}' via CDP Element.click(). Page content changed (same-page transition). Call domhand_fill as your NEXT action to fill the new page.",
                         include_in_memory=True,
                     )
         except Exception as e:
@@ -726,7 +726,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                     )
                 if state_changed:
                     return ActionResult(
-                        extracted_content=f"DomHand click: submitted form for '{label}'. Page content changed (same-page transition). Check if auth succeeded.",
+                        extracted_content=f"DomHand click: submitted form for '{label}'. Page content changed (same-page transition). Call domhand_fill as your NEXT action to fill the new page.",
                         include_in_memory=True,
                     )
         except Exception as e:
@@ -760,7 +760,7 @@ async def domhand_click_button(params: DomHandClickButtonParams, browser_session
                     )
                 if state_changed:
                     return ActionResult(
-                        extracted_content=f"DomHand click: pressed Enter on '{label}'. Page content changed (same-page transition). Check if auth succeeded.",
+                        extracted_content=f"DomHand click: pressed Enter on '{label}'. Page content changed (same-page transition). Call domhand_fill as your NEXT action to fill the new page.",
                         include_in_memory=True,
                     )
         except Exception as e:

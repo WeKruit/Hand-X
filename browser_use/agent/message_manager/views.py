@@ -98,5 +98,6 @@ class MessageManagerState(BaseModel):
 	compaction_count: int = 0
 	last_compaction_step: int | None = None
 	last_page_identity: str | None = None
+	spa_transition_fired: bool = False  # Set when fingerprint-based PAGE UPDATE fires
 
 	model_config = ConfigDict(arbitrary_types_allowed=True)
