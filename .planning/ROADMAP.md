@@ -5,6 +5,7 @@
 - **v1.0 Runtime Profile Contract** - Phases 1-4 (deferred)
 - **v1.1 Generic Repeater Pre-fill Detection** - Phases 5-7 (in progress)
 - **v1.2 SPA Page Transition Detection** - Phases 8-9 (planned)
+- **v1.3 Streamlined Desktop <-> Hand-X Integration** - Phases 10-11 (in progress)
 
 ## Phases
 
@@ -73,28 +74,8 @@ Plans:
 
 </details>
 
-### v1.1 Generic Repeater Pre-fill Detection (In Progress)
-
-**Milestone Goal:** Replace platform-specific repeater entry counting with generic field observation + LLM matching so any ATS pre-fill is detected without per-platform selectors.
-
-**Phase Numbering:**
-- Integer phases (5, 6, 7): Planned milestone work
-- Decimal phases (5.1, 5.2): Urgent insertions (marked with INSERTED)
-
-Decimal phases appear between their surrounding integers in numeric order.
-
-- [ ] **Phase 5: Observation + Anchor Detection** - Extract visible form fields per repeater section and identify existing entries by anchor values
-- [ ] **Phase 6: LLM Batch Matching** - Match profile entries against observed page entries using normalization fast-path and LLM fuzzy matching
-- [ ] **Phase 7: Integration + End-to-End Testing** - Wire observation into the repeater loop, keep tile-count fallback, and prove correctness with fixture tests
-
-### v1.2 SPA Page Transition Detection (Planned)
-
-**Milestone Goal:** Make the browser-use agent reliably detect SPA page transitions by enriching page identity fingerprinting with DOM content signals, so PAGE UPDATE fires on content changes even when the URL stays the same.
-
-- [ ] **Phase 8: Fingerprint Collection + Transition Detection** - Collect lightweight DOM fingerprints per step in browser_use and enrich page identity to detect SPA content changes
-- [ ] **Phase 9: Validation + Regression Testing** - Prove SPA transitions trigger domhand_fill on Workday, GS Oracle still works, and conditional reveals do not false-positive
-
-## Phase Details
+<details>
+<summary>v1.1 Generic Repeater Pre-fill Detection (Phases 5-7) - IN PROGRESS</summary>
 
 ### Phase 5: Observation + Anchor Detection
 **Goal**: The repeater system can observe pre-filled form fields per section and identify which entries already exist on the page before expanding any new rows.
@@ -108,8 +89,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 2 plans
 
 Plans:
-- [ ] 05-01-PLAN.md — Anchor definitions, ObservationResult dataclass, and _observe_existing_entries function
-- [ ] 05-02-PLAN.md — Unit tests for anchor matching, profile key extraction, and ObservationResult contract
+- [ ] 05-01-PLAN.md -- Anchor definitions, ObservationResult dataclass, and _observe_existing_entries function
+- [ ] 05-02-PLAN.md -- Unit tests for anchor matching, profile key extraction, and ObservationResult contract
 
 ### Phase 6: LLM Batch Matching
 **Goal**: Profile entries can be matched against observed page entries using a normalization fast-path for exact matches and a single LLM call per section for fuzzy matches.
@@ -141,6 +122,11 @@ Plans:
 - [ ] 07-01: TBD
 - [ ] 07-02: TBD
 
+</details>
+
+<details>
+<summary>v1.2 SPA Page Transition Detection (Phases 8-9) - PLANNED</summary>
+
 ### Phase 8: Fingerprint Collection + Transition Detection
 **Goal**: The browser-use agent collects a lightweight DOM fingerprint per step and uses it to detect SPA page transitions where the URL stays the same but the page content changes.
 **Depends on**: Nothing (first phase of v1.2; builds on existing `_page_identity()` and `_apply_page_transition_context()` in browser_use)
@@ -153,7 +139,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 08-01-PLAN.md — Add page_fingerprint field, JS collection in _prepare_context, identity enrichment in _page_identity, unit tests
+- [ ] 08-01-PLAN.md -- Add page_fingerprint field, JS collection in _prepare_context, identity enrichment in _page_identity, unit tests
 
 ### Phase 9: Validation + Regression Testing
 **Goal**: SPA transition detection is proven correct on real ATS flows: Workday transitions trigger domhand_fill, GS Oracle URL-based transitions still work, and conditional field reveals do not cause false positives.
@@ -169,10 +155,54 @@ Plans:
 - [ ] 09-01: TBD
 - [ ] 09-02: TBD
 
+</details>
+
+### v1.3 Streamlined Desktop <-> Hand-X Integration (In Progress)
+
+**Milestone Goal:** Make the Desktop-to-Hand-X binary pipeline reliable -- one command rebuilds from current source, installs to the correct path, and Desktop runs jobs end-to-end without module errors.
+
+**Phase Numbering:**
+- Integer phases (10, 11): Planned milestone work
+- Decimal phases (10.1, 10.2): Urgent insertions if needed (marked with INSERTED)
+
+- [ ] **Phase 10: Build Pipeline + Installation** - Fix dev-deploy.sh, verify PyInstaller spec bundles all deps, add import smoke test, install binary to correct Desktop path
+- [ ] **Phase 11: End-to-End Validation** - Rebuild binary from current source, dispatch job from Desktop, verify profile fields and LLM proxy work through the binary
+
+## Phase Details
+
+### Phase 10: Build Pipeline + Installation
+**Goal**: Running `dev-deploy.sh` reliably produces a binary from the project .venv Python 3.12 with all required modules bundled, validates the binary with a smoke test, and installs it where Desktop expects it.
+**Depends on**: Nothing (first phase of v1.3; builds on existing dev-deploy.sh and build/hand-x.spec)
+**Requirements**: BUILD-01, BUILD-02, BUILD-03, INST-01, INST-02
+**Success Criteria** (what must be TRUE):
+  1. Running `dev-deploy.sh` on a machine with conda active still uses the project .venv Python 3.12 (not anaconda/system Python) and the build completes without errors
+  2. The built binary can import openai, anthropic, google.genai, playwright, aiohttp, and stagehand without ModuleNotFoundError
+  3. A smoke test runs automatically after build and before installation, blocking install if any critical import fails
+  4. The binary is installed to `~/Library/Application Support/gh-desktop-app/bin/` and a version state JSON is written so Desktop's updater recognizes the dev build
+**Plans**: TBD
+
+Plans:
+- [ ] 10-01: TBD
+- [ ] 10-02: TBD
+
+### Phase 11: End-to-End Validation
+**Goal**: A fresh binary built from current source is dispatched by Desktop and completes a job without module errors, with correct profile field names and working LLM proxy.
+**Depends on**: Phase 10
+**Requirements**: E2E-01, E2E-02, E2E-03
+**Success Criteria** (what must be TRUE):
+  1. Desktop dispatches a job and the Hand-X binary starts, runs the agent loop, and completes without any module import errors
+  2. Profile data flowing from Desktop to Hand-X uses the correct field names (authorized_to_work_in_us, needs_visa_sponsorship, citizenship_country, visa_type) with no EMPTY values for renamed/new fields
+  3. LLM calls through the VALET proxy succeed from the binary (Gemini calls via proxy return valid responses, no import crashes on error-path fallback)
+**Plans**: TBD
+
+Plans:
+- [ ] 11-01: TBD
+- [ ] 11-02: TBD
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 5 -> 6 -> 7 -> 8 -> 9
+Phases execute in numeric order: 10 -> 11
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
@@ -185,3 +215,5 @@ Phases execute in numeric order: 5 -> 6 -> 7 -> 8 -> 9
 | 7. Integration + End-to-End Testing | v1.1 | 0/2 | Not started | - |
 | 8. Fingerprint Collection + Transition Detection | v1.2 | 0/1 | Planned | - |
 | 9. Validation + Regression Testing | v1.2 | 0/2 | Not started | - |
+| 10. Build Pipeline + Installation | v1.3 | 0/2 | Not started | - |
+| 11. End-to-End Validation | v1.3 | 0/2 | Not started | - |

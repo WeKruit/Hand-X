@@ -5,14 +5,14 @@
 See: .planning/PROJECT.md (updated 2026-04-01)
 
 **Core value:** A saved applicant identity can be applied accurately, repeatably, and safely across ATS flows without the user re-entering data.
-**Current focus:** Milestone v1.3 -- Streamlined Desktop ↔ Hand-X Integration
+**Current focus:** Phase 10 -- Build Pipeline + Installation (v1.3)
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-04-01 — Milestone v1.3 started
+Phase: 10 of 11 (Build Pipeline + Installation)
+Plan: 0 of 2 in current phase
+Status: Ready to plan
+Last activity: 2026-04-01 -- Roadmap created for milestone v1.3
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -40,12 +40,10 @@ Progress: [░░░░░░░░░░] 0%
 - Binary at `~/Library/Application Support/Valet/bin/hand-x-darwin-arm64` is stale (dev-20260328), built with anaconda Python 3.11
 - Desktop reads from `~/Library/Application Support/gh-desktop-app/bin/` (primary) and `~/Library/Application Support/Valet/bin/` (alternate)
 - dev-deploy.sh had two bugs fixed in previous session: (1) conda VIRTUAL_ENV tricked venv activation skip, (2) installed to Valet instead of gh-desktop-app
-- apply.sh works because it runs Python source directly — all packages available
-- When Gemini returns bad JSON, browser-use error handler tries `import openai` → missing from binary → fatal crash
-- Profile fields renamed: work_authorization→authorized_to_work_in_us, visa_sponsorship→needs_visa_sponsorship — only in source, not binary
-- New fields added: citizenship_country, visa_type, citizenship_status, us_citizen, export_control_eligible — only in source
-- Timeout increases on LLM calls — only in source, not binary
-- PyInstaller spec (build/hand-x.spec) has hidden_imports for openai, anthropic, google.genai — but binary was built with wrong Python so deps weren't found
+- apply.sh works because it runs Python source directly -- all packages available
+- When Gemini returns bad JSON, browser-use error handler tries `import openai` -- missing from binary -- fatal crash
+- Profile fields renamed: work_authorization->authorized_to_work_in_us, visa_sponsorship->needs_visa_sponsorship -- only in source, not binary
+- PyInstaller spec (build/hand-x.spec) has hidden_imports for openai, anthropic, google.genai -- but binary was built with wrong Python so deps weren't found
 
 ### Pending Todos
 
@@ -58,5 +56,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-04-01
-Stopped at: Milestone v1.3 started, defining requirements
+Stopped at: Roadmap created for v1.3, ready to plan Phase 10
 Resume file: None

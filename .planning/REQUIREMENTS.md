@@ -3,7 +3,7 @@
 **Defined:** 2026-04-01
 **Core Value:** A saved applicant identity can be applied accurately, repeatably, and safely across ATS flows without the user re-entering data.
 
-## v1.3 Requirements — Streamlined Desktop ↔ Hand-X Integration
+## v1.3 Requirements -- Streamlined Desktop <-> Hand-X Integration
 
 ### Build Pipeline
 
@@ -19,10 +19,10 @@
 ### End-to-End Validation
 
 - [ ] **E2E-01**: Desktop dispatches a job and Hand-X binary starts without module import errors
-- [ ] **E2E-02**: Profile data flows Desktop→Hand-X with correct field names (no EMPTY values for renamed fields)
+- [ ] **E2E-02**: Profile data flows Desktop->Hand-X with correct field names (no EMPTY values for renamed fields)
 - [ ] **E2E-03**: LLM proxy works through binary (Gemini calls succeed via VALET proxy)
 
-## v1.2 Requirements — SPA Page Transition Detection (planned)
+## v1.2 Requirements -- SPA Page Transition Detection (planned)
 
 <details>
 <summary>Planned requirements</summary>
@@ -35,17 +35,17 @@
 ### Transition Detection
 
 - [ ] **TRANS-01**: `_page_identity()` includes fingerprint hash so SPA content changes (same URL, different content) produce a different identity
-- [ ] **TRANS-02**: When page identity changes due to fingerprint, the existing PAGE UPDATE note + stale context clearing + forced compaction fires — same behavior as URL-based transitions
+- [ ] **TRANS-02**: When page identity changes due to fingerprint, the existing PAGE UPDATE note + stale context clearing + forced compaction fires -- same behavior as URL-based transitions
 
 ### Validation
 
 - [ ] **VAL-01**: On Workday SPA (URL stays same, content changes), PAGE UPDATE fires and agent calls domhand_fill on the new page
-- [ ] **VAL-02**: On GS Oracle (URL changes between sections), existing behavior still works — no regression
-- [ ] **VAL-03**: Conditional field reveals within a page (clicking radio → new fields appear) do NOT trigger a false page transition
+- [ ] **VAL-02**: On GS Oracle (URL changes between sections), existing behavior still works -- no regression
+- [ ] **VAL-03**: Conditional field reveals within a page (clicking radio -> new fields appear) do NOT trigger a false page transition
 
 </details>
 
-## v1.1 Requirements — Repeater Pre-fill Detection (shipped)
+## v1.1 Requirements -- Repeater Pre-fill Detection (shipped)
 
 <details>
 <summary>Completed requirements</summary>
@@ -69,7 +69,7 @@
 - [x] **TEST-01**: Unit tests validate anchor label matching, profile key extraction, and `ObservationResult` contract
 - [x] **TEST-02**: CI browser tests use toy-workday fixture with JS-simulated pre-fill
 - [x] **TEST-03**: CI browser tests verify section scoping isolates education from experience
-- [x] **TEST-04**: LLM integration tests validate fuzzy matching — skipped without API key
+- [x] **TEST-04**: LLM integration tests validate fuzzy matching -- skipped without API key
 
 </details>
 
@@ -85,31 +85,31 @@
 
 | Feature | Reason |
 |---------|--------|
-| .dmg packaging | Separate milestone — need stable integration first |
+| .dmg packaging | Separate milestone -- need stable integration first |
 | CI automated builds | Manual dev-deploy.sh is sufficient for now |
 | Windows/Linux binaries | macOS-only development environment |
 | LLM provider architecture changes | Just bundle existing providers correctly |
 | Hook-based ActionResult injection | Tried in v1.1, created noise |
-| Per-action middleware | Too aggressive — intercepts every tool call |
+| Per-action middleware | Too aggressive -- intercepts every tool call |
 
 ## Traceability
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BUILD-01 | TBD | Pending |
-| BUILD-02 | TBD | Pending |
-| BUILD-03 | TBD | Pending |
-| INST-01 | TBD | Pending |
-| INST-02 | TBD | Pending |
-| E2E-01 | TBD | Pending |
-| E2E-02 | TBD | Pending |
-| E2E-03 | TBD | Pending |
+| BUILD-01 | Phase 10 | Pending |
+| BUILD-02 | Phase 10 | Pending |
+| BUILD-03 | Phase 10 | Pending |
+| INST-01 | Phase 10 | Pending |
+| INST-02 | Phase 10 | Pending |
+| E2E-01 | Phase 11 | Pending |
+| E2E-02 | Phase 11 | Pending |
+| E2E-03 | Phase 11 | Pending |
 
 **Coverage:**
 - v1.3 requirements: 8 total
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 8
+- Mapped to phases: 8
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-01*
-*Last updated: 2026-04-01 after milestone v1.3 start*
+*Last updated: 2026-04-01 after roadmap creation*
