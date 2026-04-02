@@ -169,6 +169,69 @@ async def load_runtime_profile(
     return profile
 
 
+async def load_runtime_profile_from_api(
+    api_url: str,
+    runtime_grant: str,
+    resume_id: str | None = None,
+) -> dict[str, Any]:
+    """Load profile from VALET API — same normalization as load_runtime_profile().
+
+    The VALET API endpoint returns raw DB data (user, applicationProfile,
+    resumeParsedData, answerBank).  This function feeds that data through
+    the SAME _map_to_profile() + _apply_user_fallbacks() +
+    _apply_application_profile_overrides() code that the DB-direct path uses,
+    guaranteeing identical output regardless of entry point.
+    """
+    import httpx
+
+    url = f"{api_url.rstrip('/')}/api/v1/local-workers/profile"
+    if resume_id:
+        url += f"?resumeId={resume_id}"
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(url, headers={"x-api-key": runtime_grant})
+        resp.raise_for_status()
+        data = resp.json()
+
+    user_profile = data.get("user") or {}
+    application_profile = data.get("applicationProfile") or {}
+    resume_parsed_data = data.get("resumeParsedData") or {}
+    answer_bank_rows = data.get("answerBank") or []
+    api_resume_id = data.get("resumeId")
+
+    # ── Same normalization as load_runtime_profile() ──────────────
+    if resume_parsed_data:
+        profile = _map_to_profile(resume_parsed_data)
+    else:
+        # No resume parsed data — build minimal profile from user table
+        profile = _map_to_profile(user_profile)
+
+    _apply_user_fallbacks(profile, user_profile)
+    _apply_application_profile_overrides(profile, application_profile)
+
+    answer_bank_entries = [
+        {
+            "question": row.get("question", ""),
+            "answer": row.get("answer", ""),
+            "canonical_question": row.get("canonicalQuestion") or row.get("canonical_question"),
+            "intent_tag": row.get("intentTag") or row.get("intent_tag"),
+            "usage_mode": row.get("usageMode") or row.get("usage_mode"),
+            "source": row.get("source"),
+            "confidence": row.get("confidence"),
+            "synonyms": row.get("synonyms"),
+        }
+        for row in answer_bank_rows
+    ]
+    if answer_bank_entries:
+        profile["answer_bank"] = answer_bank_entries
+        profile["answerBank"] = answer_bank_entries
+
+    if api_resume_id:
+        profile["_resume_id"] = api_resume_id
+
+    return profile
+
+
 def _is_already_flat_profile(data: dict[str, Any]) -> bool:
     """Return True when *data* looks like an already-normalized flat profile.
 
@@ -507,6 +570,32 @@ def _apply_user_fallbacks(profile: dict[str, Any], user_profile: dict[str, Any])
     if not profile.get("country") and parsed_location.get("country"):
         profile["country"] = parsed_location["country"]
 
+    # Merge education from users table when resume parsed_data is missing fields.
+    # The resume parser often omits dates, minors, honors that the user filled in
+    # the Desktop profile form (stored in users.education JSONB).
+    user_edu = user_profile.get("education")
+    profile_edu = profile.get("education")
+    if isinstance(user_edu, list) and isinstance(profile_edu, list):
+        for i, p_entry in enumerate(profile_edu):
+            if not isinstance(p_entry, dict):
+                continue
+            # Match by school name
+            p_school = (p_entry.get("school") or "").strip().lower()
+            if not p_school:
+                continue
+            for u_entry in user_edu:
+                if not isinstance(u_entry, dict):
+                    continue
+                u_school = (u_entry.get("school") or "").strip().lower()
+                if u_school and u_school in p_school or p_school in u_school:
+                    # Backfill missing fields from user table entry
+                    for key in ("start_date", "startDate", "end_date", "endDate",
+                                "gpa", "minor", "minors", "honors", "field_of_study",
+                                "fieldOfStudy", "degree_type", "degreeType"):
+                        if not _has_profile_value(p_entry.get(key)) and _has_profile_value(u_entry.get(key)):
+                            p_entry[key] = u_entry[key]
+                    break
+
 
 def _set_if_present(profile: dict[str, Any], key: str, value: Any) -> None:
     if _has_profile_value(value):
@@ -548,13 +637,33 @@ def _apply_application_profile_overrides(
     _set_if_present(profile, "country", application_profile.get("country_of_residence"))
     _set_if_present(profile, "country_of_residence", application_profile.get("country_of_residence"))
 
+    # Helper: DB column names (asyncpg) are snake_case like authorized_to_work_in_us,
+    # but legacy code and API paths may use work_authorization. Read both.
+    def _ap(primary: str, *fallbacks: str) -> Any:
+        v = application_profile.get(primary)
+        if _has_profile_value(v):
+            return v
+        for fb in fallbacks:
+            v = application_profile.get(fb)
+            if _has_profile_value(v):
+                return v
+        return None
+
     scalar_overrides = {
-        "work_authorization": application_profile.get("work_authorization"),
-        "visa_sponsorship": application_profile.get("visa_sponsorship"),
-        "gender": application_profile.get("eeo_gender"),
-        "race_ethnicity": application_profile.get("eeo_ethnicity"),
-        "veteran_status": application_profile.get("eeo_veteran"),
-        "disability_status": application_profile.get("eeo_disability"),
+        "work_authorization": _ap("work_authorization", "authorized_to_work_in_us"),
+        "authorized_to_work_in_us": _ap("authorized_to_work_in_us", "work_authorization"),
+        "visa_sponsorship": _ap("visa_sponsorship", "needs_visa_sponsorship"),
+        "needs_visa_sponsorship": _ap("needs_visa_sponsorship", "visa_sponsorship"),
+        "gender": _ap("eeo_gender", "gender"),
+        "race_ethnicity": _ap("eeo_ethnicity", "race_ethnicity"),
+        "veteran_status": _ap("eeo_veteran", "veteran_status"),
+        "disability_status": _ap("eeo_disability", "disability_status"),
+        "sexual_orientation": _ap("sexual_orientation", "eeo_lgbtq"),
+        "citizenship_status": _ap("citizenship_status"),
+        "citizenship_country": _ap("citizenship_country"),
+        "visa_type": _ap("visa_type"),
+        "us_citizen": _ap("us_citizen"),
+        "export_control_eligible": _ap("export_control_eligible"),
         "salary_expectation": application_profile.get("salary_expectation"),
         "spoken_languages": application_profile.get("spoken_languages"),
         "english_proficiency": application_profile.get("english_proficiency"),

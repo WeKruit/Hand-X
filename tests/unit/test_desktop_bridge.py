@@ -2158,7 +2158,12 @@ class TestReviewOutcomeHandling:
     def test_timeout_emits_done_failure_message(self):
         from ghosthands.cli import _handle_review_result
 
-        with patch("ghosthands.output.jsonl.emit_done") as emit_done:
+        cs = {
+            "total_tracked_cost_usd": 0.01,
+            "total_tracked_prompt_tokens": 1,
+            "total_tracked_completion_tokens": 2,
+        }
+        with patch("ghosthands.output.jsonl_terminal.emit_run_terminal") as emit_terminal:
             exit_code = _handle_review_result(
                 "timeout",
                 fields_filled=8,
@@ -2166,10 +2171,13 @@ class TestReviewOutcomeHandling:
                 job_id="job-1",
                 lease_id="lease-1",
                 result_data={"success": True},
+                cost_summary=cs,
+                total_cost_usd=0.01,
             )
 
         assert exit_code == 1
-        emit_done.assert_called_once_with(
+        emit_terminal.assert_called_once_with(
+            termination_status="review_timeout",
             success=False,
             message="Review timed out after 30 minutes. The browser window is still open — you can submit manually.",
             fields_filled=8,
@@ -2177,6 +2185,8 @@ class TestReviewOutcomeHandling:
             job_id="job-1",
             lease_id="lease-1",
             result_data={"success": False, "timedOut": True},
+            cost_summary=cs,
+            total_cost_usd=0.01,
         )
 
 

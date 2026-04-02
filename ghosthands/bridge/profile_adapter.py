@@ -46,6 +46,8 @@ CAMEL_TO_SNAKE_SCALAR: dict[str, str] = {
     "raceEthnicity": "race_ethnicity",
     "veteranStatus": "veteran_status",
     "disabilityStatus": "disability_status",
+    "sexualOrientation": "sexual_orientation",
+    "postalCode": "postal_code",
     "phoneDeviceType": "phone_device_type",
     "phoneCountryCode": "phone_country_code",
     "salaryExpectation": "salary_expectation",

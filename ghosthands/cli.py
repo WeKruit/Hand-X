@@ -778,12 +778,30 @@ async def _load_profile_async(args: argparse.Namespace) -> dict:
             return _validate_profile_object(json.loads(path.read_text()))
         return _validate_profile_object(json.loads(raw))
 
-    user_id = getattr(args, "user_id", None)
-    resume_id = getattr(args, "resume_id", None)
+    user_id = getattr(args, "user_id", None) or os.environ.get("GH_USER_ID", "").strip() or None
+    resume_id = getattr(args, "resume_id", None) or os.environ.get("GH_RESUME_ID", "").strip() or None
     if resume_id and not user_id:
         raise ValueError("--resume-id requires --user-id")
     if user_id:
-        return _validate_profile_object(await _load_profile_from_user_resume_async(user_id, resume_id))
+        # Prefer DB-direct (apply.sh has GH_DATABASE_URL).
+        # Fall back to VALET API (Desktop passes proxy URL + runtime grant).
+        db_url = os.environ.get("GH_DATABASE_URL", "").strip()
+        if db_url:
+            return _validate_profile_object(await _load_profile_from_user_resume_async(user_id, resume_id))
+        # Desktop path: call VALET API → same _map_to_profile() normalization
+        api_url = (os.environ.get("GH_LLM_PROXY_URL") or "").strip()
+        grant = (os.environ.get("GH_LLM_RUNTIME_GRANT") or "").strip()
+        if api_url and grant:
+            from ghosthands.integrations.resume_loader import load_runtime_profile_from_api
+
+            profile = await load_runtime_profile_from_api(api_url, grant, resume_id)
+            # Overlay Desktop-only data (credentials, runtime learning) from GH_USER_PROFILE_TEXT
+            _overlay = _load_desktop_overlay_fields()
+            if _overlay:
+                for k, v in _overlay.items():
+                    if v and k not in profile:
+                        profile[k] = v
+            return _validate_profile_object(profile)
 
     # --test-data: load from JSON file
     if args.test_data:
@@ -813,6 +831,36 @@ async def _load_profile_async(args: argparse.Namespace) -> dict:
         return _validate_profile_object(json.loads(profile_text))
 
     raise ValueError("Either --profile, --test-data, GH_USER_PROFILE_PATH, or GH_USER_PROFILE_TEXT env var is required")
+
+
+def _load_desktop_overlay_fields() -> dict[str, Any] | None:
+    """Extract Desktop-only fields (credentials, runtime learning) from GH_USER_PROFILE_TEXT.
+
+    These fields are not in the VALET DB — they're ephemeral Desktop data
+    that must be overlaid on top of the API-loaded profile.
+    """
+    raw = os.environ.get("GH_USER_PROFILE_TEXT", "").strip()
+    if not raw:
+        p = os.environ.get("GH_USER_PROFILE_PATH", "").strip()
+        if p and Path(p).is_file():
+            raw = Path(p).read_text(encoding="utf-8")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    overlay: dict[str, Any] = {}
+    for key in (
+        "credentials",
+        "learnedQuestionAliases",
+        "learned_question_aliases",
+        "learnedInteractionRecipes",
+        "learned_interaction_recipes",
+    ):
+        if key in data and data[key]:
+            overlay[key] = data[key]
+    return overlay if overlay else None
 
 
 def _load_profile(args: argparse.Namespace) -> dict:
@@ -1658,12 +1706,15 @@ def _handle_review_result(
     job_id: str,
     lease_id: str,
     result_data: dict[str, Any],
+    cost_summary: dict[str, Any],
+    total_cost_usd: float,
 ) -> int | None:
-    """Emit the terminal review result event and return the desired exit code."""
-    from ghosthands.output.jsonl import emit_done
+    """Emit the terminal review result (cost + done) and return the desired exit code."""
+    from ghosthands.output.jsonl_terminal import emit_run_terminal
 
     if review_result == "complete":
-        emit_done(
+        emit_run_terminal(
+            termination_status="completed",
             success=True,
             message="Application submitted — review completed",
             fields_filled=fields_filled,
@@ -1671,11 +1722,14 @@ def _handle_review_result(
             job_id=job_id,
             lease_id=lease_id,
             result_data=result_data,
+            cost_summary=cost_summary,
+            total_cost_usd=total_cost_usd,
         )
         return None
 
     if review_result == "cancel":
-        emit_done(
+        emit_run_terminal(
+            termination_status="review_cancelled",
             success=False,
             message="Review cancelled by user",
             fields_filled=fields_filled,
@@ -1683,11 +1737,14 @@ def _handle_review_result(
             job_id=job_id,
             lease_id=lease_id,
             result_data={**result_data, "success": False, "cancelled": True},
+            cost_summary=cost_summary,
+            total_cost_usd=total_cost_usd,
         )
         return 1
 
     if review_result == "timeout":
-        emit_done(
+        emit_run_terminal(
+            termination_status="review_timeout",
             success=False,
             message="Review timed out after 30 minutes. The browser window is still open — you can submit manually.",
             fields_filled=fields_filled,
@@ -1695,10 +1752,13 @@ def _handle_review_result(
             job_id=job_id,
             lease_id=lease_id,
             result_data={**result_data, "success": False, "timedOut": True},
+            cost_summary=cost_summary,
+            total_cost_usd=total_cost_usd,
         )
         return 1
 
-    emit_done(
+    emit_run_terminal(
+        termination_status="review_disconnect",
         success=False,
         message="Desktop disconnected",
         fields_filled=fields_filled,
@@ -1706,6 +1766,8 @@ def _handle_review_result(
         job_id=job_id,
         lease_id=lease_id,
         result_data={**result_data, "success": False},
+        cost_summary=cost_summary,
+        total_cost_usd=total_cost_usd,
     )
     return 1
 
@@ -1713,19 +1775,75 @@ def _handle_review_result(
 # ── JSONL agent run ───────────────────────────────────────────────────
 
 
+def _jsonl_done_signals_incomplete_outcome(final_result: str, history: Any) -> bool:
+    """True when the agent called done() but the run is step-capped or explicitly partial.
+
+    Without this, Hand-X treats any truthy final_result as success and emits awaiting_review,
+    which mislabels max-step / partial fills as 'ready to submit'.
+    """
+    t = (final_result or "").lower()
+    phrases = (
+        "partially completed",
+        "partially complete",
+        "partial completion",
+        "terminated due to step limit",
+        "due to step limit",
+        "step limit",
+        "maximum steps",
+        "max steps",
+        "not fully submitted",
+        "without submitting",
+        "could not complete",
+        "unable to complete the full",
+    )
+    if any(p in t for p in phrases):
+        return True
+    try:
+        for entry in reversed((getattr(history, "history", None) or [])[-12:]):
+            mo = getattr(entry, "model_output", None)
+            if mo is None:
+                continue
+            cs = getattr(mo, "current_state", None)
+            if cs is None:
+                continue
+            blob = (
+                f"{getattr(cs, 'memory', '')} "
+                f"{getattr(cs, 'evaluation_previous_goal', '')} "
+                f"{getattr(cs, 'next_goal', '')}"
+            ).lower()
+            if (
+                "step limit" in blob
+                or "maximum steps" in blob
+                or "terminated due to step limit" in blob
+            ):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 async def run_agent_jsonl(args: argparse.Namespace) -> None:
     """Run the agent with JSONL event output on stdout."""
     from ghosthands.cost_summary import summarize_history_cost
+    from ghosthands.output import jsonl_terminal as jt
+    from ghosthands.output.agent_history_payload import build_agent_history_payload
     from ghosthands.output.jsonl import (
         emit_account_created,
         emit_awaiting_review,
         emit_browser_ready,
         emit_cost,
-        emit_done,
         emit_error,
         emit_phase,
         emit_status,
     )
+
+    jt.reset()
+    jt.configure(
+        job_id=getattr(args, "job_id", None) or "",
+        lease_id=getattr(args, "lease_id", None) or "",
+        platform="generic",
+    )
+    jt.install_signal_handlers()
 
     app_settings = None
     browser = None
@@ -1749,6 +1867,12 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     except (json.JSONDecodeError, OSError, ValueError) as e:
         logger.error("profile_load_failed", error=str(e))
         emit_error("Failed to load applicant profile", fatal=True)
+        jt.emit_run_terminal(
+            termination_status="profile_load_failed",
+            success=False,
+            message=f"Failed to load applicant profile: {e}",
+            result_data={"success": False, "error": str(e)},
+        )
         sys.exit(1)
 
     # -- Convert camelCase keys from Desktop bridge to snake_case ----------
@@ -1780,10 +1904,16 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 "visa_sponsorship": _profile_debug_preview(
                     profile.get("visa_sponsorship") or profile.get("needs_visa_sponsorship")
                 ),
+                "citizenship_status": _profile_debug_preview(profile.get("citizenship_status")),
+                "visa_type": _profile_debug_preview(profile.get("visa_type")),
+                "citizenship_country": _profile_debug_preview(profile.get("citizenship_country")),
+                "us_citizen": _profile_debug_preview(profile.get("us_citizen")),
+                "export_control_eligible": _profile_debug_preview(profile.get("export_control_eligible")),
                 "gender": _profile_debug_preview(profile.get("gender")),
                 "race_ethnicity": _profile_debug_preview(profile.get("race_ethnicity")),
                 "veteran_status": _profile_debug_preview(profile.get("veteran_status")),
                 "disability_status": _profile_debug_preview(profile.get("disability_status")),
+                "sexual_orientation": _profile_debug_preview(profile.get("sexual_orientation")),
                 "salary_expectation": _profile_debug_preview(profile.get("salary_expectation")),
                 "english_proficiency": _profile_debug_preview(profile.get("english_proficiency")),
                 "spoken_languages": _profile_debug_preview(profile.get("spoken_languages")),
@@ -1795,6 +1925,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                     profile.get("learnedInteractionRecipes") or profile.get("learned_interaction_recipes") or []
                 ),
                 "answer_bank_count": len(profile.get("answerBank") or profile.get("answer_bank") or []),
+                "education_count": len(profile.get("education") or []),
+                "education_has_dates": bool(
+                    profile.get("education")
+                    and isinstance(profile["education"], list)
+                    and len(profile["education"]) > 0
+                    and isinstance(profile["education"][0], dict)
+                    and (profile["education"][0].get("start_date") or profile["education"][0].get("startDate"))
+                ),
             },
         )
     _emit_phase_if_changed("Starting application")
@@ -1847,6 +1985,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         logger.warning("startup.platform_detected", platform=platform)
     except ImportError:
         pass
+
+    jt.configure(job_id=job_id, lease_id=lease_id, platform=platform)
 
     # -- System prompt ------------------------------------------------------
     system_ext = ""
@@ -1916,9 +2056,10 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     # -- Step hooks for live JSONL events -----------------------------------
     _prefill_done = False
+    last_cost_summary: dict[str, Any] = {}
 
     async def _on_step_start(ag: Agent) -> None:
-        nonlocal _prefill_done
+        nonlocal _prefill_done, last_cost_summary
         from ghosthands.agent.hooks import infer_phase_from_goal
         from ghosthands.agent.oracle_step_tuning import maybe_tighten_max_actions_for_oracle_focus
 
@@ -1926,6 +2067,18 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         await maybe_tighten_max_actions_for_oracle_focus(ag)
         await install_final_submit_guard(ag, allow_submit=app_settings.submit_intent == "submit")
         step = ag.state.n_steps
+        n_hist = len(ag.history.history or [])
+        sc = max(n_hist, int(step))
+        jt.update_runtime_snapshot(last_cost_summary if last_cost_summary else None, step_count=sc)
+        if step > 0 and step % 10 == 0:
+            cost_summary = summarize_history_cost(ag.history, ag.browser_session)
+            last_cost_summary = cost_summary
+            hist_payload = build_agent_history_payload(ag.history, sensitive_data)
+            jt.update_runtime_snapshot(
+                cost_summary,
+                step_count=max(n_hist, int(step)),
+                agent_history=hist_payload,
+            )
         goal = ""
         if ag.state.last_model_output:
             goal = ag.state.last_model_output.next_goal or ""
@@ -1966,8 +2119,6 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             except Exception as exc:
                 logger.warning("auto_prefill.failed", error=str(exc))
 
-    last_cost_summary: dict[str, Any] = {}
-
     async def _on_step_end(ag: Agent) -> None:
         nonlocal account_created_emitted, last_cost_summary
         from browser_use.agent.views import ActionResult
@@ -1989,6 +2140,12 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         usage = ag.history.usage
         cost_summary = summarize_history_cost(ag.history, ag.browser_session)
         last_cost_summary = cost_summary
+        hist_payload = build_agent_history_payload(ag.history, sensitive_data)
+        jt.update_runtime_snapshot(
+            cost_summary,
+            step_count=len(ag.history.history or []),
+            agent_history=hist_payload,
+        )
         tracked_cost = float(cost_summary["total_tracked_cost_usd"])
         if usage or tracked_cost:
             emit_cost(
@@ -2098,6 +2255,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         except asyncio.TimeoutError:
             logger.error("startup.browser_launch_timeout", timeout_seconds=60)
             emit_error("Browser failed to start within 60 seconds", fatal=True, job_id=job_id)
+            jt.emit_run_terminal(
+                termination_status="browser_launch_timeout",
+                success=False,
+                message="Browser failed to start within 60 seconds",
+                job_id=job_id,
+                lease_id=lease_id,
+                result_data={"success": False},
+            )
             sys.exit(1)
         logger.warning("startup.browser_ready", cdp_url=bool(browser.cdp_url))
         if browser.cdp_url:
@@ -2124,11 +2289,13 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             )
             if workday_preface_status == "blocker":
                 emit_error(workday_preface_message, fatal=False, job_id=job_id)
-                emit_done(
+                jt.emit_run_terminal(
+                    termination_status="workday_preface_blocker",
                     success=False,
-                    text=workday_preface_message,
+                    message=workday_preface_message,
                     job_id=job_id,
-                    browser_open=True,
+                    lease_id=lease_id,
+                    result_data={"success": False, "browserOpen": True},
                 )
                 return
 
@@ -2199,15 +2366,6 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         total_cost += float(cost_summary["total_tracked_cost_usd"])
         total_steps += len(history.history) if history.history else 0
 
-        # Final cost event
-        if history:
-            emit_cost(
-                total_usd=total_cost,
-                prompt_tokens=int(cost_summary["total_tracked_prompt_tokens"]),
-                completion_tokens=int(cost_summary["total_tracked_completion_tokens"]),
-                cost_summary=cost_summary,
-            )
-
         if await _should_resume_from_false_verification_blocker(
             final_result,
             platform=platform,
@@ -2233,13 +2391,6 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             cost_summary = summarize_history_cost(history, browser)
             total_cost += float(cost_summary["total_tracked_cost_usd"])
             total_steps += len(history.history) if history.history else 0
-            if history:
-                emit_cost(
-                    total_usd=total_cost,
-                    prompt_tokens=int(cost_summary["total_tracked_prompt_tokens"]),
-                    completion_tokens=int(cost_summary["total_tracked_completion_tokens"]),
-                    cost_summary=cost_summary,
-                )
 
         # Get real field counts and successful field provenance from DomHand callback
         from ghosthands.output.field_events import get_field_counts, get_filled_field_records
@@ -2267,26 +2418,31 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                         "cancelled": True,
                     },
                 )
-            emit_done(
+            cancel_rd: dict[str, Any] = {
+                "success": False,
+                "steps": total_steps,
+                "costUsd": round(total_cost, 6),
+                "costSummary": cost_summary,
+                "finalResult": final_result,
+                "blocker": None,
+                "platform": platform,
+                "cancelled": True,
+                "best_effort_guess_count": best_effort_guess_count,
+                "best_effort_guess_fields": best_effort_guess_fields,
+                **runtime_learning_payload,
+            }
+            cancel_rd["agentHistory"] = build_agent_history_payload(history, sensitive_data)
+            jt.emit_run_terminal(
+                termination_status="cancelled",
                 success=False,
                 message="Job cancelled by user",
                 fields_filled=filled_count,
                 fields_failed=failed_count,
                 job_id=job_id,
                 lease_id=lease_id,
-                result_data={
-                    "success": False,
-                    "steps": total_steps,
-                    "costUsd": round(total_cost, 6),
-                    "costSummary": cost_summary,
-                    "finalResult": final_result,
-                    "blocker": None,
-                    "platform": platform,
-                    "cancelled": True,
-                    "best_effort_guess_count": best_effort_guess_count,
-                    "best_effort_guess_fields": best_effort_guess_fields,
-                    **runtime_learning_payload,
-                },
+                cost_summary=cost_summary,
+                total_cost_usd=total_cost,
+                result_data=cancel_rd,
             )
             await _cleanup_browser(
                 browser,
@@ -2301,6 +2457,10 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         if final_result and "blocker:" in final_result.lower():
             blocker = final_result
             success = False
+        if success and _jsonl_done_signals_incomplete_outcome(final_result, history):
+            success = False
+            if blocker is None:
+                blocker = final_result
         if app_settings.submit_intent != "submit" and final_result:
             final_lower = final_result.lower()
             if "application submitted" in final_lower or "submitted successfully" in final_lower:
@@ -2336,12 +2496,25 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 },
             )
         result_data.update(runtime_learning_payload)
+        result_data["agentHistory"] = build_agent_history_payload(history, sensitive_data)
 
         if success:
             # I-02/U-01: emit status (not done) before review so the terminal
             # event is only sent once, after the user has actually reviewed.
             _emit_phase_if_changed("Reviewing filled fields")
             emit_status("Application filled — awaiting review", job_id=job_id)
+
+            # Last agent step may skip emit_cost when usage + tracked USD are both empty;
+            # push one snapshot so Desktop Cost & Progress is not stuck at $0.00.
+            _tc = float(cost_summary.get("total_tracked_cost_usd") or 0.0)
+            _pt = int(cost_summary.get("total_tracked_prompt_tokens") or 0)
+            _ct = int(cost_summary.get("total_tracked_completion_tokens") or 0)
+            emit_cost(
+                total_usd=_tc,
+                prompt_tokens=_pt,
+                completion_tokens=_ct,
+                cost_summary=cost_summary,
+            )
 
             # Resolve CDP URL and current page URL for Desktop review attachment
             review_cdp_url = browser.cdp_url
@@ -2361,17 +2534,22 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 job_id=job_id,
                 lease_id=lease_id,
                 result_data=result_data,
+                cost_summary=cost_summary,
+                total_cost_usd=total_cost,
             )
             if exit_code is not None:
                 sys.exit(exit_code)
         else:
-            emit_done(
+            jt.emit_run_terminal(
+                termination_status="agent_incomplete",
                 success=False,
                 message=blocker or final_result or "Agent did not complete successfully",
                 fields_filled=filled_count,
                 fields_failed=failed_count,
                 job_id=job_id,
                 lease_id=lease_id,
+                cost_summary=cost_summary,
+                total_cost_usd=total_cost,
                 result_data=result_data,
             )
             await _cleanup_browser(
@@ -2381,15 +2559,28 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
 
+    except (KeyboardInterrupt, asyncio.CancelledError) as intr:
+        logger.warning("agent_run_interrupted", error=str(intr))
+        jt.emit_run_terminal(
+            termination_status="interrupted",
+            success=False,
+            message="Run interrupted",
+            job_id=job_id,
+            lease_id=lease_id,
+            cost_summary=last_cost_summary or None,
+            result_data={"cancelled": True, "success": False},
+        )
+        if browser is not None:
+            with contextlib.suppress(Exception):
+                await _cleanup_browser(
+                    browser,
+                    desktop_owns_browser,
+                    keep_browser_alive=keep_worker_browser_alive,
+                )
+        sys.exit(130)
+
     except Exception as e:
         logger.error("agent_run_failed", error=str(e))
-        if last_cost_summary:
-            emit_cost(
-                total_usd=float(last_cost_summary.get("total_tracked_cost_usd") or 0.0),
-                prompt_tokens=int(last_cost_summary.get("total_tracked_prompt_tokens") or 0),
-                completion_tokens=int(last_cost_summary.get("total_tracked_completion_tokens") or 0),
-                cost_summary=last_cost_summary,
-            )
         runtime_error = _classify_runtime_error(
             e,
             proxy_mode=bool(args.proxy_url or (app_settings and app_settings.llm_proxy_url)),
@@ -2400,6 +2591,18 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 fatal=runtime_error.fatal,
                 job_id=job_id,
                 code=runtime_error.code,
+            )
+            jt.emit_run_terminal(
+                termination_status="runtime_error",
+                success=False,
+                message=runtime_error.message,
+                job_id=job_id,
+                lease_id=lease_id,
+                cost_summary=last_cost_summary or None,
+                result_data={
+                    "success": False,
+                    "code": runtime_error.code,
+                },
             )
             if browser is not None:
                 with contextlib.suppress(Exception):
@@ -2417,6 +2620,15 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             sys.exit(1)
 
         emit_error("Agent encountered an unexpected error", fatal=True, job_id=job_id)
+        jt.emit_run_terminal(
+            termination_status="unexpected_error",
+            success=False,
+            message=str(e),
+            job_id=job_id,
+            lease_id=lease_id,
+            cost_summary=last_cost_summary or None,
+            result_data={"success": False},
+        )
         if browser is not None:
             with contextlib.suppress(Exception):
                 await _cleanup_browser(
@@ -2733,14 +2945,10 @@ async def run_agent_human(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    # S-08: Install SIGTERM handler so the process exits cleanly when the
-    # desktop app terminates the child process.  SystemExit is caught by
-    # the existing KeyboardInterrupt/Exception handlers in both
-    # run_agent_jsonl and run_agent_human.
+    # S-08: SIGTERM for human mode only. JSONL mode installs handlers inside
+    # run_agent_jsonl so SIGTERM emits the terminal cost+done contract first.
     def _handle_sigterm(signum: int, frame: object) -> None:
         raise SystemExit(1)
-
-    signal.signal(signal.SIGTERM, _handle_sigterm)
 
     # Handle --smoke-test-import before argparse (bypasses --job-url requirement)
     _handle_smoke_test_import()
@@ -2748,6 +2956,9 @@ def main() -> None:
     args = parse_args()
 
     is_jsonl = args.output_format == "jsonl"
+
+    if not is_jsonl:
+        signal.signal(signal.SIGTERM, _handle_sigterm)
 
     # Install stdout guard BEFORE any library imports in JSONL mode.
     # This saves the real stdout fd for JSONL and redirects sys.stdout
@@ -2765,13 +2976,31 @@ def main() -> None:
     try:
         asyncio.run(runner(args))
     except KeyboardInterrupt:
+        if is_jsonl:
+            from ghosthands.output.jsonl_terminal import emit_run_terminal, was_terminal_emitted
+
+            if not was_terminal_emitted():
+                emit_run_terminal(
+                    termination_status="keyboard_interrupt",
+                    success=False,
+                    message="Keyboard interrupt",
+                    result_data={"cancelled": True, "success": False},
+                )
         sys.exit(130)
     except Exception as e:
         if is_jsonl:
             from ghosthands.output.jsonl import emit_error
+            from ghosthands.output.jsonl_terminal import emit_run_terminal, was_terminal_emitted
 
             logger.error("fatal_startup_error", error=str(e))
             emit_error("Hand-X encountered a fatal error", fatal=True)
+            if not was_terminal_emitted():
+                emit_run_terminal(
+                    termination_status="fatal_startup",
+                    success=False,
+                    message=str(e),
+                    result_data={"success": False},
+                )
         else:
             print(f"Fatal error: {e}", file=sys.stderr)
         sys.exit(1)

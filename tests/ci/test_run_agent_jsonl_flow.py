@@ -1,10 +1,10 @@
 """Flow tests for ghosthands.cli.run_agent_jsonl.
 
-Tests cover the four main outcomes of the 362-line async function:
+Tests cover the four main outcomes of the async function:
 1. Success path  -> emit_awaiting_review -> wait_for_review_command
-2. Failure path  -> emit_done(success=False) -> cleanup -> exit(1)
-3. Cancel path   -> emit_done(cancelled=True) -> cleanup -> exit(1)
-4. Exception path -> emit_error -> cleanup -> exit(1)
+2. Failure path  -> terminal emit_cost + emit_done (agent_incomplete) -> cleanup -> exit(1)
+3. Cancel path   -> terminal cost+done (terminationStatus=cancelled) -> cleanup -> exit(1)
+4. Exception path -> emit_error + terminal cost+done -> cleanup -> exit(1)
 
 All heavy dependencies (browser-use, Agent, BrowserSession, LLM) are
 mocked so these tests run without playwright or API keys.
@@ -44,6 +44,31 @@ _m_emit_error = MagicMock()
 _m_emit_done = MagicMock()
 _m_emit_awaiting_review = MagicMock()
 _m_cleanup_browser = AsyncMock()
+
+
+def _stub_emit_run_terminal(**kwargs: object) -> bool:
+    """Mirror real emit_run_terminal: final cost line + done (uses JSONL mocks)."""
+    cs = kwargs.get("cost_summary") or {}
+    if not isinstance(cs, dict):
+        cs = {}
+    total = kwargs.get("total_cost_usd")
+    total_f = float(total if total is not None else cs.get("total_tracked_cost_usd") or 0)
+    _m_emit_cost(
+        total_usd=total_f,
+        prompt_tokens=int(cs.get("total_tracked_prompt_tokens") or 0),
+        completion_tokens=int(cs.get("total_tracked_completion_tokens") or 0),
+        cost_summary=cs if cs else None,
+    )
+    _m_emit_done(
+        success=kwargs["success"],  # type: ignore[arg-type]
+        message=kwargs["message"],  # type: ignore[arg-type]
+        fields_filled=int(kwargs.get("fields_filled") or 0),
+        fields_failed=int(kwargs.get("fields_failed") or 0),
+        job_id=str(kwargs.get("job_id") or ""),
+        lease_id=str(kwargs.get("lease_id") or ""),
+        result_data=kwargs.get("result_data"),
+    )
+    return True
 
 
 def _install_stub(name: str, mod: types.ModuleType) -> None:
@@ -161,6 +186,15 @@ def _stub_all():
     go_jsonl.emit_done = _m_emit_done
     go_jsonl.emit_awaiting_review = _m_emit_awaiting_review
     _install_stub("ghosthands.output.jsonl", go_jsonl)
+
+    go_jt = types.ModuleType("ghosthands.output.jsonl_terminal")
+    go_jt.reset = MagicMock()
+    go_jt.configure = MagicMock()
+    go_jt.install_signal_handlers = MagicMock()
+    go_jt.update_runtime_snapshot = MagicMock()
+    go_jt.emit_run_terminal = _stub_emit_run_terminal
+    go_jt.was_terminal_emitted = MagicMock(return_value=False)
+    _install_stub("ghosthands.output.jsonl_terminal", go_jt)
 
     go_fe = types.ModuleType("ghosthands.output.field_events")
     go_fe.install_jsonl_callback = MagicMock()
