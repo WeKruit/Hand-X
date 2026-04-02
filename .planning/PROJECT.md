@@ -4,7 +4,7 @@
 
 Hand-X is a brownfield browser automation engine for job applications. It runs both as a desktop-invoked CLI and as a server-side worker, fills ATS flows across platforms like Workday and Greenhouse, and integrates with VALET and GH Desktop for profile data, progress reporting, and review.
 
-The current project focus is streamlining the Desktop ↔ Hand-X binary integration — fixing the build pipeline so code changes on `main` reliably produce a working binary that Desktop can dispatch jobs to end-to-end.
+The current project focus is rebuilding the observation layer from the ground up — replacing the DOM-based field extraction with a deterministic, generic system that reliably understands page structure, field semantics, grouping, and state across all ATS platforms.
 
 ## Core Value
 
@@ -21,21 +21,24 @@ A saved applicant identity can be applied accurately, repeatably, and safely acr
 
 ### Active
 
-- [ ] dev-deploy.sh reliably builds from project .venv Python 3.12 and installs to correct Desktop path
-- [ ] Binary bundles all required modules (openai, playwright, aiohttp, google-genai, anthropic)
-- [ ] Smoke test validates critical imports before installing binary
-- [ ] Desktop dispatches a job and Hand-X binary completes without module errors
-- [ ] All recent code changes (field renames, timeout increases, profile fields) reflected in binary
+- [ ] Observation layer produces deterministic, generic semantic representation of any ATS form page
+- [ ] Field grouping correctly associates questions with options regardless of DOM structure
+- [ ] State detection reliably knows whether fields are filled, checkboxes checked, dropdowns selected
+- [ ] Semantic understanding maps structural variations to canonical meanings across platforms
+- [ ] Repeater sections are recognized and bounded without platform-specific logic
+- [ ] Clean observer contract defines interface between observation, decision, and action layers
 
-## Current Milestone: v1.3 Streamlined Desktop ↔ Hand-X Integration
+## Current Milestone: v2.0 Observation Layer Rebuild
 
-**Goal:** Make the Desktop→Hand-X binary pipeline reliable and streamlined — one command rebuilds from current source, installs, and Desktop runs jobs end-to-end.
+**Goal:** Ground-up rebuild of the observation layer so Hand-X can deterministically and generically understand page structure, field semantics, grouping, and state across all ATS platforms.
 
 **Target features:**
-- Reliable binary build: dev-deploy.sh always uses project .venv, bundles all deps, installs to correct path
-- Build verification: smoke test validates critical module imports before installing
-- Current source in binary: all recent changes automatically included by rebuilding from main
-- End-to-end validation: Desktop dispatches job → Hand-X binary runs → completes
+- Deterministic page observation: same page always produces the same semantic representation
+- Generic field grouping: correctly associates questions with options, sections with fields, regardless of DOM structure
+- Reliable state detection: knows field state even in custom widgets
+- Semantic understanding: maps structural variations to meaning across platforms
+- Repeater awareness: recognizes repeatable sections and their boundaries generically
+- Clean observer contract: well-defined interface between observation, decision, and action layers
 
 ### Out of Scope
 
@@ -48,7 +51,7 @@ A saved applicant identity can be applied accurately, repeatably, and safely acr
 
 Hand-X is already a large brownfield codebase with a documented architecture under `.planning/codebase/`. The codebase currently supports desktop CLI mode, worker mode, DOM-first filling, Stagehand escalation, runtime learning, and VALET/Postgres integration.
 
-The current gap is the binary build pipeline. Hand-X works perfectly when run as Python source (`apply.sh`), but the PyInstaller binary that Desktop uses is stale (dev-20260328) and was built with wrong Python (anaconda 3.11 instead of project .venv 3.12), causing missing modules (openai, playwright, aiohttp). Recent code changes (field renames to authorized_to_work_in_us/needs_visa_sponsorship, timeout increases, citizenship_country/visa_type fields, LLM proxy config) are only in source, not in the binary.
+The current observation layer (`ghosthands/dom/field_extractor.py`) injects JavaScript to traverse the full DOM including shadow DOMs, discovers interactive elements by querying for native inputs + ARIA roles + custom widgets, and resolves labels via an accessibility chain. Grouping uses field_type + label + section matching. This approach is non-deterministic (DOM structure doesn't encode semantic meaning reliably), non-generic (can't handle structural variations across ATS platforms), and overwhelms the LLM (Gemini 3.0 Flash) with too much raw DOM context, causing hallucinations and wrong field values. Specific failure modes include: sibling elements that are semantically related (multiselect options as siblings to questions) being misinterpreted, state changes not being detected in custom widgets, and the agent looping on already-completed actions because it can't observe that a selection was made.
 
 ## Constraints
 
@@ -68,6 +71,9 @@ The current gap is the binary build pipeline. Hand-X works perfectly when run as
 | Fix build pipeline before adding features | Stale binary is blocking all Desktop testing — no point adding features nobody can run | v1.3 |
 | dev-deploy.sh always activates .venv | Conda sets VIRTUAL_ENV, tricking the old check into skipping project venv | v1.3 |
 | Primary install path is gh-desktop-app not Valet | Desktop reads from ~/Library/Application Support/gh-desktop-app/bin/ | v1.3 |
+| Rebuild observation layer from ground up | Current DOM extraction is non-deterministic, non-generic, causes hallucinations — fixing incrementally won't solve the structural issues | v2.0 |
+| Action layer stays, observation is replaced | Acting (domhand_fill strategies) works well — the problem is observation feeding wrong data to good actors | v2.0 |
+| Strategic screenshots OK, per-action screenshots not | Screenshots too expensive per-action but can be used per-page/section for anchoring | v2.0 |
 
 ## Evolution
 
@@ -87,4 +93,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-01 after milestone v1.3 start*
+*Last updated: 2026-04-02 after milestone v2.0 start*
