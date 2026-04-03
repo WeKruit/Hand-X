@@ -2,36 +2,17 @@
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-04-01)
+See: .planning/PROJECT.md (updated 2026-04-02)
 
 **Core value:** A saved applicant identity can be applied accurately, repeatably, and safely across ATS flows without the user re-entering data.
-**Current focus:** Phase 10 -- Build Pipeline + Installation (v1.3)
+**Current focus:** Milestone v1.4 — Production Ship
 
 ## Current Position
 
-Phase: 10 of 11 (Build Pipeline + Installation)
-Plan: 0 of 2 in current phase
-Status: Ready to plan
-Last activity: 2026-04-01 -- Roadmap created for milestone v1.3
-
-Progress: [░░░░░░░░░░] 0%
-
-## Performance Metrics
-
-**Velocity:**
-- Total plans completed: 0
-- Average duration: -
-- Total execution time: 0.0 hours
-
-**By Phase:**
-
-| Phase | Plans | Total | Avg/Plan |
-|-------|-------|-------|----------|
-| - | - | - | - |
-
-**Recent Trend:**
-- Last 5 plans: -
-- Trend: Stable
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-04-02 — Milestone v1.4 started
 
 ## Accumulated Context
 
@@ -41,9 +22,11 @@ Progress: [░░░░░░░░░░] 0%
 - Desktop reads from `~/Library/Application Support/gh-desktop-app/bin/` (primary) and `~/Library/Application Support/Valet/bin/` (alternate)
 - dev-deploy.sh had two bugs fixed in previous session: (1) conda VIRTUAL_ENV tricked venv activation skip, (2) installed to Valet instead of gh-desktop-app
 - apply.sh works because it runs Python source directly -- all packages available
-- When Gemini returns bad JSON, browser-use error handler tries `import openai` -- missing from binary -- fatal crash
-- Profile fields renamed: work_authorization->authorized_to_work_in_us, visa_sponsorship->needs_visa_sponsorship -- only in source, not binary
-- PyInstaller spec (build/hand-x.spec) has hidden_imports for openai, anthropic, google.genai -- but binary was built with wrong Python so deps weren't found
+- VALET staging has 289 commits not in prod — includes profile endpoint, DB migrations, resume parser, write-path whitelist
+- languages column changed from varchar(2000) to jsonb in staging — prod ALTER requires data verification
+- @wekruit/valet-shared@1.0.3 published with all profile fields
+- Desktop has uncommitted Workday role-gating on feat/staging-dmg-packaging branch
+- Unified profile API endpoint deployed to staging, not yet prod-verified
 
 ### Pending Todos
 
@@ -51,10 +34,11 @@ None yet.
 
 ### Blockers/Concerns
 
-None.
+- Prod DB languages column data must be verified before jsonb ALTER
+- 289-commit staging→prod delta is large blast radius
 
 ## Session Continuity
 
-Last session: 2026-04-01
-Stopped at: Roadmap created for v1.3, ready to plan Phase 10
+Last session: 2026-04-02
+Stopped at: Milestone v1.4 started, defining requirements
 Resume file: None

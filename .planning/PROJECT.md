@@ -4,7 +4,7 @@
 
 Hand-X is a brownfield browser automation engine for job applications. It runs both as a desktop-invoked CLI and as a server-side worker, fills ATS flows across platforms like Workday and Greenhouse, and integrates with VALET and GH Desktop for profile data, progress reporting, and review.
 
-The current project focus is streamlining the Desktop ↔ Hand-X binary integration — fixing the build pipeline so code changes on `main` reliably produce a working binary that Desktop can dispatch jobs to end-to-end.
+The current project focus is shipping the unified data contract and all staging work to production — VALET staging→prod promotion with DB migration safety, Desktop release with Workday role-gating, and Hand-X binary rebuild from current source.
 
 ## Core Value
 
@@ -27,28 +27,29 @@ A saved applicant identity can be applied accurately, repeatably, and safely acr
 - [ ] Desktop dispatches a job and Hand-X binary completes without module errors
 - [ ] All recent code changes (field renames, timeout increases, profile fields) reflected in binary
 
-## Current Milestone: v1.3 Streamlined Desktop ↔ Hand-X Integration
+## Current Milestone: v1.4 Production Ship
 
-**Goal:** Make the Desktop→Hand-X binary pipeline reliable and streamlined — one command rebuilds from current source, installs, and Desktop runs jobs end-to-end.
+**Goal:** Promote all staging work to production across VALET, Desktop, and Hand-X — DB migrations verified, unified data contract live, Desktop release cut.
 
 **Target features:**
-- Reliable binary build: dev-deploy.sh always uses project .venv, bundles all deps, installs to correct path
-- Build verification: smoke test validates critical module imports before installing
-- Current source in binary: all recent changes automatically included by rebuilding from main
-- End-to-end validation: Desktop dispatches job → Hand-X binary runs → completes
+- VALET staging → prod: cherry-pick or full promote of profile endpoint, DB migrations (13 columns + jsonb), resume parser, write-path whitelist
+- DB migration safety: verify prod data compatibility before ALTER (languages varchar→jsonb)
+- Desktop: commit Workday role-gating + packaging changes, merge to main, build release DMG
+- Hand-X binary: rebuild from current source so Desktop ships with latest fills
+- E2E validation: Desktop-dispatched job completes on prod with all profile fields populated
 
 ### Out of Scope
 
-- .dmg packaging for Mac app distribution — separate milestone after integration is stable
-- CI/CD automated binary builds (GitHub Actions) — future, manual dev-deploy.sh is sufficient now
-- Cross-platform binary testing (Windows/Linux) — macOS-only for now
-- Changing Hand-X's LLM provider architecture — just ensure all providers are bundled correctly
+- New ATS platform support — ship what works now
+- CI/CD automated binary builds — manual dev-deploy.sh is sufficient
+- Cross-platform (Windows/Linux) — macOS-only for now
+- Matching engine / job recommendations in prod — not required for core automation
 
 ## Context
 
 Hand-X is already a large brownfield codebase with a documented architecture under `.planning/codebase/`. The codebase currently supports desktop CLI mode, worker mode, DOM-first filling, Stagehand escalation, runtime learning, and VALET/Postgres integration.
 
-The current gap is the binary build pipeline. Hand-X works perfectly when run as Python source (`apply.sh`), but the PyInstaller binary that Desktop uses is stale (dev-20260328) and was built with wrong Python (anaconda 3.11 instead of project .venv 3.12), causing missing modules (openai, playwright, aiohttp). Recent code changes (field renames to authorized_to_work_in_us/needs_visa_sponsorship, timeout increases, citizenship_country/visa_type fields, LLM proxy config) are only in source, not in the binary.
+Staging is stable. VALET has 289 commits on staging not yet in prod, including: unified profile API endpoint, DB schema additions (13 new application profile columns, languages varchar→jsonb), resume parser improvements, write-path whitelist expansion, and the full @wekruit/valet-shared@1.0.3 contract. Desktop has uncommitted Workday role-gating and packaging changes on `feat/staging-dmg-packaging`. Hand-X source on main has all profile/EEO fixes committed. The binary needs rebuilding from current source.
 
 ## Constraints
 
@@ -68,6 +69,8 @@ The current gap is the binary build pipeline. Hand-X works perfectly when run as
 | Fix build pipeline before adding features | Stale binary is blocking all Desktop testing — no point adding features nobody can run | v1.3 |
 | dev-deploy.sh always activates .venv | Conda sets VIRTUAL_ENV, tricking the old check into skipping project venv | v1.3 |
 | Primary install path is gh-desktop-app not Valet | Desktop reads from ~/Library/Application Support/gh-desktop-app/bin/ | v1.3 |
+| VALET API as single source of truth for profile data | Desktop and apply.sh must use identical normalization path — duplicated merge logic causes regressions | v1.4 |
+| Cherry-pick or full promote for staging→prod | 289 commits; verify DB migration safety before promoting | v1.4 |
 
 ## Evolution
 
@@ -87,4 +90,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-01 after milestone v1.3 start*
+*Last updated: 2026-04-02 after milestone v1.4 start*
