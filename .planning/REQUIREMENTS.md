@@ -3,6 +3,31 @@
 **Defined:** 2026-04-01
 **Core Value:** A saved applicant identity can be applied accurately, repeatably, and safely across ATS flows without the user re-entering data.
 
+## v1.4 Requirements -- Production Ship
+
+### VALET Prod Promotion
+
+- [ ] **VALET-01**: Prod DB languages column data verified safe for varchar→jsonb ALTER (no non-JSON text)
+- [ ] **VALET-02**: Staging merged to main via PR, triggering CD to prod
+- [ ] **VALET-03**: Rollback SHA recorded (81ce921) for emergency revert
+- [ ] **VALET-04**: Profile API endpoint (`GET /api/v1/local-workers/profile`) responds on prod
+
+### Desktop Release
+
+- [ ] **DESK-01**: Workday role-gating changes committed and PR merged to main
+- [ ] **DESK-02**: Desktop launched from main, profile save works without 500
+- [ ] **DESK-03**: Desktop dispatches a job to Hand-X without errors
+
+### Hand-X Binary
+
+- [ ] **HANDX-01**: Binary rebuilt from current main source with all modules bundled
+- [ ] **HANDX-02**: Binary installed to Desktop path and smoke-tested
+
+### E2E Validation
+
+- [ ] **E2E-01**: Bridge summary shows all profile fields populated (including sexual_orientation, education dates)
+- [ ] **E2E-02**: Desktop-dispatched job completes an application end-to-end on prod
+
 ## v1.3 Requirements -- Streamlined Desktop <-> Hand-X Integration
 
 ### Build Pipeline
@@ -112,4 +137,4 @@
 
 ---
 *Requirements defined: 2026-04-01*
-*Last updated: 2026-04-01 after roadmap creation*
+*Last updated: 2026-04-02 after v1.4 requirements added*
