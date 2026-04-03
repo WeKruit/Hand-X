@@ -7,7 +7,7 @@
 
 ### VALET Prod Promotion
 
-- [ ] **VALET-01**: Prod DB languages column data verified safe for varchar→jsonb ALTER (no non-JSON text)
+- [ ] **VALET-01**: Prod DB languages column data verified safe for varchar->jsonb ALTER (no non-JSON text)
 - [ ] **VALET-02**: Staging merged to main via PR, triggering CD to prod
 - [ ] **VALET-03**: Rollback SHA recorded (81ce921) for emergency revert
 - [ ] **VALET-04**: Profile API endpoint (`GET /api/v1/local-workers/profile`) responds on prod
@@ -126,15 +126,26 @@
 | BUILD-03 | Phase 10 | Pending |
 | INST-01 | Phase 10 | Pending |
 | INST-02 | Phase 10 | Pending |
-| E2E-01 | Phase 11 | Pending |
-| E2E-02 | Phase 11 | Pending |
-| E2E-03 | Phase 11 | Pending |
+| E2E-01 (v1.3) | Phase 11 | Pending |
+| E2E-02 (v1.3) | Phase 11 | Pending |
+| E2E-03 (v1.3) | Phase 11 | Pending |
+| VALET-01 | Phase 12 | Pending |
+| VALET-02 | Phase 12 | Pending |
+| VALET-03 | Phase 12 | Pending |
+| VALET-04 | Phase 12 | Pending |
+| DESK-01 | Phase 13 | Pending |
+| HANDX-01 | Phase 13 | Pending |
+| HANDX-02 | Phase 13 | Pending |
+| DESK-02 | Phase 14 | Pending |
+| DESK-03 | Phase 14 | Pending |
+| E2E-01 (v1.4) | Phase 14 | Pending |
+| E2E-02 (v1.4) | Phase 14 | Pending |
 
 **Coverage:**
-- v1.3 requirements: 8 total
-- Mapped to phases: 8
+- v1.3 requirements: 8 total, 8 mapped
+- v1.4 requirements: 11 total, 11 mapped
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-01*
-*Last updated: 2026-04-02 after v1.4 requirements added*
+*Last updated: 2026-04-02 after v1.4 roadmap created*

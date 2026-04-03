@@ -6,6 +6,7 @@
 - **v1.1 Generic Repeater Pre-fill Detection** - Phases 5-7 (in progress)
 - **v1.2 SPA Page Transition Detection** - Phases 8-9 (planned)
 - **v1.3 Streamlined Desktop <-> Hand-X Integration** - Phases 10-11 (in progress)
+- **v1.4 Production Ship** - Phases 12-14 (in progress)
 
 ## Phases
 
@@ -157,18 +158,8 @@ Plans:
 
 </details>
 
-### v1.3 Streamlined Desktop <-> Hand-X Integration (In Progress)
-
-**Milestone Goal:** Make the Desktop-to-Hand-X binary pipeline reliable -- one command rebuilds from current source, installs to the correct path, and Desktop runs jobs end-to-end without module errors.
-
-**Phase Numbering:**
-- Integer phases (10, 11): Planned milestone work
-- Decimal phases (10.1, 10.2): Urgent insertions if needed (marked with INSERTED)
-
-- [ ] **Phase 10: Build Pipeline + Installation** - Fix dev-deploy.sh, verify PyInstaller spec bundles all deps, add import smoke test, install binary to correct Desktop path
-- [ ] **Phase 11: End-to-End Validation** - Rebuild binary from current source, dispatch job from Desktop, verify profile fields and LLM proxy work through the binary
-
-## Phase Details
+<details>
+<summary>v1.3 Streamlined Desktop <-> Hand-X Integration (Phases 10-11) - IN PROGRESS</summary>
 
 ### Phase 10: Build Pipeline + Installation
 **Goal**: Running `dev-deploy.sh` reliably produces a binary from the project .venv Python 3.12 with all required modules bundled, validates the binary with a smoke test, and installs it where Desktop expects it.
@@ -199,10 +190,66 @@ Plans:
 - [ ] 11-01: TBD
 - [ ] 11-02: TBD
 
+</details>
+
+### v1.4 Production Ship (In Progress)
+
+**Milestone Goal:** Promote all staging work to production across VALET, Desktop, and Hand-X -- DB migrations verified safe, unified data contract live on prod, Desktop release cut with latest Hand-X binary, and E2E validated on production infrastructure.
+
+**Phase Numbering:**
+- Integer phases (12, 13, 14): Planned milestone work
+- Decimal phases (12.1, 12.2): Urgent insertions if needed (marked with INSERTED)
+
+- [ ] **Phase 12: VALET Prod Promotion** - Verify prod DB safety, merge staging to main, deploy to prod, confirm profile endpoint live
+- [ ] **Phase 13: Desktop + Hand-X Ship** - Commit Workday gating, rebuild Hand-X binary from current source, install and smoke-test
+- [ ] **Phase 14: E2E Validation on Prod** - Launch Desktop on prod, verify profile fields, dispatch job end-to-end on production
+
+## Phase Details
+
+### Phase 12: VALET Prod Promotion
+**Goal**: VALET staging (289 commits including unified profile endpoint, DB migrations, resume parser) is safely promoted to production with verified DB compatibility and a recorded rollback path.
+**Depends on**: Phase 11 (v1.3 must be stable -- binary pipeline works, Desktop-Hand-X integration proven on staging)
+**Requirements**: VALET-01, VALET-02, VALET-03, VALET-04
+**Success Criteria** (what must be TRUE):
+  1. Prod DB `languages` column contains only valid JSON values (no bare text that would break the varchar-to-jsonb ALTER) -- verified by query before migration runs
+  2. Staging branch is merged to main via PR and the CD pipeline completes deployment to prod without errors
+  3. Rollback SHA (81ce921) is recorded and the operator can revert prod to that commit if critical issues surface post-deploy
+  4. `GET /api/v1/local-workers/profile` returns a 200 with the full hydrated profile payload on the production VALET instance
+**Plans**: TBD
+
+Plans:
+- [ ] 12-01: TBD
+- [ ] 12-02: TBD
+
+### Phase 13: Desktop + Hand-X Ship
+**Goal**: Desktop has Workday role-gating merged to main, and Hand-X binary is rebuilt from current source with all recent fixes (field renames, EEO aliases, timeout increases) bundled and installed to the Desktop path.
+**Depends on**: Nothing for DESK-01 and HANDX-01 (independent of VALET deploy); HANDX-02 depends on HANDX-01
+**Requirements**: DESK-01, HANDX-01, HANDX-02
+**Success Criteria** (what must be TRUE):
+  1. Workday role-gating changes are committed on GH-Desktop-App main branch via a merged PR
+  2. Hand-X binary is built from current main source and all critical imports succeed (openai, anthropic, google.genai, playwright, aiohttp)
+  3. Binary is installed to `~/Library/Application Support/gh-desktop-app/bin/` and passes the import smoke test at the installed location
+**Plans**: TBD
+
+Plans:
+- [ ] 13-01: TBD
+- [ ] 13-02: TBD
+
+### Phase 14: E2E Validation on Prod
+**Goal**: The full stack -- VALET prod, Desktop from main, Hand-X binary -- works end-to-end: profile saves without errors, bridge summary shows all fields populated, and a dispatched job completes an application on production.
+**Depends on**: Phase 12 (VALET on prod), Phase 13 (Desktop + binary ready)
+**Requirements**: DESK-02, DESK-03, E2E-01, E2E-02
+**Success Criteria** (what must be TRUE):
+  1. Desktop launched from main can save a profile without HTTP 500 errors (profile API on prod responds correctly)
+  2. Desktop dispatches a job to the Hand-X binary and the binary starts without errors (no module import failures, no stale field names)
+  3. Bridge summary log shows all profile fields populated -- including sexual_orientation, education start/end dates, and EEO fields -- with no EMPTY or missing values
+  4. A Desktop-dispatched job completes an application end-to-end on production infrastructure (VALET prod + Hand-X binary + real ATS)
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 10 -> 11
+Phases execute in numeric order: 12 -> 13 -> 14
+(Phase 12 and Phase 13 can partially overlap -- DESK-01 and HANDX-01 are independent of VALET deploy)
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
@@ -217,3 +264,6 @@ Phases execute in numeric order: 10 -> 11
 | 9. Validation + Regression Testing | v1.2 | 0/2 | Not started | - |
 | 10. Build Pipeline + Installation | v1.3 | 0/2 | Planning | - |
 | 11. End-to-End Validation | v1.3 | 0/2 | Not started | - |
+| 12. VALET Prod Promotion | v1.4 | 0/2 | Not started | - |
+| 13. Desktop + Hand-X Ship | v1.4 | 0/2 | Not started | - |
+| 14. E2E Validation on Prod | v1.4 | 0/2 | Not started | - |
