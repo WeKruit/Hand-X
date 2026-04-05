@@ -783,12 +783,17 @@ async def _load_profile_async(args: argparse.Namespace) -> dict:
     if resume_id and not user_id:
         raise ValueError("--resume-id requires --user-id")
     if user_id:
-        # Prefer DB-direct (apply.sh has GH_DATABASE_URL).
-        # Fall back to VALET API (Desktop passes proxy URL + runtime grant).
+        # Desktop passes the complete profile via GH_USER_PROFILE_TEXT — use it
+        # directly to avoid env-mismatch issues (e.g. .env leaking a staging
+        # GH_DATABASE_URL when Desktop targets prod).
+        profile_text = os.environ.get("GH_USER_PROFILE_TEXT", "").strip()
+        if profile_text:
+            return _validate_profile_object(json.loads(profile_text))
+        # Standalone: DB-direct (apply.sh has GH_DATABASE_URL).
         db_url = os.environ.get("GH_DATABASE_URL", "").strip()
         if db_url:
             return _validate_profile_object(await _load_profile_from_user_resume_async(user_id, resume_id))
-        # Desktop path: call VALET API → same _map_to_profile() normalization
+        # Fallback: VALET API proxy
         api_url = (os.environ.get("GH_LLM_PROXY_URL") or "").strip()
         grant = (os.environ.get("GH_LLM_RUNTIME_GRANT") or "").strip()
         if api_url and grant:
