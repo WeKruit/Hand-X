@@ -2020,9 +2020,13 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     if cdp_url:
         # Desktop-owned browser: connect to existing browser via CDP URL.
-        # Do not launch a new browser; headless flag is irrelevant here.
+        # Do not launch a new browser; the browser is always headful (visible to user).
         # If GH_TARGET_ID is set, attach to that specific tab (shared-browser mode).
-        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains)
+        # Explicit headless=False + no_viewport=True prevents detect_display_configuration()
+        # from incorrectly assuming headless mode (get_display_size() returns None in
+        # Electron-spawned subprocesses) and setting a 1920x1080 viewport override via CDP,
+        # which would cause pages to render wider than the physical Chrome window.
+        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains, headless=False, no_viewport=True)
         browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url, target_id=cdp_target_id)
         if cdp_target_id:
             emit_status(f"Connecting to Desktop-owned browser via CDP (target: {cdp_target_id[:8]}...)", job_id=job_id)
@@ -2780,7 +2784,9 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     desktop_owns_browser = cdp_url is not None
 
     if cdp_url:
-        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains)
+        # Desktop-owned browser is always headful; bypass faulty display auto-detection
+        # (see primary CDP path above for full rationale).
+        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains, headless=False, no_viewport=True)
         browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
         print(f"Connecting to Desktop-owned browser via CDP: {cdp_url}")
     else:
