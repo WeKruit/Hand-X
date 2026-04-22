@@ -10,9 +10,10 @@ Locks in the strict Workday multiselect contract:
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -20,7 +21,6 @@ import pytest
 pytest.importorskip("playwright.async_api")
 from browser_use.browser import BrowserProfile, BrowserSession
 from browser_use.tools.service import Tools
-
 from ghosthands.actions.domhand_fill import (
     _build_inject_helpers_js,
     _preferred_field_label,
@@ -31,12 +31,7 @@ from ghosthands.actions.views import DomHandFillParams
 from ghosthands.dom.fill_executor import _fill_select_field_outcome
 from ghosthands.dom.shadow_helpers import ensure_helpers
 
-_FIXTURE = (
-    Path(__file__).resolve().parent.parent.parent
-    / "examples"
-    / "toy-workday"
-    / "index.html"
-)
+_FIXTURE = Path(__file__).resolve().parent.parent.parent / "examples" / "toy-workday" / "index.html"
 
 
 @asynccontextmanager
@@ -78,9 +73,9 @@ async def test_toy_workday_skills_require_enter_before_live_results(httpserver, 
         assert page is not None
         await page.evaluate("() => showStep(1)")
         await page.evaluate(
-            "() => document.querySelector('[data-automation-id=\"skillsSection\"]').scrollIntoView({block: \"center\"})"
+            '() => document.querySelector(\'[data-automation-id="skillsSection"]\').scrollIntoView({block: "center"})'
         )
-        await ensure_helpers(page)
+        await ensure_helpers(cast(Any, page))
         await page.evaluate(_build_inject_helpers_js())
         closed_popup_text = await page.evaluate(
             """() => document.querySelector('[data-multiselect="skills"] .wd-popup')?.textContent || ''"""
@@ -144,9 +139,9 @@ async def test_toy_workday_skills_reject_blob_query(httpserver, toy_html: str) -
         assert page is not None
         await page.evaluate("() => showStep(1)")
         await page.evaluate(
-            "() => document.querySelector('[data-automation-id=\"skillsSection\"]').scrollIntoView({block: \"center\"})"
+            '() => document.querySelector(\'[data-automation-id="skillsSection"]\').scrollIntoView({block: "center"})'
         )
-        await ensure_helpers(page)
+        await ensure_helpers(cast(Any, page))
         await page.evaluate(_build_inject_helpers_js())
         await page.evaluate(
             """() => {
@@ -185,9 +180,9 @@ async def test_toy_workday_skills_commit_selected_tokens(httpserver, toy_html: s
         assert page is not None
         await page.evaluate("() => showStep(1)")
         await page.evaluate(
-            "() => document.querySelector('[data-automation-id=\"skillsSection\"]').scrollIntoView({block: \"center\"})"
+            '() => document.querySelector(\'[data-automation-id="skillsSection"]\').scrollIntoView({block: "center"})'
         )
-        await ensure_helpers(page)
+        await ensure_helpers(cast(Any, page))
         await page.evaluate(_build_inject_helpers_js())
 
         fields = await extract_visible_form_fields(page)
@@ -195,8 +190,7 @@ async def test_toy_workday_skills_commit_selected_tokens(httpserver, toy_html: s
             (
                 field
                 for field in fields
-                if field.field_type == "select"
-                and "skills" in _preferred_field_label(field).lower()
+                if field.field_type == "select" and "skills" in _preferred_field_label(field).lower()
             ),
             None,
         )
@@ -219,10 +213,13 @@ async def test_toy_workday_skills_commit_selected_tokens(httpserver, toy_html: s
         )
         assert "Python" in selected_titles, selected_titles
         assert "React" in selected_titles, selected_titles
-        visible_results = await page.evaluate(
+        visible_results_raw = await page.evaluate(
             """() => Array.from(
                 document.querySelectorAll('[data-multiselect="skills"] .wd-popup [role="option"]')
             ).map((node) => node.textContent.trim()).filter(Boolean)"""
+        )
+        visible_results = (
+            json.loads(visible_results_raw) if isinstance(visible_results_raw, str) else visible_results_raw
         )
         assert visible_results == [], visible_results
 
@@ -242,9 +239,9 @@ async def test_toy_workday_skills_do_not_substitute_similar_option_text(httpserv
         assert page is not None
         await page.evaluate("() => showStep(1)")
         await page.evaluate(
-            "() => document.querySelector('[data-automation-id=\"skillsSection\"]').scrollIntoView({block: \"center\"})"
+            '() => document.querySelector(\'[data-automation-id="skillsSection"]\').scrollIntoView({block: "center"})'
         )
-        await ensure_helpers(page)
+        await ensure_helpers(cast(Any, page))
         await page.evaluate(_build_inject_helpers_js())
 
         fields = await extract_visible_form_fields(page)
@@ -252,8 +249,7 @@ async def test_toy_workday_skills_do_not_substitute_similar_option_text(httpserv
             (
                 field
                 for field in fields
-                if field.field_type == "select"
-                and "skills" in _preferred_field_label(field).lower()
+                if field.field_type == "select" and "skills" in _preferred_field_label(field).lower()
             ),
             None,
         )
@@ -292,7 +288,7 @@ async def test_toy_workday_domhand_fill_commits_skills_widget(httpserver, toy_ht
         assert page is not None
         await page.evaluate("() => showStep(1)")
         await page.evaluate(
-            "() => document.querySelector('[data-automation-id=\"skillsSection\"]').scrollIntoView({block: \"center\"})"
+            '() => document.querySelector(\'[data-automation-id="skillsSection"]\').scrollIntoView({block: "center"})'
         )
 
         async def fake_generate(fields, *_args, **_kwargs):
@@ -310,14 +306,24 @@ async def test_toy_workday_domhand_fill_commits_skills_widget(httpserver, toy_ht
             patch("ghosthands.actions.domhand_fill._infer_entry_data_from_scope", return_value=None),
             patch("ghosthands.actions.domhand_fill._parse_profile_evidence", return_value={}),
             patch("ghosthands.actions.domhand_fill._generate_answers", AsyncMock(side_effect=fake_generate)),
-            patch("ghosthands.actions.domhand_fill._safe_page_url", AsyncMock(return_value="https://intel.wd1.myworkdayjobs.com/job/123")),
-            patch("ghosthands.actions.domhand_fill._get_page_context_key", AsyncMock(return_value="toy-workday-my-experience")),
+            patch(
+                "ghosthands.actions.domhand_fill._safe_page_url",
+                AsyncMock(return_value="https://intel.wd1.myworkdayjobs.com/job/123"),
+            ),
+            patch(
+                "ghosthands.actions.domhand_fill._get_page_context_key",
+                AsyncMock(return_value="toy-workday-my-experience"),
+            ),
             patch("ghosthands.actions.domhand_fill._stagehand_observe_cross_reference", AsyncMock(return_value=None)),
         ):
             result = await domhand_fill(
                 DomHandFillParams(
                     target_section="My Experience",
+                    heading_boundary=None,
                     focus_fields=["Type to Add Skills"],
+                    entry_data=None,
+                    use_auth_credentials=False,
+                    strict_scope=False,
                 ),
                 browser_session,
             )
@@ -330,10 +336,13 @@ async def test_toy_workday_domhand_fill_commits_skills_widget(httpserver, toy_ht
         )
         assert "Python" in selected_titles, selected_titles
         assert "React" in selected_titles, selected_titles
-        visible_results = await page.evaluate(
+        visible_results_raw = await page.evaluate(
             """() => Array.from(
                 document.querySelectorAll('[data-multiselect="skills"] .wd-popup [role="option"]')
             ).map((node) => node.textContent.trim()).filter(Boolean)"""
+        )
+        visible_results = (
+            json.loads(visible_results_raw) if isinstance(visible_results_raw, str) else visible_results_raw
         )
         assert visible_results == [], visible_results
 
@@ -353,7 +362,7 @@ async def test_toy_workday_domhand_fill_uses_profile_skills_without_llm(httpserv
         assert page is not None
         await page.evaluate("() => showStep(1)")
         await page.evaluate(
-            "() => document.querySelector('[data-automation-id=\"skillsSection\"]').scrollIntoView({block: \"center\"})"
+            '() => document.querySelector(\'[data-automation-id="skillsSection"]\').scrollIntoView({block: "center"})'
         )
 
         with (
@@ -363,14 +372,24 @@ async def test_toy_workday_domhand_fill_uses_profile_skills_without_llm(httpserv
             patch("ghosthands.actions.domhand_fill._infer_entry_data_from_scope", return_value=None),
             patch("ghosthands.actions.domhand_fill._parse_profile_evidence", return_value={}),
             patch("ghosthands.actions.domhand_fill._generate_answers", AsyncMock()) as generate_answers,
-            patch("ghosthands.actions.domhand_fill._safe_page_url", AsyncMock(return_value="https://intel.wd1.myworkdayjobs.com/job/123")),
-            patch("ghosthands.actions.domhand_fill._get_page_context_key", AsyncMock(return_value="toy-workday-my-experience")),
+            patch(
+                "ghosthands.actions.domhand_fill._safe_page_url",
+                AsyncMock(return_value="https://intel.wd1.myworkdayjobs.com/job/123"),
+            ),
+            patch(
+                "ghosthands.actions.domhand_fill._get_page_context_key",
+                AsyncMock(return_value="toy-workday-my-experience"),
+            ),
             patch("ghosthands.actions.domhand_fill._stagehand_observe_cross_reference", AsyncMock(return_value=None)),
         ):
             result = await domhand_fill(
                 DomHandFillParams(
                     target_section="My Experience",
+                    heading_boundary=None,
                     focus_fields=["Type to Add Skills"],
+                    entry_data=None,
+                    use_auth_credentials=False,
+                    strict_scope=False,
                 ),
                 browser_session,
             )
