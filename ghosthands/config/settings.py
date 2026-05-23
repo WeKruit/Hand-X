@@ -34,6 +34,10 @@ class Settings(BaseSettings):
         "gemini-3-flash-preview",
         description="Cheap model for DomHand answer generation",
     )
+    domhand_visual_model: str = Field(
+        "gemini-3-flash-preview",
+        description="Model for page-batched DomHand visual verification",
+    )
     llm_temperature: float = Field(
         0.0,
         description="Sampling temperature for planner + DomHand (via get_chat_model). "
@@ -156,4 +160,4 @@ class Settings(BaseSettings):
     )
 
 
-settings = Settings()
+settings = Settings()  # pyright: ignore[reportCallIssue]

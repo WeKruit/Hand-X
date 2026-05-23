@@ -78,15 +78,15 @@ MODEL_CATALOG: dict[str, ModelConfig] = {
     "gemini-3-flash-preview": ModelConfig(
         model_id="gemini-3-flash-preview",
         provider="google",
-        input_cost_per_1k=0.0003,
-        output_cost_per_1k=0.0025,
+        input_cost_per_1k=0.0005,
+        output_cost_per_1k=0.003,
         max_context=1_048_576,
     ),
     "gemini-3.1-flash-lite-preview": ModelConfig(
         model_id="gemini-3.1-flash-lite-preview",
         provider="google",
-        input_cost_per_1k=0.000075,
-        output_cost_per_1k=0.0003,
+        input_cost_per_1k=0.00025,
+        output_cost_per_1k=0.0015,
         max_context=1_048_576,
     ),
 }

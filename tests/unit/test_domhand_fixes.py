@@ -278,7 +278,10 @@ async def test_domhand_fill_agent_summary_defers_blocker_reporting_to_assess_sta
             AsyncMock(return_value="https://higher.gs.com/apply"),
         ),
         patch("ghosthands.actions.domhand_fill._get_page_context_key", AsyncMock(return_value="page-1")),
-        patch("ghosthands.actions.domhand_fill.extract_visible_form_fields", AsyncMock(side_effect=[[city_field], [city_field]])),
+        patch(
+            "ghosthands.actions.domhand_fill.extract_visible_form_fields",
+            AsyncMock(side_effect=[[city_field], [city_field]]),
+        ),
         patch("ghosthands.actions.domhand_fill._filter_fields_for_scope", side_effect=lambda fields, **_: fields),
         patch(
             "ghosthands.actions.domhand_fill._resolve_focus_fields",
@@ -307,6 +310,8 @@ def test_same_page_advance_guard_requires_clean_assess_state():
     from ghosthands.actions.domhand_assess_state import _last_state_is_cleanly_advanceable as assess_clean
     from ghosthands.actions.domhand_fill import (
         _last_assess_state_has_no_hard_blockers as fill_hard_clear,
+    )
+    from ghosthands.actions.domhand_fill import (
         _last_assess_state_is_cleanly_advanceable as fill_clean,
     )
 
@@ -598,8 +603,8 @@ def test_estimate_cost_known_model():
 
     cost = estimate_cost("gemini-3.1-flash-lite-preview", 1000, 500)
     assert cost > 0
-    # 1K input * 0.000075 + 500 output * 0.0003/1000
-    assert abs(cost - (0.000075 + 0.00015)) < 1e-8
+    # 1K input * 0.00025 + 500 output * 0.0015/1000
+    assert abs(cost - (0.00025 + 0.00075)) < 1e-8
 
 
 def test_estimate_cost_unknown_model_returns_fallback():
@@ -1360,7 +1365,10 @@ def test_build_task_prompt_user_create_account():
     assert "AUTH_RESULT=ACCOUNT_CREATED_ACTIVE" in prompt
     assert "Do NOT click Create Account again" in prompt
     assert "submit Create Account using domhand_click_button" in prompt
-    assert "A plain native Sign In page with email + password and NO verification/inbox/code text is NOT email verification." in prompt
+    assert (
+        "A plain native Sign In page with email + password and NO verification/inbox/code text is NOT email verification."
+        in prompt
+    )
     assert "call refresh() ONCE" in prompt
     assert "take ONE screenshot/vision retry on that blocker" in prompt
 
@@ -5572,7 +5580,10 @@ async def test_click_group_option_with_gui_falls_back_to_locator_when_element_ap
             "ghosthands.dom.fill_executor._get_group_option_target",
             AsyncMock(return_value={"found": True, "optionFfId": "ff-58", "text": "Male", "x": 100, "y": 200}),
         ),
-        patch("ghosthands.dom.fill_executor._read_group_selection", AsyncMock(side_effect=["", "", "", "", "", "", "Male"])),
+        patch(
+            "ghosthands.dom.fill_executor._read_group_selection",
+            AsyncMock(side_effect=["", "", "", "", "", "", "Male"]),
+        ),
     ):
         ok = await _click_group_option_with_gui(page, field, "Male", "[Gender]")
 
@@ -5998,7 +6009,10 @@ async def test_fill_workday_skill_multiselect_deduplicates_skills():
         ),
     ):
         ok = await _fill_workday_skill_multiselect(
-            page, field, ["Python", "python", "PYTHON", "Java"], "[Skills]",
+            page,
+            field,
+            ["Python", "python", "PYTHON", "Java"],
+            "[Skills]",
         )
 
     assert ok is True
@@ -7636,9 +7650,7 @@ def test_detect_platform_oracle():
     from ghosthands.platforms import detect_platform
 
     assert (
-        detect_platform(
-            "https://fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/12345"
-        )
+        detect_platform("https://fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/12345")
         == "oracle"
     )
     assert detect_platform("https://fa.ocs.oraclecloud.com/") == "oracle"
@@ -7647,13 +7659,8 @@ def test_detect_platform_oracle():
 def test_detect_platform_workday_unchanged():
     from ghosthands.platforms import detect_platform
 
-    assert (
-        detect_platform("https://wd3.myworkdayjobs.com/en-US/company/job/12345") == "workday"
-    )
-    assert (
-        detect_platform("https://wd5.myworkday.com/wday/authgwy/company/login.htmld")
-        == "workday"
-    )
+    assert detect_platform("https://wd3.myworkdayjobs.com/en-US/company/job/12345") == "workday"
+    assert detect_platform("https://wd5.myworkday.com/wday/authgwy/company/login.htmld") == "workday"
 
 
 def test_oracle_fill_overrides():
@@ -7831,11 +7838,13 @@ async def test_try_oracle_combobox_blocks_entity_fallthrough():
     field = _make_ff(name="School", field_type="select", is_native=False)
     page = AsyncMock()
     # Oracle searchable: True
-    page.evaluate = AsyncMock(side_effect=[
-        True,  # _IS_ORACLE_SEARCHABLE_JS
-        json.dumps({"exists": True}),  # _ELEMENT_EXISTS_JS
-        # _fill_oracle_combobox_outcome will fail — but we mock at higher level
-    ])
+    page.evaluate = AsyncMock(
+        side_effect=[
+            True,  # _IS_ORACLE_SEARCHABLE_JS
+            json.dumps({"exists": True}),  # _ELEMENT_EXISTS_JS
+            # _fill_oracle_combobox_outcome will fail — but we mock at higher level
+        ]
+    )
 
     with (
         patch("ghosthands.platforms.detect_platform", return_value="oracle"),
@@ -7845,7 +7854,10 @@ async def test_try_oracle_combobox_blocks_entity_fallthrough():
         ),
     ):
         result = await _try_oracle_searchable_combobox_first(
-            page, field, "University of California, Los Angeles", "test-tag",
+            page,
+            field,
+            "University of California, Los Angeles",
+            "test-tag",
             page_url="https://hdpc.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/X/job/1/apply",
         )
 
@@ -7861,10 +7873,12 @@ async def test_try_oracle_combobox_allows_non_entity_fallthrough():
 
     field = _make_ff(name="Visa Status", field_type="select", is_native=False)
     page = AsyncMock()
-    page.evaluate = AsyncMock(side_effect=[
-        True,  # _IS_ORACLE_SEARCHABLE_JS
-        json.dumps({"exists": True}),  # _ELEMENT_EXISTS_JS
-    ])
+    page.evaluate = AsyncMock(
+        side_effect=[
+            True,  # _IS_ORACLE_SEARCHABLE_JS
+            json.dumps({"exists": True}),  # _ELEMENT_EXISTS_JS
+        ]
+    )
 
     with (
         patch("ghosthands.platforms.detect_platform", return_value="oracle"),
@@ -7874,7 +7888,10 @@ async def test_try_oracle_combobox_allows_non_entity_fallthrough():
         ),
     ):
         result = await _try_oracle_searchable_combobox_first(
-            page, field, "H-1B", "test-tag",
+            page,
+            field,
+            "H-1B",
+            "test-tag",
             page_url="https://hdpc.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/X/job/1/apply",
         )
 
