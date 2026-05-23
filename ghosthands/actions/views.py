@@ -213,10 +213,7 @@ class DomHandFillRepeatersParams(BaseModel):
     """Fill all repeater entries for a section in one call."""
 
     section: str = Field(
-        description=(
-            "Repeater section to fill: 'Education', 'Work Experience', "
-            "'Skills', 'Languages', or 'Licenses'."
-        ),
+        description=("Repeater section to fill: 'Education', 'Work Experience', 'Skills', 'Languages', or 'Licenses'."),
     )
     max_entries: int | None = Field(
         None,
@@ -262,6 +259,26 @@ class ApplicationFieldIssue(BaseModel):
     options: list[str] = Field(default_factory=list)
 
 
+class VisualVerificationSummary(BaseModel):
+    """Aggregate summary of one assess-state visual verification pass."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    attempted: bool = False
+    cache_hit: bool = False
+    candidate_count: int = 0
+    calls: int = 0
+    verified_count: int = 0
+    mismatch_count: int = 0
+    unfilled_count: int = 0
+    uncertain_count: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    prompt_image_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    error: str | None = None
+
+
 class ApplicationState(BaseModel):
     """Runtime view of the current application page for planner decisions."""
 
@@ -282,6 +299,7 @@ class ApplicationState(BaseModel):
     advance_disabled: bool = False
     advance_allowed: bool = False
     platform_hint: str | None = None
+    visual_verification: VisualVerificationSummary | None = None
 
 
 class DomHandAssessStateParams(BaseModel):
@@ -355,7 +373,9 @@ def is_placeholder_value(value: str) -> bool:
 
 def normalize_name(s: str) -> str:
     """Normalize a field name for comparison: strip asterisks/underscores/apostrophes, collapse whitespace, lowercase."""
-    return re.sub(r"\s+", " ", s.replace("*", "").replace("_", " ").replace("'", "").replace("\u2019", "")).strip().lower()
+    return (
+        re.sub(r"\s+", " ", s.replace("*", "").replace("_", " ").replace("'", "").replace("\u2019", "")).strip().lower()
+    )
 
 
 def split_dropdown_value_hierarchy(value: str) -> list[str]:

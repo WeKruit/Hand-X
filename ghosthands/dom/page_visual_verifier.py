@@ -7,6 +7,7 @@ isolation before it is wired into ``domhand_assess_state``.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import tempfile
@@ -273,7 +274,7 @@ def _get_visual_file_system(browser_session: BrowserSession) -> FileSystem:
         return fs
     _VISUAL_PROMPT_FS_DIR.mkdir(parents=True, exist_ok=True)
     fs = FileSystem(base_dir=_VISUAL_PROMPT_FS_DIR)
-    browser_session._gh_visual_prompt_file_system = fs
+    object.__setattr__(browser_session, "_gh_visual_prompt_file_system", fs)
     return fs
 
 
@@ -281,11 +282,13 @@ def _build_cache_key(
     *,
     page_context_key: str,
     page_url: str,
+    screenshot_b64: str,
     candidates: list[VisualVerificationCandidate],
 ) -> str:
     payload = {
         "page_context_key": page_context_key,
         "page_url": page_url,
+        "screenshot_sha256": hashlib.sha256(screenshot_b64.encode("ascii")).hexdigest(),
         "candidates": [
             {
                 "field_key": candidate.field_key,
@@ -344,10 +347,34 @@ async def verify_page_visual_candidates(
     if not candidates:
         return VisualVerificationBatchResult(page_context_key=page_context_key)
 
-    state = await browser_session.get_browser_state_summary(include_screenshot=True)
+    try:
+        raw_state = await browser_session.get_browser_state_summary(include_screenshot=True)
+    except Exception as exc:
+        logger.info(
+            "domhand.visual_verifier.browser_state_unavailable",
+            extra={"error": str(exc), "page_context_key": page_context_key},
+        )
+        return VisualVerificationBatchResult(
+            page_context_key=page_context_key,
+            candidate_count=len(candidates),
+            model_name=settings.domhand_visual_model,
+            error="browser_state_unavailable",
+        )
+
+    if not isinstance(raw_state, BrowserStateSummary):
+        logger.debug(
+            "domhand.visual_verifier.skipped_invalid_browser_state",
+            extra={"page_context_key": page_context_key, "state_type": type(raw_state).__name__},
+        )
+        return VisualVerificationBatchResult(
+            page_context_key=page_context_key,
+            candidate_count=len(candidates),
+            model_name=settings.domhand_visual_model,
+        )
+
+    state = raw_state
     if not state.screenshot:
         return VisualVerificationBatchResult(
-            attempted=True,
             page_context_key=page_context_key,
             candidate_count=len(candidates),
             model_name=settings.domhand_visual_model,
@@ -357,6 +384,7 @@ async def verify_page_visual_candidates(
     cache_key = _build_cache_key(
         page_context_key=page_context_key,
         page_url=state.url,
+        screenshot_b64=state.screenshot,
         candidates=candidates,
     )
     cache_store = getattr(browser_session, "_gh_visual_verification_cache", None)
@@ -441,5 +469,5 @@ async def verify_page_visual_candidates(
 
     cache_store = cache_store if isinstance(cache_store, dict) else {}
     cache_store[cache_key] = result.model_dump(mode="json")
-    browser_session._gh_visual_verification_cache = cache_store
+    object.__setattr__(browser_session, "_gh_visual_verification_cache", cache_store)
     return result

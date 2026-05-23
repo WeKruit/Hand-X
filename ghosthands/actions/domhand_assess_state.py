@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import re
-from typing import Any
+from typing import Any, cast
 
 from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
@@ -18,11 +18,13 @@ from ghosthands.actions.domhand_fill import (
     _field_value_matches_expected,
     _filter_fields_for_scope,
     _get_page_context_key,
+    _get_profile_data,
     _grouped_date_is_complete,
     _is_effectively_unset_field_value,
     _is_navigation_field,
     _is_upload_like_field,
     _preferred_field_label,
+    _profile_skill_values,
     _read_binary_state,
     _read_checkbox_group_value,
     _read_field_value,
@@ -32,17 +34,24 @@ from ghosthands.actions.domhand_fill import (
     _section_matches_scope,
     _value_shape_is_compatible,
     extract_visible_form_fields,
-    _get_profile_data,
-    _profile_skill_values,
 )
 from ghosthands.actions.views import (
     ApplicationFieldIssue,
     ApplicationState,
+    ApplicationTerminalState,
     DomHandAssessStateParams,
     FormField,
+    VisualVerificationSummary,
     get_stable_field_key,
     is_placeholder_value,
     normalize_name,
+)
+from ghosthands.dom.page_visual_verifier import (
+    VisualTrustTier,
+    VisualVerificationBatchResult,
+    VisualVerificationFieldOutcome,
+    build_visual_candidates,
+    verify_page_visual_candidates,
 )
 from ghosthands.platforms import detect_platform_from_signals, get_config_by_name
 from ghosthands.runtime_learning import detect_host_from_url, get_expected_field_value
@@ -106,9 +115,7 @@ _STRICT_VERIFICATION_HINTS = (
     "legally permitted to work",
 )
 
-_STRICT_VERIFICATION_WORD_BOUNDARY_HINTS = (
-    "state",
-)
+_STRICT_VERIFICATION_WORD_BOUNDARY_HINTS = ("state",)
 
 
 def _label_has_strict_hint(label: str) -> bool:
@@ -124,6 +131,7 @@ def _label_has_strict_hint(label: str) -> bool:
         if re.search(rf"(?<!\w){re.escape(token)}(?!\w)", label):
             return True
     return False
+
 
 _COMPANION_BOOLEAN_FIELD_TYPES = {
     "checkbox",
@@ -171,7 +179,10 @@ def _expected_cluster_signature(label: str | None, field_type: str | None) -> tu
     is_binary = family == "binary"
 
     if any(token in normalized_label for token in ("relocation", "relocate")):
-        if any(token in normalized_label for token in ("location to which", "preferred location", "where would you relocate")):
+        if any(
+            token in normalized_label
+            for token in ("location to which", "preferred location", "where would you relocate")
+        ):
             return "relocation", "location_child"
         if is_binary or family == "select":
             return "relocation", "boolean_parent"
@@ -185,7 +196,9 @@ def _expected_cluster_signature(label: str | None, field_type: str | None) -> tu
         return "visa_sponsorship", "detail_child"
 
     if any(token in normalized_label for token in ("authorized to work", "legally permitted to work")):
-        if any(token in normalized_label for token in ("please choose", "please specify", "which most accurately fits")):
+        if any(
+            token in normalized_label for token in ("please choose", "please specify", "which most accurately fits")
+        ):
             return "work_authorization", "detail_child"
         if is_binary or family == "select":
             return "work_authorization", "boolean_parent"
@@ -290,11 +303,7 @@ def _semantic_tokens(text: str) -> set[str]:
         "to",
         "with",
     }
-    return {
-        token
-        for token in normalize_name(text).split()
-        if len(token) > 2 and token not in stop_words
-    }
+    return {token for token in normalize_name(text).split() if len(token) > 2 and token not in stop_words}
 
 
 def _semantic_text_values_match(current: str, expected: str) -> bool:
@@ -343,12 +352,228 @@ def _verification_issue_for_field(
         current_value=(field.current_value or "").strip(),
         visible_error=f"Expected value: {expected_value}",
         widget_kind=None,
-        options=[
-            str(option).strip()
-            for option in (field.options or field.choices or [])
-            if str(option).strip()
-        ],
+        options=[str(option).strip() for option in (field.options or field.choices or []) if str(option).strip()],
     )
+
+
+_VISUAL_HIGH_CONFIDENCE_THRESHOLD = 0.9
+
+
+def _relative_position_from_layout_entry(field_layout: dict[str, Any] | None) -> str:
+    if not field_layout:
+        return "unknown"
+    if bool(field_layout.get("in_view")):
+        return "in_view"
+    if float(field_layout.get("bottom", 0)) < 0:
+        return "above"
+    if float(field_layout.get("top", 0)) > 0:
+        return "below"
+    return "unknown"
+
+
+def _remove_issue_field_ids(
+    issues: list[ApplicationFieldIssue],
+    field_ids: set[str],
+    *,
+    only_reason: str | None = None,
+) -> list[ApplicationFieldIssue]:
+    if not field_ids:
+        return issues
+    return [
+        issue
+        for issue in issues
+        if issue.field_id not in field_ids or (only_reason is not None and issue.reason != only_reason)
+    ]
+
+
+def _upsert_issue_by_field_id(
+    issues: list[ApplicationFieldIssue],
+    issue: ApplicationFieldIssue,
+) -> list[ApplicationFieldIssue]:
+    for index, current in enumerate(issues):
+        if current.field_id == issue.field_id:
+            issues[index] = issue
+            return issues
+    issues.append(issue)
+    return issues
+
+
+def _visual_issue_for_field(
+    field: FormField,
+    *,
+    reason: str,
+    relative_position: str,
+    expected_value: str,
+    observed_value: str,
+) -> ApplicationFieldIssue:
+    observed_display = observed_value or "[empty]"
+    return ApplicationFieldIssue(
+        field_id=field.field_id,
+        name=_preferred_field_label(field),
+        field_type=field.field_type,
+        section=field.section or "",
+        section_path=field.section or "",
+        required=field.required,
+        reason=reason,
+        relative_position=relative_position,  # type: ignore[arg-type]
+        takeover_suggestion="browser_use_takeover",
+        question_text=(field.raw_label or _preferred_field_label(field) or "").strip() or None,
+        current_value=observed_value,
+        visible_error=f'Expected "{expected_value}" but visually observed "{observed_display}"',
+        widget_kind=_widget_kind_for_field(field),
+        options=[str(option).strip() for option in (field.options or field.choices or []) if str(option).strip()],
+    )
+
+
+def _visual_outcome_has_high_confidence(outcome: VisualVerificationFieldOutcome) -> bool:
+    return float(outcome.confidence or 0.0) >= _VISUAL_HIGH_CONFIDENCE_THRESHOLD
+
+
+def _visual_summary_from_result(result: VisualVerificationBatchResult) -> VisualVerificationSummary:
+    return VisualVerificationSummary(
+        attempted=result.attempted,
+        cache_hit=result.cache_hit,
+        candidate_count=result.candidate_count,
+        calls=result.calls,
+        verified_count=result.verified_count,
+        mismatch_count=result.mismatch_count,
+        unfilled_count=result.unfilled_count,
+        uncertain_count=result.uncertain_count,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        prompt_image_tokens=result.prompt_image_tokens,
+        estimated_cost_usd=result.estimated_cost_usd,
+        error=result.error,
+    )
+
+
+def _record_visual_verification_cost(
+    browser_session: BrowserSession,
+    *,
+    page_context_key: str,
+    target_section: str | None,
+    result: VisualVerificationBatchResult,
+) -> None:
+    if result.input_tokens <= 0 and result.output_tokens <= 0:
+        return
+    store = getattr(browser_session, "_gh_visual_verification_costs", None)
+    if not isinstance(store, dict):
+        store = {}
+    entry_key = page_context_key or (target_section or "(unknown)")
+    entry = store.get(entry_key)
+    if not isinstance(entry, dict):
+        entry = {
+            "calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "estimated_cost_usd": 0.0,
+        }
+    entry["calls"] = int(entry.get("calls") or 0) + int(result.calls or 0)
+    entry["input_tokens"] = int(entry.get("input_tokens") or 0) + int(result.input_tokens or 0)
+    entry["output_tokens"] = int(entry.get("output_tokens") or 0) + int(result.output_tokens or 0)
+    entry["candidate_count"] = int(result.candidate_count or 0)
+    entry["model_name"] = result.model_name
+    entry["target_section"] = target_section or ""
+    entry["estimated_cost_usd"] = float(entry.get("estimated_cost_usd") or 0.0) + float(
+        result.estimated_cost_usd or 0.0
+    )
+    store[entry_key] = entry
+    object.__setattr__(browser_session, "_gh_visual_verification_costs", store)
+
+
+def _apply_visual_verification_result(
+    *,
+    layout: dict[str, Any],
+    field_by_id: dict[str, FormField],
+    unresolved_required: list[ApplicationFieldIssue],
+    unresolved_optional: list[ApplicationFieldIssue],
+    mismatched_fields: list[ApplicationFieldIssue],
+    opaque_fields: list[ApplicationFieldIssue],
+    unverified_fields: list[ApplicationFieldIssue],
+    visual_result: VisualVerificationBatchResult,
+) -> tuple[
+    list[ApplicationFieldIssue],
+    list[ApplicationFieldIssue],
+    list[ApplicationFieldIssue],
+    list[ApplicationFieldIssue],
+    list[ApplicationFieldIssue],
+]:
+    if not visual_result.attempted or visual_result.error:
+        return unresolved_required, unresolved_optional, mismatched_fields, opaque_fields, unverified_fields
+
+    original_soft_issue_ids = {issue.field_id for issue in mismatched_fields + opaque_fields + unverified_fields}
+    original_required_missing_ids = {
+        issue.field_id for issue in unresolved_required if issue.reason == "required_missing_value"
+    }
+    cleared_ids = {outcome.field_id for outcome in visual_result.results if outcome.status == "verified"}
+
+    unresolved_required = _remove_issue_field_ids(
+        unresolved_required,
+        cleared_ids,
+        only_reason="required_missing_value",
+    )
+    mismatched_fields = _remove_issue_field_ids(mismatched_fields, cleared_ids)
+    opaque_fields = _remove_issue_field_ids(opaque_fields, cleared_ids)
+    unverified_fields = _remove_issue_field_ids(unverified_fields, cleared_ids)
+
+    for outcome in visual_result.results:
+        if outcome.status in {"verified", "uncertain"}:
+            continue
+
+        field = field_by_id.get(outcome.field_id)
+        if field is None:
+            continue
+
+        relative_position = _relative_position_from_layout_entry(layout.get(outcome.field_id, {}))
+        had_dom_issue = outcome.field_id in original_soft_issue_ids or outcome.field_id in original_required_missing_ids
+        visual_reason = "visual_unfilled" if outcome.status == "unfilled" else "visual_mismatch"
+        visual_issue = _visual_issue_for_field(
+            field,
+            reason=visual_reason,
+            relative_position=relative_position,
+            expected_value=outcome.expected_value,
+            observed_value=outcome.observed_value,
+        )
+
+        if outcome.status == "unfilled":
+            if field.required:
+                unresolved_required = _upsert_issue_by_field_id(unresolved_required, visual_issue)
+                mismatched_fields = _remove_issue_field_ids(mismatched_fields, {outcome.field_id})
+                opaque_fields = _remove_issue_field_ids(opaque_fields, {outcome.field_id})
+                unverified_fields = _remove_issue_field_ids(unverified_fields, {outcome.field_id})
+            else:
+                mismatched_fields = _upsert_issue_by_field_id(mismatched_fields, visual_issue)
+            continue
+
+        if outcome.trust_tier is VisualTrustTier.TIER_A:
+            if field.required:
+                unresolved_required = _upsert_issue_by_field_id(unresolved_required, visual_issue)
+                mismatched_fields = _remove_issue_field_ids(mismatched_fields, {outcome.field_id})
+                opaque_fields = _remove_issue_field_ids(opaque_fields, {outcome.field_id})
+                unverified_fields = _remove_issue_field_ids(unverified_fields, {outcome.field_id})
+            else:
+                mismatched_fields = _upsert_issue_by_field_id(mismatched_fields, visual_issue)
+            continue
+
+        if outcome.trust_tier is VisualTrustTier.TIER_B:
+            if field.required and had_dom_issue and _visual_outcome_has_high_confidence(outcome):
+                unresolved_required = _upsert_issue_by_field_id(unresolved_required, visual_issue)
+                mismatched_fields = _remove_issue_field_ids(mismatched_fields, {outcome.field_id})
+                opaque_fields = _remove_issue_field_ids(opaque_fields, {outcome.field_id})
+                unverified_fields = _remove_issue_field_ids(unverified_fields, {outcome.field_id})
+            else:
+                mismatched_fields = _upsert_issue_by_field_id(mismatched_fields, visual_issue)
+            continue
+
+        if field.required and not outcome.observed_value:
+            unresolved_required = _upsert_issue_by_field_id(unresolved_required, visual_issue)
+            mismatched_fields = _remove_issue_field_ids(mismatched_fields, {outcome.field_id})
+            opaque_fields = _remove_issue_field_ids(opaque_fields, {outcome.field_id})
+            unverified_fields = _remove_issue_field_ids(unverified_fields, {outcome.field_id})
+        elif had_dom_issue:
+            unverified_fields = _upsert_issue_by_field_id(unverified_fields, visual_issue)
+
+    return unresolved_required, unresolved_optional, mismatched_fields, opaque_fields, unverified_fields
 
 
 def _assess_debug_enabled() -> bool:
@@ -386,9 +611,7 @@ def _is_meaningful_section_label(section: str | None, field_label: str | None = 
         return False
     if len(text) > 80:
         return False
-    if "?" in text:
-        return False
-    return True
+    return "?" not in text
 
 
 # Top-level Workday steps that should not cross-pick fields when planner target ≠ visible heading.
@@ -708,12 +931,7 @@ def _profile_backed_repeater_issues(
         open_inline_form_count = max(0, int(section.get("open_inline_form_count") or 0))
         active_control_count = max(0, int(section.get("active_control_count") or 0))
         section_text = str(section.get("section_text") or "").strip()
-        section_is_live = bool(
-            section.get("add_visible")
-            or saved_tile_count
-            or open_inline_form_count
-            or section_text
-        )
+        section_is_live = bool(section.get("add_visible") or saved_tile_count or open_inline_form_count or section_text)
         if not section_is_live:
             continue
         if saved_tile_count >= expected_count and open_inline_form_count == 0:
@@ -904,7 +1122,11 @@ def _maybe_suppress_custom_select_readback_false_positives(
 def _widget_kind_for_field(field: FormField, browser_context: dict[str, Any] | None = None) -> str:
     if field.widget_kind:
         return field.widget_kind
-    if browser_context and isinstance(browser_context.get("widget_kind"), str) and browser_context["widget_kind"].strip():
+    if (
+        browser_context
+        and isinstance(browser_context.get("widget_kind"), str)
+        and browser_context["widget_kind"].strip()
+    ):
         return str(browser_context["widget_kind"]).strip()
     if field.field_type == "select":
         return "native_select" if field.is_native else "custom_select"
@@ -1012,7 +1234,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
     try:
         from ghosthands.dom.shadow_helpers import ensure_helpers
 
-        await ensure_helpers(page)
+        await ensure_helpers(page)  # pyright: ignore[reportArgumentType]
     except Exception:
         pass
 
@@ -1034,7 +1256,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         and str(last_fill.get("page_url") or "") == current_url
         and bool(last_fill.get("broad_fill_completed"))
     ):
-        setattr(
+        object.__setattr__(
             browser_session,
             "_gh_last_domhand_fill",
             {
@@ -1050,9 +1272,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         and str(last_state.get("page_url") or "") == current_url
         and _last_state_is_cleanly_advanceable(last_state)
     ):
-        agent_summary = (
-            "DomHand assess_state: same page already assessed as advance_allowed=yes."
-        )
+        agent_summary = "DomHand assess_state: same page already assessed as advance_allowed=yes."
         return ActionResult(
             extracted_content=agent_summary,
             long_term_memory=agent_summary,
@@ -1145,16 +1365,12 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         # Stale planner target while the DOM shows another section: assess fields that match the
         # visible page heading. If nothing aligns (unrelated section-only fields), keep scoped empty.
         heading_texts_early = [
-            str(text).strip()
-            for text in (page_scan.get("heading_texts") or [])
-            if str(text).strip()
+            str(text).strip() for text in (page_scan.get("heading_texts") or []) if str(text).strip()
         ]
         primary_heading = heading_texts_early[0] if heading_texts_early else ""
         target_root = _workday_root_step_key(params.target_section)
         heading_root = _workday_root_step_key(primary_heading)
-        planner_on_different_workday_step = bool(
-            target_root and heading_root and target_root != heading_root
-        )
+        planner_on_different_workday_step = bool(target_root and heading_root and target_root != heading_root)
         _stop = frozenset({"my", "the", "a", "an", "of", "and", "or", "to", "for", "in", "on"})
 
         def _field_aligns_with_visible_heading(field: FormField, heading: str) -> bool:
@@ -1186,6 +1402,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
     unverified_fields: list[ApplicationFieldIssue] = []
     sections_in_view: list[str] = []
     field_context_by_id: dict[str, dict[str, Any]] = {}
+    field_by_id = {field.field_id: field for field in fields}
     verification_attempts = _verification_attempt_count()
 
     for field in scoped_fields:
@@ -1206,7 +1423,10 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                 relative_position = "above"
             elif top > 0:
                 relative_position = "below"
-        if _is_meaningful_section_label(field.section, _preferred_field_label(field)) and relative_position == "in_view":
+        if (
+            _is_meaningful_section_label(field.section, _preferred_field_label(field))
+            and relative_position == "in_view"
+        ):
             sections_in_view.append(field.section)
 
         if field.field_type == "checkbox-group" and not field.current_value:
@@ -1266,11 +1486,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             current_value=(field.current_value or "").strip(),
             visible_error=str(field_context.get("error_text") or "").strip() or None,
             widget_kind=_widget_kind_for_field(field, field_context),
-            options=[
-                str(option).strip()
-                for option in (field.options or field.choices or [])
-                if str(option).strip()
-            ],
+            options=[str(option).strip() for option in (field.options or field.choices or []) if str(option).strip()],
         )
         if field.required:
             unresolved_required.append(issue)
@@ -1291,7 +1507,9 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             unresolved_by_id.setdefault(issue.field_id, issue)
         unresolved_required = list(unresolved_by_id.values())
 
-    verification_failures: tuple[list[ApplicationFieldIssue], list[ApplicationFieldIssue], list[ApplicationFieldIssue]] = (
+    verification_failures: tuple[
+        list[ApplicationFieldIssue], list[ApplicationFieldIssue], list[ApplicationFieldIssue]
+    ] = (
         [],
         [],
         [],
@@ -1336,6 +1554,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                     },
                 )
                 continue
+            expected_value = str(expected.expected_value or "")
             field_layout = layout.get(field.field_id, {})
             relative_position = "unknown"
             if field_layout:
@@ -1375,18 +1594,41 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                 if observed_value or not field.current_value:
                     field.current_value = observed_value or field.current_value
 
+            if not expected_value.strip():
+                if not str(field.current_value or "").strip():
+                    continue
+                if _field_current_value_is_opaque(field):
+                    opaque_attempt.append(
+                        _verification_issue_for_field(
+                            field,
+                            reason="opaque_value",
+                            relative_position=relative_position,
+                            expected_value=expected_value,
+                        ),
+                    )
+                    continue
+                mismatched_attempt.append(
+                    _verification_issue_for_field(
+                        field,
+                        reason="mismatched_value",
+                        relative_position=relative_position,
+                        expected_value=expected_value,
+                    ),
+                )
+                continue
+
             if not str(field.current_value or "").strip():
                 unverified_attempt.append(
                     _verification_issue_for_field(
                         field,
                         reason="unverified_value",
                         relative_position=relative_position,
-                        expected_value=expected.expected_value,
+                        expected_value=expected_value,
                     ),
                 )
                 continue
 
-            if not _value_shape_is_compatible(field, expected.expected_value):
+            if not _value_shape_is_compatible(field, expected_value):
                 if _assess_debug_enabled():
                     logger.info(
                         "domhand.assess_state.skip_incompatible_expected",
@@ -1395,7 +1637,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                             "field_label": _preferred_field_label(field),
                             "field_type": field.field_type,
                             "current_value": field.current_value,
-                            "expected_value": expected.expected_value,
+                            "expected_value": expected_value,
                             "source": expected.source,
                         },
                     )
@@ -1407,7 +1649,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                         field,
                         reason="opaque_value",
                         relative_position=relative_position,
-                        expected_value=expected.expected_value,
+                        expected_value=expected_value,
                     ),
                 )
                 continue
@@ -1422,7 +1664,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                     field.field_type == "textarea"
                     or _ve_values_match(
                         field.current_value,
-                        expected.expected_value,
+                        expected_value,
                         field_type=field.field_type,
                         semantic=True,
                     )
@@ -1431,7 +1673,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
 
             if not _ve_values_match(
                 field.current_value,
-                expected.expected_value,
+                expected_value,
                 field_type=field.field_type,
             ):
                 mismatched_attempt.append(
@@ -1439,7 +1681,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                         field,
                         reason="mismatched_value",
                         relative_position=relative_position,
-                        expected_value=expected.expected_value,
+                        expected_value=expected_value,
                     ),
                 )
 
@@ -1450,11 +1692,52 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             await asyncio.sleep(0.2)
 
     mismatched_fields, opaque_fields, unverified_fields = verification_failures
-    optional_validation_blockers = [
-        issue
-        for issue in unresolved_optional
-        if issue.reason == "validation_error"
+    visual_candidates = build_visual_candidates(
+        verification_scoped_fields,
+        page_host=page_host,
+        page_context_key=page_context_key,
+    )
+    visual_candidates = [
+        candidate for candidate in visual_candidates if bool(layout.get(candidate.field_id, {}).get("in_view"))
     ]
+    if params.target_section:
+        scoped_visual_candidates = [
+            candidate
+            for candidate in visual_candidates
+            if (
+                field_by_id.get(candidate.field_id) is not None
+                and _section_matches_scope((field_by_id[candidate.field_id].section or ""), params.target_section)
+            )
+        ]
+        if scoped_visual_candidates:
+            visual_candidates = scoped_visual_candidates
+    visual_result = VisualVerificationBatchResult(page_context_key=page_context_key)
+    if visual_candidates:
+        visual_result = await verify_page_visual_candidates(
+            browser_session,
+            page_context_key=page_context_key,
+            candidates=visual_candidates,
+        )
+        _record_visual_verification_cost(
+            browser_session,
+            page_context_key=page_context_key,
+            target_section=params.target_section,
+            result=visual_result,
+        )
+        unresolved_required, unresolved_optional, mismatched_fields, opaque_fields, unverified_fields = (
+            _apply_visual_verification_result(
+                layout=layout,
+                field_by_id=field_by_id,
+                unresolved_required=unresolved_required,
+                unresolved_optional=unresolved_optional,
+                mismatched_fields=mismatched_fields,
+                opaque_fields=opaque_fields,
+                unverified_fields=unverified_fields,
+                visual_result=visual_result,
+            )
+        )
+
+    optional_validation_blockers = [issue for issue in unresolved_optional if issue.reason == "validation_error"]
 
     scroll_bias = "none"
     if any(issue.relative_position == "in_view" for issue in unresolved_required):
@@ -1476,11 +1759,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             for field in fields
         )
     )
-    heading_texts = [
-        str(text).strip()
-        for text in (page_scan.get("heading_texts") or [])
-        if str(text).strip()
-    ]
+    heading_texts = [str(text).strip() for text in (page_scan.get("heading_texts") or []) if str(text).strip()]
     current_section = params.target_section if target_section_has_live_match else ""
     if not current_section:
         for issue in unresolved_required:
@@ -1515,8 +1794,10 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         visible_errors,
         body_text,
     )
+    visual_verification_blocked = bool(visual_candidates and visual_result.error)
+    current_section = str(current_section or "")
     application_state = ApplicationState(
-        terminal_state=terminal_state,
+        terminal_state=cast(ApplicationTerminalState, terminal_state),
         current_section=current_section,
         unresolved_required_fields=unresolved_required,
         unresolved_optional_fields=unresolved_optional,
@@ -1534,15 +1815,16 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             and not optional_validation_blockers
             and not visible_errors
             and not opaque_fields
+            and not visual_verification_blocked
             and not (bool(page_scan.get("advance_visible")) and bool(page_scan.get("advance_disabled")))
         ),
         platform_hint=platform_hint,
+        visual_verification=(
+            _visual_summary_from_result(visual_result) if visual_candidates or visual_result.attempted else None
+        ),
     )
-    field_by_id = {field.field_id: field for field in fields}
     active_blocker_issues = (
-        application_state.unresolved_required_fields
-        + optional_validation_blockers
-        + application_state.opaque_fields
+        application_state.unresolved_required_fields + optional_validation_blockers + application_state.opaque_fields
     )
     blocker_states: dict[str, dict[str, str]] = {}
     for issue in active_blocker_issues:
@@ -1553,7 +1835,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             "field_label": issue.name,
             "field_type": issue.field_type,
             "field_section": issue.section or "",
-            "field_fingerprint": field.field_fingerprint if field else "",
+            "field_fingerprint": str(field.field_fingerprint or "") if field else "",
             "reason": issue.reason,
             "current_value": issue.current_value or "",
             "visible_error": issue.visible_error or "",
@@ -1573,11 +1855,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         if not previous:
             blocker_state_changes[blocker_key] = "new"
             continue
-        blocker_state_changes[blocker_key] = (
-            "no_state_change"
-            if previous == state
-            else "changed"
-        )
+        blocker_state_changes[blocker_key] = "no_state_change" if previous == state else "changed"
 
     # Phenom dropdowns can cause volatile current_value reads between
     # assessments (DOM re-renders, whitespace fluctuation), resetting the
@@ -1599,21 +1877,20 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
     else:
         blocker_signature = json.dumps(blocker_states, sort_keys=True, ensure_ascii=True)
     previous_signature = previous_state.get("blocking_signature") if isinstance(previous_state, dict) else None
-    previous_repeat_count = int(previous_state.get("same_blocker_signature_count") or 0) if isinstance(previous_state, dict) else 0
+    previous_repeat_count = (
+        int(previous_state.get("same_blocker_signature_count") or 0) if isinstance(previous_state, dict) else 0
+    )
+    previous_page_context_key = previous_state.get("page_context_key") if isinstance(previous_state, dict) else None
     same_blocker_signature_count = (
         previous_repeat_count + 1
-        if previous_signature == blocker_signature and previous_state.get("page_context_key") == page_context_key
+        if previous_signature == blocker_signature and previous_page_context_key == page_context_key
         else 0
     )
 
-    _STALE_MISMATCH_THRESHOLD = 3
-    only_soft_blockers = (
-        not unresolved_required
-        and not visible_errors
-        and not optional_validation_blockers
-    )
+    stale_mismatch_threshold = 3
+    only_soft_blockers = not unresolved_required and not visible_errors and not optional_validation_blockers
     if (
-        same_blocker_signature_count >= _STALE_MISMATCH_THRESHOLD
+        same_blocker_signature_count >= stale_mismatch_threshold
         and only_soft_blockers
         and (mismatched_fields or opaque_fields or unverified_fields)
     ):
@@ -1648,7 +1925,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         blocker_state_changes = {}
         blocker_signature = "{}"
 
-    setattr(
+    object.__setattr__(
         browser_session,
         "_gh_last_application_state",
         {
@@ -1666,25 +1943,12 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             "unverified_count": len(application_state.unverified_fields),
             "blocking_signature": blocker_signature,
             "same_blocker_signature_count": same_blocker_signature_count,
-            "blocking_field_ids": sorted(
-                {
-                    issue.field_id
-                    for issue in active_blocker_issues
-                    if issue.field_id
-                }
-            ),
+            "blocking_field_ids": sorted({issue.field_id for issue in active_blocker_issues if issue.field_id}),
             "blocking_field_keys": sorted(blocker_states.keys()),
             "blocking_field_reasons": {
-                blocker_key: state.get("reason", "")
-                for blocker_key, state in blocker_states.items()
+                blocker_key: state.get("reason", "") for blocker_key, state in blocker_states.items()
             },
-            "blocking_field_labels": sorted(
-                {
-                    str(issue.name).strip()
-                    for issue in active_blocker_issues
-                    if issue.name
-                }
-            ),
+            "blocking_field_labels": sorted({str(issue.name).strip() for issue in active_blocker_issues if issue.name}),
             "blocking_field_states": blocker_states,
             "blocking_field_state_changes": blocker_state_changes,
             "single_active_blocker": (
@@ -1704,17 +1968,10 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             "page_context_key": page_context_key,
             "page_url": current_url,
             "current_section": application_state.current_section,
-            "blocking_field_ids": sorted(
-                {
-                    issue.field_id
-                    for issue in active_blocker_issues
-                    if issue.field_id
-                }
-            ),
+            "blocking_field_ids": sorted({issue.field_id for issue in active_blocker_issues if issue.field_id}),
             "blocking_field_keys": sorted(blocker_states.keys()),
             "blocking_field_reasons": {
-                blocker_key: state.get("reason", "")
-                for blocker_key, state in blocker_states.items()
+                blocker_key: state.get("reason", "") for blocker_key, state in blocker_states.items()
             },
             "blocking_field_state_changes": blocker_state_changes,
             "single_active_blocker": (
@@ -1733,6 +1990,11 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             "mismatched_count": len(application_state.mismatched_fields),
             "opaque_count": len(application_state.opaque_fields),
             "unverified_count": len(application_state.unverified_fields),
+            "visual_verification": (
+                application_state.visual_verification.model_dump()
+                if application_state.visual_verification is not None
+                else None
+            ),
         },
     )
     logger.info(
@@ -1745,6 +2007,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         f"mismatched_count={len(application_state.mismatched_fields)} "
         f"opaque_count={len(application_state.opaque_fields)} "
         f"unverified_count={len(application_state.unverified_fields)} "
+        f"visual_attempted={'yes' if application_state.visual_verification and application_state.visual_verification.attempted else 'no'} "
         f"same_blocker_signature_count={same_blocker_signature_count}"
     )
     logger.debug(
@@ -1768,11 +2031,26 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         f"Advance disabled: {'Yes' if application_state.advance_disabled else 'No'}",
         f"Advance allowed: {'Yes' if application_state.advance_allowed else 'No'}",
     ]
+    if application_state.visual_verification is not None:
+        visual = application_state.visual_verification
+        summary_lines.append(
+            "Visual verification: "
+            f"attempted={'Yes' if visual.attempted else 'No'}, "
+            f"candidates={visual.candidate_count}, "
+            f"verified={visual.verified_count}, "
+            f"mismatched={visual.mismatch_count}, "
+            f"unfilled={visual.unfilled_count}, "
+            f"uncertain={visual.uncertain_count}"
+        )
+        if visual.error:
+            summary_lines.append(f"Visual verification error: {visual.error}")
     if application_state.platform_hint:
         summary_lines.append(f"Platform hint: {application_state.platform_hint}")
     if application_state.advance_allowed:
         summary_lines.append("All visible blockers clear on this page.")
-    if application_state.advance_allowed and (application_state.mismatched_fields or application_state.unverified_fields):
+    if application_state.advance_allowed and (
+        application_state.mismatched_fields or application_state.unverified_fields
+    ):
         summary_lines.append(
             "Advisory: mismatched/unverified readback noise was detected, but no hard blockers remain; do not let that stop advancement."
         )
@@ -1781,6 +2059,8 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             f"Unresolved blockers remain: {len(application_state.unresolved_required_fields)} required, "
             f"{len(application_state.visible_errors)} visible errors."
         )
+        if application_state.visual_verification is not None and application_state.visual_verification.error:
+            summary_lines.append("Visual verification is required for this page and could not complete successfully.")
     if application_state.unresolved_required_fields:
         summary_lines.append("Required field issues:")
         for issue in application_state.unresolved_required_fields[:10]:

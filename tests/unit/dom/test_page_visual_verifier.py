@@ -174,3 +174,29 @@ async def test_verify_page_visual_candidates_uses_cache_and_tracks_cost(monkeypa
     assert first.estimated_cost_usd == pytest.approx(0.0011)
     assert second.cache_hit is True
     assert fake_llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_verify_page_visual_candidates_skips_invalid_mock_browser_state():
+    browser_session = SimpleNamespace()
+    browser_session.get_browser_state_summary = AsyncMock(return_value=SimpleNamespace())
+
+    result = await verify_page_visual_candidates(
+        cast(Any, browser_session),
+        page_context_key="ctx",
+        candidates=[
+            VisualVerificationCandidate(
+                field_id="country",
+                field_key="country-key",
+                field_label="Country",
+                field_type="select",
+                expected_value="United States",
+                trust_tier=VisualTrustTier.TIER_A,
+                verification_mode=VisualVerificationMode.EXACT_VISIBLE_VALUE,
+            )
+        ],
+    )
+
+    assert result.attempted is False
+    assert result.error is None
+    assert result.candidate_count == 1
