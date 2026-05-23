@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
@@ -20,28 +21,37 @@ import pytest
 
 pytest.importorskip("playwright.async_api")
 from browser_use.browser import BrowserProfile, BrowserSession
+from browser_use.browser.profile import ViewportSize
 from browser_use.tools.service import Tools
+from ghosthands.actions.domhand_assess_state import domhand_assess_state
 from ghosthands.actions.domhand_fill import (
     _build_inject_helpers_js,
     _preferred_field_label,
     domhand_fill,
     extract_visible_form_fields,
 )
-from ghosthands.actions.views import DomHandFillParams
+from ghosthands.actions.views import DomHandAssessStateParams, DomHandFillParams, get_stable_field_key
 from ghosthands.dom.fill_executor import _fill_select_field_outcome
+from ghosthands.dom.page_visual_verifier import (
+    VisualVerificationFieldOutcome,
+    VisualVerificationMode,
+)
 from ghosthands.dom.shadow_helpers import ensure_helpers
+from ghosthands.runtime_learning import record_expected_field_value, reset_runtime_learning_state
 
 _FIXTURE = Path(__file__).resolve().parent.parent.parent / "examples" / "toy-workday" / "index.html"
 
 
 @asynccontextmanager
-async def managed_browser_session():
+async def managed_browser_session(*, viewport: ViewportSize | None = None):
     session = BrowserSession(
         browser_profile=BrowserProfile(
             headless=True,
             user_data_dir=None,
             keep_alive=True,
             enable_default_extensions=True,
+            viewport=viewport,
+            window_size=viewport,
         )
     )
     await session.start()
@@ -396,3 +406,179 @@ async def test_toy_workday_domhand_fill_uses_profile_skills_without_llm(httpserv
 
         assert result.error is None, result
         generate_answers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_toy_workday_assess_state_scroll_batches_visual_verification(
+    httpserver, toy_html: str, monkeypatch
+) -> None:
+    httpserver.expect_request("/index.html").respond_with_data(
+        toy_html,
+        content_type="text/html; charset=utf-8",
+    )
+    url = httpserver.url_for("/index.html")
+    host = "company.myworkdayjobs.com.lvh.me"
+    page_context_key = "toy-workday-my-information-scroll-batch"
+    short_viewport = ViewportSize(width=1280, height=420)
+    visual_batches: list[list[str]] = []
+
+    async def fake_invoke_visual_batch(
+        *,
+        llm,
+        file_system,
+        messages_prefix,
+        browser_state,
+        page_context_key,
+        batch,
+        screenshot_b64,
+    ):
+        del llm, file_system, messages_prefix, browser_state, page_context_key, screenshot_b64
+        visual_batches.append([candidate.field_label for candidate in batch])
+        outcomes = [
+            VisualVerificationFieldOutcome(
+                field_id=candidate.field_id,
+                field_key=candidate.field_key,
+                field_label=candidate.field_label,
+                field_type=candidate.field_type,
+                expected_value=candidate.expected_value,
+                observed_value=(
+                    "Filled"
+                    if candidate.verification_mode is VisualVerificationMode.FILLEDNESS_ONLY
+                    else candidate.expected_value
+                ),
+                required=candidate.required,
+                trust_tier=candidate.trust_tier,
+                verification_mode=candidate.verification_mode,
+                matches_expected=True,
+                confidence=0.99,
+                status="verified",
+            )
+            for candidate in batch
+        ]
+        return outcomes, 1200, 180, 400
+
+    reset_runtime_learning_state()
+    try:
+        async with managed_browser_session(viewport=short_viewport) as browser_session:
+            tools = Tools()
+            await tools.navigate(url=url, new_tab=False, browser_session=browser_session)
+            page = await browser_session.get_current_page()
+            assert page is not None
+            await page.evaluate(
+                """() => {
+                    showStep(0);
+                    window.scrollTo(0, 0);
+
+                    const selectDropdown = (key, value) => {
+                      const button = document.querySelector(`.wd-dropdown[data-dropdown="${key}"] button`);
+                      const popup = document.querySelector(`.wd-popup[data-for="${key}"]`);
+                      if (!button || !popup) throw new Error(`Missing dropdown ${key}`);
+                      commitDropdown(button, popup, value);
+                    };
+
+                    const selectPrompt = (inputId, value) => {
+                      const input = document.getElementById(inputId);
+                      if (!input) throw new Error(`Missing prompt input ${inputId}`);
+                      const widget = input.closest('.wd-prompt');
+                      if (!widget) throw new Error(`Missing prompt widget for ${inputId}`);
+                      commitPromptSelection(widget, value);
+                    };
+
+                    const previousWorkerNo = document.querySelector('input[name="candidateIsPreviousWorker"][value="No"]');
+                    if (!previousWorkerNo) throw new Error("Missing previous worker radio");
+                    previousWorkerNo.checked = true;
+                    previousWorkerNo.dispatchEvent(new Event("change", { bubbles: true }));
+
+                    selectPrompt("source--source", "Company Website");
+                    selectDropdown("country", "United States of America");
+                    selectDropdown("state", "Virginia");
+                    selectDropdown("phone-device", "Mobile");
+                    selectPrompt("phone--countryPhoneCode", "United States of America (+1)");
+
+                    document.getElementById("name--legalName--firstName").value = "Spencer";
+                    document.getElementById("name--legalName--middleName").value = "Yi Chen";
+                    document.getElementById("name--legalName--lastName").value = "Wang";
+                    document.getElementById("address--addressLine1").value = "123 Main St";
+                    document.getElementById("address--city").value = "Chantilly";
+                    document.getElementById("address--postalCode").value = "20151";
+                    document.getElementById("contactInformation--email").value = "spencer@example.com";
+                    document.getElementById("phone--phoneNumber").value = "5717788080";
+                    document.getElementById("phone--phoneExtension").value = "123";
+                }"""
+            )
+
+            await ensure_helpers(cast(Any, page))
+            await page.evaluate(_build_inject_helpers_js())
+            fields = await extract_visible_form_fields(page)
+            recorded_expected_field_count = 0
+            for field in fields:
+                current_value = str(field.current_value or "").strip()
+                if not current_value or current_value == "\u00d7 \u2630":
+                    continue
+                recorded_expected_field_count += 1
+                record_expected_field_value(
+                    host=host,
+                    page_context_key=page_context_key,
+                    field_key=get_stable_field_key(field),
+                    field_label=field.name,
+                    field_type=field.field_type,
+                    field_section=field.section or "",
+                    field_fingerprint=field.field_fingerprint or "",
+                    expected_value=current_value,
+                    source="manual_recovery",
+                )
+
+            monkeypatch.setattr(
+                "ghosthands.dom.page_visual_verifier.get_chat_model",
+                lambda model: SimpleNamespace(model=model),
+            )
+            monkeypatch.setattr("ghosthands.dom.page_visual_verifier._invoke_visual_batch", fake_invoke_visual_batch)
+            monkeypatch.setattr("ghosthands.dom.page_visual_verifier._VISUAL_SCROLL_SETTLE_SECONDS", 0.0)
+
+            with (
+                patch(
+                    "ghosthands.actions.domhand_assess_state._safe_page_url",
+                    AsyncMock(return_value=f"http://{host}/index.html"),
+                ),
+                patch(
+                    "ghosthands.actions.domhand_assess_state._get_page_context_key",
+                    AsyncMock(return_value=page_context_key),
+                ),
+            ):
+                result = await domhand_assess_state(
+                    DomHandAssessStateParams(target_section=None),
+                    browser_session,
+                )
+
+            payload = json.loads((result.metadata or {})["application_state_json"])
+            visual = payload["visual_verification"]
+            assert visual["attempted"] is True
+            assert visual["segment_count"] >= 2
+            assert visual["calls"] >= visual["segment_count"]
+            assert visual["candidate_count"] == recorded_expected_field_count
+            assert len(visual_batches) == visual["calls"]
+            assert payload["advance_allowed"] is False
+            assert payload["unresolved_required_fields"] == [
+                {
+                    "field_id": "ff-20",
+                    "name": "First Name* Middle Name Last Name*",
+                    "field_type": "checkbox",
+                    "section": "",
+                    "section_path": "",
+                    "required": True,
+                    "reason": "required_missing_value",
+                    "relative_position": "below",
+                    "takeover_suggestion": "browser_use_takeover",
+                    "question_text": "First Name* Middle Name Last Name*",
+                    "current_value": "",
+                    "visible_error": None,
+                    "widget_kind": "checkbox",
+                    "options": [],
+                }
+            ]
+            assert any(any("First Name" in label for label in batch) for batch in visual_batches)
+            assert any(any("Phone Number" in label for label in batch) for batch in visual_batches)
+            final_scroll_y = await page.evaluate("() => window.scrollY")
+            assert int(final_scroll_y) == 0
+    finally:
+        reset_runtime_learning_state()
