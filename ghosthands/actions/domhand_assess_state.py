@@ -453,6 +453,7 @@ def _visual_summary_from_result(result: VisualVerificationBatchResult) -> Visual
         attempted=result.attempted,
         cache_hit=result.cache_hit,
         candidate_count=result.candidate_count,
+        segment_count=result.segment_count,
         calls=result.calls,
         verified_count=result.verified_count,
         mismatch_count=result.mismatch_count,
@@ -643,6 +644,7 @@ def _workday_root_step_key(label: str | None) -> str | None:
 _FIELD_LAYOUT_JS = r"""(fieldIds) => {
 	const ff = window.__ff;
 	if (!ff) return JSON.stringify({});
+	const scrollY = window.pageYOffset || document.documentElement.scrollTop || 0;
 	const out = {};
 	for (const fieldId of fieldIds || []) {
 		const node = ff.queryOne('[data-ff-id="' + fieldId + '"]');
@@ -651,6 +653,8 @@ _FIELD_LAYOUT_JS = r"""(fieldIds) => {
 		out[fieldId] = {
 			top: rect.top,
 			bottom: rect.bottom,
+			abs_top: rect.top + scrollY,
+			abs_bottom: rect.bottom + scrollY,
 			in_view: rect.bottom >= 0 && rect.top <= window.innerHeight,
 		};
 	}
@@ -1739,8 +1743,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         candidate
         for candidate in visual_candidates
         if (
-            bool(layout.get(candidate.field_id, {}).get("in_view"))
-            and field_by_id.get(candidate.field_id) is not None
+            field_by_id.get(candidate.field_id) is not None
             and _expected_value_is_compatible_for_field(field_by_id[candidate.field_id], candidate.expected_value)
         )
     ]
@@ -1761,6 +1764,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             browser_session,
             page_context_key=page_context_key,
             candidates=visual_candidates,
+            layout=layout,
         )
         _record_visual_verification_cost(
             browser_session,
@@ -2087,6 +2091,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             "Visual verification: "
             f"attempted={'Yes' if visual.attempted else 'No'}, "
             f"candidates={visual.candidate_count}, "
+            f"segments={visual.segment_count}, "
             f"verified={visual.verified_count}, "
             f"mismatched={visual.mismatch_count}, "
             f"unfilled={visual.unfilled_count}, "

@@ -267,6 +267,7 @@ class VisualVerificationSummary(BaseModel):
     attempted: bool = False
     cache_hit: bool = False
     candidate_count: int = 0
+    segment_count: int = 0
     calls: int = 0
     verified_count: int = 0
     mismatch_count: int = 0
