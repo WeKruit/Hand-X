@@ -59,6 +59,8 @@ from ghosthands.dom.dropdown_match import (  # noqa: F401
 )
 from ghosthands.dom.dropdown_verify import selection_matches_desired  # noqa: F401
 from ghosthands.dom.fill_browser_scripts import (
+    _CLICK_BINARY_FIELD_JS,  # noqa: F401 - re-exported for domhand_interact_control compatibility
+    _CLICK_RADIO_OPTION_JS,  # noqa: F401 - re-exported for domhand_interact_control compatibility
     _DISMISS_DROPDOWN_SOFT_JS,
     _EXTRACT_FIELDS_JS,
     _PAGE_CONTEXT_SCAN_JS,
@@ -2059,6 +2061,8 @@ def _raw_grouped_date_fields(
 from ghosthands.dom.fill_verify import (
     DOMHAND_RETRY_CAPPED,
     _attempt_domhand_fill_with_retry_cap,
+    _field_already_matches,  # noqa: F401 - re-exported for domhand_interact_control compatibility
+    _is_explicit_false,  # noqa: F401 - re-exported for domhand_interact_control compatibility
     _record_expected_value_if_settled,
 )
 
