@@ -1095,6 +1095,24 @@ def _maybe_suppress_custom_select_readback_false_positives(
     if not host_l or "localhost" in host_l or "127.0.0.1" in host_l:
         return unresolved_required
     field_by_id = {f.field_id: f for f in fields}
+
+    def _select_text_companion(field: FormField) -> FormField | None:
+        section_norm = normalize_name(field.section or "")
+        if not section_norm:
+            return None
+        for candidate in fields:
+            if candidate.field_id == field.field_id:
+                continue
+            if normalize_name(candidate.section or "") != section_norm:
+                continue
+            if candidate.field_type not in {"text", "search", "email", "tel", "number"}:
+                continue
+            candidate_label = normalize_name(candidate.raw_label or _preferred_field_label(candidate) or "")
+            if candidate_label:
+                continue
+            return candidate
+        return None
+
     kept: list[ApplicationFieldIssue] = []
     dropped = 0
     for issue in unresolved_required:
@@ -1116,6 +1134,10 @@ def _maybe_suppress_custom_select_readback_false_positives(
             ev = str(getattr(expected, "expected_value", None) or "").strip()
             source = str(getattr(expected, "source", "") or "").strip()
             if expected is not None and ev and source == "domhand_unverified":
+                dropped += 1
+                continue
+            companion = _select_text_companion(field)
+            if companion is not None and not _field_is_empty(companion):
                 dropped += 1
                 continue
         kept.append(issue)

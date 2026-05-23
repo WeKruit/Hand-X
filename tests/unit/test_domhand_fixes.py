@@ -2681,6 +2681,98 @@ async def test_assess_state_marks_opaque_select_values_as_unverified_gate():
 
 
 @pytest.mark.asyncio
+async def test_assess_state_suppresses_custom_select_parent_when_blank_text_companion_has_value():
+    from ghosthands.actions.domhand_assess_state import domhand_assess_state
+    from ghosthands.actions.views import DomHandAssessStateParams, FormField, get_stable_field_key
+    from ghosthands.runtime_learning import (
+        build_page_context_key,
+        record_expected_field_value,
+        reset_runtime_learning_state,
+    )
+
+    reset_runtime_learning_state()
+    parent = FormField(
+        field_id="state-parent",
+        name="State*",
+        field_type="select",
+        section="State*",
+        required=True,
+        is_native=False,
+    )
+    companion = FormField(
+        field_id="state-child",
+        name="",
+        field_type="text",
+        section="State*",
+        required=False,
+    )
+    page_context_key = build_page_context_key(
+        url="https://example.wd1.myworkdayjobs.com/job",
+        page_marker="My Information",
+    )
+    record_expected_field_value(
+        host="example.wd1.myworkdayjobs.com",
+        page_context_key=page_context_key,
+        field_key=get_stable_field_key(companion),
+        field_label="",
+        field_type=companion.field_type,
+        field_section=companion.section,
+        expected_value="NY",
+        source="derived_profile",
+    )
+
+    async def evaluate_side_effect(script, *args):
+        if args == (["state-parent", "state-child"],):
+            return {
+                "state-parent": {"in_view": True, "top": 0, "bottom": 20},
+                "state-child": {"in_view": True, "top": 0, "bottom": 20},
+            }
+        if args == ("state-parent",):
+            return {"error_text": "", "widget_kind": "custom_select"}
+        if args == ("state-child",):
+            return {"error_text": "", "widget_kind": ""}
+        return {
+            "button_texts": ["Save and Continue"],
+            "body_text": "",
+            "markers": [],
+            "submit_visible": False,
+            "submit_disabled": False,
+            "advance_visible": True,
+            "error_texts": [],
+            "heading_texts": ["My Information"],
+        }
+
+    page = AsyncMock()
+    page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
+    page.get_url = AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job")
+    browser_session = AsyncMock()
+    browser_session.get_current_page = AsyncMock(return_value=page)
+
+    with (
+        patch("ghosthands.dom.shadow_helpers.ensure_helpers", AsyncMock(return_value=None)),
+        patch(
+            "ghosthands.actions.domhand_assess_state.extract_visible_form_fields",
+            AsyncMock(return_value=[parent, companion]),
+        ),
+        patch(
+            "ghosthands.actions.domhand_assess_state._safe_page_url",
+            AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job"),
+        ),
+        patch("ghosthands.actions.domhand_assess_state._field_has_validation_error", AsyncMock(return_value=False)),
+        patch(
+            "ghosthands.actions.domhand_assess_state._read_field_value",
+            AsyncMock(side_effect=["", "NY", "", "NY"]),
+        ),
+        patch.dict(os.environ, {"GH_VERIFICATION_EFFORT": "low"}, clear=False),
+    ):
+        result = await domhand_assess_state(DomHandAssessStateParams(), browser_session)
+
+    payload = json.loads((result.metadata or {})["application_state_json"])
+    assert payload["advance_allowed"] is True
+    assert payload["unresolved_required_fields"] == []
+
+
+@pytest.mark.asyncio
 async def test_assess_state_treats_no_response_text_as_required_missing_value():
     from ghosthands.actions.domhand_assess_state import domhand_assess_state
     from ghosthands.actions.views import DomHandAssessStateParams, FormField
