@@ -74,6 +74,8 @@ Context = TypeVar('Context')
 
 T = TypeVar('T', bound=BaseModel)
 
+_GHOSTHANDS_DONE_TERMINAL_STATES = frozenset({'review', 'confirmation', 'presubmit_single_page'})
+
 
 def _detect_sensitive_key_name(text: str, sensitive_data: dict[str, str | dict[str, str]] | None) -> str | None:
 	"""Detect which sensitive key name corresponds to the given text value."""
@@ -90,6 +92,47 @@ def _detect_sensitive_key_name(text: str, sensitive_data: dict[str, str | dict[s
 		elif content:  # Old format: {key: value}
 			if content == text:
 				return domain_or_key
+
+	return None
+
+
+async def _ghosthands_done_guard_error(
+	browser_session: BrowserSession | None,
+	*,
+	success: bool | None,
+) -> str | None:
+	"""Return a blocking message when done(success=True) would bypass Hand-X assessment."""
+	if success is not True or browser_session is None:
+		return None
+
+	try:
+		current_url = await browser_session.get_current_page_url()
+	except Exception:
+		current_url = ''
+
+	pending_assessment = getattr(browser_session, '_gh_pending_assessment', None)
+	if isinstance(pending_assessment, dict):
+		pending_url = str(pending_assessment.get('page_url') or '')
+		if current_url and pending_url == current_url:
+			source_action = str(pending_assessment.get('source_action') or 'domhand_fill').strip() or 'domhand_fill'
+			return (
+				'Current page still needs a fresh domhand_assess_state checkpoint before calling done(success=True). '
+				f'Latest same-page change came from {source_action}. Run domhand_assess_state once first.'
+			)
+
+	last_state = getattr(browser_session, '_gh_last_application_state', None)
+	if not isinstance(last_state, dict):
+		return None
+
+	last_url = str(last_state.get('page_url') or '')
+	terminal_state = str(last_state.get('terminal_state') or '').strip().lower()
+	if current_url and last_url == current_url and terminal_state and terminal_state not in _GHOSTHANDS_DONE_TERMINAL_STATES:
+		return (
+			'Current page is not yet a terminal application state for done(success=True). '
+			f'Latest domhand_assess_state says state={terminal_state}. '
+			'Run domhand_assess_state after final same-page fixes, then call done() only on review, confirmation, '
+			'or an allowed presubmit_single_page state.'
+		)
 
 	return None
 
@@ -2174,6 +2217,10 @@ Validated Code (after quote fixing):
 				param_model=StructuredOutputAction[output_model],
 			)
 			async def done(params: StructuredOutputAction, file_system: FileSystem, browser_session: BrowserSession):
+				done_guard_error = await _ghosthands_done_guard_error(browser_session, success=params.success)
+				if done_guard_error:
+					return ActionResult(error=done_guard_error)
+
 				# Exclude success from the output JSON
 				# Use mode='json' to properly serialize enums at all nesting levels
 				output_dict = params.data.model_dump(mode='json')
@@ -2210,7 +2257,11 @@ Validated Code (after quote fixing):
 				'Complete task.',
 				param_model=DoneAction,
 			)
-			async def done(params: DoneAction, file_system: FileSystem):
+			async def done(params: DoneAction, file_system: FileSystem, browser_session: BrowserSession = None):
+				done_guard_error = await _ghosthands_done_guard_error(browser_session, success=params.success)
+				if done_guard_error:
+					return ActionResult(error=done_guard_error)
+
 				user_message = params.text
 
 				len_text = len(params.text)

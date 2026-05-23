@@ -11,6 +11,7 @@ All tests are offline (no browser, no database, no API calls).
 import asyncio
 import json
 import os
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -1418,7 +1419,107 @@ def test_build_task_prompt_requires_assess_state_before_advancing():
     )
 
     assert "run domhand_assess_state ONCE before clicking Next/Continue/Save" in prompt
+    assert "calling done() on an editable page" in prompt
     assert "Do NOT call domhand_assess_state — it causes false positives and loops." not in prompt
+
+
+@pytest.mark.asyncio
+async def test_done_action_requires_fresh_domhand_assessment_before_success():
+    from browser_use.filesystem.file_system import FileSystem
+    from browser_use.tools.service import Tools
+
+    tools = Tools()
+    browser_session = SimpleNamespace(
+        get_current_page_url=AsyncMock(return_value="https://boards.greenhouse.io/example/jobs/123/apply"),
+        cdp_client=None,
+    )
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        file_system = FileSystem(temp_dir)
+
+        browser_session._gh_pending_assessment = {
+            "page_url": "https://boards.greenhouse.io/example/jobs/123/apply",
+            "page_context_key": "page-1",
+            "source_action": "domhand_fill",
+        }
+        result = await tools.done(
+            text="Should not complete yet",
+            success=True,
+            browser_session=browser_session,
+            file_system=file_system,
+        )
+
+        assert result.error is not None
+        assert "domhand_assess_state" in result.error
+        assert result.is_done is not True
+
+        delattr(browser_session, "_gh_pending_assessment")
+        browser_session._gh_last_application_state = {
+            "page_url": "https://boards.greenhouse.io/example/jobs/123/apply",
+            "page_context_key": "page-1",
+            "terminal_state": "advanceable",
+        }
+        result = await tools.done(
+            text="Still not complete",
+            success=True,
+            browser_session=browser_session,
+            file_system=file_system,
+        )
+
+        assert result.error is not None
+        assert "terminal application state" in result.error
+        assert result.is_done is not True
+
+        browser_session._gh_last_application_state = {
+            "page_url": "https://boards.greenhouse.io/example/jobs/123/apply",
+            "page_context_key": "page-1",
+            "terminal_state": "review",
+        }
+        result = await tools.done(
+            text="Ready for review",
+            success=True,
+            browser_session=browser_session,
+            file_system=file_system,
+        )
+
+        assert result.error is None
+        assert result.is_done is True
+        assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_structured_done_action_requires_terminal_handx_state():
+    from pydantic import BaseModel, Field
+
+    from browser_use.filesystem.file_system import FileSystem
+    from browser_use.tools.service import Tools
+
+    class MyOutput(BaseModel):
+        answer: str = Field(description="The answer")
+
+    tools = Tools(output_model=MyOutput)
+    browser_session = SimpleNamespace(
+        get_current_page_url=AsyncMock(return_value="https://boards.greenhouse.io/example/jobs/123/apply"),
+        cdp_client=None,
+        _gh_last_application_state={
+            "page_url": "https://boards.greenhouse.io/example/jobs/123/apply",
+            "page_context_key": "page-1",
+            "terminal_state": "editing",
+        },
+    )
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        file_system = FileSystem(temp_dir)
+        result = await tools.done(
+            data={"answer": "hello"},
+            success=True,
+            browser_session=browser_session,
+            file_system=file_system,
+        )
+
+    assert result.error is not None
+    assert "domhand_assess_state" in result.error
+    assert result.is_done is not True
 
 
 def test_build_task_prompt_defaults_to_review_only_submit_intent():

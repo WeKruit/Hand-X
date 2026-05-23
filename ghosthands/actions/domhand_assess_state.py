@@ -1975,6 +1975,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         {
             "page_context_key": page_context_key,
             "page_url": current_url,
+            "terminal_state": application_state.terminal_state,
             "current_section": application_state.current_section,
             "advance_allowed": application_state.advance_allowed,
             "advance_visible": application_state.advance_visible,
