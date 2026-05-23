@@ -20,6 +20,7 @@ from ghosthands.actions.domhand_fill import (
     _get_page_context_key,
     _get_profile_data,
     _grouped_date_is_complete,
+    _is_binary_value_text,
     _is_effectively_unset_field_value,
     _is_navigation_field,
     _is_upload_like_field,
@@ -213,10 +214,27 @@ def _expected_cluster_signature(label: str | None, field_type: str | None) -> tu
     return None, None
 
 
+def _expected_value_is_compatible_for_field(field: FormField, expected_value: str) -> bool:
+    if not _value_shape_is_compatible(field, expected_value):
+        return False
+
+    if field.field_type not in {"checkbox", "toggle"}:
+        return True
+
+    option_norms = {
+        normalize_name(str(option).strip()) for option in (field.options or field.choices or []) if str(option).strip()
+    }
+    expected_norm = normalize_name(expected_value)
+    if option_norms:
+        return expected_norm in option_norms or _is_binary_value_text(expected_value)
+    return _is_binary_value_text(expected_value)
+
+
 def _expected_binding_is_compatible(field: FormField, expected: Any) -> bool:
     expected_label = str(getattr(expected, "field_label", "") or "").strip()
     expected_type = str(getattr(expected, "field_type", "") or "").strip()
     expected_section = str(getattr(expected, "field_section", "") or "").strip()
+    expected_value = str(getattr(expected, "expected_value", "") or "").strip()
     expected_fingerprint = normalize_name(str(getattr(expected, "field_fingerprint", "") or ""))
     current_fingerprint = normalize_name(field.field_fingerprint or "")
 
@@ -253,7 +271,7 @@ def _expected_binding_is_compatible(field: FormField, expected: Any) -> bool:
         if smaller >= 2 and (len(overlap) / smaller) < 0.5:
             return False
 
-    return True
+    return not expected_value or _expected_value_is_compatible_for_field(field, expected_value)
 
 
 def _field_companion_identity(field: FormField) -> tuple[str, str] | None:
@@ -535,16 +553,6 @@ def _apply_visual_verification_result(
             observed_value=outcome.observed_value,
         )
 
-        if outcome.status == "unfilled":
-            if field.required:
-                unresolved_required = _upsert_issue_by_field_id(unresolved_required, visual_issue)
-                mismatched_fields = _remove_issue_field_ids(mismatched_fields, {outcome.field_id})
-                opaque_fields = _remove_issue_field_ids(opaque_fields, {outcome.field_id})
-                unverified_fields = _remove_issue_field_ids(unverified_fields, {outcome.field_id})
-            else:
-                mismatched_fields = _upsert_issue_by_field_id(mismatched_fields, visual_issue)
-            continue
-
         if outcome.trust_tier is VisualTrustTier.TIER_A:
             if field.required:
                 unresolved_required = _upsert_issue_by_field_id(unresolved_required, visual_issue)
@@ -561,11 +569,11 @@ def _apply_visual_verification_result(
                 mismatched_fields = _remove_issue_field_ids(mismatched_fields, {outcome.field_id})
                 opaque_fields = _remove_issue_field_ids(opaque_fields, {outcome.field_id})
                 unverified_fields = _remove_issue_field_ids(unverified_fields, {outcome.field_id})
-            else:
-                mismatched_fields = _upsert_issue_by_field_id(mismatched_fields, visual_issue)
+            elif had_dom_issue:
+                unverified_fields = _upsert_issue_by_field_id(unverified_fields, visual_issue)
             continue
 
-        if field.required and not outcome.observed_value:
+        if field.required and had_dom_issue and not outcome.observed_value:
             unresolved_required = _upsert_issue_by_field_id(unresolved_required, visual_issue)
             mismatched_fields = _remove_issue_field_ids(mismatched_fields, {outcome.field_id})
             opaque_fields = _remove_issue_field_ids(opaque_fields, {outcome.field_id})
@@ -1698,7 +1706,13 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         page_context_key=page_context_key,
     )
     visual_candidates = [
-        candidate for candidate in visual_candidates if bool(layout.get(candidate.field_id, {}).get("in_view"))
+        candidate
+        for candidate in visual_candidates
+        if (
+            bool(layout.get(candidate.field_id, {}).get("in_view"))
+            and field_by_id.get(candidate.field_id) is not None
+            and _expected_value_is_compatible_for_field(field_by_id[candidate.field_id], candidate.expected_value)
+        )
     ]
     if params.target_section:
         scoped_visual_candidates = [

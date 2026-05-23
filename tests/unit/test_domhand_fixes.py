@@ -4059,6 +4059,86 @@ async def test_assess_state_ignores_shape_incompatible_expected_value_for_condit
     assert payload["advance_allowed"] is True
 
 
+@pytest.mark.asyncio
+async def test_assess_state_ignores_shape_incompatible_expected_value_for_checkbox():
+    from ghosthands.actions.domhand_assess_state import domhand_assess_state
+    from ghosthands.actions.views import DomHandAssessStateParams, FormField, get_stable_field_key
+    from ghosthands.runtime_learning import (
+        build_page_context_key,
+        record_expected_field_value,
+        reset_runtime_learning_state,
+    )
+
+    reset_runtime_learning_state()
+    field = FormField(
+        field_id="preferred-name-toggle",
+        name="I have a preferred name",
+        field_type="checkbox",
+        section="My Information",
+        required=True,
+        current_value="checked",
+    )
+    page_context_key = build_page_context_key(
+        url="https://example.wd1.myworkdayjobs.com/job",
+        page_marker="My Information",
+    )
+    record_expected_field_value(
+        host="example.wd1.myworkdayjobs.com",
+        page_context_key=page_context_key,
+        field_key=get_stable_field_key(field),
+        field_label=field.name,
+        field_type=field.field_type,
+        field_section=field.section,
+        expected_value="Ruiyang",
+        source="derived_profile",
+    )
+
+    async def evaluate_side_effect(script, *args):
+        if args == (["preferred-name-toggle"],):
+            return {"preferred-name-toggle": {"in_view": True, "top": 0, "bottom": 20}}
+        return {
+            "button_texts": ["Save and Continue"],
+            "body_text": "",
+            "markers": [],
+            "submit_visible": False,
+            "submit_disabled": False,
+            "advance_visible": True,
+            "error_texts": [],
+            "heading_texts": ["My Information"],
+        }
+
+    page = AsyncMock()
+    page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
+    page.get_url = AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job")
+    browser_session = AsyncMock()
+    browser_session.get_current_page = AsyncMock(return_value=page)
+
+    with (
+        patch("ghosthands.dom.shadow_helpers.ensure_helpers", AsyncMock(return_value=None)),
+        patch("ghosthands.actions.domhand_assess_state.extract_visible_form_fields", AsyncMock(return_value=[field])),
+        patch(
+            "ghosthands.actions.domhand_assess_state._safe_page_url",
+            AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job"),
+        ),
+        patch(
+            "ghosthands.actions.domhand_fill._read_page_context_snapshot",
+            AsyncMock(return_value={"page_marker": "My Information", "heading_texts": ["My Information"]}),
+        ),
+        patch("ghosthands.actions.domhand_assess_state._field_has_validation_error", AsyncMock(return_value=False)),
+        patch("ghosthands.actions.domhand_assess_state._read_binary_state", AsyncMock(return_value=True)),
+        patch.dict(os.environ, {"GH_VERIFICATION_EFFORT": "low"}, clear=False),
+    ):
+        result = await domhand_assess_state(
+            DomHandAssessStateParams(target_section="My Information"),
+            browser_session,
+        )
+
+    payload = json.loads((result.metadata or {})["application_state_json"])
+    assert payload["mismatched_fields"] == []
+    assert payload["unverified_fields"] == []
+    assert payload["advance_allowed"] is True
+
+
 def test_resolve_known_profile_value_for_field_skips_binary_default_for_conditional_detail_textarea():
     from ghosthands.actions.domhand_fill import _resolve_known_profile_value_for_field
     from ghosthands.actions.views import FormField

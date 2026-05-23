@@ -209,7 +209,7 @@ async def test_assess_state_visual_tier_a_mismatch_blocks_required_field():
 
 
 @pytest.mark.asyncio
-async def test_assess_state_visual_tier_b_mismatch_stays_advisory_when_dom_has_no_issue():
+async def test_assess_state_visual_tier_b_mismatch_is_ignored_when_dom_has_no_issue():
     from ghosthands.actions.domhand_assess_state import domhand_assess_state
 
     field = FormField(
@@ -291,8 +291,95 @@ async def test_assess_state_visual_tier_b_mismatch_stays_advisory_when_dom_has_n
     payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["advance_allowed"] is True
     assert payload["unresolved_required_fields"] == []
-    assert len(payload["mismatched_fields"]) == 1
-    assert payload["mismatched_fields"][0]["name"] == "Email Address"
+    assert payload["mismatched_fields"] == []
+    assert payload["unverified_fields"] == []
+
+
+@pytest.mark.asyncio
+async def test_assess_state_visual_tier_b_unfilled_is_ignored_when_dom_has_no_issue():
+    from ghosthands.actions.domhand_assess_state import domhand_assess_state
+
+    field = FormField(
+        field_id="email",
+        name="Email Address",
+        field_type="email",
+        section="My Information",
+        required=True,
+    )
+    candidate = VisualVerificationCandidate(
+        field_id="email",
+        field_key="email-key",
+        field_label=field.name,
+        field_type=field.field_type,
+        required=True,
+        section=field.section,
+        expected_value="spencer@example.com",
+        trust_tier=VisualTrustTier.TIER_B,
+        verification_mode=VisualVerificationMode.EXACT_VISIBLE_VALUE,
+    )
+    visual_result = VisualVerificationBatchResult(
+        attempted=True,
+        page_context_key="ctx",
+        model_name="gemini-3-flash-preview",
+        candidate_count=1,
+        calls=1,
+        unfilled_count=1,
+        results=[
+            VisualVerificationFieldOutcome(
+                field_id="email",
+                field_key="email-key",
+                field_label=field.name,
+                field_type=field.field_type,
+                expected_value="spencer@example.com",
+                observed_value="",
+                required=True,
+                trust_tier=VisualTrustTier.TIER_B,
+                verification_mode=VisualVerificationMode.EXACT_VISIBLE_VALUE,
+                matches_expected=False,
+                confidence=0.96,
+                status="unfilled",
+            )
+        ],
+    )
+
+    async def evaluate_side_effect(script, *args):
+        if args == (["email"],):
+            return _layout_payload("email")
+        if args == ("email",):
+            return json.dumps({"error_text": "", "widget_kind": ""})
+        return _page_scan_payload("My Information")
+
+    page = AsyncMock()
+    page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
+    page.get_url = AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job")
+    browser_session = AsyncMock()
+    browser_session.get_current_page = AsyncMock(return_value=page)
+
+    with (
+        patch("ghosthands.dom.shadow_helpers.ensure_helpers", AsyncMock(return_value=None)),
+        patch("ghosthands.actions.domhand_assess_state.extract_visible_form_fields", AsyncMock(return_value=[field])),
+        patch(
+            "ghosthands.actions.domhand_assess_state._safe_page_url",
+            AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job"),
+        ),
+        patch("ghosthands.actions.domhand_assess_state._get_page_context_key", AsyncMock(return_value="ctx")),
+        patch("ghosthands.actions.domhand_assess_state._field_has_validation_error", AsyncMock(return_value=False)),
+        patch(
+            "ghosthands.actions.domhand_assess_state._read_field_value", AsyncMock(return_value="spencer@example.com")
+        ),
+        patch("ghosthands.actions.domhand_assess_state.build_visual_candidates", return_value=[candidate]),
+        patch(
+            "ghosthands.actions.domhand_assess_state.verify_page_visual_candidates",
+            AsyncMock(return_value=visual_result),
+        ),
+    ):
+        result = await domhand_assess_state(DomHandAssessStateParams(target_section="My Information"), browser_session)
+
+    payload = json.loads((result.metadata or {})["application_state_json"])
+    assert payload["advance_allowed"] is True
+    assert payload["unresolved_required_fields"] == []
+    assert payload["unverified_fields"] == []
+    assert payload["mismatched_fields"] == []
 
 
 @pytest.mark.asyncio
@@ -364,3 +451,62 @@ async def test_assess_state_visual_verification_error_blocks_advancement():
     payload = json.loads((result.metadata or {})["application_state_json"])
     assert payload["advance_allowed"] is False
     assert payload["visual_verification"]["error"] == "model unavailable"
+
+
+@pytest.mark.asyncio
+async def test_assess_state_skips_shape_incompatible_visual_candidates():
+    from ghosthands.actions.domhand_assess_state import domhand_assess_state
+
+    field = FormField(
+        field_id="preferred-name-toggle",
+        name="I have a preferred name",
+        field_type="checkbox",
+        section="My Information",
+        required=True,
+        current_value="checked",
+    )
+    candidate = VisualVerificationCandidate(
+        field_id="preferred-name-toggle",
+        field_key="preferred-name-toggle-key",
+        field_label=field.name,
+        field_type=field.field_type,
+        required=True,
+        section=field.section,
+        expected_value="Ruiyang",
+        trust_tier=VisualTrustTier.TIER_A,
+        verification_mode=VisualVerificationMode.EXACT_VISIBLE_VALUE,
+    )
+
+    async def evaluate_side_effect(script, *args):
+        if args == (["preferred-name-toggle"],):
+            return _layout_payload("preferred-name-toggle")
+        if args == ("preferred-name-toggle",):
+            return json.dumps({"error_text": "", "widget_kind": ""})
+        return _page_scan_payload("My Information")
+
+    page = AsyncMock()
+    page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
+    page.get_url = AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job")
+    browser_session = AsyncMock()
+    browser_session.get_current_page = AsyncMock(return_value=page)
+    verify_mock = AsyncMock()
+
+    with (
+        patch("ghosthands.dom.shadow_helpers.ensure_helpers", AsyncMock(return_value=None)),
+        patch("ghosthands.actions.domhand_assess_state.extract_visible_form_fields", AsyncMock(return_value=[field])),
+        patch(
+            "ghosthands.actions.domhand_assess_state._safe_page_url",
+            AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job"),
+        ),
+        patch("ghosthands.actions.domhand_assess_state._get_page_context_key", AsyncMock(return_value="ctx")),
+        patch("ghosthands.actions.domhand_assess_state._field_has_validation_error", AsyncMock(return_value=False)),
+        patch("ghosthands.actions.domhand_assess_state._read_binary_state", AsyncMock(return_value=True)),
+        patch("ghosthands.actions.domhand_assess_state.build_visual_candidates", return_value=[candidate]),
+        patch("ghosthands.actions.domhand_assess_state.verify_page_visual_candidates", verify_mock),
+    ):
+        result = await domhand_assess_state(DomHandAssessStateParams(target_section="My Information"), browser_session)
+
+    payload = json.loads((result.metadata or {})["application_state_json"])
+    verify_mock.assert_not_awaited()
+    assert payload["advance_allowed"] is True
+    assert payload["visual_verification"] is None
