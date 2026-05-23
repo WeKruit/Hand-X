@@ -47,6 +47,7 @@ from ghosthands.actions.views import (
     is_placeholder_value,
     normalize_name,
 )
+from ghosthands.dom.assessment_checkpoint import clear_assessment_pending, get_pending_assessment
 from ghosthands.dom.page_visual_verifier import (
     VisualTrustTier,
     VisualVerificationBatchResult,
@@ -1279,6 +1280,12 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
             delattr(browser_session, "_gh_last_application_state")
 
     page_context_key = await _get_page_context_key(page, fallback_marker=params.target_section)
+    pending_assessment = get_pending_assessment(browser_session)
+    pending_assessment_active = bool(
+        isinstance(pending_assessment, dict)
+        and str(pending_assessment.get("page_context_key") or "") == page_context_key
+        and str(pending_assessment.get("page_url") or "") == current_url
+    )
     last_fill = getattr(browser_session, "_gh_last_domhand_fill", None)
     if (
         isinstance(last_fill, dict)
@@ -1301,6 +1308,7 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
         and str(last_state.get("page_context_key") or "") == page_context_key
         and str(last_state.get("page_url") or "") == current_url
         and _last_state_is_cleanly_advanceable(last_state)
+        and not pending_assessment_active
     ):
         agent_summary = "DomHand assess_state: same page already assessed as advance_allowed=yes."
         return ActionResult(
@@ -1996,6 +2004,11 @@ async def domhand_assess_state(params: DomHandAssessStateParams, browser_session
                 else None
             ),
         },
+    )
+    clear_assessment_pending(
+        browser_session,
+        page_url=current_url,
+        page_context_key=page_context_key,
     )
     await publish_browser_session_trace(
         browser_session,

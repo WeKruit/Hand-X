@@ -49,6 +49,7 @@ from ghosthands.actions.views import (
     normalize_name,
 )
 from ghosthands.bridge.profile_adapter import camel_to_snake_profile
+from ghosthands.dom.assessment_checkpoint import mark_assessment_pending
 from ghosthands.dom.dropdown_fill import DropdownFillResult, fill_interactive_dropdown  # noqa: F401
 from ghosthands.dom.dropdown_match import (  # noqa: F401
     CLICK_DROPDOWN_OPTION_ENHANCED_JS,
@@ -58,8 +59,6 @@ from ghosthands.dom.dropdown_match import (  # noqa: F401
 )
 from ghosthands.dom.dropdown_verify import selection_matches_desired  # noqa: F401
 from ghosthands.dom.fill_browser_scripts import (
-    _CLICK_BINARY_FIELD_JS,
-    _CLICK_RADIO_OPTION_JS,
     _DISMISS_DROPDOWN_SOFT_JS,
     _EXTRACT_FIELDS_JS,
     _PAGE_CONTEXT_SCAN_JS,
@@ -80,7 +79,6 @@ from ghosthands.dom.fill_executor import (  # noqa: F401
     _confirm_text_like_value,
     _field_has_effective_value,
     _field_has_validation_error,
-    _read_multi_select_selection,
     _field_needs_blur_revalidation,
     _field_needs_enter_commit,
     _field_value_matches_expected,
@@ -118,6 +116,7 @@ from ghosthands.dom.fill_executor import (  # noqa: F401
     _read_field_value,
     _read_field_value_for_field,
     _read_group_selection,
+    _read_multi_select_selection,
     _record_field_interaction_recipe,
     _refresh_binary_field,
     _reset_group_selection_with_gui,
@@ -126,8 +125,8 @@ from ghosthands.dom.fill_executor import (  # noqa: F401
     _settle_dropdown_selection,
     _text_fill_attempt_values,
     _try_open_combobox_menu,
-    _type_text_compat,
     _type_and_click_dropdown_option,
+    _type_text_compat,
     _visible_field_id_snapshot,
     _wait_for_field_value,
 )
@@ -926,9 +925,7 @@ async def _maybe_auto_expand_profile_repeaters(
     if not candidate_sections:
         return False
 
-    attempted: set[str] | None = getattr(
-        browser_session, _DOMHAND_AUTO_EXPAND_PROFILE_SECTIONS_ATTR, None
-    )
+    attempted: set[str] | None = getattr(browser_session, _DOMHAND_AUTO_EXPAND_PROFILE_SECTIONS_ATTR, None)
     if attempted is None:
         attempted = set()
         setattr(browser_session, _DOMHAND_AUTO_EXPAND_PROFILE_SECTIONS_ATTR, attempted)
@@ -2062,8 +2059,6 @@ def _raw_grouped_date_fields(
 from ghosthands.dom.fill_verify import (
     DOMHAND_RETRY_CAPPED,
     _attempt_domhand_fill_with_retry_cap,
-    _field_already_matches,
-    _is_explicit_false,
     _record_expected_value_if_settled,
 )
 
@@ -2126,9 +2121,8 @@ def _build_field_description(field: FormField, display_name: str) -> str:
     # Education/experience location hint: tell the LLM this is the entity location
     _label_lc = normalize_name(display_name)
     _section_lc = normalize_name(field.section or "")
-    if (
-        _label_lc in {"country", "state", "city", "province", "region"}
-        and any(tok in _section_lc for tok in ("education", "college", "university", "experience", "work", "employment"))
+    if _label_lc in {"country", "state", "city", "province", "region"} and any(
+        tok in _section_lc for tok in ("education", "college", "university", "experience", "work", "employment")
     ):
         desc += " [CRITICAL: This field is the SCHOOL/EMPLOYER location — NOT the applicant's home address. Look at the School or Company field in THIS SAME section and return THAT institution's city/state/country. NEVER use the applicant's residential address here.]"
     return desc
@@ -2368,7 +2362,11 @@ def _match_answer(
     # "decline" option rather than leaving the field empty and forcing
     # the agent to waste steps filling them one at a time.
     _has_constrained_choices = bool(field.choices or field.options) and field.field_type in {
-        "button-group", "radio-group", "radio", "checkbox-group", "select",
+        "button-group",
+        "radio-group",
+        "radio",
+        "checkbox-group",
+        "select",
     }
     if field.required or _has_constrained_choices:
         for norm_name in candidate_norms:
@@ -3066,7 +3064,9 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 "page_context_key": page_context_key,
                 "page_url": page_url,
                 "guard_field_count": len(_guard_field_ids) if _guard_field_ids else 0,
-                "last_fill_field_count": len((getattr(browser_session, "_gh_last_domhand_fill", {}) or {}).get("field_ids", [])),
+                "last_fill_field_count": len(
+                    (getattr(browser_session, "_gh_last_domhand_fill", {}) or {}).get("field_ids", [])
+                ),
                 "message": same_page_advance_guard,
             },
         )
@@ -3098,7 +3098,9 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 "page_context_key": page_context_key,
                 "page_url": page_url,
                 "guard_field_count": len(_guard_field_ids) if _guard_field_ids else 0,
-                "last_fill_field_count": len((getattr(browser_session, "_gh_last_domhand_fill", {}) or {}).get("field_ids", [])),
+                "last_fill_field_count": len(
+                    (getattr(browser_session, "_gh_last_domhand_fill", {}) or {}).get("field_ids", [])
+                ),
                 "guard_message": same_page_guard,
             },
         )
@@ -3239,9 +3241,9 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 "round": round_num,
                 "extracted_total": len(fields),
                 "fillable_count": len(fillable_fields),
-                "fillable_types": dict(
-                    __import__("collections").Counter(f.field_type for f in fillable_fields)
-                ) if fillable_fields else {},
+                "fillable_types": dict(__import__("collections").Counter(f.field_type for f in fillable_fields))
+                if fillable_fields
+                else {},
                 "page_context_key": page_context_key,
             },
         )
@@ -3334,7 +3336,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 # When called from repeater with entry_data, use the single skill
                 single_skill = (
                     (entry_data.get("skill_name") or entry_data.get("skill") or "").strip()
-                    if isinstance(entry_data, dict) else ""
+                    if isinstance(entry_data, dict)
+                    else ""
                 )
                 if single_skill:
                     direct_fills[f.field_id] = single_skill
@@ -3555,17 +3558,17 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 if is_structured_education_candidate
                 else None
             )
-            skip_oracle_education_combobox_coercion = (
-                _structured_education_oracle_combobox_skip_dropdown_coercion(
-                    f,
-                    is_structured_education_candidate=is_structured_education_candidate,
-                    structured_education_diag=structured_education_diag,
-                )
+            skip_oracle_education_combobox_coercion = _structured_education_oracle_combobox_skip_dropdown_coercion(
+                f,
+                is_structured_education_candidate=is_structured_education_candidate,
+                structured_education_diag=structured_education_diag,
             )
             # Fallback guard: Oracle FA school combobox should always go to needs_llm
             # even if structured education gate didn't fire (section mismatch, etc.)
             _label_norm_guard = normalize_name(_preferred_field_label(f))
-            _is_school_label = any(tok in _label_norm_guard for tok in ("school", "university", "college", "institution"))
+            _is_school_label = any(
+                tok in _label_norm_guard for tok in ("school", "university", "college", "institution")
+            )
             if _is_school_label and f.field_type == "select" and not f.is_native:
                 logger.info(
                     "domhand.oracle_school_guard_trace",
@@ -3771,17 +3774,17 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             # Route to needs_llm so the LLM infers from the entity in the profile text.
             _section_norm = normalize_name(f.section or "")
             _label_norm_loc = normalize_name(_preferred_field_label(f))
-            if (
-                _label_norm_loc in {"country", "state", "city", "province", "region"}
-                and any(
-                    tok in _section_norm
-                    for tok in ("education", "experience", "work", "employment", "college", "university")
-                )
+            if _label_norm_loc in {"country", "state", "city", "province", "region"} and any(
+                tok in _section_norm
+                for tok in ("education", "experience", "work", "employment", "college", "university")
             ):
                 needs_llm.append(f)
                 continue
             _has_constrained_choices = bool(f.choices or f.options) and f.field_type in {
-                "button-group", "radio-group", "radio", "checkbox-group",
+                "button-group",
+                "radio-group",
+                "radio",
+                "checkbox-group",
             }
             minimum_confidence = "medium" if (f.required or _has_constrained_choices) else "strong"
             resolved_profile_value = _resolve_known_profile_value_for_field(
@@ -3803,9 +3806,9 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 "round": round_num,
                 "direct_fills": len(direct_fills),
                 "needs_llm": len(needs_llm),
-                "needs_llm_types": dict(
-                    __import__("collections").Counter(f.field_type for f in needs_llm)
-                ) if needs_llm else {},
+                "needs_llm_types": dict(__import__("collections").Counter(f.field_type for f in needs_llm))
+                if needs_llm
+                else {},
                 "already_filled": already_filled_count,
                 "skipped": len(fields_skipped),
             },
@@ -3851,9 +3854,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 _f_section = normalize_name(f.section or "")
                 if _f_norm in {"school", "university", "institution", "college"} or "school" in _f_norm:
                     _school_answer = answers.get(_f_label, "")
-                if (
-                    _f_norm in {"country", "state", "city", "province", "region"}
-                    and any(tok in _f_section for tok in ("education", "college", "university"))
+                if _f_norm in {"country", "state", "city", "province", "region"} and any(
+                    tok in _f_section for tok in ("education", "college", "university")
                 ):
                     _edu_location_keys[_f_label] = _f_norm
             # Use cached location from previous round, or look up fresh
@@ -3865,6 +3867,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             elif _school_answer and _edu_location_keys:
                 try:
                     from ghosthands.dom.oracle_combobox_llm import oracle_school_location_llm
+
                     _location = await oracle_school_location_llm(_school_answer)
                     if _location:
                         _cached_school_location.update(_location)
@@ -4402,11 +4405,13 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
         _truncate_agent_fill_text(r.name, 40) for r in reconciled_results[:15] if r.success and r.name.strip()
     )
     failed_labels = ", ".join(
-        _truncate_agent_fill_text(r.name, 40) for r in reconciled_results[:15]
+        _truncate_agent_fill_text(r.name, 40)
+        for r in reconciled_results[:15]
         if not r.success and r.actor == "dom" and r.name.strip()
     )
     skipped_labels = ", ".join(
-        _truncate_agent_fill_text(r.name, 40) for r in reconciled_results[:15]
+        _truncate_agent_fill_text(r.name, 40)
+        for r in reconciled_results[:15]
         if r.actor == "skipped" and r.name.strip()
     )
     agent_summary = _agent_prose
@@ -4452,9 +4457,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
     # Include verified/already-correct field labels so the agent knows which
     # fields are confirmed good and should NOT be deleted or re-entered.
     if _already_correct_field_labels:
-        _acl = ", ".join(
-            _truncate_agent_fill_text(lbl, 30) for lbl in _already_correct_field_labels[:20]
-        )
+        _acl = ", ".join(_truncate_agent_fill_text(lbl, 30) for lbl in _already_correct_field_labels[:20])
         agent_summary += (
             f" Already correct ({total_already_filled_count} fields verified by DOM readback"
             f" — do NOT delete or modify): {_acl}."
@@ -4486,6 +4489,12 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             delattr(browser_session, "_gh_last_application_state")
         except AttributeError:
             pass
+    mark_assessment_pending(
+        browser_session,
+        page_url=page_url,
+        page_context_key=page_context_key,
+        source_action="domhand_fill",
+    )
 
     return ActionResult(
         extracted_content=_timeout_prefix + agent_summary,

@@ -54,6 +54,7 @@ from ghosthands.actions.views import (
     normalize_name,
     split_dropdown_value_hierarchy,
 )
+from ghosthands.dom.assessment_checkpoint import mark_assessment_pending
 from ghosthands.dom.dropdown_match import match_dropdown_option_dict
 from ghosthands.dom.fill_label_match import _coerce_proficiency_choice
 from ghosthands.runtime_learning import (
@@ -784,6 +785,7 @@ def _fuzzy_match_option(
     which implements the canonical 5-pass cascade (exact → prefix → contains →
     synonym → word-overlap).
     """
+
     def _looks_like_employer_dropdown(label: str) -> bool:
         norm = normalize_name(label)
         return any(
@@ -830,7 +832,7 @@ def _fuzzy_match_option(
     coerced = _coerce_proficiency_choice(labels, target)
     if not coerced:
         return None
-    for opt, label in zip(options, labels):
+    for opt, label in zip(options, labels, strict=False):
         if label == coerced:
             return opt
     return None
@@ -962,9 +964,9 @@ async def _click_option_via_playwright(page: Any, matched_text: str) -> dict[str
         '[role="gridcell"]',
         '[role="menuitem"]',
         '[role="listitem"]',
-        'li',
+        "li",
         '[class*="option"]',
-        '[data-value]',
+        "[data-value]",
         '[role="row"]',
     )
     for selector in actor_selectors:
@@ -1013,7 +1015,9 @@ async def _click_option_via_playwright(page: Any, matched_text: str) -> dict[str
         with contextlib.suppress(Exception):
             locator_candidates.append((f"playwright:{role}:name", page.get_by_role(role, name=pattern)))
         with contextlib.suppress(Exception):
-            locator_candidates.append((f"playwright:{role}:text", page.locator(f'[role=\"{role}\"]').filter(has_text=pattern)))
+            locator_candidates.append(
+                (f"playwright:{role}:text", page.locator(f'[role="{role}"]').filter(has_text=pattern))
+            )
         for via, loc in locator_candidates:
             try:
                 if await loc.count() == 0:
@@ -1264,9 +1268,7 @@ def _select_failover_or_retry_cap_message(
         return _build_failover_message(
             widget_kind,
             index,
-            reason=(
-                f"domhand_retry_capped: retry cap reached after {count or DOMHAND_RETRY_CAP} attempts."
-            ),
+            reason=(f"domhand_retry_capped: retry cap reached after {count or DOMHAND_RETRY_CAP} attempts."),
             current_value=current_value,
         )
     return _build_failover_message(
@@ -1337,9 +1339,7 @@ async def _resolve_select_node(
 
     if not matches:
         if index_error:
-            return None, index, (
-                f'{index_error} No visible dropdown matched field_id="{requested_id}".'
-            )
+            return None, index, (f'{index_error} No visible dropdown matched field_id="{requested_id}".')
         return None, index, f'No visible dropdown matched field_id="{requested_id}".'
 
     matches.sort(key=lambda item: _score_selector_map_node(item[1]), reverse=True)
@@ -1421,8 +1421,7 @@ async def _resolve_stale_select_field_id(
     ]
     if len(focused) > 1:
         details = ", ".join(
-            f'{_preferred_field_label(field)}: {field.field_id} ({field.field_type})'
-            for field in focused
+            f"{_preferred_field_label(field)}: {field.field_id} ({field.field_type})" for field in focused
         )
         return None, (
             "Provided field_id is stale and label fallback is ambiguous. "
@@ -1671,9 +1670,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             f"current_value_before={current_before!r}"
         )
         return ActionResult(
-            extracted_content=(
-                f'Dropdown "{field_label or params.index}" already showed "{current_before}".'
-            ),
+            extracted_content=(f'Dropdown "{field_label or params.index}" already showed "{current_before}".'),
             include_extracted_content_only_once=False,
             metadata={
                 "tool": "domhand_select",
@@ -1714,8 +1711,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
         )
         return ActionResult(
             extracted_content=(
-                f'Dropdown "{field_label or params.index}" already showed "{discovery_value}" '
-                "(from discovery)."
+                f'Dropdown "{field_label or params.index}" already showed "{discovery_value}" (from discovery).'
             ),
             include_extracted_content_only_once=False,
             metadata={
@@ -1982,7 +1978,9 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
             },
         )
 
-    matched = _fuzzy_match_option(params.value, match_options, field_label=field_label) if shared_result is None else None
+    matched = (
+        _fuzzy_match_option(params.value, match_options, field_label=field_label) if shared_result is None else None
+    )
 
     if result is None and shared_result is None and not matched:
         if dropdown_type != "native_select":
@@ -2047,9 +2045,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                 # For custom dropdowns, try SelectDropdownOptionEvent first
                 try:
                     if field_invalid:
-                        result = await _click_option_via_page_js(
-                            page, matched_text, dropdown_type
-                        )
+                        result = await _click_option_via_page_js(page, matched_text, dropdown_type)
                         if result.get("success"):
                             used_action_chain = ["page_js_click"]
                     elif dropdown_type == "aria_listbox":
@@ -2057,9 +2053,7 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                             with contextlib.suppress(Exception):
                                 await trusted_open_combobox_by_ffid(page, node_ff_id)
                                 await asyncio.sleep(0.12)
-                        result = await _click_option_via_page_js(
-                            page, matched_text, dropdown_type
-                        )
+                        result = await _click_option_via_page_js(page, matched_text, dropdown_type)
                         if result.get("success"):
                             used_action_chain = ["page_js_click"]
                     else:
@@ -2072,15 +2066,11 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
                             used_action_chain = ["event_bus_select"]
                         else:
                             # Fallback: click the option via page-level JS
-                            result = await _click_option_via_page_js(
-                                page, matched_text, dropdown_type
-                            )
+                            result = await _click_option_via_page_js(page, matched_text, dropdown_type)
                             if result.get("success"):
                                 used_action_chain = ["page_js_click"]
                 except Exception:
-                    result = await _click_option_via_page_js(
-                        page, matched_text, dropdown_type
-                    )
+                    result = await _click_option_via_page_js(page, matched_text, dropdown_type)
                     if result.get("success"):
                         used_action_chain = ["page_js_click"]
         except Exception as e:
@@ -2238,6 +2228,12 @@ async def domhand_select(params: DomHandSelectParams, browser_session: BrowserSe
         success=True,
         state_change="changed",
         recommended_next_action="continue_current_recovery",
+    )
+    mark_assessment_pending(
+        browser_session,
+        page_url=page_url,
+        page_context_key=page_context_key,
+        source_action="domhand_select",
     )
     memory = f'Selected "{clicked_text}" for dropdown at index {params.index}.'
     if current and normalize_name(current) != normalize_name(clicked_text):

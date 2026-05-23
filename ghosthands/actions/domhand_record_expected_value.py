@@ -4,13 +4,11 @@ import logging
 
 from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
-
-from ghosthands.step_trace import publish_browser_session_trace, update_blocker_attempt_state
 from ghosthands.actions.domhand_fill import (
     _build_inject_helpers_js,
-    _filter_fields_for_scope,
     _field_has_validation_error,
     _field_value_matches_expected,
+    _filter_fields_for_scope,
     _get_page_context_key,
     _preferred_field_label,
     _read_binary_state,
@@ -22,7 +20,9 @@ from ghosthands.actions.domhand_fill import (
     extract_visible_form_fields,
 )
 from ghosthands.actions.views import DomHandRecordExpectedValueParams, FormField, get_stable_field_key
+from ghosthands.dom.assessment_checkpoint import mark_assessment_pending
 from ghosthands.runtime_learning import detect_host_from_url, record_expected_field_value
+from ghosthands.step_trace import publish_browser_session_trace, update_blocker_attempt_state
 
 logger = logging.getLogger(__name__)
 
@@ -97,13 +97,11 @@ async def domhand_record_expected_value(
         fallback_fields = scoped_fields
         if params.field_type:
             requested_type = str(params.field_type).strip().lower()
-            fallback_fields = [
-                field for field in scoped_fields if field.field_type.lower() == requested_type
-            ]
+            fallback_fields = [field for field in scoped_fields if field.field_type.lower() == requested_type]
         focused = _resolve_focus_fields(fallback_fields, [params.field_label])
         if focused.ambiguous_labels:
             details = ", ".join(
-                f'{label}: {[f"{field.field_id} ({field.field_type})" for field in matches]}'
+                f"{label}: {[f'{field.field_id} ({field.field_type})' for field in matches]}"
                 for label, matches in focused.ambiguous_labels.items()
             )
             return ActionResult(
@@ -134,7 +132,7 @@ async def domhand_record_expected_value(
         focused = _resolve_focus_fields(scoped_fields, [params.field_label])
         if focused.ambiguous_labels:
             details = ", ".join(
-                f'{label}: {[f"{field.field_id} ({field.field_type})" for field in matches]}'
+                f"{label}: {[f'{field.field_id} ({field.field_type})' for field in matches]}"
                 for label, matches in focused.ambiguous_labels.items()
             )
             return ActionResult(
@@ -147,16 +145,9 @@ async def domhand_record_expected_value(
             target = focused.fields[0]
 
     if target is None:
-        available = sorted({
-            _preferred_field_label(field)
-            for field in scoped_fields
-            if _preferred_field_label(field)
-        })
+        available = sorted({_preferred_field_label(field) for field in scoped_fields if _preferred_field_label(field)})
         return ActionResult(
-            error=(
-                f'No visible field matched "{params.field_label}". '
-                f"Available fields: {available[:12]}"
-            ),
+            error=(f'No visible field matched "{params.field_label}". Available fields: {available[:12]}'),
         )
 
     if target.field_type in {"checkbox", "toggle"}:
@@ -190,7 +181,8 @@ async def domhand_record_expected_value(
             ),
         )
 
-    page_host = detect_host_from_url(await _safe_page_url(page))
+    page_url = await _safe_page_url(page)
+    page_host = detect_host_from_url(page_url)
     page_context_key = await _get_page_context_key(
         page,
         fields=scoped_fields,
@@ -235,6 +227,12 @@ async def domhand_record_expected_value(
             "state_change": "changed",
             "recommended_next_action": "continue_current_recovery",
         },
+    )
+    mark_assessment_pending(
+        browser_session,
+        page_url=page_url,
+        page_context_key=page_context_key,
+        source_action="domhand_record_expected_value",
     )
 
     logger.info(

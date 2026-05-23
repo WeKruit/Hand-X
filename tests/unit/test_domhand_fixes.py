@@ -1406,6 +1406,21 @@ def test_build_task_prompt_requires_single_field_recovery():
     assert "domhand_record_expected_value" in prompt
 
 
+def test_build_task_prompt_requires_assess_state_before_advancing():
+    from ghosthands.agent.prompts import build_task_prompt
+
+    prompt = build_task_prompt(
+        "https://example.wd1.myworkdayjobs.com/en-US/job/123/apply",
+        "/tmp/resume.pdf",
+        {"email": "user@example.com", "password": "Secret!123"},
+        credential_source="user",
+        credential_intent="create_account",
+    )
+
+    assert "run domhand_assess_state ONCE before clicking Next/Continue/Save" in prompt
+    assert "Do NOT call domhand_assess_state — it causes false positives and loops." not in prompt
+
+
 def test_build_task_prompt_defaults_to_review_only_submit_intent():
     from ghosthands.agent.prompts import build_task_prompt
 
@@ -4379,6 +4394,41 @@ async def test_default_action_watchdog_allows_continue_when_only_soft_assessment
     message = await watchdog._guard_advance_click_requires_assessment(node)
 
     assert message is None
+
+
+@pytest.mark.asyncio
+async def test_default_action_watchdog_requires_fresh_assess_state_for_pending_page_mutation():
+    from types import SimpleNamespace
+
+    from bubus import EventBus
+
+    from browser_use.browser.watchdogs.default_action_watchdog import DefaultActionWatchdog
+
+    page = AsyncMock()
+    page.get_url = AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job")
+    browser_session = AsyncMock()
+    browser_session.get_current_page = AsyncMock(return_value=page)
+    browser_session._gh_pending_assessment = {
+        "page_url": "https://example.wd1.myworkdayjobs.com/job",
+        "page_context_key": "ctx",
+        "source_action": "domhand_fill",
+    }
+
+    node = SimpleNamespace(
+        node_name="button",
+        attributes={"aria-label": "Save and Continue"},
+        get_all_children_text=lambda max_depth=2: "Save and Continue",
+    )
+
+    watchdog = DefaultActionWatchdog.model_construct(
+        browser_session=browser_session,
+        event_bus=EventBus(),
+    )
+    message = await watchdog._guard_advance_click_requires_assessment(node)
+
+    assert message is not None
+    assert "fresh domhand_assess_state checkpoint" in message
+    assert "domhand_fill" in message
 
 
 @pytest.mark.asyncio

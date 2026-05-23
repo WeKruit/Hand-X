@@ -9,21 +9,22 @@ Supported sections: Education, Work Experience, Skills, Languages, Licenses.
 
 import asyncio
 import json
-import structlog
 import os
 import re
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
+
 from browser_use.agent.views import ActionResult
 from browser_use.browser import BrowserSession
-
 from ghosthands.actions.views import (
     DomHandExpandParams,
     DomHandFillParams,
     DomHandFillRepeatersParams,
     normalize_name,
 )
+from ghosthands.dom.assessment_checkpoint import mark_assessment_pending
 
 logger = structlog.get_logger(__name__)
 
@@ -434,16 +435,13 @@ async def _observe_existing_entries(
     NOTE: This phase uses normalize_name exact match only.
     LLM fuzzy matching is added in Phase 6.
     """
-    from ghosthands.dom.fill_executor import extract_visible_form_fields, _field_has_effective_value
+    from ghosthands.dom.fill_executor import _field_has_effective_value, extract_visible_form_fields
     from ghosthands.dom.fill_label_match import _section_matches_scope
 
     all_fields = await extract_visible_form_fields(page)
 
     # Step 1: Filter fields to target section (try scoped first, fall back to all)
-    section_fields = [
-        f for f in all_fields
-        if _section_matches_scope(f.section, canonical_section)
-    ]
+    section_fields = [f for f in all_fields if _section_matches_scope(f.section, canonical_section)]
     # If section scoping found nothing, fall back to all fields.
     # Anchor label matching (_is_anchor_field) already isolates per section type —
     # "Company" won't match education, "School" won't match experience.
@@ -530,7 +528,7 @@ async def domhand_fill_repeaters(
     N * (expand + fill + save) agent planner steps.
     """
     from ghosthands.actions.domhand_expand import domhand_expand
-    from ghosthands.actions.domhand_fill import domhand_fill
+    from ghosthands.actions.domhand_fill import _get_page_context_key, _safe_page_url, domhand_fill
 
     page = await browser_session.get_current_page()
     if not page:
@@ -545,9 +543,7 @@ async def domhand_fill_repeaters(
 
     profile_data = _get_profile_data()
     if not profile_data:
-        return ActionResult(
-            error="No user profile data found. Set GH_USER_PROFILE_PATH or GH_USER_PROFILE_JSON."
-        )
+        return ActionResult(error="No user profile data found. Set GH_USER_PROFILE_PATH or GH_USER_PROFILE_JSON.")
 
     entries = _get_entries_for_section(profile_data, canonical, params.max_entries)
     logger.info(
@@ -559,16 +555,16 @@ async def domhand_fill_repeaters(
         raw_education_len=len(profile_data.get("education") or []),
     )
     if not entries:
-        return ActionResult(
-            extracted_content=f"No {params.section} entries found in user profile. Section skipped."
-        )
+        return ActionResult(extracted_content=f"No {params.section} entries found in user profile. Section skipped.")
 
     # --- Generic observation (primary) ---
     try:
         obs = await _observe_existing_entries(page, canonical, entries)
     except Exception as exc:
         logger.warning("domhand.fill_repeaters.observation_failed", error=str(exc)[:120])
-        obs = ObservationResult(existing_count=0, matched_profile_indices=[], unmatched_entries=list(entries), page_anchor_values=[])
+        obs = ObservationResult(
+            existing_count=0, matched_profile_indices=[], unmatched_entries=list(entries), page_anchor_values=[]
+        )
 
     if obs.page_anchor_values:
         # Observation found anchor fields — use its results
@@ -802,9 +798,7 @@ async def domhand_fill_repeaters(
 
         # Do NOT save/commit when fields failed — entry is incomplete
         if entry_failed > 0:
-            failed_entries.append(
-                f"{entry_label}: {entry_failed} field(s) failed to fill, skipping save"
-            )
+            failed_entries.append(f"{entry_label}: {entry_failed} field(s) failed to fill, skipping save")
             logger.warning(
                 "domhand.fill_repeaters.skip_save_due_to_failures",
                 section=canonical,
@@ -886,9 +880,7 @@ async def domhand_fill_repeaters(
     if committed_labels:
         summary_parts.append(f"Committed: {', '.join(committed_labels)}")
     if skills_taxonomy_miss_labels:
-        summary_parts.append(
-            f"Skipped (not in employer taxonomy): {', '.join(skills_taxonomy_miss_labels)}"
-        )
+        summary_parts.append(f"Skipped (not in employer taxonomy): {', '.join(skills_taxonomy_miss_labels)}")
     if failed_entries:
         summary_parts.append(f"Failed: {'; '.join(failed_entries)}")
     summary_parts.append(
@@ -912,6 +904,13 @@ async def domhand_fill_repeaters(
         completed = getattr(browser_session, "_gh_completed_repeater_sections", set())
         completed.add(canonical)
         browser_session._gh_completed_repeater_sections = completed
+        if filled_count > 0:
+            mark_assessment_pending(
+                browser_session,
+                page_url=await _safe_page_url(page),
+                page_context_key=await _get_page_context_key(page, fallback_marker=params.section),
+                source_action="domhand_fill_repeaters",
+            )
 
     return ActionResult(
         extracted_content="\n".join(summary_parts),

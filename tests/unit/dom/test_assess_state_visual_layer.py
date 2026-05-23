@@ -510,3 +510,67 @@ async def test_assess_state_skips_shape_incompatible_visual_candidates():
     verify_mock.assert_not_awaited()
     assert payload["advance_allowed"] is True
     assert payload["visual_verification"] is None
+
+
+@pytest.mark.asyncio
+async def test_assess_state_recomputes_when_pending_assessment_exists_on_same_page():
+    from ghosthands.actions.domhand_assess_state import domhand_assess_state
+
+    field = FormField(
+        field_id="first-name",
+        name="First Name",
+        field_type="text",
+        section="My Information",
+        required=True,
+    )
+
+    async def evaluate_side_effect(script, *args):
+        if args == (["first-name"],):
+            return _layout_payload("first-name")
+        if args == ("first-name",):
+            return json.dumps({"error_text": "", "widget_kind": ""})
+        return _page_scan_payload("My Information")
+
+    page = AsyncMock()
+    page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
+    page.get_url = AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job")
+    browser_session = AsyncMock()
+    browser_session.get_current_page = AsyncMock(return_value=page)
+    browser_session._gh_last_application_state = {
+        "page_context_key": "ctx",
+        "page_url": "https://example.wd1.myworkdayjobs.com/job",
+        "advance_allowed": True,
+        "unresolved_required_count": 0,
+        "optional_validation_count": 0,
+        "visible_error_count": 0,
+        "mismatched_count": 0,
+        "opaque_count": 0,
+        "unverified_count": 0,
+    }
+    browser_session._gh_pending_assessment = {
+        "page_context_key": "ctx",
+        "page_url": "https://example.wd1.myworkdayjobs.com/job",
+        "source_action": "domhand_fill",
+    }
+
+    with (
+        patch("ghosthands.dom.shadow_helpers.ensure_helpers", AsyncMock(return_value=None)),
+        patch(
+            "ghosthands.actions.domhand_assess_state.extract_visible_form_fields", AsyncMock(return_value=[field])
+        ) as extract_mock,
+        patch(
+            "ghosthands.actions.domhand_assess_state._safe_page_url",
+            AsyncMock(return_value="https://example.wd1.myworkdayjobs.com/job"),
+        ),
+        patch("ghosthands.actions.domhand_assess_state._get_page_context_key", AsyncMock(return_value="ctx")),
+        patch("ghosthands.actions.domhand_assess_state._field_has_validation_error", AsyncMock(return_value=False)),
+        patch("ghosthands.actions.domhand_assess_state._read_field_value", AsyncMock(return_value="Spencer")),
+        patch("ghosthands.actions.domhand_assess_state.build_visual_candidates", return_value=[]),
+    ):
+        result = await domhand_assess_state(DomHandAssessStateParams(target_section="My Information"), browser_session)
+
+    payload = json.loads((result.metadata or {})["application_state_json"])
+    extract_mock.assert_awaited_once()
+    assert payload["advance_allowed"] is True
+    assert "unresolved_required_fields" in payload
+    assert not hasattr(browser_session, "_gh_pending_assessment")

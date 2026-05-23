@@ -516,6 +516,24 @@ class DefaultActionWatchdog(BaseWatchdog):
 		if not self._is_advance_navigation_target(element_node):
 			return None
 
+		pending_assessment = getattr(self.browser_session, '_gh_pending_assessment', None)
+		if isinstance(pending_assessment, dict):
+			page = await self.browser_session.get_current_page()
+			if page is not None:
+				current_url = ''
+				try:
+					current_url = await page.get_url()
+				except Exception:
+					current_url = ''
+				pending_url = str(pending_assessment.get('page_url') or '')
+				if not pending_url or not current_url or pending_url == current_url:
+					source_action = str(pending_assessment.get('source_action') or 'domhand_fill').strip() or 'domhand_fill'
+					return (
+						'Current page still needs a fresh domhand_assess_state checkpoint before advancement. '
+						f'Latest pending source: {source_action}. '
+						'Run domhand_assess_state once, then decide whether to click Next / Continue / Save.'
+					)
+
 		last_state = getattr(self.browser_session, '_gh_last_application_state', None)
 		if not isinstance(last_state, dict):
 			return None
