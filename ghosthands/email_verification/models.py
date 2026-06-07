@@ -52,6 +52,44 @@ class VerificationArtifactType(StrEnum):
     MAGIC_LINK = "magic_link"
 
 
+class EmailVerificationPageKind(StrEnum):
+    """Current-page verification state inferred from visible browser facts."""
+
+    EMAIL_CODE = "email_code"
+    EMAIL_MAGIC_LINK = "email_magic_link"
+    SMS_CODE = "sms_code"
+    AUTHENTICATOR_CODE = "authenticator_code"
+    CAPTCHA = "captcha"
+    AMBIGUOUS = "ambiguous"
+    NOT_VERIFICATION = "not_verification"
+
+
+class CodeEntryMode(StrEnum):
+    """How a verification code was entered into the page."""
+
+    SINGLE_INPUT = "single_input"
+    SEGMENTED_INPUTS = "segmented_inputs"
+    NONE = "none"
+
+
+class CodeEntryStatus(StrEnum):
+    """Structured result status for deterministic code entry."""
+
+    ENTERED = "entered"
+    MISSING_CODE = "missing_code"
+    NO_INPUT = "no_code_input"
+    FAILED = "failed"
+
+
+class MagicLinkOpenStatus(StrEnum):
+    """Structured result status for deterministic magic-link opening."""
+
+    OPENED = "opened"
+    MISSING_LINK = "missing_link"
+    MISSING_BROWSER_SESSION = "missing_browser_session"
+    FAILED = "failed"
+
+
 class MailboxEligibilityStatus(StrEnum):
     """V1 mailbox eligibility states."""
 
@@ -100,6 +138,21 @@ class EmailVerificationPageState(BaseModel):
     expected_code_length: int | None = Field(default=None, ge=3, le=12)
     supports_code_entry: bool = False
     supports_magic_link: bool = False
+    page_kind: EmailVerificationPageKind = EmailVerificationPageKind.NOT_VERIFICATION
+    visible_text: str = ""
+    heading_text: str = ""
+    code_input_count: int = Field(default=0, ge=0)
+    code_input_selectors: tuple[str, ...] = ()
+    action_button_labels: tuple[str, ...] = ()
+    detected_email_addresses: tuple[str, ...] = ()
+    resend_available: bool = False
+    verify_button_available: bool = False
+    continue_button_available: bool = False
+    email_signals: bool = False
+    magic_link_signals: bool = False
+    sms_signals: bool = False
+    authenticator_signals: bool = False
+    captcha_signals: bool = False
 
     @field_validator("application_email")
     @classmethod
@@ -115,6 +168,42 @@ class EmailVerificationPageState(BaseModel):
     @classmethod
     def _normalize_detected_at(cls, value: datetime) -> datetime:
         return ensure_utc(value)
+
+
+class CodeEntryResult(BaseModel):
+    """Structured browser result after attempting to enter a verification code."""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: CodeEntryStatus
+    mode: CodeEntryMode = CodeEntryMode.NONE
+    filled_input_count: int = Field(default=0, ge=0)
+    clicked_action: bool = False
+    clicked_action_label: str = ""
+    page_url: str = ""
+    reason: str = ""
+
+    @property
+    def success(self) -> bool:
+        return self.status is CodeEntryStatus.ENTERED
+
+
+class MagicLinkOpenResult(BaseModel):
+    """Structured browser result after opening a verification magic link."""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: MagicLinkOpenStatus
+    original_target_id: str = ""
+    magic_link_target_id: str = ""
+    original_url: str = ""
+    magic_link_url: str = ""
+    returned_to_original: bool = False
+    reason: str = ""
+
+    @property
+    def success(self) -> bool:
+        return self.status is MagicLinkOpenStatus.OPENED
 
 
 class MailboxVerificationQuery(BaseModel):
