@@ -94,6 +94,61 @@ class Settings(BaseSettings):
         description="Whether the run may actually submit the application: "
         "'review' (default, stop before final submit) or 'submit' (explicitly allow final submit).",
     )
+    email_verification_mode: str = Field(
+        "disabled",
+        description="Inbox recovery mode for email-verification walls: "
+        "'disabled', 'fake_inbox', 'local_gmail_oauth', or 'valet_brokered'.",
+    )
+    email_verification_connected_email: str = Field(
+        "",
+        description="Connected inbox email for V1 exact-match email verification recovery.",
+    )
+    email_verification_fake_inbox_path: str = Field(
+        "",
+        description="JSON fixture path for fake-inbox email verification recovery tests.",
+    )
+    email_verification_gmail_credentials_file: str = Field(
+        "",
+        description="Local/dev Gmail OAuth client JSON path for email verification recovery.",
+    )
+    email_verification_gmail_token_file: str = Field(
+        "",
+        description="Local/dev Gmail OAuth token JSON path for email verification recovery.",
+    )
+    email_verification_gmail_config_dir: str = Field(
+        "",
+        description="Local/dev Gmail config directory for email verification recovery.",
+    )
+    email_verification_min_candidate_score: float = Field(
+        0.75,
+        ge=0.0,
+        le=1.0,
+        description="Minimum ranked inbox-candidate score before Hand-X may enter a code/link.",
+    )
+    email_verification_ambiguity_score_gap: float = Field(
+        0.15,
+        ge=0.0,
+        le=1.0,
+        description="Minimum score gap between competing code/link candidates.",
+    )
+    email_verification_poll_attempts: int = Field(
+        3,
+        ge=1,
+        le=10,
+        description="How many times runtime recovery polls the inbox after a verification wall.",
+    )
+    email_verification_poll_interval_seconds: float = Field(
+        2.0,
+        ge=0.0,
+        le=30.0,
+        description="Seconds between inbox polls during email verification recovery.",
+    )
+    email_verification_lookback_seconds: int = Field(
+        300,
+        ge=0,
+        le=3600,
+        description="Inbox lookback window before the verification wall was detected.",
+    )
     allowed_domains: list[str] = Field(
         default_factory=lambda: [
             "myworkdayjobs.com",

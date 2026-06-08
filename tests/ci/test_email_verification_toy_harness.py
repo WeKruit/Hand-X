@@ -22,13 +22,16 @@ pytest.importorskip("playwright.async_api")
 from browser_use.browser import BrowserProfile, BrowserSession
 from browser_use.tools.service import Tools
 from ghosthands.email_verification import (
+    EmailVerificationMode,
     EmailVerificationPageKind,
+    EmailVerificationRecoveryConfig,
+    EmailVerificationRecoveryStatus,
     FakeInboxClient,
     MailboxMessage,
     MailboxVerificationQuery,
     extract_email_verification_page_state,
-    fill_verification_code,
     is_auto_resolvable_email_page,
+    recover_email_verification_if_possible,
 )
 
 _TOY_APP = Path(__file__).resolve().parent.parent.parent / "examples" / "toy-job-app" / "index.html"
@@ -159,9 +162,26 @@ async def _select_best_fake_inbox_code(state) -> str:
     return candidates[0].artifact_value
 
 
+class _RuntimeFakeInboxClient:
+    async def list_verification_candidates(self, query: MailboxVerificationQuery):
+        inbox = FakeInboxClient(
+            [
+                MailboxMessage(
+                    message_id="toy-runtime-email-verification-code",
+                    received_at=query.detected_at + timedelta(seconds=1),
+                    sender="Acme Careers <no-reply@acme.example>",
+                    subject="Acme Careers verification code",
+                    recipients=(_APP_EMAIL,),
+                    body_text=f"Use verification code {_VERIFICATION_CODE} to continue your Acme Careers application.",
+                )
+            ]
+        )
+        return await inbox.list_verification_candidates(query)
+
+
 @pytest.mark.asyncio
 async def test_toy_app_email_code_verification_e2e(httpserver) -> None:
-    """Toy app flow: login gate -> verification wall -> fake inbox -> code fill -> app unlock."""
+    """Toy app flow: login gate -> verification wall -> runtime fake inbox -> code fill -> app unlock."""
 
     assert _TOY_APP.is_file(), f"missing toy app fixture: {_TOY_APP}"
     requests_seen: list[tuple[str, dict[str, Any]]] = []
@@ -189,9 +209,23 @@ async def test_toy_app_email_code_verification_e2e(httpserver) -> None:
         assert state.application_email == _APP_EMAIL
         assert state.code_input_selectors == ("#googleVerificationCode",)
 
-        code = await _select_best_fake_inbox_code(state)
-        entry_result = await fill_verification_code(page, code, state=state)
-        assert entry_result.success is True
+        recovery_result = await recover_email_verification_if_possible(
+            browser_session,
+            blocker_text="blocker: email verification required -- user must verify email then retry",
+            config=EmailVerificationRecoveryConfig(
+                mode=EmailVerificationMode.FAKE_INBOX,
+                application_email=_APP_EMAIL,
+                connected_email=_APP_EMAIL,
+                min_candidate_score=0.75,
+                poll_attempts=1,
+                poll_interval_seconds=0,
+            ),
+            inbox_client=_RuntimeFakeInboxClient(),
+            platform="toy-job-app",
+            company_hint="Acme",
+        )
+        assert recovery_result.status is EmailVerificationRecoveryStatus.RESOLVED_CODE
+        assert recovery_result.resolved is True
 
         await _wait_for_js(page, "() => document.getElementById('applicationContainer').hidden === false")
         assert await _read_text(page, "() => document.getElementById('email').value") == _APP_EMAIL

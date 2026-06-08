@@ -600,6 +600,40 @@ async def _should_resume_from_false_verification_blocker(
     return auth_state == "native_login"
 
 
+def _build_email_verification_recovery_config(app_settings, sensitive_data: dict[str, str] | None):
+    """Build Phase 5 email-verification recovery config from runtime settings."""
+
+    from ghosthands.email_verification import recovery_config_from_settings
+
+    application_email = (sensitive_data or {}).get("email", "") or str(getattr(app_settings, "email", "") or "")
+    return recovery_config_from_settings(app_settings, application_email=application_email)
+
+
+def _email_verification_recovery_summary(result) -> dict[str, Any]:
+    """Return a safe, code-free recovery summary for JSONL result payloads."""
+
+    if result is None:
+        return {}
+    page_state = getattr(result, "page_state", None)
+    candidate = getattr(result, "candidate", None)
+    code_entry_result = getattr(result, "code_entry_result", None)
+    magic_link_result = getattr(result, "magic_link_result", None)
+    artifact = getattr(candidate, "artifact", None)
+    return {
+        "status": str(getattr(result, "status", "") or ""),
+        "resolved": bool(getattr(result, "resolved", False)),
+        "attempted": bool(getattr(result, "attempted", False)),
+        "message": str(getattr(result, "message", "") or ""),
+        "pageKind": str(getattr(page_state, "page_kind", "") or ""),
+        "candidatesSeen": int(getattr(result, "candidates_seen", 0) or 0),
+        "topScore": getattr(result, "top_score", None),
+        "competingScore": getattr(result, "competing_score", None),
+        "artifactType": str(getattr(artifact, "artifact_type", "") or ""),
+        "codeEntryStatus": str(getattr(code_entry_result, "status", "") or ""),
+        "magicLinkStatus": str(getattr(magic_link_result, "status", "") or ""),
+    }
+
+
 # ── Argument parsing ──────────────────────────────────────────────────
 
 
@@ -2354,11 +2388,11 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         total_steps = 0
         cancelled = False
         resumed_after_false_verification = False
+        email_verification_recovery_result = None
+        email_verification_recovered = False
         hitl_recovery_task = initial_task
-        # Single run — never restart the agent from scratch. Restarting loses all
-        # form progress (the new agent navigates back to the job URL). If the agent
-        # dies from consecutive failures, accept the result rather than wasting a
-        # second full run on the same stuck field.
+        # Never restart from the original job URL. Any recovery run below continues
+        # from the current browser page so form/auth progress is preserved.
         history, cancelled = await _run_agent_once(hitl_recovery_task)
         is_done = history.is_done()
         final_result = history.final_result() or ""
@@ -2391,6 +2425,45 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             cost_summary = summarize_history_cost(history, browser)
             total_cost += float(cost_summary["total_tracked_cost_usd"])
             total_steps += len(history.history) if history.history else 0
+
+        if not cancelled:
+            from ghosthands.email_verification import recover_email_verification_if_possible
+
+            email_verification_config = _build_email_verification_recovery_config(app_settings, sensitive_data)
+            email_verification_recovery_result = await recover_email_verification_if_possible(
+                browser,
+                blocker_text=final_result,
+                config=email_verification_config,
+                platform=platform,
+            )
+            if email_verification_recovery_result.attempted:
+                logger.info(
+                    "cli.email_verification_recovery",
+                    extra=_email_verification_recovery_summary(email_verification_recovery_result),
+                )
+                emit_status(
+                    f"Email verification recovery: {email_verification_recovery_result.status}",
+                    job_id=job_id,
+                )
+            if email_verification_recovery_result.resolved:
+                email_verification_recovered = True
+                emit_status(
+                    "Email verification resolved automatically; continuing application",
+                    job_id=job_id,
+                )
+                directly_open_url = False
+                continuation_task = (
+                    "Email verification was resolved automatically. Continue from the CURRENT page without "
+                    "navigating back to the job URL. Do not repeat the auth/start-dialog flow. Continue the "
+                    "application from the current browser state, and keep submit_intent=review protections."
+                )
+                history, recovery_cancelled = await _run_agent_once(continuation_task)
+                cancelled = cancelled or recovery_cancelled
+                is_done = history.is_done()
+                final_result = history.final_result() or ""
+                cost_summary = summarize_history_cost(history, browser)
+                total_cost += float(cost_summary["total_tracked_cost_usd"])
+                total_steps += len(history.history) if history.history else 0
 
         # Get real field counts and successful field provenance from DomHand callback
         from ghosthands.output.field_events import get_field_counts, get_filled_field_records
@@ -2476,6 +2549,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             "blocker": blocker,
             "platform": platform,
             "resumedAfterFalseVerification": resumed_after_false_verification,
+            "emailVerificationRecovered": email_verification_recovered,
+            "emailVerificationRecovery": _email_verification_recovery_summary(email_verification_recovery_result),
             "best_effort_guess_count": best_effort_guess_count,
             "best_effort_guess_fields": best_effort_guess_fields,
         }
@@ -2855,25 +2930,6 @@ async def run_agent_human(args: argparse.Namespace) -> None:
             directly_open_url = False
             initial_task = _build_current_page_continuation_task(task, platform=platform, stage=workday_stage)
 
-    # -- Agent --------------------------------------------------------------
-    available_files = [resume_path] if resume_path else []
-    agent = Agent(
-        task=initial_task,
-        llm=llm,
-        browser_session=browser,
-        tools=tools,
-        extend_system_message=system_ext or None,
-        sensitive_data=sensitive_data,
-        available_file_paths=available_files or None,
-        use_vision="auto",
-        max_actions_per_step=app_settings.agent_max_actions_per_step,
-        max_history_items=app_settings.agent_max_history_items,
-        calculate_cost=True,
-        use_judge=False,
-        directly_open_url=directly_open_url,
-        step_timeout=300,
-    )
-
     async def _on_step_start_human(ag: Agent) -> None:
         from ghosthands.agent.oracle_step_tuning import maybe_tighten_max_actions_for_oracle_focus
 
@@ -2898,14 +2954,57 @@ async def run_agent_human(args: argparse.Namespace) -> None:
                     )
                 ]
 
-    try:
-        history = await agent.run(
+    # -- Agent --------------------------------------------------------------
+    available_files = [resume_path] if resume_path else []
+
+    async def _run_human_agent_once(current_task: str, *, open_url: bool) -> Any:
+        agent = Agent(
+            task=current_task,
+            llm=llm,
+            browser_session=browser,
+            tools=tools,
+            extend_system_message=system_ext or None,
+            sensitive_data=sensitive_data,
+            available_file_paths=available_files or None,
+            use_vision="auto",
+            max_actions_per_step=app_settings.agent_max_actions_per_step,
+            max_history_items=app_settings.agent_max_history_items,
+            calculate_cost=True,
+            use_judge=False,
+            directly_open_url=open_url,
+            step_timeout=300,
+        )
+        return await agent.run(
             max_steps=args.max_steps,
             on_step_start=_on_step_start_human,
             on_step_end=_on_step_end_human,
         )
+
+    history = None
+    try:
+        history = await _run_human_agent_once(initial_task, open_url=directly_open_url)
+        final_result = history.final_result() or ""
+
+        from ghosthands.email_verification import recover_email_verification_if_possible
+
+        email_verification_config = _build_email_verification_recovery_config(app_settings, sensitive_data)
+        recovery_result = await recover_email_verification_if_possible(
+            browser,
+            blocker_text=final_result,
+            config=email_verification_config,
+            platform=platform,
+        )
+        if recovery_result.attempted:
+            print(f"Email verification recovery: {recovery_result.status} - {recovery_result.message}")
+        if recovery_result.resolved:
+            print("Email verification resolved automatically; continuing from current page.")
+            continuation_task = (
+                "Email verification was resolved automatically. Continue from the CURRENT page without "
+                "navigating back to the job URL. Do not repeat the auth/start-dialog flow. Continue the "
+                "application from the current browser state, and keep submit_intent=review protections."
+            )
+            history = await _run_human_agent_once(continuation_task, open_url=False)
     except (KeyboardInterrupt, asyncio.CancelledError):
-        history = getattr(agent, "history", None)
         cost_summary = summarize_history_cost(history, browser)
         _print_human_result_summary(history, cost_summary, interrupted=True)
         print("Closing browser...")
