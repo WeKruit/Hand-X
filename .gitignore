@@ -35,6 +35,9 @@ browser_cookies.json
 cookies.json
 credentials.json
 token.json
+gmail_credentials.json
+gmail_token.json
+client_secret_*.json
 
 # IDE
 .vscode/
