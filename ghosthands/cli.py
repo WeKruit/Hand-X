@@ -1263,6 +1263,16 @@ _TERMINAL_BLOCKER_PATTERNS = (
     "stored credentials are invalid",
     "credential is invalid",
 )
+_VERIFICATION_SKIP_PATTERNS = (
+    "email verification",
+    "verification code",
+    "verification email",
+    "verify your account",
+    "verify your email",
+    "one-time code",
+    "one time passcode",
+)
+_OTP_RE = re.compile(r"\botp\b", re.IGNORECASE)
 _REQUIRED_FIELD_RE = re.compile(r"required field ['\"](?P<field>[^'\"]+)['\"]", re.IGNORECASE)
 _SECTION_RE = re.compile(r"on the ['\"](?P<section>[^'\"]+)['\"] page", re.IGNORECASE)
 
@@ -1357,6 +1367,16 @@ def _looks_like_answer_needed_blocker(text: str | None) -> bool:
 def _looks_like_terminal_blocker(text: str | None) -> bool:
     lowered = (text or "").lower()
     return bool(lowered) and any(pattern in lowered for pattern in _TERMINAL_BLOCKER_PATTERNS)
+
+
+def _is_verification_code_blocker(text: str | None) -> bool:
+    """True when a blocker is an email/SMS verification wall — unsupported, skip with notice."""
+    if not text:
+        return False
+    lowered = text.lower()
+    if any(pattern in lowered for pattern in _VERIFICATION_SKIP_PATTERNS):
+        return True
+    return _OTP_RE.search(lowered) is not None
 
 
 def _extract_application_state_json(summary: str) -> dict[str, Any]:
@@ -2549,10 +2569,18 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             if exit_code is not None:
                 sys.exit(exit_code)
         else:
+            termination_status = "agent_incomplete"
+            terminal_message = blocker or final_result or "Agent did not complete successfully"
+            if _is_verification_code_blocker(blocker):
+                termination_status = "verification_code_required"
+                terminal_message = (
+                    "This application requires an email verification code — skipped for now. "
+                    "Email-verification applications are not yet supported."
+                )
             jt.emit_run_terminal(
-                termination_status="agent_incomplete",
+                termination_status=termination_status,
                 success=False,
-                message=blocker or final_result or "Agent did not complete successfully",
+                message=terminal_message,
                 fields_filled=filled_count,
                 fields_failed=failed_count,
                 job_id=job_id,
