@@ -52,6 +52,18 @@ def build_instructions(submit: bool) -> str:
         if submit
         else "Do NOT click the final Submit/Apply button — stop on the review step and report what is filled."
     )
+    verification = (
+        "- If you hit an email-verification wall (a page asking for a code or magic link\n"
+        "  sent to the applicant's email), call the get_recent_emails action with a\n"
+        "  keyword like 'verification' or the company name, read the latest code/link,\n"
+        "  and enter it to continue. CAPTCHAs are solved automatically — just continue."
+        if submit else
+        "- If you reach an email-verification wall (a page asking for a code / magic link\n"
+        "  sent to the applicant's email), STOP THERE — the form is already filled and the\n"
+        "  code is a submit-time gate. In this fill-only run do NOT call get_recent_emails\n"
+        "  or wait for a code; report the application as filled up to the verification step.\n"
+        "  CAPTCHAs are solved automatically — just continue past those."
+    )
     return f"""You are filling out a multi-page job application.
 
 - Use ONLY the applicant resume + profile data in the task. Never fabricate answers.
@@ -64,15 +76,73 @@ def build_instructions(submit: bool) -> str:
   use the values in `eeo_optional`, defaulting to "Prefer not to say".
 - This is a multi-step wizard: after completing a page, click
   Next / Continue / Save and continue to advance to the next page.
-- For autocomplete / react-select dropdowns: type the value, WAIT one step for
-  the suggestion list, then click the matching suggestion (do not press Enter).
+- ONE action at a time, then OBSERVE. After each input/click, look at the fresh
+  screenshot + state and confirm it actually took effect before the next action.
+  Do not assume an action worked. ATS forms re-render and shift element indices, so
+  a chained second action often lands on the wrong field — fill, observe, then fill
+  the next.
+- COMBOBOX / autocomplete / react-select dropdowns (Location, School, Degree,
+  Discipline, and Yes/No questions rendered as a dropdown): type the value, OBSERVE
+  the suggestion list on the next step, then click the matching role=option (never
+  press Enter). If the typed value reads back empty, you typed but never selected an
+  option (the widget clears on blur) — type again, then click the option.
+- ALREADY-FILLED = SKIP. Before typing into any field, read its CURRENT value in the
+  screenshot/state. If it already shows the correct value, do NOT click or re-type it
+  — move on to the next empty field. Re-filling a field that is already correct is the
+  most common waste loop (especially long textareas like "Why interested" / cover
+  letter, where the text is present but you doubt it). Trust the visible value.
+- DON'T LOOP ON ONE FIELD. Never input the same value into the same field more than
+  TWICE. If a field still reads empty/wrong after two honest tries, it is a widget
+  quirk (input mask, validation, a control you haven't revealed yet) — leave it,
+  note it in memory, and MOVE ON to the next field. One field must never block the
+  whole form, and repeating an action with no change is the stuck loop to avoid.
+- CLICK-TO-REVEAL fields: some inputs are hidden behind a toggle/button — e.g. a
+  cover letter or long-answer may show "Enter manually" / "Write" / "Paste" before
+  the textarea exists. Click that control FIRST to reveal the field, THEN type.
+- REPEATERS (sections holding MULTIPLE entries — Work Experience, Education, Skills,
+  Languages, Certifications — usually with an "Add another" / "+ Add" button) are a
+  legitimate multi-pass loop, NOT a stuck loop. Fully fill the current entry (commit
+  its comboboxes per the rule above), THEN click "Add another" to open a fresh blank
+  entry and fill the next item. Repeat once per item in the profile list — add ALL of
+  `experience`, ALL of `education`, every `skills` value. Each pass must make progress
+  (a NEW entry appears); stop when the profile list is exhausted and never add empty
+  entries. Re-typing the same field with no new entry is the stuck loop to avoid;
+  clicking "Add another" to enter the NEXT item is expected and correct.
 - Upload the resume from the available files when a file-upload field appears.
-- If you hit an email-verification wall (a page asking for a code or magic link
-  sent to the applicant's email), call the get_recent_emails action with a
-  keyword like 'verification' or the company name, read the latest code/link,
-  and enter it to continue. CAPTCHAs are solved automatically — just continue.
+{verification}
 - On a Review/Confirm page, check the values, then {('submit.' if submit else 'stop.')}
 - {final}"""
+
+
+# Inter-action timing. ATS comboboxes/autocomplete (Workday, react-select) need a
+# beat between "type the value" and "click the suggestion": the suggestion list is
+# rendered by an XHR that the next action must not race. These widen browser-use's
+# defaults (wait_between_actions=0.1, wait_for_network_idle=0.5, min_page_load=0.25)
+# so dropdowns settle before the click — trades a little speed for click-wait-search
+# reliability on multi-page wizards.
+_BROWSER_TIMING = dict(
+    wait_between_actions=1.0,                    # pause after every action (type -> suggestions -> click)
+    wait_for_network_idle_page_load_time=1.0,    # let XHR-driven dropdowns / page transitions settle
+    minimum_wait_page_load_time=0.5,             # floor wait after a navigation before reading the DOM
+)
+
+
+def _browser(headless: bool) -> Any:
+    """Build the browser with dropdown-friendly timing (see _BROWSER_TIMING)."""
+    from browser_use import Browser, BrowserProfile
+
+    return Browser(browser_profile=BrowserProfile(headless=headless, keep_alive=True, **_BROWSER_TIMING))
+
+
+def _trace_path(args: argparse.Namespace, model: str) -> str | None:
+    """Per-(command, model) directory for browser-use's built-in cause trace
+    (Agent.save_conversation_path): one file per step with the model's eval / goal /
+    memory / chosen actions — i.e. WHY each step happened. Reuse-first: no custom
+    tracing, just point the existing flag at a tidy per-run dir. '' disables it."""
+    trace = (getattr(args, "trace", "") or "").strip()
+    if not trace:
+        return None
+    return str(Path(trace) / args.cmd / model.replace("/", "_").replace(".", "_"))
 
 
 def _make_llm(model: str) -> Any:
@@ -96,7 +166,7 @@ def _make_llm(model: str) -> Any:
     raise SystemExit(f"Unrecognised model id: {model!r}")
 
 
-def _gmail_tools(access_token: str | None, credentials_file: str | None, token_file: str | None) -> Tools:
+def _gmail_tools(access_token: str | None, credentials_file: str | None, token_file: str | None) -> Any:
     """Reuse browser-use's Gmail integration verbatim — register the built-in
     get_recent_emails action so the agent can pull verification codes itself."""
     from browser_use import Tools
@@ -209,7 +279,7 @@ async def _kill(agent: Any) -> None:
 
 async def _do_record(args: argparse.Namespace, *, model: str, history_path: str, submit: bool) -> tuple[Any, Any]:
     """Core record run. Returns (history, agent); caller owns browser lifecycle."""
-    from browser_use import Agent, Browser, BrowserProfile
+    from browser_use import Agent
 
     profile = json.loads(Path(args.profile).read_text())
     resume = str(Path(args.resume).resolve()) if args.resume else None
@@ -218,11 +288,15 @@ async def _do_record(args: argparse.Namespace, *, model: str, history_path: str,
         task=_build_task(args.job_url, profile, resume),
         llm=_make_llm(model),
         tools=_gmail_tools(args.gmail_access_token, args.gmail_credentials, args.gmail_token),
-        browser=Browser(browser_profile=BrowserProfile(headless=args.headless, keep_alive=True)),
+        browser=_browser(args.headless),
         extend_system_message=build_instructions(submit),
         available_file_paths=[resume] if resume else None,
         use_vision="auto",
-        max_actions_per_step=5,   # chain input+input+…+click -> fewer steps -> cheaper
+        save_conversation_path=_trace_path(args, model),  # built-in per-step cause trace
+        max_actions_per_step=args.max_actions,  # default 1 = act-then-observe. Chaining on
+                                  # ATS forms lands later actions on stale element indices
+                                  # (DOM re-renders after a combobox/upload) -> fields read
+                                  # back empty -> retype loops. Raise for speed on simple forms.
         calculate_cost=True,      # native cost tracking -> history.usage
     )
     history = await agent.run(max_steps=args.max_steps)
@@ -271,7 +345,7 @@ async def compare(args: argparse.Namespace) -> None:
             continue
         u = getattr(history, "usage", None)
         cost = f"${u.total_cost:.4f}" if u else "n/a"
-        print(f"  {model:<28} {len(history.history):>6} {str(history.is_done()):>5} {cost:>10}   {hp}")
+        print(f"  {model:<28} {len(history.history):>6} {history.is_done()!s:>5} {cost:>10}   {hp}")
     print("=" * 72)
     print("  (fill-only; rerun any saved history cheaply with:  python jobapply.py replay --history <file>)")
 
@@ -280,7 +354,7 @@ async def replay(args: argparse.Namespace) -> None:
     """Cheap re-submit: same job page, different applicant data. Deterministic
     fills replay with no LLM; the recorded get_recent_emails step re-evaluates
     live so a fresh verification code is fetched automatically."""
-    from browser_use import Agent, Browser, BrowserProfile
+    from browser_use import Agent
 
     profile = json.loads(Path(args.profile).read_text())
 
@@ -298,15 +372,18 @@ async def replay(args: argparse.Namespace) -> None:
         print("[replay] no .vars.json sidecar found — replaying with original recorded data")
 
     agent = Agent(
-        # Non-empty apply-flow task on purpose: browser-use gates value-pattern
-        # variable detection on whether the task looks like a job application
-        # (Agent._is_apply_flow_task). The record run's task is apply-flow, so we
-        # must match it here — otherwise replay re-detects variable names under a
-        # different policy than the saved .vars.json and substitutions silently skip.
+        # browser-use re-detects substitutable variables from the history AT REPLAY
+        # time (service.py _substitute_variables_in_history) and only swaps a value
+        # when replay-time detection re-derives the same var_name saved in .vars.json
+        # at record time; unknown names are logged-and-skipped. So a stable, non-empty
+        # task keeps detection consistent between record and replay. (NB: browser-use
+        # 0.13.1 has no apply-flow gate / Agent._is_apply_flow_task — value-pattern
+        # detection runs unconditionally; this task string is just for run stability.)
         task="Re-run the saved job application with substituted applicant data.",
         llm=_make_llm(args.model),
         tools=_gmail_tools(args.gmail_access_token, args.gmail_credentials, args.gmail_token),
-        browser=Browser(browser_profile=BrowserProfile(headless=args.headless, keep_alive=True)),
+        browser=_browser(args.headless),
+        save_conversation_path=_trace_path(args, args.model),  # built-in per-step cause trace
         calculate_cost=True,
     )
     print(f"[replay] model={args.model} url-from-history={args.history}")
@@ -356,11 +433,19 @@ def main() -> None:
         sp.add_argument("--gmail-access-token", default=None, help="Gmail OAuth access token (read-only)")
         sp.add_argument("--gmail-credentials", default=None, help="Gmail OAuth client credentials JSON")
         sp.add_argument("--gmail-token", default=None, help="Gmail OAuth token JSON")
+        sp.add_argument("--trace", default="runs/trace",
+                        help="Dir for per-step cause trace (browser-use save_conversation_path). "
+                             "Pass --trace '' to disable.")
 
     def job_args(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--job-url", required=True)
         sp.add_argument("--resume", default=None)
         sp.add_argument("--max-steps", type=int, default=80)
+        sp.add_argument("--max-actions", type=int, default=1,
+                        help="Actions per step. Measured on a combobox-heavy Greenhouse form (bu-2-0): "
+                             "1 = reliable (~$0.27, phone retyped 1-4x); 3 = cheap (~$0.12) but thrashy "
+                             "(phone 27x); 2 is DOMINATED (~$0.26 yet phone 20x) — don't use it. "
+                             "Default 1: record once reliably, then amortise cost via reuse (replay/cloud).")
 
     pr = sub.add_parser("record", help="Run + record the application trajectory")
     common(pr)

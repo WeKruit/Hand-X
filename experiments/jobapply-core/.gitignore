@@ -1,6 +1,7 @@
 .env
 .venv/
 # run artifacts
+runs/
 application_history.json
 compare_*.json
 *.vars.json
