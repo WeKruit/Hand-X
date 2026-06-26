@@ -22,39 +22,40 @@ deterministically for **$0 LLM** — the only cost is the live email-read step (
 there's a verification wall) plus the one mandatory rerun summary call, on top of
 browser-use's native prompt caching.
 
-## Setup (fresh venv, latest browser-use)
+## Local setup (one command)
+
+On your local machine (not the web container — see caveat below):
 
 ```bash
 cd experiments/jobapply-core
-uv venv --python 3.12 .venv && source .venv/bin/activate
-uv pip install -U browser-use
-playwright install chromium
-
-export BROWSER_USE_API_KEY="..."     # for bu-2-0 (https://cloud.browser-use.com/new-api-key)
-# Gmail read-only OAuth: pass --gmail-credentials/--gmail-token or --gmail-access-token,
-# or drop gmail_credentials.json into the browser-use config dir.
+./setup.sh                       # fresh venv + latest browser-use + Chromium + .env
+source .venv/bin/activate
+$EDITOR .env                     # add BROWSER_USE_API_KEY (+ GOOGLE_API_KEY for gemini)
 ```
+
+`.env` is auto-loaded. For Gmail verification codes, either drop a
+`gmail_credentials.json` into the browser-use config dir (first run does the OAuth
+consent) or pass `--gmail-credentials/--gmail-token`.
 
 ## Use
 
 ```bash
-# 1) Record a successful application (fill only — stops before final submit):
-python jobapply.py record --job-url "https://job-boards.greenhouse.io/<org>/jobs/<id>" \
-    --resume ~/resume.pdf --history jobA.json
+# Side-by-side cost: same job through bu-2-0 AND gemini (fill-only, never submits):
+python jobapply.py compare --job-url "https://job-boards.greenhouse.io/<org>/jobs/<id>" --resume ~/resume.pdf
 
-# Compare models on the same job:
-python jobapply.py record --job-url "..." --model gemini-3-flash-preview --history jobA_gemini.json
+# Record one model's trajectory (fill only — stops before final submit):
+python jobapply.py record --job-url "..." --resume ~/resume.pdf --history jobA.json
 
 # Actually submit (IRREVERSIBLE — real application to the employer):
 python jobapply.py record --job-url "..." --submit
 
-# 2) Cheap re-submit of the SAME job with a different applicant:
+# Cheap re-submit of the SAME job with a different applicant:
 python jobapply.py replay --history jobA.json --profile other_applicant.json
 ```
 
-`record` writes `jobA.json` (the cached trajectory) and `jobA.vars.json` (the
-fields browser-use auto-detected as substitutable). `replay` maps the new
-profile onto those fields and re-runs deterministically, then prints the cost.
+`record`/`compare` write `*.json` (the cached trajectory) and `*.vars.json` (the
+fields browser-use auto-detected as substitutable). `replay` maps a new profile
+onto those fields and re-runs deterministically, then prints the cost.
 
 ## Verification code (multi-page friendly)
 

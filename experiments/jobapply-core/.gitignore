@@ -1,0 +1,8 @@
+.env
+.venv/
+# run artifacts
+application_history.json
+compare_*.json
+*.vars.json
+gmail_token.json
+gmail_credentials.json

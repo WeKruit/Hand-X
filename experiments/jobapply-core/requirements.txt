@@ -1,0 +1,4 @@
+# Latest upstream browser-use (NOT the repo's vendored fork) + dotenv.
+# Installed by setup.sh into a fresh venv.
+browser-use
+python-dotenv

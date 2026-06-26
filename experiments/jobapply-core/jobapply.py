@@ -168,46 +168,98 @@ def map_profile_to_variables(detected: dict[str, Any], profile: dict) -> dict[st
     return out
 
 
-async def record(args: argparse.Namespace) -> None:
-    from browser_use import Agent, Browser, BrowserProfile
-
-    profile = json.loads(Path(args.profile).read_text())
-    resume = str(Path(args.resume).resolve()) if args.resume else None
-
-    tools = _gmail_tools(args.gmail_access_token, args.gmail_credentials, args.gmail_token)
-    agent = Agent(
-        task=_build_task(args.job_url, profile, resume),
-        llm=_make_llm(args.model),
-        tools=tools,
-        browser=Browser(browser_profile=BrowserProfile(headless=args.headless, keep_alive=True)),
-        extend_system_message=build_instructions(args.submit),
-        available_file_paths=[resume] if resume else None,
-        use_vision="auto",
-        max_actions_per_step=5,   # chain input+input+…+click -> fewer steps -> cheaper
-        calculate_cost=True,      # native cost tracking -> history.usage
-    )
-
-    print(f"[record] model={args.model} submit={args.submit} url={args.job_url}")
-    history = await agent.run(max_steps=args.max_steps)
-    _print_cost("RECORD", history)
-
-    # Save the cached "script" (full multi-page trajectory) + the detected vars
-    # sidecar so a later rerun knows which fields are substitutable.
-    agent.save_history(args.history)
+def _write_vars_sidecar(agent: Any, history_path: str) -> int:
+    """Persist the fields browser-use auto-detected as substitutable, so a later
+    rerun knows what it can swap. Returns the count (0 on failure)."""
     try:
         detected = agent.detect_variables()
-        sidecar = Path(args.history).with_suffix(".vars.json")
+        sidecar = Path(history_path).with_suffix(".vars.json")
         sidecar.write_text(json.dumps(
             {n: {"original_value": getattr(v, "original_value", ""),
                  "format": getattr(v, "format", None)} for n, v in detected.items()},
             indent=2,
         ))
-        print(f"[record] saved history -> {args.history}; {len(detected)} variable(s) -> {sidecar.name}")
+        return len(detected)
     except Exception as exc:
-        print(f"[record] saved history -> {args.history}; variable detection skipped ({exc})")
+        print(f"[record] variable detection skipped ({exc})")
+        return 0
 
-    if not args.headless:
+
+async def _kill(agent: Any) -> None:
+    try:
+        if agent.browser_session is not None:
+            await agent.browser_session.kill()
+    except Exception:
+        pass
+
+
+async def _do_record(args: argparse.Namespace, *, model: str, history_path: str, submit: bool) -> tuple[Any, Any]:
+    """Core record run. Returns (history, agent); caller owns browser lifecycle."""
+    from browser_use import Agent, Browser, BrowserProfile
+
+    profile = json.loads(Path(args.profile).read_text())
+    resume = str(Path(args.resume).resolve()) if args.resume else None
+
+    agent = Agent(
+        task=_build_task(args.job_url, profile, resume),
+        llm=_make_llm(model),
+        tools=_gmail_tools(args.gmail_access_token, args.gmail_credentials, args.gmail_token),
+        browser=Browser(browser_profile=BrowserProfile(headless=args.headless, keep_alive=True)),
+        extend_system_message=build_instructions(submit),
+        available_file_paths=[resume] if resume else None,
+        use_vision="auto",
+        max_actions_per_step=5,   # chain input+input+…+click -> fewer steps -> cheaper
+        calculate_cost=True,      # native cost tracking -> history.usage
+    )
+    history = await agent.run(max_steps=args.max_steps)
+    agent.save_history(history_path)  # the cached "script" (full multi-page trajectory)
+    return history, agent
+
+
+async def record(args: argparse.Namespace) -> None:
+    print(f"[record] model={args.model} submit={args.submit} url={args.job_url}")
+    history, agent = await _do_record(args, model=args.model, history_path=args.history, submit=args.submit)
+    _print_cost("RECORD", history)
+    n = _write_vars_sidecar(agent, args.history)
+    print(f"[record] saved history -> {args.history}; {n} substitutable variable(s) -> "
+          f"{Path(args.history).with_suffix('.vars.json').name}")
+    if args.headless:
+        await _kill(agent)
+    else:
         await _hold_open(agent)
+
+
+async def compare(args: argparse.Namespace) -> None:
+    """Run the SAME job through multiple models and print a side-by-side cost table.
+    Fill-only (never submits). Each run saves its own history."""
+    models = [m.strip() for m in args.models.split(",") if m.strip()]
+    rows: list[tuple[str, Any, str]] = []
+    for model in models:
+        hp = f"compare_{model.replace('/', '_').replace('.', '_')}.json"
+        print(f"\n[compare] ===== {model} =====")
+        try:
+            history, agent = await _do_record(args, model=model, history_path=hp, submit=False)
+            _print_cost(model, history)
+            _write_vars_sidecar(agent, hp)
+            await _kill(agent)  # close between runs so windows don't stack
+            rows.append((model, history, hp))
+        except Exception as exc:
+            print(f"[compare] {model} failed: {type(exc).__name__}: {exc}")
+            rows.append((model, None, hp))
+
+    print("\n" + "=" * 72)
+    print(f"  COST COMPARISON — {args.job_url}")
+    print("=" * 72)
+    print(f"  {'model':<28} {'steps':>6} {'done':>5} {'cost':>10}   history")
+    for model, history, hp in rows:
+        if history is None:
+            print(f"  {model:<28} {'—':>6} {'—':>5} {'FAILED':>10}")
+            continue
+        u = getattr(history, "usage", None)
+        cost = f"${u.total_cost:.4f}" if u else "n/a"
+        print(f"  {model:<28} {len(history.history):>6} {str(history.is_done()):>5} {cost:>10}   {hp}")
+    print("=" * 72)
+    print("  (fill-only; rerun any saved history cheaply with:  python jobapply.py replay --history <file>)")
 
 
 async def replay(args: argparse.Namespace) -> None:
@@ -248,7 +300,9 @@ async def replay(args: argparse.Namespace) -> None:
     print(f"  prompt {usage.total_prompt_tokens:,} (cached {usage.total_prompt_cached_tokens:,}) "
           f"| completion {usage.total_completion_tokens:,}")
     print("  (deterministic fills cost $0 LLM; cost is the live email-read step + final summary)")
-    if not args.headless:
+    if args.headless:
+        await _kill(agent)
+    else:
         await _hold_open(agent)
 
 
@@ -265,11 +319,18 @@ async def _hold_open(agent: Any) -> None:
 
 
 def main() -> None:
+    # Local convenience: pick up a .env (BROWSER_USE_API_KEY, GOOGLE_API_KEY, …) if present.
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(HERE / ".env")
+    except Exception:
+        pass
+
     p = argparse.ArgumentParser(description="Job-application submitter (glue over browser-use)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def common(sp: argparse.ArgumentParser) -> None:
-        sp.add_argument("--model", default="bu-2-0", help="Model id (default: bu-2-0)")
         sp.add_argument("--profile", default=str(DEFAULT_PROFILE), help="Applicant profile JSON")
         sp.add_argument("--history", default="application_history.json", help="Saved trajectory path")
         sp.add_argument("--headless", action="store_true")
@@ -277,18 +338,30 @@ def main() -> None:
         sp.add_argument("--gmail-credentials", default=None, help="Gmail OAuth client credentials JSON")
         sp.add_argument("--gmail-token", default=None, help="Gmail OAuth token JSON")
 
+    def job_args(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--job-url", required=True)
+        sp.add_argument("--resume", default=None)
+        sp.add_argument("--max-steps", type=int, default=80)
+
     pr = sub.add_parser("record", help="Run + record the application trajectory")
     common(pr)
-    pr.add_argument("--job-url", required=True)
-    pr.add_argument("--resume", default=None)
-    pr.add_argument("--max-steps", type=int, default=80)
+    job_args(pr)
+    pr.add_argument("--model", default="bu-2-0", help="Model id (default: bu-2-0)")
     pr.add_argument("--submit", action="store_true", help="Actually submit (IRREVERSIBLE). Default: fill only.")
 
     rp = sub.add_parser("replay", help="Cheaply re-run a saved trajectory with new data")
     common(rp)
+    rp.add_argument("--model", default="bu-2-0", help="Model id (default: bu-2-0)")
+
+    cp = sub.add_parser("compare", help="Run the same job on multiple models; print a cost table")
+    common(cp)
+    job_args(cp)
+    cp.add_argument("--models", default="bu-2-0,gemini-3-flash-preview",
+                    help="Comma-separated model ids (default: bu-2-0,gemini-3-flash-preview)")
 
     args = p.parse_args()
-    asyncio.run(record(args) if args.cmd == "record" else replay(args))
+    fn = {"record": record, "replay": replay, "compare": compare}[args.cmd]
+    asyncio.run(fn(args))
 
 
 if __name__ == "__main__":
