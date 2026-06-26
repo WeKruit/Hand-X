@@ -54,12 +54,11 @@ def build_instructions(submit: bool) -> str:
     )
     return f"""You are filling out a multi-page job application.
 
-- Use ONLY the applicant resume + profile data provided in the task. Never
-  fabricate answers. Fill work experience, education, dates, and open-ended
-  questions from `experience`, `education`, `summary`, and `cover_letter`. If a
-  required field has detail not in the JSON, read the resume file for it; if it's
-  genuinely unknown, choose the most reasonable non-committal option and leave
-  optional fields blank.
+- Use ONLY the applicant resume + profile data in the task. Never fabricate answers.
+  Fill work experience, education, dates, and open-ended questions from
+  `experience`, `education`, `summary`, and `cover_letter`. If a required field has
+  detail not in the JSON, read the resume file for it; if it's genuinely unknown,
+  choose the most reasonable non-committal option and leave optional fields blank.
 - For voluntary / EEO / demographic questions (gender, race, veteran, disability),
   use the values in `eeo_optional`, defaulting to "Prefer not to say".
 - This is a multi-step wizard: after completing a page, click
