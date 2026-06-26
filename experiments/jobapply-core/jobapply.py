@@ -54,9 +54,14 @@ def build_instructions(submit: bool) -> str:
     )
     return f"""You are filling out a multi-page job application.
 
-- Use ONLY the applicant profile provided in the task. Never fabricate answers.
-  If a required field has no matching profile value, choose the most reasonable
-  non-committal option; leave optional fields blank.
+- Use ONLY the applicant resume + profile data provided in the task. Never
+  fabricate answers. Fill work experience, education, dates, and open-ended
+  questions from `experience`, `education`, `summary`, and `cover_letter`. If a
+  required field has detail not in the JSON, read the resume file for it; if it's
+  genuinely unknown, choose the most reasonable non-committal option and leave
+  optional fields blank.
+- For voluntary / EEO / demographic questions (gender, race, veteran, disability),
+  use the values in `eeo_optional`, defaulting to "Prefer not to say".
 - This is a multi-step wizard: after completing a page, click
   Next / Continue / Save and continue to advance to the next page.
 - For autocomplete / react-select dropdowns: type the value, WAIT one step for
@@ -119,11 +124,19 @@ def _gmail_tools(access_token: str | None, credentials_file: str | None, token_f
 def _build_task(job_url: str, profile: dict, resume: str | None) -> str:
     parts = [
         f"Open {job_url} and complete the job application end to end.",
-        "Applicant profile (JSON):",
+        "",
+        "Applicant resume + profile data (JSON) — use this as the source of truth "
+        "for every field, including work experience, education, dates, skills, and "
+        "open-ended questions (draw on `summary`, `experience[].highlights`, and "
+        "`cover_letter`):",
         json.dumps(profile, indent=2),
     ]
     if resume:
-        parts.append(f"\nResume file available locally at: {resume}")
+        parts.append(
+            f"\nResume file is available locally at: {resume}\n"
+            "Upload it when a resume/CV file-upload field appears. If a field needs "
+            "detail not in the JSON above, read the resume file for it."
+        )
     return "\n".join(parts)
 
 
