@@ -1,0 +1,17 @@
+{
+  "first_name": "Jordan",
+  "last_name": "Avery",
+  "full_name": "Jordan Avery",
+  "email": "jordan.avery.test@example.com",
+  "phone": "+1 415 555 0142",
+  "location": "San Francisco, CA, USA",
+  "linkedin": "https://www.linkedin.com/in/jordan-avery-test",
+  "github": "https://github.com/jordan-avery-test",
+  "website": "https://jordanavery.example.com",
+  "current_company": "Northwind Labs",
+  "current_title": "Senior Software Engineer",
+  "years_experience": 7,
+  "work_authorization": "US Citizen",
+  "requires_sponsorship": false,
+  "skills": ["Python", "Go", "PostgreSQL", "React", "Playwright", "AWS"]
+}
