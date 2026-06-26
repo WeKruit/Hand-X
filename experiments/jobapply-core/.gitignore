@@ -6,3 +6,5 @@ compare_*.json
 *.vars.json
 gmail_token.json
 gmail_credentials.json
+__pycache__/
+*.pyc
