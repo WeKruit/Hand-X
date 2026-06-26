@@ -55,16 +55,19 @@ python jobapply.py replay --history jobA.json --profile other_applicant.json
 
 ### Applicant data: two inputs
 
-- `--profile` is the **full resume profile** (`fixtures/sample_profile.json` is the
+- `--profile` is the **parsed resume** as JSON (`fixtures/sample_profile.json` is the
   template) — identity, contact, links, work authorization, and the resume content
   itself: `summary`, `experience[]` (with `highlights`), `education[]`, `skills`,
-  `cover_letter`, and an optional `eeo_optional` block for voluntary questions. The
-  agent fills every text field and open-ended question from this.
-- `--resume` is the **PDF** — uploaded to file fields, and read for any detail not
-  in the JSON.
+  `cover_letter`, and an optional `eeo_optional` block. The agent fills **every** text
+  field and open-ended question from this. This is the only text the LLM sees.
+- `--resume` is the **PDF** — used **only for upload** to file fields. The agent is
+  told **not to read it**: uploading a file is token-free (Playwright just passes the
+  path), but reading the PDF dumps its parsed text into context and costs tokens. So
+  parse the resume once into `--profile`; the PDF rides along just to satisfy upload
+  widgets.
 
-Provide a complete profile per applicant; the richer it is, the fewer fields the
-agent has to guess (and the fewer LLM steps it burns).
+Provide a complete parsed profile per applicant; the richer it is, the fewer fields
+the agent has to guess (and the fewer LLM steps it burns).
 
 `record`/`compare` write `*.json` (the cached trajectory) and `*.vars.json` (the
 fields browser-use auto-detected as substitutable). `replay` maps a new profile

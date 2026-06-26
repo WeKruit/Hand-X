@@ -55,10 +55,11 @@ def build_instructions(submit: bool) -> str:
     return f"""You are filling out a multi-page job application.
 
 - Use ONLY the applicant resume + profile data in the task. Never fabricate answers.
-  Fill work experience, education, dates, and open-ended questions from
-  `experience`, `education`, `summary`, and `cover_letter`. If a required field has
-  detail not in the JSON, read the resume file for it; if it's genuinely unknown,
-  choose the most reasonable non-committal option and leave optional fields blank.
+  That JSON is the parsed resume and has everything you need — fill work experience,
+  education, dates, and open-ended questions from `experience`, `education`,
+  `summary`, and `cover_letter`. Do NOT open or read the resume PDF (that loads it
+  into context and wastes tokens). If a field is genuinely unknown, choose the most
+  reasonable non-committal option and leave optional fields blank.
 - For voluntary / EEO / demographic questions (gender, race, veteran, disability),
   use the values in `eeo_optional`, defaulting to "Prefer not to say".
 - This is a multi-step wizard: after completing a page, click
@@ -132,9 +133,10 @@ def _build_task(job_url: str, profile: dict, resume: str | None) -> str:
     ]
     if resume:
         parts.append(
-            f"\nResume file is available locally at: {resume}\n"
-            "Upload it when a resume/CV file-upload field appears. If a field needs "
-            "detail not in the JSON above, read the resume file for it."
+            f"\nResume PDF available locally at: {resume}\n"
+            "Upload it (file picker) when a resume/CV upload field appears. Do NOT "
+            "read its contents — the JSON above is the parsed resume and has "
+            "everything; reading the PDF into context wastes tokens."
         )
     return "\n".join(parts)
 
