@@ -57,6 +57,13 @@ python jobapply.py replay --history jobA.json --profile other_applicant.json
 fields browser-use auto-detected as substitutable). `replay` maps a new profile
 onto those fields and re-runs deterministically, then prints the cost.
 
+> **Substitution scope:** for job-application flows browser-use detects
+> substitutable fields by element attributes (name/id/placeholder/aria-label) and
+> deliberately disables value-pattern guessing (to avoid over-substituting). So a
+> field only gets the new applicant's value if its input is labeled; unlabeled
+> fields replay the recorded value. Either way the **replay cost** measurement is
+> valid — re-record per applicant if you need every field swapped.
+
 ## Verification code (multi-page friendly)
 
 The recorded flow includes the `get_recent_emails` action wherever the agent hit

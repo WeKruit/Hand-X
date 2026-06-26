@@ -284,7 +284,12 @@ async def replay(args: argparse.Namespace) -> None:
         print("[replay] no .vars.json sidecar found — replaying with original recorded data")
 
     agent = Agent(
-        task="",  # rerun drives from history, not a task
+        # Non-empty apply-flow task on purpose: browser-use gates value-pattern
+        # variable detection on whether the task looks like a job application
+        # (Agent._is_apply_flow_task). The record run's task is apply-flow, so we
+        # must match it here — otherwise replay re-detects variable names under a
+        # different policy than the saved .vars.json and substitutions silently skip.
+        task="Re-run the saved job application with substituted applicant data.",
         llm=_make_llm(args.model),
         tools=_gmail_tools(args.gmail_access_token, args.gmail_credentials, args.gmail_token),
         browser=Browser(browser_profile=BrowserProfile(headless=args.headless, keep_alive=True)),
