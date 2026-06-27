@@ -211,16 +211,50 @@ class AshbyAdapter(ATSAdapter):
         if ntype == "single_select" and await self._has_radios(page, path):
             return await self._fill_radio(page, path, value)  # renders as a radio fieldset, not a combobox
 
-        if ntype in ("single_select", "location", "date"):
+        if ntype == "date":
+            return await self._fill_date(page, field, value)
+
+        if ntype in ("single_select", "location"):
             return await self._fill_combobox(page, field, value)
 
-        # text / email / tel / textarea / url
+        # text / email / tel / textarea / url — scroll into view + click to focus FIRST: a fill on
+        # an off-screen / unfocused textarea (e.g. "Additional Information", next to the date widget)
+        # silently doesn't stick mid-form. Verify it took; one retry.
         el = await self.locate(page, field)
         if not el:
             return False
+        for _ in range(2):
+            try:
+                with contextlib.suppress(Exception):
+                    await el.evaluate("() => this.scrollIntoView({block: 'center'})")
+                    await el.click()
+                await el.fill(value)
+            except Exception:
+                return False
+            with contextlib.suppress(Exception):
+                if ((await el.evaluate("() => this.value")) or "").strip():
+                    return True
+            await asyncio.sleep(0.3)
+        return False
+
+    async def _fill_date(self, page: Any, field: FormField, value: str) -> bool:
+        """Ashby date is a text input ('Pick date...') backing a calendar popup; it accepts a typed
+        MM/DD/YYYY but REJECTS the ISO 'YYYY-MM-DD' we carry. Convert and fill."""
+        v = (value or "").strip()
+        parts = v.replace("/", "-").split("-")
+        if len(parts) >= 3 and len(parts[0]) == 4:  # YYYY-MM-DD
+            v = f"{parts[1]}/{parts[2]}/{parts[0]}"
+        elif len(parts) == 2 and len(parts[0]) == 4:  # YYYY-MM -> default day 01
+            v = f"{parts[1]}/01/{parts[0]}"
+        el = await self.locate(page, field)
+        if not el or not v:
+            return False
         try:
-            await el.fill(value)
-            return True
+            with contextlib.suppress(Exception):
+                await el.evaluate("() => this.scrollIntoView({block: 'center'})")
+                await el.click()
+            await el.fill(v)
+            return bool(((await el.evaluate("() => this.value")) or "").strip())
         except Exception:
             return False
 
@@ -420,9 +454,8 @@ class AshbyAdapter(ATSAdapter):
         got = (got or "").strip()
         if not got:
             return False
-        # Open-ended textarea: any reasonable free-text content counts. The L3 agent (or a re-gen)
-        # won't reproduce the mapped string verbatim, so requiring substring-equality wrongly FAILs a
-        # box that IS filled — only require it to be non-empty.
-        if field.type == "textarea":
+        # Open-ended textarea (free text won't match the mapped string verbatim) and date (input
+        # shows MM/DD/YYYY, not the ISO value we carry): a non-empty value is success.
+        if field.type in ("textarea", "date"):
             return len(got) >= 2
         return eng.norm(value) in eng.norm(got) or eng.norm(got) in eng.norm(value)
