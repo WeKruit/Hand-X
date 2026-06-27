@@ -343,11 +343,12 @@ async def _do_record(args: argparse.Namespace, *, model: str, history_path: str,
         browser=_browser(args.headless),
         extend_system_message=build_instructions(submit),
         available_file_paths=[resume] if resume else None,
-        use_vision="auto",          # measured best: agent pulls a screenshot only when it needs
-        vision_detail_level="low",  # one (~1/run, cheap) and stays loop-free. use_vision=False was
-                                    # WORSE ($0.125 / 10 nudges) — bu-2-0 won't call the verify action
-                                    # on its own, so blind+no-call loops. Cheap-VLM offload only pays
-                                    # off when invoked deterministically (the greenhouse_fill path).
+        use_vision="auto",          # measured best: agent pulls a screenshot only when it needs one
+        vision_detail_level="low",  # (~1/run) and calls verify_field_visually once -> $0.096, 0 nudges.
+                                    # use_vision=False also WORKS (verify called 3x, the cheap VLM
+                                    # correctly resolved the false-empties) but is pricier ($0.125, 10
+                                    # nudges): blind, the agent thrashes more BEFORE each verify. auto's
+                                    # on-demand vision needs fewer verifies and zero loop nudges.
         save_conversation_path=_trace_path(args, model),  # built-in per-step cause trace
         max_actions_per_step=args.max_actions,  # default 1 = act-then-observe. Chaining on
                                   # ATS forms lands later actions on stale element indices
