@@ -116,13 +116,12 @@ def build_instructions(submit: bool) -> str:
 - BEFORE ADVANCING a page, scan the screenshot: do not click Next/Continue while red
   errors, empty required fields, or a disabled Next button are visible — resolve those
   first. Stay near the current section; don't jump back to re-verify filled fields.
-- RETRY → THEN LOOK (the anti-loop rule, this matters most). The browser-state `value=`
-  for inputs is UNRELIABLE on React/Greenhouse/Workday forms — it reads EMPTY even when
-  the field is filled and visible. So do NOT re-type a field just because the state
-  shows it empty. Count your attempts per field: after you have typed the SAME field
-  TWICE and the state still shows empty, STOP typing it and call the verify_field_visually
-  action with the field's label — a cheap vision model looks at the screenshot and reports
-  whether it is filled.
+- VERIFY BEFORE RE-TYPING (the anti-loop rule, this matters most). The browser-state
+  `value=` for inputs is UNRELIABLE on React/Greenhouse/Workday forms — it reads EMPTY
+  even when the field is filled and visible. So the FIRST time a field you ALREADY typed
+  reads empty in the state, do NOT re-type it. Instead call verify_field_visually with
+  the field's label — a cheap vision model looks at the screenshot and reports whether it
+  is filled. NEVER type the same value into the same field a second time before verifying.
   - If verify_field_visually says filled (or you can plainly see it) → it IS filled. Mark
     it done and NEVER touch that field again.
   - Only if it reports clearly empty is it truly unfilled → try ONE different method
@@ -331,7 +330,7 @@ async def _do_record(args: argparse.Namespace, *, model: str, history_path: str,
     profile = json.loads(Path(args.profile).read_text())
     resume = str(Path(args.resume).resolve()) if args.resume else None
 
-    from vision_verify import register_visual_verify
+    from vision_verify import make_loop_verify_hook, register_visual_verify
 
     tools = _gmail_tools(args.gmail_access_token, args.gmail_credentials, args.gmail_token)
     register_visual_verify(tools)  # (c) cheap-VLM visual field check the agent can call on a stuck field
@@ -356,7 +355,9 @@ async def _do_record(args: argparse.Namespace, *, model: str, history_path: str,
                                   # back empty -> retype loops. Raise for speed on simple forms.
         calculate_cost=True,      # native cost tracking -> history.usage
     )
-    history = await agent.run(max_steps=args.max_steps)
+    # Deterministic loop->visual: auto-verify a field the moment it's re-typed, so the
+    # false-empty retype loop is broken before loop-detection nudges accumulate.
+    history = await agent.run(max_steps=args.max_steps, on_step_end=make_loop_verify_hook())
     agent.save_history(history_path)  # the cached "script" (full multi-page trajectory)
     return history, agent
 

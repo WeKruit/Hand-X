@@ -25,10 +25,77 @@ def _vlm() -> Any:
     return ChatGoogle(model=VERIFY_MODEL, api_key=os.environ.get("GOOGLE_API_KEY"))
 
 
+async def visual_check(session: Any, target: str) -> str:
+    """Core cheap-VLM check, reused by the action AND the deterministic loop hook.
+    `target` is a field label ("Cover Letter") or a value to look for ("646-678-9391").
+    Returns a short JSON-ish verdict string {filled, value}."""
+    from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+    try:
+        png = await session.take_screenshot()  # bytes (PNG)
+    except Exception as exc:
+        return f'{{"filled": null, "error": "screenshot: {exc}"}}'
+    b64 = base64.b64encode(png).decode()
+    prompt = (
+        f"This is a job-application web form. Is '{target}' currently filled in / visibly present "
+        f'in an input (not blank)? Reply STRICT JSON: {{"filled": true|false, "value": "<visible text>"}}.'
+    )
+    msg = UserMessage(
+        content=[
+            ContentPartTextParam(type="text", text=prompt),
+            ContentPartImageParam(
+                type="image_url",
+                image_url=ImageURL(url=f"data:image/png;base64,{b64}", detail="low", media_type="image/png"),
+            ),
+        ]
+    )
+    try:
+        resp = await _vlm().ainvoke([msg])
+        return (getattr(resp, "completion", None) or str(resp)).strip()
+    except Exception as exc:
+        return f'{{"filled": null, "error": "{type(exc).__name__}: {exc}"}}'
+
+
+def make_loop_verify_hook(repeat_threshold: int = 2) -> Any:
+    """Return an on_step_end(agent) callback that DETERMINISTICALLY breaks the false-empty
+    retype loop: if the agent types the SAME value into the SAME field on consecutive steps,
+    it runs the cheap visual check itself and injects the verdict (agent.add_new_task) so the
+    agent stops re-typing — without waiting for loop-detection nudges to pile up."""
+    seen = {"key": None, "n": 0}
+
+    async def on_step_end(agent: Any) -> None:
+        out = getattr(agent.state, "last_model_output", None)
+        if not out or not getattr(out, "action", None):
+            return
+        typed = None
+        for act in out.action:
+            try:
+                dumped = act.model_dump(exclude_none=True)
+            except Exception:
+                continue
+            for params in dumped.values():
+                if isinstance(params, dict) and "text" in params and ("index" in params or "selector" in params):
+                    typed = (params.get("index", params.get("selector")), str(params.get("text", ""))[:60])
+        if typed is None:
+            seen["key"], seen["n"] = None, 0
+            return
+        seen["n"] = seen["n"] + 1 if typed == seen["key"] else 1
+        seen["key"] = typed
+        if seen["n"] >= repeat_threshold:
+            verdict = await visual_check(agent.browser_session, typed[1])
+            agent.add_new_task(
+                f"LOOP GUARD (automatic visual check): you re-typed '{typed[1]}' into the same field "
+                f"{seen['n']}x. The vision model reports: {verdict}. If filled=true, that field IS done — "
+                f"STOP re-typing it and move on to the next field."
+            )
+            seen["n"] = 0
+
+    return on_step_end
+
+
 def register_visual_verify(tools: Any) -> Any:
     """Add the verify_field_visually action onto an existing browser-use Tools object."""
     from browser_use import ActionResult, BrowserSession
-    from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
 
     @tools.action(
         "Visually verify whether a form field is filled, using a cheap vision model. "
@@ -37,29 +104,7 @@ def register_visual_verify(tools: Any) -> Any:
         "Trust its answer over the state read-back."
     )
     async def verify_field_visually(field_label: str, browser_session: BrowserSession) -> Any:
-        try:
-            png = await browser_session.take_screenshot()  # bytes (PNG)
-        except Exception as exc:
-            return ActionResult(extracted_content=f"visual-verify: screenshot failed ({exc})")
-        b64 = base64.b64encode(png).decode()
-        prompt = (
-            f"This is a job-application web form. Is the field labelled '{field_label}' currently "
-            f'filled with a value (not blank)? Reply STRICT JSON: {{"filled": true|false, "value": "<visible text>"}}.'
-        )
-        msg = UserMessage(
-            content=[
-                ContentPartTextParam(type="text", text=prompt),
-                ContentPartImageParam(
-                    type="image_url",
-                    image_url=ImageURL(url=f"data:image/png;base64,{b64}", detail="low", media_type="image/png"),
-                ),
-            ]
-        )
-        try:
-            resp = await _vlm().ainvoke([msg])
-            verdict = (getattr(resp, "completion", None) or str(resp)).strip()
-        except Exception as exc:
-            verdict = f'{{"filled": null, "error": "{type(exc).__name__}: {exc}"}}'
+        verdict = await visual_check(browser_session, field_label)
         return ActionResult(
             extracted_content=f"VISUAL VERIFY '{field_label}' -> {verdict}",
             long_term_memory=f"Visual check '{field_label}': {verdict}",
