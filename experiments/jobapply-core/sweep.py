@@ -161,6 +161,8 @@ async def main_async(args: argparse.Namespace) -> None:
         r["profile"] = pname
         results[i] = r
         done["n"] += 1
+        if conc == 1:
+            _reap_chromium()  # safe only sequentially: browser-use leaks chromium; reap orphans per job
         with contextlib.suppress(Exception):
             out.write_text(json.dumps([x for x in results if x], indent=1))  # incremental
         t = r.get("tiers") or {}
