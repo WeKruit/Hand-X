@@ -269,15 +269,23 @@ class AshbyAdapter(ATSAdapter):
         inp = await self.locate(page, field)
         if not inp:
             return False
+        is_loc = field.type == "location"
+        # Location: type the CITY only. The full "San Francisco, CA, USA" (commas) doesn't match
+        # the geocode results ("San Francisco, California, United States") so the menu never filters
+        # to the municipality (same root cause as Greenhouse). The bare city surfaces it as option-0.
+        typed = (value.split(",")[0].strip() or value) if is_loc else value
         try:
             with contextlib.suppress(Exception):
                 await inp.click()
-            await inp.fill(value)
+            if is_loc:
+                await asyncio.sleep(0.3)
+            await inp.fill(typed)
         except Exception:
             return False
         want = eng.norm(value)
-        for _ in range(6):
-            await asyncio.sleep(0.4)
+        city = eng.norm(typed)
+        for _ in range(10 if is_loc else 6):
+            await asyncio.sleep(0.35)
             opts = await page.get_elements_by_css_selector('[role="option"], [class*="option"]')
             if not opts:
                 continue
@@ -291,9 +299,10 @@ class AshbyAdapter(ATSAdapter):
                 if n == want:
                     exact = o
                     break
-                if partial is None and want and want in n:
+                if partial is None and ((want and want in n) or (is_loc and city and city in n)):
                     partial = o
-            target = exact or partial
+            # Location: the first option IS the geocoded municipality — accept it if nothing better.
+            target = exact or partial or (opts[0] if is_loc else None)
             if target:
                 with contextlib.suppress(Exception):
                     await target.click()
@@ -349,7 +358,9 @@ class AshbyAdapter(ATSAdapter):
                 got = await el.evaluate("() => this.value || (this.textContent||'')")
             except Exception:
                 got = ""
-            want = eng.norm(value)
+            # Location commits to the geocoded label ("San Francisco, California, United States");
+            # match on the CITY we typed, not the raw "City, ST, USA".
+            want = eng.norm(value.split(",")[0].strip() if ntype == "location" else value)
             return bool(want) and want in eng.norm(got)
 
         # text / email / tel / textarea / date
