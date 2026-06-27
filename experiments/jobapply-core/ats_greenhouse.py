@@ -120,6 +120,27 @@ class GreenhouseAdapter(ATSAdapter):
         except Exception:
             return False
 
+    async def fill_repeaters(self, session: Any, page: Any, profile: dict) -> dict:
+        """Education repeater. The boards-api schema can't enumerate rows and the
+        school/degree/discipline are searchable closed taxonomies living below the fold (NOT in
+        browser-use's selector map) — deterministic string-match gets them wrong. So drive this
+        section with a focused browser-use Agent (eng.agent_fill_section), which scrolls to it and
+        uses browser-use's native dropdown handling. Fill-only stays guaranteed: submit is disabled
+        for the duration. Only runs when an education repeater is actually present."""
+        edu = profile.get("education") or []
+        if not edu:
+            return {}
+        if not await eng.first(page, '[id^="react-select-school--0"], [class*="education--"]'):
+            return {}  # new-template boards turn education into flat questions — no repeater here
+        entries = "; ".join(
+            f"entry {i + 1}: School='{e.get('school', '')}', Degree='{e.get('degree', '')}', "
+            f"Discipline='{e.get('field_of_study', '')}'"
+            for i, e in enumerate(edu)
+        )
+        return {"education_rows": len(edu), **await eng.agent_fill_section(
+            session, page, section="Education", instructions=entries, max_steps=10
+        )}
+
     async def _combobox(self, page: Any, name: str, value: str) -> bool:
         """react-select: open, type (filters menu), click the field-scoped option."""
         inp = await self._locate(page, name) or await eng.first(page, f"#react-select-{name}-input")

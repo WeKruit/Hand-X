@@ -330,6 +330,54 @@ async def escalate(session: Any, agent_llm: Any, field: FormField, value: str) -
                 await session.connect()
 
 
+async def agent_fill_section(session: Any, page: Any, *, section: str, instructions: str, max_steps: int = 10) -> dict:
+    """Hand a hard, NON-schema section (an education / experience REPEATER whose rows + searchable
+    closed-taxonomy comboboxes exist only in the live DOM, below the fold and NOT in the selector
+    map) to a FOCUSED browser-use Agent. The agent scrolls to the section and drives the comboboxes
+    with browser-use's native dropdown actions + reasoning — robust where deterministic string-match
+    fails ('B.S.' -> 'Bachelor of Science', huge searchable school lists).
+
+    FILL-ONLY is enforced STRUCTURALLY, not by prompt alone: every submit control is DISABLED before
+    the agent runs (it physically cannot submit) and restored after. Runs LAST, so the agent's CDP
+    teardown can't perturb earlier deterministic fields."""
+    from browser_use import Agent, ChatGoogle
+
+    disable_js = (
+        "() => { let n=0; document.querySelectorAll('button[type=submit],input[type=submit]')"
+        ".forEach(b => { b.setAttribute('data-gh-was', b.disabled ? '1':'0'); b.disabled = true; n++; }); return n; }"
+    )
+    restore_js = (
+        "() => document.querySelectorAll('[data-gh-was]').forEach(b => {"
+        " b.disabled = b.getAttribute('data-gh-was') === '1'; b.removeAttribute('data-gh-was'); })"
+    )
+    with contextlib.suppress(Exception):
+        await page.evaluate(disable_js)  # neutralise submit so the agent CANNOT submit the form
+
+    task = (
+        f"You are already on a job-application page. Fill ONLY the {section} section: {instructions}. "
+        f"Each {section} field (School, Degree, Discipline, etc.) is a SEARCHABLE dropdown — scroll to "
+        "it, click it, type the value, and pick the closest matching option (e.g. Degree 'B.S.' -> "
+        "'Bachelor of Science'). Use the 'Add another' link before each additional entry. Touch NOTHING "
+        "outside this section. The Submit button is DISABLED on purpose — do NOT try to submit and do "
+        "NOT navigate. Call done once the section's rows show the values."
+    )
+    ok = True
+    try:
+        llm = ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY"))
+        agent = Agent(task=task, llm=llm, browser_session=session, use_vision=True)
+        await agent.run(max_steps=max_steps)
+    except Exception as exc:
+        print(f"   [agent:{section}] {exc}")
+        ok = False
+    finally:
+        with contextlib.suppress(Exception):  # Agent.close() drops the shared CDP client — re-attach
+            if not session.is_cdp_connected:
+                await session.connect()
+        with contextlib.suppress(Exception):
+            await page.evaluate(restore_js)
+    return {"section": section, "agent_ok": ok}
+
+
 async def fill_with_ladder(
     adapter: ATSAdapter,
     session: Any,
