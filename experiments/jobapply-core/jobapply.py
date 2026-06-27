@@ -350,6 +350,7 @@ async def _do_record(args: argparse.Namespace, *, model: str, history_path: str,
                                     # nudges): blind, the agent thrashes more BEFORE each verify. auto's
                                     # on-demand vision needs fewer verifies and zero loop nudges.
         save_conversation_path=_trace_path(args, model),  # built-in per-step cause trace
+        max_history_items=getattr(args, "max_history", None),  # cap per-step history input on long forms
         max_actions_per_step=args.max_actions,  # default 1 = act-then-observe. Chaining on
                                   # ATS forms lands later actions on stale element indices
                                   # (DOM re-renders after a combobox/upload) -> fields read
@@ -516,6 +517,10 @@ def main() -> None:
                         help="Actions per step. Default 3 (~$0.13, reliable now that the retry-then-vision "
                              "fix killed the re-fill loop: phone 3x, 4 nudges, done). 1 = most reliable but "
                              "~2x cost ($0.27, 64 steps). 2 is dominated — avoid.")
+        sp.add_argument("--max-history", type=int, default=None,
+                        help="Cap the step-history sent to the LLM each step (browser-use max_history_items; "
+                             "None=full). Long forms grow history every step -> quadratic input cost; capping "
+                             "to e.g. 10 keeps the first step + recent ones and elides the middle. Must be >5.")
 
     pr = sub.add_parser("record", help="Run + record the application trajectory")
     common(pr)
