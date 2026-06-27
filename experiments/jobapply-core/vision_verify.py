@@ -56,6 +56,23 @@ async def visual_check(session: Any, target: str) -> str:
         return f'{{"filled": null, "error": "{type(exc).__name__}: {exc}"}}'
 
 
+async def _field_label(session: Any, index: Any) -> str:
+    """Resolve a human field label from an element index (aria-label / name / id /
+    placeholder) so the loop-guard can name WHICH field, not just the typed value."""
+    if index is None:
+        return "this field"
+    try:
+        node = await session.get_element_by_index(int(index))
+        attrs = (getattr(node, "attributes", None) or {}) if node else {}
+        for k in ("aria-label", "name", "id", "placeholder", "aria-labelledby"):
+            v = attrs.get(k)
+            if v:
+                return str(v)
+    except Exception:
+        pass
+    return f"field #{index}"
+
+
 def make_loop_verify_hook(verify_at: int = 2, stop_at: int = 3) -> Any:
     """Return an on_step_end(agent) callback that DETERMINISTICALLY breaks the false-empty
     retype loop. Keyed by the TEXT VALUE typed (NOT element index — the index shifts and the
@@ -88,18 +105,20 @@ def make_loop_verify_hook(verify_at: int = 2, stop_at: int = 3) -> Any:
             counts[key] += 1
             n = counts[key]
             if n == verify_at:
-                verdict = await visual_check(agent.browser_session, key)
+                label = await _field_label(agent.browser_session, params.get("index"))
+                verdict = await visual_check(agent.browser_session, f"the '{label}' field")
                 if '"filled": true' in verdict.lower() or "'filled': true" in verdict.lower() or '"filled":true' in verdict.lower():
                     verified.add(key)
                 agent.add_new_task(
-                    f"LOOP GUARD (automatic visual check): you have typed '{key[:40]}…' {n}x. Vision "
-                    f"model reports: {verdict}. If filled=true this field IS DONE — issue NO further "
-                    f"input into it; move to another field or call done."
+                    f"LOOP GUARD (automatic visual check): you typed into the '{label}' field {n}x. "
+                    f"Vision model reports for '{label}': {verdict}. If filled=true, the '{label}' field "
+                    f"IS DONE — issue NO further input into '{label}'; move to another field or call done."
                 )
             elif n >= stop_at and key in verified:
+                label = await _field_label(agent.browser_session, params.get("index"))
                 agent.add_new_task(
-                    "LOOP GUARD: this field is vision-verified FILLED yet you keep re-typing it. The "
-                    "form is filled; stopping the fill-only run now."
+                    f"LOOP GUARD: the '{label}' field is vision-verified FILLED yet you keep re-typing it. "
+                    f"The form is filled; stopping the fill-only run now."
                 )
                 try:
                     res = agent.stop()
