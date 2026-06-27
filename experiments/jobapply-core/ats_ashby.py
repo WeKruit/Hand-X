@@ -417,6 +417,12 @@ class AshbyAdapter(ATSAdapter):
             got = await el.evaluate("() => this.value")
         except Exception:
             return False
-        if not (got or "").strip():
+        got = (got or "").strip()
+        if not got:
             return False
+        # Open-ended textarea: any reasonable free-text content counts. The L3 agent (or a re-gen)
+        # won't reproduce the mapped string verbatim, so requiring substring-equality wrongly FAILs a
+        # box that IS filled — only require it to be non-empty.
+        if field.type == "textarea":
+            return len(got) >= 2
         return eng.norm(value) in eng.norm(got) or eng.norm(got) in eng.norm(value)
