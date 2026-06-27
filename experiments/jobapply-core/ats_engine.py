@@ -205,7 +205,7 @@ async def upload_file(session: Any, page: Any, file_el: Any, path: str) -> bool:
         or getattr(page, "session_id", None)
     )
     if hasattr(sid, "__await__"):  # page.session_id is a COROUTINE — the prior code passed it
-        sid = await sid           # un-awaited, so CDP got a coroutine as session_id and failed
+        sid = await sid  # un-awaited, so CDP got a coroutine as session_id and failed
     try:
         await session.cdp_client.send.DOM.setFileInputFiles(
             params={"files": [str(Path(path).resolve())], "backendNodeId": bnid},
@@ -224,7 +224,13 @@ async def press_enter_trusted(session: Any, page: Any) -> bool:
     try:
         sid = await page.session_id
         for ev in (
-            {"type": "rawKeyDown", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "code": "Enter", "key": "Enter"},
+            {
+                "type": "rawKeyDown",
+                "windowsVirtualKeyCode": 13,
+                "nativeVirtualKeyCode": 13,
+                "code": "Enter",
+                "key": "Enter",
+            },
             {"type": "keyUp", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "code": "Enter", "key": "Enter"},
         ):
             await session.cdp_client.send.Input.dispatchKeyEvent(params=ev, session_id=sid)

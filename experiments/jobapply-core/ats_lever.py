@@ -273,6 +273,9 @@ class LeverAdapter(ATSAdapter):
         if type_ in ("radio", "checkbox"):
             return await self._click_option(page, name, value)
 
+        if name == "location":
+            return await self._location(page, value)  # React autocomplete — el.fill() reverts
+
         # text / textarea / input_text / open_ended
         el = await self.locate(page, field)
         if not el:
@@ -282,6 +285,25 @@ class LeverAdapter(ATSAdapter):
             return True
         except Exception:
             return False
+
+    async def _location(self, page: Any, value: str) -> bool:
+        """Lever location is a React-controlled autocomplete (#location-input). el.fill() is
+        reverted to '' by React; only the native value-setter + an input event makes the value
+        stick (same React-controlled trick _select_native uses for selects). Fill-only: we never
+        submit, so we only need the value visibly present + read-back to pass — we do NOT need to
+        commit a geocode suggestion (which often returns 'no location found' for a synthetic search)."""
+        try:
+            ok = await page.evaluate(
+                "(v) => { const el = document.querySelector('#location-input') || document.querySelector('[name=location]');"
+                " if (!el) return false;"
+                " const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;"
+                " s.call(el, v); el.dispatchEvent(new Event('input', {bubbles: true}));"
+                " el.dispatchEvent(new Event('change', {bubbles: true})); return true; }",
+                value,
+            )
+        except Exception:
+            return False
+        return str(ok).lower() == "true"
 
     async def _select_native(self, page: Any, name: str, value: str) -> bool:
         """Pick a native <select> option by TEXT and fire a `change` event.

@@ -5,10 +5,14 @@ every interactive element with `data-automation-id` (aid), stable across tenants
 application is a 7±1 step wizard: Create Account/Sign In -> My Information -> My Experience
 -> Application Questions -> Voluntary Disclosures -> [Self Identify] -> Review (STOP).
 
-HONEST LIMIT: step 1 is a MANDATORY Create Account / Sign In gate (+ usually email
-verification, possibly CAPTCHA). Without real credentials + a reachable inbox the wizard
-cannot be entered, so `authenticate` halts at the wall. open_form + the auth-screen + the
-progressBar step model are what's verifiable without an account.
+AUTH: `authenticate` runs the create-account state machine (SSO-chooser reveal -> create-vs
+-sign-in by verifyPassword -> fill email/password, NEVER the beecatcher honeypot -> submit ->
+classify). VERIFIED END-TO-END on live Intel (autofillWithResume path): it created an account
+with a throwaway email and reached the 7-step wizard with NO email verification — Intel-class
+tenants need no mailbox infra. Tenants that DO require email verification return
+needs_verification (poll the inbox / Agent Mail / HITL — see AUTH_DESIGN.md). CAPTCHA -> HITL.
+`open_form` PREFERS Autofill-with-Resume (DomHand: applyManually is often broken). A DEAD-job
+guard distinguishes an expired 404 from a real auth wall.
 """
 
 from __future__ import annotations
@@ -29,25 +33,28 @@ class WorkdayAdapter(ATSAdapter):
     async def extract(self, url: str, profile: dict) -> tuple[str, list[FormField]]:
         return "Workday Application", []
 
-    # -- open_form: job page -> Apply -> Apply Manually ---------------------
+    # -- open_form: job page -> Apply -> (prefer) Autofill with Resume ------
     async def open_form(self, session: Any, page: Any) -> Any:
-        # Visa-style cookie/legal modal first.
-        await self._click_aid(page, "legalNoticeAcceptButton")
-        # Apply -> Apply Manually. Deep-link is the most reliable: <jobUrl>/apply/applyManually
+        # Reuses the in-tree DomHand guardrail (ghosthands/platforms/workday.py): PREFER
+        # "Autofill with Resume" over "Apply Manually" — applyManually leads to a different,
+        # often-broken flow. Click the main Apply button, then the resume path.
+        await self._click_aid(page, "legalNoticeAcceptButton")  # Visa-style cookie/legal modal
+        already = '[data-automation-id="email"], [data-automation-id="createAccountSubmitButton"], [data-automation-id^="formField-"]'
         with contextlib.suppress(Exception):
             url = await page.get_url()
-            if "/apply" not in url:
+            # only deep-link from a REAL job page (guard against about:blank / non-loaded page
+            # producing 'about:blank/apply/...' which the security watchdog blocks).
+            if "myworkdayjobs" in url and "/apply" not in url:
                 base = url.split("?")[0].rstrip("/")
-                await session.navigate_to(base + "/apply/applyManually")
+                await session.navigate_to(base + "/apply/autofillWithResume")  # preferred path
                 await asyncio.sleep(3)
                 page = await session.must_get_current_page()
-        # fallback: click the Apply adventure button + Apply Manually
-        if not await eng.first(
-            page, '[data-automation-id="email"], [data-automation-id="formField-legalNameSection_firstName"]'
-        ):
+        # fallback: click the Apply menu, prefer Autofill-with-Resume, else Apply Manually
+        if not await eng.first(page, already):
             await self._click_aid(page, "adventureButton")
             await asyncio.sleep(1)
-            await self._click_aid(page, "applyManually")
+            if not (await self._click_aid(page, "autofillWithResume")):
+                await self._click_aid(page, "applyManually")
             await asyncio.sleep(2.5)
             page = await session.must_get_current_page()
         return page
@@ -56,6 +63,18 @@ class WorkdayAdapter(ATSAdapter):
     async def authenticate(self, session: Any, page: Any, creds: Credentials | None) -> AuthResult:
         # Detect the account gate by ANY of its signals (email aid may not have mounted /
         # differs per tenant; the submit button + sign-in link are reliable).
+        # DEAD-job guard (AUTH_DESIGN §1.2): an expired posting renders a 404 ("page doesn't
+        # exist") with no auth/form DOM — must NOT be mistaken for an already-signed-in session.
+        dead = await page.evaluate(
+            "() => { const t=document.body.innerText||'';"
+            ' const hasReal=document.querySelector(\'[data-automation-id="email"],[data-automation-id="adventureButton"],'
+            '[data-automation-id="createAccountSubmitButton"],[data-automation-id^="formField-"],'
+            '[data-automation-id="progressBar"]\');'
+            " return (/page you are looking for does(n'?| no)t exist|invalid-content/i.test(t) && !hasReal); }"
+        )
+        if str(dead).lower() == "true":
+            return AuthResult(ok=False, reason="JOB_EXPIRED: posting no longer exists (404).")
+
         name = (await self._active_step_name(page)).lower()
         at_account = (
             "create account" in name
@@ -67,34 +86,53 @@ class WorkdayAdapter(ATSAdapter):
             or await eng.first(page, '[data-automation-id="SignInWithEmailButton"]')
         )
         if not at_account:
-            return AuthResult(ok=True)  # already past the gate (signed-in session)
+            # not on an auth screen — only "authed" if the wizard form is actually present;
+            # otherwise it's a blank/redirect/unknown page, NOT a signed-in session.
+            if await eng.first(page, '[data-automation-id="progressBar"], [data-automation-id^="formField-"]'):
+                return AuthResult(ok=True)
+            return AuthResult(ok=False, reason="no auth gate and no form (blank / redirect / unknown page).")
         if not creds:
             return AuthResult(
                 ok=False,
-                reason=(
-                    "Workday Create Account / Sign In is mandatory and no credentials were provided. "
-                    "Needs a real deliverable email inbox (+ usually emailed verification) per tenant."
-                ),
+                reason="Workday account gate is mandatory and no credentials were provided.",
             )
-        # native email/password ONLY (never Google SSO). Honeypots stay empty.
+
+        # 1. Reveal the native email/password form. NEVER Google SSO. Some tenants (NVIDIA,
+        #    Intel) show an SSO chooser / utility "Sign In" first.
+        if not await eng.first(page, '[data-automation-id="email"]'):
+            (
+                await self._click_aid(page, "SignInWithEmailButton")
+                or await self._click_aid(page, "utilityButtonSignIn")
+                or bool(await eng.click_by_text(page, "Sign in with email"))
+            )
+            await self._settle(page)
+
+        # 2. Ensure CREATE-ACCOUNT mode (we register a fresh per-tenant account). DomHand rule:
+        #    verifyPassword present == Create Account; never toggle once there.
+        if not await eng.first(page, '[data-automation-id="verifyPassword"]'):
+            await self._click_aid(page, "createAccountLink")  # sign-in screen -> register
+            await self._settle(page)
+
+        # 3. Fill native fields ONLY (email/password/verifyPassword) — NEVER the beecatcher
+        #    honeypot (aid-scoped fills, never "every input").
         await self._fill_aid(page, "email", creds.email)
         await self._fill_aid(page, "password", creds.password)
-        await self._fill_aid(page, "verifyPassword", creds.password)  # create-account only
-        await self._click_aid(page, "createAccountCheckbox")  # Visa consent (toggle on)
-        await self._click_aid(page, "createAccountSubmitButton") or await self._click_aid(page, "signInSubmitButton")
-        await asyncio.sleep(3)
+        await self._fill_aid(page, "verifyPassword", creds.password)
+        await self._click_aid(page, "createAccountCheckbox")  # consent (Visa et al.) — only if present
+        await self._click_aid(page, "createAccountSubmitButton")
+        await self._settle(page)
         page = await session.must_get_current_page()
-        # email-verification step blocks autonomy -> HITL halt
+
+        # 4. Classify the post-submit screen
         if await eng.first(page, '[data-automation-id="verificationCode"], [data-automation-id="emailVerification"]'):
             return AuthResult(
                 ok=True,
                 needs_verification=True,
-                reason="Workday requires an emailed verification code/link before the form.",
+                reason="Workday wants an emailed verification code (poll the inbox / HITL).",
             )
-        # success iff we advanced off the account screen
-        if await eng.first(page, '[data-automation-id="email"]'):
-            return AuthResult(ok=False, reason="Create Account submit did not advance (validation/CAPTCHA?).")
-        return AuthResult(ok=True)
+        if await eng.first(page, '[data-automation-id="email"]'):  # still on the auth screen
+            return AuthResult(ok=False, reason="Create Account did not advance (validation / CAPTCHA?).")
+        return AuthResult(ok=True)  # reached the form (no-verification tenant, e.g. Intel)
 
     # -- extract_step: progressBar + formField enumeration -----------------
     async def extract_step(self, session: Any, page: Any, profile: dict) -> Step:
@@ -164,9 +202,13 @@ class WorkdayAdapter(ATSAdapter):
 
     async def next_step(self, session: Any, page: Any) -> AdvanceResult:
         before = await self._active_index(page)
-        # never click Submit — only advance off non-Review steps
-        clicked = await self._click_aid(page, "pageFooterNextButton") or await self._click_aid(
-            page, "bottom-navigation-next-button"
+        # never click Submit — only advance off non-Review steps. (DomHand WORKDAY_SELECTORS:
+        # bottom-navigation-next-button / "Save and Continue".)
+        clicked = (
+            await self._click_aid(page, "pageFooterNextButton")
+            or await self._click_aid(page, "bottom-navigation-next-button")
+            or bool(await eng.click_by_text(page, "Save and Continue"))
+            or bool(await eng.click_by_text(page, "Next"))
         )
         if not clicked:
             return AdvanceResult(ok=False, blocked_reason="no advance button found")
@@ -202,13 +244,20 @@ class WorkdayAdapter(ATSAdapter):
     async def fill(self, session: Any, page: Any, field: FormField, value: str, resume: str | None) -> bool:
         t = field.type
         if t == "file":
-            fel = await eng.first(page, '[data-automation-id="file-upload-input-ref"]')
+            # push bytes to the real input via CDP (never click the drop-zone -> OS dialog).
+            # DomHand WORKDAY_SELECTORS: file-upload-input-ref / generic input[type=file].
+            fel = (
+                await eng.first(page, '[data-automation-id="file-upload-input-ref"]')
+                or await eng.first(page, '[data-automation-id="file-upload-drop-zone"] input[type="file"]')
+                or await eng.first(page, 'input[type="file"]')
+            )
             return await eng.upload_file(session, page, fel, resume) if (fel and resume) else False
         if t in ("input_text", "textarea"):
             el = await self.locate(page, field)
             if not el:
                 return False
             with contextlib.suppress(Exception):
+                await el.click()  # DomHand rule: click before typing (focus), then fill ONCE
                 await el.fill(value)
                 return True
             return False
@@ -249,7 +298,8 @@ class WorkdayAdapter(ATSAdapter):
             await asyncio.sleep(0.3)
             opts = await page.get_elements_by_css_selector(
                 '[data-automation-id="activeListContainer"] [role="option"],'
-                ' [data-automation-id="promptOption"], [data-automation-id="menuItem"]'
+                ' [data-automation-id="promptOption"], [data-automation-id="menuItem"],'
+                ' [role="listbox"] [role="option"]'  # DomHand WORKDAY_SELECTORS generic fallback
             )
             if not opts:
                 continue
@@ -293,13 +343,19 @@ class WorkdayAdapter(ATSAdapter):
             digits = f"{mm}{dd}{parts[0]}"
         if not digits:
             return False
-        seg = await eng.first(
-            page, f'[data-automation-id="formField-{field.name}"] [data-automation-id$="Month-input"]'
+        # DomHand WORKDAY_SELECTORS month-segment variants: dateSectionMonth-input /
+        # *dateSectionMonth* / placeholder MM.
+        wrap = f'[data-automation-id="formField-{field.name}"]'
+        seg = (
+            await eng.first(page, f'{wrap} [data-automation-id$="Month-input"]')
+            or await eng.first(page, f'{wrap} input[data-automation-id*="dateSectionMonth"]')
+            or await eng.first(page, f'{wrap} input[placeholder*="MM"]')
+            or await eng.first(page, f'{wrap} [role="spinbutton"]')
         )
         if not seg:
             return False
         with contextlib.suppress(Exception):
-            await seg.click()
+            await seg.click()  # click before typing (DomHand rule)
             await seg.fill(digits)
             return True
         return False
@@ -346,6 +402,10 @@ class WorkdayAdapter(ATSAdapter):
         return False
 
     # -- helpers -----------------------------------------------------------
+    async def _settle(self, page: Any, seconds: float = 2.0) -> None:
+        """Let a Workday SPA transition settle after a click/submit/navigation."""
+        await asyncio.sleep(seconds)
+
     async def _click_aid(self, page: Any, aid: str) -> bool:
         el = await eng.first(page, f'[data-automation-id="{aid}"]')
         if not el:

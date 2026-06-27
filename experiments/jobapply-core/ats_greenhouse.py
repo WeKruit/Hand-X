@@ -137,9 +137,10 @@ class GreenhouseAdapter(ATSAdapter):
             f"Discipline='{e.get('field_of_study', '')}'"
             for i, e in enumerate(edu)
         )
-        return {"education_rows": len(edu), **await eng.agent_fill_section(
-            session, page, section="Education", instructions=entries, max_steps=10
-        )}
+        return {
+            "education_rows": len(edu),
+            **await eng.agent_fill_section(session, page, section="Education", instructions=entries, max_steps=10),
+        }
 
     async def _combobox(self, page: Any, name: str, value: str) -> bool:
         """react-select: open, type (filters menu), click the field-scoped option."""
