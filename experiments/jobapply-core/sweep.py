@@ -146,26 +146,35 @@ async def main_async(args: argparse.Namespace) -> None:
     if ss_dir:
         Path(ss_dir).mkdir(parents=True, exist_ok=True)
 
-    results: list[dict] = []
-    print(f"[sweep] {len(urls)} urls | escalate={args.escalate} | {len(profiles)} profile(s): "
-          f"{[n for n, _ in profiles]}", flush=True)
-    for i, u in enumerate(urls):
+    conc = max(1, args.concurrency)
+    sem = asyncio.Semaphore(conc)
+    results: list[dict | None] = [None] * len(urls)
+    done = {"n": 0}
+    print(f"[sweep] {len(urls)} urls | escalate={args.escalate} | concurrency={conc} | "
+          f"{len(profiles)} profile(s): {[n for n, _ in profiles]}", flush=True)
+
+    async def worker(i: int, u: str) -> None:
         pname, profile = profiles[i % len(profiles)]
         ss = str(Path(ss_dir) / f"{i:03d}.png") if ss_dir else None
-        r = await _one(u, profile, args.resume, args.escalate, ss, args.timeout)
+        async with sem:  # bound to N concurrent browser sessions; each _one owns its own session
+            r = await _one(u, profile, args.resume, args.escalate, ss, args.timeout)
         r["profile"] = pname
-        results.append(r)
-        out.write_text(json.dumps(results, indent=1))  # incremental — partial progress survives
+        results[i] = r
+        done["n"] += 1
+        with contextlib.suppress(Exception):
+            out.write_text(json.dumps([x for x in results if x], indent=1))  # incremental
         t = r.get("tiers") or {}
         print(
-            f"[{i + 1}/{len(urls)}] {r.get('adapter', '?').replace('Adapter', ''):<11} {pname:<10} "
+            f"[{done['n']}/{len(urls)}] {r.get('adapter', '?').replace('Adapter', ''):<11} {pname:<10} "
             f"{r.get('status', '?'):<8} FAIL={t.get('FAIL', '-')} "
             f"filled={r.get('filled', '-')}/{r.get('fields_total', '-')} "
             f"${r.get('cost', 0) or 0:.4f} {r.get('secs', '?')}s  {u}",
             flush=True,
         )
-        _reap_chromium()  # don't let killed-but-lingering Chromium accumulate across jobs
-    _summary(results)
+
+    await asyncio.gather(*(worker(i, u) for i, u in enumerate(urls)))
+    _reap_chromium()  # final cleanup only (NEVER mid-run — it would kill concurrent sessions)
+    _summary([x for x in results if x])
 
 
 def main() -> None:
@@ -184,6 +193,7 @@ def main() -> None:
     p.add_argument("--screenshots", default=None, help="dir to save per-job filled-form PNGs")
     p.add_argument("--escalate", action="store_true", help="allow L3 agent (pricey); default off = cheap proof")
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--concurrency", type=int, default=1, help="N jobs (browser sessions) in parallel")
     p.add_argument("--timeout", type=float, default=150.0, help="per-job seconds before TIMEOUT")
     args = p.parse_args()
     asyncio.run(main_async(args))
