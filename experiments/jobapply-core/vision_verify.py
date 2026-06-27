@@ -110,15 +110,16 @@ def make_loop_verify_hook(verify_at: int = 2, stop_at: int = 3) -> Any:
                 if '"filled": true' in verdict.lower() or "'filled': true" in verdict.lower() or '"filled":true' in verdict.lower():
                     verified.add(key)
                 agent.add_new_task(
-                    f"LOOP GUARD (automatic visual check): you typed into the '{label}' field {n}x. "
-                    f"Vision model reports for '{label}': {verdict}. If filled=true, the '{label}' field "
-                    f"IS DONE — issue NO further input into '{label}'; move to another field or call done."
+                    f"LOOP GUARD (automatic visual check): the '{label}' field is ALREADY FILLED with "
+                    f"\"{key[:60]}\" (you typed it {n}x; its state read-back is a false-empty). Vision "
+                    f"model confirms for '{label}': {verdict}. The '{label}' field IS DONE — do NOT type "
+                    f"\"{key[:30]}\" into '{label}' again; move to the next field or call done."
                 )
             elif n >= stop_at and key in verified:
                 label = await _field_label(agent.browser_session, params.get("index"))
                 agent.add_new_task(
-                    f"LOOP GUARD: the '{label}' field is vision-verified FILLED yet you keep re-typing it. "
-                    f"The form is filled; stopping the fill-only run now."
+                    f"LOOP GUARD: the '{label}' field is vision-verified FILLED with \"{key[:60]}\" yet you "
+                    f"keep re-typing it. The form is filled; stopping the fill-only run now."
                 )
                 try:
                     res = agent.stop()
