@@ -169,10 +169,14 @@ class GreenhouseAdapter(ATSAdapter):
         inp = await eng.first(page, "#candidate-location") or await self._locate(page, "location")
         if not inp:
             return False
+        # Type the CITY portion only. The full "San Francisco, CA, USA" (commas) does NOT match
+        # the geocode results ("San Francisco, California, United States") so the menu never opens;
+        # the bare city "San Francisco" surfaces the municipality as the pre-focused option-0.
+        city = (value or "").split(",")[0].strip() or value
         try:
             await inp.click()
             await asyncio.sleep(0.3)
-            await inp.fill(value)  # profile location verbatim -> the municipality is option-1
+            await inp.fill(city)
         except Exception:
             return False
         got_menu = False
