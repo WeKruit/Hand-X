@@ -362,13 +362,13 @@ async def _do_record(args: argparse.Namespace, *, model: str, history_path: str,
                                   # back empty -> retype loops. Raise for speed on simple forms.
         calculate_cost=True,      # native cost tracking -> history.usage
     )
-    # use_vision="auto" + the agent-invoked verify_field_visually action is the proven floor
-    # ($0.096). The on_step_end loop hook rides on a CACHED + CAPPED visual check (see
-    # vision_verify): each looping field is vision-checked at most once per page, the page is
-    # capped at GH_VERIFY_MAX_CALLS VLM calls, and it injects ONE nudge per field only on a
-    # vision-confirmed false-empty (else silent). It NEVER stops the agent — a single looping
-    # field must not abort a multi-field form; the agent finishes the form and calls done().
-    history = await agent.run(max_steps=args.max_steps, on_step_end=make_loop_verify_hook())
+    # DEFAULT = the proven floor: use_vision="auto" + the agent-invoked verify_field_visually
+    # action ($0.096, loop-free on this form). The on_step_end loop hook is OPT-IN (--loop-guard):
+    # it's cached/capped + nudge-only + never stops the agent, but its add_new_task nudges evict
+    # prompt cache, so it measured +18% with no gain unless auto-vision actually loops. Reserve it
+    # for multi-page ATSs where the agent genuinely re-types false-empties.
+    hook = make_loop_verify_hook() if getattr(args, "loop_guard", False) else None
+    history = await agent.run(max_steps=args.max_steps, on_step_end=hook)
     agent.save_history(history_path)  # the cached "script" (full multi-page trajectory)
     return history, agent
 
@@ -530,6 +530,11 @@ def main() -> None:
                         help="Cap the step-history sent to the LLM each step (browser-use max_history_items; "
                              "None=full). Long forms grow history every step -> quadratic input cost; capping "
                              "to e.g. 10 keeps the first step + recent ones and elides the middle. Must be >5.")
+        sp.add_argument("--loop-guard", action="store_true",
+                        help="OPT-IN: wire the deterministic on_step_end loop hook (cached/capped, nudge-only). "
+                             "OFF by default — measured +18%% ($0.113 vs $0.096) with no gain on a non-looping "
+                             "form because its add_new_task nudges EVICT prompt cache. Enable only for forms "
+                             "where plain auto-vision genuinely loops (multi-page Workday/Oracle).")
 
     pr = sub.add_parser("record", help="Run + record the application trajectory")
     common(pr)
