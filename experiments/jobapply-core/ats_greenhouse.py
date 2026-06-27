@@ -139,7 +139,7 @@ class GreenhouseAdapter(ATSAdapter):
         )
         return {
             "education_rows": len(edu),
-            **await eng.agent_fill_section(session, page, section="Education", instructions=entries, max_steps=10),
+            **await eng.agent_fill_section(session, page, section="Education", instructions=entries, max_steps=14),
         }
 
     async def _combobox(self, page: Any, name: str, value: str) -> bool:

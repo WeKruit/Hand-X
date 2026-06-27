@@ -362,10 +362,15 @@ async def agent_fill_section(session: Any, page: Any, *, section: str, instructi
     task = (
         f"You are already on a job-application page. Fill ONLY the {section} section: {instructions}. "
         f"Each {section} field (School, Degree, Discipline, etc.) is a SEARCHABLE dropdown — scroll to "
-        "it, click it, type the value, and pick the closest matching option (e.g. Degree 'B.S.' -> "
-        "'Bachelor of Science'). Use the 'Add another' link before each additional entry. Touch NOTHING "
-        "outside this section. The Submit button is DISABLED on purpose — do NOT try to submit and do "
-        "NOT navigate. Call done once the section's rows show the values."
+        "it, click it, type, and pick an option. CRITICAL: these are CLOSED lists, so you must pick the "
+        "CLOSEST AVAILABLE option, not insist on an exact string. Map abbreviations (Degree 'B.S.' -> "
+        "'Bachelor's Degree' / 'Bachelor of Science'; 'M.S.' -> 'Master's Degree' / 'Master of Science'). "
+        "If a search shows 'No options', the list doesn't have that exact term — RETRY with a SHORTER or "
+        "broader term (e.g. 'Electrical and Computer Engineering' -> 'Electrical' -> 'Engineering' -> "
+        "'Computer'), then pick the nearest option offered. Do not leave a dropdown with text typed but no "
+        "option selected. Use 'Add another' before each additional entry. Touch NOTHING outside this "
+        "section. The Submit button is DISABLED on purpose — do NOT submit and do NOT navigate. Call done "
+        "once every dropdown in the section shows a SELECTED value."
     )
     ok = True
     try:
