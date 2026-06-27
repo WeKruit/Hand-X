@@ -358,11 +358,11 @@ async def _do_record(args: argparse.Namespace, *, model: str, history_path: str,
         calculate_cost=True,      # native cost tracking -> history.usage
     )
     # use_vision="auto" + the agent-invoked verify_field_visually action is the proven floor
-    # ($0.096, 0 nudges). The deterministic on_step_end loop hook now rides on a CACHED + CAPPED
-    # visual check (see vision_verify): a field is vision-checked at most once per page, the page
-    # is capped at GH_VERIFY_MAX_CALLS VLM calls, and it nudges ONLY on a vision-confirmed
-    # false-empty (else silent). So it catches residual retype loops auto-vision misses without
-    # the per-field VLM storm that made the old hook too noisy.
+    # ($0.096). The on_step_end loop hook rides on a CACHED + CAPPED visual check (see
+    # vision_verify): each looping field is vision-checked at most once per page, the page is
+    # capped at GH_VERIFY_MAX_CALLS VLM calls, and it injects ONE nudge per field only on a
+    # vision-confirmed false-empty (else silent). It NEVER stops the agent — a single looping
+    # field must not abort a multi-field form; the agent finishes the form and calls done().
     history = await agent.run(max_steps=args.max_steps, on_step_end=make_loop_verify_hook())
     agent.save_history(history_path)  # the cached "script" (full multi-page trajectory)
     return history, agent

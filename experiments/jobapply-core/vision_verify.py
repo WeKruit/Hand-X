@@ -145,26 +145,30 @@ async def _field_label(session: Any, index: Any) -> str:
     return f"field #{index}"
 
 
-def make_loop_verify_hook(verify_at: int = 2, stop_at: int = 3) -> Any:
-    """Return an on_step_end(agent) callback that DETERMINISTICALLY breaks the false-empty
-    re-do loop for ANY field action — text input, dropdown select, or duplicate option click
-    (multi-select). Keyed by the action's value (or click#index), counted across the whole run
-    (interleaving-proof).
+def make_loop_verify_hook(verify_at: int = 2) -> Any:
+    """Return an on_step_end(agent) callback that NUDGES the agent off a false-empty re-do
+    loop for ANY field action — text input, dropdown select, or duplicate option click
+    (multi-select). Keyed by the action's value (or click#index), counted across the whole
+    run (interleaving-proof).
 
-    Cost-safe by construction:
-      * Visual checks are CACHED + CAPPED per page (see visual_check) — a field costs one VLM
-        call at most, and the page costs at most VLM_MAX_CALLS total.
-      * On the `verify_at`-th repeat it consults the cheap visual_check and nudges ONLY when
-        vision CONFIRMS the field is already filled (a true false-empty) — naming the FIELD +
-        the VALUE so bu-2-0 cannot re-hallucinate it empty. If vision says empty (or the budget
-        is spent) it stays SILENT: the agent is legitimately filling, so we never false-skip.
-      * If a vision-VERIFIED field is still re-done to `stop_at`, agent.stop() — fill-only, so
-        the filled form means stopping IS success.
-    The page cache/budget reset on navigation (new page == fresh visual truth)."""
+    SAFE by construction — it NEVER stops the agent. A single looping field must never abort
+    a multi-field application (an earlier version called agent.stop() on the 3rd re-do of the
+    flaky phone widget and killed the run with most of the form unfilled). The hook only ever
+    injects ONE corrective nudge per field and lets the agent finish the form / call done().
+
+    Cost-safe:
+      * EXACTLY ONCE per field (the `verify_at`-th re-do) it consults the cheap visual_check;
+        further re-dos of the same field add nothing (the nudge is already in context).
+      * visual_check is CACHED + CAPPED per page — a field costs one VLM call at most and the
+        page is capped at VLM_MAX_CALLS; over budget it returns capped -> the hook stays silent.
+      * It nudges ONLY when vision CONFIRMS the field is already filled (a true false-empty),
+        naming the FIELD + the VALUE so bu-2-0 cannot re-hallucinate it empty. If vision says
+        empty (or budget spent) it stays SILENT — the agent is legitimately filling.
+    The per-page VLM budget resets on navigation (new page == fresh visual truth)."""
     from collections import defaultdict
 
     counts: dict[str, int] = defaultdict(int)
-    verified: set[str] = set()
+    nudged: set[str] = set()
     last_url = {"u": None}
 
     async def on_step_end(agent: Any) -> None:
@@ -188,34 +192,21 @@ def make_loop_verify_hook(verify_at: int = 2, stop_at: int = 3) -> Any:
                 continue
             key = (str(val).strip()[:80] if val else "") or f"click#{idx}"
             counts[key] += 1
-            n = counts[key]
+            if counts[key] != verify_at or key in nudged:
+                continue  # nudge each looping field at most ONCE; never on the 1st do
 
-            if n == verify_at:
-                label = await _field_label(session, idx)
-                verdict = await visual_check(session, f"the '{label}' field", key=label)
-                if not _is_filled(verdict):
-                    continue  # empty (agent legitimately filling) or budget spent -> SILENT
-                verified.add(key)
-                shown = str(val)[:60] if val else label
-                agent.add_new_task(
-                    f"LOOP GUARD (automatic visual check): the '{label}' field ALREADY has \"{shown}\" "
-                    f"set (you did this {n}x; its state read-back is a false-empty). Vision model confirms "
-                    f"for '{label}': {verdict}. '{label}' IS DONE — do NOT input or re-select \"{shown}\" "
-                    f"into '{label}' again (avoid duplicate entries); move to the next field or call done."
-                )
-            elif n >= stop_at and key in verified:
-                label = await _field_label(session, idx)
-                agent.add_new_task(
-                    f"LOOP GUARD: the '{label}' field is vision-verified FILLED yet you keep re-doing it. "
-                    f"The form is filled; stopping the fill-only run now."
-                )
-                try:
-                    res = agent.stop()
-                    if hasattr(res, "__await__"):
-                        await res
-                except Exception:
-                    pass
-                return
+            label = await _field_label(session, idx)
+            verdict = await visual_check(session, f"the '{label}' field", key=label)
+            if not _is_filled(verdict):
+                continue  # empty (agent legitimately filling) or budget spent -> SILENT
+            nudged.add(key)
+            shown = str(val)[:60] if val else label
+            agent.add_new_task(
+                f"LOOP GUARD (automatic visual check): the '{label}' field ALREADY has \"{shown}\" "
+                f"set (you did this {counts[key]}x; its state read-back is a false-empty). Vision model "
+                f"confirms for '{label}': {verdict}. '{label}' IS DONE — do NOT input or re-select "
+                f"\"{shown}\" into '{label}' again (avoid duplicate entries); move to the next unfilled field."
+            )
 
     return on_step_end
 
