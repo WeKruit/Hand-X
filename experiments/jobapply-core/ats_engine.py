@@ -284,7 +284,10 @@ authorized_to_work_us, requires_sponsorship, visa_status, citizenship). An age q
 employment at a NAMED company, a family/relationship or conflict-of-interest tie, owning or \
 controlling intellectual property, being a current/former government or military/DOD employee, an \
 existing non-compete / non-disclosure / non-solicitation agreement, criminal or disciplinary \
-history — default to "No" (the applicant has no such tie unless the profile says so).
+history — default to "No" (the applicant has no such tie unless the profile says so). For a \
+"select all that apply" / checkbox question the profile does not cover, choose the neutral \
+none-of-the-above option if one is present ("Neither" / "None" / "None of the above" / "Not \
+applicable"); otherwise leave it unchecked.
 - SAFE DEFAULTS when there is no exact profile basis (do NOT leave a reasonable field blank, but \
 NEVER invent specific data — zip, salary, employee id, address, references): \
 "Preferred name"/"preferred first name" -> the profile's first name; \
@@ -412,7 +415,7 @@ async def agent_fill_section(session: Any, page: Any, *, section: str, instructi
 
 
 async def repair_and_advance(
-    session: Any, page: Any, errors: list[str], advance_label: str, max_steps: int = 10
+    session: Any, page: Any, errors: list[str], advance_label: str, max_steps: int = 22
 ) -> bool:
     """Agent-driven recovery for a step that FAILED validation on advance. KEY finding: once a
     platform (Workday) rejects a Save, NO deterministic re-fill re-arms it — not browser-use
@@ -456,7 +459,9 @@ async def repair_and_advance(
         "applicant — '18 or older' -> Yes; questions about a prior tie the resume does not mention "
         "(prior employment at a named company, family/conflict ties, owning IP, gov/military "
         "employment, non-compete/NDA) -> No; authorized to work in the US -> Yes, require visa "
-        "sponsorship -> No (unless the form data says otherwise). Do NOT leave required questions "
+        "sponsorship -> No (unless the form data says otherwise). For a 'select all that apply' / "
+        "checkbox question the resume doesn't cover, tick the none-of-the-above option ('Neither' / "
+        "'None' / 'None of the above' / 'Not applicable') if present. Do NOT leave required questions "
         "blank.\n"
         "Prefer values already on the form / resume; for the screening defaults above use the stated "
         "ordinary-applicant answer. CRITICAL: every field is "
