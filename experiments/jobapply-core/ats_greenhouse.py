@@ -154,8 +154,8 @@ class GreenhouseAdapter(ATSAdapter):
         except Exception:
             return False
         want = value.strip().lower()
-        for _ in range(6):
-            await asyncio.sleep(0.4)
+        for i in range(8):  # observe: poll the menu until a real match shows (geocode/search settles)
+            await asyncio.sleep(0.35)
             # Scope to THIS field's react-select menu. A bare [role="option"] also matches
             # the phone widget's 245-item country <li> list and would mis-click a country.
             opts = await page.get_elements_by_css_selector(
@@ -163,23 +163,27 @@ class GreenhouseAdapter(ATSAdapter):
             )
             if not opts:
                 continue
-            exact, partial = None, None
+            exact = partial = None
             for o in opts:
                 try:
-                    txt = ((await o.evaluate("() => this.textContent")) or "").strip()
+                    txt = ((await o.evaluate("() => this.textContent")) or "").strip().lower()
                 except Exception:
                     continue
-                if txt.lower() == want:
+                if txt == want:
                     exact = o
                     break
-                if partial is None and want and want in txt.lower():
+                # bidirectional: the option may EXTEND or ABBREVIATE the mapped value
+                # ('Bachelor of Science' vs option 'B.S.', or 'Yes' vs 'Yes, I ...').
+                if partial is None and want and (want in txt or txt in want):
                     partial = o
-            target = exact or partial or opts[0]
-            try:
-                await target.click()
-                return True
-            except Exception:
-                return False
+            # pick the best; only fall to the first filtered option once the search has settled
+            # (single option, or after a few polls) — never click opts[0] prematurely.
+            target = exact or partial or (opts[0] if (len(opts) == 1 or i >= 4) else None)
+            if target:
+                with contextlib.suppress(Exception):
+                    await target.click()
+                    return True
+        return False
         return False
 
     async def _geocomplete(self, session: Any, page: Any, value: str) -> bool:
