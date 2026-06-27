@@ -111,11 +111,32 @@ def _summary(results: list[dict]) -> None:
     print("  " + "-" * 88)
     print(f"  TOTAL: {g_jobs} jobs | full-coverage {g_full} ({(100*g_full/g_jobs if g_jobs else 0):.0f}%) | "
           f"spend ${g_cost:.3f} | avg ${ (g_cost/g_jobs if g_jobs else 0):.4f}/job")
+    # per-profile breakdown (generalization across rotated user data)
+    byp: dict[str, list[dict]] = {}
+    for r in results:
+        byp.setdefault(r.get("profile", "?"), []).append(r)
+    if len(byp) > 1:
+        print("  " + "-" * 88)
+        print("  per-profile full-coverage (rotated user data):")
+        for pn, rows in sorted(byp.items()):
+            fc = sum(1 for r in rows if r.get("status") == "FILLED" and (r.get("tiers") or {}).get("FAIL", 1) == 0)
+            print(f"    {pn:<14} {fc:>3}/{len(rows):<3} full-cov  ({100*fc/len(rows) if rows else 0:.0f}%)")
     print("=" * 92)
 
 
+def _load_profiles(args: argparse.Namespace) -> list[tuple[str, dict]]:
+    """One or many profiles. --profiles takes a DIR (all *.json) or a comma-list of paths and
+    ROTATES them across jobs (job i -> profiles[i % N]) so generalization is tested at scale."""
+    if args.profiles:
+        src = args.profiles
+        paths = sorted(Path(src).glob("*.json")) if Path(src).is_dir() else [Path(p.strip()) for p in src.split(",") if p.strip()]
+    else:
+        paths = [Path(args.profile)]
+    return [(p.stem, json.loads(p.read_text())) for p in paths]
+
+
 async def main_async(args: argparse.Namespace) -> None:
-    profile = json.loads(Path(args.profile).read_text())
+    profiles = _load_profiles(args)
     urls = _load_urls(args.urls)
     if args.limit:
         urls = urls[: args.limit]
@@ -126,15 +147,18 @@ async def main_async(args: argparse.Namespace) -> None:
         Path(ss_dir).mkdir(parents=True, exist_ok=True)
 
     results: list[dict] = []
-    print(f"[sweep] {len(urls)} urls | escalate={args.escalate} | profile={Path(args.profile).name}", flush=True)
+    print(f"[sweep] {len(urls)} urls | escalate={args.escalate} | {len(profiles)} profile(s): "
+          f"{[n for n, _ in profiles]}", flush=True)
     for i, u in enumerate(urls):
+        pname, profile = profiles[i % len(profiles)]
         ss = str(Path(ss_dir) / f"{i:03d}.png") if ss_dir else None
         r = await _one(u, profile, args.resume, args.escalate, ss, args.timeout)
+        r["profile"] = pname
         results.append(r)
         out.write_text(json.dumps(results, indent=1))  # incremental — partial progress survives
         t = r.get("tiers") or {}
         print(
-            f"[{i + 1}/{len(urls)}] {r.get('adapter', '?').replace('Adapter', ''):<12} "
+            f"[{i + 1}/{len(urls)}] {r.get('adapter', '?').replace('Adapter', ''):<11} {pname:<10} "
             f"{r.get('status', '?'):<8} FAIL={t.get('FAIL', '-')} "
             f"filled={r.get('filled', '-')}/{r.get('fields_total', '-')} "
             f"${r.get('cost', 0) or 0:.4f} {r.get('secs', '?')}s  {u}",
@@ -153,7 +177,8 @@ def main() -> None:
         load_dotenv(HERE / ".env")
     p = argparse.ArgumentParser(description="Fill-only deterministic sweep over many ATS job URLs")
     p.add_argument("--urls", required=True, help="JSON: flat list or {ats: [urls]}")
-    p.add_argument("--profile", required=True)
+    p.add_argument("--profile", default=None, help="single profile JSON (or use --profiles to rotate)")
+    p.add_argument("--profiles", default=None, help="DIR of *.json or comma-list — ROTATED across jobs")
     p.add_argument("--resume", default=None)
     p.add_argument("--out", default="runs/sweep_results.json")
     p.add_argument("--screenshots", default=None, help="dir to save per-job filled-form PNGs")
