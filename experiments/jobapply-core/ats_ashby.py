@@ -208,6 +208,9 @@ class AshbyAdapter(ATSAdapter):
                 ok = await self._check_option(page, path, part) or ok
             return ok
 
+        if ntype == "single_select" and await self._has_radios(page, path):
+            return await self._fill_radio(page, path, value)  # renders as a radio fieldset, not a combobox
+
         if ntype in ("single_select", "location", "date"):
             return await self._fill_combobox(page, field, value)
 
@@ -262,6 +265,32 @@ class AshbyAdapter(ATSAdapter):
         )
         return str(res).lower() == "true"
 
+    async def _has_radios(self, page: Any, path: str) -> bool:
+        try:
+            return bool(await page.evaluate(
+                "(p) => { const w = document.querySelector(`[data-field-path=\"${p}\"]`);"
+                " return !!(w && w.querySelector('input[type=radio]')); }",
+                path,
+            ))
+        except Exception:
+            return False
+
+    async def _fill_radio(self, page: Any, path: str, value: str) -> bool:
+        """Ashby single_select that renders as a RADIO fieldset (e.g. pronouns) — not a combobox.
+        Click the radio whose label closest-matches the mapped value (bidirectional substring)."""
+        try:
+            return str(await page.evaluate(
+                "([p, want]) => { const w = document.querySelector(`[data-field-path=\"${p}\"]`); if(!w) return false;"
+                " const norm = s => (s||'').replace(/\\s+/g,'').toLowerCase(); const wn = norm(want);"
+                " const rs = [...w.querySelectorAll('input[type=radio]')];"
+                " const lab = r => norm(((document.querySelector(`label[for=\"${r.id}\"]`)||r.closest('label')||{}).textContent)||r.value||'');"
+                " let hit = rs.find(r => lab(r) === wn) || rs.find(r => wn && (lab(r).includes(wn) || wn.includes(lab(r))));"
+                " if(!hit) return false; hit.click(); return true; }",
+                [path, value],
+            )).lower() == "true"
+        except Exception:
+            return False
+
     async def _fill_combobox(self, page: Any, field: FormField, value: str) -> bool:
         """SingleSelect / Location / Date custom widget: focus the input, type to filter,
         click the matching listbox option. Falls back to leaving the typed text if no
@@ -299,10 +328,14 @@ class AshbyAdapter(ATSAdapter):
                 if n == want:
                     exact = o
                     break
-                if partial is None and ((want and want in n) or (is_loc and city and city in n)):
+                # bidirectional substring (the DOM option may extend OR abbreviate the mapped label,
+                # e.g. mapped 'Yes' vs option 'Yes, I have ...') + the location city match.
+                if partial is None and ((want and (want in n or n in want)) or (is_loc and city and city in n)):
                     partial = o
-            # Location: the first option IS the geocoded municipality — accept it if nothing better.
-            target = exact or partial or (opts[0] if is_loc else None)
+            # Pick the CLOSEST option, never leave it unselected: location -> the geocoded option-0;
+            # any combobox -> if typing filtered to a SINGLE option, that's the match (the LLM already
+            # chose a valid value, so the lone filtered option is it).
+            target = exact or partial or (opts[0] if (is_loc or len(opts) == 1) else None)
             if target:
                 with contextlib.suppress(Exception):
                     await target.click()
@@ -345,6 +378,19 @@ class AshbyAdapter(ATSAdapter):
                   }
                   return false;
                 }""",
+                [path, want],
+            )
+            return str(got).lower() == "true"
+
+        if ntype == "single_select" and await self._has_radios(page, path):
+            # radio fieldset (e.g. pronouns): success = the CHECKED radio's label matches.
+            want = eng.norm(value)
+            got = await page.evaluate(
+                "([p, w]) => { const f = document.querySelector(`[data-field-path=\"${p}\"]`); if(!f) return false;"
+                " const r = [...f.querySelectorAll('input[type=radio]')].find(x => x.checked); if(!r) return false;"
+                " const n = (((document.querySelector(`label[for=\"${r.id}\"]`)||r.closest('label')||{}).textContent)||r.value||'')"
+                "   .replace(/\\s+/g,'').toLowerCase();"
+                " return !w || n.includes(w) || w.includes(n); }",
                 [path, want],
             )
             return str(got).lower() == "true"
