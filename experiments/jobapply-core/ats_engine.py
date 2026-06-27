@@ -276,6 +276,15 @@ For demographic / EEO questions (gender, race/ethnicity, veteran, disability, se
 orientation): if the profile DISCLOSES that attribute, pick the option matching it; ONLY if the \
 profile does not disclose it, choose a "Prefer not to say" / "I don't wish to answer" / "Decline" \
 option.
+- SCREENING / ELIGIBILITY yes-no questions: answer the safe, TRUTHFUL default for an ordinary \
+applicant rather than leaving a required question blank. Work-authorization / visa-sponsorship / \
+citizenship / export-control questions -> answer from the profile (work_authorization, \
+authorized_to_work_us, requires_sponsorship, visa_status, citizenship). An age question \
+("18 or older?") -> "Yes". Questions about a prior tie the profile does NOT mention — prior/current \
+employment at a NAMED company, a family/relationship or conflict-of-interest tie, owning or \
+controlling intellectual property, being a current/former government or military/DOD employee, an \
+existing non-compete / non-disclosure / non-solicitation agreement, criminal or disciplinary \
+history — default to "No" (the applicant has no such tie unless the profile says so).
 - SAFE DEFAULTS when there is no exact profile basis (do NOT leave a reasonable field blank, but \
 NEVER invent specific data — zip, salary, employee id, address, references): \
 "Preferred name"/"preferred first name" -> the profile's first name; \
@@ -441,7 +450,16 @@ async def repair_and_advance(
         "Science'; 'M.S.' -> \"Master's Degree\"). If it shows 'No options', RETRY with a SHORTER or "
         "broader term (e.g. 'Electrical and Computer Engineering' -> 'Electrical' -> 'Engineering'), "
         "then pick the nearest option. Never leave a dropdown with text typed but no option selected.\n"
-        "Use ONLY data already on the form / resume — never invent values. CRITICAL: every field is "
+        "3. SCREENING / ELIGIBILITY yes-no questions (18 or older?, prior employee of a named "
+        "company?, own intellectual property?, government/DOD employee?, non-compete agreement?, "
+        "work authorization / visa sponsorship?): answer the safe, TRUTHFUL default for an ordinary "
+        "applicant — '18 or older' -> Yes; questions about a prior tie the resume does not mention "
+        "(prior employment at a named company, family/conflict ties, owning IP, gov/military "
+        "employment, non-compete/NDA) -> No; authorized to work in the US -> Yes, require visa "
+        "sponsorship -> No (unless the form data says otherwise). Do NOT leave required questions "
+        "blank.\n"
+        "Prefer values already on the form / resume; for the screening defaults above use the stated "
+        "ordinary-applicant answer. CRITICAL: every field is "
         "on THIS page — NEVER open a URL, navigate, search the web, or go back/forward (it loses the "
         "form). Do NOT submit a FINAL application (any 'Submit Application' is disabled). Call done "
         "as soon as the page has advanced to the next step."
