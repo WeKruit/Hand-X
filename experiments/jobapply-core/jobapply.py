@@ -77,20 +77,29 @@ def build_instructions(submit: bool) -> str:
 - This is a multi-step wizard: after completing a page, click
   Next / Continue / Save and continue to advance to the next page.
 - ONE action at a time, then OBSERVE. After each input/click, look at the fresh
-  screenshot + state and confirm it actually took effect before the next action.
-  Do not assume an action worked. ATS forms re-render and shift element indices, so
-  a chained second action often lands on the wrong field — fill, observe, then fill
-  the next.
+  screenshot and confirm it actually took effect before the next action. ATS forms
+  re-render and shift element indices, so a chained second action often lands on the
+  wrong field — fill, observe, then fill the next.
+- THE SCREENSHOT IS GROUND TRUTH, not the DOM/state text. Custom widgets (react-select,
+  Greenhouse/Oracle/Workday selects, masked tel inputs) routinely read back EMPTY in
+  the state even when the value is visibly present on screen. If a field VISUALLY shows
+  the correct value and has no red error, it IS filled — move on. Do not re-type a field
+  just because the state text looks empty; that false-empty is the #1 cause of the
+  retype loop (e.g. phone typed once but state says empty -> do NOT retype 20 times).
 - COMBOBOX / autocomplete / react-select dropdowns (Location, School, Degree,
-  Discipline, and Yes/No questions rendered as a dropdown): type the value, OBSERVE
-  the suggestion list on the next step, then click the matching role=option (never
-  press Enter). If the typed value reads back empty, you typed but never selected an
-  option (the widget clears on blur) — type again, then click the option.
-- ALREADY-FILLED = SKIP. Before typing into any field, read its CURRENT value in the
-  screenshot/state. If it already shows the correct value, do NOT click or re-type it
-  — move on to the next empty field. Re-filling a field that is already correct is the
-  most common waste loop (especially long textareas like "Why interested" / cover
-  letter, where the text is present but you doubt it). Trust the visible value.
+  Discipline, Yes/No questions, phone country/type): type the value, WAIT 2-3s for the
+  suggestion list, then click the matching role=option (never press Enter to pick). On
+  the next step VERIFY a selected chip/token/value is visible — that, not the typed
+  text, means it committed. If no list appears, try a shorter/alternate term before
+  giving up ("United States of America" -> "United States" -> "US"; "+1"/"USA"/"Mobile"
+  for phone). Never batch a dropdown pick with a Next/Continue click in the same step.
+- COMMIT a stuck value instead of re-typing it: if a field visibly holds the right text
+  but still shows a red "required"/validation error, focus it and press Tab (or Enter)
+  to commit — do NOT re-type it and do NOT refresh the whole page. After any typed date,
+  Tab/blur away so the form re-validates.
+- BEFORE ADVANCING a page, scan the screenshot: do not click Next/Continue while red
+  errors, empty required fields, or a disabled Next button are visible — resolve those
+  first. Stay near the current section; don't jump back to re-verify filled fields.
 - DON'T LOOP ON ONE FIELD. Never input the same value into the same field more than
   TWICE. If a field still reads empty/wrong after two honest tries, it is a widget
   quirk (input mask, validation, a control you haven't revealed yet) — leave it,

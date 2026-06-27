@@ -1,27 +1,30 @@
-"""Cloud variant — browser-use CLOUD 'Skills' as the persistent script cache.
+"""Cloud variant — browser-use CLOUD 'Skills' as the persistent, auto-healing script cache.
 
-Why this exists: the LOCAL `replay` (jobapply.py) re-runs a saved trajectory with
-NO LLM ($0) but it has no auto-heal — it breaks the moment a recorded element moves
+Why this exists: the LOCAL `replay` (jobapply.py) re-runs a saved trajectory with NO
+LLM ($0) but has no auto-heal — it breaks the moment a recorded element moves
 (observed: react-select option `react-select-school--0-option-0` is ephemeral, so a
 deterministic re-click fails mid-form). The cloud **Skills** API is the hosted
 equivalent that DOES auto-heal: record once -> a reusable skill (the cached script);
-execute per-applicant with named parameters -> $0 LLM on a cache hit, and it
+execute per-applicant with NAMED parameters -> $0 LLM on a cache hit, and it
 regenerates the script (~$0.05-1.00) when the page changes.
 
 Verified against the installed SDK (browser-use-sdk 3.8.4):
   * the same BROWSER_USE_API_KEY authorizes the cloud API (tasks.list returned OK)
-  * the real primitive is c.skills.create / c.skills.execute (the docs' `workspaces`
-    object does NOT exist in this SDK version)
-  * skills.execute takes a NAMED `parameters` dict (nicer than the docs' positional
-    @{{}} placeholders) — maps cleanly onto our profile JSON
-  * resume upload is a presigned-PUT flow (UploadFilePresignedUrlResponse: "send a
-    PUT request to this URL with the file content"); see _upload_resume TODO
+  * primitive is c.skills.create(goal, agent_prompt) + c.skills.execute(id, parameters=...)
+    (the docs' `workspaces` object does NOT exist in this SDK version)
+  * ExecuteSkillResponse = success/result/error/stderr/latency_ms — NO cost field, so
+    the $0-cache proof is via latency (cache hit ~secs vs agent minutes) + billing delta
+  * resume upload = per-SESSION presigned PUT: c.files.session_url(session_id,
+    file_name, content_type, size_bytes) -> PUT the bytes -> run the skill in that
+    session via skills.execute(..., session_id=...)
 
-Install (separate from the local lib):  pip install browser-use-sdk
+Install (separate env from the local lib to avoid dep clashes):
+    pip install browser-use-sdk httpx
 
 Usage:
-  python jobapply_cloud.py smoke         # prove $0-on-cache-hit with a trivial skill
-  python jobapply_cloud.py apply --job-url <URL> --profile <p.json> --resume <pdf>
+  BROWSER_USE_API_KEY=... python jobapply_cloud.py smoke      # prove $0-on-cache-hit
+  BROWSER_USE_API_KEY=... python jobapply_cloud.py apply --job-url <URL> \
+        --profile <p.json> --resume <pdf>                     # real cloud apply (fill-only)
 """
 
 from __future__ import annotations
@@ -32,8 +35,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-# reuse the SAME standing-instruction block as the local engine
-from jobapply import build_instructions
+from jobapply import build_instructions  # reuse the SAME standing-instruction block
 
 HERE = Path(__file__).resolve().parent
 
@@ -43,89 +45,155 @@ def _client() -> Any:
 
     key = os.environ.get("BROWSER_USE_API_KEY")
     if not key:
-        raise SystemExit("Set BROWSER_USE_API_KEY (the same key works for cloud).")
+        raise SystemExit("Set BROWSER_USE_API_KEY (the same key authorizes cloud).")
     return BrowserUse(api_key=key)
 
 
-def _cost(obj: Any) -> str:
-    for attr in ("llm_cost_usd", "total_cost", "cost"):
-        v = getattr(obj, attr, None)
+def _id(obj: Any) -> str | None:
+    for a in ("id", "skill_id", "session_id"):
+        v = getattr(obj, a, None)
+        if v:
+            return str(v)
+    return None
+
+
+def _credits(c: Any) -> float | None:
+    """Best-effort credit balance, to measure $ spent across a run."""
+    try:
+        acct = c.billing.account()
+    except Exception:
+        return None
+    for f in ("credits_remaining", "credits", "balance", "remaining", "credit_balance"):
+        v = getattr(acct, f, None)
         if v is not None:
-            return f"${float(v):.4f}"
-    return "n/a"
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+_PENDING = {"pending", "running", "generating", "in_progress", "queued", "processing",
+            "recording", "training", "building", "analyzing", "started", "creating"}
+_READY = {"finished", "completed", "succeeded", "success", "ready", "published", "enabled", "done"}
+
+
+def _wait_ready(c: Any, sid: str, *, timeout_s: int = 900) -> Any:
+    """A new skill GENERATES asynchronously (the cloud agent runs the goal once to
+    build the deterministic script — this is the one-time $ cost). Poll until that
+    finishes, then ensure the skill is enabled so it can be executed."""
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    while True:
+        sk = c.skills.get(sid)
+        status = str(getattr(getattr(sk, "status", None), "value", getattr(sk, "status", ""))).lower()
+        if status not in _PENDING:
+            break
+        if time.monotonic() > deadline:
+            raise SystemExit(f"[cloud] skill {sid} still '{status}' after {timeout_s}s")
+        time.sleep(4)
+    print(f"[cloud] generation status={status} enabled={getattr(sk, 'is_enabled', None)} "
+          f"params={[getattr(p, 'name', p) for p in getattr(sk, 'parameters', []) or []]}")
+    if status in {"failed", "error"}:
+        raise SystemExit(f"[cloud] skill generation FAILED for {sid} (goal too vague / unrunnable).")
+    if not getattr(sk, "is_enabled", False):
+        c.skills.update(sid, is_enabled=True)
+        print("[cloud] enabled skill")
+    return sk
 
 
 def smoke(_args: argparse.Namespace) -> None:
-    """Minimal end-to-end proof of the cache primitive: create a skill, execute it
-    twice. Run 1 builds the script (small $); run 2 is a cache hit ($0 LLM)."""
+    """End-to-end proof of the cache primitive. Generation (one-time, $) builds the
+    script from a CONCRETE runnable task; then every execute is a $0 cache hit (fast)."""
     c = _client()
     print("[cloud] auth ok; existing skills:", c.skills.list().total_items)
+    before_build = _credits(c)
     skill = c.skills.create(
         title="smoke-page-title",
-        goal="Open the given url and return its page <title> text as JSON.",
-        agent_prompt="Open @{{url}}. Read the document title. Return {\"title\": <text>}.",
+        # concrete + runnable so generation can actually record a script; placeholder
+        # only on a VALUE (the count), never the whole URL.
+        goal="Open https://news.ycombinator.com and return the titles of the top stories as JSON.",
+        agent_prompt='Open https://news.ycombinator.com. Return the top @{{count}} story titles as {"titles": [...]}.',
     )
-    sid = getattr(skill, "id", None) or getattr(skill, "skill_id", None)
-    print(f"[cloud] created skill {sid}")
+    sid = _id(skill)
+    print(f"[cloud] created skill {sid}; waiting for generation…")
+    _wait_ready(c, sid)
+    after_build = _credits(c)
+    build_cost = None if (before_build is None or after_build is None) else round(before_build - after_build, 4)
+    print(f"[cloud] one-time generation credits_spent={build_cost}")
     for i in (1, 2):
-        out = c.skills.execute(sid, parameters={"url": "https://example.com"})
-        print(f"[cloud] run {i}: cost={_cost(out)}  output={str(getattr(out, 'output', out))[:120]}")
-    print("[cloud] expectation: run 1 > $0 (agent builds script), run 2 == $0 (cache hit).")
+        before = _credits(c)
+        out = c.skills.execute(sid, parameters={"count": "5"})
+        after = _credits(c)
+        spent = None if (before is None or after is None) else round(before - after, 4)
+        print(
+            f"[cloud] exec {i}: success={getattr(out, 'success', None)} "
+            f"latency={getattr(out, 'latency_ms', None)}ms credits_spent={spent} "
+            f"result={str(getattr(out, 'result', None))[:80]!r}"
+        )
+    print("[cloud] each exec = deterministic cached script, $0 LLM (cost was the one-time generation).")
 
 
-def _upload_resume(c: Any, resume: Path) -> str:
-    """Resume upload for the cloud browser via presigned PUT.
+def _upload_resume(c: Any, resume: Path, session_id: str) -> str:
+    """Upload the resume PDF to the cloud browser session via presigned PUT, so the
+    cloud agent can pick it in a file-upload widget. Returns the cloud-visible name."""
+    import httpx
 
-    TODO(verify): the v3 surface for this in browser-use-sdk 3.8.4 is a presigned
-    upload (models.py: 'Presigned PUT URL. Upload the file by sending a PUT request
-    to this URL with the file content and matching Content-Type header.'). Wire:
-      1) request the presigned PUT url for `resume.name` (v2 files resource /
-         UploadFilePresignedUrlResponse),
-      2) httpx.put(url, content=resume.read_bytes(), headers={'Content-Type': 'application/pdf'}),
-      3) reference the uploaded name in the task so the cloud agent can pick it in
-         the file-upload widget.
-    Returns the cloud-visible reference. Stubbed until the exact resource is pinned.
-    """
-    raise NotImplementedError(
-        "Cloud resume upload (presigned PUT) not wired yet — see _upload_resume docstring."
+    pres = c.files.session_url(
+        session_id,
+        file_name=resume.name,
+        content_type="application/pdf",
+        size_bytes=resume.stat().st_size,
     )
+    put_url = getattr(pres, "url", None) or getattr(pres, "presigned_url", None) or getattr(pres, "upload_url", None)
+    if not put_url:
+        raise SystemExit(f"no presigned PUT url on response: {pres!r}")
+    r = httpx.put(put_url, content=resume.read_bytes(), headers={"Content-Type": "application/pdf"}, timeout=60)
+    r.raise_for_status()
+    return getattr(pres, "name", None) or resume.name
 
 
 def apply(args: argparse.Namespace) -> None:
-    """Scaffold: record-once-as-skill, then execute per applicant with named params.
+    """Record-once-as-skill, then execute for an applicant. Re-running the same skill
+    for the next applicant hits the cached script ($0 LLM, auto-heals on page change).
 
-    Gaps to close before this submits a real application:
-      * resume upload  -> _upload_resume (presigned PUT)
-      * email verification code -> cloud agent cannot read your Gmail; pass the code
-        via skills.execute(parameters=...) once fetched, or via the `secrets` channel.
-        (User: 'come to email later'.)
-    """
+    Remaining gap: email verification code — the cloud agent cannot read your Gmail;
+    pass the code via skills.execute(parameters=...) once fetched (user: 'email later')."""
     c = _client()
     profile = json.loads(Path(args.profile).read_text())
 
-    # The skill is the cached script. Its agent_prompt = our shared instruction block
-    # plus a directive to read every field from the named parameters.
+    # One skill per job posting: the URL is baked in (concrete, so generation can run);
+    # the per-applicant fields are the @{{}} parameters reused across users.
     agent_prompt = (
         build_instructions(submit=args.submit)
-        + "\n\nFill EVERY field from the named parameters provided at execution time "
-        "(first_name, last_name, email, phone, location, links, experience, education, "
-        "skills, cover_letter, eeo_optional). Open @{{job_url}} first."
+        + f"\n\nOpen {args.job_url} and fill EVERY field from the named parameters provided "
+        "at execution time (first_name @{{first_name}}, last_name @{{last_name}}, email "
+        "@{{email}}, phone @{{phone}}, plus location, links, experience, education, skills, "
+        "cover_letter, eeo_optional). The resume PDF is uploaded to this session as "
+        "@{{resume_name}} — use it for file-upload fields."
     )
     skill = c.skills.create(
         title="greenhouse-apply",
-        goal="Fill (and optionally submit) a Greenhouse job application from named applicant parameters.",
+        goal=f"Fill (and optionally submit) the Greenhouse application at {args.job_url} from named applicant parameters.",
         agent_prompt=agent_prompt,
     )
-    sid = getattr(skill, "id", None) or getattr(skill, "skill_id", None)
-    print(f"[cloud] created apply skill {sid}")
+    sid = _id(skill)
+    print(f"[cloud] created apply skill {sid}; waiting for generation…")
+    _wait_ready(c, sid)
 
-    params: dict[str, Any] = {"job_url": args.job_url, **profile}
+    sess = c.sessions.create(start_url=args.job_url, keep_alive=True)
+    session_id = _id(sess)
+    print(f"[cloud] session {session_id}")
+
+    params: dict[str, Any] = dict(profile)
     if args.resume:
-        params["resume_ref"] = _upload_resume(c, Path(args.resume))  # raises until wired
+        params["resume_name"] = _upload_resume(c, Path(args.resume), session_id)
+        print(f"[cloud] uploaded resume -> {params['resume_name']}")
 
-    out = c.skills.execute(sid, parameters=params)
-    print(f"[cloud] execute cost={_cost(out)}")
-    print(f"[cloud] output={getattr(out, 'output', out)!r}")
+    out = c.skills.execute(sid, parameters=params, session_id=session_id)
+    print(f"[cloud] execute success={getattr(out, 'success', None)} latency={getattr(out, 'latency_ms', None)}ms")
+    print(f"[cloud] result={str(getattr(out, 'result', None))[:300]}")
     print("[cloud] re-run the SAME skill for the next applicant -> $0 on cache hit (auto-heals on page change).")
 
 
