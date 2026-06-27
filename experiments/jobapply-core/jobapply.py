@@ -396,15 +396,23 @@ async def replay(args: argparse.Namespace) -> None:
         calculate_cost=True,
     )
     print(f"[replay] model={args.model} url-from-history={args.history}")
-    await agent.load_and_rerun(args.history, variables=variables or None)
+    # Always report the cache cost — even if the deterministic rerun stops early on a
+    # moved element (e.g. ephemeral react-select option). The whole point is to MEASURE
+    # the LLM cost of the deterministic replay, which holds for the steps that did run.
+    rerun = "completed"
+    try:
+        await agent.load_and_rerun(args.history, variables=variables or None)
+    except Exception as exc:
+        rerun = f"stopped early ({type(exc).__name__}: {str(exc).splitlines()[0][:80]})"
 
     # load_and_rerun populates the same usage tracker
     usage = await agent.token_cost_service.get_usage_summary()
-    print("\n----- REPLAY -----")
-    print(f"  COST:  ${usage.total_cost:.4f}")
+    print("\n----- REPLAY (browser-use deterministic cache) -----")
+    print(f"  rerun: {rerun}")
+    print(f"  COST:  ${usage.total_cost:.4f}   <-- LLM cost of replaying the cached script")
     print(f"  prompt {usage.total_prompt_tokens:,} (cached {usage.total_prompt_cached_tokens:,}) "
           f"| completion {usage.total_completion_tokens:,}")
-    print("  (deterministic fills cost $0 LLM; cost is the live email-read step + final summary)")
+    print("  (deterministic fills replay with NO LLM call; any cost is a live re-eval step)")
     if args.headless:
         await _kill(agent)
     else:
