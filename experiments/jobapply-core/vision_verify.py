@@ -56,39 +56,58 @@ async def visual_check(session: Any, target: str) -> str:
         return f'{{"filled": null, "error": "{type(exc).__name__}: {exc}"}}'
 
 
-def make_loop_verify_hook(repeat_threshold: int = 2) -> Any:
+def make_loop_verify_hook(verify_at: int = 2, stop_at: int = 4) -> Any:
     """Return an on_step_end(agent) callback that DETERMINISTICALLY breaks the false-empty
-    retype loop: if the agent types the SAME value into the SAME field on consecutive steps,
-    it runs the cheap visual check itself and injects the verdict (agent.add_new_task) so the
-    agent stops re-typing — without waiting for loop-detection nudges to pile up."""
-    seen = {"key": None, "n": 0}
+    retype loop. Keyed by the TEXT VALUE typed (NOT element index — the index shifts and the
+    retypes are interleaved with other actions, so consecutive/index detection misses them):
+      - on the `verify_at`-th time a value is typed, run the cheap visual_check; if the field
+        is visibly filled, mark it verified and inject a hard 'stop, it is filled' nudge.
+      - if a vision-VERIFIED-filled value is STILL re-typed up to `stop_at` times (bu-2-0
+        ignoring the nudge), mechanically agent.stop() — the form is filled and this is a
+        fill-only run, so stopping IS success. Caps a 21x runaway loop at ~4."""
+    from collections import defaultdict
+
+    counts: dict[str, int] = defaultdict(int)
+    verified: set[str] = set()
 
     async def on_step_end(agent: Any) -> None:
         out = getattr(agent.state, "last_model_output", None)
         if not out or not getattr(out, "action", None):
             return
-        typed = None
         for act in out.action:
             try:
                 dumped = act.model_dump(exclude_none=True)
             except Exception:
                 continue
-            for params in dumped.values():
-                if isinstance(params, dict) and "text" in params and ("index" in params or "selector" in params):
-                    typed = (params.get("index", params.get("selector")), str(params.get("text", ""))[:60])
-        if typed is None:
-            seen["key"], seen["n"] = None, 0
-            return
-        seen["n"] = seen["n"] + 1 if typed == seen["key"] else 1
-        seen["key"] = typed
-        if seen["n"] >= repeat_threshold:
-            verdict = await visual_check(agent.browser_session, typed[1])
-            agent.add_new_task(
-                f"LOOP GUARD (automatic visual check): you re-typed '{typed[1]}' into the same field "
-                f"{seen['n']}x. The vision model reports: {verdict}. If filled=true, that field IS done — "
-                f"STOP re-typing it and move on to the next field."
-            )
-            seen["n"] = 0
+            params = dumped.get("input") or dumped.get("input_text")
+            if not isinstance(params, dict) or "text" not in params:
+                continue
+            key = str(params["text"])[:80].strip()
+            if not key:
+                continue
+            counts[key] += 1
+            n = counts[key]
+            if n == verify_at:
+                verdict = await visual_check(agent.browser_session, key)
+                if '"filled": true' in verdict.lower() or "'filled': true" in verdict.lower() or '"filled":true' in verdict.lower():
+                    verified.add(key)
+                agent.add_new_task(
+                    f"LOOP GUARD (automatic visual check): you have typed '{key[:40]}…' {n}x. Vision "
+                    f"model reports: {verdict}. If filled=true this field IS DONE — issue NO further "
+                    f"input into it; move to another field or call done."
+                )
+            elif n >= stop_at and key in verified:
+                agent.add_new_task(
+                    "LOOP GUARD: this field is vision-verified FILLED yet you keep re-typing it. The "
+                    "form is filled; stopping the fill-only run now."
+                )
+                try:
+                    res = agent.stop()
+                    if hasattr(res, "__await__"):
+                        await res
+                except Exception:
+                    pass
+                return
 
     return on_step_end
 
