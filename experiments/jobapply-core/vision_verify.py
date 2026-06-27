@@ -16,7 +16,7 @@ import base64
 import os
 from typing import Any
 
-VERIFY_MODEL = os.environ.get("GH_VERIFY_MODEL", "gemini-2.5-flash-lite")
+VERIFY_MODEL = os.environ.get("GH_VERIFY_MODEL", "gemini-3.1-flash-lite")
 
 
 def _vlm() -> Any:

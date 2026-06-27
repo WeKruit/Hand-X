@@ -88,12 +88,13 @@ def build_instructions(submit: bool) -> str:
   screenshot and confirm it actually took effect before the next action. ATS forms
   re-render and shift element indices, so a chained second action often lands on the
   wrong field — fill, observe, then fill the next.
-- THE SCREENSHOT IS GROUND TRUTH, not the DOM/state text. Custom widgets (react-select,
-  Greenhouse/Oracle/Workday selects, masked tel inputs) routinely read back EMPTY in
-  the state even when the value is visibly present on screen. If a field VISUALLY shows
-  the correct value and has no red error, it IS filled — move on. Do not re-type a field
-  just because the state text looks empty; that false-empty is the #1 cause of the
-  retype loop (e.g. phone typed once but state says empty -> do NOT retype 20 times).
+- THE SCREENSHOT IS GROUND TRUTH, not the DOM state text. The state `value=` is UNRELIABLE
+  on React/Greenhouse/Workday forms — it reads EMPTY even when the field is visibly filled.
+  So NEVER decide a field is empty from the state value. Look at the screenshot: if the
+  field visibly shows the value, it IS filled — move on. If you cannot tell from the
+  screenshot, call the verify_field_visually action with the field's label for a yes/no.
+  A false-empty state is the #1 cause of the retype loop (phone typed once, state says
+  empty -> do NOT retype 20 times).
 - DROPDOWNS — USE YOUR DROPDOWN TOOLS, don't hand-click options. For any select /
   dropdown / Yes-No / single-choice field, FIRST call get_dropdown_options on it to
   read the real option list, then select_dropdown with the EXACT option text. That
@@ -342,8 +343,11 @@ async def _do_record(args: argparse.Namespace, *, model: str, history_path: str,
         browser=_browser(args.headless),
         extend_system_message=build_instructions(submit),
         available_file_paths=[resume] if resume else None,
-        use_vision="auto",
-        vision_detail_level="low",  # (b) screenshots at low detail -> far fewer image tokens
+        use_vision="auto",          # measured best: agent pulls a screenshot only when it needs
+        vision_detail_level="low",  # one (~1/run, cheap) and stays loop-free. use_vision=False was
+                                    # WORSE ($0.125 / 10 nudges) — bu-2-0 won't call the verify action
+                                    # on its own, so blind+no-call loops. Cheap-VLM offload only pays
+                                    # off when invoked deterministically (the greenhouse_fill path).
         save_conversation_path=_trace_path(args, model),  # built-in per-step cause trace
         max_actions_per_step=args.max_actions,  # default 1 = act-then-observe. Chaining on
                                   # ATS forms lands later actions on stale element indices
