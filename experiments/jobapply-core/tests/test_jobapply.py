@@ -12,6 +12,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
+import greenhouse_schema  # noqa: E402
 import jobapply  # noqa: E402
 
 
@@ -55,6 +56,35 @@ def test_map_skips_unknown_and_missing():
 def test_sample_profile_is_valid_json():
     data = json.loads((HERE.parent / "fixtures" / "sample_profile.json").read_text())
     assert data["email"] and data["first_name"]
+
+
+def test_greenhouse_parse_url():
+    assert greenhouse_schema.parse_job_url(
+        "https://job-boards.greenhouse.io/discord/jobs/8289766002"
+    ) == ("discord", "8289766002")
+
+
+def test_greenhouse_classify_offline():
+    # the standard template + one custom dropdown + one open-ended textarea
+    schema = {
+        "questions": [
+            {"label": "First Name", "required": True, "fields": [{"name": "first_name", "type": "input_text"}]},
+            {"label": "Resume", "required": True, "fields": [{"name": "resume", "type": "input_file"}]},
+            {"label": "Why are you interested?", "required": True,
+             "fields": [{"name": "question_1", "type": "textarea"}]},
+            {"label": "Authorized to work?", "required": True, "fields": [
+                {"name": "question_2", "type": "multi_value_single_select",
+                 "values": [{"label": "Yes"}, {"label": "No"}]}]},
+        ]
+    }
+    plan = greenhouse_schema.classify(schema, {"first_name": "Ruiyang"})
+    by_name = {r["name"]: r for r in plan}
+    assert by_name["first_name"]["source"] == "standard" and by_name["first_name"]["value"] == "Ruiyang"
+    assert by_name["first_name"]["llm"] is False
+    assert by_name["question_1"]["source"] == "open_ended" and by_name["question_1"]["llm"] is True
+    assert by_name["question_2"]["source"] == "select" and by_name["question_2"]["options"] == ["Yes", "No"]
+    s = greenhouse_schema.summarize(plan)
+    assert s["llm_fields"] == 1 and s["total"] == 4  # only the open-ended question costs an LLM
 
 
 if __name__ == "__main__":
