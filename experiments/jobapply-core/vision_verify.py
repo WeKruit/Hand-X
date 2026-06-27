@@ -56,6 +56,20 @@ async def visual_check(session: Any, target: str) -> str:
         return f'{{"filled": null, "error": "{type(exc).__name__}: {exc}"}}'
 
 
+def _action_target(dumped: dict) -> tuple[Any, Any]:
+    """(index, value) for any action that fills/selects a field — text input, dropdown
+    select, OR a bare option click (value None, resolved from the element). Else (None, None).
+    Generalising past text-only lets the guard catch duplicate dropdown / multi-select picks."""
+    for name in ("input", "input_text", "select_dropdown"):
+        p = dumped.get(name)
+        if isinstance(p, dict) and "text" in p:
+            return p.get("index"), str(p["text"])
+    p = dumped.get("click")
+    if isinstance(p, dict) and "index" in p:
+        return p.get("index"), None  # a click (e.g. selecting a react-select option / checkbox)
+    return None, None
+
+
 async def _field_label(session: Any, index: Any) -> str:
     """Resolve a human field label from an element index (aria-label / name / id /
     placeholder) so the loop-guard can name WHICH field, not just the typed value."""
@@ -75,13 +89,12 @@ async def _field_label(session: Any, index: Any) -> str:
 
 def make_loop_verify_hook(verify_at: int = 2, stop_at: int = 3) -> Any:
     """Return an on_step_end(agent) callback that DETERMINISTICALLY breaks the false-empty
-    retype loop. Keyed by the TEXT VALUE typed (NOT element index — the index shifts and the
-    retypes are interleaved with other actions, so consecutive/index detection misses them):
-      - on the `verify_at`-th time a value is typed, run the cheap visual_check; if the field
-        is visibly filled, mark it verified and inject a hard 'stop, it is filled' nudge.
-      - if a vision-VERIFIED-filled value is STILL re-typed up to `stop_at` times (bu-2-0
-        ignoring the nudge), mechanically agent.stop() — the form is filled and this is a
-        fill-only run, so stopping IS success. Caps a 21x runaway loop at ~4."""
+    re-do loop for ANY field action — text input, dropdown select, or duplicate option click
+    (multi-select). Keyed by the action's value (or click#index), counted across the whole run
+    (interleaving-proof). On the `verify_at`-th repeat, run the cheap visual_check, name the
+    FIELD + the VALUE it already holds in the nudge (so bu-2-0 cannot hallucinate it empty);
+    if a vision-VERIFIED field is still re-done to `stop_at`, agent.stop() — fill-only, so the
+    filled form means stopping IS success."""
     from collections import defaultdict
 
     counts: dict[str, int] = defaultdict(int)
@@ -91,35 +104,35 @@ def make_loop_verify_hook(verify_at: int = 2, stop_at: int = 3) -> Any:
         out = getattr(agent.state, "last_model_output", None)
         if not out or not getattr(out, "action", None):
             return
+        session = agent.browser_session
         for act in out.action:
             try:
                 dumped = act.model_dump(exclude_none=True)
             except Exception:
                 continue
-            params = dumped.get("input") or dumped.get("input_text")
-            if not isinstance(params, dict) or "text" not in params:
+            idx, val = _action_target(dumped)
+            if idx is None and not val:
                 continue
-            key = str(params["text"])[:80].strip()
-            if not key:
-                continue
+            key = (str(val).strip()[:80] if val else "") or f"click#{idx}"
             counts[key] += 1
             n = counts[key]
             if n == verify_at:
-                label = await _field_label(agent.browser_session, params.get("index"))
-                verdict = await visual_check(agent.browser_session, f"the '{label}' field")
+                label = await _field_label(session, idx)
+                shown = (str(val)[:60] if val else label)  # what was put / selected
+                verdict = await visual_check(session, f"the '{label}' field")
                 if '"filled": true' in verdict.lower() or "'filled': true" in verdict.lower() or '"filled":true' in verdict.lower():
                     verified.add(key)
                 agent.add_new_task(
-                    f"LOOP GUARD (automatic visual check): the '{label}' field is ALREADY FILLED with "
-                    f"\"{key[:60]}\" (you typed it {n}x; its state read-back is a false-empty). Vision "
-                    f"model confirms for '{label}': {verdict}. The '{label}' field IS DONE — do NOT type "
-                    f"\"{key[:30]}\" into '{label}' again; move to the next field or call done."
+                    f"LOOP GUARD (automatic visual check): the '{label}' field ALREADY has \"{shown}\" "
+                    f"set (you did this {n}x; its state read-back is a false-empty). Vision model confirms "
+                    f"for '{label}': {verdict}. '{label}' IS DONE — do NOT input or re-select \"{shown}\" "
+                    f"into '{label}' again (avoid duplicate entries); move to the next field or call done."
                 )
             elif n >= stop_at and key in verified:
-                label = await _field_label(agent.browser_session, params.get("index"))
+                label = await _field_label(session, idx)
                 agent.add_new_task(
-                    f"LOOP GUARD: the '{label}' field is vision-verified FILLED with \"{key[:60]}\" yet you "
-                    f"keep re-typing it. The form is filled; stopping the fill-only run now."
+                    f"LOOP GUARD: the '{label}' field is vision-verified FILLED yet you keep re-doing it. "
+                    f"The form is filled; stopping the fill-only run now."
                 )
                 try:
                     res = agent.stop()
