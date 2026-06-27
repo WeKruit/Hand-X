@@ -97,6 +97,7 @@ class AdvanceResult:
 class ATSAdapter(abc.ABC):
     hosts: tuple[str, ...] = ()  # url hostnames this adapter claims
     multi_page: bool = False  # single-page (Greenhouse/Lever/Ashby) leave False
+    advance_label: str = "Save and Continue"  # the step-advance button (agent repair clicks it)
 
     @abc.abstractmethod
     async def extract(self, url: str, profile: dict) -> tuple[str, list[FormField]]:
@@ -139,6 +140,12 @@ class ATSAdapter(abc.ABC):
     async def is_complete(self, session: Any, page: Any) -> bool:
         """At-Review / terminal detection. HARD STOP — never click Submit. Single-page: True."""
         return True
+
+    async def validation_errors(self, page: Any) -> list[str]:
+        """Step-level validation messages currently blocking advance (e.g. 'Enter a valid format
+        for Phone Number'). Used to trigger generic agent-mode repair when next_step fails. The
+        messages should name the offending field(s). Default: none."""
+        return []
 
     async def fill_repeaters(self, session: Any, page: Any, profile: dict) -> dict:
         """Optional: fill 'Add another' repeater sections (education / work experience) that
@@ -276,6 +283,12 @@ NEVER invent specific data — zip, salary, employee id, address, references): \
 "LinkedIn" when the profile has a LinkedIn, else "Company Website"/"Other" (free text -> "LinkedIn"); \
 a required acknowledgement/consent option (label starts with "I ", "By ", "Acknowledge", or says \
 agree/confirm/consent) -> return that option's label verbatim to select it; \
+a "phone device type"/"phone type" field, when the profile gives a phone but no device type -> \
+"Mobile" (a personal contact number is a mobile/cell — pick the option matching that if OPTIONS \
+are given); \
+a "country/region phone code" / "phone code" / "dialing code" field -> the profile's COUNTRY NAME \
+(these widgets are searched by country name, e.g. country "United States" -> "United States", NOT \
+the numeric "+1"); \
 a specific data field the profile lacks -> "" (blank, never fabricated).
 - If TYPE is `textarea` (an open-ended question like "Why are you interested?"), WRITE a \
 concise, specific answer of 3-5 sentences, first person, plain text, grounded ONLY in the \
@@ -387,6 +400,64 @@ async def agent_fill_section(session: Any, page: Any, *, section: str, instructi
         with contextlib.suppress(Exception):
             await page.evaluate(restore_js)
     return {"section": section, "agent_ok": ok}
+
+
+async def repair_and_advance(
+    session: Any, page: Any, errors: list[str], advance_label: str, max_steps: int = 10
+) -> bool:
+    """Agent-driven recovery for a step that FAILED validation on advance. KEY finding: once a
+    platform (Workday) rejects a Save, NO deterministic re-fill re-arms it — not browser-use
+    el.fill, not the native value-setter + input/change/blur, not clicking Save repeatedly. Only a
+    real, coherent interaction context (fix the field AND click the advance button as one human-like
+    sequence) re-arms the form. So we hand the WHOLE recovery to a browser-use Agent: it reads the
+    validation messages, corrects the flagged fields, and clicks the step-advance button itself.
+    Only the FINAL submit is disabled (the agent must still be able to Save-and-Continue past the
+    step); the agent is told never to navigate and never to finalize. The agent's CDP teardown is
+    re-attached in finally. Returns True if the agent ran (advancement is verified by the caller)."""
+    from browser_use import Agent, ChatGoogle
+
+    # Disable ONLY the final submit (a button whose text is submit-y but NOT save/continue), so the
+    # agent can advance the step but cannot finalize the application past our controlled stop.
+    with contextlib.suppress(Exception):
+        await page.evaluate(
+            "() => document.querySelectorAll('button').forEach(b => { const t=(b.textContent||'');"
+            " if (/submit/i.test(t) && !/save|continue|next/i.test(t)) {"
+            " b.setAttribute('data-gh-sub','1'); b.disabled=true; } })"
+        )
+
+    bullet = "\n- ".join(errors[:12])
+    task = (
+        "You are on one step of a multi-step job-application form. It FAILED to advance because of "
+        f"these validation errors:\n- {bullet}\n"
+        "Fix ONLY the field(s) named by these errors so they become valid, then click the "
+        f"'{advance_label}' button to advance to the NEXT step. Reason from the error + the other "
+        "fields already filled (e.g. a phone number rejected as an invalid format, when a separate "
+        "country/dial-code field is already set, should DROP the leading dial code: "
+        "'+1 415 555 0142' -> '415 555 0142'). Use ONLY data already on the form — never invent "
+        "values. CRITICAL: every field is on THIS page — NEVER open a URL, navigate, search the web, "
+        "or go back/forward. Do NOT submit a FINAL application (any 'Submit Application' is "
+        "disabled). Call done once the page has advanced to the next step."
+    )
+    try:
+        agent = Agent(
+            task=task,
+            llm=ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY")),
+            browser_session=session,
+            use_vision=True,
+        )
+        await agent.run(max_steps=max_steps)
+    except Exception as exc:
+        print(f"   [agent:repair] {exc}")
+    finally:
+        with contextlib.suppress(Exception):  # Agent.close() drops the shared CDP client — re-attach
+            if not session.is_cdp_connected:
+                await session.connect()
+        with contextlib.suppress(Exception):  # re-enable the final submit we disabled
+            await page.evaluate(
+                "() => document.querySelectorAll('[data-gh-sub]').forEach(b => {"
+                " b.disabled=false; b.removeAttribute('data-gh-sub'); })"
+            )
+    return True
 
 
 async def fill_with_ladder(
@@ -729,9 +800,24 @@ async def run_wizard(
         if screenshot_path:
             await _screenshot(session, page, screenshot_path.replace(".png", f"_step{step.index}.png"))
 
+        # Deterministic fill got the values in but the platform may reject a field's FORMAT/choice
+        # on advance — and once it rejects a Save, NO deterministic re-fill re-arms it (verified).
+        # So on a validation block, hand the recovery to an agent that fixes the flagged field(s)
+        # AND clicks the advance button itself (the only thing that re-arms the form). Advancement
+        # is verified by re-reading the step; if the agent didn't advance, the monotonicity guard
+        # at the top of the loop turns the repeated step into an honest STEP_STALLED halt.
         adv = await adapter.next_step(session, page)
         if not adv.ok:
-            return await _wizard_halt(result, "ADVANCE_FAILED", adv.blocked_reason, tc, session)
+            errs = await adapter.validation_errors(page)
+            if errs:
+                print(f"  [agent-repair] advance blocked by validation: {errs}")
+                await repair_and_advance(session, page, errs, adapter.advance_label)
+                page = await session.must_get_current_page()
+                moved = await adapter.extract_step(session, page, profile)
+                if moved.index != step.index or moved.is_review or await adapter.is_complete(session, page):
+                    adv = AdvanceResult(ok=True, page=page)  # the agent advanced the step
+            if not adv.ok:
+                return await _wizard_halt(result, "ADVANCE_FAILED", adv.blocked_reason, tc, session)
         page = adv.page or await session.must_get_current_page()
 
     usage = await tc.get_usage_summary()

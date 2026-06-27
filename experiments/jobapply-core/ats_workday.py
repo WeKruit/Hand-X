@@ -19,10 +19,108 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from typing import Any
 
 import ats_engine as eng
 from ats_engine import AdvanceResult, ATSAdapter, AuthResult, Credentials, FormField, Step
+
+_DBG = bool(os.environ.get("WD_DEBUG"))
+
+# Generic, tenant-independent step enumerator (see extract_step for the rationale).
+# Emits {index,total,name, fields:[{name=<full wrapper aid>, label, type, required, options}]}.
+_EXTRACT_STEP_JS = r"""
+() => {
+  const norm = s => (s||'').replace(/\s+/g,' ').trim();
+  // chrome / non-field aids to never treat as a form field
+  const CHROME = /utility|hammy|header|mainMenu|MenuButton|menuItem|navigation|adventure|progressBar|pageFooter|file-upload|fileUpload|legalNotice|cookie|searchBox|relatedActions/i;
+  // labels that are an OPTION, not the question (so radio/checkbox group label != "Yes")
+  const isOpt = t => /^(yes|no|prefer not.*|decline.*|i don'?t.*|choose one|select one|select\.\.\.|on|off)$/i.test(t);
+
+  // ---- progress bar: active step index / total / name ----
+  const bar = document.querySelector('[data-automation-id="progressBar"]');
+  let index=1, total=1, name='';
+  if (bar){
+    const steps=[...bar.querySelectorAll('[data-automation-id^="progressBar"]')].filter(s=>/step/i.test(s.textContent||''));
+    total = steps.length || 1;
+    const active = bar.querySelector('[data-automation-id="progressBarActiveStep"]') || steps[0];
+    if (active){
+      const m=(active.textContent||'').match(/step\s+(\d+)\s+of\s+(\d+)\s*(.*)/i);
+      if (m){ index=+m[1]; total=+m[2]; name=norm(m[3]||''); } else { name=norm(active.textContent||''); }
+      steps.forEach((s,i)=>{ if(s===active) index=i+1; });
+    }
+  }
+
+  // ---- generic wrapper discovery (NOT limited to the formField- prefix) ----
+  const wrappers = new Map();   // aid -> wrapper element (insertion order = DOM order)
+  document.querySelectorAll('[data-automation-id^="formField-"]').forEach(w => {
+    const aid = w.getAttribute('data-automation-id'); if (aid && !wrappers.has(aid)) wrappers.set(aid, w);
+  });
+  // secondary: editable controls not inside any formField-* wrapper (tenants without the
+  // prefix, or standalone inputs) -> adopt their nearest in-content [data-automation-id] ancestor.
+  const EDITABLE='input:not([type=hidden]):not([type=button]):not([type=submit]):not([type=search]),'
+               +' textarea, select, button[aria-haspopup="listbox"], [data-uxi-widget-type="selectinput"]';
+  document.querySelectorAll(EDITABLE).forEach(c => {
+    if (c.closest('[data-automation-id^="formField-"]')) return;
+    if (!c.closest('[data-automation-id$="Page"],[data-automation-id*="applyFlow"],[data-automation-id*="Content"]')) return;
+    const w = c.closest('[data-automation-id]'); if (!w) return;
+    const aid = w.getAttribute('data-automation-id'); if (!aid || CHROME.test(aid) || wrappers.has(aid)) return;
+    wrappers.set(aid, w);
+  });
+
+  const typeOf = w => {
+    if (w.querySelector('button[aria-haspopup="listbox"]')) return 'single_select';
+    if (w.querySelector('[data-uxi-widget-type="selectinput"],[data-automation-id="multiSelectContainer"]')) return 'multi_select';
+    if (w.querySelector('input[type=radio],[role=radio],[role=radiogroup]')) return 'radio';
+    if (w.querySelector('input[type=checkbox],[role=checkbox]')) return 'checkbox';
+    if (w.querySelector('[data-automation-id*="dateSection"],[data-automation-id*="dateInput"]')) return 'date';
+    if (w.querySelector('select')) return 'select_native';
+    if (w.querySelector('input[type=file]')) return 'file';
+    if (w.querySelector('textarea')) return 'textarea';
+    return 'input_text';
+  };
+
+  const labelOf = (w, type) => {
+    const labels=[...w.querySelectorAll('label')].map(l=>norm(l.textContent)).filter(Boolean);
+    if (type==='radio' || type==='checkbox'){
+      const lg=w.querySelector('legend'); if (lg && norm(lg.textContent)) return norm(lg.textContent);
+      const fl=w.querySelector('[data-automation-id*="formLabel"],[data-automation-id*="questionText"],[data-automation-id$="-label"]');
+      if (fl && norm(fl.textContent)) return norm(fl.textContent);
+      const grp=w.querySelector('[role=group],[role=radiogroup],fieldset')||w;
+      const lb=grp.getAttribute('aria-labelledby')||w.getAttribute('aria-labelledby');
+      if (lb){ const t=lb.split(' ').map(x=>{const e=document.getElementById(x);return e?norm(e.textContent):'';}).join(' ').trim(); if (t) return t; }
+      const al=grp.getAttribute('aria-label')||w.getAttribute('aria-label'); if (al) return norm(al);
+      const q=labels.find(l=>!isOpt(l)); if (q) return q;
+    }
+    if (labels[0]) return labels[0];
+    const fl=w.querySelector('[data-automation-id*="formLabel"],[data-automation-id*="questionText"]');
+    if (fl && norm(fl.textContent)) return norm(fl.textContent);
+    const al=w.getAttribute('aria-label'); if (al) return norm(al);
+    // humanize the aid as a last resort: formField-legalName--firstName -> "legalName firstName"
+    return (w.getAttribute('data-automation-id')||'').replace(/^formField-/,'')
+      .replace(/[-_]+/g,' ').replace(/([a-z])([A-Z])/g,'$1 $2').trim();
+  };
+
+  const out=[];
+  for (const [aid, w] of wrappers){
+    const type=typeOf(w);
+    const label=labelOf(w, type).replace(/\*/g,'').trim().slice(0,90);
+    let req=/\*/.test([...w.querySelectorAll('label')].map(l=>l.textContent).join(' '))
+            || !!w.querySelector('[aria-required="true"],[required]');
+    let options=null;
+    if (type==='radio' || type==='checkbox'){
+      options=[...w.querySelectorAll('label')].map(l=>norm(l.textContent)).filter(Boolean);
+      if (!options.length) options=null;
+    } else if (type==='select_native'){
+      const s=w.querySelector('select');
+      if (s) options=[...s.options].map(o=>norm(o.textContent)).filter(t=>t && !/^select/i.test(t));
+      if (options && !options.length) options=null;
+    }
+    out.push({name:aid, label, type, required:!!req, options});
+  }
+  return JSON.stringify({index, total, name, fields:out});
+}
+"""
 
 
 class WorkdayAdapter(ATSAdapter):
@@ -134,46 +232,22 @@ class WorkdayAdapter(ATSAdapter):
             return AuthResult(ok=False, reason="Create Account did not advance (validation / CAPTCHA?).")
         return AuthResult(ok=True)  # reached the form (no-verification tenant, e.g. Intel)
 
-    # -- extract_step: progressBar + formField enumeration -----------------
+    # -- extract_step: progressBar + GENERIC field enumeration -------------
+    # Workday's per-step DOM is NOT uniform across tenants: My Information widgets nest
+    # inside section wrappers whose aid varies (`formField-country`, `formField-legalName--
+    # firstName`, `formField-countryRegion` LABELLED "State", or standalone `phone-sms-opt-in`),
+    # and a wrapper carries BOTH a listbox `button[aria-haspopup=listbox]` AND a search `input`
+    # (so "grab the first input" mis-drives Country/State/Phone-Type as text). This enumerator
+    # is therefore CONTROL-first + label-first, not formField-prefix-first:
+    #   - discover wrappers two ways (every formField-* PLUS any editable control whose nearest
+    #     aid ancestor isn't a formField wrapper — covers tenants that drop the prefix),
+    #   - type by PRIORITY (listbox > multiselect > radio > checkbox > date > native-select >
+    #     file > textarea > text) so a listbox is never mistaken for its inner text box,
+    #   - label from the GROUP/question text (legend / formLabel / non-option <label>), never an
+    #     option ("Yes"/"No"). The field meaning is decided by LABEL downstream, never the aid.
     async def extract_step(self, session: Any, page: Any, profile: dict) -> Step:
-        meta = await page.evaluate(
-            """() => {
-              const bar = document.querySelector('[data-automation-id="progressBar"]');
-              let index=1, total=1, name='';
-              if (bar){
-                const steps=[...bar.querySelectorAll('[data-automation-id^="progressBar"]')]
-                  .filter(s=>/step/i.test(s.textContent||''));
-                total = steps.length || 1;
-                const active = bar.querySelector('[data-automation-id="progressBarActiveStep"]') || steps[0];
-                if (active){ const m=(active.textContent||'').match(/step\\s+(\\d+)\\s+of\\s+(\\d+)\\s*(.*)/i);
-                  if (m){ index=+m[1]; total=+m[2]; name=(m[3]||'').trim(); } else { name=(active.textContent||'').trim(); }
-                  steps.forEach((s,i)=>{ if(s===active) index=i+1; });
-                }
-              }
-              const out=[];
-              for (const w of document.querySelectorAll('[data-automation-id^="formField-"]')){
-                const aid=w.getAttribute('data-automation-id')||'';
-                const key=aid.replace(/^formField-/,'');
-                const lab=(w.querySelector('label')||{}).textContent || w.getAttribute('aria-label') || key;
-                const ctrl=w.querySelector('input,textarea,select,button[aria-haspopup]');
-                let type='input_text';
-                if (ctrl){
-                  const tag=ctrl.tagName.toLowerCase(); const it=(ctrl.getAttribute('type')||'').toLowerCase();
-                  if (tag==='select') type='select_native';
-                  else if (tag==='textarea') type='textarea';
-                  else if (it==='checkbox') type='checkbox';
-                  else if (it==='radio' || w.querySelector('[role=radiogroup]')) type='radio';
-                  else if (it==='file') type='file';
-                  else if (ctrl.getAttribute('aria-haspopup')==='listbox' || w.querySelector('button[aria-haspopup=listbox]')) type='single_select';
-                  else if (w.querySelector('[data-automation-id=dateInputWrapper],[data-automation-id$=dateInput]')) type='date';
-                  else type='input_text';
-                }
-                const req = (ctrl && ctrl.getAttribute('aria-required')==='true') || /\\*/.test(lab);
-                out.push({name:key, label:(lab||'').replace(/\\*/g,'').trim().slice(0,80), type, required:!!req});
-              }
-              return JSON.stringify({index, total, name, fields:out});
-            }"""
-        )
+        await self._await_step_mounted(page)  # widgets mount async after a step transition
+        meta = await page.evaluate(_EXTRACT_STEP_JS)
         import json
 
         d = json.loads(meta)
@@ -187,6 +261,29 @@ class WorkdayAdapter(ATSAdapter):
             is_review=bool(is_review),
         )
 
+    async def _await_step_mounted(self, page: Any, stable_s: float = 1.8, max_s: float = 12.0) -> None:
+        """A Workday step mounts its fields asynchronously AFTER the progress index flips.
+        Measured curve (Intel My Information): the count sits at 1 for ~1s (the first widget),
+        then JUMPS to 12. There is no spinner to gate on, so a naive "stable across two reads"
+        returns during that 1-field plateau (the original bug). Instead, wait until the field
+        count has held STEADY for `stable_s` (a window that outlasts the plateau) — any increase
+        resets the window — bounded by `max_s`. Generic: counts every field-bearing control."""
+        count_js = (
+            '() => document.querySelectorAll(\'[data-automation-id^="formField-"],'
+            ' [data-uxi-widget-type="selectinput"]\').length'
+        )
+        interval, elapsed, prev, steady_at = 0.3, 0.0, -1, 0.0
+        while elapsed < max_s:
+            n = -1
+            with contextlib.suppress(Exception):
+                n = int(await page.evaluate(count_js) or 0)
+            if n != prev:  # the count changed (a widget mounted) — reset the stability window
+                prev, steady_at = n, elapsed
+            if n > 0 and (elapsed - steady_at) >= stable_s:
+                return
+            await asyncio.sleep(interval)
+            elapsed += interval
+
     def _to_field(self, f: dict) -> FormField:
         t = f["type"]
         source = (
@@ -198,7 +295,14 @@ class WorkdayAdapter(ATSAdapter):
             if t == "textarea"
             else "input_text"
         )
-        return FormField(name=f["name"], label=f["label"], type=t, source=source, required=f["required"])
+        return FormField(
+            name=f["name"],
+            label=f["label"],
+            type=t,
+            source=source,
+            required=f["required"],
+            options=f.get("options") or None,
+        )
 
     async def next_step(self, session: Any, page: Any) -> AdvanceResult:
         before = await self._active_index(page)
@@ -218,6 +322,22 @@ class WorkdayAdapter(ATSAdapter):
                 return AdvanceResult(ok=True, page=await session.must_get_current_page())
         return AdvanceResult(ok=False, blocked_reason="step did not advance (validation error?)")
 
+    async def validation_errors(self, page: Any) -> list[str]:
+        """Workday surfaces field errors after a blocked Save (e.g. 'Error-Phone Number Enter a
+        valid format for Phone Number.'). Collect them so the engine can run agent-mode repair."""
+        with contextlib.suppress(Exception):
+            raw = await page.evaluate(
+                "() => { const e=[...document.querySelectorAll("
+                '\'[data-automation-id="errorMessage"],[data-automation-id*="rror"],[role="alert"]\')]'
+                ".map(x=>(x.textContent||'').replace(/\\s+/g,' ').trim())"
+                ".filter(t=>t && /error|valid|required|format/i.test(t));"
+                " return JSON.stringify([...new Set(e)].slice(0,12)); }"
+            )
+            import json
+
+            return json.loads(raw) if raw else []
+        return []
+
     async def is_complete(self, session: Any, page: Any) -> bool:
         d = await page.evaluate(
             """() => { const bar=document.querySelector('[data-automation-id=progressBar]'); if(!bar) return '';
@@ -233,7 +353,7 @@ class WorkdayAdapter(ATSAdapter):
 
     # -- locate / fill / read_back -----------------------------------------
     async def locate(self, page: Any, field: FormField) -> Any | None:
-        sel = f'[data-automation-id="formField-{field.name}"]'
+        sel = f'[data-automation-id="{field.name}"]'
         return (
             await eng.first(page, f"{sel} input")
             or await eng.first(page, f"{sel} textarea")
@@ -279,39 +399,115 @@ class WorkdayAdapter(ATSAdapter):
             return False
         if t == "radio":
             return await self._click_radio(page, field, value)
-        if t in ("single_select",):
+        if t == "single_select":
             return await self._listbox(page, field, value)
+        if t == "multi_select":
+            return await self._multiselect(session, page, field, value)
         if t == "date":
             return await self._date(page, field, value)
         return False
 
+    async def _multiselect(self, session: Any, page: Any, field: FormField, value: str) -> bool:
+        """Workday typeahead multiselect (`multiSelectContainer` + `selectinput`): type the value
+        to filter, then commit the highlighted top match with a TRUSTED Enter (see below).
+        Single-value (commit one); commit-then-add for repeaters is handled elsewhere."""
+        wrap = f'[data-automation-id="{field.name}"]'
+        inp = await eng.first(page, f'{wrap} [data-uxi-widget-type="selectinput"] input') or await eng.first(
+            page, f"{wrap} input"
+        )
+        if not inp:
+            return False
+        with contextlib.suppress(Exception):
+            await inp.click()
+            await inp.fill(value)
+        # The multiselect's option portal also contains the committed PILL's sub-elements
+        # (menuItem>selectedItem>promptOption), so clicking "an option" mis-targets the pill while
+        # the widget auto-commits its highlighted top option on blur (observed: a wrong "Albania"
+        # pill). Instead, type-to-filter then commit the highlighted top match with a TRUSTED CDP
+        # Enter — synthetic keys are ignored by the widget. Verified: 'United States' -> pill
+        # 'United States of America (+1)'.
+        await asyncio.sleep(1.2)  # let the typeahead filter + highlight the top match
+        await eng.press_enter_trusted(session, page)
+        await asyncio.sleep(0.6)
+        ok = await self.read_back(session, page, field, value)
+        if _DBG:
+            print(f"   [msel {field.name}] value={value!r} committed={ok}")
+        return ok
+
     async def _listbox(self, page: Any, field: FormField, value: str) -> bool:
         """Workday button-listbox: click trigger -> options mount in the body portal
         `activeListContainer` -> click the matching promptOption."""
-        trig = await eng.first(page, f'[data-automation-id="formField-{field.name}"] button')
+        trig = await eng.first(page, f'[data-automation-id="{field.name}"] button')
         if not trig:
             return False
         with contextlib.suppress(Exception):
             await trig.click()
+        return await self._pick_option(page, value)
+
+    # The option portal is shared: bare `promptOption`/`menuItem` aids from PREVIOUSLY-opened
+    # widgets persist in the DOM (hidden), so an unscoped query mixes a closed widget's STALE
+    # options into the current one (observed: phone-code options bleeding into the State list, and
+    # a click landing on a detached/hidden element while the real widget auto-commits its first
+    # option on blur). The active dropdown's options are the only VISIBLE ones — filter on that.
+    _VISIBLE_TEXT_JS = (
+        "() => { const r=this.getBoundingClientRect();"
+        # a committed pill's sub-elements (menuItem>selectedItem>promptOption) also carry this aid —
+        # they are NOT selectable options, so skip anything inside a selectedItemList.
+        " if (this.closest('[data-automation-id=\"selectedItemList\"]')) return '';"
+        " return (r.width>0 && r.height>0 && this.offsetParent!==null) ? (this.textContent||'') : ''; }"
+    )
+
+    async def _pick_option(self, page: Any, value: str, allow_fallback: bool = True) -> bool:
+        """Shared option-portal picker for listbox + multiselect. Considers ONLY VISIBLE options
+        (the active dropdown) — hidden stale options from closed widgets are skipped. Match exact ->
+        contains; strip-and-contains tolerates trailing dial codes ('United States' vs '...(+1)').
+        allow_fallback=True picks the first VISIBLE option when nothing matches (fine for a typed-
+        filtered single-select); pass False where a wrong pick is harmful (multiselect commits a pill)."""
         want = eng.norm(value)
         for _ in range(10):
             await asyncio.sleep(0.3)
-            opts = await page.get_elements_by_css_selector(
+            raw = await page.get_elements_by_css_selector(
                 '[data-automation-id="activeListContainer"] [role="option"],'
                 ' [data-automation-id="promptOption"], [data-automation-id="menuItem"],'
                 ' [role="listbox"] [role="option"]'  # DomHand WORKDAY_SELECTORS generic fallback
             )
+            # keep only on-screen options (drops stale hidden options from other widgets)
+            opts: list[tuple[Any, str]] = []
+            for o in raw:
+                vis = (await o.evaluate(self._VISIBLE_TEXT_JS)) or ""
+                if vis.strip():
+                    opts.append((o, eng.norm(vis)))
             if not opts:
                 continue
-            exact = None
-            for o in opts:
-                txt = eng.norm((await o.evaluate("() => this.textContent")) or "")
+            if _DBG:
+                print(f"      [pick] want={want!r} visible[:6]={[t for _, t in opts[:6]]}")
+            # BEST match, not first-contains: exact > prefix > contains > reverse-contains, and
+            # among equals the SHORTEST option (closest). Critical so 'United States' resolves to
+            # 'United States of America' rather than 'United States Minor Outlying Islands' — a
+            # wrong country cascades a different address schema and breaks the whole step.
+            best: tuple[int, int, Any] | None = None
+            for o, txt in opts:
+                if not txt:
+                    continue
                 if txt == want:
-                    exact = o
+                    best = (0, 0, o)
                     break
-                if exact is None and want and want in txt:
-                    exact = o
-            target = exact or opts[0]
+                score = (
+                    1
+                    if (want and txt.startswith(want))
+                    else 2
+                    if (want and want in txt)
+                    else 3
+                    if (txt and txt in want)
+                    else None
+                )
+                if score is not None:
+                    cand = (score, len(txt), o)
+                    if best is None or cand[:2] < best[:2]:
+                        best = cand
+            target = (best[2] if best else None) or (opts[0][0] if allow_fallback else None)
+            if target is None:
+                return False
             with contextlib.suppress(Exception):
                 await target.click()
                 return True
@@ -319,18 +515,35 @@ class WorkdayAdapter(ATSAdapter):
         return False
 
     async def _click_radio(self, page: Any, field: FormField, value: str) -> bool:
+        """Select a Workday Yes/No-style radio. Workday markup is
+        `<input id=X value=true><label for=X>Yes</label>` inside a <fieldset><legend>question.
+        Clicking the LABEL does NOT check the React input (verified: checked stays false), so we
+        resolve each option's text via its label[for]=input.id and click the INPUT element
+        directly. Match label text exact -> contains -> the value attr (yes->true / no->false)."""
+        sel = f'[data-automation-id="{field.name}"]'
         want = eng.norm(value)
-        sel = f'[data-automation-id="formField-{field.name}"]'
-        for r in await page.get_elements_by_css_selector(
-            f'{sel} [role="radio"], {sel} input[type="radio"], {sel} label'
-        ):
+        yn = {"yes": "true", "no": "false", "true": "true", "false": "false"}.get(want)
+        radios = await page.get_elements_by_css_selector(f'{sel} input[type="radio"], {sel} [role="radio"]')
+        scored: list[tuple[Any, str, str]] = []
+        for el in radios:
             with contextlib.suppress(Exception):
-                txt = eng.norm(
-                    (await r.evaluate("() => this.textContent || this.getAttribute('aria-label') || ''")) or ""
+                info = await el.evaluate(
+                    "() => { let t=''; if(this.id){const l=document.querySelector('label[for=\"'+this.id+'\"]');"
+                    " if(l) t=l.textContent||'';} if(!t) t=this.getAttribute('aria-label')||'';"
+                    " return (t.replace(/\\s+/g,' ').trim())+'|~|'+(this.getAttribute('value')||''); }"
                 )
-                if want and want in txt:
-                    await r.click()
-                    return True
+                txt, _, val = (info or "").partition("|~|")
+                scored.append((el, eng.norm(txt), eng.norm(val)))
+        target = next((el for el, t, _ in scored if t == want and want), None)
+        if not target:
+            target = next((el for el, t, _ in scored if want and t and (want in t or t in want)), None)
+        if not target and yn:
+            target = next((el for el, _, v in scored if v == yn), None)
+        if not target:
+            return False
+        with contextlib.suppress(Exception):
+            await target.click()
+            return True
         return False
 
     async def _date(self, page: Any, field: FormField, value: str) -> bool:
@@ -345,7 +558,7 @@ class WorkdayAdapter(ATSAdapter):
             return False
         # DomHand WORKDAY_SELECTORS month-segment variants: dateSectionMonth-input /
         # *dateSectionMonth* / placeholder MM.
-        wrap = f'[data-automation-id="formField-{field.name}"]'
+        wrap = f'[data-automation-id="{field.name}"]'
         seg = (
             await eng.first(page, f'{wrap} [data-automation-id$="Month-input"]')
             or await eng.first(page, f'{wrap} input[data-automation-id*="dateSectionMonth"]')
@@ -361,8 +574,20 @@ class WorkdayAdapter(ATSAdapter):
         return False
 
     async def read_back(self, session: Any, page: Any, field: FormField, value: str) -> bool:
+        # A widget's commit (listbox button text, radio check, pill) can lag the click by a
+        # re-render, so an immediate single read false-negatives — POLL the check (returns the
+        # instant it passes, so a correct fill costs nothing extra).
+        tries = 1 if field.type in ("input_text", "textarea", "file") else 6
+        for i in range(tries):
+            if await self._read_once(page, field, value):
+                return True
+            if i + 1 < tries:
+                await asyncio.sleep(0.3)
+        return False
+
+    async def _read_once(self, page: Any, field: FormField, value: str) -> bool:
         t = field.type
-        sel = f'[data-automation-id="formField-{field.name}"]'
+        sel = f'[data-automation-id="{field.name}"]'
         if t == "file":
             return (await eng.first(page, f'{sel} [data-automation-id="file-upload-successful"]')) is not None
         if t in ("input_text", "textarea", "select_native"):
@@ -379,12 +604,31 @@ class WorkdayAdapter(ATSAdapter):
                     else False
                 )
             return False
-        if t in ("single_select", "radio"):
+        if t == "radio":
+            # Read the CHECKED input's label (NOT the wrapper text — both option labels are
+            # always present there). Map Workday's true/false value attr to yes/no.
+            with contextlib.suppress(Exception):
+                got = await page.evaluate(
+                    f"() => {{ const w=document.querySelector('{sel}'); if(!w) return '';"
+                    " const c=[...w.querySelectorAll('input[type=radio],[role=radio]')]"
+                    ".find(i=>i.checked||i.getAttribute('aria-checked')==='true'); if(!c) return '';"
+                    " let t=''; if(c.id){{const l=document.querySelector('label[for=\"'+c.id+'\"]'); if(l) t=l.textContent;}}"
+                    " return (t||c.getAttribute('value')||'').trim(); }}"
+                )
+                g = {"true": "yes", "false": "no"}.get(eng.norm(got), eng.norm(got))
+                w = eng.norm(value)
+                return bool(g) and bool(w) and (w in g or g in w)
+            return False
+        if t in ("single_select", "multi_select"):
+            # single_select: the chosen label replaces "Select One" in the wrapper text.
+            # multi_select: the committed pill(s) appear in `selectedItem` / the wrapper text.
             with contextlib.suppress(Exception):
                 txt = await page.evaluate(
-                    f"() => {{ const w=document.querySelector('{sel}'); return w ? (w.textContent||'') : ''; }}"
+                    f"() => {{ const w=document.querySelector('{sel}'); if(!w) return '';"
+                    " const pills=[...w.querySelectorAll('[data-automation-id=\\\"selectedItem\\\"]')]"
+                    ".map(e=>e.textContent).join(' '); return (pills||'')+' '+(w.textContent||''); }}"
                 )
-                return eng.norm(value) in eng.norm(txt)
+                return bool(eng.norm(value)) and eng.norm(value) in eng.norm(txt)
             return False
         if t == "checkbox":
             el = await self.locate(page, field)
