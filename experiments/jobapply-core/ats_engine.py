@@ -801,6 +801,10 @@ async def run_wizard(
         step = await adapter.extract_step(session, page, profile)
         if step.is_review or await adapter.is_complete(session, page):
             result["status"] = "FILLED_TO_REVIEW"  # STOP — never submit
+            if screenshot_path:  # capture the final Review page as proof of completion
+                result["review_screenshot"] = await _screenshot(
+                    session, page, screenshot_path.replace(".png", "_review.png")
+                )
             break
         if step.index in seen:  # progress-monotonicity guard
             return await _wizard_halt(result, "STEP_STALLED", f"re-entered step {step.index}", tc, session)

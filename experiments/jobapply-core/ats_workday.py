@@ -80,23 +80,29 @@ _EXTRACT_STEP_JS = r"""
     return 'input_text';
   };
 
+  // a label that is just the control's PLACEHOLDER (e.g. "Select One") is not the question.
+  const isPlaceholder=t=>/^\*?\s*(select one|choose one|select\.\.\.|select|please select|--|—)\s*\*?$/i.test(t);
+  const meaningful=(t,type)=>t && t.length>=3 && !isPlaceholder(t) && !((type==='radio'||type==='checkbox')&&isOpt(t));
   const labelOf = (w, type) => {
     const labels=[...w.querySelectorAll('label')].map(l=>norm(l.textContent)).filter(Boolean);
-    if (type==='radio' || type==='checkbox'){
-      const lg=w.querySelector('legend'); if (lg && norm(lg.textContent)) return norm(lg.textContent);
-      const fl=w.querySelector('[data-automation-id*="formLabel"],[data-automation-id*="questionText"],[data-automation-id$="-label"]');
-      if (fl && norm(fl.textContent)) return norm(fl.textContent);
-      const grp=w.querySelector('[role=group],[role=radiogroup],fieldset')||w;
-      const lb=grp.getAttribute('aria-labelledby')||w.getAttribute('aria-labelledby');
-      if (lb){ const t=lb.split(' ').map(x=>{const e=document.getElementById(x);return e?norm(e.textContent):'';}).join(' ').trim(); if (t) return t; }
-      const al=grp.getAttribute('aria-label')||w.getAttribute('aria-label'); if (al) return norm(al);
-      const q=labels.find(l=>!isOpt(l)); if (q) return q;
-    }
+    // 1. explicit question/label elements
+    const lg=w.querySelector('legend'); if (lg){ const t=norm(lg.textContent); if (meaningful(t,type)) return t; }
+    const fl=w.querySelector('[data-automation-id*="formLabel"],[data-automation-id*="questionText"],[data-automation-id$="-label"]');
+    if (fl){ const t=norm(fl.textContent); if (meaningful(t,type)) return t; }
+    // 2. a meaningful <label> (skip the dropdown placeholder / a radio option)
+    const q=labels.find(l=>meaningful(l,type)); if (q) return q;
+    // 3. aria
+    const grp=w.querySelector('[role=group],[role=radiogroup],fieldset')||w;
+    const lb=grp.getAttribute('aria-labelledby')||w.getAttribute('aria-labelledby');
+    if (lb){ const t=lb.split(' ').map(x=>{const e=document.getElementById(x);return e?norm(e.textContent):'';}).join(' ').trim(); if (meaningful(t,type)) return t; }
+    const al=grp.getAttribute('aria-label')||w.getAttribute('aria-label'); if (al && meaningful(norm(al),type)) return norm(al);
+    // 4. the wrapper's OWN text minus controls/options (DomHand-style) — catches a question
+    //    rendered as plain text (numbered screening questions) rather than a <label>.
+    const clone=w.cloneNode(true);
+    clone.querySelectorAll('input,textarea,select,button,ul,ol,li,[role=option],[role=listbox],[role=radio],[role=checkbox],[data-automation-id="promptOption"]').forEach(x=>{ if(x.remove) x.remove(); });
+    const own=norm(clone.textContent); if (meaningful(own,type) && own.length<=240) return own;
+    // 5. fallbacks
     if (labels[0]) return labels[0];
-    const fl=w.querySelector('[data-automation-id*="formLabel"],[data-automation-id*="questionText"]');
-    if (fl && norm(fl.textContent)) return norm(fl.textContent);
-    const al=w.getAttribute('aria-label'); if (al) return norm(al);
-    // humanize the aid as a last resort: formField-legalName--firstName -> "legalName firstName"
     return (w.getAttribute('data-automation-id')||'').replace(/^formField-/,'')
       .replace(/[-_]+/g,' ').replace(/([a-z])([A-Z])/g,'$1 $2').trim();
   };
