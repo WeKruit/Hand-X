@@ -330,10 +330,11 @@ async def _do_record(args: argparse.Namespace, *, model: str, history_path: str,
     profile = json.loads(Path(args.profile).read_text())
     resume = str(Path(args.resume).resolve()) if args.resume else None
 
-    from vision_verify import register_visual_verify
+    from vision_verify import make_loop_verify_hook, register_visual_verify, reset_visual_cache
 
     tools = _gmail_tools(args.gmail_access_token, args.gmail_credentials, args.gmail_token)
     register_visual_verify(tools)  # (c) cheap-VLM visual field check the agent can call on a stuck field
+    reset_visual_cache()  # fresh per-page visual cache + VLM budget for this run
 
     agent = Agent(
         task=_build_task(args.job_url, profile, resume, submit=submit),
@@ -355,11 +356,13 @@ async def _do_record(args: argparse.Namespace, *, model: str, history_path: str,
                                   # back empty -> retype loops. Raise for speed on simple forms.
         calculate_cost=True,      # native cost tracking -> history.usage
     )
-    # use_vision="auto" + the verify_field_visually action (agent-invoked) is the measured
-    # best ($0.096, 0 nudges). The deterministic on_step_end loop hook
-    # (vision_verify.make_loop_verify_hook) works but fired per-field = too noisy/slow, so it
-    # is kept available but NOT wired by default. TODO: cache visual checks before re-enabling.
-    history = await agent.run(max_steps=args.max_steps)
+    # use_vision="auto" + the agent-invoked verify_field_visually action is the proven floor
+    # ($0.096, 0 nudges). The deterministic on_step_end loop hook now rides on a CACHED + CAPPED
+    # visual check (see vision_verify): a field is vision-checked at most once per page, the page
+    # is capped at GH_VERIFY_MAX_CALLS VLM calls, and it nudges ONLY on a vision-confirmed
+    # false-empty (else silent). So it catches residual retype loops auto-vision misses without
+    # the per-field VLM storm that made the old hook too noisy.
+    history = await agent.run(max_steps=args.max_steps, on_step_end=make_loop_verify_hook())
     agent.save_history(history_path)  # the cached "script" (full multi-page trajectory)
     return history, agent
 

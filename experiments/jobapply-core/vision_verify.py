@@ -10,6 +10,15 @@ the retry-then-vision balance.
 Model: defaults to gemini-2.5-flash-lite (cheap, needs GOOGLE_API_KEY). To use a local
 Qwen2.5-VL-7B instead, point GH_VERIFY_MODEL at it and swap ChatGoogle for a ChatOpenAI
 against your vLLM/Ollama OpenAI-compatible endpoint (one-line change in _vlm()).
+
+COST CONTROL (so the deterministic loop hook is affordable to keep wired):
+  * A per-page CACHE keyed by (url + field label): the agent action AND the loop hook
+    share verdicts, so a field is vision-checked at most ONCE per page — repeat checks
+    are served free. URL in the key means a stale "filled" never leaks across pages.
+  * A per-page CAP on unique VLM calls (GH_VERIFY_MAX_CALLS). Past it the hook stays
+    SILENT rather than spend — it degrades to plain auto-vision, never guesses.
+  * The hook only nudges on a vision-CONFIRMED filled=true (a real false-empty loop).
+    filled=false -> the agent is legitimately filling, so we say nothing.
 """
 
 import base64
@@ -17,6 +26,29 @@ import os
 from typing import Any
 
 VERIFY_MODEL = os.environ.get("GH_VERIFY_MODEL", "gemini-3.1-flash-lite")
+# Max unique VLM calls per page (reset on navigation). flash-lite low-detail is cheap,
+# but this bounds latency + nudge noise hard. Past it the hook stops spending/intervening.
+VLM_MAX_CALLS = int(os.environ.get("GH_VERIFY_MAX_CALLS", "6"))
+
+# ---- run-scoped state (one process == one application run) -------------------
+_VCACHE: dict[str, str] = {}     # cache key (url|label) -> raw verdict string
+_VLM_CALLS = {"n": 0}            # unique VLM calls on the CURRENT page
+
+
+def reset_visual_cache() -> None:
+    """Full reset — call once at the start of a record run."""
+    _VCACHE.clear()
+    _VLM_CALLS["n"] = 0
+
+
+def _norm(s: Any) -> str:
+    return " ".join(str(s).lower().split())[:120]
+
+
+def _is_filled(verdict: str) -> bool:
+    """Centralised, whitespace/quote-tolerant parse of the VLM's {"filled": true} reply."""
+    v = verdict.lower().replace("'", '"').replace(" ", "")
+    return '"filled":true' in v
 
 
 def _vlm() -> Any:
@@ -25,11 +57,28 @@ def _vlm() -> Any:
     return ChatGoogle(model=VERIFY_MODEL, api_key=os.environ.get("GOOGLE_API_KEY"))
 
 
-async def visual_check(session: Any, target: str) -> str:
+async def _current_url(session: Any) -> str:
+    try:
+        return await session.get_current_page_url()
+    except Exception:
+        return ""
+
+
+async def visual_check(session: Any, target: str, *, key: str | None = None, use_cache: bool = True) -> str:
     """Core cheap-VLM check, reused by the action AND the deterministic loop hook.
-    `target` is a field label ("Cover Letter") or a value to look for ("646-678-9391").
-    Returns a short JSON-ish verdict string {filled, value}."""
-    from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+    `target` is what to look for ("Cover Letter" / "646-678-9391"); `key` overrides the
+    cache identity (default: target) so the hook (keyed by field label) and the action
+    (keyed by field_label) hit the SAME cache entry for a field. Returns a short JSON-ish
+    verdict string {filled, value}. Served from cache (no VLM, no $) on a repeat; returns
+    a {"capped"} sentinel once the per-page VLM budget is spent."""
+    ck = ""
+    if use_cache:
+        # cache hit / over-budget are the FAST paths: no screenshot, no import, no $.
+        ck = f"{await _current_url(session)}|{_norm(key if key is not None else target)}"
+        if ck in _VCACHE:
+            return _VCACHE[ck]
+        if _VLM_CALLS["n"] >= VLM_MAX_CALLS:
+            return '{"filled": null, "capped": true}'  # budget spent — caller stays silent
 
     try:
         png = await session.take_screenshot()  # bytes (PNG)
@@ -40,20 +89,29 @@ async def visual_check(session: Any, target: str) -> str:
         f"This is a job-application web form. Is '{target}' currently filled in / visibly present "
         f'in an input (not blank)? Reply STRICT JSON: {{"filled": true|false, "value": "<visible text>"}}.'
     )
-    msg = UserMessage(
-        content=[
-            ContentPartTextParam(type="text", text=prompt),
-            ContentPartImageParam(
-                type="image_url",
-                image_url=ImageURL(url=f"data:image/png;base64,{b64}", detail="low", media_type="image/png"),
-            ),
-        ]
-    )
+    try:  # production always has browser_use; the guard only lets offline tests fake _vlm()
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+        msg = UserMessage(
+            content=[
+                ContentPartTextParam(type="text", text=prompt),
+                ContentPartImageParam(
+                    type="image_url",
+                    image_url=ImageURL(url=f"data:image/png;base64,{b64}", detail="low", media_type="image/png"),
+                ),
+            ]
+        )
+    except Exception:
+        msg = prompt
     try:
         resp = await _vlm().ainvoke([msg])
-        return (getattr(resp, "completion", None) or str(resp)).strip()
+        verdict = (getattr(resp, "completion", None) or str(resp)).strip()
     except Exception as exc:
         return f'{{"filled": null, "error": "{type(exc).__name__}: {exc}"}}'
+    if use_cache:
+        _VLM_CALLS["n"] += 1
+        _VCACHE[ck] = verdict
+    return verdict
 
 
 def _action_target(dumped: dict) -> tuple[Any, Any]:
@@ -91,20 +149,35 @@ def make_loop_verify_hook(verify_at: int = 2, stop_at: int = 3) -> Any:
     """Return an on_step_end(agent) callback that DETERMINISTICALLY breaks the false-empty
     re-do loop for ANY field action — text input, dropdown select, or duplicate option click
     (multi-select). Keyed by the action's value (or click#index), counted across the whole run
-    (interleaving-proof). On the `verify_at`-th repeat, run the cheap visual_check, name the
-    FIELD + the VALUE it already holds in the nudge (so bu-2-0 cannot hallucinate it empty);
-    if a vision-VERIFIED field is still re-done to `stop_at`, agent.stop() — fill-only, so the
-    filled form means stopping IS success."""
+    (interleaving-proof).
+
+    Cost-safe by construction:
+      * Visual checks are CACHED + CAPPED per page (see visual_check) — a field costs one VLM
+        call at most, and the page costs at most VLM_MAX_CALLS total.
+      * On the `verify_at`-th repeat it consults the cheap visual_check and nudges ONLY when
+        vision CONFIRMS the field is already filled (a true false-empty) — naming the FIELD +
+        the VALUE so bu-2-0 cannot re-hallucinate it empty. If vision says empty (or the budget
+        is spent) it stays SILENT: the agent is legitimately filling, so we never false-skip.
+      * If a vision-VERIFIED field is still re-done to `stop_at`, agent.stop() — fill-only, so
+        the filled form means stopping IS success.
+    The page cache/budget reset on navigation (new page == fresh visual truth)."""
     from collections import defaultdict
 
     counts: dict[str, int] = defaultdict(int)
     verified: set[str] = set()
+    last_url = {"u": None}
 
     async def on_step_end(agent: Any) -> None:
         out = getattr(agent.state, "last_model_output", None)
         if not out or not getattr(out, "action", None):
             return
         session = agent.browser_session
+
+        url = await _current_url(session)  # new page -> reset the per-page VLM budget
+        if last_url["u"] is not None and url != last_url["u"]:
+            _VLM_CALLS["n"] = 0
+        last_url["u"] = url
+
         for act in out.action:
             try:
                 dumped = act.model_dump(exclude_none=True)
@@ -116,12 +189,14 @@ def make_loop_verify_hook(verify_at: int = 2, stop_at: int = 3) -> Any:
             key = (str(val).strip()[:80] if val else "") or f"click#{idx}"
             counts[key] += 1
             n = counts[key]
+
             if n == verify_at:
                 label = await _field_label(session, idx)
-                shown = (str(val)[:60] if val else label)  # what was put / selected
-                verdict = await visual_check(session, f"the '{label}' field")
-                if '"filled": true' in verdict.lower() or "'filled': true" in verdict.lower() or '"filled":true' in verdict.lower():
-                    verified.add(key)
+                verdict = await visual_check(session, f"the '{label}' field", key=label)
+                if not _is_filled(verdict):
+                    continue  # empty (agent legitimately filling) or budget spent -> SILENT
+                verified.add(key)
+                shown = str(val)[:60] if val else label
                 agent.add_new_task(
                     f"LOOP GUARD (automatic visual check): the '{label}' field ALREADY has \"{shown}\" "
                     f"set (you did this {n}x; its state read-back is a false-empty). Vision model confirms "
