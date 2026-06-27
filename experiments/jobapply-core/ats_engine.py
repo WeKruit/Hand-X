@@ -140,6 +140,13 @@ class ATSAdapter(abc.ABC):
         """At-Review / terminal detection. HARD STOP — never click Submit. Single-page: True."""
         return True
 
+    async def fill_repeaters(self, session: Any, page: Any, profile: dict) -> dict:
+        """Optional: fill 'Add another' repeater sections (education / work experience) that
+        are NOT in the flat field schema — they exist only in the live DOM and need an
+        add-row loop, not the per-field map. Default: none. Kept structurally separate from
+        the flat FormField fill so it never perturbs form_present / read_back."""
+        return {}
+
 
 async def form_present(adapter: ATSAdapter, page: Any, fields: list[FormField]) -> bool:
     """Pre-flight: is the form actually on this page? Guards the expensive L1->L2->L3
@@ -190,13 +197,15 @@ async def click_by_text(page: Any, text: str) -> int:
 async def upload_file(session: Any, page: Any, file_el: Any, path: str) -> bool:
     """File upload via CDP DOM.setFileInputFiles (no high-level wrapper exists)."""
     bnid = getattr(file_el, "_backend_node_id", None) or getattr(file_el, "backend_node_id", None)
+    if not bnid:
+        return False
     sid = (
         getattr(file_el, "_session_id", None)
         or getattr(file_el, "session_id", None)
         or getattr(page, "session_id", None)
     )
-    if not bnid:
-        return False
+    if hasattr(sid, "__await__"):  # page.session_id is a COROUTINE — the prior code passed it
+        sid = await sid           # un-awaited, so CDP got a coroutine as session_id and failed
     try:
         await session.cdp_client.send.DOM.setFileInputFiles(
             params={"files": [str(Path(path).resolve())], "backendNodeId": bnid},
@@ -205,6 +214,23 @@ async def upload_file(session: Any, page: Any, file_el: Any, path: str) -> bool:
         return True
     except Exception as exc:
         print(f"   [upload] CDP setFileInputFiles failed: {exc}")
+        return False
+
+
+async def press_enter_trusted(session: Any, page: Any) -> bool:
+    """A TRUSTED Enter via CDP Input.dispatchKeyEvent on the focused element. react-select
+    (and similar geocomplete widgets) IGNORE synthetic page.press / JS-dispatched keys — only
+    a real CDP key commits the highlighted option. Caller must have focused/typed first."""
+    try:
+        sid = await page.session_id
+        for ev in (
+            {"type": "rawKeyDown", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "code": "Enter", "key": "Enter"},
+            {"type": "keyUp", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "code": "Enter", "key": "Enter"},
+        ):
+            await session.cdp_client.send.Input.dispatchKeyEvent(params=ev, session_id=sid)
+        return True
+    except Exception as exc:
+        print(f"   [trusted-enter] {exc}")
         return False
 
 
@@ -537,6 +563,13 @@ async def run_single_page(
             with contextlib.suppress(Exception):
                 page = await session.must_get_current_page()
         report.append(_Row(name=f.name, type=f.type, src=src, tier=tier))
+
+    # repeater sections (education / experience) — separate add-row pass, not the flat loop
+    with contextlib.suppress(Exception):
+        rep = await adapter.fill_repeaters(session, page, profile)
+        if rep:
+            result["repeaters"] = rep
+            print(f"  repeaters: {rep}")
 
     usage = await tc.get_usage_summary()
     _print_report(adapter.__class__.__name__.replace("Adapter", ""), title, report, usage, len(mapped))  # step 5

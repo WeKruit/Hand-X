@@ -28,21 +28,27 @@ class GreenhouseAdapter(ATSAdapter):
         org, jid = gh.parse_job_url(url)
         schema = gh.fetch_schema(org, jid)
         plan = gh.classify(schema, profile)
-        fields = [
-            FormField(
-                name=r["name"],
-                label=r.get("label", ""),
-                type=r["type"],
-                source="file"
-                if (r["name"] in ("resume", "cover_letter") or r["type"] == "input_file")
-                else r["source"],
-                required=r.get("required", False),
-                options=r.get("options"),
-                option_values=r.get("option_values"),
-                value=r.get("value"),
+        fields = []
+        for r in plan:
+            name, typ, req = r["name"], r["type"], r.get("required", False)
+            if name in ("cover_letter", "cover_letter_text") and not req:
+                source = "skip"  # optional cover letter -> don't attempt (skip unless required)
+            elif name in ("resume", "cover_letter") or typ == "input_file":
+                source = "file"
+            else:
+                source = r["source"]
+            fields.append(
+                FormField(
+                    name=name,
+                    label=r.get("label", ""),
+                    type=typ,
+                    source=source,
+                    required=req,
+                    options=r.get("options"),
+                    option_values=r.get("option_values"),
+                    value=r.get("value"),
+                )
             )
-            for r in plan
-        ]
         return schema.get("title", ""), fields
 
     # -- reach the form (handles iframe-embed on company sites) -------------
@@ -79,7 +85,7 @@ class GreenhouseAdapter(ATSAdapter):
             return await eng.upload_file(session, page, fel, resume) if (fel and resume) else False
 
         if name == "location" or (ftype == "input_text" and "location" in (field.label or "").lower()):
-            return await self._geocomplete(page, value)  # geocomplete combobox, not plain text
+            return await self._geocomplete(session, page, value)  # geocomplete combobox, not plain text
 
         if ftype in ("multi_value_single_select", "multi_value_multi_select"):
             parts = [p.strip() for p in value.split(";") if p.strip()] or [value]
@@ -154,29 +160,48 @@ class GreenhouseAdapter(ATSAdapter):
                 return False
         return False
 
-    async def _geocomplete(self, page: Any, value: str) -> bool:
-        """Greenhouse Location: react-select geocomplete (id=candidate-location). Type the
-        city, wait for the geocode menu, commit the pre-highlighted option-1 with a TRUSTED
-        Enter (browser_use page.press) — synthetic clicks/keys are ignored by react-select,
-        and el.fill alone sets text without geocoding (form rejects on submit)."""
+    async def _geocomplete(self, session: Any, page: Any, value: str) -> bool:
+        """Greenhouse Location: react-select geocomplete (id=candidate-location). Type the city,
+        wait for the geocode menu, commit the pre-highlighted option-1 with a TRUSTED CDP Enter
+        (eng.press_enter_trusted) — synthetic page.press / JS keys are ignored by react-select,
+        and el.fill alone sets text without geocoding (form rejects on submit). Success signal is
+        the .select__single-value text (lat/long live only in React state, never in the DOM)."""
         inp = await eng.first(page, "#candidate-location") or await self._locate(page, "location")
         if not inp:
             return False
         try:
             await inp.click()
-            await inp.fill(value)
+            await asyncio.sleep(0.3)
+            await inp.fill(value)  # profile location verbatim -> the municipality is option-1
         except Exception:
             return False
-        for _ in range(16):
+        got_menu = False
+        for _ in range(16):  # geocode round-trip — poll, don't fixed-sleep
             await asyncio.sleep(0.25)
             if await page.get_elements_by_css_selector('[id^="react-select-candidate-location-option"]'):
+                got_menu = True
                 break
-        try:
-            await page.press("Enter")  # selects pre-highlighted option-1 (no ArrowDown -> exact city)
-        except Exception:
+        if not got_menu:
             return False
-        await asyncio.sleep(0.4)
-        return True
+        # NO ArrowDown — react-select pre-highlights option-1; one ArrowDown overshoots the city.
+        if not await eng.press_enter_trusted(session, page):
+            return False
+        for _ in range(10):  # settle: single-value renders after commit
+            await asyncio.sleep(0.35)
+            if (await self._single_value(page, "candidate-location")).strip():
+                return True
+        return False
+
+    async def _single_value(self, page: Any, el_id: str) -> str:
+        """Read a react-select control's chosen label (the input's own .value stays '')."""
+        try:
+            return await page.evaluate(
+                "() => { const a=document.getElementById(%r); if(!a) return '';"
+                " const c=a.closest('[class*=select__control]')||a.closest('[class*=container]');"
+                " const s=c&&c.querySelector('[class*=single-value]'); return s?s.textContent:''; }" % el_id
+            )
+        except Exception:
+            return ""
 
     async def _checkboxes(self, page: Any, name: str) -> list:
         return await page.get_elements_by_css_selector(
@@ -231,7 +256,26 @@ class GreenhouseAdapter(ATSAdapter):
     async def read_back(self, session: Any, page: Any, field: FormField, value: str) -> bool:
         ftype, name = field.type, field.name
         if ftype == "input_file" or field.source == "file":
-            return (await self._locate(page, name)) is not None  # CDP upload has no readable .value
+            # Greenhouse REMOVES the <input> on a SUCCESSFUL upload and renders the filename in a
+            # .file-upload__wrapper / .field-wrapper. So input-existence is backwards (it's gone
+            # exactly when upload worked). Confirm by the uploaded basename — the same rendered
+            # filename the agent path visually verifies (probe: "resume.pdf" in .file-upload__wrapper).
+            base = (value or "").replace("\\", "/").rstrip("/").split("/")[-1]
+            if not base:
+                return (await self._locate(page, name)) is not None
+            want = eng.norm(base)
+            for _ in range(6):  # the filename renders ~1-2s after the CDP upload — poll, don't race
+                try:
+                    txt = await page.evaluate(
+                        "() => [...document.querySelectorAll('[class*=file-upload], .field-wrapper')]"
+                        ".map(e => e.textContent || '').join(' ')"
+                    )
+                except Exception:
+                    txt = ""
+                if want in eng.norm(txt):
+                    return True
+                await asyncio.sleep(0.4)
+            return False
 
         if name == "location" or (ftype == "input_text" and "location" in (field.label or "").lower()):
             try:
