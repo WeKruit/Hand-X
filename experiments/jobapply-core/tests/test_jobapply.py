@@ -26,8 +26,11 @@ class _DetectedVar:
 def test_instructions_toggle_submit():
     fill_only = jobapply.build_instructions(submit=False)
     submitting = jobapply.build_instructions(submit=True)
-    assert "Do NOT click the final Submit" in fill_only
-    assert "click the final Submit/Apply button to submit" in submitting
+    # fill-only must forbid submit absolutely and trigger done() at the Submit step
+    assert "NEVER click Submit" in fill_only and "done(success=True)" in fill_only
+    assert "click the final Submit/Apply button once to submit" in submitting
+    # reCAPTCHA must route to HITL, not a loop
+    assert "HITL" in fill_only and "reCAPTCHA" in fill_only
     # conventions that must always be present (align with browser-use's manual)
     for must in ("get_recent_emails", "Next / Continue", "Never fabricate", "react-select"):
         assert must in fill_only

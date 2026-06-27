@@ -48,9 +48,17 @@ DEFAULT_PROFILE = HERE / "fixtures" / "sample_profile.json"
 # ─────────────────────────────────────────────────────────────────────────────
 def build_instructions(submit: bool) -> str:
     final = (
-        "When the whole application is complete, click the final Submit/Apply button to submit."
+        "When every field is filled and verified, click the final Submit/Apply button once to submit, then call done."
         if submit
-        else "Do NOT click the final Submit/Apply button — stop on the review step and report what is filled."
+        else (
+            "STOP PROTOCOL — the moment every visible field is filled and the ONLY remaining\n"
+            "  control is the final Submit / Submit application / Apply / Finish button, IMMEDIATELY\n"
+            "  call done(success=True) with a short summary of what you filled. That is your terminal\n"
+            "  action. It is an ABSOLUTE rule that you NEVER click Submit/Apply/Finish — not to submit,\n"
+            "  not to 'advance', not to 'check', not to reveal errors. After you reach the Submit step\n"
+            "  do NOT go back to re-verify or re-fill ANY field — clicking Submit only creates\n"
+            "  validation errors you will then loop on. Filled + at Submit = call done NOW."
+        )
     )
     verification = (
         "- If you hit an email-verification wall (a page asking for a code or magic link\n"
@@ -86,13 +94,20 @@ def build_instructions(submit: bool) -> str:
   the correct value and has no red error, it IS filled — move on. Do not re-type a field
   just because the state text looks empty; that false-empty is the #1 cause of the
   retype loop (e.g. phone typed once but state says empty -> do NOT retype 20 times).
-- COMBOBOX / autocomplete / react-select dropdowns (Location, School, Degree,
-  Discipline, Yes/No questions, phone country/type): type the value, WAIT 2-3s for the
-  suggestion list, then click the matching role=option (never press Enter to pick). On
-  the next step VERIFY a selected chip/token/value is visible — that, not the typed
-  text, means it committed. If no list appears, try a shorter/alternate term before
-  giving up ("United States of America" -> "United States" -> "US"; "+1"/"USA"/"Mobile"
-  for phone). Never batch a dropdown pick with a Next/Continue click in the same step.
+- DROPDOWNS — USE YOUR DROPDOWN TOOLS, don't hand-click options. For any select /
+  dropdown / Yes-No / single-choice field, FIRST call get_dropdown_options on it to
+  read the real option list, then select_dropdown with the EXACT option text. That
+  handles native <select> AND ARIA menus reliably in one step — always prefer it over
+  manual click+type, and it never loops.
+- TYPEAHEAD / react-select (autocomplete with NO native <select> — Location, School,
+  Degree, Discipline, phone country/type — where select_dropdown does not apply): do
+  the click->wait->observe->search->click routine. Click the control, type the value,
+  call the wait action (2-3s) so the option list renders, OBSERVE it, then click the
+  matching role=option (never press Enter to pick). If no options appear, retype a
+  SHORTER / alternate term ("United States of America" -> "United States" -> "US";
+  "+1"/"USA"/"Mobile" for phone). VERIFY a selected chip/value is visible before moving
+  on — that, not the typed text, means it committed. Never batch the option-click with
+  a Next/Continue in the same step.
 - COMMIT a stuck value instead of re-typing it: if a field visibly holds the right text
   but still shows a red "required"/validation error, focus it and press Tab (or Enter)
   to commit — do NOT re-type it and do NOT refresh the whole page. After any typed date,
@@ -100,11 +115,21 @@ def build_instructions(submit: bool) -> str:
 - BEFORE ADVANCING a page, scan the screenshot: do not click Next/Continue while red
   errors, empty required fields, or a disabled Next button are visible — resolve those
   first. Stay near the current section; don't jump back to re-verify filled fields.
-- DON'T LOOP ON ONE FIELD. Never input the same value into the same field more than
-  TWICE. If a field still reads empty/wrong after two honest tries, it is a widget
-  quirk (input mask, validation, a control you haven't revealed yet) — leave it,
-  note it in memory, and MOVE ON to the next field. One field must never block the
-  whole form, and repeating an action with no change is the stuck loop to avoid.
+- RETRY → THEN LOOK (the anti-loop rule, this matters most). The browser-state `value=`
+  for inputs is UNRELIABLE on React/Greenhouse/Workday forms — it reads EMPTY even when
+  the field is filled and visible. So do NOT re-type a field just because the state
+  shows it empty. Count your attempts per field: after you have typed the SAME field
+  TWICE and the state still shows empty, STOP typing it and take a screenshot to LOOK.
+  - If the screenshot shows the value is visibly there → it IS filled. Mark it done and
+    NEVER touch that field again.
+  - Only if the screenshot ALSO shows it clearly empty is it truly unfilled → try ONE
+    different method (e.g. send_keys / click-then-type) or flag it as a blocker.
+  Vision is the arbiter, never the state read-back. Re-typing a visibly-filled field is
+  the #1 stuck loop. Selects/dropdowns are the same — a chosen option can read back
+  empty while visibly selected; confirm by screenshot, do not re-select.
+- ADVANCE-TO-VERIFY: on a multi-page form, the cleanest proof a page is complete is that
+  Next/Continue ACCEPTS it — if the form advances, every required field was filled. If it
+  blocks with an error, fix only the field it flags. Don't re-verify by re-reading state.
 - CLICK-TO-REVEAL fields: some inputs are hidden behind a toggle/button — e.g. a
   cover letter or long-answer may show "Enter manually" / "Write" / "Paste" before
   the textarea exists. Click that control FIRST to reveal the field, THEN type.
@@ -119,7 +144,11 @@ def build_instructions(submit: bool) -> str:
   clicking "Add another" to enter the NEXT item is expected and correct.
 - Upload the resume from the available files when a file-upload field appears.
 {verification}
-- On a Review/Confirm page, check the values, then {('submit.' if submit else 'stop.')}
+- reCAPTCHA / HUMAN VERIFICATION: a simple "I'm not a robot" checkbox is solved
+  automatically — continue. But if an IMAGE reCAPTCHA / puzzle / challenge, or any
+  human-verification step you cannot pass deterministically appears, do NOT attempt it
+  and do NOT loop — call done(success=False) noting that human-in-the-loop (HITL)
+  verification is required, and stop there.
 - {final}"""
 
 
@@ -200,9 +229,15 @@ def _gmail_tools(access_token: str | None, credentials_file: str | None, token_f
     return tools
 
 
-def _build_task(job_url: str, profile: dict, resume: str | None) -> str:
+def _build_task(job_url: str, profile: dict, resume: str | None, submit: bool = False) -> str:
+    objective = (
+        f"Open {job_url} and complete the job application end to end, then submit it."
+        if submit
+        else f"Open {job_url} and FILL OUT the application completely, but STOP at the final "
+        "Submit step WITHOUT clicking it — this is a fill-only run, never submit."
+    )
     parts = [
-        f"Open {job_url} and complete the job application end to end.",
+        objective,
         "",
         "Applicant resume + profile data (JSON) — use this as the source of truth "
         "for every field, including work experience, education, dates, skills, and "
@@ -294,7 +329,7 @@ async def _do_record(args: argparse.Namespace, *, model: str, history_path: str,
     resume = str(Path(args.resume).resolve()) if args.resume else None
 
     agent = Agent(
-        task=_build_task(args.job_url, profile, resume),
+        task=_build_task(args.job_url, profile, resume, submit=submit),
         llm=_make_llm(model),
         tools=_gmail_tools(args.gmail_access_token, args.gmail_credentials, args.gmail_token),
         browser=_browser(args.headless),
