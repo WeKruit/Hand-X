@@ -56,7 +56,7 @@ async def visual_check(session: Any, target: str) -> str:
         return f'{{"filled": null, "error": "{type(exc).__name__}: {exc}"}}'
 
 
-def make_loop_verify_hook(verify_at: int = 2, stop_at: int = 4) -> Any:
+def make_loop_verify_hook(verify_at: int = 2, stop_at: int = 3) -> Any:
     """Return an on_step_end(agent) callback that DETERMINISTICALLY breaks the false-empty
     retype loop. Keyed by the TEXT VALUE typed (NOT element index — the index shifts and the
     retypes are interleaved with other actions, so consecutive/index detection misses them):
