@@ -27,7 +27,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
+import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -318,7 +321,9 @@ def _write_vars_sidecar(agent: Any, history_path: str) -> int:
 async def _kill(agent: Any) -> None:
     try:
         if agent.browser_session is not None:
-            await agent.browser_session.kill()
+            # bound it: browser-use's keep_alive session kill can hang on CDP teardown.
+            # Time-box so a record run always returns; main()'s hard-exit does the rest.
+            await asyncio.wait_for(agent.browser_session.kill(), timeout=10)
     except Exception:
         pass
 
@@ -487,6 +492,10 @@ async def _hold_open(agent: Any) -> None:
 
 
 def main() -> None:
+    # Line-buffer stdout so COST/progress reach a redirected log immediately — not trapped in a
+    # block buffer if a browser teardown step hangs after them (a record's cost prints BEFORE _kill).
+    with contextlib.suppress(Exception):
+        sys.stdout.reconfigure(line_buffering=True)
     # Local convenience: pick up a .env (BROWSER_USE_API_KEY, GOOGLE_API_KEY, …) if present.
     try:
         from dotenv import load_dotenv
@@ -541,6 +550,11 @@ def main() -> None:
     args = p.parse_args()
     fn = {"record": record, "replay": replay, "compare": compare}[args.cmd]
     asyncio.run(fn(args))
+    # browser-use's keep_alive watchdog tasks can keep the event loop alive after the work is
+    # done -> the process hangs forever. The work + cost print are complete here; flush and
+    # hard-exit so a record/compare run actually ENDS instead of zombie-ing in teardown.
+    sys.stdout.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":
