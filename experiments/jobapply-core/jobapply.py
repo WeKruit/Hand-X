@@ -119,11 +119,13 @@ def build_instructions(submit: bool) -> str:
   for inputs is UNRELIABLE on React/Greenhouse/Workday forms — it reads EMPTY even when
   the field is filled and visible. So do NOT re-type a field just because the state
   shows it empty. Count your attempts per field: after you have typed the SAME field
-  TWICE and the state still shows empty, STOP typing it and take a screenshot to LOOK.
-  - If the screenshot shows the value is visibly there → it IS filled. Mark it done and
-    NEVER touch that field again.
-  - Only if the screenshot ALSO shows it clearly empty is it truly unfilled → try ONE
-    different method (e.g. send_keys / click-then-type) or flag it as a blocker.
+  TWICE and the state still shows empty, STOP typing it and call the verify_field_visually
+  action with the field's label — a cheap vision model looks at the screenshot and reports
+  whether it is filled.
+  - If verify_field_visually says filled (or you can plainly see it) → it IS filled. Mark
+    it done and NEVER touch that field again.
+  - Only if it reports clearly empty is it truly unfilled → try ONE different method
+    (e.g. send_keys / click-then-type) or flag it as a blocker.
   Vision is the arbiter, never the state read-back. Re-typing a visibly-filled field is
   the #1 stuck loop. Selects/dropdowns are the same — a chosen option can read back
   empty while visibly selected; confirm by screenshot, do not re-select.
@@ -328,14 +330,20 @@ async def _do_record(args: argparse.Namespace, *, model: str, history_path: str,
     profile = json.loads(Path(args.profile).read_text())
     resume = str(Path(args.resume).resolve()) if args.resume else None
 
+    from vision_verify import register_visual_verify
+
+    tools = _gmail_tools(args.gmail_access_token, args.gmail_credentials, args.gmail_token)
+    register_visual_verify(tools)  # (c) cheap-VLM visual field check the agent can call on a stuck field
+
     agent = Agent(
         task=_build_task(args.job_url, profile, resume, submit=submit),
         llm=_make_llm(model),
-        tools=_gmail_tools(args.gmail_access_token, args.gmail_credentials, args.gmail_token),
+        tools=tools,
         browser=_browser(args.headless),
         extend_system_message=build_instructions(submit),
         available_file_paths=[resume] if resume else None,
         use_vision="auto",
+        vision_detail_level="low",  # (b) screenshots at low detail -> far fewer image tokens
         save_conversation_path=_trace_path(args, model),  # built-in per-step cause trace
         max_actions_per_step=args.max_actions,  # default 1 = act-then-observe. Chaining on
                                   # ATS forms lands later actions on stale element indices
@@ -493,11 +501,10 @@ def main() -> None:
         sp.add_argument("--job-url", required=True)
         sp.add_argument("--resume", default=None)
         sp.add_argument("--max-steps", type=int, default=80)
-        sp.add_argument("--max-actions", type=int, default=1,
-                        help="Actions per step. Measured on a combobox-heavy Greenhouse form (bu-2-0): "
-                             "1 = reliable (~$0.27, phone retyped 1-4x); 3 = cheap (~$0.12) but thrashy "
-                             "(phone 27x); 2 is DOMINATED (~$0.26 yet phone 20x) — don't use it. "
-                             "Default 1: record once reliably, then amortise cost via reuse (replay/cloud).")
+        sp.add_argument("--max-actions", type=int, default=3,
+                        help="Actions per step. Default 3 (~$0.13, reliable now that the retry-then-vision "
+                             "fix killed the re-fill loop: phone 3x, 4 nudges, done). 1 = most reliable but "
+                             "~2x cost ($0.27, 64 steps). 2 is dominated — avoid.")
 
     pr = sub.add_parser("record", help="Run + record the application trajectory")
     common(pr)
