@@ -131,7 +131,25 @@ browser session.** That itself is a finding: the offline harness must parse, not
 the real DOM**. Dynamic sections (Languages proficiency, validation) are correctly NOT in the initial
 plan — which is exactly why the engine is a **fixpoint reconcile loop, not a one-shot plan.** Design holds.
 
-## Status
-Assumptions **verified offline against the real Intel My-Experience DOM** (A1/A3/A4 PASS, A2 partial,
-A13→A12 confirmed). NEXT: fix the 2 detector nits, then build `map_plan` + `reconcile` + `put` as pure
-functions and assert against (a) this dump and (b) a post-add / post-Next dump for the dynamic cases.
+## BUILD STATUS (implemented + verified)
+**Decision layer — BUILT & OFFLINE-VERIFIED on the real DOM** (`wd_repeaters.py`, `wd_offline/`):
+- `extract_offline`/`extract_live` (data-fkit-id row-aware), `dedup`, `reconcile` (row-aware, semantic
+  equivalence, overflow), `make_plan` (real `gemini-3.1-flash-lite` semantic map). 13/13 asserts green
+  (`test_detect.py`): 2 experience rows (225/226) + education + skills; start/end dates distinct; 3 dedup
+  nits fixed. LLM map proven offline: natural keys mapped, `BS`->"Bachelor's Degree" canonicalized.
+- **Act layer — BUILT** (`put` per archetype located row-safe by fkit, `ensure_rows` dup-guarded,
+  `fill_deterministic` fixpoint loop) and **WIRED** into `ats_workday.fill_repeaters` deterministic-first
+  (agent = residual backstop only). ruff clean, never submits.
+
+**Live run (`wd_offline/live_verify.py`, Intel CXS API + throwaway account): BLOCKED UPSTREAM, not at the
+repeaters.** Auth + autofill OK, but every Intel job gates My Information on a screening radio ("previously
+employed by Intel?") that the *repair agent* couldn't register (the known `_click_radio` "label-click
+doesn't check the React input" issue) → never advanced to My Experience, so `fill_deterministic` wasn't
+exercised live. This is a My-Information-step defect, separate from the repeater engine.
+
+## Status / NEXT
+Repeater engine **built + comprehensively offline-verified**; **live observation pending** an unblock of
+the My-Information screening radio (deterministic-answer that question instead of leaving it to the agent,
+or pick a tenant without it), then watch `fill_deterministic`'s ledger (rounds/filled/rows_added/residual)
+on a live My-Experience page. Dynamic cases (A10 validation, A11 cascade, A12 reveal) need a post-advance
+dump — produced by the loop's observe-after-every-act once live.
