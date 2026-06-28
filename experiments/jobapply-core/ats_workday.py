@@ -395,6 +395,20 @@ class WorkdayAdapter(ATSAdapter):
                     return True
             return False
         if t == "checkbox":
+            # checkbox GROUP ("select all that apply"): the value NAMES an option (e.g. "Neither")
+            # rather than yes/no — click THAT option's checkbox. Single boolean checkbox: toggle.
+            if eng.norm(value) not in (
+                "yes",
+                "true",
+                "1",
+                "y",
+                "no",
+                "false",
+                "0",
+                "n",
+                "",
+            ) and await self._click_radio(page, field, value):
+                return True
             el = await self.locate(page, field)
             if el:
                 with contextlib.suppress(Exception):
@@ -521,15 +535,17 @@ class WorkdayAdapter(ATSAdapter):
         return False
 
     async def _click_radio(self, page: Any, field: FormField, value: str) -> bool:
-        """Select a Workday Yes/No-style radio. Workday markup is
-        `<input id=X value=true><label for=X>Yes</label>` inside a <fieldset><legend>question.
-        Clicking the LABEL does NOT check the React input (verified: checked stays false), so we
-        resolve each option's text via its label[for]=input.id and click the INPUT element
-        directly. Match label text exact -> contains -> the value attr (yes->true / no->false)."""
+        """Select a Workday choice control by option text — radios AND checkbox-GROUPS ("select all
+        that apply"). Markup is `<input id=X value=true><label for=X>Yes</label>`; clicking the
+        LABEL does NOT check the React input (verified), so we resolve each option's text via
+        label[for]=input.id and click the INPUT directly. Match label text exact -> contains -> the
+        value attr (yes->true / no->false)."""
         sel = f'[data-automation-id="{field.name}"]'
         want = eng.norm(value)
         yn = {"yes": "true", "no": "false", "true": "true", "false": "false"}.get(want)
-        radios = await page.get_elements_by_css_selector(f'{sel} input[type="radio"], {sel} [role="radio"]')
+        radios = await page.get_elements_by_css_selector(
+            f'{sel} input[type="radio"], {sel} [role="radio"], {sel} input[type="checkbox"], {sel} [role="checkbox"]'
+        )
         scored: list[tuple[Any, str, str]] = []
         for el in radios:
             with contextlib.suppress(Exception):
