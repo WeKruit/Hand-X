@@ -533,11 +533,14 @@ async def install_submit_guard(page: Any) -> None:
     human must do either. Forward controls (Save/Continue/Next/Add) stay enabled. Idempotent."""
     with contextlib.suppress(Exception):
         await page.evaluate(
-            "() => { const kill=()=>document.querySelectorAll('button,input[type=submit],a[role=button]').forEach(b=>{"
-            "   const t=((b.textContent||'')+' '+(b.value||'')+' '+(b.getAttribute('aria-label')||''));"
-            "   const danger=/submit|finish|finali[sz]e|discard|cancel|sign ?out|log ?out|delete application|withdraw/i;"
-            "   const safe=/save|continue|next|add|search|upload|edit/i;"
-            "   if (danger.test(t) && !safe.test(t)) b.disabled=true; });"
+            "() => { const kill=()=>{"
+            "   document.querySelectorAll('button,input[type=submit],a[role=button]').forEach(b=>{"
+            "     const t=((b.textContent||'')+' '+(b.value||'')+' '+(b.getAttribute('aria-label')||''));"
+            "     const danger=/submit|finish|finali[sz]e|discard|cancel|sign ?out|log ?out|delete application|withdraw|\\bback\\b|\\bprevious\\b|go back/i;"
+            "     const safe=/save|continue|next|add|search|upload|edit/i;"
+            "     if (danger.test(t) && !safe.test(t)) b.disabled=true; });"
+            '   document.querySelectorAll(\'[data-automation-id="progressBar"],[data-automation-id*="progressBar"],'
+            "[role=navigation] ol,[role=navigation] ul').forEach(e=>{ e.style.pointerEvents='none'; }); };"
             "  kill(); if (!window.__ghSubGuard) window.__ghSubGuard=setInterval(kill, 300); }"
         )
 
