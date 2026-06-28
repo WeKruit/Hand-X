@@ -52,9 +52,13 @@ _EXTRACT_STEP_JS = r"""
   }
 
   // ---- generic wrapper discovery (NOT limited to the formField- prefix) ----
-  const wrappers = new Map();   // aid -> wrapper element (insertion order = DOM order)
+  const wrappers = new Map();   // UNIQUE key -> wrapper element (insertion order = DOM order)
   document.querySelectorAll('[data-automation-id^="formField-"]').forEach(w => {
-    const aid = w.getAttribute('data-automation-id'); if (aid && !wrappers.has(aid)) wrappers.set(aid, w);
+    // KEY by data-fkit-id (UNIQUE per instance, e.g. "workExperience-225--jobTitle") so repeater ROWS
+    // don't collide on the shared data-automation-id ("formField-jobTitle") — that collision is why the
+    // ladder could fill only ONE row and the agent had to do the rest. Fall back to the aid.
+    const key = w.getAttribute('data-fkit-id') || w.getAttribute('data-automation-id');
+    if (key && !wrappers.has(key)) wrappers.set(key, w);
   });
   // secondary: editable controls not inside any formField-* wrapper (tenants without the
   // prefix, or standalone inputs) -> adopt their nearest in-content [data-automation-id] ancestor.
@@ -64,8 +68,9 @@ _EXTRACT_STEP_JS = r"""
     if (c.closest('[data-automation-id^="formField-"]')) return;
     if (!c.closest('[data-automation-id$="Page"],[data-automation-id*="applyFlow"],[data-automation-id*="Content"]')) return;
     const w = c.closest('[data-automation-id]'); if (!w) return;
-    const aid = w.getAttribute('data-automation-id'); if (!aid || CHROME.test(aid) || wrappers.has(aid)) return;
-    wrappers.set(aid, w);
+    const aid = w.getAttribute('data-automation-id'); if (!aid || CHROME.test(aid)) return;
+    const key = w.getAttribute('data-fkit-id') || aid; if (wrappers.has(key)) return;
+    wrappers.set(key, w);
   });
 
   const typeOf = w => {
@@ -124,6 +129,13 @@ _EXTRACT_STEP_JS = r"""
     }
     out.push({name:aid, label, type, required:!!req, options});
   }
+  // ENTRY-INDEX repeater fields so MAP can tell row 1 from row 2 (both share a label like "Job Title").
+  // A repeater field's name is "<section>-<rownum>--<field>" (e.g. workExperience-225--jobTitle). Group
+  // by <section>, order the distinct <rownum>s by DOM appearance, tag each label with its 1-based entry.
+  const rowRe = /^([A-Za-z]+)-(\d+)--/;
+  const order = {};
+  out.forEach(f => { const m=(f.name||'').match(rowRe); if(m){ (order[m[1]] = order[m[1]] || []); if(!order[m[1]].includes(m[2])) order[m[1]].push(m[2]); } });
+  out.forEach(f => { const m=(f.name||'').match(rowRe); if(m && order[m[1]].length>1){ f.label = f.label + ' (entry ' + (order[m[1]].indexOf(m[2])+1) + ')'; } });
   return JSON.stringify({index, total, name, fields:out});
 }
 """
@@ -359,13 +371,14 @@ class WorkdayAdapter(ATSAdapter):
 
     # -- locate / fill / read_back -----------------------------------------
     async def locate(self, page: Any, field: FormField) -> Any | None:
-        sel = f'[data-automation-id="{field.name}"]'
-        return (
-            await eng.first(page, f"{sel} input")
-            or await eng.first(page, f"{sel} textarea")
-            or await eng.first(page, f"{sel} select")
-            or await eng.first(page, f"{sel} button")
-        )
+        # field.name is the UNIQUE data-fkit-id (repeater-row safe, e.g. "workExperience-225--jobTitle")
+        # or, as fallback, the data-automation-id. Match by either so a single name resolves both.
+        n = field.name
+        for suf in (" input", " textarea", " select", " button"):
+            el = await eng.first(page, f'[data-fkit-id="{n}"]{suf}, [data-automation-id="{n}"]{suf}')
+            if el:
+                return el
+        return None
 
     async def fill(self, session: Any, page: Any, field: FormField, value: str, resume: str | None) -> bool:
         t = field.type
