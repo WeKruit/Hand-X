@@ -22,9 +22,12 @@ import re
 from dataclasses import dataclass, field
 
 KW = ["experience", "education", "skill", "language", "certification", "website", "resume", "social"]
-# canonical section keys used by the plan + profile
-SECTION_KEYS = {"experience": "experience", "education": "education", "skill": "skills",
-                "language": "languages", "certification": "certifications"}
+# data-fkit-id section token -> canonical section key (the plan + profile use canonical keys)
+SEC_FROM_FKIT = {"workexperience": "experience", "education": "education", "skills": "skills",
+                 "languages": "languages", "certifications": "certifications",
+                 "resumeattachments": "resume", "websitepanelset": "websites", "socialnetwork": "social"}
+CANON = {"experience": "experience", "education": "education", "skill": "skills",
+         "language": "languages", "certification": "certifications"}
 
 
 def norm(s: str | None) -> str:
@@ -34,6 +37,25 @@ def norm(s: str | None) -> str:
 def nkey(s: str | None) -> str:
     """Normalised match key: lowercase, collapse ws, drop a trailing required '*' and punctuation."""
     return re.sub(r"[\s*:]+$", "", norm(s).lower()).strip()
+
+
+def humanize(camel: str) -> str:
+    """'startDate' -> 'Start Date' — recover a readable label from a camelCase fkit field."""
+    return norm(re.sub(r"([a-z])([A-Z])", r"\1 \2", camel).replace("-", " ").replace("_", " ")).title()
+
+
+_SEGMENT_WORDS = {"month", "year", "day", ""}
+
+
+def parse_fkit(fkit: str) -> tuple[str | None, str, str]:
+    """'workExperience-225--jobTitle' -> ('experience','225','jobtitle'). The ROW-SAFE identity:
+    section base + row instance + machine field. 'skills--skills' -> ('skills','','skills')."""
+    if not fkit or "--" not in fkit:
+        return (None, "", "")
+    secrow, _, fld = fkit.partition("--")
+    m = re.match(r"^(.*?)-(\d+)$", secrow)
+    base, row = (m.group(1), m.group(2)) if m else (secrow, "")
+    return (SEC_FROM_FKIT.get(base.lower(), base.lower()), row, fld.lower())
 
 
 # ---------------------------------------------------------------------------
@@ -47,12 +69,19 @@ class Control:
     itype: str = ""               # input type
     cid: str = ""                 # element id
     aid: str = ""                 # data-automation-id
-    label: str = ""               # resolved visible label
+    fkit: str = ""                # data-fkit-id — the ROW-SAFE unique key
+    sec: str | None = None        # canonical section (from fkit, else heading)
+    row: str = ""                 # row instance token ('225'); '' = non-repeating
+    field_key: str = ""           # machine field (jobtitle, degree, startdate, skills)
+    label: str = ""               # resolved visible label (for LLM map matching)
     wrapper_aid: str = ""         # nearest ancestor data-automation-id (widget group)
     in_multiselect: bool = False  # inside a multiSelectContainer
     doc_index: int = 0            # document order
-    section: str | None = None    # assigned section keyword
+    section: str | None = None    # heading-proximity section (fallback when no fkit)
     handle: object = None         # live element handle (None offline)
+
+    def sect(self) -> str | None:
+        return self.sec or (CANON.get(self.section or "", self.section) if self.section else None)
 
     def archetype(self) -> str | None:
         if self.in_multiselect:
@@ -86,38 +115,34 @@ def _assign_sections(controls: list[Control], headings: list[tuple[int, str]]) -
         c.section = next((k for k in KW if best and k in best), None) if best else None
 
 
+_ARCHE_RANK = {"chip": 0, "select": 1, "date": 2, "check": 3, "radio": 4, "textarea": 5, "text": 6}
+
+
 def dedup(controls: list[Control]) -> list[Control]:
-    """Collapse raw handles to ONE entry per logical widget. Fixes the 2 offline-found nits:
-      (1) Degree dup: a select (button[haspopup]) + a hidden text input share a wrapper -> keep the
-          select, drop the text twin.
-      (2) selectedItemList false-chip: the pill CONTAINER ('items selected') is not an input -> drop
-          any control whose aid/wrapper marks it the selectedItem(List) container, keep the typeahead."""
-    out: list[Control] = []
-    seen: set[str] = set()
-    # group by wrapper to resolve select+text twins
-    wrapper_has_rich: set[str] = set()
-    for c in controls:
-        if c.archetype() in ("select", "chip", "date", "check", "radio") and c.wrapper_aid:
-            wrapper_has_rich.add(c.wrapper_aid)
+    """Collapse raw handles to ONE entry per logical field, keyed by data-fkit-id (the ROW-SAFE key —
+    so workExperience-225 and -226 stay distinct, while a field's visible+hidden input twins and a
+    date's MM/YYYY spinbuttons collapse to one). Controls without a fkit-id fall back to wrapper key.
+    Among twins sharing a fkit-id, keep the RICHEST archetype (a select beats its hidden text input)."""
+    best: dict[str, Control] = {}
+    order: list[str] = []
     for c in controls:
         a = c.archetype()
         if a is None:
             continue
-        # nit 2: drop the pills container masquerading as a control
-        if "selecteditem" in (c.aid or "").lower():
+        if "selecteditem" in (c.aid or "").lower():   # the pill CONTAINER is not an input
             continue
-        # nit 1: a plain text twin in a wrapper that already has a rich control is the hidden backing input
-        if a == "text" and c.wrapper_aid and c.wrapper_aid in wrapper_has_rich:
-            continue
-        # one logical field == one Workday formField wrapper; collapse visible+hidden input twins by
-        # wrapper. (Multi-row disambiguation is added by the row layer via the row index in the key.)
-        gid = c.wrapper_aid or c.cid or c.aid
-        key = f"{a}::{gid}::{nkey(c.label)}::{c.section}"
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(c)
-    return out
+        if c.field_key in ("", "null"):               # the wrapper row marker, not a real field
+            if not c.fkit:                            # but keep genuinely fkit-less controls (rare)
+                pass
+            else:
+                continue
+        key = c.fkit or f"{c.wrapper_aid or c.cid or c.aid}::{nkey(c.label)}::{c.section}"
+        if key not in best:
+            best[key] = c
+            order.append(key)
+        elif _ARCHE_RANK.get(a, 9) < _ARCHE_RANK.get(best[key].archetype(), 9):
+            best[key] = c                              # richer archetype wins the twin
+    return [best[k] for k in order]
 
 
 # ---------------------------------------------------------------------------
@@ -160,13 +185,22 @@ def extract_offline(html: str) -> list[Control]:
     raw = tree.xpath('//input|//select|//textarea|//*[@role="spinbutton"]|//*[@role="listbox"]'
                      '|//button[@aria-haspopup="listbox"]')
     for el in raw:
-        wrapper_aid, in_ms = "", False
+        wrapper_aid, in_ms, fkit = "", False, el.get("data-fkit-id") or ""
         for anc in el.iterancestors():
             aid = anc.get("data-automation-id")
             if aid == "multiSelectContainer":
                 in_ms = True
             if aid and not wrapper_aid:
                 wrapper_aid = aid
+            if not fkit and anc.get("data-fkit-id"):
+                fkit = anc.get("data-fkit-id")
+        sec, row, fld = parse_fkit(fkit)
+        label = label_for(el)
+        rawfld = fkit.split("--")[-1] if "--" in fkit else ""
+        # a date segment's own label is just "Month"/"Year" — use the fkit field for the field label
+        # (startDate -> "Start Date") so start/end dates are distinct + matchable by the plan.
+        if rawfld and (not label or nkey(label) in _SEGMENT_WORDS):
+            label = humanize(rawfld)
         controls.append(Control(
             tag=(el.tag if isinstance(el.tag, str) else "").upper(),
             role=(el.get("role") or "").lower(),
@@ -174,12 +208,13 @@ def extract_offline(html: str) -> list[Control]:
             itype=(el.get("type") or "").lower(),
             cid=el.get("id") or "",
             aid=el.get("data-automation-id") or "",
-            label=label_for(el),
+            fkit=fkit, sec=sec, row=row, field_key=fld,
+            label=label,
             wrapper_aid=wrapper_aid,
             in_multiselect=in_ms,
             doc_index=order[rt.getpath(el)],
         ))
-    _assign_sections(controls, heads)
+    _assign_sections(controls, heads)   # heading-proximity fallback for fkit-less controls
     return dedup(controls)
 
 
@@ -221,35 +256,58 @@ class Diff:
         return not self.todo() and not self.unplanned
 
 
+def _rows_of(controls: list[Control], sec: str) -> list[str]:
+    """Ordered distinct row tokens mounted for a section (by first appearance)."""
+    seen: dict[str, int] = {}
+    for c in controls:
+        if c.sect() == sec and c.row not in seen:
+            seen[c.row] = c.doc_index
+    return [r for r, _ in sorted(seen.items(), key=lambda kv: kv[1])]
+
+
+def _match(controls: list[Control], sec: str, row: str, label: str) -> Control | None:
+    lk = nkey(label)
+    cand = [c for c in controls if c.sect() == sec and c.row == row]
+    for c in cand:                                  # exact visible-label match
+        if nkey(c.label) == lk:
+            return c
+    fk = re.sub(r"[^a-z]", "", lk)                   # else machine field_key alias (jobtitle ~ "job title")
+    for c in cand:
+        if c.field_key and (fk in c.field_key or c.field_key in fk):
+            return c
+    return None
+
+
 def reconcile(plan: dict, controls: list[Control], readback: dict | None = None) -> Diff:
-    """plan = {section: {"rows": [ {label: value} ], "count": N}} (skills/langs flattened to rows too).
-    readback = {(section,row,label_key): committed_value} from the live DOM ('' if unread/empty).
-    Pure: classifies each planned field; flags unplanned required controls + row overflow."""
+    """plan = {section: {"count": N, "rows": [ {label: value} ]}} (skills/langs are rows of one value).
+    readback = {fkit_id: committed_value} from the live DOM ('' if empty). ROW-AWARE: aligns plan row j
+    to DOM row j (via fkit row tokens); a plan row beyond the mounted rows => MISSING (needs Add Another).
+    Pure: classifies DONE / MISSING / DIVERGED; flags unplanned-required + row overflow (dup-guard)."""
     readback = readback or {}
     d = Diff()
-    # index controls by (section, label_key) for unplanned detection
-    planned_keys: set[tuple] = set()
     for sec, blk in plan.items():
-        for ri, row in enumerate(blk.get("rows", [])):
-            for label, value in row.items():
-                planned_keys.add((sec, nkey(label)))
-                got = readback.get((sec, ri, nkey(label)), "")
-                if not str(value).strip():
-                    status = "DONE"                       # nothing to fill
-                elif semantic_equal(str(value), got):
+        plan_rows = blk.get("rows", [])
+        dom_rows = _rows_of(controls, sec)
+        for j, prow in enumerate(plan_rows):
+            dom_row = dom_rows[j] if j < len(dom_rows) else None
+            for label, value in prow.items():
+                v = str(value).strip()
+                ctrl = _match(controls, sec, dom_row, label) if dom_row is not None else None
+                got = readback.get(ctrl.fkit, "") if ctrl else ""
+                if not v:
+                    status = "DONE"                         # nothing intended
+                elif dom_row is None or ctrl is None:
+                    status = "MISSING"                      # row not mounted / control absent -> Add+fill
+                elif semantic_equal(v, got):
                     status = "DONE" if got else "MISSING"
                 else:
                     status = "DIVERGED" if got else "MISSING"
-                d.fields.append(FieldDiff(sec, ri, label, str(value), status))
-    # unplanned REQUIRED controls present in the DOM but absent from the plan
-    for c in controls:
-        sec = SECTION_KEYS.get(c.section or "", c.section)
-        if sec and (sec, nkey(c.label)) not in planned_keys and c.label.endswith("*"):
+                d.fields.append(FieldDiff(sec, j, label, v, status, ctrl))
+        if len(dom_rows) > len(plan_rows):                  # dup-guard signal
+            d.row_overflow[sec] = dom_rows[len(plan_rows):]
+    planned = {(f.section, nkey(f.label)) for f in d.fields}
+    for c in controls:                                      # unplanned REQUIRED controls (conditional reveals)
+        s = c.sect()
+        if s and c.label.endswith("*") and (s, nkey(c.label)) not in planned:
             d.unplanned.append(c)
-    # row overflow (dup-guard signal): more rows present than planned
-    by_sec_rows: dict = {}
-    for c in controls:
-        sec = SECTION_KEYS.get(c.section or "", c.section)
-        if sec:
-            by_sec_rows.setdefault(sec, set())
     return d
