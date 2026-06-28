@@ -685,7 +685,19 @@ class WorkdayAdapter(ATSAdapter):
     )
 
     async def fill_repeaters(self, session: Any, page: Any, profile: dict) -> dict:
-        headings = await self._page_headings(page)
+        # HARD GATE: only run on a page that actually HAS a repeater affordance — an "Add"/"Add
+        # Another" control. Without this, a keyword in some unrelated QUESTION text (e.g. "employ"
+        # in an export-control question on Application Questions) would falsely fire the experience
+        # agent on the wrong page, where it then tries to NAVIGATE to find the section (dangerous).
+        has_add = await page.evaluate(
+            '() => !!document.querySelector(\'[data-automation-id="Add"],[data-automation-id*="add-button"],'
+            '[data-automation-id*="addButton"]\')'
+            " || [...document.querySelectorAll('button')].some(b=>/^add( another)?$/i.test((b.textContent||'').trim()))"
+        )
+        if str(has_add).lower() != "true":
+            return {}
+        # section TITLES are short ("Work Experience"); long strings are question text, not headings.
+        headings = [h for h in await self._page_headings(page) if len(h) <= 40]
         out: dict = {}
         for key, keywords, is_tag in self._REPEATERS:
             items = profile.get(key) or []
@@ -731,7 +743,7 @@ class WorkdayAdapter(ATSAdapter):
         with contextlib.suppress(Exception):
             raw = await page.evaluate(
                 "() => JSON.stringify([...document.querySelectorAll("
-                '\'h1,h2,h3,h4,legend,[data-automation-id*="title"],[data-automation-id*="Title"],'
+                '\'h1,h2,h3,h4,[data-automation-id*="title"],[data-automation-id*="Title"],'
                 "[data-automation-id*=\"pageHeader\"]')].map(e=>(e.textContent||'').replace(/\\s+/g,' ')"
                 ".trim().toLowerCase()).filter(Boolean).slice(0,60))"
             )

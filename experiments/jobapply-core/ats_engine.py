@@ -524,17 +524,20 @@ async def repair_and_advance(
 
 
 async def install_submit_guard(page: Any) -> None:
-    """Continuously DISABLE any final-submit/finish button via a persistent interval. Workday's
-    apply flow is a single-page app: the agent can advance forward (e.g. into the Review step)
-    WITHIN the same document, so a one-time disable wouldn't cover a Submit button that mounts on a
-    later step. The interval re-disables it every 300ms, so the automation physically cannot submit
-    the application — a human reviewer must do that. Idempotent (guarded by window.__ghSubGuard)."""
+    """Continuously DISABLE any button that could FINALIZE (submit/finish) or DESTROY (discard/
+    cancel/sign-out/back-to-posting) the application, via a persistent 300ms interval. Workday's
+    apply flow is an SPA: an agent can advance forward (e.g. into Review) WITHIN the same document,
+    so a one-time disable wouldn't cover controls that mount on a later step — and a confused agent
+    has been seen click Back -> "Discard Application?" -> Discard, which would wipe all work. The
+    interval re-disables these every tick so the automation physically cannot submit OR discard; a
+    human must do either. Forward controls (Save/Continue/Next/Add) stay enabled. Idempotent."""
     with contextlib.suppress(Exception):
         await page.evaluate(
-            "() => { const kill=()=>document.querySelectorAll('button,input[type=submit]').forEach(b=>{"
+            "() => { const kill=()=>document.querySelectorAll('button,input[type=submit],a[role=button]').forEach(b=>{"
             "   const t=((b.textContent||'')+' '+(b.value||'')+' '+(b.getAttribute('aria-label')||''));"
-            "   if (/submit|finish|finali[sz]e/i.test(t) && !/save|continue|next|previous|back|add|search/i.test(t))"
-            "     b.disabled=true; });"
+            "   const danger=/submit|finish|finali[sz]e|discard|cancel|sign ?out|log ?out|delete application|withdraw/i;"
+            "   const safe=/save|continue|next|add|search|upload|edit/i;"
+            "   if (danger.test(t) && !safe.test(t)) b.disabled=true; });"
             "  kill(); if (!window.__ghSubGuard) window.__ghSubGuard=setInterval(kill, 300); }"
         )
 
