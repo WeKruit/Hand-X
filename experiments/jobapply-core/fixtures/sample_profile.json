@@ -1,0 +1,72 @@
+{
+  "first_name": "Jordan",
+  "last_name": "Avery",
+  "full_name": "Jordan Avery",
+  "email": "jordan.avery.test@example.com",
+  "phone": "+1 415 555 0142",
+  "location": "San Francisco, CA, USA",
+  "linkedin": "https://www.linkedin.com/in/jordan-avery-test",
+  "github": "https://github.com/jordan-avery-test",
+  "website": "https://jordanavery.example.com",
+
+  "work_authorization": "Authorized to work in the US (US Citizen)",
+  "requires_sponsorship": false,
+  "desired_salary": "180000",
+  "available_start_date": "2026-08-01",
+  "willing_to_relocate": false,
+  "preferred_work_arrangement": "Remote or Hybrid (SF Bay Area)",
+
+  "summary": "Senior software engineer with 7 years building reliable backend services and developer tooling in Python and Go. Led a 4-person team delivering a job-matching API serving 2M requests/day. Comfortable owning a feature from design through on-call.",
+
+  "experience": [
+    {
+      "company": "Northwind Labs",
+      "title": "Senior Software Engineer",
+      "location": "San Francisco, CA",
+      "start_date": "2022-03",
+      "end_date": "Present",
+      "current": true,
+      "highlights": [
+        "Led design and rollout of a job-matching API (Python/FastAPI, Postgres) serving 2M req/day at p99 < 120ms.",
+        "Mentored 3 engineers; ran the team's on-call rotation and cut paging volume 40% via SLO-based alerting.",
+        "Built a Go ingestion pipeline that reduced data-freshness latency from hours to under 5 minutes."
+      ]
+    },
+    {
+      "company": "Contoso",
+      "title": "Software Engineer",
+      "location": "Remote",
+      "start_date": "2019-07",
+      "end_date": "2022-02",
+      "current": false,
+      "highlights": [
+        "Full-stack development with React and FastAPI for a B2B analytics dashboard (300+ enterprise customers).",
+        "Introduced end-to-end browser tests (Playwright) that caught 30+ regressions before release."
+      ]
+    }
+  ],
+
+  "education": [
+    {
+      "school": "University of California, Berkeley",
+      "degree": "B.S.",
+      "field_of_study": "Computer Science",
+      "start_date": "2015-08",
+      "graduation_date": "2019-05",
+      "gpa": "3.8"
+    }
+  ],
+
+  "skills": ["Python", "Go", "PostgreSQL", "FastAPI", "React", "Playwright", "AWS", "Docker", "Kubernetes"],
+  "certifications": ["AWS Certified Solutions Architect – Associate (2023)"],
+  "languages": [{"language": "English", "proficiency": "Native"}, {"language": "Spanish", "proficiency": "Professional"}],
+
+  "cover_letter": "I'm excited to apply because this role centers on backend reliability and developer experience, which is exactly where I've spent the last several years. I'd bring hands-on ownership of high-throughput Python/Go services and a track record of mentoring teams.",
+
+  "eeo_optional": {
+    "gender": "Prefer not to say",
+    "race_ethnicity": "Prefer not to say",
+    "veteran_status": "Prefer not to say",
+    "disability_status": "Prefer not to say"
+  }
+}

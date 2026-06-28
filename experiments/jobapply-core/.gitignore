@@ -1,0 +1,15 @@
+.env
+.venv/
+# run artifacts
+runs/
+application_history.json
+compare_*.json
+*.vars.json
+gmail_token.json
+gmail_credentials.json
+__pycache__/
+*.pyc
+
+# probes / scratch
+_probe*
+_phone_probe.py

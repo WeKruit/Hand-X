@@ -1,0 +1,43 @@
+{
+  "first_name": "Jordan",
+  "last_name": "Avery",
+  "full_name": "Jordan Avery",
+  "email": "jordan.avery.test@example.com",
+  "phone": "+1 415 555 0142",
+  "location": "San Francisco, CA, USA",
+  "linkedin": "https://www.linkedin.com/in/jordan-avery-test",
+  "github": "https://github.com/jordan-avery-test",
+  "website": "https://jordanavery.example.com",
+  "current_company": "Northwind Labs",
+  "current_title": "Senior Software Engineer",
+  "years_experience": 7,
+  "work_authorization": "US Citizen",
+  "requires_sponsorship": false,
+  "desired_salary": "180000",
+  "available_start_date": "2026-08-01",
+  "education": [
+    {
+      "school": "University of California, Berkeley",
+      "degree": "B.S. Computer Science",
+      "graduation_year": 2019
+    }
+  ],
+  "experience": [
+    {
+      "company": "Northwind Labs",
+      "title": "Senior Software Engineer",
+      "start": "2022-03",
+      "end": "present",
+      "summary": "Backend services in Python and Go; led a 4-person team building a job-matching API."
+    },
+    {
+      "company": "Contoso",
+      "title": "Software Engineer",
+      "start": "2019-07",
+      "end": "2022-02",
+      "summary": "Full-stack web app development with React and FastAPI."
+    }
+  ],
+  "skills": ["Python", "Go", "PostgreSQL", "React", "Playwright", "AWS"],
+  "cover_letter": "I am excited to apply because this role aligns with my backend and automation experience."
+}
