@@ -428,22 +428,24 @@ async def repair_and_advance(
     re-attached in finally. Returns True if the agent ran (advancement is verified by the caller)."""
     from browser_use import Agent, ChatGoogle
 
-    # Disable ONLY the final submit (a button whose text is submit-y but NOT save/continue), so the
-    # agent can advance the step but cannot finalize the application past our controlled stop.
-    with contextlib.suppress(Exception):
-        await page.evaluate(
-            "() => document.querySelectorAll('button').forEach(b => { const t=(b.textContent||'');"
-            " if (/submit/i.test(t) && !/save|continue|next/i.test(t)) {"
-            " b.setAttribute('data-gh-sub','1'); b.disabled=true; } })"
-        )
+    # STRUCTURAL submit-guard (belt-and-suspenders to install_submit_guard already running on the
+    # session): re-disable any final-submit button now, in case the guard interval isn't installed.
+    await install_submit_guard(page)
 
     bullet = "\n- ".join(errors[:12])
     task = (
         "You are on one step of a multi-step job-application form. It FAILED to advance because of "
         f"these validation errors:\n- {bullet}\n"
         "Fix ONLY the field(s) named by these errors so they become valid, then click the "
-        f"'{advance_label}' button to advance to the NEXT step. Work efficiently — fix all the "
-        "flagged fields, then advance; do not re-verify endlessly.\n"
+        f"'{advance_label}' button EXACTLY ONCE to advance ONE step, and then IMMEDIATELY call done. "
+        "Work efficiently — fix all the flagged fields, then advance; do not re-verify endlessly.\n"
+        "ABSOLUTE STOP RULES (a human reviewer must submit, not you):\n"
+        "- Advance only ONE step. After the page advances once, call done. Do NOT fill or advance a "
+        "second step.\n"
+        "- NEVER click a button labelled 'Submit', 'Submit Application', 'Submit Apply', 'Finish', or "
+        "anything that finalizes the application — these are FORBIDDEN.\n"
+        "- If clicking advance brings you to a REVIEW / summary page, or the only remaining action is "
+        "a Submit/Finish button, call done IMMEDIATELY WITHOUT clicking anything.\n"
         "Reason from the error + the other fields already filled. Two common cases:\n"
         "1. FORMAT: a phone number rejected as invalid, when a separate country/dial-code field is "
         "already set, should DROP the leading dial code: '+1 415 555 0142' -> '415 555 0142'.\n"
@@ -483,12 +485,25 @@ async def repair_and_advance(
         with contextlib.suppress(Exception):  # Agent.close() drops the shared CDP client — re-attach
             if not session.is_cdp_connected:
                 await session.connect()
-        with contextlib.suppress(Exception):  # re-enable the final submit we disabled
-            await page.evaluate(
-                "() => document.querySelectorAll('[data-gh-sub]').forEach(b => {"
-                " b.disabled=false; b.removeAttribute('data-gh-sub'); })"
-            )
+        # NOTE: the submit-guard is intentionally LEFT installed — the final Submit must stay
+        # disabled for the rest of the wizard so nothing finalizes the application.
     return True
+
+
+async def install_submit_guard(page: Any) -> None:
+    """Continuously DISABLE any final-submit/finish button via a persistent interval. Workday's
+    apply flow is a single-page app: the agent can advance forward (e.g. into the Review step)
+    WITHIN the same document, so a one-time disable wouldn't cover a Submit button that mounts on a
+    later step. The interval re-disables it every 300ms, so the automation physically cannot submit
+    the application — a human reviewer must do that. Idempotent (guarded by window.__ghSubGuard)."""
+    with contextlib.suppress(Exception):
+        await page.evaluate(
+            "() => { const kill=()=>document.querySelectorAll('button,input[type=submit]').forEach(b=>{"
+            "   const t=((b.textContent||'')+' '+(b.value||'')+' '+(b.getAttribute('aria-label')||''));"
+            "   if (/submit|finish|finali[sz]e/i.test(t) && !/save|continue|next|previous|back|add|search/i.test(t))"
+            "     b.disabled=true; });"
+            "  kill(); if (!window.__ghSubGuard) window.__ghSubGuard=setInterval(kill, 300); }"
+        )
 
 
 async def fill_with_ladder(
@@ -801,8 +816,14 @@ async def run_wizard(
     if auth.needs_verification:
         return await _wizard_halt(result, "EMAIL_VERIFICATION_REQUIRED", auth.reason, tc, session)
 
+    # HARD SAFETY: keep the final Submit/Finish button disabled for the ENTIRE wizard (SPA-
+    # persistent interval) so neither the deterministic path nor an agent can finalize the
+    # application — we always STOP at Review for a human to submit.
+    await install_submit_guard(page)
+
     seen: set[int] = set()
     for _ in range(12):  # MAX_STEPS guardrail
+        await install_submit_guard(page)  # re-assert each iteration (cheap; idempotent)
         step = await adapter.extract_step(session, page, profile)
         if step.is_review or await adapter.is_complete(session, page):
             result["status"] = "FILLED_TO_REVIEW"  # STOP — never submit
