@@ -896,6 +896,17 @@ async def run_wizard(
             tier = await fill_with_ladder(adapter, session, page, f, value, llm, resume, allow_escalation)
             rows.append(_Row(name=f.name, type=f.type, src=src, tier=tier))
 
+        # off-schema repeater sections on this step (My Experience: work experience / education /
+        # skills / languages). No-op (returns {}) on steps without a repeater — the adapter gates
+        # on section headings. The agent freezes filled fields + submit stays disabled.
+        repeaters_used = False
+        with contextlib.suppress(Exception):
+            rep = await adapter.fill_repeaters(session, page, profile)
+            if rep:
+                repeaters_used = True
+                print(f"  repeaters: {rep}")
+            page = await session.must_get_current_page()  # agent_fill_section re-attaches CDP
+
         # screenshot the deterministically-filled step BEFORE advancing (the agent, if invoked,
         # advances to the NEXT page, so capture this page now).
         shot = None
@@ -929,7 +940,8 @@ async def run_wizard(
                 "tiers": {t: sum(1 for r in rows if r.tier == t) for t in ("L1", "L2", "L3", "blank", "FAIL")},
                 "seconds": round(time.monotonic() - t0, 1),
                 "cost": round((await tc.get_usage_summary()).total_cost - c0, 5),
-                "agent_used": agent_used,
+                "agent_used": agent_used or repeaters_used,
+                "repeaters": repeaters_used,
                 "screenshot": shot,
             }
         )

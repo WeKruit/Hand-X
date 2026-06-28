@@ -651,6 +651,79 @@ class WorkdayAdapter(ATSAdapter):
             return False
         return False
 
+    # -- repeaters: off-schema "Add Another" sections (My Experience) -------
+    # GENERIC by design (第一性原理): a repeater is matched to a profile LIST by the section's
+    # HEADING keyword — never a hardcoded aid — so "Work Experience" / "Professional Experience" /
+    # "Employment History" all resolve to profile.experience, and a tenant/Oracle relabel just
+    # re-keys. Each present section is handed to eng.agent_fill_section (the proven single-page
+    # pattern: it scrolls to the section, clicks "Add Another" per entry, and drives the searchable
+    # comboboxes — School/Degree — that deterministic string-match gets wrong). Already-filled
+    # fields are frozen and Submit stays disabled for the duration, so it can't disturb prior steps
+    # or finalize. Deterministic add-row fill (handoff A2) layers on later to cut cost.
+    _REPEATERS = (
+        ("experience", ("experien", "employ", "work history"), False),
+        ("education", ("educat", "academ", "school"), False),
+        ("skills", ("skill",), True),
+        ("languages", ("language",), True),
+        ("certifications", ("certif", "licen"), True),
+    )
+
+    async def fill_repeaters(self, session: Any, page: Any, profile: dict) -> dict:
+        headings = await self._page_headings(page)
+        out: dict = {}
+        for key, keywords, is_tag in self._REPEATERS:
+            items = profile.get(key) or []
+            if not items:
+                continue
+            if not any(any(kw in h for kw in keywords) for h in headings):
+                continue  # section not on THIS page — generic gate, no hardcoded aid
+            label = key.capitalize()
+            if is_tag:  # Skills / Languages / Certs: typeahead tags (type + pick), one at a time
+                vals = ", ".join(self._item_str(it) for it in items)
+                instr = (
+                    f"Add these {label} one at a time using the section's typeahead/'Add' control "
+                    f"(type each, then pick the matching option so it becomes a tag/pill): {vals}"
+                )
+            else:  # Experience / Education: row repeater — Add Another per entry, fill the group
+                entries = "; ".join(f"entry {i + 1}: {self._item_str(it)}" for i, it in enumerate(items))
+                instr = (
+                    f"Add {len(items)} {label} entr{'y' if len(items) == 1 else 'ies'}. Use the "
+                    f"'Add Another' button before each entry, then fill its fields by label. Dates "
+                    f"like '2021-06' go in the segmented month/year inputs. {entries}"
+                )
+            res = await eng.agent_fill_section(session, page, section=label, instructions=instr, max_steps=18)
+            out[label] = {"items": len(items), **res}
+        return out
+
+    @staticmethod
+    def _item_str(item: Any) -> str:
+        """Flatten a profile list-item to a 'Key=Value, ...' string the agent maps by label."""
+        if isinstance(item, str):
+            return item
+        if isinstance(item, dict):
+            parts = []
+            for k, v in item.items():
+                if v in (None, "", [], {}):
+                    continue
+                parts.append(f"{k.replace('_', ' ')}='{str(v)[:300]}'")
+            return ", ".join(parts)
+        return str(item)
+
+    async def _page_headings(self, page: Any) -> list[str]:
+        """Lower-cased visible section headings/labels — used to GENERICALLY detect which repeater
+        sections are present (heading keyword match), independent of any tenant-specific aid."""
+        with contextlib.suppress(Exception):
+            raw = await page.evaluate(
+                "() => JSON.stringify([...document.querySelectorAll("
+                '\'h1,h2,h3,h4,legend,[data-automation-id*="title"],[data-automation-id*="Title"],'
+                "[data-automation-id*=\"pageHeader\"]')].map(e=>(e.textContent||'').replace(/\\s+/g,' ')"
+                ".trim().toLowerCase()).filter(Boolean).slice(0,60))"
+            )
+            import json
+
+            return json.loads(raw) if raw else []
+        return []
+
     # -- helpers -----------------------------------------------------------
     async def _settle(self, page: Any, seconds: float = 2.0) -> None:
         """Let a Workday SPA transition settle after a click/submit/navigation."""
