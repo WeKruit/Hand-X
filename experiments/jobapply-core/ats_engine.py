@@ -542,6 +542,24 @@ async def install_submit_guard(page: Any) -> None:
         )
 
 
+# field types whose deterministic read-back is prone to false-negatives (custom widgets the
+# serialized DOM mis-reads) — worth a cheap VLM glance before re-filling / escalating.
+_VLM_RESCUE_TYPES = {"single_select", "multi_select", "radio", "checkbox", "date", "select_native"}
+
+
+async def _vlm_filled(session: Any, field: FormField, value: str) -> bool:
+    """Cheap, cached VLM read-back rescue (handoff R1): is the field VISIBLY filled? Only for the
+    widget types that false-negative; silent on any error / over-budget (caller falls through)."""
+    if field.type not in _VLM_RESCUE_TYPES:
+        return False
+    with contextlib.suppress(Exception):
+        from vision_verify import _is_filled, visual_check
+
+        verdict = await visual_check(session, target=field.label or field.name, key=field.name)
+        return _is_filled(verdict)
+    return False
+
+
 async def fill_with_ladder(
     adapter: ATSAdapter,
     session: Any,
@@ -563,12 +581,21 @@ async def fill_with_ladder(
     if not (value or "").strip():  # nothing to fill (incl. a file field with no path)
         return "blank"
 
-    if await adapter.fill(session, page, field, value, resume) and await adapter.read_back(session, page, field, value):
+    filled = await adapter.fill(session, page, field, value, resume)
+    if filled and await adapter.read_back(session, page, field, value):
         return "L1"
+    # READ-BACK RESCUE (handoff R1): a custom widget (Workday listbox/checkbox) is often visibly
+    # filled while the serialized DOM reads it blank -> a FALSE read-back failure. A cheap, cached
+    # VLM glance confirms it without RE-FILLING (re-picking a listbox can mis-select) or paying for
+    # the agent. Only for the widget types that actually false-negative.
+    if filled and await _vlm_filled(session, field, value):
+        return "vlm"
 
     await asyncio.sleep(0.4)
     if await adapter.fill(session, page, field, value, resume) and await adapter.read_back(session, page, field, value):
         return "L2"
+    if await _vlm_filled(session, field, value):
+        return "vlm"
 
     if allow_escalation and await escalate(session, agent_llm, page, field, value):
         with contextlib.suppress(Exception):
@@ -603,7 +630,7 @@ class _Row:
 
 
 def _print_report(adapter_name: str, title: str, report: list[_Row], usage: Any, n_mapped: int) -> None:
-    tiers = {t: sum(1 for r in report if r.tier == t) for t in ("L1", "L2", "L3", "blank", "FAIL")}
+    tiers = {t: sum(1 for r in report if r.tier == t) for t in ("L1", "L2", "L3", "vlm", "blank", "FAIL")}
     fillable = [r for r in report if r.tier != "blank"]
     escalated = tiers["L2"] + tiers["L3"] + tiers["FAIL"]
     esc_rate = (escalated / len(fillable) * 100) if fillable else 0.0
@@ -789,7 +816,7 @@ async def run_single_page(
     if screenshot_path:
         result["screenshot"] = await _screenshot(session, page, screenshot_path)
 
-    tiers = {t: sum(1 for r in report if r.tier == t) for t in ("L1", "L2", "L3", "blank", "FAIL")}
+    tiers = {t: sum(1 for r in report if r.tier == t) for t in ("L1", "L2", "L3", "vlm", "blank", "FAIL")}
     try:
         final_url = await page.get_url()
     except Exception:
@@ -799,7 +826,7 @@ async def run_single_page(
         final_url=final_url,
         cost=usage.total_cost,
         tiers=tiers,
-        filled=tiers["L1"] + tiers["L2"] + tiers["L3"],
+        filled=tiers["L1"] + tiers["L2"] + tiers["L3"] + tiers["vlm"],
     )
 
     if headless:
@@ -863,6 +890,10 @@ async def run_wizard(
     seen: set[int] = set()
     for _ in range(12):  # MAX_STEPS guardrail
         await install_submit_guard(page)  # re-assert each iteration (cheap; idempotent)
+        with contextlib.suppress(Exception):
+            from vision_verify import reset_visual_cache
+
+            reset_visual_cache()  # fresh per-step VLM budget for the read-back rescue
         t0 = time.monotonic()
         c0 = (await tc.get_usage_summary()).total_cost
         step = await adapter.extract_step(session, page, profile)
@@ -940,7 +971,7 @@ async def run_wizard(
                 "name": step.name,
                 "index": step.index,
                 "total": step.total,
-                "tiers": {t: sum(1 for r in rows if r.tier == t) for t in ("L1", "L2", "L3", "blank", "FAIL")},
+                "tiers": {t: sum(1 for r in rows if r.tier == t) for t in ("L1", "L2", "L3", "vlm", "blank", "FAIL")},
                 "seconds": round(time.monotonic() - t0, 1),
                 "cost": round((await tc.get_usage_summary()).total_cost - c0, 5),
                 "agent_used": agent_used or repeaters_used,
