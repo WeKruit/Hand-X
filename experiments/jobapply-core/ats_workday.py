@@ -563,7 +563,26 @@ class WorkdayAdapter(ATSAdapter):
             target = next((el for el, _, v in scored if v == yn), None)
         if not target:
             return False
+        # Robust check (DomHand _CLICK_BINARY_FIELD_JS pattern): a plain CDP click on a Workday
+        # checkbox/radio often misses — the real <input> is hidden behind a styled label. Click the
+        # VISIBLE label/wrapper with the native .click() (which performs the toggle), fall back to
+        # the input, and fire input/change so React registers it. Skip if already checked.
         with contextlib.suppress(Exception):
+            res = await target.evaluate(
+                "() => { const el=this;"
+                " const on=()=>el.checked||el.getAttribute('aria-checked')==='true';"
+                " if(on()) return 'already';"
+                " const lbl=el.id?document.querySelector('label[for=\"'+el.id+'\"]'):null;"
+                " const node=lbl||(el.closest&&el.closest('label'))||el;"
+                " if(node.scrollIntoView) node.scrollIntoView({block:'center'});"
+                " if(node.click) node.click(); if(!on() && el.click) el.click();"
+                " el.dispatchEvent(new Event('input',{bubbles:true}));"
+                " el.dispatchEvent(new Event('change',{bubbles:true}));"
+                " return on()?'ok':'fail'; }"
+            )
+            if res in ("ok", "already"):
+                return True
+        with contextlib.suppress(Exception):  # last resort: the plain CDP click
             await target.click()
             return True
         return False
