@@ -308,6 +308,11 @@ concise, specific answer of 3-5 sentences, first person, plain text, grounded ON
 profile. Do not use markdown.
 - For short text fields, copy the matching profile value verbatim (e.g. a LinkedIn / Website \
 / GitHub URL); blank if the profile has none.
+- PHONE NUMBER field: if the field list ALSO contains a separate "phone code" / "country/region \
+phone code" / "dialing code" field, the phone-number value MUST EXCLUDE the country/dial code \
+(e.g. profile "+1 415 555 0142" -> "415 555 0142") — the code lives in its own field, and a \
+number with a duplicate code fails validation. If there is NO separate code field, keep the full \
+number as the profile has it.
 Return one entry per field, no extras."""
 
 
