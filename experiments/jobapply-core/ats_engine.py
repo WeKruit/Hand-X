@@ -27,6 +27,7 @@ import asyncio
 import contextlib
 import json
 import os
+import time
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from pathlib import Path
@@ -415,7 +416,7 @@ async def agent_fill_section(session: Any, page: Any, *, section: str, instructi
 
 
 async def repair_and_advance(
-    session: Any, page: Any, errors: list[str], advance_label: str, max_steps: int = 22
+    session: Any, page: Any, errors: list[str], advance_label: str, agent_llm: Any = None, max_steps: int = 22
 ) -> bool:
     """Agent-driven recovery for a step that FAILED validation on advance. KEY finding: once a
     platform (Workday) rejects a Save, NO deterministic re-fill re-arms it — not browser-use
@@ -474,7 +475,7 @@ async def repair_and_advance(
     try:
         agent = Agent(
             task=task,
-            llm=ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY")),
+            llm=agent_llm or ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY")),
             browser_session=session,
             use_vision=True,
         )
@@ -801,6 +802,8 @@ async def run_wizard(
     llm = tc.register_llm(
         ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY"), thinking_level="minimal")
     )
+    # separate tc-registered LLM for the repair agent so its tokens count toward per-step cost.
+    agent_llm = tc.register_llm(ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY")))
     result: dict = {"adapter": adapter.__class__.__name__, "title": title, "url": url, "steps": []}
 
     session = BrowserSession(browser_profile=BrowserProfile(headless=headless, keep_alive=True))
@@ -824,13 +827,27 @@ async def run_wizard(
     seen: set[int] = set()
     for _ in range(12):  # MAX_STEPS guardrail
         await install_submit_guard(page)  # re-assert each iteration (cheap; idempotent)
+        t0 = time.monotonic()
+        c0 = (await tc.get_usage_summary()).total_cost
         step = await adapter.extract_step(session, page, profile)
         if step.is_review or await adapter.is_complete(session, page):
             result["status"] = "FILLED_TO_REVIEW"  # STOP — never submit
+            shot = None
             if screenshot_path:  # capture the final Review page as proof of completion
-                result["review_screenshot"] = await _screenshot(
-                    session, page, screenshot_path.replace(".png", "_review.png")
-                )
+                shot = await _screenshot(session, page, screenshot_path.replace(".png", "_review.png"))
+                result["review_screenshot"] = shot
+            result["steps"].append(
+                {
+                    "name": step.name or "Review",
+                    "index": step.index,
+                    "total": step.total,
+                    "tiers": {},
+                    "seconds": round(time.monotonic() - t0, 1),
+                    "cost": round((await tc.get_usage_summary()).total_cost - c0, 5),
+                    "agent_used": False,
+                    "screenshot": shot,
+                }
+            )
             break
         if step.index in seen:  # progress-monotonicity guard
             return await _wizard_halt(result, "STEP_STALLED", f"re-entered step {step.index}", tc, session)
@@ -845,16 +862,12 @@ async def run_wizard(
             value, src = _resolve(f, mapped, resume)
             tier = await fill_with_ladder(adapter, session, page, f, value, llm, resume, allow_escalation)
             rows.append(_Row(name=f.name, type=f.type, src=src, tier=tier))
-        result["steps"].append(
-            {
-                "name": step.name,
-                "index": step.index,
-                "total": step.total,
-                "tiers": {t: sum(1 for r in rows if r.tier == t) for t in ("L1", "L2", "L3", "blank", "FAIL")},
-            }
-        )
+
+        # screenshot the deterministically-filled step BEFORE advancing (the agent, if invoked,
+        # advances to the NEXT page, so capture this page now).
+        shot = None
         if screenshot_path:
-            await _screenshot(session, page, screenshot_path.replace(".png", f"_step{step.index}.png"))
+            shot = await _screenshot(session, page, screenshot_path.replace(".png", f"_step{step.index}.png"))
 
         # Deterministic fill got the values in but the platform may reject a field's FORMAT/choice
         # on advance — and once it rejects a Save, NO deterministic re-fill re-arms it (verified).
@@ -862,18 +875,33 @@ async def run_wizard(
         # AND clicks the advance button itself (the only thing that re-arms the form). Advancement
         # is verified by re-reading the step; if the agent didn't advance, the monotonicity guard
         # at the top of the loop turns the repeated step into an honest STEP_STALLED halt.
+        agent_used = False
         adv = await adapter.next_step(session, page)
         if not adv.ok:
             errs = await adapter.validation_errors(page)
             if errs:
                 print(f"  [agent-repair] advance blocked by validation: {errs}")
-                await repair_and_advance(session, page, errs, adapter.advance_label)
+                agent_used = True
+                await repair_and_advance(session, page, errs, adapter.advance_label, agent_llm=agent_llm)
                 page = await session.must_get_current_page()
                 moved = await adapter.extract_step(session, page, profile)
                 if moved.index != step.index or moved.is_review or await adapter.is_complete(session, page):
                     adv = AdvanceResult(ok=True, page=page)  # the agent advanced the step
-            if not adv.ok:
-                return await _wizard_halt(result, "ADVANCE_FAILED", adv.blocked_reason, tc, session)
+
+        result["steps"].append(
+            {
+                "name": step.name,
+                "index": step.index,
+                "total": step.total,
+                "tiers": {t: sum(1 for r in rows if r.tier == t) for t in ("L1", "L2", "L3", "blank", "FAIL")},
+                "seconds": round(time.monotonic() - t0, 1),
+                "cost": round((await tc.get_usage_summary()).total_cost - c0, 5),
+                "agent_used": agent_used,
+                "screenshot": shot,
+            }
+        )
+        if not adv.ok:
+            return await _wizard_halt(result, "ADVANCE_FAILED", adv.blocked_reason, tc, session)
         page = adv.page or await session.must_get_current_page()
 
     usage = await tc.get_usage_summary()
