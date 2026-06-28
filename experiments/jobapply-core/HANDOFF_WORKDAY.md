@@ -4,6 +4,28 @@
 (never submits). Reverted here after an unverified refactor caused churn; the refactor is preserved as a
 patch (see *Churn* below) for the next session to mine.
 
+## ⭐ KEY FINDING (offline, 2026-06-28) — changes the optimization plan
+Captured Intel's live per-step DOM (`fixtures/dom_intel/`, via `GH_DUMP`) and ran the baseline extractor
+against it OFFLINE in seconds (`tools/offline_dom_harness.py` — strips `<script>` so React can't mangle
+the static DOM). Result: **`_EXTRACT_STEP_JS` already classifies EVERY My Experience field** —
+Job Title/Company/Location/From/To/Role Description/currently-work-here, **School (multi_select), Degree
+(single_select), Field of Study (multi_select), GPA, Skills (multi_select)**. These are all STANDARD field
+types the schema fill ladder ALREADY handles (single_select→`_pick_option`, multi_select→tags, date, text).
+
+**⇒ The repeater fields are NOT special. The whole churn (observe_and_fill, `_SECTION_ROWS_JS`,
+`fill_language_proficiencies`, `fill_education_combos`) re-solved a problem the existing extractor + ladder
+already solve.** The agent only needs to exist for what the schema path genuinely can't do:
+- **"Add Another"** to create rows for profile entries beyond the first (extractor only sees present rows).
+- **multi_select / tag commit reliability** (School/Field/Skills — the ~1/3 chip-drop) — fix the tag
+  primitive, not a per-section filler.
+- **dynamic language proficiency** dropdowns (appear only AFTER a language chip is added — NOT in the
+  mount-state DOM; capture a post-add DOM to test them) — single_selects, `_pick_option` once present.
+
+**Recommended optimization (simplest, data-backed):** loop per repeater section — schema-fill the present
+rows via the existing ladder → click "Add Another" to reach the profile count → RE-EXTRACT → fill the new
+rows → repeat to closure. No new fill primitives; just *re-extract after add*. Verify each step OFFLINE
+against `fixtures/dom_intel/` before any live run.
+
 ## What works (baseline, proven)
 - **Single-page ATS** (Greenhouse / Lever / Ashby): ~98% deterministic, fill-only (shipped in PR #38).
 - **Workday multi-page**: reached **Review on 3 tenants** — Intel (7-step), NVIDIA (5-step), Visa (5-step)

@@ -905,6 +905,13 @@ async def run_wizard(
         t0 = time.monotonic()
         c0 = (await tc.get_usage_summary()).total_cost
         step = await adapter.extract_step(session, page, profile)
+        if os.environ.get("GH_DUMP"):  # capture each step's live DOM for OFFLINE detector dev (no live reruns)
+            with contextlib.suppress(Exception):
+                html = await page.evaluate("() => document.documentElement.outerHTML")
+                dp = Path(os.environ["GH_DUMP"])
+                dp.mkdir(parents=True, exist_ok=True)
+                (dp / f"step{step.index:02d}_{(step.name or 'step').replace(' ', '_')[:24]}.html").write_text(html)
+                print(f"   [dump] step {step.index} '{step.name}' ({len(html) // 1024}KB)")
         if step.is_review or await adapter.is_complete(session, page):
             result["status"] = "FILLED_TO_REVIEW"  # STOP — never submit
             shot = None
