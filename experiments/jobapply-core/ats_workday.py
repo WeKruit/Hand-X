@@ -140,6 +140,32 @@ _EXTRACT_STEP_JS = r"""
 }
 """
 
+# Count the PRESENT rows of a repeater section, generically: find the section by heading keyword, then
+# count distinct numbered row-prefixes among its data-fkit-id values (e.g. workExperience-225,
+# workExperience-226 -> 2). No hardcoded section id — the prefix is derived from the DOM. Lets
+# fill_repeaters skip the agent when the row-aware ladder already filled all present rows.
+_ROW_COUNT_JS = r"""
+(keywords) => {
+  const low = s => (s||'').toLowerCase();
+  const hit = s => { s = low(s); return keywords.some(k => s.includes(k)); };
+  const heads = [...document.querySelectorAll('h2,h3,h4,[role="heading"],legend,[data-automation-id*="title" i]')];
+  let root = null;
+  for (const h of heads) {
+    if (!hit(h.textContent)) continue;
+    let s = h.parentElement;
+    for (let u = 0; u < 6 && s; u++) { if (s.querySelector('[data-fkit-id]')) { root = s; break; } s = s.parentElement; }
+    if (root) break;
+  }
+  if (!root) return 0;
+  const prefixes = new Set();
+  root.querySelectorAll('[data-fkit-id]').forEach(e => {
+    const m = (e.getAttribute('data-fkit-id') || '').match(/^([A-Za-z]+-\d+)--/);
+    if (m) prefixes.add(m[1]);
+  });
+  return prefixes.size;
+}
+"""
+
 
 class WorkdayAdapter(ATSAdapter):
     hosts = ("myworkdayjobs.com", "myworkday.com", "myworkdaysite.com")
@@ -728,12 +754,28 @@ class WorkdayAdapter(ATSAdapter):
         )
         if str(has_add).lower() != "true":
             return {}
-        # section TITLES are short ("Work Experience"); long strings are question text, not headings.
-        headings = [h for h in await self._page_headings(page) if len(h) <= 40]
+        # DETERMINISTIC-FIRST (wd_repeaters): detect rows via data-fkit-id -> ONE semantic map call ->
+        # fixpoint reconcile-and-repair loop (Add-Another dup-guarded, put() per archetype, read-back
+        # verified). The section AGENT is now only a RESIDUAL backstop for whatever the loop can't close,
+        # not the driver. NEVER submits (put never clicks Submit; the agent runs submit-disabled).
+        import os
+
+        import wd_repeaters as wr
+
+        from browser_use import ChatGoogle
+
+        gkey = os.environ.get("GOOGLE_API_KEY")
+        llm = ChatGoogle(model="gemini-3.1-flash-lite", api_key=gkey) if gkey else None
         out: dict = {}
+        with contextlib.suppress(Exception):
+            out["deterministic"] = await wr.fill_deterministic(self, session, page, profile, llm)
+        residual = {r.split("[")[0].split(".")[0] for r in (out.get("deterministic") or {}).get("residual", [])}
+
+        # RESIDUAL backstop: only sections the deterministic loop could not fully close fall to the agent.
+        headings = [h for h in await self._page_headings(page) if len(h) <= 40]
         for key, keywords, is_tag in self._REPEATERS:
             items = profile.get(key) or []
-            if not items:
+            if not items or key not in residual:
                 continue
             if not any(any(kw in h for kw in keywords) for h in headings):
                 continue  # section not on THIS page — generic gate, no hardcoded aid
@@ -744,7 +786,7 @@ class WorkdayAdapter(ATSAdapter):
                     f"Add these {label} one at a time using the section's typeahead/'Add' control "
                     f"(type each, then pick the matching option so it becomes a tag/pill): {vals}"
                 )
-            else:  # Experience / Education: row repeater — Add Another per entry, fill the group
+            else:  # Experience / Education: ROW repeater
                 entries = "; ".join(f"entry {i + 1}: {self._item_str(it)}" for i, it in enumerate(items))
                 instr = (
                     f"Add {len(items)} {label} entr{'y' if len(items) == 1 else 'ies'}. Use the "
@@ -752,7 +794,7 @@ class WorkdayAdapter(ATSAdapter):
                     f"like '2021-06' go in the segmented month/year inputs. {entries}"
                 )
             res = await eng.agent_fill_section(session, page, section=label, instructions=instr, max_steps=18)
-            out[label] = {"items": len(items), **res}
+            out[label] = {"items": len(items), "residual_agent": True, **res}
         return out
 
     @staticmethod

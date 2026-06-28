@@ -18,6 +18,7 @@ North-star: anything a human can do, the agent decides, the deterministic layer 
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 
@@ -45,6 +46,15 @@ def humanize(camel: str) -> str:
 
 
 _SEGMENT_WORDS = {"month", "year", "day", ""}
+
+
+def _fix_label(fkit: str, label: str) -> str:
+    """A date segment's own label is just 'Month'/'Year' — recover the field label from the fkit
+    field (startDate -> 'Start Date') so start/end dates are distinct + matchable by the plan."""
+    rawfld = fkit.split("--")[-1] if "--" in fkit else ""
+    if rawfld and (not label or nkey(label) in _SEGMENT_WORDS):
+        return humanize(rawfld)
+    return label
 
 
 def parse_fkit(fkit: str) -> tuple[str | None, str, str]:
@@ -195,12 +205,7 @@ def extract_offline(html: str) -> list[Control]:
             if not fkit and anc.get("data-fkit-id"):
                 fkit = anc.get("data-fkit-id")
         sec, row, fld = parse_fkit(fkit)
-        label = label_for(el)
-        rawfld = fkit.split("--")[-1] if "--" in fkit else ""
-        # a date segment's own label is just "Month"/"Year" — use the fkit field for the field label
-        # (startDate -> "Start Date") so start/end dates are distinct + matchable by the plan.
-        if rawfld and (not label or nkey(label) in _SEGMENT_WORDS):
-            label = humanize(rawfld)
+        label = _fix_label(fkit, label_for(el))
         controls.append(Control(
             tag=(el.tag if isinstance(el.tag, str) else "").upper(),
             role=(el.get("role") or "").lower(),
@@ -311,3 +316,317 @@ def reconcile(plan: dict, controls: list[Control], readback: dict | None = None)
         if s and c.label.endswith("*") and (s, nkey(c.label)) not in planned:
             d.unplanned.append(c)
     return d
+
+
+# ===========================================================================
+# LIVE layer (CDP). extract_live mirrors extract_offline; put = the act; the
+# fixpoint loop is fill_deterministic. Pure decisions stay in the functions above.
+# ===========================================================================
+EXTRACT_JS = r"""
+() => {
+  const norm = s => (s||'').replace(/\s+/g,' ').trim();
+  const idx = new Map(); document.querySelectorAll('*').forEach((e,i)=>idx.set(e,i));
+  const labelFor = (el) => {
+    if (el.id){ const l=document.querySelector('label[for="'+CSS.escape(el.id)+'"]'); if(l) return norm(l.textContent); }
+    if (el.getAttribute('aria-label')) return norm(el.getAttribute('aria-label'));
+    const lb=el.getAttribute('aria-labelledby'); if(lb){ const n=document.getElementById(lb.split(' ')[0]); if(n) return norm(n.textContent); }
+    const p=el.closest('[data-automation-id]'); if(p){ const l=p.querySelector('label'); if(l) return norm(l.textContent); }
+    return '';
+  };
+  const heads=[...document.querySelectorAll('h1,h2,h3,h4,[role="heading"],[data-automation-id*="Title"]')]
+    .map(n=>({i:idx.get(n), t:norm(n.textContent).toLowerCase()})).filter(h=>h.t && h.t.length<=40);
+  const raw=[...document.querySelectorAll('input,select,textarea,[role="spinbutton"],[role="listbox"],button[aria-haspopup="listbox"]')];
+  const out=raw.map(el=>{
+    let w='',ms=false,fk=el.getAttribute('data-fkit-id')||'',a=el;
+    while(a && a.getAttribute){ const aid=a.getAttribute('data-automation-id');
+      if(aid==='multiSelectContainer') ms=true; if(aid && !w) w=aid;
+      if(!fk && a.getAttribute('data-fkit-id')) fk=a.getAttribute('data-fkit-id'); a=a.parentElement; }
+    return {tag:el.tagName, role:(el.getAttribute('role')||'').toLowerCase(),
+      haspopup:(el.getAttribute('aria-haspopup')||'').toLowerCase(), itype:(el.getAttribute('type')||'').toLowerCase(),
+      cid:el.id||'', aid:el.getAttribute('data-automation-id')||'', fkit:fk, label:labelFor(el),
+      wrapper_aid:w, in_ms:ms, doc_index:idx.get(el)};
+  });
+  return JSON.stringify({headings:heads, controls:out});
+}
+"""
+
+
+async def extract_live(page) -> list[Control]:
+    """Production extractor — same Control shape + shared dedup/section logic as extract_offline."""
+    import json
+
+    data = json.loads(await page.evaluate(EXTRACT_JS))
+    controls = [
+        Control(tag=(c["tag"] or "").upper(), role=c["role"], haspopup=c["haspopup"], itype=c["itype"],
+                cid=c["cid"], aid=c["aid"], fkit=c["fkit"], label=_fix_label(c["fkit"], c["label"]),
+                wrapper_aid=c["wrapper_aid"], in_multiselect=c["in_ms"], doc_index=c["doc_index"],
+                **dict(zip(("sec", "row", "field_key"), parse_fkit(c["fkit"]), strict=False)))
+        for c in data["controls"]
+    ]
+    _assign_sections(controls, [(h["i"], h["t"]) for h in data["headings"] if any(k in h["t"] for k in KW)])
+    return dedup(controls)
+
+
+READ_JS = r"""
+(fkit) => {
+  const root = document.querySelector('[data-fkit-id="'+fkit+'"]') || document;
+  const ms = root.closest && root.closest('[data-automation-id="multiSelectContainer"]');
+  if (ms) {  // chip: read committed pill text(s)
+    const pills=[...ms.querySelectorAll('[data-automation-id="selectedItem"]')].map(p=>(p.textContent||'').trim());
+    return pills.join(', ');
+  }
+  const el = root.querySelector ? (root.querySelector('input,textarea,select,[role="spinbutton"]') || root) : root;
+  if (el.getAttribute && (el.getAttribute('type')==='checkbox' || el.getAttribute('role')==='checkbox'))
+    return (el.checked||el.getAttribute('aria-checked')==='true') ? 'true' : '';
+  const btn = root.querySelector && root.querySelector('button');  // listbox button shows the chosen text
+  if (btn && (el.tagName==='BUTTON' || (el.getAttribute&&el.getAttribute('aria-haspopup')==='listbox')))
+    return (btn.textContent||'').trim();
+  // date: concat segment spinbutton values
+  const spins=[...root.querySelectorAll('[role="spinbutton"]')];
+  if (spins.length) return spins.map(s=>(s.textContent||s.value||'').trim()).filter(Boolean).join('/');
+  return (el.value!==undefined ? el.value : (el.textContent||'')).trim();
+}
+"""
+
+
+async def read_live(page, controls: list[Control]) -> dict:
+    """Read-back: {fkit: committed value} for every control — the ground truth reconcile diffs against."""
+    out: dict = {}
+    for c in controls:
+        if not c.fkit:
+            continue
+        with __import__("contextlib").suppress(Exception):
+            out[c.fkit] = norm(await page.evaluate(READ_JS, c.fkit))
+    return out
+
+
+# archetype -> the WorkdayAdapter.fill() type that drives it
+ARCHE2TYPE = {"text": "input_text", "textarea": "textarea", "select": "single_select",
+              "chip": "multi_select", "date": "date", "check": "checkbox", "radio": "radio"}
+
+
+async def _locate(page, c: Control):
+    from ats_engine import first
+
+    return await first(page, f'[data-fkit-id="{c.fkit}"]') if c.fkit else None
+
+
+async def put(adapter, session, page, c: Control, value: str) -> bool:
+    """ONE verb: drive a control to `value`, dispatching by archetype to the proven WorkdayAdapter
+    primitives. Locates row-safe by data-fkit-id. Observe-then-verify is inside each primitive."""
+    from ats_engine import first
+
+    a = c.archetype()
+    if not (value or "").strip() or a is None:
+        return True
+    base = f'[data-fkit-id="{c.fkit}"]'
+    if a in ("text", "textarea"):
+        el = await first(page, f"{base} input") or await first(page, f"{base} textarea")
+        if not el:
+            return False
+        with __import__("contextlib").suppress(Exception):
+            await el.click()
+            await el.fill(value)
+            return True
+        return False
+    if a == "check":
+        el = await first(page, f'{base} input[type="checkbox"]') or await first(page, f"{base} input")
+        if el and str(value).strip().lower() in ("yes", "true", "1", "y", c.field_key.lower()):
+            with __import__("contextlib").suppress(Exception):
+                await el.evaluate("() => { if(!this.checked){ this.click(); "
+                                  "this.dispatchEvent(new Event('change',{bubbles:true})); } }")
+                return True
+        return False
+    if a == "select":  # button-listbox: open then pick from the shared portal
+        trig = await first(page, f"{base} button")
+        if not trig:
+            return False
+        with __import__("contextlib").suppress(Exception):
+            await trig.click()
+        return await adapter._pick_option(page, value)
+    if a == "chip":  # typeahead: type -> filter -> pick the matching option -> verify pill (else skip)
+        inp = await first(page, f"{base} input") or await first(page, f'{base} [role="combobox"]')
+        if not inp:
+            return False
+        with __import__("contextlib").suppress(Exception):
+            await inp.click()
+            await inp.fill(value)
+        await asyncio.sleep(1.0)
+        picked = await adapter._pick_option(page, value, allow_fallback=False)  # CLICK the matching option
+        if not picked:
+            await eng_press_enter(session, page)  # fallback: trusted Enter on the highlight
+        await asyncio.sleep(0.4)
+        return True
+    if a == "date":
+        from ats_engine import FormField
+
+        return await adapter._date(page, FormField(name=c.fkit, type="date", label=c.label), value)
+    return False
+
+
+async def eng_press_enter(session, page) -> None:
+    from ats_engine import press_enter_trusted
+
+    with __import__("contextlib").suppress(Exception):
+        await press_enter_trusted(session, page)
+
+
+async def _add_row(page, sec: str) -> bool:
+    """Click the section's Add/Add Another control so the next row mounts. Generic: match by the
+    section keyword in the button text, else a bare 'Add'."""
+    label_kw = {"experience": "experience", "education": "education", "skills": "skill",
+                "languages": "language", "certifications": "certification"}.get(sec, sec)
+    clicked = await page.evaluate(
+        """(kw) => { const bs=[...document.querySelectorAll('button,[role=button]')];
+          const re=new RegExp('add (another|'+kw+')','i');
+          let b=bs.find(x=>re.test((x.textContent||'').trim()));
+          if(!b) b=bs.find(x=>/^add$/i.test((x.textContent||'').trim()) &&
+                    (x.closest('[data-automation-id]')||{}).getAttribute &&
+                    new RegExp(kw,'i').test((x.closest('[data-automation-id]').getAttribute('data-automation-id')||'')));
+          if(b){ b.scrollIntoView({block:'center'}); b.click(); return true; } return false; }""",
+        label_kw,
+    )
+    if clicked:
+        await asyncio.sleep(1.2)  # let the new row mount
+    return bool(clicked)
+
+
+async def ensure_rows(adapter, page, plan: dict) -> bool:
+    """Add Another until each section has at least as many rows as the plan. dup-guard: never add
+    PAST the plan count. Returns True if any row was added (caller re-reconciles)."""
+    added = False
+    for sec, blk in plan.items():
+        want = len(blk.get("rows", []))
+        for _ in range(8):
+            controls = await extract_live(page)
+            have = len(_rows_of(controls, sec))
+            if have >= want:
+                break
+            if not await _add_row(page, sec):
+                break
+            added = True
+    return added
+
+
+async def fill_deterministic(adapter, session, page, profile: dict, llm, title: str = "",
+                             max_rounds: int = 5) -> dict:
+    """The fixpoint reconcile-and-repair loop. plan = 1 semantic map call; then loop: extract -> add
+    missing rows (dup-guarded) -> reconcile(read-back) -> put() the MISSING/DIVERGED -> until the DOM
+    is stable. Returns a ledger summary. NEVER submits. Per-control agent escalation is the backstop."""
+    controls = await extract_live(page)
+    plan = await make_plan(llm, controls, profile, title)
+    summary = {"rounds": 0, "filled": 0, "rows_added": 0}
+    last_todo = None
+    for rnd in range(max_rounds):
+        summary["rounds"] = rnd + 1
+        if await ensure_rows(adapter, page, plan):
+            summary["rows_added"] += 1
+        controls = await extract_live(page)
+        readback = await read_live(page, controls)
+        diff = reconcile(plan, controls, readback)
+        todo = diff.todo()
+        if not todo:
+            break
+        if last_todo is not None and len(todo) >= last_todo:  # no progress -> stop the deterministic loop
+            break
+        last_todo = len(todo)
+        for fd in todo:
+            if fd.control and await put(adapter, session, page, fd.control, fd.intended):
+                summary["filled"] += 1
+        await asyncio.sleep(0.5)
+    summary["residual"] = [f"{f.section}[{f.row}].{f.label}" for f in reconcile(
+        plan, await extract_live(page), await read_live(page, await extract_live(page))).todo()]
+    return summary
+
+
+_PKEY = {"experience": ("experience", "work_experience"), "education": ("education",),
+         "skills": ("skills",), "languages": ("languages",), "certifications": ("certifications",)}
+_PLAN_SYS = (
+    "You map an applicant profile onto a job application's repeater sections. You are given, per "
+    "section, the rows to fill (one per profile entry) and each field's visible LABEL. For every "
+    "(section,row,label) return a value: copy the matching profile value VERBATIM; '' if the profile "
+    "lacks it (never fabricate). For a closed-list field (e.g. Degree) map to the closest CANONICAL "
+    "form the form likely offers (e.g. 'B.S.' -> \"Bachelor's Degree\"). Dates stay ISO 'YYYY-MM'. "
+    "Return one cell per requested (section,row,label), nothing else."
+)
+
+
+def _plan_skeleton(controls: list[Control], profile: dict) -> dict:
+    """Deterministic STRUCTURE: which sections + labels are present, and how many rows (= profile
+    entries). Values are filled afterwards (LLM semantic, or structural fallback)."""
+    sections: dict = {}
+    for c in controls:
+        s = c.sect()
+        if s in ("experience", "education", "skills", "languages", "certifications") and c.label and c.label != "·":
+            sections.setdefault(s, {})[nkey(c.label)] = c.label
+    plan: dict = {}
+    for sec, labelset in sections.items():
+        items: list = []
+        for pk in _PKEY.get(sec, (sec,)):
+            items = profile.get(pk) or items
+        if not items:
+            continue
+        labels = list(labelset.values())
+        rows = [{lbl: "" for lbl in labels} for _ in items]
+        plan[sec] = {"count": len(rows), "rows": rows, "_items": items, "_labels": labels}
+    return plan
+
+
+def _fill_values_struct(plan: dict) -> None:
+    """Structural value fill: fuzzy field_key match (no LLM). Used offline + as fallback."""
+    for _sec, blk in plan.items():
+        for row, item in zip(blk["rows"], blk["_items"], strict=False):
+            for lbl in blk["_labels"]:
+                if isinstance(item, dict):
+                    lk = re.sub(r"[^a-z]", "", nkey(lbl))
+                    row[lbl] = next((str(v) for k, v in item.items()
+                                     if re.sub(r"[^a-z]", "", k.lower()) in lk
+                                     or lk in re.sub(r"[^a-z]", "", k.lower())), "")
+                else:  # scalar (a skill/language string) -> the single label
+                    row[lbl] = str(item)
+
+
+async def _fill_values_llm(llm, plan: dict, title: str) -> None:
+    """The ONE semantic call: map every (section,row,label) cell to a profile value."""
+    import json
+
+    from pydantic import BaseModel
+
+    from browser_use.llm.messages import SystemMessage, UserMessage
+
+    class _Cell(BaseModel):
+        section: str
+        row: int
+        label: str
+        value: str
+
+    class _Out(BaseModel):
+        cells: list[_Cell]
+
+    to_fill, prof = [], {}
+    for sec, blk in plan.items():
+        prof[sec] = blk["_items"]
+        for ri, _ in enumerate(blk["rows"]):
+            for lbl in blk["_labels"]:
+                to_fill.append({"section": sec, "row": ri, "label": lbl})
+    ctx = {"job_title": title, "profile": prof, "to_fill": to_fill}
+    res = await llm.ainvoke([SystemMessage(content=_PLAN_SYS),
+                             UserMessage(content=json.dumps(ctx, ensure_ascii=False))], output_format=_Out)
+    for cell in res.completion.cells:
+        blk = plan.get(cell.section)
+        if blk and 0 <= cell.row < len(blk["rows"]) and cell.label in blk["rows"][cell.row]:
+            blk["rows"][cell.row][cell.label] = cell.value
+
+
+async def make_plan(llm, controls: list[Control], profile: dict, title: str = "") -> dict:
+    """Structure (counts + labels) is deterministic; VALUES are the ONE semantic LLM call (label->value,
+    closed-list canonicalisation), with a structural fuzzy-key fallback when no llm / on error."""
+    plan = _plan_skeleton(controls, profile)
+    if llm is not None:
+        try:
+            await _fill_values_llm(llm, plan, title)
+        except Exception:
+            _fill_values_struct(plan)
+    else:
+        _fill_values_struct(plan)
+    return {sec: {"count": blk["count"], "rows": blk["rows"]} for sec, blk in plan.items()}
