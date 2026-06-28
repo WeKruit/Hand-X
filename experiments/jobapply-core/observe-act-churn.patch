@@ -1,0 +1,1481 @@
+diff --git a/experiments/jobapply-core/ats_engine.py b/experiments/jobapply-core/ats_engine.py
+index 98fb9983c..23f1a3e12 100644
+--- a/experiments/jobapply-core/ats_engine.py
++++ b/experiments/jobapply-core/ats_engine.py
+@@ -40,6 +40,83 @@ from pydantic import BaseModel, Field
+ # `skip` is dropped. Everything else (select / input_text / open_ended) is mapped.
+ MAP_SOURCES = {"select", "input_text", "open_ended"}
+ 
++# Actions stripped from every form-filling agent so it PHYSICALLY cannot leave the application page.
++# A gemini agent ignored the "never navigate" prompt and went to a hallucinated 'https://value.Error'
++# then DuckDuckGo (CAPTCHA), and a navigate-back recovery reset the wizard to step 1. Excluding these
++# at the tool layer is the only reliable guard; the remaining actions are click/input/scroll/done/etc.
++_NO_NAV_ACTIONS = [
++    "navigate", "go_to_url", "go_back", "go_forward", "search", "search_google",
++    "open_tab", "create_tab", "switch", "close", "save_as_pdf",
++]
++
++
++def _safe_tools() -> Any:
++    """A browser_use Tools registry with all navigation/search/tab actions removed."""
++    from browser_use import Tools
++
++    return Tools(exclude_actions=_NO_NAV_ACTIONS)
++
++
++def _make_agent_llm() -> Any:
++    """The browser_use Agent's brain (used ONLY for the hard agent passes — repeater/repair/escalate).
++    DEFAULT = gemini-3-flash-preview: the PROVEN baseline that drove all 3 tenants to Review at
++    $0.022-0.071. bu-2-0 was bake-off-tested (2026-06-28) and LOST - its price edge ($0.20/$2.0) is gone
++    vs the flash-lite we now use for deterministic ($0.25/$1.5, cheaper output), and on a broken page it
++    thrashed (23 calls / 18 min / failed). Opt in to bu-2-0 only with GH_AGENT_BU=1 for re-measurement.
++    The real cost lever is deterministic coverage (so the agent never fires), NOT a cheaper agent model."""
++    if os.environ.get("GH_AGENT_BU") == "1" and os.environ.get("BROWSER_USE_API_KEY"):
++        with contextlib.suppress(Exception):
++            from browser_use.llm.browser_use.chat import ChatBrowserUse
++
++            return ChatBrowserUse(model="bu-2-0")
++    from browser_use import ChatGoogle
++
++    return ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY"))
++
++
++# Agent actions that fill/commit a field — the ones worth replaying deterministically. Navigation/
++# bookkeeping actions (done/scroll/think/extract) carry no fill intent, so the recipe drops them.
++_RECIPE_FILL_ACTIONS = {"click_element_by_index", "input_text", "select_dropdown_option", "send_keys",
++                        "click", "type", "select_option", "get_dropdown_options", "upload_file"}
++
++
++def _record_agent_recipe(section: str, agent: Any) -> None:
++    """Replay principle, made systematic (第一性原理): the agent is the DISCOVERY mechanism — whatever it
++    fills, we capture as a deterministic 'recipe' so the next run REPLACES this agent call with selector-
++    based fills (escalation & cost -> 0). browser_use records every action + its target element, so for
++    each fill/click we keep the STABLE hooks (data-automation-id / id / aria-label / ax_name / xpath) +
++    the value. The aid/label/ax_name are what make the derived routine GENERIC across label/title changes.
++    Writes one JSONL per section under GH_RECIPE_DIR (the loop's feedback artifact); no-op if unset."""
++    rec_dir = os.environ.get("GH_RECIPE_DIR")
++    if not rec_dir:
++        return
++    with contextlib.suppress(Exception):
++        steps = []
++        for a in agent.history.model_actions():
++            atype = next((k for k in a if k != "interacted_element"), None)
++            if atype not in _RECIPE_FILL_ACTIONS:
++                continue
++            el = a.get("interacted_element")
++            attrs = (getattr(el, "attributes", None) or {}) if el is not None else {}
++            steps.append({
++                "action": atype,
++                "params": a.get(atype),
++                "aid": attrs.get("data-automation-id"),
++                "id": attrs.get("id"),
++                "aria_label": attrs.get("aria-label"),
++                "name": attrs.get("name"),
++                "tag": getattr(el, "node_name", None),
++                "ax_name": getattr(el, "ax_name", None),
++                "xpath": getattr(el, "x_path", None),
++            })
++        if not steps:
++            return
++        d = Path(rec_dir)
++        d.mkdir(parents=True, exist_ok=True)
++        fp = d / f"{section.lower().replace(' ', '_')}.jsonl"
++        fp.write_text("\n".join(json.dumps(s, ensure_ascii=False) for s in steps))
++        print(f"   [recipe:{section}] captured {len(steps)} fill-actions -> {fp.name}")
++
+ 
+ # ---------------------------------------------------------------------------
+ # Normalized field descriptor — every adapter's extract() yields these.
+@@ -148,11 +225,12 @@ class ATSAdapter(abc.ABC):
+         messages should name the offending field(s). Default: none."""
+         return []
+ 
+-    async def fill_repeaters(self, session: Any, page: Any, profile: dict) -> dict:
++    async def fill_repeaters(self, session: Any, page: Any, profile: dict, llm: Any = None) -> dict:
+         """Optional: fill 'Add another' repeater sections (education / work experience) that
+         are NOT in the flat field schema — they exist only in the live DOM and need an
+-        add-row loop, not the per-field map. Default: none. Kept structurally separate from
+-        the flat FormField fill so it never perturbs form_present / read_back."""
++        add-row loop, not the per-field map. `llm` (optional) disambiguates closed-list
++        typeaheads (Skills/Languages). Default: none. Kept structurally separate from the
++        flat FormField fill so it never perturbs form_present / read_back."""
+         return {}
+ 
+ 
+@@ -225,6 +303,23 @@ async def upload_file(session: Any, page: Any, file_el: Any, path: str) -> bool:
+         return False
+ 
+ 
++async def type_text_trusted(session: Any, page: Any, text: str, delay_ms: int = 55) -> bool:
++    """Type REAL keystrokes via CDP Input.insertText per char (ported from DomHand _type_text_compat).
++    browser_use's `page.keyboard.type` is a no-op in this session (verified: input stayed empty), and
++    Workday's React search only reacts to real input events — a JS `.fill()` triggers the search but not
++    the commit-on-Enter path. Caller must focus the target first (click it)."""
++    try:
++        sid = await page.session_id
++        for ch in text:
++            await session.cdp_client.send.Input.insertText(params={"text": ch}, session_id=sid)
++            if delay_ms:
++                await asyncio.sleep(delay_ms / 1000.0)
++        return True
++    except Exception as exc:
++        print(f"   [trusted-type] {exc}")
++        return False
++
++
+ async def press_enter_trusted(session: Any, page: Any) -> bool:
+     """A TRUSTED Enter via CDP Input.dispatchKeyEvent on the focused element. react-select
+     (and similar geocomplete widgets) IGNORE synthetic page.press / JS-dispatched keys — only
+@@ -338,6 +433,42 @@ async def map_fields(llm: Any, fields: list[FormField], profile: dict, title: st
+     return {f.name: f for f in res.completion.fields}
+ 
+ 
++class _OptionPick(BaseModel):
++    index: int = Field(description="0-based index of the option that is the SAME item, or -1 if none is")
++
++
++_PICK_SYSTEM = (
++    "You map a requested item (a skill / technology / language / certification) to ONE option from a "
++    "CLOSED search-result list. Return the 0-based index of the option that is the SAME item, allowing "
++    "canonical expansions and abbreviations: 'Go' -> 'Go Programming Language' (NOT 'Go Gauges' or "
++    "'Go-Carts'); 'AWS' -> 'Amazon Web Services (AWS)' (NOT 'AWS VPN'); 'React' -> 'React.js'; "
++    "'Postgres' -> 'PostgreSQL'. When BOTH a bare generic word and a more SPECIFIC technology entry are "
++    "present (e.g. 'Go' AND 'Go Programming Language', or 'AWS' AND 'Amazon Web Services (AWS)'), prefer "
++    "the SPECIFIC one — the bare word is often a non-selectable category. If NONE of the options is the "
++    "same item — only unrelated near-spellings — return -1. NEVER substitute a different item; a wrong "
++    "pick is worse than -1."
++)
++
++
++async def llm_pick_option(llm: Any, query: str, options: list[str]) -> int:
++    """Semantic disambiguation for a closed-list typeahead: pick the option that is the SAME item as
++    `query`, or -1. Deterministic string-match cannot tell 'Go Programming Language' from 'Go Gauges'
++    (both start 'go '); a tiny LLM call can. Returns a valid index or -1."""
++    from browser_use.llm.messages import SystemMessage, UserMessage
++
++    if not options:
++        return -1
++    ctx = {"requested": query, "options": [{"i": i, "text": t} for i, t in enumerate(options)]}
++    with contextlib.suppress(Exception):
++        res = await llm.ainvoke(
++            [SystemMessage(content=_PICK_SYSTEM), UserMessage(content=json.dumps(ctx, ensure_ascii=False))],
++            output_format=_OptionPick,
++        )
++        i = res.completion.index
++        return i if 0 <= i < len(options) else -1
++    return -1
++
++
+ # ---------------------------------------------------------------------------
+ # L3 — escalate a single field to a browser-use Agent (generic fallback).
+ # ---------------------------------------------------------------------------
+@@ -380,7 +511,7 @@ async def escalate(session: Any, agent_llm: Any, page: Any, field: FormField, va
+     try:
+         # use_vision='auto' lets the agent pull a screenshot to SEE field state (avoids re-typing a
+         # field the serialized DOM falsely reads empty) — it observes, the deterministic layer fills.
+-        agent = Agent(task=task, llm=agent_llm, browser_session=session, use_vision="auto")
++        agent = Agent(task=task, llm=agent_llm, browser_session=session, use_vision="auto", tools=_safe_tools(), directly_open_url=False)
+         await agent.run(max_steps=4)
+         return True
+     except Exception as exc:
+@@ -396,7 +527,26 @@ async def escalate(session: Any, agent_llm: Any, page: Any, field: FormField, va
+         await _unfreeze(session)  # ALWAYS unlock — else subsequent deterministic fills hit frozen fields
+ 
+ 
+-async def agent_fill_section(session: Any, page: Any, *, section: str, instructions: str, max_steps: int = 10) -> dict:
++async def recover_to_host(session: Any, step_url: str) -> bool:
++    """If an agent wandered OFF the form host (observed: it navigated to a hallucinated
++    'https://value.Error' then DuckDuckGo, derailing the run — and allowed_domains did NOT block it),
++    bring it back to the in-progress step URL so the wizard can continue. Returns True if it recovered."""
++    from urllib.parse import urlparse
++
++    with contextlib.suppress(Exception):
++        p = await session.must_get_current_page()
++        cur = await p.get_url()
++        if urlparse(cur or "").hostname != urlparse(step_url or "").hostname:
++            print(f"   [recover] agent left to {urlparse(cur or '').hostname!r} -> back to form")
++            await session.navigate_to(step_url)
++            await asyncio.sleep(2.5)
++            return True
++    return False
++
++
++async def agent_fill_section(
++    session: Any, page: Any, *, section: str, instructions: str, searchable: bool = True, max_steps: int = 10
++) -> dict:
+     """Hand a hard, NON-schema section (an education / experience REPEATER whose rows + searchable
+     closed-taxonomy comboboxes exist only in the live DOM, below the fold and NOT in the selector
+     map) to a FOCUSED browser-use Agent. The agent scrolls to the section and drives the comboboxes
+@@ -406,7 +556,7 @@ async def agent_fill_section(session: Any, page: Any, *, section: str, instructi
+     FILL-ONLY is enforced STRUCTURALLY, not by prompt alone: every submit control is DISABLED before
+     the agent runs (it physically cannot submit) and restored after. Runs LAST, so the agent's CDP
+     teardown can't perturb earlier deterministic fields."""
+-    from browser_use import Agent, ChatGoogle
++    from browser_use import Agent
+ 
+     disable_js = (
+         "() => { let n=0; document.querySelectorAll('button[type=submit],input[type=submit]')"
+@@ -421,28 +571,39 @@ async def agent_fill_section(session: Any, page: Any, *, section: str, instructi
+     with contextlib.suppress(Exception):
+         await page.evaluate(_FREEZE_FILLED_JS)  # lock already-filled fields — agent can't disturb them
+ 
+-    task = (
+-        f"You are already on a job-application page. Fill ONLY the {section} section: {instructions}. "
+-        f"Each {section} field (School, Degree, Discipline, etc.) is a SEARCHABLE dropdown — scroll to "
+-        "it, click it, type, and pick an option. CRITICAL: these are CLOSED lists, so you must pick the "
+-        "CLOSEST AVAILABLE option, not insist on an exact string. Map abbreviations (Degree 'B.S.' -> "
++    # searchable=True -> row-repeater sections (Experience/Education) whose closed-taxonomy comboboxes
++    # (School/Degree/Discipline) need the pick-closest + broaden-term guidance. searchable=False ->
++    # tag sections (Skills/Languages) where that School/Degree guidance is wrong and misleads the agent.
++    searchable_hint = (
++        " Each field (School, Degree, Discipline, etc.) is a SEARCHABLE dropdown — scroll to it, click "
++        "it, type, and pick an option. CRITICAL: these are CLOSED lists, so you must pick the CLOSEST "
++        "AVAILABLE option, not insist on an exact string. Map abbreviations (Degree 'B.S.' -> "
+         "'Bachelor's Degree' / 'Bachelor of Science'; 'M.S.' -> 'Master's Degree' / 'Master of Science'). "
+         "If a search shows 'No options', the list doesn't have that exact term — RETRY with a SHORTER or "
+         "broader term (e.g. 'Electrical and Computer Engineering' -> 'Electrical' -> 'Engineering' -> "
+-        "'Computer'), then pick the nearest option offered. Do not leave a dropdown with text typed but no "
+-        "option selected. Use 'Add another' before each additional entry. Touch NOTHING outside this "
+-        "section. The Submit button is DISABLED on purpose — do NOT submit and do NOT navigate. Call done "
+-        "once every dropdown in the section shows a SELECTED value."
++        "'Computer'), then pick the nearest option offered. Do not leave a dropdown with text typed but "
++        "no option selected. Use 'Add another' before each additional entry."
++        if searchable
++        else ""
++    )
++    task = (
++        f"You are already on a job-application page. Fill ONLY the {section} section: {instructions}."
++        f"{searchable_hint} Touch NOTHING outside this section. The Submit button is DISABLED on purpose "
++        "— do NOT submit and do NOT navigate. Call done once every field in the section shows a "
++        "committed value."
+     )
+     ok = True
++    agent = None
+     try:
+-        llm = ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY"))
+-        agent = Agent(task=task, llm=llm, browser_session=session, use_vision="auto")
++        llm = _make_agent_llm()
++        agent = Agent(task=task, llm=llm, browser_session=session, use_vision="auto", tools=_safe_tools(), directly_open_url=False)
+         await agent.run(max_steps=max_steps)
+     except Exception as exc:
+         print(f"   [agent:{section}] {exc}")
+         ok = False
+     finally:
++        if agent is not None:
++            _record_agent_recipe(section, agent)  # capture trace -> deterministic recipe (replay principle)
+         with contextlib.suppress(Exception):  # Agent.close() drops the shared CDP client — re-attach
+             if not session.is_cdp_connected:
+                 await session.connect()
+@@ -464,7 +625,7 @@ async def repair_and_advance(
+     Only the FINAL submit is disabled (the agent must still be able to Save-and-Continue past the
+     step); the agent is told never to navigate and never to finalize. The agent's CDP teardown is
+     re-attached in finally. Returns True if the agent ran (advancement is verified by the caller)."""
+-    from browser_use import Agent, ChatGoogle
++    from browser_use import Agent
+ 
+     # STRUCTURAL submit-guard (belt-and-suspenders to install_submit_guard already running on the
+     # session): re-disable any final-submit button now, in case the guard interval isn't installed.
+@@ -512,9 +673,11 @@ async def repair_and_advance(
+     try:
+         agent = Agent(
+             task=task,
+-            llm=agent_llm or ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY")),
++            llm=agent_llm or _make_agent_llm(),
+             browser_session=session,
+             use_vision=True,
++            tools=_safe_tools(),
++            directly_open_url=False,
+         )
+         await agent.run(max_steps=max_steps)
+     except Exception as exc:
+@@ -748,10 +911,10 @@ async def run_single_page(
+ 
+     tc = TokenCost(include_cost=True)
+     await tc.initialize()
+-    # thinking_level='minimal': label->value mapping is deterministic reasoning, not a
+-    # puzzle — minimal thinking cuts thought tokens ~10x, holding the call near ~$0.0015.
++    # thinking_budget=0: label->value mapping is deterministic reasoning, not a puzzle — zero thinking
++    # budget cuts thought tokens ~10x, holding the call near ~$0.0015. (flash-lite rejects thinking_level.)
+     llm = tc.register_llm(
+-        ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY"), thinking_level="minimal")
++        ChatGoogle(model="gemini-3.1-flash-lite", api_key=os.environ.get("GOOGLE_API_KEY"), thinking_budget=0)
+     )
+ 
+     map_rows = [f for f in fields if f.needs_map]  # step 2 (generic)
+@@ -814,7 +977,7 @@ async def run_single_page(
+ 
+     # repeater sections (education / experience) — separate add-row pass, not the flat loop
+     with contextlib.suppress(Exception):
+-        rep = await adapter.fill_repeaters(session, page, profile)
++        rep = await adapter.fill_repeaters(session, page, profile, llm=llm)
+         if rep:
+             result["repeaters"] = rep
+             print(f"  repeaters: {rep}")
+@@ -871,13 +1034,30 @@ async def run_wizard(
+     tc = TokenCost(include_cost=True)
+     await tc.initialize()
+     llm = tc.register_llm(
+-        ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY"), thinking_level="minimal")
++        ChatGoogle(model="gemini-3.1-flash-lite", api_key=os.environ.get("GOOGLE_API_KEY"), thinking_budget=0)
+     )
+     # separate tc-registered LLM for the repair agent so its tokens count toward per-step cost.
+-    agent_llm = tc.register_llm(ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY")))
++    agent_llm = tc.register_llm(_make_agent_llm())
++    # expose the map LLM to the adapter so its closed-list pickers can semantically disambiguate
++    # 近义词 values ('B.S.' -> 'Bachelor of Science') that deterministic string-match can't.
++    with contextlib.suppress(Exception):
++        adapter._llm = llm
+     result: dict = {"adapter": adapter.__class__.__name__, "title": title, "url": url, "steps": []}
+ 
+-    session = BrowserSession(browser_profile=BrowserProfile(headless=headless, keep_alive=True))
++    # STRUCTURAL navigation guard: confine the browser to the job host + the adapter's ATS domains.
++    # A repair/section agent (gemini) can ignore the "NEVER navigate" prompt and wander off — observed
++    # navigating to a hallucinated `https://value.Error` then DuckDuckGo (CAPTCHA), destroying the form.
++    # allowed_domains blocks ALL off-host navigation at the browser layer (generic across tenants).
++    from urllib.parse import urlparse
++
++    host = urlparse(url).hostname or ""
++    allowed = sorted({host, *adapter.hosts, *(f"*.{h}" for h in adapter.hosts)} - {""})
++    # NB: StealthConfig(enabled=True) BROKE Create-Account auth on Visa (AUTH_FAILED) even though it's
++    # the documented CAPTCHA-avoidance lever — so it is NOT safe as a global default; reserve it for a
++    # dedicated CAPTCHA-gated path (Sony/Workday-own) behind a flag, never for the working tenants.
++    session = BrowserSession(
++        browser_profile=BrowserProfile(headless=headless, keep_alive=True, allowed_domains=allowed)
++    )
+     await session.start()
+     await session.navigate_to(url)
+     await asyncio.sleep(2.5)
+@@ -905,6 +1085,14 @@ async def run_wizard(
+         t0 = time.monotonic()
+         c0 = (await tc.get_usage_summary()).total_cost
+         step = await adapter.extract_step(session, page, profile)
++        if os.environ.get("GH_DUMP"):  # capture each step's live DOM for OFFLINE detector testing
++            with contextlib.suppress(Exception):
++                html = await page.evaluate("() => document.documentElement.outerHTML")
++                dp = Path(os.environ["GH_DUMP"])
++                dp.mkdir(parents=True, exist_ok=True)
++                fn = dp / f"step{step.index:02d}_{(step.name or 'step').replace(' ', '_')[:24]}.html"
++                fn.write_text(html)
++                print(f"   [dump] step {step.index} '{step.name}' -> {fn.name} ({len(html) // 1024}KB)")
+         if step.is_review or await adapter.is_complete(session, page):
+             result["status"] = "FILLED_TO_REVIEW"  # STOP — never submit
+             shot = None
+@@ -943,7 +1131,7 @@ async def run_wizard(
+         # on section headings. The agent freezes filled fields + submit stays disabled.
+         repeaters_used = False
+         with contextlib.suppress(Exception):
+-            rep = await adapter.fill_repeaters(session, page, profile)
++            rep = await adapter.fill_repeaters(session, page, profile, llm=llm)
+             if rep:
+                 repeaters_used = True
+                 print(f"  repeaters: {rep}")
+@@ -994,14 +1182,23 @@ async def run_wizard(
+     usage = await tc.get_usage_summary()
+     result.setdefault("status", "FILLED_TO_REVIEW")
+     result["cost"] = usage.total_cost
++    result["by_model"] = _by_model(usage)
+     print(f"  wizard steps filled: {len(result['steps'])}   cost ${usage.total_cost:.5f}   (stopped before Submit)")
+     await session.kill()
+     return result
+ 
+ 
++def _by_model(usage: Any) -> dict:
++    """Per-model cost split (bu-2-0 agent vs gemini deterministic) for the run report."""
++    return {
++        m: {"cost": round(s.cost, 5), "invocations": s.invocations, "tokens": s.total_tokens}
++        for m, s in usage.by_model.items()
++    }
++
++
+ async def _wizard_halt(result: dict, status: str, reason: str, tc: Any, session: Any) -> dict:
+     usage = await tc.get_usage_summary()
+-    result.update(status=status, reason=reason, cost=usage.total_cost)
++    result.update(status=status, reason=reason, cost=usage.total_cost, by_model=_by_model(usage))
+     print(f"  WIZARD HALT: {status} — {reason}   (cost ${usage.total_cost:.5f})")
+     with contextlib.suppress(Exception):
+         await session.kill()
+diff --git a/experiments/jobapply-core/ats_workday.py b/experiments/jobapply-core/ats_workday.py
+index 3d974aa03..ecd917471 100644
+--- a/experiments/jobapply-core/ats_workday.py
++++ b/experiments/jobapply-core/ats_workday.py
+@@ -27,6 +27,378 @@ from ats_engine import AdvanceResult, ATSAdapter, AuthResult, Credentials, FormF
+ 
+ _DBG = bool(os.environ.get("WD_DEBUG"))
+ 
++# -- Deterministic TAG/typeahead fill (Skills, Languages, Certifications) -------------------
++# Ported from Hand-X DomHand (ghosthands/actions/domhand_fill_repeaters.py): these "type to add"
++# multiselects accept MANY pills via one input. The agent paste-bugs the whole list into a single
++# pill and bleeds into neighbours, so fill them deterministically: locate the section's typeahead
++# GENERICALLY by keyword (own id/aria/aid -> nearest heading), then per item CLEAR the stale query,
++# type, TRUSTED-Enter, and verify a NEW pill appeared. DomHand's hard-won rules: clear between items,
++# cap the count, and early-stop after N consecutive misses (the employer's CLOSED taxonomy lacks the
++# rest — keep typing forever otherwise).
++
++# locate the tag typeahead input for a section by keyword (returns {sel}); keyword matches the input's
++# own id/aria-label/aid/placeholder, else the nearest ancestor aid / heading / label / legend text.
++_TAG_INPUT_LOCATOR_JS = r"""
++(keywords) => {
++  const norm = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
++  const hit  = s => { s = norm(s); return keywords.some(k => s.includes(k)); };
++  const inputs = [...document.querySelectorAll(
++    '[data-uxi-widget-type="selectinput"] input, [role="combobox"] input, input[role="combobox"],'
++    + ' input[aria-autocomplete], input[aria-haspopup="listbox"],'
++    + ' [data-automation-id*="multiSelectContainer"] input, [data-automation-id*="multiselect" i] input')];
++  for (const inp of inputs) {
++    const r = inp.getBoundingClientRect();
++    if (r.width === 0 && r.height === 0) continue;
++    let match = hit((inp.id||'') + ' ' + (inp.getAttribute('aria-label')||'') + ' '
++                    + (inp.getAttribute('data-automation-id')||'') + ' ' + (inp.getAttribute('placeholder')||''));
++    if (!match) {
++      let node = inp;
++      for (let up = 0; up < 6 && node; up++) {
++        node = node.parentElement; if (!node) break;
++        const aid = node.getAttribute && node.getAttribute('data-automation-id');
++        if (aid && hit(aid)) { match = true; break; }
++        const h = node.querySelector && node.querySelector('h2,h3,h4,[role="heading"],label,legend');
++        if (h && hit(h.textContent)) { match = true; break; }
++      }
++    }
++    if (match) {
++      let sel;
++      if (inp.id) sel = '#' + ((window.CSS && CSS.escape) ? CSS.escape(inp.id) : inp.id);
++      else { inp.setAttribute('data-gh-tag', '1'); sel = '[data-gh-tag="1"]'; }
++      return JSON.stringify({sel: sel});
++    }
++  }
++  return JSON.stringify({sel: ''});
++}
++"""
++
++# GENERIC repeater row detector (第一性原理: labeling is the hard part — we CANNOT enumerate every
++# field name across every ATS, so we do NOT try). Instead: (1) find the section by heading keyword,
++# (2) detect ENTRY containers by REPEATED DOM structure (not a hardcoded id-prefix like "workexperience"),
++# (3) for each fillable control resolve its VISIBLE LABEL generically (aria-label / aria-labelledby text /
++# <label for> / wrapping <label> / placeholder / humanized data-automation-id). The {entry-index, label}
++# pairs then go to the SAME semantic map_fields LLM call the schema fields use — so "Position"/"Firm"/
++# "Summary of duties" all map correctly with zero per-ATS keywords. Returns rows of labeled fields.
++_SECTION_ROWS_JS = r"""
++(keywords) => {
++  const low = s => (s||'').toLowerCase();
++  const hit = s => { s = low(s); return keywords.some(k => s.includes(k)); };
++  const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 || r.height > 0; };
++  // 1. section root: the heading that matches, climbed to the ancestor that holds the fields.
++  const heads = [...document.querySelectorAll('h2,h3,h4,[role="heading"],legend,[data-automation-id*="title" i]')];
++  let root = null;
++  for (const h of heads) {
++    if (!hit(h.textContent)) continue;
++    let sec = h.parentElement;
++    for (let up = 0; up < 6 && sec; up++) {
++      if (sec.querySelector('input,textarea,select,[role="combobox"]')) { root = sec; break; }
++      sec = sec.parentElement;
++    }
++    if (root) break;
++  }
++  if (!root) return JSON.stringify({rows: [], found: false});
++  // generic label resolver for one control
++  const labelFor = (e) => {
++    const al = e.getAttribute('aria-label'); if (al && al.trim()) return al.trim();
++    const lb = e.getAttribute('aria-labelledby');
++    if (lb) { const t = lb.split(/\s+/).map(id => (document.getElementById(id)||{}).textContent||'').join(' ').trim(); if (t) return t; }
++    if (e.id) { const l = document.querySelector('label[for="' + (window.CSS&&CSS.escape?CSS.escape(e.id):e.id) + '"]'); if (l && l.textContent.trim()) return l.textContent.trim(); }
++    let p = e.parentElement;
++    for (let up = 0; up < 4 && p; up++) { if (p.tagName === 'LABEL' && p.textContent.trim()) return p.textContent.trim(); p = p.parentElement; }
++    const ph = e.getAttribute('placeholder'); if (ph && ph.trim()) return ph.trim();
++    const aid = e.getAttribute('data-automation-id'); if (aid) return aid.replace(/[-_]/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
++    return '';
++  };
++  // widget kind by OBSERVATION of the element (not its name): text / select / combo / check.
++  // observe_and_fill re-confirms on click; this is just for enumeration + emptiness.
++  const widgetKind = (e) => {
++    const tag = e.tagName, t = low(e.type);
++    const role = low(e.getAttribute('role')||''), pop = low(e.getAttribute('aria-haspopup')||''), auto = low(e.getAttribute('aria-autocomplete')||'');
++    if (role === 'combobox' || auto === 'list' || auto === 'both') return 'combo';   // searchable (School/Degree)
++    if (tag === 'SELECT' || role === 'listbox' || (tag === 'BUTTON' && pop === 'listbox')) return 'select';
++    if (tag === 'TEXTAREA') return 'text';
++    if (tag === 'INPUT') { if (t === 'checkbox') return 'check'; if (pop === 'listbox') return 'select';
++      if (['','text','tel','email','url','number'].includes(t)) return 'text'; }
++    return '';
++  };
++  // date segments (From/To month+year) -> the dedicated date filler (segmented spinbuttons, genuinely
++  // a different widget — native fill clamps the month). The ONE legit exception to the unified path.
++  const isDate = lab => /\b(date|month|year|day)\b|mm.?\/|yyyy/.test(low(lab));
++  // 2. entry containers: outermost elements under root that REPEAT (same tag+role as a sibling) and each
++  //    hold >=1 fillable control. That generic "repeated sibling" test replaces the id-number grouping.
++  const allCtl = [...root.querySelectorAll('input,textarea')].filter(vis).filter(e => fillable(e));
++  const sig = e => e.tagName + '|' + (e.getAttribute('role')||'') + '|' + (e.getAttribute('data-automation-id')||'').replace(/\d+/g,'#');
++  const containerOf = (ctl) => {
++    let e = ctl;
++    for (let up = 0; up < 8 && e && e !== root; up++) {
++      const par = e.parentElement; if (!par) break;
++      const sibs = [...par.children].filter(s => s.tagName === e.tagName && sig(s) === sig(e));
++      if (sibs.length >= 2 && e.querySelector && e.querySelector('input,textarea')) return e;
++      e = par;
++    }
++    return null;
++  };
++  let containers = [...new Set(allCtl.map(containerOf).filter(Boolean))];
++  // order containers by document position; if none repeat, treat the whole root as a single entry.
++  if (containers.length === 0) containers = [root];
++  containers.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
++  const rows = containers.map((c, idx) => {
++    const fields = [];
++    [...c.querySelectorAll('input,textarea,select,button,[role="combobox"],[role="listbox"]')].filter(vis).forEach(e => {
++      const kind = widgetKind(e); if (!kind) return;
++      const label = labelFor(e); if (!label) return;
++      if (isDate(label)) return;  // segmented dates -> fill_repeater_dates
++      const cur = (kind === 'text' ? (e.value || '') : (e.textContent || e.value || '')).replace(/\s+/g, ' ').trim();
++      const empty = kind === 'check' ? !(e.checked || e.getAttribute('aria-checked') === 'true')
++                                     : (!cur || /^(select one|select\.\.\.|select$|choose)/i.test(cur));
++      const sel = '[data-gh-rf="' + idx + '~' + fields.length + '"]';
++      e.setAttribute('data-gh-rf', idx + '~' + fields.length);
++      fields.push({label, sel, kind, val: cur, empty});
++    });
++    return {entry: idx, fields};
++  }).filter(r => r.fields.length);
++  // diagnostics: when rows come back empty, these say WHY (no heading match / no controls / no labels)
++  const dbg = {
++    matchedHeads: heads.filter(h => hit(h.textContent)).map(h => (h.textContent||'').trim().slice(0, 40)).slice(0, 4),
++    nCtl: allCtl.length, nContainers: containers.length,
++    sampleLabels: allCtl.slice(0, 6).map(e => (labelFor(e) || '∅').slice(0, 30)),
++  };
++  return JSON.stringify({rows, found: true, dbg});
++}
++"""
++
++# Enumerate a row-repeater's TEXT/textarea/checkbox fields per row (Experience/Education), keyed to a
++# profile field by id/label keyword (jobTitle/company/location/roleDescription/gpa/currentlyWorkHere).
++# This is what lets us fill the rows DETERMINISTICALLY instead of with the slow section agent — the
++# agent was only ever typing into these known fields. Combos (school/degree/field) + dates are handled
++# by their own deterministic fillers. Generic: matches by keyword, not a hardcoded id.
++_ROW_STRUCTURE_JS = r"""
++(prefix) => {
++  const norm = s => (s||'').toLowerCase();
++  const rx = new RegExp(prefix + '-\\d+', 'i');
++  const all = [...document.querySelectorAll('[id*="' + prefix + '-"]')];
++  const rowIds = [...new Set(all.map(e => (e.id.match(rx) || [])[0]).filter(Boolean))]
++    .sort((a, b) => parseInt(a.split('-')[1]) - parseInt(b.split('-')[1]));
++  const keyOf = (idk) => {
++    if (/jobtitle|\btitle\b/.test(idk)) return 'title';
++    if (/companyname|company|employer/.test(idk)) return 'company';
++    if (/location|\bcity\b/.test(idk)) return 'location';
++    if (/roledescription|description|responsib|achievement/.test(idk)) return 'description';
++    if (/\bgpa\b|gradeaverage|overallresult|grade/.test(idk)) return 'gpa';
++    return '';
++  };
++  const rows = rowIds.map((rid) => {
++    const fields = [];
++    [...document.querySelectorAll('input[id*="' + rid + '"], textarea[id*="' + rid + '"]')].forEach((e) => {
++      const t = norm(e.type);
++      const isText = e.tagName === 'TEXTAREA' || t === 'text' || t === '';
++      const isCheck = t === 'checkbox';
++      const idk = norm((e.id || '') + ' ' + (e.getAttribute('aria-label') || ''));
++      let key = '';
++      if (isCheck && /current|presently|\bwork here\b/.test(idk)) key = 'current';
++      else if (isText) key = keyOf(idk);
++      if (!key) return;
++      if (fields.some(f => f.key === key)) return;
++      const r = e.getBoundingClientRect();
++      if (r.width === 0 && r.height === 0) return;
++      e.setAttribute('data-gh-rf', rid + '~' + key);
++      fields.push({key, sel: '[data-gh-rf="' + rid + '~' + key + '"]', check: isCheck,
++                   val: (e.value || '').trim()});
++    });
++    return {rid, fields};
++  });
++  return JSON.stringify({rows});
++}
++"""
++
++# Find each Education row's School / Degree / Field-of-Study controls, grouped by row (the
++# `education-N` id prefix) in numeric order, each tagged empty/filled. These searchable comboboxes are
++# what the section AGENT types into but fails to COMMIT ('field required' persists) — we re-commit them
++# deterministically with the proven skills primitive. School/Field = typeahead inputs; Degree = button
++# listbox. Generic-ish: keyed by the structural `education-` id (Workday-stable) + role.
++_EDU_COMBO_JS = r"""
++() => {
++  const ctrls = [...document.querySelectorAll(
++    'input[id*="education-"], button[id*="education-"], [id*="education-"] input, [id*="education-"] button')];
++  const rows = {};
++  for (const c of ctrls) {
++    const m = (c.id||'').match(/(education-\d+)/i); if (!m) continue;
++    const idl = ((c.id||'') + ' ' + (c.getAttribute('aria-label')||'')).toLowerCase();
++    let kind = '';
++    if (/school|universit/.test(idl)) kind = 'school';
++    else if (/degree/.test(idl)) kind = 'degree';
++    else if (/field|study|discipline|major/.test(idl)) kind = 'field';
++    else continue;
++    const r = c.getBoundingClientRect(); if (r.width === 0 && r.height === 0) continue;
++    const row = m[1];
++    const tag = c.tagName.toLowerCase();
++    const cur = (tag === 'button' ? (c.textContent||'') : (c.value||'')).replace(/\s+/g,' ').trim();
++    const empty = !cur || /select one|select\.\.\./i.test(cur);
++    rows[row] = rows[row] || {row};
++    if (rows[row][kind]) continue;  // first control of this kind wins
++    c.setAttribute('data-gh-edu', kind + '-' + row);
++    rows[row][kind] = '[data-gh-edu="' + kind + '-' + row + '"]';
++    rows[row][kind + 'Tag'] = tag;
++    rows[row][kind + 'Empty'] = empty;
++  }
++  return JSON.stringify(Object.values(rows).sort(
++    (a, b) => parseInt(a.row.split('-')[1]) - parseInt(b.row.split('-')[1])));
++}
++"""
++
++# Click the "Add" button of the section whose HEADING matches a keyword — for tenants (e.g. Visa) that
++# COLLAPSE Certifications/Languages behind an Add control, so the typeahead/row only mounts after a click.
++# Returns a selector for the clicked button (or '').
++_EXPAND_SECTION_JS = r"""
++(keywords) => {
++  const hit = s => { s = (s||'').toLowerCase(); return keywords.some(k => s.includes(k)); };
++  const isAdd = b => /^add\b|^add another/i.test(((b.textContent||'') + ' ' + (b.getAttribute('aria-label')||'')).trim());
++  const heads = [...document.querySelectorAll('h2,h3,h4,[role="heading"],legend,[data-automation-id*="title" i]')];
++  for (const h of heads) {
++    if (!hit(h.textContent)) continue;
++    let sec = h.parentElement;
++    for (let up = 0; up < 5 && sec; up++) {
++      const btn = [...sec.querySelectorAll('button,[role="button"]')].find(isAdd);
++      if (btn) {
++        const r = btn.getBoundingClientRect();
++        if (r.width || r.height) { btn.scrollIntoView({block: 'center'}); btn.setAttribute('data-gh-add', '1'); return '[data-gh-add="1"]'; }
++      }
++      sec = sec.parentElement;
++    }
++  }
++  return '';
++}
++"""
++
++# GLOBAL count of committed pills (selectedItem charms). Other multiselects on the page (e.g. the
++# Education Field-of-Study combobox) also render selectedItem, but they are a CONSTANT baseline while
++# we fill ONE section, so the DELTA before/after each type isolates the newly-added pill. Scoping to
++# the input's ancestor was unreliable (the selectedItemList is not always an ancestor of the input).
++_TAG_PILL_COUNT_JS = r"""
++() => document.querySelectorAll(
++  '[data-automation-id="selectedItemList"] [data-automation-id="selectedItem"]').length
++"""
++
++# true if a COMMITTED pill matches `text`. GROUND TRUTH (live Intel DOM): a committed pill is a
++# `selectedItem` (role=option) INSIDE a `selectedItemList`; dropdown search results are `promptOption`
++# (NOT selectedItem). So selectedItemList > selectedItem targets committed pills precisely — no fragile
++# role-based exclusion (the pills are themselves role=option, which the old filter wrongly removed).
++_TAG_HAS_PILL_JS = r"""
++(text) => {
++  const t = (text||'').replace(/\s+/g,' ').trim().toLowerCase();
++  if (!t) return false;
++  const pills = document.querySelectorAll('[data-automation-id="selectedItemList"] [data-automation-id="selectedItem"]');
++  for (const p of pills) {
++    const pt = (p.textContent||'').replace(/\s+/g,' ').replace(/\u00d7|delete|remove/gi,'').trim().toLowerCase();
++    if (pt && (pt === t || pt.includes(t) || t.includes(pt))) return true;
++  }
++  return false;
++}
++"""
++
++# Find the MONTH-segment spinbutton of every From/To date in a repeater section (Experience/Education),
++# in DOM order, each tagged start|end by its nearest ancestor id/label. Workday repeater dates are
++# segmented MM/YYYY spinbuttons (no <select>), structurally addressable by the row id (workExperience-N
++# / education-N) — the part the section agent reliably fails on. Returns [{idx, kind, sel}].
++_REPEATER_DATE_SEGMENTS_JS = r"""
++(sectionId) => {
++  const want = sectionId.toLowerCase();
++  const months = [...document.querySelectorAll(
++    'input[data-automation-id$="Month-input"], input[data-automation-id*="dateSectionMonth"]')];
++  const out = [];
++  months.forEach((m) => {
++    const r = m.getBoundingClientRect();
++    if (r.width === 0 && r.height === 0) return;
++    let inSection = false, kind = '', yearEl = null, node = m;
++    for (let u = 0; u < 12 && node; u++) {
++      node = node.parentElement; if (!node) break;
++      const a = ((node.getAttribute && (node.getAttribute('id') || '') + ' ' + (node.getAttribute('data-automation-id') || '')
++                  + ' ' + (node.getAttribute('aria-label') || '')) || '').toLowerCase();
++      if (a.includes(want)) inSection = true;
++      if (!kind && /end|graduat|\bto\b/.test(a)) kind = 'end';      // 'endDate' has no \b before date
++      if (!kind && /start|from/.test(a)) kind = 'start';
++      // the YEAR segment of THIS date sits under the same date wrapper as the month
++      if (!yearEl) yearEl = node.querySelector('input[data-automation-id$="Year-input"], input[data-automation-id*="dateSectionYear"]');
++      if (inSection && kind && yearEl) break;
++    }
++    if (!inSection) return;
++    const idx = out.length;
++    m.setAttribute('data-gh-m', String(idx));
++    let ySel = '';
++    if (yearEl) { yearEl.setAttribute('data-gh-y', String(idx)); ySel = '[data-gh-y="' + idx + '"]'; }
++    out.push({idx, kind: kind || 'start', mSel: '[data-gh-m="' + idx + '"]', ySel});
++  });
++  return JSON.stringify(out);
++}
++"""
++
++# Find the still-empty proficiency listbox triggers in the Languages section — Workday makes each
++# language carry several rating dropdowns (Comprehension / Overall / Reading / Speaking / Writing /
++# Proficiency), all required, which the section agent leaves at 'Select One'. Match by label keyword
++# (generic, tenant-independent) + empty state; return clickable trigger selectors.
++_LANG_PROFICIENCY_TRIGGERS_JS = r"""
++() => {
++  const kw = /comprehension|overall|reading|speaking|writing|listening|proficien|fluen|abilit|\blevel\b/i;
++  const empty = /select one|select\.\.\.|^$/i;
++  const out = [];
++  const trigs = [...document.querySelectorAll('[data-automation-id] button, button[aria-haspopup="listbox"], [role="listbox"]')];
++  trigs.forEach((b) => {
++    const r = b.getBoundingClientRect();
++    if (r.width === 0 && r.height === 0) return;
++    // label: own text/aria, else nearest ancestor label/aria-label
++    let lbl = (b.getAttribute('aria-label') || '') + ' ';
++    let node = b;
++    for (let u = 0; u < 6 && node; u++) {
++      node = node.parentElement; if (!node) break;
++      lbl += ' ' + ((node.getAttribute && (node.getAttribute('aria-label') || '')) || '');
++      const l = node.querySelector && node.querySelector('label');
++      if (l) lbl += ' ' + (l.textContent || '');
++    }
++    if (!kw.test(lbl)) return;
++    const cur = (b.textContent || '').replace(/\s+/g, ' ').trim();
++    if (!empty.test(cur)) return;  // already set -> skip
++    const idx = out.length;
++    b.setAttribute('data-gh-prof', String(idx));
++    out.push('[data-gh-prof="' + idx + '"]');
++  });
++  return JSON.stringify(out);
++}
++"""
++
++# set a React-controlled input's value via the native setter + input/change (DomHand fill pattern);
++# returns the resulting value. Used for the date spinbuttons where browser_use .fill() clamps wrong.
++_SET_SEG_JS = r"""
++(sel, val) => {
++  const el = document.querySelector(sel);
++  if (!el) return '';
++  el.focus();
++  const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
++  const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
++  setter.call(el, val);
++  el.dispatchEvent(new Event('input',  {bubbles: true}));
++  el.dispatchEvent(new Event('change', {bubbles: true}));
++  el.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true}));
++  el.blur();
++  return el.value;
++}
++"""
++
++# clear the located input's stale query so the next item isn't appended into one giant pill
++_TAG_CLEAR_JS = r"""
++(sel) => {
++  const el = document.querySelector(sel);
++  if (!el) return false;
++  if (el.value && el.value.trim()) {
++    el.focus(); el.select();
++    try { document.execCommand('delete'); } catch (e) {}
++    el.value = '';
++    el.dispatchEvent(new Event('input',  {bubbles: true}));
++    el.dispatchEvent(new Event('change', {bubbles: true}));
++  }
++  return true;
++}
++"""
++
+ # Generic, tenant-independent step enumerator (see extract_step for the rationale).
+ # Emits {index,total,name, fields:[{name=<full wrapper aid>, label, type, required, options}]}.
+ _EXTRACT_STEP_JS = r"""
+@@ -131,6 +503,10 @@ _EXTRACT_STEP_JS = r"""
+ 
+ class WorkdayAdapter(ATSAdapter):
+     hosts = ("myworkdayjobs.com", "myworkday.com", "myworkdaysite.com")
++    # set once by run_wizard so closed-list pickers (single-select _pick_option AND tag _fill_tags)
++    # can fall back to semantic LLM disambiguation for 近义词 values ('B.S.'->'Bachelor of Science')
++    # that deterministic string-match cannot resolve. None = deterministic-only (single-page path).
++    _llm: Any = None
+     multi_page = True
+ 
+     # -- extract: title only; fields come per-step --------------------------
+@@ -454,6 +830,189 @@ class WorkdayAdapter(ATSAdapter):
+             print(f"   [msel {field.name}] value={value!r} committed={ok}")
+         return ok
+ 
++    # cap & miss limits ported from DomHand: closed employer taxonomies often lack niche skills,
++    # so don't type forever — stop after a few consecutive misses, and bound the total.
++    _TAG_CAP = 15
++    _TAG_MAX_CONSEC_MISS = 3
++
++    @staticmethod
++    def _primary_value(item: Any) -> str:
++        """The single string to type for a tag item. A skill/cert is already a string; a Language
++        dict ({'language': 'English', 'proficiency': 'Native'}) types only the NAME — proficiency,
++        if it is a separate per-row control, is not a pill. Generic: prefer a name-like key, else the
++        first non-empty value. Never flatten the whole dict (that becomes one bogus pill)."""
++        if isinstance(item, str):
++            return item.strip()
++        if isinstance(item, dict):
++            for k in ("skill", "skill_name", "name", "language", "certification", "title", "value", "label"):
++                v = item.get(k)
++                if isinstance(v, str) and v.strip():
++                    return v.strip()
++            for v in item.values():
++                if isinstance(v, str) and v.strip():
++                    return v.strip()
++        return str(item).strip()
++
++    async def _fill_tags(self, session: Any, page: Any, keywords: tuple[str, ...], items: list, llm: Any = None) -> dict:
++        """Multi-pill typeahead fill for Skills / Languages / Certifications. Locate the section
++        typeahead generically by keyword, then per item: CLEAR -> focus -> inp.fill (the ONLY thing
++        that triggers Workday's React search here — CDP Input.insertText sets the value but fires no
++        search, and page.keyboard.type is a no-op) -> TRUSTED Enter to open results -> PICK the SAME
++        item (exact, else LLM-from-the-returned-options) -> CLICK once (the click commits; Enter / a
++        2nd click TOGGLE the chip OFF). The pill renders late, so a per-item poll under-counts; we
++        VERIFY truth against `selectedItemList > selectedItem` and do a SAFE second pass over only the
++        skills with NO pill (re-clicking a missing skill can't toggle anything off). No agent."""
++        import json
++
++        loc = json.loads(await page.evaluate(_TAG_INPUT_LOCATOR_JS, list(keywords)))
++        sel = loc.get("sel") or ""
++        if not sel:
++            # the section may be COLLAPSED behind an "Add" control (Visa-class) — the typeahead only
++            # mounts after a click. Click the matching section's Add button, then re-locate.
++            with contextlib.suppress(Exception):
++                addsel = await page.evaluate(_EXPAND_SECTION_JS, list(keywords))
++                if addsel:
++                    btn = await eng.first(page, addsel)
++                    if btn:
++                        await btn.click()
++                        await asyncio.sleep(1.6)
++                        loc = json.loads(await page.evaluate(_TAG_INPUT_LOCATOR_JS, list(keywords)))
++                        sel = loc.get("sel") or ""
++                        if _DBG:
++                            print(f"   [tags {keywords[0]}] expanded section -> located={bool(sel)}")
++        if not sel:
++            return {"located": False, "added": 0, "want": len(items)}
++        baseline = await self._pill_count(page)  # pills already present (e.g. Education)
++        targets = [v for v in (self._primary_value(it) for it in items[: self._TAG_CAP]) if v]
++        picks: dict[str, str] = {}  # value -> the option text actually picked (for pill verification)
++
++        async def _attempt(val: str) -> bool:
++            """Search -> pick the SAME item -> click once; return True only if a NEW pill is CONFIRMED
++            (count delta, now that _pill_count casts to int). The click commits; Enter/2nd-click toggle
++            off, so we do neither."""
++            before = await self._pill_count(page)
++            inp = await eng.first(page, sel)
++            if not inp:
++                return False
++            with contextlib.suppress(Exception):
++                await page.evaluate(_TAG_CLEAR_JS, sel)
++                await inp.click()
++                await inp.fill(val)
++            await eng.press_enter_trusted(session, page)
++            await asyncio.sleep(1.4)  # let the results load
++            pt = await self._pick_tag_option(page, val, llm)
++            if pt is None:
++                return False
++            picks[val] = pt
++            return await self._await_commit(page, before, 4.0)
++
++        # Up to 2 passes. Pass 2 re-attempts ONLY the still-uncommitted (SAFE — re-clicking a skill with
++        # no chip can't toggle an existing one off, and detection is now reliable after the int-cast fix).
++        committed_vals: set[str] = set()
++        for _pass in range(2):
++            todo = [v for v in targets if v not in committed_vals]
++            if not todo:
++                break
++            for val in todo:
++                if await _attempt(val):
++                    committed_vals.add(val)
++            if _DBG:
++                print(f"   [tags {keywords[0]}] pass {_pass + 1}: {len(committed_vals)}/{len(targets)} committed")
++
++        await asyncio.sleep(0.6)
++        final = await self._pill_count(page)
++        missed = [v for v in targets if v not in committed_vals]
++        if _DBG:
++            print(f"   [tags {keywords[0]}] committed={len(committed_vals)}/{len(targets)} "
++                  f"(final {final}, baseline {baseline}) missed={missed}")
++        return {"located": True, "added": len(committed_vals), "pills": max(0, final - baseline),
++                "want": len(targets), "missed": missed, "picks": picks}
++
++    @staticmethod
++    async def _pill_count(page: Any) -> int:
++        """Committed-pill count as an int. CRITICAL: browser_use's page.evaluate returns JS numbers as
++        STRINGS ('5'), so isinstance(x, int) is always False — that silently broke every commit check
++        for the entire skills saga. Always cast through int()."""
++        with contextlib.suppress(Exception):
++            return int(await page.evaluate(_TAG_PILL_COUNT_JS))
++        return 0
++
++    async def _await_commit(self, page: Any, before: int, timeout: float) -> bool:
++        """Poll the committed-pill COUNT until it exceeds `before` (a new chip landed) or timeout. The
++        pill renders async/late, so a single fixed-delay check false-negatives (DomHand polls the same
++        way in _wait_for_multi_select_commit). Count delta — not text-match — is the reliable signal."""
++        import time as _t
++
++        deadline = _t.monotonic() + timeout
++        while _t.monotonic() < deadline:
++            await asyncio.sleep(0.2)
++            if await self._pill_count(page) > before:
++                return True
++        return False
++
++    async def _pick_tag_option(self, page: Any, value: str, llm: Any = None) -> str | None:
++        """Pick the search result that is the SAME item as `value` from a TAG typeahead and CLICK it;
++        return the picked option's text (to verify its chip), or None for an honest no-match. The
++        shared `_pick_option` strips spaces and falls back to loose prefix/shortest — which mis-picks
++        'Go' -> 'Go Gauges' and 'AWS' -> 'AWS VPN'. So: take an EXACT match deterministically (free);
++        for the ambiguous closed-list case let the LLM pick the same item or NONE (a WRONG pill is
++        worse than a MISS). Without an LLM, accept only an exact/parenthetical/dotted form, else MISS."""
++        want = " ".join(value.split()).lower().strip()
++        for _ in range(8):
++            await asyncio.sleep(0.3)
++            raw = await page.get_elements_by_css_selector(
++                '[data-automation-id="activeListContainer"] [role="option"],'
++                ' [data-automation-id="promptOption"], [data-automation-id="menuItem"],'
++                ' [role="listbox"] [role="option"]'
++            )
++            opts: list[tuple[Any, str]] = []
++            for o in raw:
++                txt = (await o.evaluate(self._VISIBLE_TEXT_JS)) or ""
++                t = " ".join(txt.split()).lower().strip()
++                if t and t != "no items.":
++                    opts.append((o, t))
++            if not opts:
++                continue
++            # 1) WITH an LLM: let it pick the canonical committable LEAF from the returned options.
++            # A bare exact ('go', 'aws') is often a non-committable category node — verified live: 'go'
++            # would not commit a chip but 'Go Programming Language' did; 'aws' vs 'Amazon Web Services
++            # (AWS)' likewise. The LLM is told to prefer the specific leaf, so let it choose over a raw
++            # exact-string grab.
++            if llm is not None:
++                idx = await eng.llm_pick_option(llm, value, [t for _, t in opts])
++                if _DBG:
++                    chosen = opts[idx][1] if 0 <= idx < len(opts) else "NONE"
++                    print(f"      [tag-pick] {value!r} -> {chosen!r} (of {len(opts)} opts)")
++                if 0 <= idx < len(opts):
++                    with contextlib.suppress(Exception):
++                        await opts[idx][0].click()
++                        return opts[idx][1]
++                return None  # LLM found no same-item -> honest miss
++            # 2) no LLM — exact, else a confident parenthetical/dotted form, never loose prefix
++            exact = next(((el, t) for el, t in opts if t == want), None)
++            if exact:
++                with contextlib.suppress(Exception):
++                    await exact[0].click()
++                    return exact[1]
++            safe = next(
++                ((el, t) for el, t in opts if f"({want})" in t or any(t.startswith(want + b) for b in (".", "/"))),
++                None,
++            )
++            if safe:
++                with contextlib.suppress(Exception):
++                    await safe[0].click()
++                    return safe[1]
++            return None  # results present but no confident match -> taxonomy lacks it
++        return None
++
++    async def _await_pill(self, page: Any, text: str) -> bool:
++        """Poll up to ~3.2s for the SPECIFIC committed chip matching `text` (the option just clicked)."""
++        for _ in range(8):
++            await asyncio.sleep(0.4)
++            if await page.evaluate(_TAG_HAS_PILL_JS, text):
++                return True
++        return False
++
+     async def _listbox(self, page: Any, field: FormField, value: str) -> bool:
+         """Workday button-listbox: click trigger -> options mount in the body portal
+         `activeListContainer` -> click the matching promptOption."""
+@@ -477,6 +1036,78 @@ class WorkdayAdapter(ATSAdapter):
+         " return (r.width>0 && r.height>0 && this.offsetParent!==null) ? (this.textContent||'') : ''; }"
+     )
+ 
++    # After clicking ANY control, report what the widget actually revealed — the basis for acting on
++    # OBSERVATION instead of a pre-assigned field name. options[] = a visible dropdown popped; searchInput
++    # = an editable text box is focused (searchable combo or plain text). This is how a human tells a
++    # dropdown from a text box: click and look.
++    _OBSERVE_JS = r"""
++    () => {
++      const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
++      const optSel = '[data-automation-id="activeListContainer"] [role="option"],[data-automation-id="promptOption"],'
++        + '[data-automation-id="menuItem"],[role="listbox"] [role="option"],ul[role="listbox"] li[role="option"]';
++      const hasOptions = [...document.querySelectorAll(optSel)].some(vis);
++      const af = document.activeElement;
++      const isEd = e => e && e.tagName === 'INPUT' && !e.readOnly
++        && ['text', 'tel', 'email', 'url', 'number', 'search', ''].includes((e.type || '').toLowerCase());
++      let searchInput = null;
++      if (isEd(af) && vis(af)) { af.setAttribute('data-gh-si', '1'); searchInput = '[data-gh-si="1"]'; }
++      return JSON.stringify({hasOptions, searchInput});
++    }
++    """
++
++    async def observe_and_fill(self, session: Any, page: Any, sel: str, value: str, llm: Any = None) -> bool:
++        """THE one primitive (第一性原理 — observe, don't pre-name). Click the control, SEE what the widget
++        does, act on what's revealed: a dropdown popped -> pick (exact/semantic via _pick_option); a search
++        box appeared -> type then pick; a plain input -> type; a checkbox -> toggle to match. SAME path for
++        school / language proficiency / degree / country / yes-no — the widget declares its type on click.
++        Replaces the per-field special fillers. Returns committed?"""
++        import json
++
++        if not (value or "").strip():
++            return False
++        el = await eng.first(page, sel)
++        if not el:
++            return False
++        role = ""
++        with contextlib.suppress(Exception):
++            role = (await el.evaluate("() => (this.getAttribute('role')||this.type||this.tagName||'').toLowerCase()")) or ""
++        # checkbox / radio: set directly from the observed checked-state
++        if "checkbox" in role or "radio" in role:
++            with contextlib.suppress(Exception):
++                checked = await el.evaluate("() => !!this.checked || this.getAttribute('aria-checked')==='true'")
++                want_on = eng.norm(value) not in ("", "no", "false", "0", "none", "n/a")
++                if want_on != bool(checked):
++                    await el.click()
++            return True
++        # textarea: plain multi-line text
++        with contextlib.suppress(Exception):
++            if (await el.evaluate("() => this.tagName")) == "TEXTAREA":
++                return bool((await page.evaluate(_SET_SEG_JS, sel, value)) or "")
++        # everything else: CLICK and OBSERVE
++        with contextlib.suppress(Exception):
++            await el.click()
++        await asyncio.sleep(0.35)
++        state = json.loads(await page.evaluate(self._OBSERVE_JS))
++        # a search box appeared -> type to filter, trigger the search (trusted Enter, as the proven combo
++        # primitive does for Workday typeaheads), then re-observe the filtered options
++        if state.get("searchInput"):
++            with contextlib.suppress(Exception):
++                si = await eng.first(page, state["searchInput"])
++                if si:
++                    await si.fill(value)
++                    with contextlib.suppress(Exception):
++                        await eng.press_enter_trusted(session, page)
++                    await asyncio.sleep(0.8)
++            state = json.loads(await page.evaluate(self._OBSERVE_JS))
++        # a dropdown is open -> pick the matching option (exact -> semantic LLM)
++        if state.get("hasOptions"):
++            return await self._pick_option(page, value, allow_fallback=True)
++        # an editable box but no options -> plain text field; type the value
++        if state.get("searchInput"):
++            return bool((await page.evaluate(_SET_SEG_JS, state["searchInput"], value)) or "")
++        # nothing revealed -> last resort, set the control's own value as text
++        return bool((await page.evaluate(_SET_SEG_JS, sel, value)) or "")
++
+     async def _pick_option(self, page: Any, value: str, allow_fallback: bool = True) -> bool:
+         """Shared option-portal picker for listbox + multiselect. Considers ONLY VISIBLE options
+         (the active dropdown) — hidden stale options from closed widgets are skipped. Match exact ->
+@@ -525,7 +1156,20 @@ class WorkdayAdapter(ATSAdapter):
+                     cand = (score, len(txt), o)
+                     if best is None or cand[:2] < best[:2]:
+                         best = cand
+-            target = (best[2] if best else None) or (opts[0][0] if allow_fallback else None)
++            target = best[2] if best else None
++            # No confident string match -> the value is likely a 近义词 of an option ('B.S.' ->
++            # 'Bachelor of Science', 'CS' -> 'Computer Science'): let the LLM pick the SAME item from
++            # the options actually returned. Same primitive as the tag picker. Only when no deterministic
++            # match AND an LLM is available; otherwise keep the legacy first-visible fallback.
++            if target is None and self._llm is not None:
++                idx = await eng.llm_pick_option(self._llm, value, [t for _, t in opts])
++                if _DBG:
++                    chosen = opts[idx][1] if 0 <= idx < len(opts) else "NONE"
++                    print(f"      [pick-llm] {value!r} -> {chosen!r} (of {len(opts)} opts)")
++                if 0 <= idx < len(opts):
++                    target = opts[idx][0]
++            if target is None:
++                target = opts[0][0] if allow_fallback else None
+             if target is None:
+                 return False
+             with contextlib.suppress(Exception):
+@@ -587,6 +1231,305 @@ class WorkdayAdapter(ATSAdapter):
+             return True
+         return False
+ 
++    @staticmethod
++    def _date_digits(value: str, with_day: bool = False) -> str:
++        """ISO 'YYYY-MM' / 'YYYY-MM-DD' -> continuous spinbutton digits 'MMYYYY' (or 'MMDDYYYY').
++        Repeater From/To dates are month/year, so default no-day. 'Present'/'' -> '' (skip)."""
++        v = (value or "").strip()
++        if not v or v.lower() in ("present", "current", "now"):
++            return ""
++        parts = v.split("-")
++        if len(parts) < 2 or not parts[0].isdigit():
++            return ""
++        yyyy, mm = parts[0], parts[1].zfill(2)
++        if with_day:
++            dd = (parts[2] if len(parts) >= 3 else "01").zfill(2)
++            return f"{mm}{dd}{yyyy}"
++        return f"{mm}{yyyy}"
++
++    async def fill_repeater_dates(self, page: Any, profile: dict) -> dict:
++        """Deterministically fill Experience/Education From/To dates — the segmented MM/YYYY spinbuttons
++        the section agent fails on (it clicks them but types nothing -> 'From/To required' blocks Save).
++        Rows are mapped to profile entries by DOM order (start-segment N -> entry N). Run AFTER the row
++        agents create the rows. Generic: keyed by the structural row id, not labels."""
++        import json
++
++        out = {"experience": 0, "education": 0}
++        for section_key, section_id in (("experience", "workexperience"), ("education", "education")):
++            items = profile.get(section_key) or []
++            if not items:
++                continue
++            try:
++                segs = json.loads(await page.evaluate(_REPEATER_DATE_SEGMENTS_JS, section_id))
++            except Exception:
++                continue
++            entry_i = -1
++            for seg in segs:
++                if seg.get("kind") == "start":
++                    entry_i += 1
++                if entry_i < 0 or entry_i >= len(items):
++                    continue
++                it = items[entry_i]
++                if not isinstance(it, dict):
++                    continue
++                if seg.get("kind") == "start":
++                    raw = it.get("start_date") or it.get("from")
++                else:  # end / graduation
++                    raw = it.get("end_date") or it.get("graduation_date") or it.get("to")
++                v = str(raw or "").strip()
++                if not v or v.lower() in ("present", "current", "now"):
++                    continue  # 'Present' end date -> the "currently work here" checkbox covers it
++                parts = v.split("-")
++                if len(parts) < 2 or not parts[0].isdigit():
++                    continue
++                yyyy, mm = parts[0], parts[1].zfill(2)
++                # fill MONTH and YEAR segments SEPARATELY — a single `fill('MMYYYY')` dumps the whole
++                # string into the month spinbutton, which clamps to 12. Each segment takes its own value.
++                # native-setter + events (DomHand fill pattern) — browser_use `.fill()` mis-handled the
++                # spinbutton (typed '03' -> clamped to '12'). Set the React-controlled value directly.
++                rm = await page.evaluate(_SET_SEG_JS, seg["mSel"], mm)
++                ry = await page.evaluate(_SET_SEG_JS, seg.get("ySel") or "##none", yyyy) if seg.get("ySel") else ""
++                if _DBG:
++                    print(f"      [date] {section_key} entry{entry_i} {seg.get('kind')} -> M={rm!r} Y={ry!r}")
++                if rm:
++                    out[section_key] += 1
++        if _DBG:
++            print(f"   [dates] filled exp={out['experience']} edu={out['education']}")
++        return out
++
++    async def fill_language_proficiencies(self, page: Any, profile: dict) -> int:
++        """Deterministically set the Languages section's required rating dropdowns (Comprehension /
++        Overall / Reading / Speaking / Writing / Proficiency) the agent leaves at 'Select One' — the
++        last advance-blocker on Intel's mega-page. Each is set to the profile proficiency, mapped to
++        the tenant's option via `_pick_option` (exact, else LLM: 'Native' -> 'Native or Bilingual')."""
++        import json
++
++        langs = profile.get("languages") or []
++        prof = next((x.get("proficiency") for x in langs if isinstance(x, dict) and x.get("proficiency")), None)
++        if not prof:
++            return 0
++        try:
++            sels = json.loads(await page.evaluate(_LANG_PROFICIENCY_TRIGGERS_JS))
++        except Exception:
++            return 0
++        filled = 0
++        for sel in sels:
++            trig = await eng.first(page, sel)
++            if not trig:
++                continue
++            with contextlib.suppress(Exception):
++                await trig.click()
++                await asyncio.sleep(0.4)
++                if await self._pick_option(page, str(prof), allow_fallback=True):
++                    filled += 1
++            await asyncio.sleep(0.3)
++        if _DBG:
++            print(f"   [lang-prof] set {filled}/{len(sels)} rating dropdowns to {prof!r}")
++        return filled
++
++    async def _commit_searchable(self, session: Any, page: Any, sel: str, value: str, llm: Any, is_button: bool) -> bool:
++        """Commit ONE searchable combobox with the proven skills primitive: a button-listbox (Degree) ->
++        click + `_pick_option` (exact, else LLM via self._llm); a typeahead input (School / Field) ->
++        click + fill + TRUSTED Enter to search + `_pick_tag_option` (LLM-pick-the-leaf + click). This is
++        what the section agent fails to do (types but never commits)."""
++        el = await eng.first(page, sel)
++        if not el:
++            return False
++        if is_button:
++            with contextlib.suppress(Exception):
++                await el.click()
++                await asyncio.sleep(0.4)
++            return await self._pick_option(page, value, allow_fallback=True)
++        with contextlib.suppress(Exception):
++            await el.click()
++            await el.fill(value)
++        await eng.press_enter_trusted(session, page)
++        await asyncio.sleep(1.4)
++        return (await self._pick_tag_option(page, value, llm)) is not None
++
++    @staticmethod
++    def _row_value(key: str, item: dict) -> str | None:
++        """Map a row field-key to its profile value."""
++        if key == "title":
++            return item.get("title") or item.get("job_title")
++        if key == "company":
++            return item.get("company") or item.get("employer")
++        if key == "location":
++            return item.get("location")
++        if key == "gpa":
++            return item.get("gpa") or item.get("gpa_result")
++        if key == "description":
++            h = item.get("highlights") or item.get("description")
++            return "\n".join(h) if isinstance(h, list) else h
++        return None
++
++    async def fill_rows_semantic(
++        self, session: Any, page: Any, key: str, items: list, keywords: tuple, llm: Any, title: str = "", add_rows: bool = True
++    ) -> dict:
++        """GENERIC row fill (第一性原理 — solves the labeling problem the user flagged): detect entry
++        containers + each field's VISIBLE LABEL structurally (`_SECTION_ROWS_JS`, zero id-prefix / zero
++        keyword regex), then map {label -> value} via the SAME semantic `map_fields` LLM call the schema
++        fields use. Handles ANY field naming in ANY ATS ("Position"/"Firm"/"Summary of duties"). Combos
++        (school/degree/field) + dates route to their dedicated fillers. Returns {filled, rows, ok}."""
++        import json
++
++        # 1. add entry rows to match the profile count (resume autofill may pre-create some). Skipped for
++        #    tag sections (languages): the chips already created the entries, we only fill their controls.
++        for _ in range(len(items) + 2 if add_rows else 0):
++            info = json.loads(await page.evaluate(_SECTION_ROWS_JS, list(keywords)))
++            if not info.get("found"):
++                return {"filled": 0, "rows": 0, "ok": False}
++            if len(info.get("rows", [])) >= len(items):
++                break
++            addsel = await page.evaluate(_EXPAND_SECTION_JS, list(keywords))
++            btn = await eng.first(page, addsel) if addsel else None
++            if not btn:
++                break
++            with contextlib.suppress(Exception):
++                await btn.click()
++                await asyncio.sleep(1.4)
++        info = json.loads(await page.evaluate(_SECTION_ROWS_JS, list(keywords)))
++        rows = info.get("rows", [])
++        if not rows:
++            if _DBG:
++                print(f"   [rows-sem {key}] 0 rows — found={info.get('found')} dbg={info.get('dbg')}")
++            return {"filled": 0, "rows": 0, "ok": False}
++        section_name = key.capitalize()
++        # 2. build entry-indexed, LABELED FormFields for EVERY empty control (text/select/combo/check).
++        #    No widget special-casing — the label carries the meaning, observe_and_fill handles the widget.
++        fields = []
++        meta: dict = {}
++        for r in rows[: len(items)]:
++            for f in r["fields"]:
++                if not f.get("empty"):
++                    continue  # already filled / committed (resume autofill) — never clobber
++                name = f"e{r['entry']}f{len(meta)}"
++                fields.append(
++                    eng.FormField(
++                        name=name,
++                        label=f"{f['label']} — {section_name} entry {r['entry'] + 1}",
++                        type=("textarea" if f["kind"] == "text" else "checkbox" if f["kind"] == "check" else "single_select"),
++                        source=("open_ended" if f["kind"] == "text" else "select"),
++                    )
++                )
++                meta[name] = f
++        if not fields:
++            return {"filled": 0, "rows": len(rows), "ok": len(rows) >= len(items)}
++        # 3. ONE semantic call: each entry-indexed label -> profile[key][entry][...] (handles any naming).
++        mapped = await eng.map_fields(llm, fields, {key: items}, title or section_name)
++        # 4. fill via THE one observe-act primitive — click, see what the widget is, pick/type. Same path
++        #    for a job-title text box, a Degree dropdown, a School searchable combo, a "current job" checkbox.
++        filled = 0
++        for name, ff in mapped.items():
++            f = meta.get(name)
++            if not f:
++                continue
++            val = (ff.value or "").strip()
++            if not val:
++                continue
++            with contextlib.suppress(Exception):
++                if await self.observe_and_fill(session, page, f["sel"], val, llm):
++                    filled += 1
++        if _DBG:
++            print(f"   [fill-section {key}] filled {filled}/{len(fields)} controls across {len(rows)} rows (profile {len(items)})")
++        return {"filled": filled, "rows": len(rows), "ok": filled >= len(fields) and len(rows) >= len(items)}
++
++    async def fill_rows_deterministic(self, session: Any, page: Any, key: str, items: list, keywords: tuple, llm: Any = None) -> dict:
++        """Fill the Experience/Education ROW text fields (jobTitle/company/location/roleDescription/gpa)
++        + the 'currently work here' checkbox DETERMINISTICALLY, adding rows to match the profile via the
++        section's Add button — REPLACING the slow section agent (the agent was only ever typing into these
++        known fields). Combos (school/degree/field) + dates are filled by their own deterministic fillers;
++        the step-level repair_and_advance backstops any gap. Generic: rows by id-prefix, fields by keyword."""
++        import json
++
++        prefix = {"experience": "workexperience", "education": "education"}.get(key)
++        if not prefix:
++            return {"filled": 0, "rows": 0, "ok": False}
++        # add rows to match the profile count (resume autofill pre-creates some)
++        for _ in range(len(items) + 2):
++            info = json.loads(await page.evaluate(_ROW_STRUCTURE_JS, prefix))
++            if len(info["rows"]) >= len(items):
++                break
++            addsel = await page.evaluate(_EXPAND_SECTION_JS, list(keywords))
++            btn = await eng.first(page, addsel) if addsel else None
++            if not btn:
++                break
++            with contextlib.suppress(Exception):
++                await btn.click()
++                await asyncio.sleep(1.4)
++        info = json.loads(await page.evaluate(_ROW_STRUCTURE_JS, prefix))
++        rows = info["rows"]
++        filled = 0
++        for i, row in enumerate(rows):
++            if i >= len(items):
++                break
++            it = items[i] if isinstance(items[i], dict) else {}
++            for f in row["fields"]:
++                k = f["key"]
++                if k == "current":
++                    if it.get("current"):
++                        with contextlib.suppress(Exception):
++                            el = await eng.first(page, f["sel"])
++                            if el and not await el.evaluate("() => !!this.checked"):
++                                await el.click()
++                                filled += 1
++                    continue
++                if f.get("val"):  # already filled (resume autofill) — don't clobber
++                    continue
++                val = self._row_value(k, it)
++                if not val:
++                    continue
++                with contextlib.suppress(Exception):
++                    if await page.evaluate(_SET_SEG_JS, f["sel"], str(val)):
++                        filled += 1
++        if _DBG:
++            print(f"   [rows {key}] filled {filled} text fields across {len(rows)} rows (profile {len(items)})")
++        return {"filled": filled, "rows": len(rows), "ok": len(rows) >= len(items)}
++
++    async def fill_education_combos(self, session: Any, page: Any, profile: dict, llm: Any = None) -> dict:
++        """Deterministically commit each Education row's School / Degree / Field-of-Study comboboxes the
++        agent leaves uncommitted ('field required'). Rows mapped to profile.education by DOM order; only
++        EMPTY controls are touched (additive — never disturbs a committed value, never invents data for
++        extra empty rows). Same primitive that cracks Skills/Certs."""
++        import json
++
++        edus = profile.get("education") or []
++        if not edus:
++            return {"filled": 0, "rows": 0}
++        filled = 0
++        rows_seen = 0
++        # Up to 2 passes. Each pass RE-SCANS `_EDU_COMBO_JS` which reports the live empty/filled state,
++        # so a control committed in pass 1 is skipped in pass 2 (no toggle/clobber risk) — only the
++        # still-empty ones are retried. This lifts the committer toward 100% (was ~half on Visa).
++        for _pass in range(2):
++            try:
++                rows = json.loads(await page.evaluate(_EDU_COMBO_JS))
++            except Exception:
++                break
++            rows_seen = len(rows)
++            any_empty = False
++            for i, row in enumerate(rows):
++                if i >= len(edus):
++                    break  # an extra empty row beyond the profile — don't fabricate data
++                edu = edus[i]
++                for kind, profkey in (("school", "school"), ("degree", "degree"), ("field", "field_of_study")):
++                    sel = row.get(kind)
++                    if not sel or not row.get(kind + "Empty"):
++                        continue
++                    val = edu.get(profkey)
++                    if not val:
++                        continue
++                    any_empty = True
++                    is_button = row.get(kind + "Tag") == "button"
++                    with contextlib.suppress(Exception):
++                        if await self._commit_searchable(session, page, sel, str(val), llm, is_button):
++                            filled += 1
++            if not any_empty:
++                break
++        if _DBG:
++            print(f"   [edu-combos] filled {filled} across {rows_seen} rows (profile {len(edus)})")
++        return {"filled": filled, "rows": rows_seen}
++
+     async def _date(self, page: Any, field: FormField, value: str) -> bool:
+         """Segmented MM/DD/YYYY spinbuttons — type continuous digits (Workday auto-advances)."""
+         digits = ""
+@@ -700,10 +1643,11 @@ class WorkdayAdapter(ATSAdapter):
+         ("education", ("educat", "academ", "school"), False),
+         ("skills", ("skill",), True),
+         ("languages", ("language",), True),
+-        ("certifications", ("certif", "licen"), True),
++        # certifications intentionally DROPPED — optional on every tenant, and cert names rarely match a
++        # closed taxonomy (per-user request: a missing certificate is fine). Re-add if a tenant requires it.
+     )
+ 
+-    async def fill_repeaters(self, session: Any, page: Any, profile: dict) -> dict:
++    async def fill_repeaters(self, session: Any, page: Any, profile: dict, llm: Any = None) -> dict:
+         # HARD GATE: only run on a page that actually HAS a repeater affordance — an "Add"/"Add
+         # Another" control. Without this, a keyword in some unrelated QUESTION text (e.g. "employ"
+         # in an export-control question on Application Questions) would falsely fire the experience
+@@ -725,21 +1669,68 @@ class WorkdayAdapter(ATSAdapter):
+             if not any(any(kw in h for kw in keywords) for h in headings):
+                 continue  # section not on THIS page — generic gate, no hardcoded aid
+             label = key.capitalize()
+-            if is_tag:  # Skills / Languages / Certs: typeahead tags (type + pick), one at a time
+-                vals = ", ".join(self._item_str(it) for it in items)
+-                instr = (
+-                    f"Add these {label} one at a time using the section's typeahead/'Add' control "
+-                    f"(type each, then pick the matching option so it becomes a tag/pill): {vals}"
+-                )
+-            else:  # Experience / Education: row repeater — Add Another per entry, fill the group
++            if is_tag:  # Skills / Languages / Certs: deterministic typeahead pills, agent tops up
++                res = await self._fill_tags(session, page, keywords, items, llm)
++                want = len(items)
++                # The deterministic pass gets the PICKING right but the finicky click-commit drops ~1/3
++                # of chips run-to-run (Enter/re-click toggle off; pill render is late). When it did NOT
++                # locate the typeahead, OR committed fewer chips than wanted, hand the REMAINDER to the
++                # agent — told to add ONLY the chips not already present (idempotent, no duplicates).
++                if not res.get("located") or res.get("added", 0) < want:
++                    vals = ", ".join(self._primary_value(it) for it in items)
++                    instr = (
++                        f"The {label} section should contain a chip/tag for EACH of these: {vals}. Several "
++                        f"may ALREADY be added as chips. Add ONLY the ones NOT yet shown as a chip — one at "
++                        f"a time: type it in the section's search box, then commit the matching suggestion "
++                        f"so a chip appears, then clear the box before the next. Do NOT duplicate an existing "
++                        f"chip and do NOT remove any."
++                    )
++                    if key == "languages":
++                        instr += (
++                            " Do NOT touch the proficiency / rating 'Select One' dropdowns "
++                            "(Comprehension/Overall/Reading/Speaking/Writing) — those are filled separately. "
++                            "Add ONLY the language NAME chips."
++                        )
++                    top = await eng.agent_fill_section(
++                        session, page, section=label, instructions=instr, searchable=False, max_steps=16
++                    )
++                    res = {**res, "agent_topup": top.get("agent_ok")}
++                # Languages also has per-language proficiency dropdowns. They are SINGLE-SELECTS — the SAME
++                # widget as any Degree/Country dropdown — so fill them with the SAME observe-act section
++                # filler (click -> observe -> pick), NOT a special handler and NOT the slow vision agent.
++                if key == "languages":
++                    with contextlib.suppress(Exception):
++                        res["prof"] = await self.fill_rows_semantic(
++                            session, page, key, items, keywords, llm, add_rows=False
++                        )
++                out[label] = {"items": len(items), **res}
++                continue
++            # Experience / Education ROWS: DETERMINISTIC (add rows + text fields). The combos
++            # (school/degree/field) + dates are filled by their own deterministic fillers below; the
++            # step-level repair_and_advance backstops any validation gap. This REMOVES the slow section
++            # agent (the cost/time hog). Agent fallback ONLY if the deterministic add-row failed to create
++            # enough rows (tenant id-prefix differs from workExperience-/education-).
++            res = await self.fill_rows_semantic(session, page, key, items, keywords, llm)
++            if not res.get("ok"):
++                n = len(items)
+                 entries = "; ".join(f"entry {i + 1}: {self._item_str(it)}" for i, it in enumerate(items))
+                 instr = (
+-                    f"Add {len(items)} {label} entr{'y' if len(items) == 1 else 'ies'}. Use the "
+-                    f"'Add Another' button before each entry, then fill its fields by label. Dates "
+-                    f"like '2021-06' go in the segmented month/year inputs. {entries}"
++                    f"There must be EXACTLY {n} {label} entr{'y' if n == 1 else 'ies'} total — count the "
++                    f"entries already present (resume import creates some); click 'Add Another' ONLY to "
++                    f"reach {n}, never create extras. Fill each entry's fields by label. IGNORE the "
++                    f"From/To/Start/Graduation DATE fields — filled separately. {entries}"
+                 )
+-            res = await eng.agent_fill_section(session, page, section=label, instructions=instr, max_steps=18)
++                ag = await eng.agent_fill_section(session, page, section=label, instructions=instr, max_steps=18)
++                res = {**res, **ag}
+             out[label] = {"items": len(items), **res}
++        # Deterministically fill what the section agents leave incomplete and that BLOCKS Save:
++        # the segmented From/To dates + the Languages rating dropdowns (Comprehension/Overall/...).
++        with contextlib.suppress(Exception):
++            out["_dates"] = await self.fill_repeater_dates(page, profile)
++        # NOTE: education School/Degree/Field combos AND language proficiency dropdowns are now filled by the
++        # unified observe-act section filler (fill_rows_semantic -> observe_and_fill) in the loop above —
++        # same path as every dropdown. Only segmented DATES keep a dedicated filler (genuinely different
++        # widget). No post-loop combo/proficiency passes.
+         return out
+ 
+     @staticmethod

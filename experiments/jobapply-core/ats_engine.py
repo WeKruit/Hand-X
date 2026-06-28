@@ -308,6 +308,11 @@ concise, specific answer of 3-5 sentences, first person, plain text, grounded ON
 profile. Do not use markdown.
 - For short text fields, copy the matching profile value verbatim (e.g. a LinkedIn / Website \
 / GitHub URL); blank if the profile has none.
+- PHONE NUMBER field: if the field list ALSO contains a separate "phone code" / "country/region \
+phone code" / "dialing code" field, the phone-number value MUST EXCLUDE the country/dial code \
+(e.g. profile "+1 415 555 0142" -> "415 555 0142") — the code lives in its own field, and a \
+number with a duplicate code fails validation. If there is NO separate code field, keep the full \
+number as the profile has it.
 Return one entry per field, no extras."""
 
 
@@ -524,19 +529,43 @@ async def repair_and_advance(
 
 
 async def install_submit_guard(page: Any) -> None:
-    """Continuously DISABLE any final-submit/finish button via a persistent interval. Workday's
-    apply flow is a single-page app: the agent can advance forward (e.g. into the Review step)
-    WITHIN the same document, so a one-time disable wouldn't cover a Submit button that mounts on a
-    later step. The interval re-disables it every 300ms, so the automation physically cannot submit
-    the application — a human reviewer must do that. Idempotent (guarded by window.__ghSubGuard)."""
+    """Continuously DISABLE any button that could FINALIZE (submit/finish) or DESTROY (discard/
+    cancel/sign-out/back-to-posting) the application, via a persistent 300ms interval. Workday's
+    apply flow is an SPA: an agent can advance forward (e.g. into Review) WITHIN the same document,
+    so a one-time disable wouldn't cover controls that mount on a later step — and a confused agent
+    has been seen click Back -> "Discard Application?" -> Discard, which would wipe all work. The
+    interval re-disables these every tick so the automation physically cannot submit OR discard; a
+    human must do either. Forward controls (Save/Continue/Next/Add) stay enabled. Idempotent."""
     with contextlib.suppress(Exception):
         await page.evaluate(
-            "() => { const kill=()=>document.querySelectorAll('button,input[type=submit]').forEach(b=>{"
-            "   const t=((b.textContent||'')+' '+(b.value||'')+' '+(b.getAttribute('aria-label')||''));"
-            "   if (/submit|finish|finali[sz]e/i.test(t) && !/save|continue|next|previous|back|add|search/i.test(t))"
-            "     b.disabled=true; });"
+            "() => { const kill=()=>{"
+            "   document.querySelectorAll('button,input[type=submit],a[role=button]').forEach(b=>{"
+            "     const t=((b.textContent||'')+' '+(b.value||'')+' '+(b.getAttribute('aria-label')||''));"
+            "     const danger=/submit|finish|finali[sz]e|discard|cancel|sign ?out|log ?out|delete application|withdraw|\\bback\\b|\\bprevious\\b|go back/i;"
+            "     const safe=/save|continue|next|add|search|upload|edit/i;"
+            "     if (danger.test(t) && !safe.test(t)) b.disabled=true; });"
+            '   document.querySelectorAll(\'[data-automation-id="progressBar"],[data-automation-id*="progressBar"],'
+            "[role=navigation] ol,[role=navigation] ul').forEach(e=>{ e.style.pointerEvents='none'; }); };"
             "  kill(); if (!window.__ghSubGuard) window.__ghSubGuard=setInterval(kill, 300); }"
         )
+
+
+# field types whose deterministic read-back is prone to false-negatives (custom widgets the
+# serialized DOM mis-reads) — worth a cheap VLM glance before re-filling / escalating.
+_VLM_RESCUE_TYPES = {"single_select", "multi_select", "radio", "checkbox", "date", "select_native"}
+
+
+async def _vlm_filled(session: Any, field: FormField, value: str) -> bool:
+    """Cheap, cached VLM read-back rescue (handoff R1): is the field VISIBLY filled? Only for the
+    widget types that false-negative; silent on any error / over-budget (caller falls through)."""
+    if field.type not in _VLM_RESCUE_TYPES:
+        return False
+    with contextlib.suppress(Exception):
+        from vision_verify import _is_filled, visual_check
+
+        verdict = await visual_check(session, target=field.label or field.name, key=field.name)
+        return _is_filled(verdict)
+    return False
 
 
 async def fill_with_ladder(
@@ -560,12 +589,21 @@ async def fill_with_ladder(
     if not (value or "").strip():  # nothing to fill (incl. a file field with no path)
         return "blank"
 
-    if await adapter.fill(session, page, field, value, resume) and await adapter.read_back(session, page, field, value):
+    filled = await adapter.fill(session, page, field, value, resume)
+    if filled and await adapter.read_back(session, page, field, value):
         return "L1"
+    # READ-BACK RESCUE (handoff R1): a custom widget (Workday listbox/checkbox) is often visibly
+    # filled while the serialized DOM reads it blank -> a FALSE read-back failure. A cheap, cached
+    # VLM glance confirms it without RE-FILLING (re-picking a listbox can mis-select) or paying for
+    # the agent. Only for the widget types that actually false-negative.
+    if filled and await _vlm_filled(session, field, value):
+        return "vlm"
 
     await asyncio.sleep(0.4)
     if await adapter.fill(session, page, field, value, resume) and await adapter.read_back(session, page, field, value):
         return "L2"
+    if await _vlm_filled(session, field, value):
+        return "vlm"
 
     if allow_escalation and await escalate(session, agent_llm, page, field, value):
         with contextlib.suppress(Exception):
@@ -600,7 +638,7 @@ class _Row:
 
 
 def _print_report(adapter_name: str, title: str, report: list[_Row], usage: Any, n_mapped: int) -> None:
-    tiers = {t: sum(1 for r in report if r.tier == t) for t in ("L1", "L2", "L3", "blank", "FAIL")}
+    tiers = {t: sum(1 for r in report if r.tier == t) for t in ("L1", "L2", "L3", "vlm", "blank", "FAIL")}
     fillable = [r for r in report if r.tier != "blank"]
     escalated = tiers["L2"] + tiers["L3"] + tiers["FAIL"]
     esc_rate = (escalated / len(fillable) * 100) if fillable else 0.0
@@ -786,7 +824,7 @@ async def run_single_page(
     if screenshot_path:
         result["screenshot"] = await _screenshot(session, page, screenshot_path)
 
-    tiers = {t: sum(1 for r in report if r.tier == t) for t in ("L1", "L2", "L3", "blank", "FAIL")}
+    tiers = {t: sum(1 for r in report if r.tier == t) for t in ("L1", "L2", "L3", "vlm", "blank", "FAIL")}
     try:
         final_url = await page.get_url()
     except Exception:
@@ -796,7 +834,7 @@ async def run_single_page(
         final_url=final_url,
         cost=usage.total_cost,
         tiers=tiers,
-        filled=tiers["L1"] + tiers["L2"] + tiers["L3"],
+        filled=tiers["L1"] + tiers["L2"] + tiers["L3"] + tiers["vlm"],
     )
 
     if headless:
@@ -860,6 +898,10 @@ async def run_wizard(
     seen: set[int] = set()
     for _ in range(12):  # MAX_STEPS guardrail
         await install_submit_guard(page)  # re-assert each iteration (cheap; idempotent)
+        with contextlib.suppress(Exception):
+            from vision_verify import reset_visual_cache
+
+            reset_visual_cache()  # fresh per-step VLM budget for the read-back rescue
         t0 = time.monotonic()
         c0 = (await tc.get_usage_summary()).total_cost
         step = await adapter.extract_step(session, page, profile)
@@ -896,6 +938,17 @@ async def run_wizard(
             tier = await fill_with_ladder(adapter, session, page, f, value, llm, resume, allow_escalation)
             rows.append(_Row(name=f.name, type=f.type, src=src, tier=tier))
 
+        # off-schema repeater sections on this step (My Experience: work experience / education /
+        # skills / languages). No-op (returns {}) on steps without a repeater — the adapter gates
+        # on section headings. The agent freezes filled fields + submit stays disabled.
+        repeaters_used = False
+        with contextlib.suppress(Exception):
+            rep = await adapter.fill_repeaters(session, page, profile)
+            if rep:
+                repeaters_used = True
+                print(f"  repeaters: {rep}")
+            page = await session.must_get_current_page()  # agent_fill_section re-attaches CDP
+
         # screenshot the deterministically-filled step BEFORE advancing (the agent, if invoked,
         # advances to the NEXT page, so capture this page now).
         shot = None
@@ -926,10 +979,11 @@ async def run_wizard(
                 "name": step.name,
                 "index": step.index,
                 "total": step.total,
-                "tiers": {t: sum(1 for r in rows if r.tier == t) for t in ("L1", "L2", "L3", "blank", "FAIL")},
+                "tiers": {t: sum(1 for r in rows if r.tier == t) for t in ("L1", "L2", "L3", "vlm", "blank", "FAIL")},
                 "seconds": round(time.monotonic() - t0, 1),
                 "cost": round((await tc.get_usage_summary()).total_cost - c0, 5),
-                "agent_used": agent_used,
+                "agent_used": agent_used or repeaters_used,
+                "repeaters": repeaters_used,
                 "screenshot": shot,
             }
         )

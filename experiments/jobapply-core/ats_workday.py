@@ -395,6 +395,20 @@ class WorkdayAdapter(ATSAdapter):
                     return True
             return False
         if t == "checkbox":
+            # checkbox GROUP ("select all that apply"): the value NAMES an option (e.g. "Neither")
+            # rather than yes/no — click THAT option's checkbox. Single boolean checkbox: toggle.
+            if eng.norm(value) not in (
+                "yes",
+                "true",
+                "1",
+                "y",
+                "no",
+                "false",
+                "0",
+                "n",
+                "",
+            ) and await self._click_radio(page, field, value):
+                return True
             el = await self.locate(page, field)
             if el:
                 with contextlib.suppress(Exception):
@@ -521,15 +535,17 @@ class WorkdayAdapter(ATSAdapter):
         return False
 
     async def _click_radio(self, page: Any, field: FormField, value: str) -> bool:
-        """Select a Workday Yes/No-style radio. Workday markup is
-        `<input id=X value=true><label for=X>Yes</label>` inside a <fieldset><legend>question.
-        Clicking the LABEL does NOT check the React input (verified: checked stays false), so we
-        resolve each option's text via its label[for]=input.id and click the INPUT element
-        directly. Match label text exact -> contains -> the value attr (yes->true / no->false)."""
+        """Select a Workday choice control by option text — radios AND checkbox-GROUPS ("select all
+        that apply"). Markup is `<input id=X value=true><label for=X>Yes</label>`; clicking the
+        LABEL does NOT check the React input (verified), so we resolve each option's text via
+        label[for]=input.id and click the INPUT directly. Match label text exact -> contains -> the
+        value attr (yes->true / no->false)."""
         sel = f'[data-automation-id="{field.name}"]'
         want = eng.norm(value)
         yn = {"yes": "true", "no": "false", "true": "true", "false": "false"}.get(want)
-        radios = await page.get_elements_by_css_selector(f'{sel} input[type="radio"], {sel} [role="radio"]')
+        radios = await page.get_elements_by_css_selector(
+            f'{sel} input[type="radio"], {sel} [role="radio"], {sel} input[type="checkbox"], {sel} [role="checkbox"]'
+        )
         scored: list[tuple[Any, str, str]] = []
         for el in radios:
             with contextlib.suppress(Exception):
@@ -547,7 +563,26 @@ class WorkdayAdapter(ATSAdapter):
             target = next((el for el, _, v in scored if v == yn), None)
         if not target:
             return False
+        # Robust check (DomHand _CLICK_BINARY_FIELD_JS pattern): a plain CDP click on a Workday
+        # checkbox/radio often misses — the real <input> is hidden behind a styled label. Click the
+        # VISIBLE label/wrapper with the native .click() (which performs the toggle), fall back to
+        # the input, and fire input/change so React registers it. Skip if already checked.
         with contextlib.suppress(Exception):
+            res = await target.evaluate(
+                "() => { const el=this;"
+                " const on=()=>el.checked||el.getAttribute('aria-checked')==='true';"
+                " if(on()) return 'already';"
+                " const lbl=el.id?document.querySelector('label[for=\"'+el.id+'\"]'):null;"
+                " const node=lbl||(el.closest&&el.closest('label'))||el;"
+                " if(node.scrollIntoView) node.scrollIntoView({block:'center'});"
+                " if(node.click) node.click(); if(!on() && el.click) el.click();"
+                " el.dispatchEvent(new Event('input',{bubbles:true}));"
+                " el.dispatchEvent(new Event('change',{bubbles:true}));"
+                " return on()?'ok':'fail'; }"
+            )
+            if res in ("ok", "already"):
+                return True
+        with contextlib.suppress(Exception):  # last resort: the plain CDP click
             await target.click()
             return True
         return False
@@ -650,6 +685,91 @@ class WorkdayAdapter(ATSAdapter):
                 return bool(eng.norm(txt)) and (value or "")[:4] in txt
             return False
         return False
+
+    # -- repeaters: off-schema "Add Another" sections (My Experience) -------
+    # GENERIC by design (第一性原理): a repeater is matched to a profile LIST by the section's
+    # HEADING keyword — never a hardcoded aid — so "Work Experience" / "Professional Experience" /
+    # "Employment History" all resolve to profile.experience, and a tenant/Oracle relabel just
+    # re-keys. Each present section is handed to eng.agent_fill_section (the proven single-page
+    # pattern: it scrolls to the section, clicks "Add Another" per entry, and drives the searchable
+    # comboboxes — School/Degree — that deterministic string-match gets wrong). Already-filled
+    # fields are frozen and Submit stays disabled for the duration, so it can't disturb prior steps
+    # or finalize. Deterministic add-row fill (handoff A2) layers on later to cut cost.
+    _REPEATERS = (
+        ("experience", ("experien", "employ", "work history"), False),
+        ("education", ("educat", "academ", "school"), False),
+        ("skills", ("skill",), True),
+        ("languages", ("language",), True),
+        ("certifications", ("certif", "licen"), True),
+    )
+
+    async def fill_repeaters(self, session: Any, page: Any, profile: dict) -> dict:
+        # HARD GATE: only run on a page that actually HAS a repeater affordance — an "Add"/"Add
+        # Another" control. Without this, a keyword in some unrelated QUESTION text (e.g. "employ"
+        # in an export-control question on Application Questions) would falsely fire the experience
+        # agent on the wrong page, where it then tries to NAVIGATE to find the section (dangerous).
+        has_add = await page.evaluate(
+            '() => !!document.querySelector(\'[data-automation-id="Add"],[data-automation-id*="add-button"],'
+            '[data-automation-id*="addButton"]\')'
+            " || [...document.querySelectorAll('button')].some(b=>/^add( another)?$/i.test((b.textContent||'').trim()))"
+        )
+        if str(has_add).lower() != "true":
+            return {}
+        # section TITLES are short ("Work Experience"); long strings are question text, not headings.
+        headings = [h for h in await self._page_headings(page) if len(h) <= 40]
+        out: dict = {}
+        for key, keywords, is_tag in self._REPEATERS:
+            items = profile.get(key) or []
+            if not items:
+                continue
+            if not any(any(kw in h for kw in keywords) for h in headings):
+                continue  # section not on THIS page — generic gate, no hardcoded aid
+            label = key.capitalize()
+            if is_tag:  # Skills / Languages / Certs: typeahead tags (type + pick), one at a time
+                vals = ", ".join(self._item_str(it) for it in items)
+                instr = (
+                    f"Add these {label} one at a time using the section's typeahead/'Add' control "
+                    f"(type each, then pick the matching option so it becomes a tag/pill): {vals}"
+                )
+            else:  # Experience / Education: row repeater — Add Another per entry, fill the group
+                entries = "; ".join(f"entry {i + 1}: {self._item_str(it)}" for i, it in enumerate(items))
+                instr = (
+                    f"Add {len(items)} {label} entr{'y' if len(items) == 1 else 'ies'}. Use the "
+                    f"'Add Another' button before each entry, then fill its fields by label. Dates "
+                    f"like '2021-06' go in the segmented month/year inputs. {entries}"
+                )
+            res = await eng.agent_fill_section(session, page, section=label, instructions=instr, max_steps=18)
+            out[label] = {"items": len(items), **res}
+        return out
+
+    @staticmethod
+    def _item_str(item: Any) -> str:
+        """Flatten a profile list-item to a 'Key=Value, ...' string the agent maps by label."""
+        if isinstance(item, str):
+            return item
+        if isinstance(item, dict):
+            parts = []
+            for k, v in item.items():
+                if v in (None, "", [], {}):
+                    continue
+                parts.append(f"{k.replace('_', ' ')}='{str(v)[:300]}'")
+            return ", ".join(parts)
+        return str(item)
+
+    async def _page_headings(self, page: Any) -> list[str]:
+        """Lower-cased visible section headings/labels — used to GENERICALLY detect which repeater
+        sections are present (heading keyword match), independent of any tenant-specific aid."""
+        with contextlib.suppress(Exception):
+            raw = await page.evaluate(
+                "() => JSON.stringify([...document.querySelectorAll("
+                '\'h1,h2,h3,h4,[data-automation-id*="title"],[data-automation-id*="Title"],'
+                "[data-automation-id*=\"pageHeader\"]')].map(e=>(e.textContent||'').replace(/\\s+/g,' ')"
+                ".trim().toLowerCase()).filter(Boolean).slice(0,60))"
+            )
+            import json
+
+            return json.loads(raw) if raw else []
+        return []
 
     # -- helpers -----------------------------------------------------------
     async def _settle(self, page: Any, seconds: float = 2.0) -> None:

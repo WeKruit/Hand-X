@@ -1,0 +1,119 @@
+{
+  "first_name": "Mei",
+  "last_name": "Tanaka",
+  "preferred_name": "Mei",
+  "full_name": "Mei Tanaka",
+  "email": "mei.tanaka.test@example.com",
+  "phone": "+1 646 555 0199",
+  "location": "New York, NY, USA",
+  "city": "New York",
+  "state": "New York",
+  "country": "United States",
+  "zip": "10013",
+  "address_line1": "120 Broadway",
+  "linkedin": "https://www.linkedin.com/in/mei-tanaka-test",
+  "github": "https://github.com/mei-tanaka-test",
+  "website": "https://meitanaka.example.com",
+  "work_authorization": "Requires sponsorship (H-1B)",
+  "authorized_to_work_us": true,
+  "requires_sponsorship": true,
+  "visa_status": "H-1B — will require sponsorship",
+  "citizenship": "Japan",
+  "currently_located_in_us": true,
+  "willing_to_relocate": true,
+  "desired_salary": 195000,
+  "available_start_date": "2026-09-15",
+  "preferred_work_arrangement": "Hybrid (NYC)",
+  "how_did_you_hear": "Company website",
+  "gender": "Female",
+  "pronouns": "She/Her",
+  "race_ethnicity": "Asian",
+  "hispanic_or_latino": "No",
+  "veteran_status": "I am not a protected veteran",
+  "disability_status": "No, I do not have a disability and have not had one in the past",
+  "sexual_orientation": "I don't wish to answer",
+  "transgender": "No",
+  "summary": "Machine-learning engineer with 6 years building large-scale data and ML platforms in Java and Python. Shipped real-time recommendation systems on Kafka/Spark and led migration to a feature store.",
+  "experience": [
+    {
+      "company": "Quantum Analytics",
+      "title": "Staff Machine Learning Engineer",
+      "location": "New York, NY",
+      "start_date": "2021-06",
+      "end_date": "Present",
+      "current": true,
+      "highlights": [
+        "Led a 5-engineer team building a real-time recommendation platform (Java, Kafka, Spark) serving 50M users.",
+        "Cut model-serving p99 latency 60% by introducing a Redis feature cache and ONNX runtime.",
+        "Owned the on-call rotation and incident reviews for the ML platform."
+      ]
+    },
+    {
+      "company": "DataBridge Inc",
+      "title": "Senior Data Engineer",
+      "location": "Boston, MA",
+      "start_date": "2018-08",
+      "end_date": "2021-05",
+      "current": false,
+      "highlights": [
+        "Built the company's first feature store on Spark + Delta Lake, adopted by 8 teams.",
+        "Designed a CDC pipeline (Debezium/Kafka) replacing nightly batch with sub-minute freshness."
+      ]
+    },
+    {
+      "company": "Hinode Robotics",
+      "title": "Software Engineer",
+      "location": "Tokyo, Japan",
+      "start_date": "2016-04",
+      "end_date": "2018-07",
+      "current": false,
+      "highlights": [
+        "Developed computer-vision modules (C++/Python) for an industrial pick-and-place robot.",
+        "Reduced false-detection rate 35% with a retrained CNN pipeline."
+      ]
+    }
+  ],
+  "education": [
+    {
+      "school": "Columbia University",
+      "degree": "M.S.",
+      "field_of_study": "Computer Science",
+      "start_date": "2014-09",
+      "graduation_date": "2016-05",
+      "gpa": "3.9"
+    },
+    {
+      "school": "University of Tokyo",
+      "degree": "B.E.",
+      "field_of_study": "Information Engineering",
+      "start_date": "2010-04",
+      "graduation_date": "2014-03",
+      "gpa": "3.7"
+    }
+  ],
+  "skills": [
+    "Java",
+    "Python",
+    "Apache Kafka",
+    "Apache Spark",
+    "TensorFlow",
+    "Kubernetes",
+    "Redis",
+    "Scala",
+    "Airflow"
+  ],
+  "certifications": [
+    "Google Cloud Professional Machine Learning Engineer (2022)"
+  ],
+  "languages": [
+    {
+      "language": "Japanese",
+      "proficiency": "Native"
+    },
+    {
+      "language": "English",
+      "proficiency": "Fluent"
+    }
+  ],
+  "cover_letter": "I'm drawn to this role because it sits at the intersection of large-scale data infrastructure and applied ML, where I've spent my career. I'd bring hands-on experience shipping real-time ML systems and leading platform teams."
+}
