@@ -336,18 +336,46 @@ async def map_fields(llm: Any, fields: list[FormField], profile: dict, title: st
 # ---------------------------------------------------------------------------
 # L3 — escalate a single field to a browser-use Agent (generic fallback).
 # ---------------------------------------------------------------------------
-async def escalate(session: Any, agent_llm: Any, field: FormField, value: str) -> bool:
+# Freeze every already-FILLED field so an agent — which can misread a React-controlled input as
+# empty (the bu-2-0 false-empty problem) — physically CANNOT re-fill or disturb completed work.
+# Empty fields (the failed target, or a not-yet-filled box) stay editable. Restored after the agent.
+_FREEZE_FILLED_JS = (
+    "() => { let n=0; document.querySelectorAll('input,textarea,select').forEach(e => {"
+    " const filled = (e.type==='checkbox'||e.type==='radio') ? e.checked : ((e.value||'').trim().length>0);"
+    " if (filled && !e.readOnly && !e.disabled) {"
+    "   const lock = (e.tagName==='SELECT'||e.type==='checkbox'||e.type==='radio'||e.type==='file');"
+    "   e.setAttribute('data-gh-froze', lock ? 'd' : 'r'); if (lock) e.disabled = true; else e.readOnly = true; n++; }"
+    " }); return n; }"
+)
+_UNFREEZE_JS = (
+    "() => document.querySelectorAll('[data-gh-froze]').forEach(e => {"
+    " if (e.getAttribute('data-gh-froze') === 'd') e.disabled = false; else e.readOnly = false;"
+    " e.removeAttribute('data-gh-froze'); })"
+)
+
+
+async def _unfreeze(session: Any) -> None:
+    with contextlib.suppress(Exception):
+        p = await session.must_get_current_page()
+        await p.evaluate(_UNFREEZE_JS)
+
+
+async def escalate(session: Any, agent_llm: Any, page: Any, field: FormField, value: str) -> bool:
     from browser_use import Agent
 
     label = field.label or field.name
+    with contextlib.suppress(Exception):
+        await page.evaluate(_FREEZE_FILLED_JS)  # lock filled fields — the agent can only touch the target
     task = (
-        f"You are already on the application page. Find the single form input labeled '{label}' "
-        f"and put this exact text into it: {value!r}. "
+        f"You are already on the application page. Every other field is LOCKED — fill ONLY the single "
+        f"form input labeled '{label}' and put this exact text into it: {value!r}. "
         "It is a form field on THIS page — never navigate, never open a URL, even if the value looks like a link. "
         "Do not submit the form and do not touch any other field. Call done once that field shows the value."
     )
     try:
-        agent = Agent(task=task, llm=agent_llm, browser_session=session)
+        # use_vision='auto' lets the agent pull a screenshot to SEE field state (avoids re-typing a
+        # field the serialized DOM falsely reads empty) — it observes, the deterministic layer fills.
+        agent = Agent(task=task, llm=agent_llm, browser_session=session, use_vision="auto")
         await agent.run(max_steps=4)
         return True
     except Exception as exc:
@@ -360,6 +388,7 @@ async def escalate(session: Any, agent_llm: Any, field: FormField, value: str) -
         with contextlib.suppress(Exception):
             if not session.is_cdp_connected:
                 await session.connect()
+        await _unfreeze(session)  # ALWAYS unlock — else subsequent deterministic fills hit frozen fields
 
 
 async def agent_fill_section(session: Any, page: Any, *, section: str, instructions: str, max_steps: int = 10) -> dict:
@@ -384,6 +413,8 @@ async def agent_fill_section(session: Any, page: Any, *, section: str, instructi
     )
     with contextlib.suppress(Exception):
         await page.evaluate(disable_js)  # neutralise submit so the agent CANNOT submit the form
+    with contextlib.suppress(Exception):
+        await page.evaluate(_FREEZE_FILLED_JS)  # lock already-filled fields — agent can't disturb them
 
     task = (
         f"You are already on a job-application page. Fill ONLY the {section} section: {instructions}. "
@@ -401,7 +432,7 @@ async def agent_fill_section(session: Any, page: Any, *, section: str, instructi
     ok = True
     try:
         llm = ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY"))
-        agent = Agent(task=task, llm=llm, browser_session=session, use_vision=True)
+        agent = Agent(task=task, llm=llm, browser_session=session, use_vision="auto")
         await agent.run(max_steps=max_steps)
     except Exception as exc:
         print(f"   [agent:{section}] {exc}")
@@ -412,6 +443,7 @@ async def agent_fill_section(session: Any, page: Any, *, section: str, instructi
                 await session.connect()
         with contextlib.suppress(Exception):
             await page.evaluate(restore_js)
+        await _unfreeze(session)  # unlock the frozen filled fields
     return {"section": section, "agent_ok": ok}
 
 
@@ -535,9 +567,10 @@ async def fill_with_ladder(
     if await adapter.fill(session, page, field, value, resume) and await adapter.read_back(session, page, field, value):
         return "L2"
 
-    if allow_escalation and await escalate(session, agent_llm, field, value):
+    if allow_escalation and await escalate(session, agent_llm, page, field, value):
         with contextlib.suppress(Exception):
             page = await session.must_get_current_page()  # re-acquire after agent + CDP re-attach
+        await _unfreeze(session)  # belt-and-suspenders: ensure nothing stays locked for later fields
         if await adapter.read_back(session, page, field, value):
             return "L3"
     return "FAIL"
