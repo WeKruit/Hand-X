@@ -734,16 +734,13 @@ class WorkdayAdapter(ATSAdapter):
             return out
 
         async def _vision_handoff() -> bool:
-            # DOM is hopeless (frozen / no-match) — read the rendered options off a screenshot, commit
-            # trusted Enter on the highlighted match, value-verify. The shared primitive owns this.
-            return await eng.pick_dropdown(
-                session,
-                page,
-                value,
-                read_dom_options=_scoped_dom,
-                llm=_match_llm(),  # REAL cheap text LLM — pick_dropdown is LLM-only, must not be None
-                verify_label=verify_label or None,
-                vis_key=f"{verify_label or owned_id or 'listbox'}:{value}",
+            # The scoped DOM is hopeless (frozen / wrong shared portal / no aria-controls on this tenant's
+            # widget). VISUAL COMMIT — what a human does: SEE the options rendered ON SCREEN and CLICK the
+            # right one. pick_option_visually reads the VISIBLE options (+ their coords), the LLM picks the
+            # best by meaning, then a TRUSTED click AT that option's coordinates commits it. No
+            # aria-controls / label / DOM-structure reliance — a tenant renaming them can't break it.
+            return await eng.pick_option_visually(
+                session, page, value, llm=_match_llm(), verify_label=verify_label or None
             )
 
         want = eng.norm(value)
