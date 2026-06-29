@@ -472,7 +472,7 @@ class WorkdayAdapter(ATSAdapter):
         if t == "radio":
             return await self._click_radio(page, field, value)
         if t == "single_select":
-            return await self._listbox(page, field, value)
+            return await self._listbox(session, page, field, value)
         if t == "multi_select":
             return await self._multiselect(session, page, field, value)
         if t == "date":
@@ -483,9 +483,9 @@ class WorkdayAdapter(ATSAdapter):
         """Workday typeahead multiselect (`multiSelectContainer` + `selectinput`): type the value
         to filter, then commit the highlighted top match with a TRUSTED Enter (see below).
         Single-value (commit one); commit-then-add for repeaters is handled elsewhere."""
-        inp = await eng.first(page, self._wsel(field.name, ' [data-uxi-widget-type="selectinput"] input')) or await eng.first(
-            page, self._wsel(field.name, " input")
-        )
+        inp = await eng.first(
+            page, self._wsel(field.name, ' [data-uxi-widget-type="selectinput"] input')
+        ) or await eng.first(page, self._wsel(field.name, " input"))
         if not inp:
             return False
         with contextlib.suppress(Exception):
@@ -505,25 +505,47 @@ class WorkdayAdapter(ATSAdapter):
             print(f"   [msel {field.name}] value={value!r} committed={ok}")
         return ok
 
-    async def _listbox(self, page: Any, field: FormField, value: str) -> bool:
+    async def _listbox(self, session: Any, page: Any, field: FormField, value: str) -> bool:
         """Workday button-listbox: click trigger -> options mount in the body portal
-        `activeListContainer` -> click the matching promptOption. SEARCHABLE listboxes (State, Country,
-        Phone-type, How-did-you-hear) show NO options until you TYPE — so type the value to filter
-        first (same fix as the repeater Degree); an inline listbox just shows them (no input -> skip)."""
+        `activeListContainer` -> commit the matching option. SEARCHABLE listboxes (State, Country,
+        Phone-type, How-did-you-hear, repeater Degree) show NO options until you TYPE — so type the
+        value to filter first; an inline (non-searchable) listbox just shows them (no input).
+
+        CRITICAL (w4hwdepap): the body portal is SHARED across every dropdown and re-serves a FROZEN
+        list — the same options regardless of which field is open or what was typed — so an unscoped
+        read + click commits a WRONG value (Python->'Computer Science') and never selects the right
+        one. Fix: SCOPE the read to the listbox THIS input OWNS (aria-controls / aria-owns id), and
+        for the searchable path COMMIT with a TRUSTED CDP Enter on the widget's pre-highlighted top
+        match (the proven Greenhouse react-select mechanism) instead of clicking a node that may have
+        re-rendered. The pre-type option snapshot lets _pick_option POLL until the list actually
+        reflects the typed filter, then abort FAST if it stays stale — no fixed-sleep spin."""
         trig = await eng.first(page, self._wsel(field.name, " button"))
         if not trig:
             return False
         with contextlib.suppress(Exception):
             await trig.click()
         await asyncio.sleep(0.4)
-        inp = (await eng.first(page, self._wsel(field.name, " input"))
-               or await eng.first(page, '[data-automation-id="activeListContainer"] input')
-               or await eng.first(page, 'input[aria-autocomplete="list"]'))
+        # The input the trigger owns. Prefer a field-scoped input; only fall back to the shared
+        # portal input. Scope the option read to the container this input declares it controls.
+        inp = (
+            await eng.first(page, self._wsel(field.name, " input"))
+            or await eng.first(page, '[data-automation-id="activeListContainer"] input')
+            or await eng.first(page, 'input[aria-autocomplete="list"]')
+        )
+        owned_id = ""
         if inp:
             with contextlib.suppress(Exception):
+                owns = (await inp.get_attribute("aria-controls")) or (await inp.get_attribute("aria-owns")) or ""
+                owned_id = owns.split()[0] if owns.split() else ""
+        if inp:
+            # snapshot the option texts BEFORE typing — _pick_option polls until they CHANGE, so a
+            # frozen shared list is detected (stale N times -> abort) instead of spun against.
+            before = await self._option_texts(page, owned_id)
+            with contextlib.suppress(Exception):
                 await inp.fill(value)
-                await asyncio.sleep(0.7)
-        return await self._pick_option(page, value)
+            return await self._pick_option(session, page, value, owned_id=owned_id, before=before, searchable=True)
+        # non-searchable inline listbox: options already shown, click the best (no Enter to commit).
+        return await self._pick_option(session, page, value, owned_id=owned_id, before=None, searchable=False)
 
     # The option portal is shared: bare `promptOption`/`menuItem` aids from PREVIOUSLY-opened
     # widgets persist in the DOM (hidden), so an unscoped query mixes a closed widget's STALE
@@ -538,27 +560,77 @@ class WorkdayAdapter(ATSAdapter):
         " return (r.width>0 && r.height>0 && this.offsetParent!==null) ? (this.textContent||'') : ''; }"
     )
 
-    async def _pick_option(self, page: Any, value: str, allow_fallback: bool = True) -> bool:
-        """Shared option-portal picker for listbox + multiselect. Considers ONLY VISIBLE options
-        (the active dropdown) — hidden stale options from closed widgets are skipped. Match exact ->
-        contains; strip-and-contains tolerates trailing dial codes ('United States' vs '...(+1)').
-        allow_fallback=True picks the first VISIBLE option when nothing matches (fine for a typed-
-        filtered single-select); pass False where a wrong pick is harmful (multiselect commits a pill)."""
+    def _opt_selector(self, owned_id: str) -> str:
+        """Option selector SCOPED to the listbox the open input owns (aria-controls/owns id). The
+        shared body portal serves a frozen list, so scoping to the owned container is what makes the
+        read reflect THIS field. Falls back to the activeListContainer / generic option aids only
+        when the widget exposes no owns-id (older inline listboxes)."""
+        if owned_id:
+            return f'#{owned_id} [role="option"], #{owned_id} [data-automation-id="promptOption"], #{owned_id} [data-automation-id="menuItem"]'
+        return (
+            '[data-automation-id="activeListContainer"] [role="option"],'
+            ' [data-automation-id="promptOption"], [data-automation-id="menuItem"],'
+            ' [role="listbox"] [role="option"]'  # DomHand WORKDAY_SELECTORS generic fallback
+        )
+
+    async def _option_texts(self, page: Any, owned_id: str) -> list[str]:
+        """VISIBLE option texts in the scoped listbox (normalized). Used to snapshot the pre-type
+        list so _pick_option can tell a filtered list from the frozen shared one."""
+        out: list[str] = []
+        with contextlib.suppress(Exception):
+            for o in await page.get_elements_by_css_selector(self._opt_selector(owned_id)):
+                vis = (await o.evaluate(self._VISIBLE_TEXT_JS)) or ""
+                if vis.strip():
+                    out.append(eng.norm(vis))
+        return out
+
+    async def _pick_option(
+        self,
+        session: Any,
+        page: Any,
+        value: str,
+        owned_id: str = "",
+        before: list[str] | None = None,
+        searchable: bool = False,
+    ) -> bool:
+        """Scoped option picker for listbox (+ inline). Reads ONLY the VISIBLE options of the listbox
+        the open input OWNS (owned_id) — never the global shared portal, which re-serves a frozen
+        list. Match exact -> prefix -> contains -> reverse-contains, shortest among equals.
+
+        SEARCHABLE path (the State/Country/Degree fix): POLL until the visible options reflect the
+        typed filter (differ from the pre-type `before` snapshot), bounded ~2s. If after the bound the
+        list is still stale/identical for N=3 reads, ABORT FAST (return False) — do NOT spin on a
+        frozen list. Once the filter has landed and a best match is visible+highlightable, COMMIT with
+        a TRUSTED CDP Enter on the widget's pre-highlighted top match (eng.press_enter_trusted) — the
+        proven Greenhouse mechanism — rather than clicking a node that may have re-rendered.
+
+        INLINE path (searchable=False): options are already shown and there is no input to Enter into,
+        so click the best VISIBLE match directly (legacy behavior preserved)."""
         want = eng.norm(value)
-        for _ in range(10):
-            await asyncio.sleep(0.3)
-            raw = await page.get_elements_by_css_selector(
-                '[data-automation-id="activeListContainer"] [role="option"],'
-                ' [data-automation-id="promptOption"], [data-automation-id="menuItem"],'
-                ' [role="listbox"] [role="option"]'  # DomHand WORKDAY_SELECTORS generic fallback
-            )
-            # keep only on-screen options (drops stale hidden options from other widgets)
+        before_set = set(before or [])
+        stale_reads = 0
+        deadline = 2.0  # bound the wait-for-filter (~2s) — replaces the fixed asyncio.sleep spin
+        elapsed = 0.0
+        step = 0.25
+        while elapsed <= deadline:
+            await asyncio.sleep(step)
+            elapsed += step
             opts: list[tuple[Any, str]] = []
-            for o in raw:
+            for o in await page.get_elements_by_css_selector(self._opt_selector(owned_id)):
                 vis = (await o.evaluate(self._VISIBLE_TEXT_JS)) or ""
                 if vis.strip():
                     opts.append((o, eng.norm(vis)))
             if not opts:
+                continue
+            cur_set = {t for _, t in opts}
+            # SEARCHABLE: require the list to have CHANGED from the pre-type snapshot before trusting
+            # it (else it's the frozen shared list). Abort fast after N=3 stale reads.
+            if searchable and before is not None and cur_set == before_set:
+                stale_reads += 1
+                if _DBG:
+                    print(f"      [pick] STALE (==before) read {stale_reads}/3 — frozen shared list?")
+                if stale_reads >= 3:
+                    return False
                 continue
             if _DBG:
                 print(f"      [pick] want={want!r} visible[:6]={[t for _, t in opts[:6]]}")
@@ -586,11 +658,23 @@ class WorkdayAdapter(ATSAdapter):
                     cand = (score, len(txt), o)
                     if best is None or cand[:2] < best[:2]:
                         best = cand
-            target = (best[2] if best else None) or (opts[0][0] if allow_fallback else None)
-            if target is None:
+            if best is None:
+                # the filter has landed but no option matches this value — abort fast (no fallback;
+                # committing the top option here would be the WRONG value the bug planted).
+                if searchable:
+                    stale_reads += 1
+                    if stale_reads >= 3:
+                        return False
+                    continue
                 return False
+            # COMMIT: searchable -> trusted Enter on the highlighted top match (input still focused
+            # from _listbox's fill); inline -> click the matched node directly.
+            if searchable:
+                ok = await eng.press_enter_trusted(session, page)
+                await asyncio.sleep(0.4)
+                return ok
             with contextlib.suppress(Exception):
-                await target.click()
+                await best[2].click()
                 return True
             return False
         return False
@@ -604,8 +688,10 @@ class WorkdayAdapter(ATSAdapter):
         want = eng.norm(value)
         yn = {"yes": "true", "no": "false", "true": "true", "false": "false"}.get(want)
         radios = await page.get_elements_by_css_selector(
-            ", ".join(self._wsel(field.name, x) for x in
-                      (' input[type="radio"]', ' [role="radio"]', ' input[type="checkbox"]', ' [role="checkbox"]'))
+            ", ".join(
+                self._wsel(field.name, x)
+                for x in (' input[type="radio"]', ' [role="radio"]', ' input[type="checkbox"]', ' [role="checkbox"]')
+            )
         )
         scored: list[tuple[Any, str, str]] = []
         for el in radios:
@@ -697,7 +783,9 @@ class WorkdayAdapter(ATSAdapter):
         t = field.type
         sel = self._wsel(field.name)
         if t == "file":
-            return (await eng.first(page, self._wsel(field.name, ' [data-automation-id="file-upload-successful"]'))) is not None
+            return (
+                await eng.first(page, self._wsel(field.name, ' [data-automation-id="file-upload-successful"]'))
+            ) is not None
         if t in ("input_text", "textarea", "select_native"):
             el = await self.locate(page, field)
             if not el:

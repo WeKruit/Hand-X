@@ -24,11 +24,23 @@ from dataclasses import dataclass, field
 
 KW = ["experience", "education", "skill", "language", "certification", "website", "resume", "social"]
 # data-fkit-id section token -> canonical section key (the plan + profile use canonical keys)
-SEC_FROM_FKIT = {"workexperience": "experience", "education": "education", "skills": "skills",
-                 "languages": "languages", "certifications": "certifications",
-                 "resumeattachments": "resume", "websitepanelset": "websites", "socialnetwork": "social"}
-CANON = {"experience": "experience", "education": "education", "skill": "skills",
-         "language": "languages", "certification": "certifications"}
+SEC_FROM_FKIT = {
+    "workexperience": "experience",
+    "education": "education",
+    "skills": "skills",
+    "languages": "languages",
+    "certifications": "certifications",
+    "resumeattachments": "resume",
+    "websitepanelset": "websites",
+    "socialnetwork": "social",
+}
+CANON = {
+    "experience": "experience",
+    "education": "education",
+    "skill": "skills",
+    "language": "languages",
+    "certification": "certifications",
+}
 
 
 def norm(s: str | None) -> str:
@@ -73,22 +85,22 @@ def parse_fkit(fkit: str) -> tuple[str | None, str, str]:
 # ---------------------------------------------------------------------------
 @dataclass
 class Control:
-    tag: str = ""                 # INPUT/SELECT/TEXTAREA/BUTTON/DIV...
-    role: str = ""                # listbox/spinbutton/checkbox/radio...
-    haspopup: str = ""            # aria-haspopup
-    itype: str = ""               # input type
-    cid: str = ""                 # element id
-    aid: str = ""                 # data-automation-id
-    fkit: str = ""                # data-fkit-id — the ROW-SAFE unique key
-    sec: str | None = None        # canonical section (from fkit, else heading)
-    row: str = ""                 # row instance token ('225'); '' = non-repeating
-    field_key: str = ""           # machine field (jobtitle, degree, startdate, skills)
-    label: str = ""               # resolved visible label (for LLM map matching)
-    wrapper_aid: str = ""         # nearest ancestor data-automation-id (widget group)
+    tag: str = ""  # INPUT/SELECT/TEXTAREA/BUTTON/DIV...
+    role: str = ""  # listbox/spinbutton/checkbox/radio...
+    haspopup: str = ""  # aria-haspopup
+    itype: str = ""  # input type
+    cid: str = ""  # element id
+    aid: str = ""  # data-automation-id
+    fkit: str = ""  # data-fkit-id — the ROW-SAFE unique key
+    sec: str | None = None  # canonical section (from fkit, else heading)
+    row: str = ""  # row instance token ('225'); '' = non-repeating
+    field_key: str = ""  # machine field (jobtitle, degree, startdate, skills)
+    label: str = ""  # resolved visible label (for LLM map matching)
+    wrapper_aid: str = ""  # nearest ancestor data-automation-id (widget group)
     in_multiselect: bool = False  # inside a multiSelectContainer
-    doc_index: int = 0            # document order
-    section: str | None = None    # heading-proximity section (fallback when no fkit)
-    handle: object = None         # live element handle (None offline)
+    doc_index: int = 0  # document order
+    section: str | None = None  # heading-proximity section (fallback when no fkit)
+    handle: object = None  # live element handle (None offline)
 
     def sect(self) -> str | None:
         return self.sec or (CANON.get(self.section or "", self.section) if self.section else None)
@@ -139,10 +151,10 @@ def dedup(controls: list[Control]) -> list[Control]:
         a = c.archetype()
         if a is None:
             continue
-        if "selecteditem" in (c.aid or "").lower():   # the pill CONTAINER is not an input
+        if "selecteditem" in (c.aid or "").lower():  # the pill CONTAINER is not an input
             continue
-        if c.field_key in ("", "null"):               # the wrapper row marker, not a real field
-            if not c.fkit:                            # but keep genuinely fkit-less controls (rare)
+        if c.field_key in ("", "null"):  # the wrapper row marker, not a real field
+            if not c.fkit:  # but keep genuinely fkit-less controls (rare)
                 pass
             else:
                 continue
@@ -151,7 +163,7 @@ def dedup(controls: list[Control]) -> list[Control]:
             best[key] = c
             order.append(key)
         elif _ARCHE_RANK.get(a, 9) < _ARCHE_RANK.get(best[key].archetype(), 9):
-            best[key] = c                              # richer archetype wins the twin
+            best[key] = c  # richer archetype wins the twin
     return [best[k] for k in order]
 
 
@@ -192,8 +204,9 @@ def extract_offline(html: str) -> list[Control]:
             heads.append((order[rt.getpath(n)], t))
 
     controls: list[Control] = []
-    raw = tree.xpath('//input|//select|//textarea|//*[@role="spinbutton"]|//*[@role="listbox"]'
-                     '|//button[@aria-haspopup="listbox"]')
+    raw = tree.xpath(
+        '//input|//select|//textarea|//*[@role="spinbutton"]|//*[@role="listbox"]' '|//button[@aria-haspopup="listbox"]'
+    )
     for el in raw:
         wrapper_aid, in_ms, fkit = "", False, el.get("data-fkit-id") or ""
         for anc in el.iterancestors():
@@ -206,20 +219,25 @@ def extract_offline(html: str) -> list[Control]:
                 fkit = anc.get("data-fkit-id")
         sec, row, fld = parse_fkit(fkit)
         label = _fix_label(fkit, label_for(el))
-        controls.append(Control(
-            tag=(el.tag if isinstance(el.tag, str) else "").upper(),
-            role=(el.get("role") or "").lower(),
-            haspopup=(el.get("aria-haspopup") or "").lower(),
-            itype=(el.get("type") or "").lower(),
-            cid=el.get("id") or "",
-            aid=el.get("data-automation-id") or "",
-            fkit=fkit, sec=sec, row=row, field_key=fld,
-            label=label,
-            wrapper_aid=wrapper_aid,
-            in_multiselect=in_ms,
-            doc_index=order[rt.getpath(el)],
-        ))
-    _assign_sections(controls, heads)   # heading-proximity fallback for fkit-less controls
+        controls.append(
+            Control(
+                tag=(el.tag if isinstance(el.tag, str) else "").upper(),
+                role=(el.get("role") or "").lower(),
+                haspopup=(el.get("aria-haspopup") or "").lower(),
+                itype=(el.get("type") or "").lower(),
+                cid=el.get("id") or "",
+                aid=el.get("data-automation-id") or "",
+                fkit=fkit,
+                sec=sec,
+                row=row,
+                field_key=fld,
+                label=label,
+                wrapper_aid=wrapper_aid,
+                in_multiselect=in_ms,
+                doc_index=order[rt.getpath(el)],
+            )
+        )
+    _assign_sections(controls, heads)  # heading-proximity fallback for fkit-less controls
     return dedup(controls)
 
 
@@ -232,9 +250,9 @@ def semantic_equal(intended: str, actual: str) -> bool:
     rungs handle the hard cases upstream of here."""
     a, b = nkey(intended), nkey(actual)
     if not a:
-        return True            # nothing intended -> not a divergence
+        return True  # nothing intended -> not a divergence
     if not b:
-        return False           # intended something, got empty -> MISSING
+        return False  # intended something, got empty -> MISSING
     return a == b or a in b or b in a
 
 
@@ -244,15 +262,15 @@ class FieldDiff:
     row: int
     label: str
     intended: str
-    status: str                # DONE | MISSING | DIVERGED | SKIP
+    status: str  # DONE | MISSING | DIVERGED | SKIP
     control: Control | None = None
 
 
 @dataclass
 class Diff:
     fields: list[FieldDiff] = field(default_factory=list)
-    unplanned: list[Control] = field(default_factory=list)   # required controls not in the plan
-    row_overflow: dict = field(default_factory=dict)         # section -> extra rows beyond target
+    unplanned: list[Control] = field(default_factory=list)  # required controls not in the plan
+    row_overflow: dict = field(default_factory=dict)  # section -> extra rows beyond target
 
     def todo(self) -> list[FieldDiff]:
         return [f for f in self.fields if f.status in ("MISSING", "DIVERGED")]
@@ -273,10 +291,10 @@ def _rows_of(controls: list[Control], sec: str) -> list[str]:
 def _match(controls: list[Control], sec: str, row: str, label: str) -> Control | None:
     lk = nkey(label)
     cand = [c for c in controls if c.sect() == sec and c.row == row]
-    for c in cand:                                  # exact visible-label match
+    for c in cand:  # exact visible-label match
         if nkey(c.label) == lk:
             return c
-    fk = re.sub(r"[^a-z]", "", lk)                   # else machine field_key alias (jobtitle ~ "job title")
+    fk = re.sub(r"[^a-z]", "", lk)  # else machine field_key alias (jobtitle ~ "job title")
     for c in cand:
         if c.field_key and (fk in c.field_key or c.field_key in fk):
             return c
@@ -304,20 +322,20 @@ def reconcile(plan: dict, controls: list[Control], readback: dict | None = None)
                 # rows; a NON-EMPTY field is already done (resume's truth) and must NOT be re-filled or
                 # overwritten (that was the slowness + the dup). Only a genuinely EMPTY field gets filled.
                 if not v:
-                    status = "DONE"                         # nothing intended
+                    status = "DONE"  # nothing intended
                 elif dom_row is None or ctrl is None:
-                    status = "MISSING"                      # row not mounted / control absent -> Add+fill
+                    status = "MISSING"  # row not mounted / control absent -> Add+fill
                 elif arche == "chip" and "," in v and got:
                     # multi-pill tag (Skills): DONE only when EVERY item is a pill (else add the rest).
                     items = [nkey(x) for x in v.split(",") if x.strip()]
                     status = "DONE" if all(it in nkey(got) for it in items) else "MISSING"
                 else:
-                    status = "DONE" if got else "MISSING"   # filled (any value) = leave it; empty = fill
+                    status = "DONE" if got else "MISSING"  # filled (any value) = leave it; empty = fill
                 d.fields.append(FieldDiff(sec, j, label, v, status, ctrl))
-        if len(dom_rows) > len(plan_rows):                  # dup-guard signal
-            d.row_overflow[sec] = dom_rows[len(plan_rows):]
+        if len(dom_rows) > len(plan_rows):  # dup-guard signal
+            d.row_overflow[sec] = dom_rows[len(plan_rows) :]
     planned = {(f.section, nkey(f.label)) for f in d.fields}
-    for c in controls:                                      # unplanned REQUIRED controls (conditional reveals)
+    for c in controls:  # unplanned REQUIRED controls (conditional reveals)
         s = c.sect()
         if s and c.label.endswith("*") and (s, nkey(c.label)) not in planned:
             d.unplanned.append(c)
@@ -373,10 +391,20 @@ async def extract_live(page) -> list[Control]:
 
     data = json.loads(await page.evaluate(EXTRACT_JS))
     controls = [
-        Control(tag=(c["tag"] or "").upper(), role=c["role"], haspopup=c["haspopup"], itype=c["itype"],
-                cid=c["cid"], aid=c["aid"], fkit=c["fkit"], label=_fix_label(c["fkit"], c["label"]),
-                wrapper_aid=c["wrapper_aid"], in_multiselect=c["in_ms"], doc_index=c["doc_index"],
-                **dict(zip(("sec", "row", "field_key"), parse_fkit(c["fkit"]), strict=False)))
+        Control(
+            tag=(c["tag"] or "").upper(),
+            role=c["role"],
+            haspopup=c["haspopup"],
+            itype=c["itype"],
+            cid=c["cid"],
+            aid=c["aid"],
+            fkit=c["fkit"],
+            label=_fix_label(c["fkit"], c["label"]),
+            wrapper_aid=c["wrapper_aid"],
+            in_multiselect=c["in_ms"],
+            doc_index=c["doc_index"],
+            **dict(zip(("sec", "row", "field_key"), parse_fkit(c["fkit"]), strict=False)),
+        )
         for c in data["controls"]
     ]
     _assign_sections(controls, [(h["i"], h["t"]) for h in data["headings"] if any(k in h["t"] for k in KW)])
@@ -423,8 +451,15 @@ async def read_live(page, controls: list[Control]) -> dict:
 
 
 # archetype -> the WorkdayAdapter.fill() type that drives it
-ARCHE2TYPE = {"text": "input_text", "textarea": "textarea", "select": "single_select",
-              "chip": "multi_select", "date": "date", "check": "checkbox", "radio": "radio"}
+ARCHE2TYPE = {
+    "text": "input_text",
+    "textarea": "textarea",
+    "select": "single_select",
+    "chip": "multi_select",
+    "date": "date",
+    "check": "checkbox",
+    "radio": "radio",
+}
 
 
 async def _locate(page, c: Control):
@@ -433,17 +468,19 @@ async def _locate(page, c: Control):
     return await first(page, f'[data-fkit-id="{c.fkit}"]') if c.fkit else None
 
 
-async def _vlm_filled(session, label: str) -> bool:
-    """Cheap-VLM ground-truth read-back (~$0.0006/call, cached per field+url): is the field labeled
-    `label` visibly filled? Used for the hard typeaheads where the DOM read-back is flaky — so we never
-    re-fill an already-filled field, and the residual is the TRUTH the user sees on screen."""
+async def _vlm_filled(session, label: str, value: str) -> bool:
+    """Cheap-VLM ground-truth read-back (~$0.0006/call, cached per field+url+value): does the field
+    labeled `label` visibly contain `value`? VALUE-AWARE, not presence-only — the shared option portal
+    commits the WRONG option (e.g. 'Computer Science' into Skills), and a presence-only 'filled' would
+    RUBBER-STAMP that wrong value as done. We ask `matches` (right value present?), so a field is DONE
+    only when the VALUE the user intended is the one on screen — never merely non-blank."""
     import contextlib
 
     with contextlib.suppress(Exception):
-        from vision_verify import visual_check
+        from vision_verify import _matches, visual_check
 
-        v = (await visual_check(session, label)) or ""
-        return '"filled":true' in v.replace(" ", "").lower()
+        v = (await visual_check(session, label, want=value)) or ""
+        return _matches(v)
     return False
 
 
@@ -463,53 +500,116 @@ async def _llm_pick(llm, value: str, options: list[str]) -> str | None:
 
     with contextlib.suppress(Exception):
         res = await llm.ainvoke(
-            [SystemMessage(content="Pick the option that best matches the wanted value — closest meaning "
-                           "or abbreviation (e.g. 'B.S.' -> \"Bachelor's Degree\"; 'Python' -> the nearest "
-                           "skill). Reply the EXACT option text from the list, or 'NONE' if truly none fit."),
-             UserMessage(content=f"wanted: {value!r}\noptions: {options}")],
-            output_format=_Pick)
+            [
+                SystemMessage(
+                    content="Pick the option that best matches the wanted value — closest meaning "
+                    "or abbreviation (e.g. 'B.S.' -> \"Bachelor's Degree\"; 'Python' -> the nearest "
+                    "skill). Reply the EXACT option text from the list, or 'NONE' if truly none fit."
+                ),
+                UserMessage(content=f"wanted: {value!r}\noptions: {options}"),
+            ],
+            output_format=_Pick,
+        )
         c = (res.completion.choice or "").strip()
         return None if c.upper() == "NONE" or not c else c
     return None
 
 
-async def pick_smart(adapter, page, llm, value: str, tries: int = 8) -> bool:
-    """Pick the best typeahead/listbox option for `value`: exact -> contains -> CHEAP LLM choice over the
-    READ options (the replayable agent decision). Clicks the chosen option. Returns True if one was clicked."""
+# ONLY currently-VISIBLE options of the OPEN dropdown — the option portal (activeListContainer) is a
+# SHARED body singleton, so a closed widget's options linger hidden AND a freshly-typed filter re-renders
+# it. offsetParent is null for hidden/detached nodes; a committed pill's sub-elements carry promptOption
+# too, so skip anything inside a selectedItemList. (Mirrors ats_workday._VISIBLE_TEXT_JS — the proven read.)
+_PICK_VISIBLE_JS = (
+    "() => { if (this.closest('[data-automation-id=\"selectedItemList\"]')) return '';"
+    " const r=this.getBoundingClientRect();"
+    " return (r.width>0 && r.height>0 && this.offsetParent!==null) ? (this.textContent||'') : ''; }"
+)
+_OPT_SEL = (
+    '[data-automation-id="activeListContainer"] [role="option"], [data-automation-id="promptOption"], '
+    '[data-automation-id="menuItem"], [role="listbox"] [role="option"]'
+)
+
+
+async def _read_visible_options(page) -> list:
+    """Read the OPEN dropdown's visible options as [(handle, normtext)] — the active widget's only."""
+    import contextlib
+
+    raw = await page.get_elements_by_css_selector(_OPT_SEL)
+    opts: list = []
+    for o in raw:
+        with contextlib.suppress(Exception):
+            t = norm(await o.evaluate(_PICK_VISIBLE_JS))
+            if t:
+                opts.append((o, t))
+    return opts
+
+
+async def pick_smart(adapter, page, llm, value: str, session=None, tries: int = 8) -> bool:
+    """Pick the best typeahead/listbox option for `value` and COMMIT it. The shared option portal returns
+    a FROZEN/stale list when the widget hasn't re-rendered for the typed filter, so:
+      1. POLL (bounded) until the visible option set CHANGES from the first read (the filter landed) — not
+         a fixed sleep that buys nothing against a stale list.
+      2. FROZEN-LIST EARLY-ABORT: if the visible list is IDENTICAL 3 reads in a row, the widget is dead —
+         stop now (return False) instead of burning all `tries` against a list that will never update.
+      3. MATCH exact -> contains -> CHEAP LLM choice over the READ options (the replayable agent decision).
+      4. COMMIT via a TRUSTED CDP Enter on the pre-highlighted match (session given) — the same primitive
+         Greenhouse react-select uses; a synthetic .click() on a portal node can land on a stale/detached
+         element. Falls back to .click() only when no trusted-Enter session is available.
+    Returns True iff an option was committed."""
     import contextlib
 
     want = norm(value)
+    prev: list[str] | None = None
+    frozen = 0
     for _ in range(tries):
-        await asyncio.sleep(0.3)
-        raw = await page.get_elements_by_css_selector(
-            '[data-automation-id="activeListContainer"] [role="option"], [data-automation-id="promptOption"], '
-            '[data-automation-id="menuItem"], [role="listbox"] [role="option"]')
-        opts: list = []
-        for o in raw:
-            with contextlib.suppress(Exception):
-                # ONLY currently-VISIBLE options — the option portal is SHARED, so a closed widget's
-                # stale options linger hidden (e.g. School options while filling Skills). offsetParent
-                # is null for hidden/detached nodes, so this drops them. (matches _pick_option's guard.)
-                t = norm(await o.evaluate(
-                    "() => (this.offsetParent !== null || this.getClientRects().length) ? (this.textContent||'') : ''"))
-                if t:
-                    opts.append((o, t))
+        opts = await _read_visible_options(page)
+        texts = [t for _, t in opts]
+        if prev is not None and texts == prev:  # list unchanged since last read
+            frozen += 1
+            if frozen >= 2:  # identical 3 reads total -> dead widget
+                print(f"  [pick] want={value!r} FROZEN list ({texts[:5]}) -> abort", flush=True)
+                return False
+        else:
+            frozen = 0
+        prev = texts
         if not opts:
+            await _wait_options_change(page, [])  # bounded wait for the menu to mount
             continue
-        target = (next((o for o, t in opts if norm(t) == want), None)
-                  or next((o for o, t in opts if want and (want in norm(t) or norm(t) in want)), None))
+        target = next((o for o, t in opts if t == want), None) or next(
+            (o for o, t in opts if want and (want in t or t in want)), None
+        )
         choice = None
         if target is None and llm is not None:
-            choice = await _llm_pick(llm, value, [t for _, t in opts])  # the agent's decision, replayed
+            choice = await _llm_pick(llm, value, texts)  # the agent's decision, replayed
             if choice:
-                target = next((o for o, t in opts if norm(t) == norm(choice)), None)
-        print(f"  [pick] want={value!r} opts={[t for _, t in opts][:5]} choice={choice!r} hit={target is not None}",
-              flush=True)
+                target = next((o for o, t in opts if t == norm(choice)), None)
+        print(f"  [pick] want={value!r} opts={texts[:5]} choice={choice!r} hit={target is not None}", flush=True)
         if target is not None:
             with contextlib.suppress(Exception):
-                await target.click()
-                await asyncio.sleep(0.3)
+                if session is not None:
+                    await target.evaluate("() => this.scrollIntoView({block:'center'})")
+                    await eng_press_enter(session, page)  # trusted CDP Enter on the highlighted option
+                else:
+                    await target.click()
+                await _wait_options_change(page, texts)  # bounded: menu closes / re-renders on commit
                 return True
+        else:
+            # no match in THIS read — wait (bounded) for the filter to settle, then re-read
+            await _wait_options_change(page, texts)
+    return False
+
+
+async def _wait_options_change(page, baseline: list[str], timeout: float = 2.0, step: float = 0.2) -> bool:
+    """Bounded wait-for-condition: poll the visible options until they DIFFER from `baseline` (the menu
+    re-rendered for the typed filter / committed / closed). Returns True on change, False on timeout —
+    replaces fixed asyncio.sleep so a settled widget proceeds immediately and a dead one bails in ~2s."""
+    elapsed = 0.0
+    while elapsed < timeout:
+        await asyncio.sleep(step)
+        elapsed += step
+        cur = [t for _, t in await _read_visible_options(page)]
+        if cur != baseline:
+            return True
     return False
 
 
@@ -536,8 +636,10 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
         el = await first(page, f'{base} input[type="checkbox"]') or await first(page, f"{base} input")
         if el and str(value).strip().lower() in ("yes", "true", "1", "y", c.field_key.lower()):
             with __import__("contextlib").suppress(Exception):
-                await el.evaluate("() => { if(!this.checked){ this.click(); "
-                                  "this.dispatchEvent(new Event('change',{bubbles:true})); } }")
+                await el.evaluate(
+                    "() => { if(!this.checked){ this.click(); "
+                    "this.dispatchEvent(new Event('change',{bubbles:true})); } }"
+                )
                 return True
         return False
     if a == "select":  # button-listbox: open, TYPE-to-filter if searchable, then pick from the portal
@@ -548,17 +650,20 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
             return False
         with contextlib.suppress(Exception):
             await trig.click()
-        await asyncio.sleep(0.4)
+        await _wait_options_change(page, [])  # bounded: wait for the menu/search input to mount
         # a SEARCHABLE listbox (e.g. Degree) shows NO options until you type — find the revealed input
         # and type the value to filter; an inline listbox just shows them (no input -> skip).
-        inp = (await first(page, f"{base} input")
-               or await first(page, '[data-automation-id="activeListContainer"] input')
-               or await first(page, 'input[aria-autocomplete="list"]'))
+        inp = (
+            await first(page, f"{base} input")
+            or await first(page, '[data-automation-id="activeListContainer"] input')
+            or await first(page, 'input[aria-autocomplete="list"]')
+        )
         if inp:
+            base_opts = [t for _, t in await _read_visible_options(page)]
             with contextlib.suppress(Exception):
                 await inp.fill(value)
-                await asyncio.sleep(0.8)
-        return await pick_smart(adapter, page, llm, value)  # exact -> contains -> LLM closest
+            await _wait_options_change(page, base_opts)  # bounded: wait for the filter to re-render
+        return await pick_smart(adapter, page, llm, value, session=session)  # exact -> contains -> LLM closest
     if a == "chip":  # typeahead TAG: add EACH comma-item as its own pill (type -> filter -> pick)
         import contextlib
 
@@ -570,14 +675,14 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
             inp = await first(page, f"{base} input") or await first(page, f'{base} [role="combobox"]')
             if not inp:
                 break
+            base_opts = [t for _, t in await _read_visible_options(page)]
             with contextlib.suppress(Exception):
                 await inp.click()
                 await inp.fill(it)
-            await asyncio.sleep(0.9)
-            picked = await pick_smart(adapter, page, llm, it, tries=5)  # exact -> contains -> LLM closest
+            await _wait_options_change(page, base_opts)  # bounded: wait for the tag filter to re-render
+            picked = await pick_smart(adapter, page, llm, it, session=session, tries=5)
             if not picked:
                 await eng_press_enter(session, page)  # fallback: trusted Enter on the highlight
-            await asyncio.sleep(0.3)
             added += 1
         return added > 0
     if a == "date":
@@ -597,8 +702,13 @@ async def eng_press_enter(session, page) -> None:
 async def _add_row(page, sec: str) -> bool:
     """Click the section's Add/Add Another control so the next row mounts. Generic: match by the
     section keyword in the button text, else a bare 'Add'."""
-    label_kw = {"experience": "experience", "education": "education", "skills": "skill",
-                "languages": "language", "certifications": "certification"}.get(sec, sec)
+    label_kw = {
+        "experience": "experience",
+        "education": "education",
+        "skills": "skill",
+        "languages": "language",
+        "certifications": "certification",
+    }.get(sec, sec)
     clicked = await page.evaluate(
         """(kw) => { const bs=[...document.querySelectorAll('button,[role=button]')];
           const re=new RegExp('add (another|'+kw+')','i');
@@ -615,8 +725,12 @@ async def _add_row(page, sec: str) -> bool:
 
 
 # ROW-repeater sections (each entry = an Add-Another row). Skills is a TAG (pills via chip put), NOT here.
-_ROW_SECTIONS = {"experience": ("experience", "work_experience"), "education": ("education",),
-                 "languages": ("languages",), "certifications": ("certifications",)}
+_ROW_SECTIONS = {
+    "experience": ("experience", "work_experience"),
+    "education": ("education",),
+    "languages": ("languages",),
+    "certifications": ("certifications",),
+}
 
 
 async def ensure_rows(adapter, page, profile: dict) -> bool:
@@ -644,8 +758,7 @@ async def ensure_rows(adapter, page, profile: dict) -> bool:
     return added
 
 
-async def fill_deterministic(adapter, session, page, profile: dict, llm, title: str = "",
-                             max_rounds: int = 3) -> dict:
+async def fill_deterministic(adapter, session, page, profile: dict, llm, title: str = "", max_rounds: int = 3) -> dict:
     """The fixpoint reconcile-and-repair loop. FIRST mount rows from the profile (so collapsed sections'
     fields exist), THEN one semantic map call, THEN loop: reconcile(read-back) -> put() MISSING/DIVERGED
     -> until the DOM is stable. Returns a ledger summary. NEVER submits. Agent escalation is the backstop.
@@ -657,8 +770,8 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
     t0 = time.monotonic()
     rows_added = await ensure_rows(adapter, page, profile)  # bootstrap ONCE: mount rows so fields appear
     t_ensure = time.monotonic() - t0
-    controls = await extract_live(page)                     # now collapsed sections have controls
-    plan = await make_plan(llm, controls, profile, title)   # ONE semantic map: labels known -> values
+    controls = await extract_live(page)  # now collapsed sections have controls
+    plan = await make_plan(llm, controls, profile, title)  # ONE semantic map: labels known -> values
     t_plan = time.monotonic() - t0 - t_ensure
     print(f"  [wd] ensure_rows={t_ensure:.1f}s plan={t_plan:.1f}s (rows_added={rows_added})", flush=True)
     summary = {"rounds": 0, "filled": 0, "rows_added": int(rows_added)}
@@ -679,9 +792,12 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
         slow: dict = {}
         for fd in todo:
             if fd.control:
-                # hard typeaheads: DOM read-back is flaky, so ask the cheap VLM if it's ALREADY filled
-                # ($0.0006, cached) before re-filling — kills the re-fill loop on a committed field.
-                if fd.control.archetype() in ("select", "chip") and await _vlm_filled(session, fd.control.label):
+                # hard typeaheads: DOM read-back is flaky, so ask the cheap VALUE-AWARE VLM whether the
+                # INTENDED value is already on screen ($0.0006, cached) before re-filling — skips a
+                # genuinely-correct field, but does NOT rubber-stamp a wrong committed value as done.
+                if fd.control.archetype() in ("select", "chip") and await _vlm_filled(
+                    session, fd.control.label, fd.intended
+                ):
                     continue
                 tp = time.monotonic()
                 ok = await put(adapter, session, page, fd.control, fd.intended, llm)
@@ -689,8 +805,11 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
                 slow[fd.control.archetype()] = slow.get(fd.control.archetype(), 0.0) + dt
                 if ok:
                     summary["filled"] += 1
-        print(f"  [wd] round {rnd + 1}: {len(todo)} todo, {time.monotonic() - tr:.1f}s, "
-              f"put-time-by-type={ {k: round(v, 1) for k, v in slow.items()} }", flush=True)
+        print(
+            f"  [wd] round {rnd + 1}: {len(todo)} todo, {time.monotonic() - tr:.1f}s, "
+            f"put-time-by-type={ {k: round(v, 1) for k, v in slow.items()} }",
+            flush=True,
+        )
         await asyncio.sleep(0.5)
     final_controls = await extract_live(page)
     final_diff = reconcile(plan, final_controls, await read_live(page, final_controls))
@@ -698,19 +817,27 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
     # the cheap VLM is the ground truth, so the residual reflects what the user would SEE, not a flaky read.
     real_residual = []
     for f in final_diff.todo():
-        if f.control and f.control.archetype() in ("select", "chip") and await _vlm_filled(session, f.label):
+        if (
+            f.control
+            and f.control.archetype() in ("select", "chip")
+            and await _vlm_filled(session, f.label, f.intended)
+        ):
             summary["filled"] += 1
             continue
         real_residual.append(f"{f.section}[{f.row}].{f.label}")
     summary["residual"] = real_residual
     summary["secs"] = round(time.monotonic() - t0, 1)
-    print(f"  [wd] TOTAL {summary['secs']}s filled={summary['filled']} residual={len(summary['residual'])}",
-          flush=True)
+    print(f"  [wd] TOTAL {summary['secs']}s filled={summary['filled']} residual={len(summary['residual'])}", flush=True)
     return summary
 
 
-_PKEY = {"experience": ("experience", "work_experience"), "education": ("education",),
-         "skills": ("skills",), "languages": ("languages",), "certifications": ("certifications",)}
+_PKEY = {
+    "experience": ("experience", "work_experience"),
+    "education": ("education",),
+    "skills": ("skills",),
+    "languages": ("languages",),
+    "certifications": ("certifications",),
+}
 _TAG_SECTIONS = {"skills", "certifications"}  # one typeahead, many pills (NOT Add-Another rows)
 _PLAN_SYS = (
     "You map an applicant profile onto a job application's repeater sections. You are given, per "
@@ -742,8 +869,12 @@ def _plan_skeleton(controls: list[Control], profile: dict) -> dict:
             # TAG: ONE typeahead control holds MANY pills (Skills) — NOT N Add-Another rows. Plan a
             # single row whose value is the comma-joined list; put() adds each as a pill.
             joined = ", ".join(str(it) for it in items)
-            plan[sec] = {"count": 1, "rows": [{labels[0]: ""}] if labels else [],
-                         "_items": [joined], "_labels": labels[:1]}
+            plan[sec] = {
+                "count": 1,
+                "rows": [{labels[0]: ""}] if labels else [],
+                "_items": [joined],
+                "_labels": labels[:1],
+            }
         else:
             rows = [{lbl: "" for lbl in labels} for _ in items]
             plan[sec] = {"count": len(rows), "rows": rows, "_items": items, "_labels": labels}
@@ -757,9 +888,14 @@ def _fill_values_struct(plan: dict) -> None:
             for lbl in blk["_labels"]:
                 if isinstance(item, dict):
                     lk = re.sub(r"[^a-z]", "", nkey(lbl))
-                    row[lbl] = next((str(v) for k, v in item.items()
-                                     if re.sub(r"[^a-z]", "", k.lower()) in lk
-                                     or lk in re.sub(r"[^a-z]", "", k.lower())), "")
+                    row[lbl] = next(
+                        (
+                            str(v)
+                            for k, v in item.items()
+                            if re.sub(r"[^a-z]", "", k.lower()) in lk or lk in re.sub(r"[^a-z]", "", k.lower())
+                        ),
+                        "",
+                    )
                 else:  # scalar (a skill/language string) -> the single label
                     row[lbl] = str(item)
 
@@ -788,8 +924,9 @@ async def _fill_values_llm(llm, plan: dict, title: str) -> None:
             for lbl in blk["_labels"]:
                 to_fill.append({"section": sec, "row": ri, "label": lbl})
     ctx = {"job_title": title, "profile": prof, "to_fill": to_fill}
-    res = await llm.ainvoke([SystemMessage(content=_PLAN_SYS),
-                             UserMessage(content=json.dumps(ctx, ensure_ascii=False))], output_format=_Out)
+    res = await llm.ainvoke(
+        [SystemMessage(content=_PLAN_SYS), UserMessage(content=json.dumps(ctx, ensure_ascii=False))], output_format=_Out
+    )
     for cell in res.completion.cells:
         blk = plan.get(cell.section)
         if blk and 0 <= cell.row < len(blk["rows"]) and cell.label in blk["rows"][cell.row]:

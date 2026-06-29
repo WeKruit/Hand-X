@@ -31,8 +31,8 @@ VERIFY_MODEL = os.environ.get("GH_VERIFY_MODEL", "gemini-3.1-flash-lite")
 VLM_MAX_CALLS = int(os.environ.get("GH_VERIFY_MAX_CALLS", "6"))
 
 # ---- run-scoped state (one process == one application run) -------------------
-_VCACHE: dict[str, str] = {}     # cache key (url|label) -> raw verdict string
-_VLM_CALLS = {"n": 0}            # unique VLM calls on the CURRENT page
+_VCACHE: dict[str, str] = {}  # cache key (url|label) -> raw verdict string
+_VLM_CALLS = {"n": 0}  # unique VLM calls on the CURRENT page
 
 
 def reset_visual_cache() -> None:
@@ -51,6 +51,14 @@ def _is_filled(verdict: str) -> bool:
     return '"filled":true' in v
 
 
+def _matches(verdict: str) -> bool:
+    """Whitespace/quote-tolerant parse of the value-aware VLM's {"matches": true} reply.
+    Used by callers that asked `want=...`: answers "does the field show the RIGHT value?"
+    (not merely "is it non-blank?"). False for presence-only verdicts (no matches key)."""
+    v = verdict.lower().replace("'", '"').replace(" ", "")
+    return '"matches":true' in v
+
+
 def _vlm() -> Any:
     from browser_use import ChatGoogle  # cheap VLM; swap to ChatOpenAI(base_url=…) for local Qwen2.5-VL
 
@@ -64,17 +72,32 @@ async def _current_url(session: Any) -> str:
         return ""
 
 
-async def visual_check(session: Any, target: str, *, key: str | None = None, use_cache: bool = True) -> str:
+async def visual_check(
+    session: Any, target: str, *, want: str | None = None, key: str | None = None, use_cache: bool = True
+) -> str:
     """Core cheap-VLM check, reused by the action AND the deterministic loop hook.
     `target` is what to look for ("Cover Letter" / "646-678-9391"); `key` overrides the
     cache identity (default: target) so the hook (keyed by field label) and the action
-    (keyed by field_label) hit the SAME cache entry for a field. Returns a short JSON-ish
-    verdict string {filled, value}. Served from cache (no VLM, no $) on a repeat; returns
-    a {"capped"} sentinel once the per-page VLM budget is spent."""
+    (keyed by field_label) hit the SAME cache entry for a field.
+
+    VALUE-AWARE mode (`want` given): asks "does field `target` visibly contain the value
+    `want`?" and returns {"filled": bool, "value": "<visible text>", "matches": bool}. This
+    is what the Workday dropdown/repeater guards need — the frozen-portal bug commits the
+    WRONG option, so a presence-only "filled" rubber-stamps a wrong value as done; `matches`
+    is the question that actually catches it. Parse it with `_matches`.
+
+    PRESENCE-ONLY mode (`want` None, the default): unchanged — "is `target` non-blank?",
+    returns {"filled": bool, "value": ...}. Single-page (jobapply.py) calls it this way.
+
+    Returns a short JSON-ish verdict string. Served from cache (no VLM, no $) on a repeat;
+    returns a {"capped"} sentinel once the per-page VLM budget is spent. The cache key
+    includes `want` so a value-check and a presence-check of the same field never collide."""
     ck = ""
     if use_cache:
         # cache hit / over-budget are the FAST paths: no screenshot, no import, no $.
-        ck = f"{await _current_url(session)}|{_norm(key if key is not None else target)}"
+        # `want` is in the key: a presence-check and a value-check of one field are distinct.
+        ident = _norm(key if key is not None else target)
+        ck = f"{await _current_url(session)}|{ident}|{_norm(want) if want is not None else ''}"
         if ck in _VCACHE:
             return _VCACHE[ck]
         if _VLM_CALLS["n"] >= VLM_MAX_CALLS:
@@ -85,10 +108,17 @@ async def visual_check(session: Any, target: str, *, key: str | None = None, use
     except Exception as exc:
         return f'{{"filled": null, "error": "screenshot: {exc}"}}'
     b64 = base64.b64encode(png).decode()
-    prompt = (
-        f"This is a job-application web form. Is '{target}' currently filled in / visibly present "
-        f'in an input (not blank)? Reply STRICT JSON: {{"filled": true|false, "value": "<visible text>"}}.'
-    )
+    if want is not None:
+        prompt = (
+            f'This is a job-application web form. Does the field labeled "{target}" visibly contain '
+            f'the value "{want}"? Reply STRICT JSON: '
+            f'{{"filled": true|false, "value": "<visible text>", "matches": true|false}}.'
+        )
+    else:
+        prompt = (
+            f"This is a job-application web form. Is '{target}' currently filled in / visibly present "
+            f'in an input (not blank)? Reply STRICT JSON: {{"filled": true|false, "value": "<visible text>"}}.'
+        )
     try:  # production always has browser_use; the guard only lets offline tests fake _vlm()
         from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
 

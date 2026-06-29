@@ -27,6 +27,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from dataclasses import field as dc_field
@@ -365,7 +366,54 @@ async def _unfreeze(session: Any) -> None:
         await p.evaluate(_UNFREEZE_JS)
 
 
-async def escalate(session: Any, agent_llm: Any, page: Any, field: FormField, value: str) -> bool:
+# ---------------------------------------------------------------------------
+# Anti-thrash kit for the wizard agents — the SAME single-page kit proven in
+# jobapply.py (the only thing that breaks the Workday vision-thrash loop + the
+# resume-upload structural failure that timed out 5 live runs at 480s / ~$7).
+#   * register_visual_verify(tools) -> the agent can CALL verify_field_visually
+#     to confirm a false-empty BEFORE retyping (kills the non-committing-dropdown
+#     loop where it clicks a stale option node 6x to timeout).
+#   * make_loop_verify_hook() on_step_end -> automatic nudge that names the field
+#     + value when vision confirms it is already set, so bu cannot re-hallucinate
+#     it empty.
+#   * available_file_paths=[resume] -> resume upload stops failing structurally.
+# ---------------------------------------------------------------------------
+# Anti-loop rules appended to every wizard-agent task prompt (the proven text).
+_ANTI_LOOP_RULES = (
+    "\nANTI-LOOP RULES (these break the vision-thrash that times the run out):\n"
+    "- If a field reads EMPTY in the browser state but you ALREADY acted on it, call "
+    "verify_field_visually BEFORE re-typing — never type or click the same field twice "
+    "without verifying it first (the state read-back is often a false-empty).\n"
+    "- For dropdowns use the dropdown SELECT tools (get_dropdown_options / select_dropdown_option), "
+    "do NOT hand-click option nodes — they re-render and your click lands on a stale node, "
+    "looping forever."
+)
+
+
+def _wizard_agent_kit() -> tuple[Any, Any]:
+    """Build the (tools, on_step_end_hook) the single-page path uses, for a wizard agent.
+    tools carries verify_field_visually; the hook is the cached/capped/nudge-only loop guard
+    (it NEVER stops the agent). Fresh per-page VLM budget is reset by run_wizard each step."""
+    from vision_verify import make_loop_verify_hook, register_visual_verify
+
+    from browser_use import Tools
+
+    tools = Tools()
+    register_visual_verify(tools)
+    return tools, make_loop_verify_hook()
+
+
+def _strip_urls(text: str) -> str:
+    """Adobe bad-seed fix: a Workday validation message can contain a token that LOOKS like a
+    URL (e.g. 'https://value.Error' / a hallucinated link), which browser-use will obediently
+    NAVIGATE to — losing the form. Strip anything URL-shaped out of the repair seed text so the
+    agent only ever reads field-level instructions, never a destination to open."""
+    return re.sub(r"\b(?:https?://|www\.)\S+", "[link removed]", text or "")
+
+
+async def escalate(
+    session: Any, agent_llm: Any, page: Any, field: FormField, value: str, resume: str | None = None
+) -> bool:
     from browser_use import Agent
 
     label = field.label or field.name
@@ -376,12 +424,22 @@ async def escalate(session: Any, agent_llm: Any, page: Any, field: FormField, va
         f"form input labeled '{label}' and put this exact text into it: {value!r}. "
         "It is a form field on THIS page — never navigate, never open a URL, even if the value looks like a link. "
         "Do not submit the form and do not touch any other field. Call done once that field shows the value."
+        + _ANTI_LOOP_RULES
     )
+    tools, hook = _wizard_agent_kit()
     try:
         # use_vision='auto' lets the agent pull a screenshot to SEE field state (avoids re-typing a
         # field the serialized DOM falsely reads empty) — it observes, the deterministic layer fills.
-        agent = Agent(task=task, llm=agent_llm, browser_session=session, use_vision="auto")
-        await agent.run(max_steps=4)
+        # tools -> verify_field_visually; available_file_paths -> resume upload works; hook -> loop guard.
+        agent = Agent(
+            task=task,
+            llm=agent_llm,
+            browser_session=session,
+            tools=tools,
+            use_vision="auto",
+            available_file_paths=[resume] if resume else None,
+        )
+        await agent.run(max_steps=4, on_step_end=hook)
         return True
     except Exception as exc:
         print(f"   [L3] agent failed for {field.name}: {exc}")
@@ -396,7 +454,9 @@ async def escalate(session: Any, agent_llm: Any, page: Any, field: FormField, va
         await _unfreeze(session)  # ALWAYS unlock — else subsequent deterministic fills hit frozen fields
 
 
-async def agent_fill_section(session: Any, page: Any, *, section: str, instructions: str, max_steps: int = 10) -> dict:
+async def agent_fill_section(
+    session: Any, page: Any, *, section: str, instructions: str, resume: str | None = None, max_steps: int = 10
+) -> dict:
     """Hand a hard, NON-schema section (an education / experience REPEATER whose rows + searchable
     closed-taxonomy comboboxes exist only in the live DOM, below the fold and NOT in the selector
     map) to a FOCUSED browser-use Agent. The agent scrolls to the section and drives the comboboxes
@@ -432,13 +492,21 @@ async def agent_fill_section(session: Any, page: Any, *, section: str, instructi
         "'Computer'), then pick the nearest option offered. Do not leave a dropdown with text typed but no "
         "option selected. Use 'Add another' before each additional entry. Touch NOTHING outside this "
         "section. The Submit button is DISABLED on purpose — do NOT submit and do NOT navigate. Call done "
-        "once every dropdown in the section shows a SELECTED value."
+        "once every dropdown in the section shows a SELECTED value." + _ANTI_LOOP_RULES
     )
     ok = True
+    tools, hook = _wizard_agent_kit()
     try:
         llm = ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY"))
-        agent = Agent(task=task, llm=llm, browser_session=session, use_vision="auto")
-        await agent.run(max_steps=max_steps)
+        agent = Agent(
+            task=task,
+            llm=llm,
+            browser_session=session,
+            tools=tools,
+            use_vision="auto",
+            available_file_paths=[resume] if resume else None,
+        )
+        await agent.run(max_steps=max_steps, on_step_end=hook)
     except Exception as exc:
         print(f"   [agent:{section}] {exc}")
         ok = False
@@ -453,7 +521,13 @@ async def agent_fill_section(session: Any, page: Any, *, section: str, instructi
 
 
 async def repair_and_advance(
-    session: Any, page: Any, errors: list[str], advance_label: str, agent_llm: Any = None, max_steps: int = 22
+    session: Any,
+    page: Any,
+    errors: list[str],
+    advance_label: str,
+    agent_llm: Any = None,
+    resume: str | None = None,
+    max_steps: int = 22,
 ) -> bool:
     """Agent-driven recovery for a step that FAILED validation on advance. KEY finding: once a
     platform (Workday) rejects a Save, NO deterministic re-fill re-arms it — not browser-use
@@ -470,7 +544,10 @@ async def repair_and_advance(
     # session): re-disable any final-submit button now, in case the guard interval isn't installed.
     await install_submit_guard(page)
 
-    bullet = "\n- ".join(errors[:12])
+    # ADOBE BAD-SEED FIX: strip URL-shaped tokens from each validation message before seeding the
+    # task — a message like 'invalid: https://value.Error' would otherwise make browse-use NAVIGATE
+    # to a hallucinated link and lose the form.
+    bullet = "\n- ".join(_strip_urls(e) for e in errors[:12])
     task = (
         "You are on one step of a multi-step job-application form. It FAILED to advance because of "
         f"these validation errors:\n- {bullet}\n"
@@ -507,16 +584,19 @@ async def repair_and_advance(
         "ordinary-applicant answer. CRITICAL: every field is "
         "on THIS page — NEVER open a URL, navigate, search the web, or go back/forward (it loses the "
         "form). Do NOT submit a FINAL application (any 'Submit Application' is disabled). Call done "
-        "as soon as the page has advanced to the next step."
+        "as soon as the page has advanced to the next step." + _ANTI_LOOP_RULES
     )
+    tools, hook = _wizard_agent_kit()
     try:
         agent = Agent(
             task=task,
             llm=agent_llm or ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY")),
             browser_session=session,
+            tools=tools,
             use_vision=True,
+            available_file_paths=[resume] if resume else None,
         )
-        await agent.run(max_steps=max_steps)
+        await agent.run(max_steps=max_steps, on_step_end=hook)
     except Exception as exc:
         print(f"   [agent:repair] {exc}")
     finally:
@@ -605,7 +685,7 @@ async def fill_with_ladder(
     if await _vlm_filled(session, field, value):
         return "vlm"
 
-    if allow_escalation and await escalate(session, agent_llm, page, field, value):
+    if allow_escalation and await escalate(session, agent_llm, page, field, value, resume=resume):
         with contextlib.suppress(Exception):
             page = await session.must_get_current_page()  # re-acquire after agent + CDP re-attach
         await _unfreeze(session)  # belt-and-suspenders: ensure nothing stays locked for later fields
@@ -975,7 +1055,7 @@ async def run_wizard(
             if errs:
                 print(f"  [agent-repair] advance blocked by validation: {errs}")
                 agent_used = True
-                await repair_and_advance(session, page, errs, adapter.advance_label, agent_llm=agent_llm)
+                await repair_and_advance(session, page, errs, adapter.advance_label, agent_llm=agent_llm, resume=resume)
                 page = await session.must_get_current_page()
                 moved = await adapter.extract_step(session, page, profile)
                 if moved.index != step.index or moved.is_review or await adapter.is_complete(session, page):
