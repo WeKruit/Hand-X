@@ -267,9 +267,11 @@ async def click_trusted(session: Any, page: Any, element: Any) -> bool:
         box = await element.evaluate(
             "() => { const el=this; el.scrollIntoView({block:'center',inline:'center'});"
             " const r=el.getBoundingClientRect();"
-            " return (r.width&&r.height) ? {x:r.left+r.width/2, y:r.top+r.height/2} : null; }"
+            " return (r.width&&r.height) ? JSON.stringify({x:r.left+r.width/2, y:r.top+r.height/2}) : ''; }"
         )
-        if not box:
+        if isinstance(box, str):
+            box = json.loads(box) if box else None
+        if not isinstance(box, dict):
             return False
         x, y = box["x"], box["y"]
         for ev in (
