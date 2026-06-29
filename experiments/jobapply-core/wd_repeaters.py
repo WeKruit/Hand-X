@@ -323,6 +323,12 @@ def reconcile(plan: dict, controls: list[Control], readback: dict | None = None)
     for sec, blk in plan.items():
         plan_rows = blk.get("rows", [])
         dom_rows = _rows_of(controls, sec)
+        # TAG section (Skills / Certifications): its control is UNNUMBERED (row="", one typeahead holding
+        # many pills), so _rows_of finds no numbered rows and returned []. Without this the plan row never
+        # links to the chip control (ctrl=None, archetype=None) and put() can't dispatch -> Skills is
+        # NEVER typed (the verified bug). One unnumbered control = one row "".
+        if not dom_rows and any(c.sect() == sec and c.row == "" for c in controls):
+            dom_rows = [""]
         for j, prow in enumerate(plan_rows):
             dom_row = dom_rows[j] if j < len(dom_rows) else None
             for label, value in prow.items():
