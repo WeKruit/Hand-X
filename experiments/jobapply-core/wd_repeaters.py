@@ -437,9 +437,68 @@ async def _locate(page, c: Control):
     return await first(page, f'[data-fkit-id="{c.fkit}"]') if c.fkit else None
 
 
-async def put(adapter, session, page, c: Control, value: str) -> bool:
+async def _llm_pick(llm, value: str, options: list[str]) -> str | None:
+    """The agent's 'which option' decision, made CHEAPLY by a text LLM over the READ options (no vision):
+    pick the closest by meaning/abbreviation ('BS'->Bachelor's, 'Python'->nearest skill). Cached upstream."""
+    import contextlib
+
+    if llm is None or not options:
+        return None
+    from pydantic import BaseModel
+
+    from browser_use.llm.messages import SystemMessage, UserMessage
+
+    class _Pick(BaseModel):
+        choice: str  # EXACT option text from the list, or "NONE"
+
+    with contextlib.suppress(Exception):
+        res = await llm.ainvoke(
+            [SystemMessage(content="Pick the option that best matches the wanted value — closest meaning "
+                           "or abbreviation (e.g. 'B.S.' -> \"Bachelor's Degree\"; 'Python' -> the nearest "
+                           "skill). Reply the EXACT option text from the list, or 'NONE' if truly none fit."),
+             UserMessage(content=f"wanted: {value!r}\noptions: {options}")],
+            output_format=_Pick)
+        c = (res.completion.choice or "").strip()
+        return None if c.upper() == "NONE" or not c else c
+    return None
+
+
+async def pick_smart(adapter, page, llm, value: str, tries: int = 8) -> bool:
+    """Pick the best typeahead/listbox option for `value`: exact -> contains -> CHEAP LLM choice over the
+    READ options (the replayable agent decision). Clicks the chosen option. Returns True if one was clicked."""
+    import contextlib
+
+    want = norm(value)
+    for _ in range(tries):
+        await asyncio.sleep(0.3)
+        raw = await page.get_elements_by_css_selector(
+            '[data-automation-id="activeListContainer"] [role="option"], [data-automation-id="promptOption"], '
+            '[data-automation-id="menuItem"], [role="listbox"] [role="option"]')
+        opts: list = []
+        for o in raw:
+            with contextlib.suppress(Exception):
+                t = norm(await o.evaluate("() => this.textContent || ''"))
+                if t:
+                    opts.append((o, t))
+        if not opts:
+            continue
+        target = (next((o for o, t in opts if norm(t) == want), None)
+                  or next((o for o, t in opts if want and (want in norm(t) or norm(t) in want)), None))
+        if target is None and llm is not None:
+            choice = await _llm_pick(llm, value, [t for _, t in opts])  # the agent's decision, replayed
+            if choice:
+                target = next((o for o, t in opts if norm(t) == norm(choice)), None)
+        if target is not None:
+            with contextlib.suppress(Exception):
+                await target.click()
+                return True
+    return False
+
+
+async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
     """ONE verb: drive a control to `value`, dispatching by archetype to the proven WorkdayAdapter
-    primitives. Locates row-safe by data-fkit-id. Observe-then-verify is inside each primitive."""
+    primitives. Locates row-safe by data-fkit-id. Observe-then-verify is inside each primitive.
+    Searchable typeaheads (Degree/School/Field/Skills) pick via pick_smart (LLM closest-match)."""
     from ats_engine import first
 
     a = c.archetype()
@@ -481,7 +540,7 @@ async def put(adapter, session, page, c: Control, value: str) -> bool:
             with contextlib.suppress(Exception):
                 await inp.fill(value)
                 await asyncio.sleep(0.8)
-        return await adapter._pick_option(page, value)
+        return await pick_smart(adapter, page, llm, value)  # exact -> contains -> LLM closest
     if a == "chip":  # typeahead TAG: add EACH comma-item as its own pill (type -> filter -> pick)
         import contextlib
 
@@ -497,7 +556,7 @@ async def put(adapter, session, page, c: Control, value: str) -> bool:
                 await inp.click()
                 await inp.fill(it)
             await asyncio.sleep(0.9)
-            picked = await adapter._pick_option(page, it, allow_fallback=False)  # CLICK the matching option
+            picked = await pick_smart(adapter, page, llm, it, tries=5)  # exact -> contains -> LLM closest
             if not picked:
                 await eng_press_enter(session, page)  # fallback: trusted Enter on the highlight
             await asyncio.sleep(0.3)
@@ -603,7 +662,7 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
         for fd in todo:
             if fd.control:
                 tp = time.monotonic()
-                ok = await put(adapter, session, page, fd.control, fd.intended)
+                ok = await put(adapter, session, page, fd.control, fd.intended, llm)
                 dt = time.monotonic() - tp
                 slow[fd.control.archetype()] = slow.get(fd.control.archetype(), 0.0) + dt
                 if ok:
