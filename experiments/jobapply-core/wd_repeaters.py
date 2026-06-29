@@ -367,37 +367,43 @@ async def extract_live(page) -> list[Control]:
     return dedup(controls)
 
 
-READ_JS = r"""
-(fkit) => {
-  const root = document.querySelector('[data-fkit-id="'+fkit+'"]') || document;
-  const ms = root.closest && root.closest('[data-automation-id="multiSelectContainer"]');
-  if (ms) {  // chip: read committed pill text(s)
-    const pills=[...ms.querySelectorAll('[data-automation-id="selectedItem"]')].map(p=>(p.textContent||'').trim());
-    return pills.join(', ');
-  }
-  const el = root.querySelector ? (root.querySelector('input,textarea,select,[role="spinbutton"]') || root) : root;
-  if (el.getAttribute && (el.getAttribute('type')==='checkbox' || el.getAttribute('role')==='checkbox'))
-    return (el.checked||el.getAttribute('aria-checked')==='true') ? 'true' : '';
-  const btn = root.querySelector && root.querySelector('button');  // listbox button shows the chosen text
-  if (btn && (el.tagName==='BUTTON' || (el.getAttribute&&el.getAttribute('aria-haspopup')==='listbox')))
-    return (btn.textContent||'').trim();
-  // date: concat segment spinbutton values
-  const spins=[...root.querySelectorAll('[role="spinbutton"]')];
-  if (spins.length) return spins.map(s=>(s.textContent||s.value||'').trim()).filter(Boolean).join('/');
-  return (el.value!==undefined ? el.value : (el.textContent||'')).trim();
+# Batched read-back: ONE eval for ALL controls (a per-control eval x 19 controls x 5 rounds is what made
+# fill_deterministic so slow it got cancelled mid-run on a live page). Returns {fkit: committed value}.
+READ_ALL_JS = r"""
+(fkits) => {
+  const norm = s => (s||'').replace(/\s+/g,' ').trim();
+  const readOne = (fkit) => {
+    const root = document.querySelector('[data-fkit-id="'+fkit+'"]'); if (!root) return '';
+    const ms = root.closest('[data-automation-id="multiSelectContainer"]');
+    if (ms) return [...ms.querySelectorAll('[data-automation-id="selectedItem"]')].map(p=>norm(p.textContent)).join(', ');
+    const el = root.querySelector('input,textarea,select,[role="spinbutton"]') || root;
+    if (el.getAttribute && (el.getAttribute('type')==='checkbox' || el.getAttribute('role')==='checkbox'))
+      return (el.checked||el.getAttribute('aria-checked')==='true') ? 'true' : '';
+    const btn = root.querySelector('button');
+    if (btn && (el.tagName==='BUTTON' || (el.getAttribute&&el.getAttribute('aria-haspopup')==='listbox')))
+      return norm(btn.textContent);
+    const spins=[...root.querySelectorAll('[role="spinbutton"]')];
+    if (spins.length) return spins.map(s=>norm(s.textContent||s.value)).filter(Boolean).join('/');
+    return norm(el.value!==undefined ? el.value : el.textContent);
+  };
+  const out={}; for (const f of fkits) out[f]=readOne(f); return JSON.stringify(out);
 }
 """
 
 
 async def read_live(page, controls: list[Control]) -> dict:
-    """Read-back: {fkit: committed value} for every control — the ground truth reconcile diffs against."""
-    out: dict = {}
-    for c in controls:
-        if not c.fkit:
-            continue
-        with __import__("contextlib").suppress(Exception):
-            out[c.fkit] = norm(await page.evaluate(READ_JS, c.fkit))
-    return out
+    """Read-back: {fkit: committed value} for every control — ground truth reconcile diffs against. ONE
+    batched eval (not per-control) so the loop stays fast enough to finish within the step budget."""
+    import contextlib
+    import json
+
+    fkits = [c.fkit for c in controls if c.fkit]
+    if not fkits:
+        return {}
+    with contextlib.suppress(Exception):
+        raw = await page.evaluate(READ_ALL_JS, fkits)
+        return {k: norm(v) for k, v in json.loads(raw).items()}
+    return {}
 
 
 # archetype -> the WorkdayAdapter.fill() type that drives it
@@ -549,8 +555,9 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
             if fd.control and await put(adapter, session, page, fd.control, fd.intended):
                 summary["filled"] += 1
         await asyncio.sleep(0.5)
-    summary["residual"] = [f"{f.section}[{f.row}].{f.label}" for f in reconcile(
-        plan, await extract_live(page), await read_live(page, await extract_live(page))).todo()]
+    final_controls = await extract_live(page)
+    final_diff = reconcile(plan, final_controls, await read_live(page, final_controls))
+    summary["residual"] = [f"{f.section}[{f.row}].{f.label}" for f in final_diff.todo()]
     return summary
 
 

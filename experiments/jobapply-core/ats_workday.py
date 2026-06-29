@@ -632,15 +632,22 @@ class WorkdayAdapter(ATSAdapter):
         return False
 
     async def _date(self, page: Any, field: FormField, value: str) -> bool:
-        """Segmented MM/DD/YYYY spinbuttons — type continuous digits (Workday auto-advances)."""
-        digits = ""
+        """Segmented date spinbuttons — type continuous digits (Workday auto-advances). SEGMENT-AWARE:
+        Experience/Education dates are MM/YYYY (no Day segment); My-Information dates are MM/DD/YYYY.
+        Inserting a day into a MM/YYYY widget overflows the Year ('2021-06' -> garbage 'Year 6012'),
+        so only include the day when the widget actually HAS a Day segment."""
         parts = (value or "").split("-")  # ISO YYYY-MM-DD or YYYY-MM
-        if len(parts) >= 2:
-            mm = parts[1].zfill(2)
-            dd = parts[2].zfill(2) if len(parts) >= 3 else "01"
-            digits = f"{mm}{dd}{parts[0]}"
-        if not digits:
+        if len(parts) < 2:
             return False
+        mm, yyyy = parts[1].zfill(2), parts[0]
+        has_day = False
+        with contextlib.suppress(Exception):
+            has_day = bool(await eng.first(page, self._wsel(field.name, ' [data-automation-id*="dateSectionDay"]')))
+        if has_day:
+            dd = parts[2].zfill(2) if len(parts) >= 3 else "01"
+            digits = f"{mm}{dd}{yyyy}"
+        else:
+            digits = f"{mm}{yyyy}"
         # DomHand WORKDAY_SELECTORS month-segment variants: dateSectionMonth-input /
         # *dateSectionMonth* / placeholder MM.
         seg = (
