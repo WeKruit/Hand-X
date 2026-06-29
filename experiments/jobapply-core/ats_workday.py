@@ -583,9 +583,9 @@ class WorkdayAdapter(ATSAdapter):
         # pill). Instead, type-to-filter then commit the highlighted top match with a TRUSTED CDP
         # Enter — synthetic keys are ignored by the widget. Verified: 'United States' -> pill
         # 'United States of America (+1)'.
-        await asyncio.sleep(1.2)  # let the typeahead filter + highlight the top match
+        await asyncio.sleep(0.5)  # let the typeahead filter + highlight the top match
         await eng.press_enter_trusted(session, page)
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(0.3)
         ok = await self.read_back(session, page, field, value)
         if _DBG:
             print(f"   [msel {field.name}] value={value!r} committed={ok}")
@@ -909,12 +909,12 @@ class WorkdayAdapter(ATSAdapter):
         # A widget's commit (listbox button text, radio check, pill) can lag the click by a
         # re-render, so an immediate single read false-negatives — POLL the check (returns the
         # instant it passes, so a correct fill costs nothing extra).
-        tries = 1 if field.type in ("input_text", "textarea", "file") else 6
+        tries = 1 if field.type in ("input_text", "textarea", "file") else 3
         for i in range(tries):
             if await self._read_once(page, field, value):
                 return True
             if i + 1 < tries:
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.25)
         return False
 
     async def _read_once(self, page: Any, field: FormField, value: str) -> bool:

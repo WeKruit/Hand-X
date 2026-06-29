@@ -496,13 +496,22 @@ async def _vlm_filled(session, label: str, value: str) -> bool:
     return False
 
 
+_PICK_CACHE: dict = {}  # (value, options) -> chosen text. The 5 language-proficiency selects share the
+# SAME value ("Native or Bilingual") AND options ("1-Beginner".."5-Native") — without this each fires its
+# own ~3s LLM call (the 15s/field the user hit). Identical (value,options) -> ONE call, reused.
+
+
 async def _llm_pick(llm, value: str, options: list[str]) -> str | None:
     """The agent's 'which option' decision, made CHEAPLY by a text LLM over the READ options (no vision):
-    pick the closest by meaning/abbreviation ('BS'->Bachelor's, 'Python'->nearest skill). Cached upstream."""
+    pick the closest by meaning/abbreviation ('BS'->Bachelor's, 'Python'->nearest skill). Memoised on
+    (value, options) so repeated identical picks (language proficiencies) cost ONE LLM call, not N."""
     import contextlib
 
     if llm is None or not options:
         return None
+    ckey = (norm(value).lower(), tuple(options))
+    if ckey in _PICK_CACHE:
+        return _PICK_CACHE[ckey]
     from pydantic import BaseModel
 
     from browser_use.llm.messages import SystemMessage, UserMessage
@@ -523,7 +532,9 @@ async def _llm_pick(llm, value: str, options: list[str]) -> str | None:
             output_format=_Pick,
         )
         c = (res.completion.choice or "").strip()
-        return None if c.upper() == "NONE" or not c else c
+        out = None if c.upper() == "NONE" or not c else c
+        _PICK_CACHE[ckey] = out  # memoise so identical later picks (proficiency selects) are instant
+        return out
     return None
 
 
