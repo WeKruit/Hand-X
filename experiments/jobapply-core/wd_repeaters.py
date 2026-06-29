@@ -476,7 +476,7 @@ async def put(adapter, session, page, c: Control, value: str) -> bool:
     if a == "date":
         from ats_engine import FormField
 
-        return await adapter._date(page, FormField(name=c.fkit, type="date", label=c.label), value)
+        return await adapter._date(page, FormField(name=c.fkit, type="date", label=c.label, source="standard"), value)
     return False
 
 
@@ -545,13 +545,20 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
 
     ensure_rows + make_plan run ONCE upfront (rows persist + labels don't change), NOT per round — the
     per-round re-mount + re-LLM made the loop too slow to finish within the step budget (timeout)."""
+    import time
+
+    t0 = time.monotonic()
     rows_added = await ensure_rows(adapter, page, profile)  # bootstrap ONCE: mount rows so fields appear
+    t_ensure = time.monotonic() - t0
     controls = await extract_live(page)                     # now collapsed sections have controls
     plan = await make_plan(llm, controls, profile, title)   # ONE semantic map: labels known -> values
+    t_plan = time.monotonic() - t0 - t_ensure
+    print(f"  [wd] ensure_rows={t_ensure:.1f}s plan={t_plan:.1f}s (rows_added={rows_added})", flush=True)
     summary = {"rounds": 0, "filled": 0, "rows_added": int(rows_added)}
     last_todo = None
     for rnd in range(max_rounds):
         summary["rounds"] = rnd + 1
+        tr = time.monotonic()
         controls = await extract_live(page)
         readback = await read_live(page, controls)
         diff = reconcile(plan, controls, readback)
@@ -559,15 +566,27 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
         if not todo:
             break
         if last_todo is not None and len(todo) >= last_todo:  # no progress -> stop the deterministic loop
+            print(f"  [wd] round {rnd + 1}: no progress ({len(todo)} todo), stop", flush=True)
             break
         last_todo = len(todo)
+        slow: dict = {}
         for fd in todo:
-            if fd.control and await put(adapter, session, page, fd.control, fd.intended):
-                summary["filled"] += 1
+            if fd.control:
+                tp = time.monotonic()
+                ok = await put(adapter, session, page, fd.control, fd.intended)
+                dt = time.monotonic() - tp
+                slow[fd.control.archetype()] = slow.get(fd.control.archetype(), 0.0) + dt
+                if ok:
+                    summary["filled"] += 1
+        print(f"  [wd] round {rnd + 1}: {len(todo)} todo, {time.monotonic() - tr:.1f}s, "
+              f"put-time-by-type={ {k: round(v, 1) for k, v in slow.items()} }", flush=True)
         await asyncio.sleep(0.5)
     final_controls = await extract_live(page)
     final_diff = reconcile(plan, final_controls, await read_live(page, final_controls))
     summary["residual"] = [f"{f.section}[{f.row}].{f.label}" for f in final_diff.todo()]
+    summary["secs"] = round(time.monotonic() - t0, 1)
+    print(f"  [wd] TOTAL {summary['secs']}s filled={summary['filled']} residual={len(summary['residual'])}",
+          flush=True)
     return summary
 
 
