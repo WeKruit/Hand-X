@@ -722,10 +722,14 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
             if ok:
                 added += 1
             else:
-                # no session / VLM unavailable (offline): commit the top highlight via trusted Enter,
-                # gated only on the menu having re-rendered for the typed filter (a render gate, not a
-                # substring match). The COMMIT decision is the widget's own highlight, not a string test.
+                # no session / VLM unavailable (offline): ArrowDown to highlight the first suggestion
+                # (Workday doesn't auto-highlight), then trusted Enter commits it — gated only on the
+                # menu having re-rendered for the typed filter (a render gate, not a substring match).
+                from ats_engine import arrow_down_trusted
+
                 await _wait_options_change(page, [])
+                await arrow_down_trusted(session, page)
+                await asyncio.sleep(0.15)
                 await eng_press_enter(session, page)
                 await asyncio.sleep(0.4)
                 added += 1
@@ -764,7 +768,11 @@ async def _chip_commit_visual(session, page, label: str, item: str, llm=None) ->
             offered = True  # VLM couldn't transcribe (budget/empty) -> don't block the commit
     if not offered:
         return False
-    await eng_press_enter(session, page)  # commit the widget's top highlight into a pill
+    from ats_engine import arrow_down_trusted
+
+    await arrow_down_trusted(session, page)  # HIGHLIGHT the first suggestion (Workday doesn't auto-highlight)
+    await asyncio.sleep(0.15)
+    await eng_press_enter(session, page)  # commit the now-highlighted top match into a pill
     await asyncio.sleep(0.4)
     # value-aware VLM verify: is OUR value now a visible pill under this Skills field?
     with contextlib.suppress(Exception):

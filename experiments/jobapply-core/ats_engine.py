@@ -233,27 +233,39 @@ async def upload_file(session: Any, page: Any, file_el: Any, path: str) -> bool:
         return False
 
 
-async def press_enter_trusted(session: Any, page: Any) -> bool:
-    """A TRUSTED Enter via CDP Input.dispatchKeyEvent on the focused element. react-select
-    (and similar geocomplete widgets) IGNORE synthetic page.press / JS-dispatched keys — only
-    a real CDP key commits the highlighted option. Caller must have focused/typed first."""
+async def press_key_trusted(session: Any, page: Any, *, key: str, code: str, vk: int) -> bool:
+    """A TRUSTED key via CDP Input.dispatchKeyEvent on the focused element. react-select (and Workday's
+    typeahead) IGNORE synthetic page.press / JS-dispatched keys — only a real CDP key navigates the
+    suggestion list / commits. Caller must have focused/typed first."""
     try:
         sid = await page.session_id
-        for ev in (
-            {
-                "type": "rawKeyDown",
-                "windowsVirtualKeyCode": 13,
-                "nativeVirtualKeyCode": 13,
-                "code": "Enter",
-                "key": "Enter",
-            },
-            {"type": "keyUp", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "code": "Enter", "key": "Enter"},
-        ):
-            await session.cdp_client.send.Input.dispatchKeyEvent(params=ev, session_id=sid)
+        for kind in ("rawKeyDown", "keyUp"):
+            await session.cdp_client.send.Input.dispatchKeyEvent(
+                params={
+                    "type": kind,
+                    "windowsVirtualKeyCode": vk,
+                    "nativeVirtualKeyCode": vk,
+                    "code": code,
+                    "key": key,
+                },
+                session_id=sid,
+            )
         return True
     except Exception as exc:
-        print(f"   [trusted-enter] {exc}")
+        print(f"   [trusted-key:{key}] {exc}")
         return False
+
+
+async def press_enter_trusted(session: Any, page: Any) -> bool:
+    """TRUSTED Enter — commits the highlighted option (Caller must have focused/typed first)."""
+    return await press_key_trusted(session, page, key="Enter", code="Enter", vk=13)
+
+
+async def arrow_down_trusted(session: Any, page: Any) -> bool:
+    """TRUSTED ArrowDown — HIGHLIGHTS the first suggestion in a typeahead menu that does NOT auto-
+    highlight (Workday's School / Field-of-Study / Skills multiselect). Without it a following Enter
+    commits NOTHING (the verified chip-residual bug). ArrowDown then Enter lands the pill."""
+    return await press_key_trusted(session, page, key="ArrowDown", code="ArrowDown", vk=40)
 
 
 async def click_trusted(session: Any, page: Any, element: Any) -> bool:
