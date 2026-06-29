@@ -309,6 +309,10 @@ def reconcile(plan: dict, controls: list[Control], readback: dict | None = None)
                     # won't match verbatim — so NON-EMPTY = filled (the Ashby read-back lesson). Don't
                     # string-compare, or we loop re-typing an already-filled field.
                     status = "DONE" if got else "MISSING"
+                elif arche == "chip" and "," in v:
+                    # multi-pill tag (Skills): DONE only when EVERY item is a committed pill.
+                    items = [nkey(x) for x in v.split(",") if x.strip()]
+                    status = "DONE" if got and all(it in nkey(got) for it in items) else "MISSING"
                 elif semantic_equal(v, got):
                     status = "DONE" if got else "MISSING"
                 else:
@@ -459,26 +463,46 @@ async def put(adapter, session, page, c: Control, value: str) -> bool:
                                   "this.dispatchEvent(new Event('change',{bubbles:true})); } }")
                 return True
         return False
-    if a == "select":  # button-listbox: open then pick from the shared portal
+    if a == "select":  # button-listbox: open, TYPE-to-filter if searchable, then pick from the portal
+        import contextlib
+
         trig = await first(page, f"{base} button")
         if not trig:
             return False
-        with __import__("contextlib").suppress(Exception):
+        with contextlib.suppress(Exception):
             await trig.click()
-        return await adapter._pick_option(page, value)
-    if a == "chip":  # typeahead: type -> filter -> pick the matching option -> verify pill (else skip)
-        inp = await first(page, f"{base} input") or await first(page, f'{base} [role="combobox"]')
-        if not inp:
-            return False
-        with __import__("contextlib").suppress(Exception):
-            await inp.click()
-            await inp.fill(value)
-        await asyncio.sleep(1.0)
-        picked = await adapter._pick_option(page, value, allow_fallback=False)  # CLICK the matching option
-        if not picked:
-            await eng_press_enter(session, page)  # fallback: trusted Enter on the highlight
         await asyncio.sleep(0.4)
-        return True
+        # a SEARCHABLE listbox (e.g. Degree) shows NO options until you type — find the revealed input
+        # and type the value to filter; an inline listbox just shows them (no input -> skip).
+        inp = (await first(page, f"{base} input")
+               or await first(page, '[data-automation-id="activeListContainer"] input')
+               or await first(page, 'input[aria-autocomplete="list"]'))
+        if inp:
+            with contextlib.suppress(Exception):
+                await inp.fill(value)
+                await asyncio.sleep(0.8)
+        return await adapter._pick_option(page, value)
+    if a == "chip":  # typeahead TAG: add EACH comma-item as its own pill (type -> filter -> pick)
+        import contextlib
+
+        items = [x.strip() for x in value.split(",")] if "," in value else [value]
+        added = 0
+        for it in items:
+            if not it:
+                continue
+            inp = await first(page, f"{base} input") or await first(page, f'{base} [role="combobox"]')
+            if not inp:
+                break
+            with contextlib.suppress(Exception):
+                await inp.click()
+                await inp.fill(it)
+            await asyncio.sleep(0.9)
+            picked = await adapter._pick_option(page, it, allow_fallback=False)  # CLICK the matching option
+            if not picked:
+                await eng_press_enter(session, page)  # fallback: trusted Enter on the highlight
+            await asyncio.sleep(0.3)
+            added += 1
+        return added > 0
     if a == "date":
         from ats_engine import FormField
 
@@ -598,6 +622,7 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
 
 _PKEY = {"experience": ("experience", "work_experience"), "education": ("education",),
          "skills": ("skills",), "languages": ("languages",), "certifications": ("certifications",)}
+_TAG_SECTIONS = {"skills", "certifications"}  # one typeahead, many pills (NOT Add-Another rows)
 _PLAN_SYS = (
     "You map an applicant profile onto a job application's repeater sections. You are given, per "
     "section, the rows to fill (one per profile entry) and each field's visible LABEL. For every "
@@ -624,8 +649,15 @@ def _plan_skeleton(controls: list[Control], profile: dict) -> dict:
         if not items:
             continue
         labels = list(labelset.values())
-        rows = [{lbl: "" for lbl in labels} for _ in items]
-        plan[sec] = {"count": len(rows), "rows": rows, "_items": items, "_labels": labels}
+        if sec in _TAG_SECTIONS:
+            # TAG: ONE typeahead control holds MANY pills (Skills) — NOT N Add-Another rows. Plan a
+            # single row whose value is the comma-joined list; put() adds each as a pill.
+            joined = ", ".join(str(it) for it in items)
+            plan[sec] = {"count": 1, "rows": [{labels[0]: ""}] if labels else [],
+                         "_items": [joined], "_labels": labels[:1]}
+        else:
+            rows = [{lbl: "" for lbl in labels} for _ in items]
+            plan[sec] = {"count": len(rows), "rows": rows, "_items": items, "_labels": labels}
     return plan
 
 
