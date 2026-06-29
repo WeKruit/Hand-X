@@ -1072,6 +1072,16 @@ def _plan_skeleton(controls: list[Control], profile: dict) -> dict:
         items: list = []
         for pk in _PKEY.get(sec, (sec,)):
             items = profile.get(pk) or items
+        if not items and sec == "languages":
+            # DEFAULT (per spec): if a Languages section is present but the profile names no languages,
+            # assume the applicant is a PROFICIENT English speaker. Only skipped when the profile DOES
+            # specify languages (then those are used verbatim). Proficiency values map via the LLM/VLM
+            # to the form's scale ('Native or Bilingual' -> '5 - Native…' / 'Fluent').
+            items = [{
+                "language": "English", "fluent": "yes", "comprehension": "Native or Bilingual",
+                "overall": "Native or Bilingual", "reading": "Native or Bilingual",
+                "speaking": "Native or Bilingual", "writing": "Native or Bilingual",
+            }]
         if not items:
             continue
         labels = list(labelset.values())
