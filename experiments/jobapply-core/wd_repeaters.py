@@ -322,10 +322,20 @@ def reconcile(plan: dict, controls: list[Control], readback: dict | None = None)
 # LIVE layer (CDP). extract_live mirrors extract_offline; put = the act; the
 # fixpoint loop is fill_deterministic. Pure decisions stay in the functions above.
 # ===========================================================================
-EXTRACT_JS = r"""
+# NB: ONE ordered query of just headings+controls (~50 nodes), NOT querySelectorAll('*') (which walked
+# ALL ~2400 elements on every call x ~20 calls/run — needless load that helped crash the headless CDP on
+# a heavy SPA). querySelectorAll preserves document order, so doc_index = position in this one list.
+_SEL_HEAD = 'h1,h2,h3,h4,[role="heading"],[data-automation-id*="Title"]'
+_SEL_CTRL = 'input,select,textarea,[role="spinbutton"],[role="listbox"],button[aria-haspopup="listbox"]'
+EXTRACT_JS = (
+    r"""
 () => {
   const norm = s => (s||'').replace(/\s+/g,' ').trim();
-  const idx = new Map(); document.querySelectorAll('*').forEach((e,i)=>idx.set(e,i));
+  const SEL_H = '"""
+    + _SEL_HEAD
+    + r"""', SEL_C = '"""
+    + _SEL_CTRL
+    + r"""';
   const labelFor = (el) => {
     if (el.id){ const l=document.querySelector('label[for="'+CSS.escape(el.id)+'"]'); if(l) return norm(l.textContent); }
     if (el.getAttribute('aria-label')) return norm(el.getAttribute('aria-label'));
@@ -333,22 +343,22 @@ EXTRACT_JS = r"""
     const p=el.closest('[data-automation-id]'); if(p){ const l=p.querySelector('label'); if(l) return norm(l.textContent); }
     return '';
   };
-  const heads=[...document.querySelectorAll('h1,h2,h3,h4,[role="heading"],[data-automation-id*="Title"]')]
-    .map(n=>({i:idx.get(n), t:norm(n.textContent).toLowerCase()})).filter(h=>h.t && h.t.length<=40);
-  const raw=[...document.querySelectorAll('input,select,textarea,[role="spinbutton"],[role="listbox"],button[aria-haspopup="listbox"]')];
-  const out=raw.map(el=>{
+  const heads=[], out=[];
+  [...document.querySelectorAll(SEL_H+','+SEL_C)].forEach((el,i)=>{   // document order
+    if (el.matches(SEL_H)) { const t=norm(el.textContent).toLowerCase(); if(t && t.length<=40) heads.push({i,t}); return; }
     let w='',ms=false,fk=el.getAttribute('data-fkit-id')||'',a=el;
     while(a && a.getAttribute){ const aid=a.getAttribute('data-automation-id');
       if(aid==='multiSelectContainer') ms=true; if(aid && !w) w=aid;
       if(!fk && a.getAttribute('data-fkit-id')) fk=a.getAttribute('data-fkit-id'); a=a.parentElement; }
-    return {tag:el.tagName, role:(el.getAttribute('role')||'').toLowerCase(),
+    out.push({tag:el.tagName, role:(el.getAttribute('role')||'').toLowerCase(),
       haspopup:(el.getAttribute('aria-haspopup')||'').toLowerCase(), itype:(el.getAttribute('type')||'').toLowerCase(),
       cid:el.id||'', aid:el.getAttribute('data-automation-id')||'', fkit:fk, label:labelFor(el),
-      wrapper_aid:w, in_ms:ms, doc_index:idx.get(el)};
+      wrapper_aid:w, in_ms:ms, doc_index:i});
   });
   return JSON.stringify({headings:heads, controls:out});
 }
 """
+)
 
 
 async def extract_live(page) -> list[Control]:
