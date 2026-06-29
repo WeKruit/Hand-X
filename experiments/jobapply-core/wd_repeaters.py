@@ -715,50 +715,16 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
             await _wait_options_change(page, base_opts)  # bounded: wait for the filter to re-render
         # exact -> contains -> LLM closest; vision reads the rendered options + verifies the committed value
         return await pick_smart(adapter, page, llm, value, session=session, verify_label=c.label)
-    if a == "chip":  # typeahead TAG (Skills): add EACH comma-item as its own pill, VISUALS-confirmed
-        import contextlib
+    if a == "chip":  # typeahead TAG (Skills) / education searchable chip: REUSE the proven adapter
+        # multiselect commit (type -> filter -> TRUSTED ENTER on the highlighted top -> read_back). One
+        # pill per comma-item. No bespoke re-implementation — _multiselect already handles the widget.
+        from ats_engine import FormField
 
+        fld = FormField(name=c.fkit, type="multi_select", label=c.label, source="standard")
         items = [x.strip() for x in value.split(",")] if "," in value else [value]
         added = 0
         for it in items:
-            if not it:
-                continue
-            # The typeahead input may be a DESCENDANT of the fkit wrapper (education chips) OR carry the
-            # fkit ITSELF (the Skills multiselect: data-fkit-id="skills--skills" is on the input/combobox,
-            # so "{base} input" finds nothing -> Skills never typed -> never committed). Try both.
-            inp = (
-                await first(page, f"{base} input")
-                or await first(page, f'{base} [role="combobox"]')
-                or await first(page, f"input{base}")  # the input itself carries the fkit
-                or await first(page, f'{base}[role="combobox"]')
-                or await first(page, f'{base} [contenteditable="true"]')
-            )
-            if not inp:
-                break
-            with contextlib.suppress(Exception):
-                await inp.click()
-                await inp.fill(it)
-            # SKILLS VIA VISUALS (directive 2 + 3): the suggestion menu LAGS and the DOM portal is stale,
-            # and we do NO substring/regex matching here — the cheap VLM is the observer. type -> VLM
-            # READS the open suggestion menu (read_options_visually) and confirms it shows our value (LLM
-            # decides, not a string `in`) -> trusted Enter commits the top highlight into a pill -> VLM
-            # visual_check(want=) confirms the pill actually carries our value. The settle-poll below is a
-            # render-readiness gate only (wait for the menu to re-render for the typed filter), not a
-            # which-option decision.
-            ok = await _chip_commit_visual(session, page, c.label, it, llm)
-            if ok:
-                added += 1
-            else:
-                # no session / VLM unavailable (offline): ArrowDown to highlight the first suggestion
-                # (Workday doesn't auto-highlight), then trusted Enter commits it — gated only on the
-                # menu having re-rendered for the typed filter (a render gate, not a substring match).
-                from ats_engine import arrow_down_trusted
-
-                await _wait_options_change(page, [])
-                await arrow_down_trusted(session, page)
-                await asyncio.sleep(0.15)
-                await eng_press_enter(session, page)
-                await asyncio.sleep(0.4)
+            if it and await adapter._multiselect(session, page, fld, it):
                 added += 1
         return added > 0
     if a == "date":
