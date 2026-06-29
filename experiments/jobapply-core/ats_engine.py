@@ -249,6 +249,117 @@ async def press_enter_trusted(session: Any, page: Any) -> bool:
         return False
 
 
+def _match_option(want: str, options: list[str]) -> int | None:
+    """Best index in `options` for `want`: exact -> startswith -> contains -> reverse-contains,
+    SHORTEST among equals (so 'United States' -> 'United States of America', not '...Minor Outlying
+    Islands'). Pure string logic over the REAL rendered option texts. None if nothing matches."""
+    w = norm(want)
+    if not w or not options:
+        return None
+    best: tuple[int, int, int] | None = None  # (rank, len, idx)
+    for i, opt in enumerate(options):
+        t = norm(opt)
+        if not t:
+            continue
+        if t == w:
+            return i
+        rank = 1 if t.startswith(w) else 2 if w in t else 3 if t in w else None
+        if rank is not None:
+            cand = (rank, len(t), i)
+            if best is None or cand[:2] < best[:2]:
+                best = cand
+    return best[2] if best else None
+
+
+async def pick_dropdown(
+    session: Any,
+    page: Any,
+    value: str,
+    *,
+    read_dom_options: Any,
+    commit: Any | None = None,
+    llm: Any = None,
+    verify_label: str | None = None,
+    vis_key: str | None = None,
+) -> bool:
+    """SHARED visual-dropdown-pick primitive. The caller has ALREADY opened the widget and typed the
+    filter. This decides WHICH option matches and commits it, using VISION as the source of truth for
+    the rendered options — the documented fix for the lagging/stale DOM option portal.
+
+    Pipeline:
+      1. READ options from the DOM first (cheap) via the caller's `read_dom_options(page) -> [str]`.
+      2. If that DOM list is STALE/empty/lagged — it does not contain the typed token — FALL BACK to
+         vision_verify.read_options_visually(session): one low-detail screenshot, VLM transcribes the
+         ACTUALLY-rendered options (no DOM lag). Vision wins when present and non-empty.
+      3. MATCH exact -> contains -> cheap-LLM closest, over the REAL (vision-or-DOM) option strings.
+      4. COMMIT: `commit(idx, options)` if the caller gave one (e.g. click the matched node); else the
+         default trusted CDP Enter on the widget's pre-highlighted top match (press_enter_trusted).
+      5. VERIFY the committed VALUE with the cheap value-aware VLM (visual_check(want=value)); return
+         True only when matches==true. No verify_label -> commit success is the answer (still no spin).
+
+    Frozen/contradiction -> returns False fast (caller decides escalation). NEVER submits."""
+    import contextlib
+
+    from vision_verify import _matches, read_options_visually, visual_check
+
+    want = norm(value)
+    if not want:
+        return True
+
+    # 1. DOM read (cheap, may be stale)
+    dom_opts: list[str] = []
+    with contextlib.suppress(Exception):
+        dom_opts = [o for o in (await read_dom_options(page) or []) if o]
+
+    # 2. trust the DOM only if it actually reflects the typed filter; else read the screen
+    dom_has_token = _match_option(want, dom_opts) is not None
+    options = dom_opts
+    used_vision = False
+    if not dom_has_token:
+        vkey = vis_key or f"{verify_label or 'menu'}:{value}"
+        vis_opts = await read_options_visually(session, key=vkey)
+        if vis_opts:
+            options = vis_opts
+            used_vision = True
+    if not options:
+        return False
+
+    # 3. match over the REAL options
+    idx = _match_option(want, options)
+    if idx is None and llm is not None:
+        from wd_repeaters import _llm_pick
+
+        choice = await _llm_pick(llm, value, options)
+        if choice:
+            idx = _match_option(choice, options)
+    print(
+        f"  [pick_dropdown] want={value!r} src={'vlm' if used_vision else 'dom'} "
+        f"opts={options[:5]} hit={idx is not None}",
+        flush=True,
+    )
+    if idx is None:
+        return False  # the filter landed but nothing matches -> abort fast (no wrong-value commit)
+
+    # 4. commit
+    committed = False
+    if commit is not None:
+        with contextlib.suppress(Exception):
+            committed = bool(await commit(idx, options))
+    else:
+        committed = await press_enter_trusted(session, page)
+    if not committed:
+        return False
+
+    # 5. value-aware visual verify (the wrong-option catch)
+    if not verify_label:
+        return True
+    await asyncio.sleep(0.4)
+    with contextlib.suppress(Exception):
+        verdict = await visual_check(session, verify_label, want=value)
+        return _matches(verdict)
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Step 2 — the ONE structured LLM call (generic).
 # ---------------------------------------------------------------------------

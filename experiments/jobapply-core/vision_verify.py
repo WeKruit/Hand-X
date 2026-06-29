@@ -144,6 +144,94 @@ async def visual_check(
     return verdict
 
 
+def _parse_str_list(raw: str) -> list[str]:
+    """Tolerant parse of the VLM's JSON array reply -> [str]. The model sometimes wraps the array
+    in prose or a ```json fence, so slice to the outermost [...] and json.load; fall back to a
+    line-split. Returns de-duped, stripped, non-empty strings in order (the rendered top-to-bottom)."""
+    import json
+    import re as _re
+
+    s = (raw or "").strip()
+    out: list[str] = []
+    m = _re.search(r"\[.*\]", s, _re.DOTALL)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            if isinstance(data, list):
+                out = [str(x).strip() for x in data if str(x).strip()]
+        except Exception:
+            out = []
+    if not out:  # no JSON array — split lines, drop bullets/numbering
+        for ln in s.splitlines():
+            t = _re.sub(r'^[\s\-\*\d\.\)"]+', "", ln).strip().strip('",')
+            if t and not t.startswith("[") and not t.startswith("{"):
+                out.append(t)
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for t in out:
+        k = t.lower()
+        if k not in seen:
+            seen.add(k)
+            uniq.append(t)
+    return uniq
+
+
+async def read_options_visually(session: Any, *, key: str | None = None, use_cache: bool = True) -> list[str]:
+    """Read the ACTUALLY-RENDERED options of the currently-open dropdown/menu from ONE low-detail
+    screenshot — no DOM lag, no stale shared portal. This is the matching fix: the DOM option portal
+    LAGS / freezes (filling 'Kubernetes' re-serves the previous 'Go' options; 'UC Berkeley' reads []),
+    so we ask a cheap VLM to TRANSCRIBE the visible option texts top-to-bottom as a JSON string array.
+
+    Cached + capped exactly like visual_check: keyed by (url | key). The caller passes a `key` that
+    identifies the open widget + the typed filter (e.g. f"{field_label}:{typed}") so a re-read after a
+    new keystroke is a DISTINCT entry (the whole point — the previous read is stale), while a repeat
+    read of the same open state is served free. Over the per-page VLM budget -> returns [] (caller
+    falls back to its DOM read rather than spend). Returns [] on any error (caller degrades, never crashes)."""
+    ck = ""
+    if use_cache:
+        ident = _norm(key) if key is not None else "open-menu"
+        ck = f"{await _current_url(session)}|opts|{ident}"
+        if ck in _VCACHE:
+            return _parse_str_list(_VCACHE[ck])
+        if _VLM_CALLS["n"] >= VLM_MAX_CALLS:
+            return []  # budget spent — caller uses its DOM read
+
+    try:
+        png = await session.take_screenshot()
+    except Exception:
+        return []
+    b64 = base64.b64encode(png).decode()
+    prompt = (
+        "This is a job-application web form with a dropdown/combobox menu currently OPEN. "
+        "List the option texts CURRENTLY VISIBLE in that open menu, top to bottom, EXACTLY as shown. "
+        'Reply ONLY a STRICT JSON array of strings, e.g. ["Bachelor\'s Degree", "Master\'s Degree"]. '
+        "If no menu is open or no options are visible, reply []."
+    )
+    try:
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+        msg = UserMessage(
+            content=[
+                ContentPartTextParam(type="text", text=prompt),
+                ContentPartImageParam(
+                    type="image_url",
+                    image_url=ImageURL(url=f"data:image/png;base64,{b64}", detail="low", media_type="image/png"),
+                ),
+            ]
+        )
+    except Exception:
+        msg = prompt
+    try:
+        resp = await _vlm().ainvoke([msg])
+        raw = (getattr(resp, "completion", None) or str(resp)).strip()
+    except Exception:
+        return []
+    if use_cache:
+        _VLM_CALLS["n"] += 1
+        _VCACHE[ck] = raw
+    return _parse_str_list(raw)
+
+
 def _action_target(dumped: dict) -> tuple[Any, Any]:
     """(index, value) for any action that fills/selects a field — text input, dropdown
     select, OR a bare option click (value None, resolved from the element). Else (None, None).

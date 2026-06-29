@@ -544,20 +544,50 @@ async def _read_visible_options(page) -> list:
     return opts
 
 
-async def pick_smart(adapter, page, llm, value: str, session=None, tries: int = 8) -> bool:
+async def pick_smart(adapter, page, llm, value: str, session=None, tries: int = 8, verify_label: str = "") -> bool:
     """Pick the best typeahead/listbox option for `value` and COMMIT it. The shared option portal returns
     a FROZEN/stale list when the widget hasn't re-rendered for the typed filter, so:
       1. POLL (bounded) until the visible option set CHANGES from the first read (the filter landed) — not
          a fixed sleep that buys nothing against a stale list.
       2. FROZEN-LIST EARLY-ABORT: if the visible list is IDENTICAL 3 reads in a row, the widget is dead —
-         stop now (return False) instead of burning all `tries` against a list that will never update.
-      3. MATCH exact -> contains -> CHEAP LLM choice over the READ options (the replayable agent decision).
+         the DOM read is hopeless, so HAND OFF to the SHARED visual primitive (eng.pick_dropdown), which
+         reads the ACTUALLY-rendered options from a screenshot (no DOM lag) and commits via trusted Enter.
+      3. Once the DOM list reflects the filter: MATCH exact -> contains -> CHEAP LLM over the READ options.
       4. COMMIT via a TRUSTED CDP Enter on the pre-highlighted match (session given) — the same primitive
          Greenhouse react-select uses; a synthetic .click() on a portal node can land on a stale/detached
          element. Falls back to .click() only when no trusted-Enter session is available.
-    Returns True iff an option was committed."""
+
+    The frozen-portal + the per-read "DOM doesn't contain the typed token" cases are exactly when the
+    VLM screenshot read wins, so both route through ONE shared primitive (eng.pick_dropdown). When a
+    session is available the whole pick goes through pick_dropdown so vision is always the fallback and
+    the committed value is VLM-verified; the no-session path keeps the legacy DOM-click for offline use.
+    Returns True iff an option was committed (and, when a session is given, VLM-verified)."""
     import contextlib
 
+    # SESSION PATH: the shared visual primitive. DOM read first; on stale/empty/lagged -> VLM screenshot
+    # read; match -> trusted-Enter commit -> value-aware VLM verify. This is the matching fix.
+    if session is not None:
+        from ats_engine import pick_dropdown
+
+        async def _dom(_page):
+            return [t for _, t in await _read_visible_options(_page)]
+
+        # let the filter settle a touch so the DOM read isn't the pre-type frozen list on the first look
+        await _wait_options_change(page, [])
+        ok = await pick_dropdown(
+            session,
+            page,
+            value,
+            read_dom_options=_dom,
+            llm=llm,
+            verify_label=verify_label or None,
+            vis_key=f"{verify_label or 'pick'}:{value}",
+        )
+        with contextlib.suppress(Exception):
+            await _wait_options_change(page, [t for _, t in await _read_visible_options(page)])
+        return ok
+
+    # NO-SESSION (offline / legacy): DOM-only poll + click the matched node; no trusted Enter available.
     want = norm(value)
     prev: list[str] | None = None
     frozen = 0
@@ -586,11 +616,7 @@ async def pick_smart(adapter, page, llm, value: str, session=None, tries: int = 
         print(f"  [pick] want={value!r} opts={texts[:5]} choice={choice!r} hit={target is not None}", flush=True)
         if target is not None:
             with contextlib.suppress(Exception):
-                if session is not None:
-                    await target.evaluate("() => this.scrollIntoView({block:'center'})")
-                    await eng_press_enter(session, page)  # trusted CDP Enter on the highlighted option
-                else:
-                    await target.click()
+                await target.click()
                 await _wait_options_change(page, texts)  # bounded: menu closes / re-renders on commit
                 return True
         else:
@@ -663,7 +689,8 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
             with contextlib.suppress(Exception):
                 await inp.fill(value)
             await _wait_options_change(page, base_opts)  # bounded: wait for the filter to re-render
-        return await pick_smart(adapter, page, llm, value, session=session)  # exact -> contains -> LLM closest
+        # exact -> contains -> LLM closest; vision reads the rendered options + verifies the committed value
+        return await pick_smart(adapter, page, llm, value, session=session, verify_label=c.label)
     if a == "chip":  # typeahead TAG: add EACH comma-item as its own pill (type -> filter -> pick)
         import contextlib
 
@@ -680,7 +707,7 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
                 await inp.click()
                 await inp.fill(it)
             await _wait_options_change(page, base_opts)  # bounded: wait for the tag filter to re-render
-            picked = await pick_smart(adapter, page, llm, it, session=session, tries=5)
+            picked = await pick_smart(adapter, page, llm, it, session=session, tries=5, verify_label=c.label)
             if not picked:
                 await eng_press_enter(session, page)  # fallback: trusted Enter on the highlight
             added += 1

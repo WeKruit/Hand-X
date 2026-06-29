@@ -539,11 +539,15 @@ class WorkdayAdapter(ATSAdapter):
                 owned_id = owns.split()[0] if owns.split() else ""
         if inp:
             # snapshot the option texts BEFORE typing — _pick_option polls until they CHANGE, so a
-            # frozen shared list is detected (stale N times -> abort) instead of spun against.
+            # frozen shared list is detected (stale N times) instead of spun against. On that frozen
+            # detection it HANDS OFF to the shared VISUAL primitive (reads the rendered options from a
+            # screenshot — no DOM lag — and commits trusted Enter + value-verifies).
             before = await self._option_texts(page, owned_id)
             with contextlib.suppress(Exception):
                 await inp.fill(value)
-            return await self._pick_option(session, page, value, owned_id=owned_id, before=before, searchable=True)
+            return await self._pick_option(
+                session, page, value, owned_id=owned_id, before=before, searchable=True, verify_label=field.label
+            )
         # non-searchable inline listbox: options already shown, click the best (no Enter to commit).
         return await self._pick_option(session, page, value, owned_id=owned_id, before=None, searchable=False)
 
@@ -592,6 +596,7 @@ class WorkdayAdapter(ATSAdapter):
         owned_id: str = "",
         before: list[str] | None = None,
         searchable: bool = False,
+        verify_label: str = "",
     ) -> bool:
         """Scoped option picker for listbox (+ inline). Reads ONLY the VISIBLE options of the listbox
         the open input OWNS (owned_id) — never the global shared portal, which re-serves a frozen
@@ -599,13 +604,36 @@ class WorkdayAdapter(ATSAdapter):
 
         SEARCHABLE path (the State/Country/Degree fix): POLL until the visible options reflect the
         typed filter (differ from the pre-type `before` snapshot), bounded ~2s. If after the bound the
-        list is still stale/identical for N=3 reads, ABORT FAST (return False) — do NOT spin on a
-        frozen list. Once the filter has landed and a best match is visible+highlightable, COMMIT with
-        a TRUSTED CDP Enter on the widget's pre-highlighted top match (eng.press_enter_trusted) — the
-        proven Greenhouse mechanism — rather than clicking a node that may have re-rendered.
+        list is still stale/identical for N=3 reads (frozen shared list) OR landed with no match, HAND
+        OFF to the SHARED VISUAL primitive (eng.pick_dropdown): it reads the ACTUALLY-rendered options
+        from a screenshot (no DOM lag), matches, commits a TRUSTED CDP Enter, and VALUE-verifies — the
+        documented fix for the lagging portal. Once a fresh DOM list HAS a match, COMMIT with a trusted
+        Enter on the widget's pre-highlighted top match (the proven Greenhouse mechanism).
 
         INLINE path (searchable=False): options are already shown and there is no input to Enter into,
         so click the best VISIBLE match directly (legacy behavior preserved)."""
+
+        async def _scoped_dom(_page: Any) -> list[str]:
+            out: list[str] = []
+            for o in await _page.get_elements_by_css_selector(self._opt_selector(owned_id)):
+                vis = (await o.evaluate(self._VISIBLE_TEXT_JS)) or ""
+                if vis.strip():
+                    out.append(eng.norm(vis))
+            return out
+
+        async def _vision_handoff() -> bool:
+            # DOM is hopeless (frozen / no-match) — read the rendered options off a screenshot, commit
+            # trusted Enter on the highlighted match, value-verify. The shared primitive owns this.
+            return await eng.pick_dropdown(
+                session,
+                page,
+                value,
+                read_dom_options=_scoped_dom,
+                llm=None,
+                verify_label=verify_label or None,
+                vis_key=f"{verify_label or owned_id or 'listbox'}:{value}",
+            )
+
         want = eng.norm(value)
         before_set = set(before or [])
         stale_reads = 0
@@ -624,13 +652,13 @@ class WorkdayAdapter(ATSAdapter):
                 continue
             cur_set = {t for _, t in opts}
             # SEARCHABLE: require the list to have CHANGED from the pre-type snapshot before trusting
-            # it (else it's the frozen shared list). Abort fast after N=3 stale reads.
+            # it (else it's the frozen shared list). After N=3 stale reads -> VLM screenshot read.
             if searchable and before is not None and cur_set == before_set:
                 stale_reads += 1
                 if _DBG:
                     print(f"      [pick] STALE (==before) read {stale_reads}/3 — frozen shared list?")
                 if stale_reads >= 3:
-                    return False
+                    return await _vision_handoff()
                 continue
             if _DBG:
                 print(f"      [pick] want={want!r} visible[:6]={[t for _, t in opts[:6]]}")
@@ -659,12 +687,12 @@ class WorkdayAdapter(ATSAdapter):
                     if best is None or cand[:2] < best[:2]:
                         best = cand
             if best is None:
-                # the filter has landed but no option matches this value — abort fast (no fallback;
-                # committing the top option here would be the WRONG value the bug planted).
+                # the filter landed but no DOM option matches — the DOM read may be lagging the render,
+                # so let VISION read the screen before giving up (never commit a wrong top option).
                 if searchable:
                     stale_reads += 1
                     if stale_reads >= 3:
-                        return False
+                        return await _vision_handoff()
                     continue
                 return False
             # COMMIT: searchable -> trusted Enter on the highlighted top match (input still focused
@@ -677,7 +705,8 @@ class WorkdayAdapter(ATSAdapter):
                 await best[2].click()
                 return True
             return False
-        return False
+        # bound reached without a confident DOM match -> last-resort vision read (searchable only)
+        return await _vision_handoff() if searchable else False
 
     async def _click_radio(self, page: Any, field: FormField, value: str) -> bool:
         """Select a Workday choice control by option text — radios AND checkbox-GROUPS ("select all
