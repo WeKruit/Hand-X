@@ -538,20 +538,20 @@ async def ensure_rows(adapter, page, profile: dict) -> bool:
 
 
 async def fill_deterministic(adapter, session, page, profile: dict, llm, title: str = "",
-                             max_rounds: int = 5) -> dict:
+                             max_rounds: int = 3) -> dict:
     """The fixpoint reconcile-and-repair loop. FIRST mount rows from the profile (so collapsed sections'
     fields exist), THEN one semantic map call, THEN loop: reconcile(read-back) -> put() MISSING/DIVERGED
-    -> until the DOM is stable. Returns a ledger summary. NEVER submits. Agent escalation is the backstop."""
-    rows_added = await ensure_rows(adapter, page, profile)  # bootstrap: mount rows so fields appear
+    -> until the DOM is stable. Returns a ledger summary. NEVER submits. Agent escalation is the backstop.
+
+    ensure_rows + make_plan run ONCE upfront (rows persist + labels don't change), NOT per round — the
+    per-round re-mount + re-LLM made the loop too slow to finish within the step budget (timeout)."""
+    rows_added = await ensure_rows(adapter, page, profile)  # bootstrap ONCE: mount rows so fields appear
     controls = await extract_live(page)                     # now collapsed sections have controls
-    plan = await make_plan(llm, controls, profile, title)   # labels known -> values mapped
+    plan = await make_plan(llm, controls, profile, title)   # ONE semantic map: labels known -> values
     summary = {"rounds": 0, "filled": 0, "rows_added": int(rows_added)}
     last_todo = None
     for rnd in range(max_rounds):
         summary["rounds"] = rnd + 1
-        if await ensure_rows(adapter, page, profile):       # idempotent (dup-guarded to profile count)
-            summary["rows_added"] += 1
-            plan = await make_plan(llm, await extract_live(page), profile, title)  # re-plan new rows
         controls = await extract_live(page)
         readback = await read_live(page, controls)
         diff = reconcile(plan, controls, readback)
