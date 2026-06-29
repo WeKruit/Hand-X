@@ -812,42 +812,66 @@ _HEAD_KW = {
 }
 
 
-async def _add_row(page, sec: str) -> bool:
-    """Click the RIGHT section's Add control so the next row mounts for THAT section.
+# Find the RIGHT section's Add control (label-agnostic) and return its on-screen CENTER coords (for a
+# trusted click), or '' if none. Section-scoped by DOCUMENT ORDER (heading kw -> next section heading),
+# never by button text. The add control is matched GENERICALLY so any tenant label works: its
+# data-automation-id contains 'add' (add-button / addButton / ...) OR its visible text STARTS WITH 'add'
+# ('Add', 'Add Another', 'Add Experience', '+ Add', 'Add another work experience' ...).
+_FIND_ADD_JS = r"""(kw) => {
+  const norm = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const KW = ['experience','education','skill','language','certification'];
+  const nodes = [...document.querySelectorAll('*')];
+  const isHead = el => /^(H1|H2|H3|H4)$/.test(el.tagName) || el.getAttribute('role')==='heading'
+                       || (el.getAttribute('data-automation-id')||'').includes('Title');
+  let myPos=-1, nextPos=nodes.length;
+  for (let i=0;i<nodes.length;i++){ const el=nodes[i];
+    if(!isHead(el)) continue; const t=norm(el.textContent); if(t.length>40) continue;
+    if(myPos===-1 && t.includes(kw)) { myPos=i; continue; }
+    if(myPos!==-1 && KW.some(k=>t.includes(k))) { nextPos=i; break; }
+  }
+  if(myPos===-1) return '';
+  const isAdd = el => {
+    const aid=(el.getAttribute('data-automation-id')||'').toLowerCase();
+    const t=(el.textContent||'').trim().toLowerCase();
+    return (aid.includes('add') || /^\+?\s*add\b/.test(t)) && t.length<40;
+  };
+  for (let i=myPos+1;i<nextPos && i<nodes.length;i++){ const el=nodes[i];
+    if((el.tagName==='BUTTON'||el.getAttribute('role')==='button') && isAdd(el)){
+      el.scrollIntoView({block:'center'});
+      const r=el.getBoundingClientRect();
+      if(r.width && r.height) return JSON.stringify({x:r.left+r.width/2, y:r.top+r.height/2});
+    }
+  }
+  return ''; }"""
 
-    Section-scoped by document order, NOT by button text (every section's button reads the same
-    "Add Another"). We find the section heading (its KW keyword), then click the first add control
-    that sits between that heading and the next section heading. Returns True iff a control was
-    clicked — the caller (ensure_rows) re-reads the count to confirm a row actually mounted."""
+
+async def _add_row(session, page, sec: str) -> bool:
+    """Mount the next row for `sec` by a TRUSTED CDP click on that section's Add control. Generic: the
+    button is located by document order + a label-AGNOSTIC match (aid contains 'add' OR text starts with
+    'add'), and committed with a TRUSTED mouse click — a synthetic .click() does NOT fire a React
+    'Add Another' button (verified: HP mounted 0 rows via .click(); the agent's real click worked).
+    Returns True iff clicked; the caller (ensure_rows) re-reads the count to confirm a row mounted."""
+    import contextlib
+    import json
+
     kw = _HEAD_KW.get(sec, sec)
-    clicked = await page.evaluate(
-        """(kw) => {
-          const norm = s => (s||'').replace(/\\s+/g,' ').trim().toLowerCase();
-          const KW = ['experience','education','skill','language','certification'];
-          const nodes = [...document.querySelectorAll('*')];
-          // section heading doc-order index for the target kw, and the next section heading after it
-          const isHead = el => /^(H1|H2|H3|H4)$/.test(el.tagName) || el.getAttribute('role')==='heading'
-                               || (el.getAttribute('data-automation-id')||'').includes('Title');
-          let myPos=-1, nextPos=nodes.length;
-          for (let i=0;i<nodes.length;i++){ const el=nodes[i];
-            if(!isHead(el)) continue; const t=norm(el.textContent); if(t.length>40) continue;
-            if(myPos===-1 && t.includes(kw)) { myPos=i; continue; }
-            if(myPos!==-1 && KW.some(k=>t.includes(k))) { nextPos=i; break; }
-          }
-          if(myPos===-1) return false;
-          // first add control strictly inside (myPos, nextPos)
-          const isAdd = el => el.getAttribute('data-automation-id')==='add-button'
-                              || /^add(\\s+another)?$/i.test((el.textContent||'').trim());
-          for (let i=myPos+1;i<nextPos && i<nodes.length;i++){ const el=nodes[i];
-            if((el.tagName==='BUTTON'||el.getAttribute('role')==='button') && isAdd(el)){
-              el.scrollIntoView({block:'center'}); el.click(); return true; }
-          }
-          return false; }""",
-        kw,
-    )
-    if clicked:
+    box = None
+    with contextlib.suppress(Exception):
+        raw = await page.evaluate(_FIND_ADD_JS, kw)
+        box = json.loads(raw) if isinstance(raw, str) and raw else None
+    if not isinstance(box, dict):
+        return False
+    with contextlib.suppress(Exception):
+        sid = await page.session_id
+        for ev in (
+            {"type": "mouseMoved", "x": box["x"], "y": box["y"], "buttons": 0},
+            {"type": "mousePressed", "x": box["x"], "y": box["y"], "button": "left", "buttons": 1, "clickCount": 1},
+            {"type": "mouseReleased", "x": box["x"], "y": box["y"], "button": "left", "buttons": 0, "clickCount": 1},
+        ):
+            await session.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=sid)
         await asyncio.sleep(1.2)  # let the new row mount
-    return bool(clicked)
+        return True
+    return False
 
 
 # ROW-repeater sections (each entry = an Add-Another row). Skills is a TAG (pills via chip put), NOT here.
@@ -859,7 +883,7 @@ _ROW_SECTIONS = {
 }
 
 
-async def ensure_rows(adapter, page, profile: dict) -> bool:
+async def ensure_rows(adapter, session, page, profile: dict) -> bool:
     """Add Another until each ROW-repeater section has at least as many rows as the PROFILE wants.
     dup-guard: never add PAST the profile count. Returns True if any row was added (caller re-reconciles).
 
@@ -883,7 +907,7 @@ async def ensure_rows(adapter, page, profile: dict) -> bool:
             have = len(_rows_of(controls, sec))
             if have >= want:  # dup-guard: at/over target -> never add past the profile count
                 break
-            if not await _add_row(page, sec):  # section not on this page / no Add control -> stop
+            if not await _add_row(session, page, sec):  # section not on this page / no Add control -> stop
                 break
             controls = await extract_live(page)
             if len(_rows_of(controls, sec)) <= have:  # click did NOT mount a new row -> stop (no spin)
@@ -902,7 +926,7 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
     import time
 
     t0 = time.monotonic()
-    rows_added = await ensure_rows(adapter, page, profile)  # bootstrap ONCE: mount rows so fields appear
+    rows_added = await ensure_rows(adapter, session, page, profile)  # bootstrap ONCE: mount rows so fields appear
     t_ensure = time.monotonic() - t0
     controls = await extract_live(page)  # now collapsed sections have controls
     plan = await make_plan(llm, controls, profile, title)  # ONE semantic map: labels known -> values

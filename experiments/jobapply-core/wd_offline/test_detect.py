@@ -35,7 +35,7 @@ def _ensure_rows_invariant() -> tuple[bool, str]:
                                      row="", field_key="skills", label="Skills", in_multiselect=True, doc_index=999))
                 return cs
 
-            async def _add(_page, _sec, _s=state, _m=mode):
+            async def _add(_session, _page, _sec, _s=state, _m=mode):
                 _s["adds"] += 1
                 if _m == "good":
                     _s["rows"].append(100 + len(_s["rows"]))
@@ -46,7 +46,7 @@ def _ensure_rows_invariant() -> tuple[bool, str]:
 
             wr.extract_live, wr._add_row = _ex, _add
             profile = {"education": [{"d": "x"}] * want}
-            asyncio.new_event_loop().run_until_complete(wr.ensure_rows(None, None, profile))
+            asyncio.new_event_loop().run_until_complete(wr.ensure_rows(None, None, None, profile))
             final = len(state["rows"])
             if final > max(want, start):
                 return False, f"{mode} start={start} want={want} -> {final} rows (EXCEEDS)"
