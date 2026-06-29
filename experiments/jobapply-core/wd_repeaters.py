@@ -23,13 +23,20 @@ import re
 from dataclasses import dataclass, field
 
 KW = ["experience", "education", "skill", "language", "certification", "website", "resume", "social"]
-# data-fkit-id section token -> canonical section key (the plan + profile use canonical keys)
+# data-fkit-id section token -> canonical section key (the plan + profile use canonical keys). The DOM
+# emits SINGULAR bases for some sections (data-fkit-id="language-222--...", "certification-..."), so map
+# BOTH singular and plural — else the section reads as "language" and _plan_skeleton/_PKEY (which key on
+# the plural "languages") never plan it (the verified empty-Languages bug).
 SEC_FROM_FKIT = {
     "workexperience": "experience",
+    "experience": "experience",
     "education": "education",
     "skills": "skills",
+    "skill": "skills",
     "languages": "languages",
+    "language": "languages",
     "certifications": "certifications",
+    "certification": "certifications",
     "resumeattachments": "resume",
     "websitepanelset": "websites",
     "socialnetwork": "social",

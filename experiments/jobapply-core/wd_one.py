@@ -29,7 +29,7 @@ PROFILES = [
                      "summary": "Led backend distributed systems.", "start": "2021-06", "current": True},
                     {"title": "Software Engineer", "company": "Beta Labs", "location": "Austin, TX",
                      "summary": "Built REST APIs.", "start": "2018-01", "end": "2021-05"}],
-     "education": [{"university": "UC Berkeley", "degree": "Bachelor's Degree", "major": "Computer Science", "gpa": "3.8"}],
+     "education": [{"university": "University of California, Berkeley", "degree": "Bachelor's Degree", "major": "Computer Science", "gpa": "3.8"}],
      "skills": ["Python", "Go", "Kubernetes", "PostgreSQL"]},
     {"_name": "priya", "first_name": "Priya", "last_name": "Sharma", "email": "priya.s.demo@example.com",
      "phone": "512-555-0173", "address": "200 Congress Ave", "city": "Austin", "state": "Texas",
