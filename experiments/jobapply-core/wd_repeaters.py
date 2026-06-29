@@ -827,7 +827,7 @@ _FIND_ADD_JS = r"""(kw) => {
   for (let i=0;i<nodes.length;i++){ const el=nodes[i];
     if(!isHead(el)) continue; const t=norm(el.textContent); if(t.length>40) continue;
     if(myPos===-1 && t.includes(kw)) { myPos=i; continue; }
-    if(myPos!==-1 && KW.some(k=>t.includes(k))) { nextPos=i; break; }
+    if(myPos!==-1 && KW.some(k=>k!==kw && t.includes(k))) { nextPos=i; break; }
   }
   if(myPos===-1) return '';
   const isAdd = el => {
