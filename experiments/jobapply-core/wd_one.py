@@ -114,14 +114,17 @@ async def main():
     if not urls:
         print(f"[{tag}] NO_JOBS", flush=True)
         return
-    for url in urls[:3]:
+    for jurl in urls[:3]:
+        # applyManually = EMPTY form (no resume-upload page -> no agent upload-loop, no resume-vs-profile
+        # conflict). My engine mounts rows from the profile + fills from scratch — the clean test.
+        url = jurl.split("?")[0].rstrip("/") + "/apply/applyManually"
         creds = Credentials(email=f"jobapply.test.{secrets.randbelow(99999999)}@mailinator.com", password=pw())
-        print(f"[{tag}] {url.split('/job/')[-1][:50]}", flush=True)
+        print(f"[{tag}] {jurl.split('/job/')[-1][:50]} (applyManually)", flush=True)
         try:
             res = await asyncio.wait_for(
                 run_wizard(WorkdayAdapter(), url=url, profile=profile, resume=resume, headless=True,
                            allow_escalation=True, screenshot_path=str(OUT / f"{tag}.png"), creds=creds),
-                timeout=900)
+                timeout=480)
         except TimeoutError:
             print(f"[{tag}] TIMEOUT", flush=True)
             return
