@@ -507,12 +507,22 @@ class WorkdayAdapter(ATSAdapter):
 
     async def _listbox(self, page: Any, field: FormField, value: str) -> bool:
         """Workday button-listbox: click trigger -> options mount in the body portal
-        `activeListContainer` -> click the matching promptOption."""
+        `activeListContainer` -> click the matching promptOption. SEARCHABLE listboxes (State, Country,
+        Phone-type, How-did-you-hear) show NO options until you TYPE — so type the value to filter
+        first (same fix as the repeater Degree); an inline listbox just shows them (no input -> skip)."""
         trig = await eng.first(page, self._wsel(field.name, " button"))
         if not trig:
             return False
         with contextlib.suppress(Exception):
             await trig.click()
+        await asyncio.sleep(0.4)
+        inp = (await eng.first(page, self._wsel(field.name, " input"))
+               or await eng.first(page, '[data-automation-id="activeListContainer"] input')
+               or await eng.first(page, 'input[aria-autocomplete="list"]'))
+        if inp:
+            with contextlib.suppress(Exception):
+                await inp.fill(value)
+                await asyncio.sleep(0.7)
         return await self._pick_option(page, value)
 
     # The option portal is shared: bare `promptOption`/`menuItem` aids from PREVIOUSLY-opened
