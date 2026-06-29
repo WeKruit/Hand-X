@@ -484,13 +484,17 @@ async def pick_smart(adapter, page, llm, value: str, tries: int = 8) -> bool:
             continue
         target = (next((o for o, t in opts if norm(t) == want), None)
                   or next((o for o, t in opts if want and (want in norm(t) or norm(t) in want)), None))
+        choice = None
         if target is None and llm is not None:
             choice = await _llm_pick(llm, value, [t for _, t in opts])  # the agent's decision, replayed
             if choice:
                 target = next((o for o, t in opts if norm(t) == norm(choice)), None)
+        print(f"  [pick] want={value!r} opts={[t for _, t in opts][:5]} choice={choice!r} hit={target is not None}",
+              flush=True)
         if target is not None:
             with contextlib.suppress(Exception):
                 await target.click()
+                await asyncio.sleep(0.3)
                 return True
     return False
 
