@@ -5,9 +5,56 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import wd_repeaters as wr  # noqa: E402
+import wd_repeaters as wr
 
 FIX = Path(__file__).resolve().parent / "fixtures" / "intel_step03_my_experience.html"
+
+
+def _ensure_rows_invariant() -> tuple[bool, str]:
+    """The 9-EDUCATION-ROW regression guard (directive 4): drive the REAL ensure_rows over a simulated
+    live page and assert mounted rows NEVER exceed want, and a dead/wrong Add control STOPS instead of
+    spinning. Monkeypatches extract_live/_add_row (the only browser touches) so the dup-guard + hard cap
+    + no-spin logic run offline. The bug was: starting from 0 rows, a wrong-section/dead Add 'succeeds'
+    but mounts nothing, and the old blind want+2 cap fired to 9 empty Education rows."""
+    import asyncio
+
+    orig_extract, orig_add = wr.extract_live, wr._add_row
+    try:
+        for mode, start, want in [
+            ("good", 0, 1), ("good", 0, 2), ("good", 0, 3),
+            ("dead_true", 0, 1), ("dead_true", 0, 9),  # the 9-row case: must NOT reach 9
+            ("dead_false", 0, 9), ("good", 5, 1),       # already-mounted: dup-guard, no shrink/over-add
+        ]:
+            state = {"rows": list(range(start)), "adds": 0}
+
+            async def _ex(_page, _s=state):
+                cs = [wr.Control(tag="INPUT", itype="text", fkit=f"education-{r}--degree", sec="education",
+                                 row=str(r), field_key="degree", label="Degree", doc_index=r)
+                      for r in _s["rows"]]
+                cs.append(wr.Control(tag="INPUT", itype="text", fkit="skills--skills", sec="skills",
+                                     row="", field_key="skills", label="Skills", in_multiselect=True, doc_index=999))
+                return cs
+
+            async def _add(_page, _sec, _s=state, _m=mode):
+                _s["adds"] += 1
+                if _m == "good":
+                    _s["rows"].append(100 + len(_s["rows"]))
+                    return True
+                if _m == "dead_true":  # click 'succeeds' but mounts nothing -> must STOP
+                    return True
+                return False  # dead_false: no Add control -> must STOP
+
+            wr.extract_live, wr._add_row = _ex, _add
+            profile = {"education": [{"d": "x"}] * want}
+            asyncio.new_event_loop().run_until_complete(wr.ensure_rows(None, None, profile))
+            final = len(state["rows"])
+            if final > max(want, start):
+                return False, f"{mode} start={start} want={want} -> {final} rows (EXCEEDS)"
+            if state["adds"] > want:
+                return False, f"{mode} start={start} want={want} -> {state['adds']} adds (SPUN)"
+        return True, "never exceeds want; dead/wrong Add stops (no 9-row spin)"
+    finally:
+        wr.extract_live, wr._add_row = orig_extract, orig_add
 
 
 def main() -> int:
@@ -20,7 +67,7 @@ def main() -> int:
     print(f"{'SECTION':<11}{'ROW':<5}{'FIELD_KEY':<14}{'ARCHE':<9}{'LABEL':<26}")
     print("-" * 78)
     for c in sorted(controls, key=lambda x: (x.sect() or "~", x.row, x.doc_index)):
-        print(f"  {str(c.sect()):<9}{c.row:<5}{c.field_key:<14}{c.archetype():<9}{(c.label or '·')[:24]:<26}")
+        print(f"  {c.sect()!s:<9}{c.row:<5}{c.field_key:<14}{c.archetype():<9}{(c.label or '·')[:24]:<26}")
 
     exp_rows = wr._rows_of(controls, "experience")
     edu_rows = wr._rows_of(controls, "education")
@@ -92,6 +139,7 @@ def main() -> int:
          st("education", "Degree") == "DONE", st("education", "Degree")),
         ("RECONCILE row overflow detects extra DOM row (226)",
          diff_overflow.row_overflow.get("experience") == ["226"], diff_overflow.row_overflow),
+        ("ENSURE_ROWS never exceeds want (9-row guard); dead Add stops, no spin", *(_ensure_rows_invariant())),
     ]
 
     print("\n=== ASSERTIONS (offline, real DOM) ===")

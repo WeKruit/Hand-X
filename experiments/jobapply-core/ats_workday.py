@@ -328,19 +328,70 @@ class WorkdayAdapter(ATSAdapter):
             await asyncio.sleep(interval)
             elapsed += interval
 
+    # DomHand file-input selectors, MOST-specific first. The HandX/DomHand resume path NEVER failed:
+    # scan the LIVE page fresh for the real <input type=file> and push bytes via CDP setFileInputFiles.
+    _FILE_INPUT_SELECTORS = (
+        '[data-automation-id="file-upload-input-ref"]',
+        '[data-automation-id="file-upload-drop-zone"] input[type="file"]',
+        'input[type="file"]',
+    )
+
+    async def upload_resume(self, session: Any, page: Any, resume: str | None) -> bool:
+        """DETERMINISTIC-ONLY resume upload (directive #1). Runs FRESH at the top of EVERY wizard step
+        and is IDEMPOTENT: scan the live DOM for the file input via the three DomHand selectors, skip if
+        that input already shows a successful upload, otherwise push the resume bytes via CDP
+        (eng.upload_file -> DOM.setFileInputFiles). NEVER escalates to an agent — the agent-driven upload
+        network-errors and loops (intel_wd4.log). Re-uploads if the field reappears empty on a later step.
+
+        Returns True iff an upload was performed THIS call (already-uploaded / no-field / no-resume -> False
+        with no error). The file FormField is source='skip', so this is the ONLY path that touches it."""
+        if not (resume or "").strip():
+            return False
+        for sel in self._FILE_INPUT_SELECTORS:
+            fel = await eng.first(page, sel)
+            if not fel:
+                continue
+            # IDEMPOTENT GATE: a "file-upload-successful" marker anywhere in this input's wrapper means
+            # the resume is already attached for this step — do NOT re-push (avoids dup/overwrite loops).
+            done = False
+            with contextlib.suppress(Exception):
+                done = bool(
+                    await fel.evaluate(
+                        "() => { const w=this.closest('[data-automation-id=\"file-upload-drop-zone\"]')"
+                        " || this.closest('[data-automation-id^=\"formField-\"]') || this.parentElement;"
+                        " return !!(w && w.querySelector('[data-automation-id=\"file-upload-successful\"]')); }"
+                    )
+                )
+            if done:
+                return False
+            ok = await eng.upload_file(session, page, fel, resume)
+            if _DBG:
+                print(f"   [upload_resume] sel={sel!r} pushed={ok}")
+            # confirm the upload registered before declaring success; the success marker mounts async.
+            if ok:
+                for _ in range(6):
+                    await asyncio.sleep(0.4)
+                    if await eng.first(page, '[data-automation-id="file-upload-successful"]'):
+                        return True
+                return True  # bytes pushed via CDP; marker may simply lag — never fall to the agent
+            return False
+        return False
+
     # repeater sections are owned by fill_repeaters (wd_repeaters), NOT the per-field schema ladder —
     # match the data-fkit-id section token so the ladder doesn't DOUBLE-fill what the engine fills.
     _REPEATER_FKIT = ("workexperience-", "education-", "skills-", "skills--", "languages-", "certifications-")
 
     def _to_field(self, f: dict) -> FormField:
         t = f["type"]
-        if any(f["name"].lower().startswith(p) for p in self._REPEATER_FKIT):
-            source = "skip"  # single-owner: wd_repeaters fills these (mount + reconcile), not the ladder
+        # RESUME UPLOAD is DETERMINISTIC-ONLY (directive #1): a file field is NEVER handed to the
+        # per-field ladder/escalate — it would network-error then loop a browser_use.Agent. Mark it
+        # 'skip' (like a repeater fkit) so run_wizard's ladder never touches it; the dedicated,
+        # idempotent upload_resume() scans the live DOM fresh on EVERY step and pushes bytes via CDP.
+        if t == "file" or any(f["name"].lower().startswith(p) for p in self._REPEATER_FKIT):
+            source = "skip"  # single-owner: upload_resume() (file) / wd_repeaters (repeaters), not the ladder
         else:
             source = (
-                "file"
-                if t == "file"
-                else "select"
+                "select"
                 if t in ("single_select", "select_native", "multi_select", "radio", "checkbox")
                 else "open_ended"
                 if t == "textarea"
@@ -662,47 +713,22 @@ class WorkdayAdapter(ATSAdapter):
                 continue
             if _DBG:
                 print(f"      [pick] want={want!r} visible[:6]={[t for _, t in opts[:6]]}")
-            # BEST match, not first-contains: exact > prefix > contains > reverse-contains, and
-            # among equals the SHORTEST option (closest). Critical so 'United States' resolves to
-            # 'United States of America' rather than 'United States Minor Outlying Islands' — a
-            # wrong country cascades a different address schema and breaks the whole step.
-            best: tuple[int, int, Any] | None = None
-            for o, txt in opts:
-                if not txt:
-                    continue
-                if txt == want:
-                    best = (0, 0, o)
-                    break
-                score = (
-                    1
-                    if (want and txt.startswith(want))
-                    else 2
-                    if (want and want in txt)
-                    else 3
-                    if (txt and txt in want)
-                    else None
-                )
-                if score is not None:
-                    cand = (score, len(txt), o)
-                    if best is None or cand[:2] < best[:2]:
-                        best = cand
-            if best is None:
-                # the filter landed but no DOM option matches — the DOM read may be lagging the render,
-                # so let VISION read the screen before giving up (never commit a wrong top option).
-                if searchable:
-                    stale_reads += 1
-                    if stale_reads >= 3:
-                        return await _vision_handoff()
-                    continue
-                return False
-            # COMMIT: searchable -> trusted Enter on the highlighted top match (input still focused
-            # from _listbox's fill); inline -> click the matched node directly.
+            # MATCH is LLM-ONLY (directive #3): the DOM gives only a fast EXACT-equality shortcut
+            # (identity, not a heuristic). ANY non-exact decision — 'United States' vs 'United States
+            # of America', 'BS' vs "Bachelor's Degree" — is the LLM's, made by the shared visual+LLM
+            # picker (_vision_handoff reads the rendered options and lets the cheap flash-lite pick).
+            # No startswith / contains / reverse-contains guessing here.
+            exact = next((o for o, txt in opts if txt and txt == want), None)
+            if exact is None:
+                return await _vision_handoff()  # LLM picks over the real rendered options
+            # COMMIT the exact match: searchable -> trusted Enter on the highlighted top match (input
+            # still focused from _listbox's fill); inline -> click the matched node directly.
             if searchable:
                 ok = await eng.press_enter_trusted(session, page)
                 await asyncio.sleep(0.4)
                 return ok
             with contextlib.suppress(Exception):
-                await best[2].click()
+                await exact.click()
                 return True
             return False
         # bound reached without a confident DOM match -> last-resort vision read (searchable only)
@@ -733,10 +759,18 @@ class WorkdayAdapter(ATSAdapter):
                 txt, _, val = (info or "").partition("|~|")
                 scored.append((el, eng.norm(txt), eng.norm(val)))
         target = next((el for el, t, _ in scored if t == want and want), None)
-        if not target:
-            target = next((el for el, t, _ in scored if want and t and (want in t or t in want)), None)
-        if not target and yn:
+        if not target and yn:  # canonical yes/no via the value attr (true/false) — identity, not substring
             target = next((el for el, _, v in scored if v == yn), None)
+        if not target:  # MATCH is LLM-ONLY (directive #3) — pick the best option label, no substring guess
+            labels = [t for _, t, _ in scored if t]
+            if labels:
+                from vision_verify import _vlm
+                from wd_repeaters import _llm_pick
+
+                with contextlib.suppress(Exception):
+                    choice = await _llm_pick(_vlm(), value, labels)
+                    if choice:
+                        target = next((el for el, t, _ in scored if t == eng.norm(choice)), None)
         if not target:
             return False
         # Robust check (DomHand _CLICK_BINARY_FIELD_JS pattern): a plain CDP click on a Workday

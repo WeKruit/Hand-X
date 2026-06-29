@@ -149,6 +149,13 @@ class ATSAdapter(abc.ABC):
         messages should name the offending field(s). Default: none."""
         return []
 
+    async def upload_resume(self, session: Any, page: Any, resume: str | None) -> bool:
+        """Optional: DETERMINISTIC-ONLY resume upload for wizards. Runs fresh at the top of every step,
+        scans the live DOM for the file input, pushes bytes via CDP, and is idempotent (skips if already
+        uploaded). NEVER escalates to an agent. Single-page adapters keep the file field on the per-field
+        ladder, so this default is a no-op for them (Greenhouse/Lever/Ashby/jobapply untouched)."""
+        return False
+
     async def fill_repeaters(self, session: Any, page: Any, profile: dict) -> dict:
         """Optional: fill 'Add another' repeater sections (education / work experience) that
         are NOT in the flat field schema — they exist only in the live DOM and need an
@@ -249,26 +256,18 @@ async def press_enter_trusted(session: Any, page: Any) -> bool:
         return False
 
 
-def _match_option(want: str, options: list[str]) -> int | None:
-    """Best index in `options` for `want`: exact -> startswith -> contains -> reverse-contains,
-    SHORTEST among equals (so 'United States' -> 'United States of America', not '...Minor Outlying
-    Islands'). Pure string logic over the REAL rendered option texts. None if nothing matches."""
-    w = norm(want)
-    if not w or not options:
+def _locate_idx(chosen: str, options: list[str]) -> int | None:
+    """Index in `options` whose VISIBLE text equals `chosen` (the LLM's pick), normalized-exact ONLY.
+    This is NOT option-matching — it merely locates the element the LLM already chose. No regex, no
+    substring, no startswith: a value->option DECISION is the LLM's job (directive #3); this is the
+    pure equality that turns the LLM's chosen string back into a clickable index. None if absent."""
+    c = norm(chosen)
+    if not c or not options:
         return None
-    best: tuple[int, int, int] | None = None  # (rank, len, idx)
     for i, opt in enumerate(options):
-        t = norm(opt)
-        if not t:
-            continue
-        if t == w:
+        if norm(opt) == c:
             return i
-        rank = 1 if t.startswith(w) else 2 if w in t else 3 if t in w else None
-        if rank is not None:
-            cand = (rank, len(t), i)
-            if best is None or cand[:2] < best[:2]:
-                best = cand
-    return best[2] if best else None
+    return None
 
 
 async def pick_dropdown(
@@ -287,11 +286,14 @@ async def pick_dropdown(
     the rendered options — the documented fix for the lagging/stale DOM option portal.
 
     Pipeline:
-      1. READ options from the DOM first (cheap) via the caller's `read_dom_options(page) -> [str]`.
-      2. If that DOM list is STALE/empty/lagged — it does not contain the typed token — FALL BACK to
-         vision_verify.read_options_visually(session): one low-detail screenshot, VLM transcribes the
-         ACTUALLY-rendered options (no DOM lag). Vision wins when present and non-empty.
-      3. MATCH exact -> contains -> cheap-LLM closest, over the REAL (vision-or-DOM) option strings.
+      1. READ options from the DOM (cheap) via the caller's `read_dom_options(page) -> [str]`.
+      2. ALSO read the screen with vision_verify.read_options_visually(session) when the DOM came back
+         empty (lagged/stale portal): one low-detail screenshot, VLM transcribes the ACTUALLY-rendered
+         options (no DOM lag). Vision is the source of truth when present; DOM is the cheap supplement.
+      3. MATCH is LLM-ONLY (directive #3): the cheap text LLM reads the REAL (vision-or-DOM) option
+         strings and picks the single best one (it canonicalizes abbreviations, e.g. 'B.S.' -> the
+         "Bachelor's Degree" option). NO regex / substring / startswith / equality MATCH heuristic —
+         _locate_idx only turns the LLM's chosen string back into a clickable index by exact equality.
       4. COMMIT: `commit(idx, options)` if the caller gave one (e.g. click the matched node); else the
          default trusted CDP Enter on the widget's pre-highlighted top match (press_enter_trusted).
       5. VERIFY the committed VALUE with the cheap value-aware VLM (visual_check(want=value)); return
@@ -306,16 +308,15 @@ async def pick_dropdown(
     if not want:
         return True
 
-    # 1. DOM read (cheap, may be stale)
+    # 1. DOM read (cheap, may be stale/empty)
     dom_opts: list[str] = []
     with contextlib.suppress(Exception):
         dom_opts = [o for o in (await read_dom_options(page) or []) if o]
 
-    # 2. trust the DOM only if it actually reflects the typed filter; else read the screen
-    dom_has_token = _match_option(want, dom_opts) is not None
+    # 2. when the DOM portal lagged (empty), read the actually-rendered options off the screen
     options = dom_opts
     used_vision = False
-    if not dom_has_token:
+    if not dom_opts:
         vkey = vis_key or f"{verify_label or 'menu'}:{value}"
         vis_opts = await read_options_visually(session, key=vkey)
         if vis_opts:
@@ -324,21 +325,29 @@ async def pick_dropdown(
     if not options:
         return False
 
-    # 3. match over the REAL options
-    idx = _match_option(want, options)
-    if idx is None and llm is not None:
+    # 3. MATCH is LLM-ONLY — no regex/substring; the LLM picks the single best option text, then
+    #    _locate_idx resolves that exact string to an index (equality is just element-location).
+    #    No llm passed -> default to the cheap flash-lite (vision_verify._vlm) so the match is ALWAYS
+    #    an LLM decision (directive #3) — never a silent abort for lack of a caller-supplied llm.
+    if llm is None:
+        with contextlib.suppress(Exception):
+            from vision_verify import _vlm
+
+            llm = _vlm()
+    idx = None
+    if llm is not None:
         from wd_repeaters import _llm_pick
 
         choice = await _llm_pick(llm, value, options)
         if choice:
-            idx = _match_option(choice, options)
+            idx = _locate_idx(choice, options)
     print(
         f"  [pick_dropdown] want={value!r} src={'vlm' if used_vision else 'dom'} "
         f"opts={options[:5]} hit={idx is not None}",
         flush=True,
     )
     if idx is None:
-        return False  # the filter landed but nothing matches -> abort fast (no wrong-value commit)
+        return False  # no LLM pick (or it chose NONE/absent) -> abort fast (no wrong-value commit)
 
     # 4. commit
     committed = False
@@ -1096,6 +1105,12 @@ async def run_wizard(
         t0 = time.monotonic()
         c0 = (await tc.get_usage_summary()).total_cost
         step = await adapter.extract_step(session, page, profile)
+        # RESUME UPLOAD — DETERMINISTIC-ONLY (directive #1). Scan the live page FRESH every step for the
+        # file input and push bytes via CDP; idempotent (skips if already uploaded). Runs BEFORE per-field
+        # fill / fill_repeaters and CANNOT escalate to an agent. No-op on single-page adapters.
+        with contextlib.suppress(Exception):
+            if await adapter.upload_resume(session, page, resume):
+                print("  resume: uploaded deterministically (CDP)")
         if os.environ.get("GH_DUMP"):  # capture each step's live DOM for OFFLINE detector dev (no live reruns)
             with contextlib.suppress(Exception):
                 html = await page.evaluate("() => document.documentElement.outerHTML")
@@ -1165,6 +1180,13 @@ async def run_wizard(
             errs = await adapter.validation_errors(page)
             if errs:
                 print(f"  [agent-repair] advance blocked by validation: {errs}")
+                # RESUME stays DETERMINISTIC even during validation repair (directive #1): if an error
+                # names the resume/file upload, push the bytes via CDP HERE — never let the agent (which
+                # network-errors + loops on upload) handle the file. Re-runs the idempotent scan.
+                if any(re.search(r"resume|cv|upload|file|attach", e, re.I) for e in errs):
+                    with contextlib.suppress(Exception):
+                        if await adapter.upload_resume(session, page, resume):
+                            print("  [agent-repair] resume re-uploaded deterministically (CDP)")
                 agent_used = True
                 await repair_and_advance(session, page, errs, adapter.advance_label, agent_llm=agent_llm, resume=resume)
                 page = await session.must_get_current_page()

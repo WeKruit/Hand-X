@@ -280,10 +280,15 @@ class Diff:
 
 
 def _rows_of(controls: list[Control], sec: str) -> list[str]:
-    """Ordered distinct row tokens mounted for a section (by first appearance)."""
+    """Ordered distinct MOUNTED row tokens for a section (by first appearance). The count this returns
+    IS the dup-guard's ground truth (ensure_rows stops at want == len(profile[section])), so it must
+    count ONLY real repeater rows: a fkit-derived row instance is a non-empty token ('225','247'). The
+    empty token '' is the NON-repeating / un-rowed control (e.g. 'skills--skills', a TAG, or a
+    section's own scaffolding) — counting it as a row would over-report a collapsed section as having
+    1 row and make ensure_rows under- or mis-mount. So '' is excluded from the row count."""
     seen: dict[str, int] = {}
     for c in controls:
-        if c.sect() == sec and c.row not in seen:
+        if c.sect() == sec and c.row and c.row not in seen:
             seen[c.row] = c.doc_index
     return [r for r, _ in sorted(seen.items(), key=lambda kv: kv[1])]
 
@@ -605,9 +610,10 @@ async def pick_smart(adapter, page, llm, value: str, session=None, tries: int = 
         if not opts:
             await _wait_options_change(page, [])  # bounded wait for the menu to mount
             continue
-        target = next((o for o, t in opts if t == want), None) or next(
-            (o for o, t in opts if want and (want in t or t in want)), None
-        )
+        # MATCHING = LLM ONLY (directive 3): no substring/contains. An EXACT option-text equality is the
+        # only deterministic shortcut (it is not a substring test); everything else is the LLM's single
+        # best-option pick over the READ option strings (it canonicalizes 'BS' -> "Bachelor's", etc.).
+        target = next((o for o, t in opts if t == want), None)
         choice = None
         if target is None and llm is not None:
             choice = await _llm_pick(llm, value, texts)  # the agent's decision, replayed
@@ -691,7 +697,7 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
             await _wait_options_change(page, base_opts)  # bounded: wait for the filter to re-render
         # exact -> contains -> LLM closest; vision reads the rendered options + verifies the committed value
         return await pick_smart(adapter, page, llm, value, session=session, verify_label=c.label)
-    if a == "chip":  # typeahead TAG: add EACH comma-item as its own pill
+    if a == "chip":  # typeahead TAG (Skills): add EACH comma-item as its own pill, VISUALS-confirmed
         import contextlib
 
         items = [x.strip() for x in value.split(",")] if "," in value else [value]
@@ -705,24 +711,65 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
             with contextlib.suppress(Exception):
                 await inp.click()
                 await inp.fill(it)
-            # The suggestion menu updates ASYNC and LAGS (typing 'PostgreSQL' still shows the previous
-            # skill's 'Go' options for a beat). DON'T over-match a stale list — POLL until the menu shows
-            # an option that CONTAINS the typed token (the menu settled on OUR value), THEN a TRUSTED CDP
-            # Enter commits the highlighted top match into a pill. (The proven _fill_tags pattern.)
-            want = nkey(it)
-            for _ in range(12):
-                opts = [nkey(t) for _, t in await _read_visible_options(page)]
-                if any(o and (want in o or o in want) for o in opts):
-                    break
-                await asyncio.sleep(0.3)
-            await eng_press_enter(session, page)  # commit the top highlight (now the typed value)
-            await asyncio.sleep(0.4)
-            added += 1
+            # SKILLS VIA VISUALS (directive 2 + 3): the suggestion menu LAGS and the DOM portal is stale,
+            # and we do NO substring/regex matching here — the cheap VLM is the observer. type -> VLM
+            # READS the open suggestion menu (read_options_visually) and confirms it shows our value (LLM
+            # decides, not a string `in`) -> trusted Enter commits the top highlight into a pill -> VLM
+            # visual_check(want=) confirms the pill actually carries our value. The settle-poll below is a
+            # render-readiness gate only (wait for the menu to re-render for the typed filter), not a
+            # which-option decision.
+            ok = await _chip_commit_visual(session, page, c.label, it, llm)
+            if ok:
+                added += 1
+            else:
+                # no session / VLM unavailable (offline): commit the top highlight via trusted Enter,
+                # gated only on the menu having re-rendered for the typed filter (a render gate, not a
+                # substring match). The COMMIT decision is the widget's own highlight, not a string test.
+                await _wait_options_change(page, [])
+                await eng_press_enter(session, page)
+                await asyncio.sleep(0.4)
+                added += 1
         return added > 0
     if a == "date":
         from ats_engine import FormField
 
         return await adapter._date(page, FormField(name=c.fkit, type="date", label=c.label, source="standard"), value)
+    return False
+
+
+async def _chip_commit_visual(session, page, label: str, item: str, llm=None) -> bool:
+    """Commit ONE Skills pill via VISUALS (directive 2). No regex/substring anywhere: the cheap VLM is
+    the observer + the matcher. Pipeline: wait for the menu to re-render for the typed filter (render
+    gate) -> VLM READS the open suggestion menu (read_options_visually) and an LLM picks whether OUR
+    value is offered -> trusted CDP Enter commits the highlighted top match into a pill -> value-aware
+    VLM (visual_check want=) confirms the pill carries our value. Returns True iff committed AND the
+    VLM confirms the pill (matches==true). Returns False with no session (offline -> caller falls back).
+    """
+    import contextlib
+
+    if session is None:
+        return False
+    from vision_verify import _matches, read_options_visually, visual_check
+
+    # render gate: let the suggestion menu settle for the typed filter (not a fixed sleep, not a match)
+    await _wait_options_change(page, [])
+    # VLM reads the ACTUALLY-rendered suggestions; an LLM decides our value is among them (no substring).
+    offered = False
+    with contextlib.suppress(Exception):
+        opts = await read_options_visually(session, key=f"skill:{item}")
+        if opts:
+            choice = await _llm_pick(llm, item, opts)
+            offered = choice is not None
+        else:
+            offered = True  # VLM couldn't transcribe (budget/empty) -> don't block the commit
+    if not offered:
+        return False
+    await eng_press_enter(session, page)  # commit the widget's top highlight into a pill
+    await asyncio.sleep(0.4)
+    # value-aware VLM verify: is OUR value now a visible pill under this Skills field?
+    with contextlib.suppress(Exception):
+        verdict = await visual_check(session, label, want=item)
+        return _matches(verdict)
     return False
 
 
@@ -733,25 +780,54 @@ async def eng_press_enter(session, page) -> None:
         await press_enter_trusted(session, page)
 
 
+# Workday section headings carry the section keyword (KW); every section's Add control shares the
+# IDENTICAL text "Add Another" (verified in the Intel fixture: Work-Experience and Education both
+# read "Add Another"), so TEXT can never disambiguate which section's Add to click. The ROW-SAFE
+# anchor is DOCUMENT ORDER: a section's Add control is the FIRST add-control whose position is AFTER
+# that section's heading and BEFORE the NEXT section's heading. This mirrors _assign_sections
+# (nearest-heading-before), the proven section-assignment logic, applied to the add controls.
+_ADD_SEL = '[data-automation-id="add-button"], button, [role="button"]'
+_HEAD_KW = {
+    "experience": "experience",
+    "education": "education",
+    "skills": "skill",
+    "languages": "language",
+    "certifications": "certification",
+}
+
+
 async def _add_row(page, sec: str) -> bool:
-    """Click the section's Add/Add Another control so the next row mounts. Generic: match by the
-    section keyword in the button text, else a bare 'Add'."""
-    label_kw = {
-        "experience": "experience",
-        "education": "education",
-        "skills": "skill",
-        "languages": "language",
-        "certifications": "certification",
-    }.get(sec, sec)
+    """Click the RIGHT section's Add control so the next row mounts for THAT section.
+
+    Section-scoped by document order, NOT by button text (every section's button reads the same
+    "Add Another"). We find the section heading (its KW keyword), then click the first add control
+    that sits between that heading and the next section heading. Returns True iff a control was
+    clicked — the caller (ensure_rows) re-reads the count to confirm a row actually mounted."""
+    kw = _HEAD_KW.get(sec, sec)
     clicked = await page.evaluate(
-        """(kw) => { const bs=[...document.querySelectorAll('button,[role=button]')];
-          const re=new RegExp('add (another|'+kw+')','i');
-          let b=bs.find(x=>re.test((x.textContent||'').trim()));
-          if(!b) b=bs.find(x=>/^add$/i.test((x.textContent||'').trim()) &&
-                    (x.closest('[data-automation-id]')||{}).getAttribute &&
-                    new RegExp(kw,'i').test((x.closest('[data-automation-id]').getAttribute('data-automation-id')||'')));
-          if(b){ b.scrollIntoView({block:'center'}); b.click(); return true; } return false; }""",
-        label_kw,
+        """(kw) => {
+          const norm = s => (s||'').replace(/\\s+/g,' ').trim().toLowerCase();
+          const KW = ['experience','education','skill','language','certification'];
+          const nodes = [...document.querySelectorAll('*')];
+          // section heading doc-order index for the target kw, and the next section heading after it
+          const isHead = el => /^(H1|H2|H3|H4)$/.test(el.tagName) || el.getAttribute('role')==='heading'
+                               || (el.getAttribute('data-automation-id')||'').includes('Title');
+          let myPos=-1, nextPos=nodes.length;
+          for (let i=0;i<nodes.length;i++){ const el=nodes[i];
+            if(!isHead(el)) continue; const t=norm(el.textContent); if(t.length>40) continue;
+            if(myPos===-1 && t.includes(kw)) { myPos=i; continue; }
+            if(myPos!==-1 && KW.some(k=>t.includes(k))) { nextPos=i; break; }
+          }
+          if(myPos===-1) return false;
+          // first add control strictly inside (myPos, nextPos)
+          const isAdd = el => el.getAttribute('data-automation-id')==='add-button'
+                              || /^add(\\s+another)?$/i.test((el.textContent||'').trim());
+          for (let i=myPos+1;i<nextPos && i<nodes.length;i++){ const el=nodes[i];
+            if((el.tagName==='BUTTON'||el.getAttribute('role')==='button') && isAdd(el)){
+              el.scrollIntoView({block:'center'}); el.click(); return true; }
+          }
+          return false; }""",
+        kw,
     )
     if clicked:
         await asyncio.sleep(1.2)  # let the new row mount
@@ -781,12 +857,20 @@ async def ensure_rows(adapter, page, profile: dict) -> bool:
         want = len(items)
         if not want:
             continue
-        for _ in range(want + 2):
+        # HARD CAP + NO-SPIN dup-guard (the 9-row fix): re-read the live row COUNT each iteration and
+        # add ONLY while have < want. The loop bound is `want` (never more clicks than the gap to fill),
+        # and if a click does NOT increase the count (wrong/dead Add control, or count can't advance) we
+        # STOP this section immediately — never spin firing Adds the count can't see. So mounted rows for
+        # the section can NEVER exceed `want` (= len(profile[section])).
+        for _ in range(want):
             controls = await extract_live(page)
             have = len(_rows_of(controls, sec))
-            if have >= want:
+            if have >= want:  # dup-guard: at/over target -> never add past the profile count
                 break
             if not await _add_row(page, sec):  # section not on this page / no Add control -> stop
+                break
+            controls = await extract_live(page)
+            if len(_rows_of(controls, sec)) <= have:  # click did NOT mount a new row -> stop (no spin)
                 break
             added = True
     return added
