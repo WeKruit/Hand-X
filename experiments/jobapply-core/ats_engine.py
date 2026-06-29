@@ -298,6 +298,31 @@ async def click_trusted(session: Any, page: Any, element: Any) -> bool:
         return False
 
 
+async def hover_trusted(session: Any, page: Any, element: Any) -> bool:
+    """Move the real cursor over an element so a hover-highlighting widget (Workday's typeahead
+    suggestion menu) HIGHLIGHTS it — WITHOUT clicking. Pairs with press_enter_trusted: hover the
+    matched option to highlight it, then Enter commits it. A trusted CLICK on a multi-pill suggestion
+    leaves the menu OPEN (verified); hover+Enter commits AND closes it. Returns False if no box."""
+    try:
+        sid = await page.session_id
+        box = await element.evaluate(
+            "() => { const el=this; el.scrollIntoView({block:'center',inline:'center'});"
+            " const r=el.getBoundingClientRect();"
+            " return (r.width&&r.height) ? JSON.stringify({x:r.left+r.width/2, y:r.top+r.height/2}) : ''; }"
+        )
+        if isinstance(box, str):
+            box = json.loads(box) if box else None
+        if not isinstance(box, dict):
+            return False
+        await session.cdp_client.send.Input.dispatchMouseEvent(
+            params={"type": "mouseMoved", "x": box["x"], "y": box["y"], "buttons": 0}, session_id=sid
+        )
+        return True
+    except Exception as exc:
+        print(f"   [trusted-hover] {exc}")
+        return False
+
+
 def _locate_idx(chosen: str, options: list[str]) -> int | None:
     """Index in `options` whose VISIBLE text equals `chosen` (the LLM's pick), normalized-exact ONLY.
     This is NOT option-matching — it merely locates the element the LLM already chose. No regex, no

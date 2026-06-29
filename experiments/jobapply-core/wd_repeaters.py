@@ -781,7 +781,7 @@ async def _chip_commit_visual(session, page, label: str, item: str, llm=None) ->
 
     if session is None:
         return False
-    from ats_engine import click_trusted
+    from ats_engine import hover_trusted
     from vision_verify import _matches, visual_check
 
     # RENDER GATE: poll the DOM suggestions (element,text) until the menu has re-rendered for the typed
@@ -804,8 +804,13 @@ async def _chip_commit_visual(session, page, label: str, item: str, llm=None) ->
     el = next((e for e, t in opts if nkey(t) == nkey(choice)), None)  # locate the chosen element (equality)
     if el is None:
         return False
-    if not await click_trusted(session, page, el):  # TRUSTED-click the matched suggestion -> pill
-        return False
+    # COMMIT the PROVEN way (reuse _multiselect's mechanism): HOVER the matched option to highlight it,
+    # then a TRUSTED ENTER commits it into a pill AND closes the menu. A trusted CLICK on the multi-pill
+    # Skills suggestion leaves the menu OPEN (verified: the agent saw 'menu is still open') — Enter is
+    # what commits. Hover targets the RIGHT option (not the blind top), so School lands UC-Berkeley.
+    await hover_trusted(session, page, el)
+    await asyncio.sleep(0.12)
+    await eng_press_enter(session, page)
     await asyncio.sleep(0.4)
     with contextlib.suppress(Exception):
         return _matches(await visual_check(session, label, want=item))
