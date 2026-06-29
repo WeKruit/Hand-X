@@ -73,6 +73,19 @@ PROFILES = [
      "skills": ["C++", "CUDA", "PyTorch", "Python"]},
 ]
 
+# Complete every profile: DEFAULT English as proficient (Native or Bilingual across all 5 proficiency
+# axes), plus a second language for variety. Workday's Languages section is a row repeater (name + 5
+# proficiency selects); the engine fills it like Education. "can add more" -> a 2nd entry per profile.
+_PROF_LANG = "Native or Bilingual"
+_SECOND_LANG = ["Spanish", "Hindi", "French", "Spanish", "Mandarin Chinese"]
+for _i, _p in enumerate(PROFILES):
+    _p.setdefault("languages", [
+        {"language": "English", "comprehension": _PROF_LANG, "overall": _PROF_LANG,
+         "reading": _PROF_LANG, "speaking": _PROF_LANG, "writing": _PROF_LANG},
+        {"language": _SECOND_LANG[_i % len(_SECOND_LANG)], "comprehension": "Intermediate",
+         "overall": "Intermediate", "reading": "Intermediate", "speaking": "Intermediate", "writing": "Intermediate"},
+    ])
+
 
 def fetch_job(tenant, host, site):
     try:
@@ -103,6 +116,7 @@ async def main():
     profile = PROFILES[pidx]
     pname = profile["_name"]
     tag = f"{tenant}_{pname}"
+    os.environ["WD_MYEXP_SHOT"] = str(OUT / f"{tag}_myexp.png")  # robust My-Experience filled screenshot
     resume = BASE + "/../../examples/resume.pdf"
     if not Path(resume).exists():
         resume = None

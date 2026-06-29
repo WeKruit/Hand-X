@@ -691,7 +691,7 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
             await _wait_options_change(page, base_opts)  # bounded: wait for the filter to re-render
         # exact -> contains -> LLM closest; vision reads the rendered options + verifies the committed value
         return await pick_smart(adapter, page, llm, value, session=session, verify_label=c.label)
-    if a == "chip":  # typeahead TAG: add EACH comma-item as its own pill (type -> filter -> pick)
+    if a == "chip":  # typeahead TAG: add EACH comma-item as its own pill
         import contextlib
 
         items = [x.strip() for x in value.split(",")] if "," in value else [value]
@@ -702,14 +702,21 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
             inp = await first(page, f"{base} input") or await first(page, f'{base} [role="combobox"]')
             if not inp:
                 break
-            base_opts = [t for _, t in await _read_visible_options(page)]
             with contextlib.suppress(Exception):
                 await inp.click()
                 await inp.fill(it)
-            await _wait_options_change(page, base_opts)  # bounded: wait for the tag filter to re-render
-            picked = await pick_smart(adapter, page, llm, it, session=session, tries=5, verify_label=c.label)
-            if not picked:
-                await eng_press_enter(session, page)  # fallback: trusted Enter on the highlight
+            # The suggestion menu updates ASYNC and LAGS (typing 'PostgreSQL' still shows the previous
+            # skill's 'Go' options for a beat). DON'T over-match a stale list — POLL until the menu shows
+            # an option that CONTAINS the typed token (the menu settled on OUR value), THEN a TRUSTED CDP
+            # Enter commits the highlighted top match into a pill. (The proven _fill_tags pattern.)
+            want = nkey(it)
+            for _ in range(12):
+                opts = [nkey(t) for _, t in await _read_visible_options(page)]
+                if any(o and (want in o or o in want) for o in opts):
+                    break
+                await asyncio.sleep(0.3)
+            await eng_press_enter(session, page)  # commit the top highlight (now the typed value)
+            await asyncio.sleep(0.4)
             added += 1
         return added > 0
     if a == "date":
@@ -854,6 +861,23 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
         real_residual.append(f"{f.section}[{f.row}].{f.label}")
     summary["residual"] = real_residual
     summary["secs"] = round(time.monotonic() - t0, 1)
+    # VERIFICATION AID: capture the filled My-Experience page (the heavy SPA errors the per-step
+    # screenshot, so grab it here, robustly, via CDP) so the fill can be checked VISUALLY.
+    import base64
+    import contextlib
+    import os
+    import pathlib
+
+    shot_path = os.environ.get("WD_MYEXP_SHOT")
+    if shot_path:
+        with contextlib.suppress(Exception):
+            sid = page.session_id
+            if hasattr(sid, "__await__"):
+                sid = await sid
+            r = await session.cdp_client.send.Page.captureScreenshot(
+                params={"format": "png", "captureBeyondViewport": True}, session_id=sid)
+            pathlib.Path(shot_path).write_bytes(base64.b64decode(r["data"]))
+            print(f"  [wd] My-Experience screenshot -> {shot_path}", flush=True)
     print(f"  [wd] TOTAL {summary['secs']}s filled={summary['filled']} residual={len(summary['residual'])}", flush=True)
     return summary
 
