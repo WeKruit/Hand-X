@@ -941,12 +941,19 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
         await asyncio.sleep(0.5)
     # SETTLE before the final read + VLM residual check: the last chip can leave its suggestion menu
     # OPEN, so the VLM would read the open menu (not the committed pill) and FALSE-flag a filled chip as
-    # residual. Close any menu (trusted Escape) + blur + wait, so visuals see the true committed state.
+    # residual. The Salesforce/Workday typeahead does NOT close on Escape — it closes on CLICK-OUTSIDE.
+    # So dispatch a TRUSTED click in the empty left margin (x=6, no field there), then Escape + blur.
     import contextlib
 
     with contextlib.suppress(Exception):
         from ats_engine import press_key_trusted
 
+        sid = await page.session_id
+        for ev in (
+            {"type": "mousePressed", "x": 6, "y": 320, "button": "left", "buttons": 1, "clickCount": 1},
+            {"type": "mouseReleased", "x": 6, "y": 320, "button": "left", "buttons": 0, "clickCount": 1},
+        ):
+            await session.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=sid)
         await press_key_trusted(session, page, key="Escape", code="Escape", vk=27)
         await page.evaluate("() => { if(document.activeElement&&document.activeElement.blur) document.activeElement.blur(); }")
         await asyncio.sleep(0.8)
