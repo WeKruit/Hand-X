@@ -408,6 +408,22 @@ async def pick_dropdown(
         choice = await _llm_pick(llm, value, options)
         if choice:
             idx = _locate_idx(choice, options)
+    # The DOM portal can serve the WRONG list: a select WITHOUT aria-controls (PayPal's Degree /
+    # language-proficiency widgets) falls back to the SHARED global portal, which returns another
+    # widget's options (e.g. language NAMES 'Afrikaans/Albanian' for a proficiency select) -> no match.
+    # When DOM gave no match, READ THE SCREEN with the VLM (it sees the actually-open widget, no portal
+    # scoping) and re-match. Visuals are the source of truth.
+    if idx is None and not used_vision:
+        with contextlib.suppress(Exception):
+            vis_opts = await read_options_visually(session, key=vis_key or f"{verify_label or 'menu'}:{value}")
+            if vis_opts and llm is not None:
+                from wd_repeaters import _llm_pick
+
+                options = vis_opts
+                used_vision = True
+                choice = await _llm_pick(llm, value, options)
+                if choice:
+                    idx = _locate_idx(choice, options)
     print(
         f"  [pick_dropdown] want={value!r} src={'vlm' if used_vision else 'dom'} "
         f"opts={options[:5]} hit={idx is not None}",
