@@ -587,6 +587,15 @@ class WorkdayAdapter(ATSAdapter):
         await eng.press_enter_trusted(session, page)
         await asyncio.sleep(0.3)
         ok = await self.read_back(session, page, field, value)
+        if not ok:
+            # Some Workday/Salesforce typeaheads (the multi-pill Skills field) do NOT auto-highlight the
+            # top match, so a plain Enter commits nothing. ArrowDown highlights the first suggestion, then
+            # Enter commits it — same primitive, just the keyboard-nav the widget needs.
+            await eng.press_key_trusted(session, page, key="ArrowDown", code="ArrowDown", vk=40)
+            await asyncio.sleep(0.2)
+            await eng.press_enter_trusted(session, page)
+            await asyncio.sleep(0.3)
+            ok = await self.read_back(session, page, field, value)
         if _DBG:
             print(f"   [msel {field.name}] value={value!r} committed={ok}")
         return ok
