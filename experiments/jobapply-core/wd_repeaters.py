@@ -712,7 +712,16 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
         for it in items:
             if not it:
                 continue
-            inp = await first(page, f"{base} input") or await first(page, f'{base} [role="combobox"]')
+            # The typeahead input may be a DESCENDANT of the fkit wrapper (education chips) OR carry the
+            # fkit ITSELF (the Skills multiselect: data-fkit-id="skills--skills" is on the input/combobox,
+            # so "{base} input" finds nothing -> Skills never typed -> never committed). Try both.
+            inp = (
+                await first(page, f"{base} input")
+                or await first(page, f'{base} [role="combobox"]')
+                or await first(page, f"input{base}")  # the input itself carries the fkit
+                or await first(page, f'{base}[role="combobox"]')
+                or await first(page, f'{base} [contenteditable="true"]')
+            )
             if not inp:
                 break
             with contextlib.suppress(Exception):
@@ -749,43 +758,47 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
 
 
 async def _chip_commit_visual(session, page, label: str, item: str, llm=None) -> bool:
-    """Commit ONE Skills pill via VISUALS (directive 2). No regex/substring anywhere: the cheap VLM is
-    the observer + the matcher. Pipeline: wait for the menu to re-render for the typed filter (render
-    gate) -> VLM READS the open suggestion menu (read_options_visually) and an LLM picks whether OUR
-    value is offered -> trusted CDP Enter commits the highlighted top match into a pill -> value-aware
-    VLM (visual_check want=) confirms the pill carries our value. Returns True iff committed AND the
-    VLM confirms the pill (matches==true). Returns False with no session (offline -> caller falls back).
+    """Commit ONE chip pill (School / Field of Study / Skills) by a MATCHED TRUSTED-CLICK — never blind.
+    The Workday typeahead does NOT auto-highlight the best match, so ArrowDown+Enter lands the FIRST
+    suggestion (e.g. 'Acupuncture & Integrative Medicine College, Berkeley' for 'University of
+    California, Berkeley' — wrong). Instead: POLL the rendered suggestions as (element, text) until the
+    menu settles on the typed filter (render gate, not a match), let the LLM pick the RIGHT text (no
+    regex/substring), TRUSTED-CLICK that SPECIFIC element, then value-aware VLM-verify the pill. Returns
+    True iff committed AND the VLM confirms the pill. False with no session (offline -> caller fallback).
     """
     import contextlib
 
     if session is None:
         return False
-    from vision_verify import _matches, read_options_visually, visual_check
+    from ats_engine import click_trusted
+    from vision_verify import _matches, visual_check
 
-    # render gate: let the suggestion menu settle for the typed filter (not a fixed sleep, not a match)
-    await _wait_options_change(page, [])
-    # VLM reads the ACTUALLY-rendered suggestions; an LLM decides our value is among them (no substring).
-    offered = False
-    with contextlib.suppress(Exception):
-        opts = await read_options_visually(session, key=f"skill:{item}")
-        if opts:
-            choice = await _llm_pick(llm, item, opts)
-            offered = choice is not None
-        else:
-            offered = True  # VLM couldn't transcribe (budget/empty) -> don't block the commit
-    if not offered:
+    # RENDER GATE: poll the DOM suggestions (element,text) until the menu has re-rendered for the typed
+    # filter (a non-empty list that CHANGED from the previous read) — not a fixed sleep, not a match.
+    opts: list = []
+    prev: list | None = None
+    for _ in range(12):
+        opts = await _read_visible_options(page)
+        texts = [t for _, t in opts]
+        if texts and texts != prev:
+            break
+        prev = texts
+        await asyncio.sleep(0.3)
+    if not opts:
         return False
-    from ats_engine import arrow_down_trusted
-
-    await arrow_down_trusted(session, page)  # HIGHLIGHT the first suggestion (Workday doesn't auto-highlight)
-    await asyncio.sleep(0.15)
-    await eng_press_enter(session, page)  # commit the now-highlighted top match into a pill
+    texts = [t for _, t in opts]
+    choice = await _llm_pick(llm, item, texts)  # LLM picks the RIGHT suggestion (no substring/regex)
+    if not choice:
+        return False
+    el = next((e for e, t in opts if nkey(t) == nkey(choice)), None)  # locate the chosen element (equality)
+    if el is None:
+        return False
+    if not await click_trusted(session, page, el):  # TRUSTED-click the matched suggestion -> pill
+        return False
     await asyncio.sleep(0.4)
-    # value-aware VLM verify: is OUR value now a visible pill under this Skills field?
     with contextlib.suppress(Exception):
-        verdict = await visual_check(session, label, want=item)
-        return _matches(verdict)
-    return False
+        return _matches(await visual_check(session, label, want=item))
+    return True
 
 
 async def eng_press_enter(session, page) -> None:
