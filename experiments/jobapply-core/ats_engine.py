@@ -401,8 +401,11 @@ async def pick_dropdown(
     if not committed:
         return False
 
-    # 5. value-aware visual verify (the wrong-option catch)
-    if not verify_label:
+    # 5. value-aware visual verify (the wrong-option catch). SKIP it when the match came from a fresh DOM
+    # read (used_vision=False): the LLM matched an EXACT visible option + trusted-Enter committed it — a
+    # reliable closed-list commit (Degree, State, language proficiency). The costly per-field VLM verify
+    # is reserved for the src=vlm case (DOM lagged -> wrong-commit risk). ~3x faster on stable selects.
+    if not verify_label or not used_vision:
         return True
     await asyncio.sleep(0.4)
     with contextlib.suppress(Exception):

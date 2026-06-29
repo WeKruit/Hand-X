@@ -74,16 +74,14 @@ PROFILES = [
 ]
 
 # Complete every profile: DEFAULT English as proficient (Native or Bilingual across all 5 proficiency
-# axes), plus a second language for variety. Workday's Languages section is a row repeater (name + 5
-# proficiency selects); the engine fills it like Education. "can add more" -> a 2nd entry per profile.
+# axes). Per spec "Language by default put English as proficient, can add more" — ONE language by default
+# (a 2nd row = 6 more selects = slower; add only when needed). Workday's Languages section is a row
+# repeater (name + 5 proficiency selects); the engine fills it like Education.
 _PROF_LANG = "Native or Bilingual"
-_SECOND_LANG = ["Spanish", "Hindi", "French", "Spanish", "Mandarin Chinese"]
-for _i, _p in enumerate(PROFILES):
+for _p in PROFILES:
     _p.setdefault("languages", [
         {"language": "English", "comprehension": _PROF_LANG, "overall": _PROF_LANG,
          "reading": _PROF_LANG, "speaking": _PROF_LANG, "writing": _PROF_LANG},
-        {"language": _SECOND_LANG[_i % len(_SECOND_LANG)], "comprehension": "Intermediate",
-         "overall": "Intermediate", "reading": "Intermediate", "speaking": "Intermediate", "writing": "Intermediate"},
     ])
 
 
