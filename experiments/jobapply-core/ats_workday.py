@@ -545,7 +545,7 @@ class WorkdayAdapter(ATSAdapter):
                 "0",
                 "n",
                 "",
-            ) and await self._click_radio(page, field, value):
+            ) and await self._click_radio(session, page, field, value):
                 return True
             el = await self.locate(page, field)
             if el:
@@ -556,7 +556,7 @@ class WorkdayAdapter(ATSAdapter):
                     return True
             return False
         if t == "radio":
-            return await self._click_radio(page, field, value)
+            return await self._click_radio(session, page, field, value)
         if t == "single_select":
             return await self._listbox(session, page, field, value)
         if t == "multi_select":
@@ -769,7 +769,7 @@ class WorkdayAdapter(ATSAdapter):
         # bound reached without a confident DOM match -> last-resort vision read (searchable only)
         return await _vision_handoff() if searchable else False
 
-    async def _click_radio(self, page: Any, field: FormField, value: str) -> bool:
+    async def _click_radio(self, session: Any, page: Any, field: FormField, value: str) -> bool:
         """Select a Workday choice control by option text — radios AND checkbox-GROUPS ("select all
         that apply"). Markup is `<input id=X value=true><label for=X>Yes</label>`; clicking the
         LABEL does NOT check the React input (verified), so we resolve each option's text via
@@ -808,10 +808,19 @@ class WorkdayAdapter(ATSAdapter):
                         target = next((el for el, t, _ in scored if t == eng.norm(choice)), None)
         if not target:
             return False
-        # Robust check (DomHand _CLICK_BINARY_FIELD_JS pattern): a plain CDP click on a Workday
-        # checkbox/radio often misses — the real <input> is hidden behind a styled label. Click the
-        # VISIBLE label/wrapper with the native .click() (which performs the toggle), fall back to
-        # the input, and fire input/change so React registers it. Skip if already checked.
+        # PRIMARY COMMIT: a TRUSTED CDP pointer event on the VISIBLE label (the <input> is 0x0/hidden
+        # behind a styled label, and a SYNTHETIC .click()/label-click does NOT flip a React radio's
+        # onChange state — the verified Workday failure that loops the vision agent). Click the label
+        # for real, then verify the input actually checked.
+        with contextlib.suppress(Exception):
+            iid = await target.evaluate("() => this.id || ''")
+            clicker = (await eng.first(page, f'label[for="{iid}"]')) if iid else None
+            if await eng.click_trusted(session, page, clicker or target):
+                await asyncio.sleep(0.2)
+                if await target.evaluate("() => this.checked===true || this.getAttribute('aria-checked')==='true'"):
+                    return True
+        # FALLBACK (DomHand _CLICK_BINARY_FIELD_JS pattern): native .click() on the label/wrapper + fire
+        # input/change so React registers it; last-resort plain CDP click. Skip if already checked.
         with contextlib.suppress(Exception):
             res = await target.evaluate(
                 "() => { const el=this;"
@@ -858,7 +867,7 @@ class WorkdayAdapter(ATSAdapter):
                     continue  # the map already answered it — don't disturb
                 opts = [o for o in f.options if o and not eng.norm(o).lower().startswith("select")]
                 choice = await _ordinary_answer(llm, f.label, opts)
-                if choice and await self._click_radio(page, f, choice):
+                if choice and await self._click_radio(session, page, f, choice):
                     answered += 1
                     print(f"  [wd] screening answered: {f.label[:48]!r} -> {choice!r}", flush=True)
         return answered

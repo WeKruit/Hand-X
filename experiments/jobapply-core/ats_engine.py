@@ -256,6 +256,34 @@ async def press_enter_trusted(session: Any, page: Any) -> bool:
         return False
 
 
+async def click_trusted(session: Any, page: Any, element: Any) -> bool:
+    """A TRUSTED mouse click via CDP Input.dispatchMouseEvent at the element's on-screen center. A
+    React-controlled radio/checkbox IGNORES a synthetic .click()/label-click for its onChange state
+    (the verified Workday failure) — only a REAL pointer event flips it. Scrolls the element into view,
+    reads its viewport-center coords, dispatches mousePressed+mouseReleased there. Returns False if the
+    element has no box (detached/zero-size)."""
+    try:
+        sid = await page.session_id
+        box = await element.evaluate(
+            "() => { const el=this; el.scrollIntoView({block:'center',inline:'center'});"
+            " const r=el.getBoundingClientRect();"
+            " return (r.width&&r.height) ? {x:r.left+r.width/2, y:r.top+r.height/2} : null; }"
+        )
+        if not box:
+            return False
+        x, y = box["x"], box["y"]
+        for ev in (
+            {"type": "mouseMoved", "x": x, "y": y, "buttons": 0},
+            {"type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1},
+            {"type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1},
+        ):
+            await session.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=sid)
+        return True
+    except Exception as exc:
+        print(f"   [trusted-click] {exc}")
+        return False
+
+
 def _locate_idx(chosen: str, options: list[str]) -> int | None:
     """Index in `options` whose VISIBLE text equals `chosen` (the LLM's pick), normalized-exact ONLY.
     This is NOT option-matching — it merely locates the element the LLM already chose. No regex, no
