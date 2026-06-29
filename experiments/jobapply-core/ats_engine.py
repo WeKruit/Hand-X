@@ -1162,6 +1162,18 @@ async def run_wizard(
                 print(f"  repeaters: {rep}")
             page = await session.must_get_current_page()  # agent_fill_section re-attaches CDP
 
+        # Deterministically answer any REQUIRED screening/eligibility radio the LLM map left empty
+        # (Intel gates My-Information on 'previously employed by Intel?') — the cheap LLM decides the
+        # ordinary external-applicant answer, the robust _click_radio commits via CDP — BEFORE the agent
+        # ever sees it (that React radio always looped a vision agent). Workday-only (single-page adapters
+        # don't define the method, so it's a no-op there).
+        if hasattr(adapter, "answer_required_choices"):
+            with contextlib.suppress(Exception):
+                n = await adapter.answer_required_choices(session, page)
+                if n:
+                    print(f"  [wd] answered {n} required screening choice(s) deterministically")
+                    page = await session.must_get_current_page()
+
         # screenshot the deterministically-filled step BEFORE advancing (the agent, if invoked,
         # advances to the NEXT page, so capture this page now).
         shot = None

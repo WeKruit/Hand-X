@@ -167,6 +167,41 @@ _ROW_COUNT_JS = r"""
 """
 
 
+async def _ordinary_answer(llm: Any, question: str, options: list[str]) -> str | None:
+    """The cheap LLM DECIDES the ordinary external-applicant answer to a required screening / eligibility
+    question — polarity-aware so 'prior employee of Intel?' -> No while '18 or older?' / 'authorized to
+    work?' -> Yes. Returns the EXACT option text, or None. (Decision = LLM; the commit is deterministic.)"""
+    import contextlib
+
+    if llm is None or not options:
+        return None
+    from pydantic import BaseModel
+
+    from browser_use.llm.messages import SystemMessage, UserMessage
+
+    class _Ans(BaseModel):
+        choice: str  # EXACT option text from the list, or "NONE"
+
+    with contextlib.suppress(Exception):
+        res = await llm.ainvoke(
+            [
+                SystemMessage(
+                    content="A typical EXTERNAL job applicant is answering a REQUIRED screening/"
+                    "eligibility question truthfully. Assume the ordinary applicant: is NOT a current or "
+                    "former employee of the hiring company and has no prior offer/contract/conflict with "
+                    "it; IS legally authorized to work; IS 18 or older; does NOT decline to answer. Pick "
+                    "the option reflecting that ordinary truthful answer — mind the question's polarity. "
+                    "Reply the EXACT option text from the list, or 'NONE' if none fit."
+                ),
+                UserMessage(content=f"question: {question!r}\noptions: {options}"),
+            ],
+            output_format=_Ans,
+        )
+        c = (res.completion.choice or "").strip()
+        return None if c.upper() == "NONE" or not c else c
+    return None
+
+
 class WorkdayAdapter(ATSAdapter):
     hosts = ("myworkdayjobs.com", "myworkday.com", "myworkdaysite.com")
     multi_page = True
@@ -796,6 +831,37 @@ class WorkdayAdapter(ATSAdapter):
             await target.click()
             return True
         return False
+
+    async def answer_required_choices(self, session: Any, page: Any, llm: Any = None) -> int:
+        """Deterministically answer REQUIRED radio / checkbox-group screening questions the LLM map
+        left empty — e.g. Intel gates My-Information on 'Are you currently or have you previously been
+        employed by Intel?'. That React radio NEVER committed deterministically (it always fell to a
+        flaky vision agent that loops on it). Here the cheap LLM DECIDES the ordinary external-applicant
+        answer (polarity-aware: 'prior employee?'->No, '18 or older?'/'authorized to work?'->Yes) and
+        the robust _click_radio commits it via CDP — BEFORE any agent. Generic: any required choice
+        with no current selection. Returns the number answered (caller re-tries advance)."""
+        if llm is None:
+            with contextlib.suppress(Exception):
+                from vision_verify import _vlm
+
+                llm = _vlm()
+        answered = 0
+        with contextlib.suppress(Exception):
+            step = await self.extract_step(session, page, {})
+            for f in step.fields:
+                if f.type not in ("radio", "checkbox") or not f.required or not f.options:
+                    continue
+                already = await page.get_elements_by_css_selector(
+                    self._wsel(f.name, ' input:checked') + ", " + self._wsel(f.name, ' [aria-checked="true"]')
+                )
+                if already:
+                    continue  # the map already answered it — don't disturb
+                opts = [o for o in f.options if o and not eng.norm(o).lower().startswith("select")]
+                choice = await _ordinary_answer(llm, f.label, opts)
+                if choice and await self._click_radio(page, f, choice):
+                    answered += 1
+                    print(f"  [wd] screening answered: {f.label[:48]!r} -> {choice!r}", flush=True)
+        return answered
 
     async def _date(self, page: Any, field: FormField, value: str) -> bool:
         """Segmented date spinbuttons — type continuous digits (Workday auto-advances). SEGMENT-AWARE:
