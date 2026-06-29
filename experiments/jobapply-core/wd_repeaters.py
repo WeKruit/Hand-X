@@ -939,6 +939,17 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
             flush=True,
         )
         await asyncio.sleep(0.5)
+    # SETTLE before the final read + VLM residual check: the last chip can leave its suggestion menu
+    # OPEN, so the VLM would read the open menu (not the committed pill) and FALSE-flag a filled chip as
+    # residual. Close any menu (trusted Escape) + blur + wait, so visuals see the true committed state.
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        from ats_engine import press_key_trusted
+
+        await press_key_trusted(session, page, key="Escape", code="Escape", vk=27)
+        await page.evaluate("() => { if(document.activeElement&&document.activeElement.blur) document.activeElement.blur(); }")
+        await asyncio.sleep(0.8)
     final_controls = await extract_live(page)
     final_diff = reconcile(plan, final_controls, await read_live(page, final_controls))
     # VLM-confirm the residual: a typeahead the DOM reads empty may actually be filled on screen —
