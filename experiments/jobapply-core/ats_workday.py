@@ -328,17 +328,24 @@ class WorkdayAdapter(ATSAdapter):
             await asyncio.sleep(interval)
             elapsed += interval
 
+    # repeater sections are owned by fill_repeaters (wd_repeaters), NOT the per-field schema ladder —
+    # match the data-fkit-id section token so the ladder doesn't DOUBLE-fill what the engine fills.
+    _REPEATER_FKIT = ("workexperience-", "education-", "skills-", "skills--", "languages-", "certifications-")
+
     def _to_field(self, f: dict) -> FormField:
         t = f["type"]
-        source = (
-            "file"
-            if t == "file"
-            else "select"
-            if t in ("single_select", "select_native", "multi_select", "radio", "checkbox")
-            else "open_ended"
-            if t == "textarea"
-            else "input_text"
-        )
+        if any(f["name"].lower().startswith(p) for p in self._REPEATER_FKIT):
+            source = "skip"  # single-owner: wd_repeaters fills these (mount + reconcile), not the ladder
+        else:
+            source = (
+                "file"
+                if t == "file"
+                else "select"
+                if t in ("single_select", "select_native", "multi_select", "radio", "checkbox")
+                else "open_ended"
+                if t == "textarea"
+                else "input_text"
+            )
         return FormField(
             name=f["name"],
             label=f["label"],

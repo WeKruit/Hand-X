@@ -299,10 +299,16 @@ def reconcile(plan: dict, controls: list[Control], readback: dict | None = None)
                 v = str(value).strip()
                 ctrl = _match(controls, sec, dom_row, label) if dom_row is not None else None
                 got = readback.get(ctrl.fkit, "") if ctrl else ""
+                arche = ctrl.archetype() if ctrl else None
                 if not v:
                     status = "DONE"                         # nothing intended
                 elif dom_row is None or ctrl is None:
                     status = "MISSING"                      # row not mounted / control absent -> Add+fill
+                elif arche in ("date", "textarea"):
+                    # a date reads back reformatted (ISO '2021-06' -> display '06/2021') and free-text
+                    # won't match verbatim — so NON-EMPTY = filled (the Ashby read-back lesson). Don't
+                    # string-compare, or we loop re-typing an already-filled field.
+                    status = "DONE" if got else "MISSING"
                 elif semantic_equal(v, got):
                     status = "DONE" if got else "MISSING"
                 else:
