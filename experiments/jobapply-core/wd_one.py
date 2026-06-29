@@ -117,6 +117,7 @@ async def main():
     pname = profile["_name"]
     tag = f"{tenant}_{pname}"
     os.environ["WD_MYEXP_SHOT"] = str(OUT / f"{tag}_myexp.png")  # robust My-Experience filled screenshot
+    os.environ["WD_MYEXP_DOM"] = str(OUT / f"{tag}_myexp.html")  # live DOM dump for offline lang/skill diagnosis
     resume = BASE + "/../../examples/resume.pdf"
     if not Path(resume).exists():
         resume = None

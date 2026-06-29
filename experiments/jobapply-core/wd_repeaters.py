@@ -962,6 +962,14 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
 
     shot_path = os.environ.get("WD_MYEXP_SHOT")
     if shot_path:
+        # SETTLE first: close any open suggestion menu (Escape) + blur, so the capture is a clean
+        # end-state (not a chip mid-commit), then wait a beat for the re-render.
+        with contextlib.suppress(Exception):
+            from ats_engine import press_key_trusted
+
+            await press_key_trusted(session, page, key="Escape", code="Escape", vk=27)
+            await page.evaluate("() => { if(document.activeElement&&document.activeElement.blur) document.activeElement.blur(); }")
+            await asyncio.sleep(0.8)
         with contextlib.suppress(Exception):
             sid = page.session_id
             if hasattr(sid, "__await__"):
@@ -970,6 +978,15 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
                 params={"format": "png", "captureBeyondViewport": True}, session_id=sid)
             pathlib.Path(shot_path).write_bytes(base64.b64decode(r["data"]))
             print(f"  [wd] My-Experience screenshot -> {shot_path}", flush=True)
+        # OFFLINE DIAGNOSIS dump: save the live My-Experience DOM so language/skill detection can be
+        # debugged with pure-lxml asserts (offline-first), not more blind live runs.
+        dump_path = os.environ.get("WD_MYEXP_DOM")
+        if dump_path:
+            with contextlib.suppress(Exception):
+                html = await page.evaluate("() => document.documentElement.outerHTML")
+                if isinstance(html, str) and html:
+                    pathlib.Path(dump_path).write_text(html, encoding="utf-8")
+                    print(f"  [wd] My-Experience DOM -> {dump_path}", flush=True)
     print(f"  [wd] TOTAL {summary['secs']}s filled={summary['filled']} residual={len(summary['residual'])}", flush=True)
     return summary
 
