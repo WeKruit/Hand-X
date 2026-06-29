@@ -931,18 +931,24 @@ class WorkdayAdapter(ATSAdapter):
             if not any(any(kw in h for kw in keywords) for h in headings):
                 continue  # section not on THIS page — generic gate, no hardcoded aid
             label = key.capitalize()
-            if is_tag:  # Skills / Languages / Certs: typeahead tags (type + pick), one at a time
+            if is_tag:  # Skills / Languages / Certs: typeahead tags
                 vals = ", ".join(self._item_str(it) for it in items)
                 instr = (
-                    f"Add these {label} one at a time using the section's typeahead/'Add' control "
-                    f"(type each, then pick the matching option so it becomes a tag/pill): {vals}"
+                    f"Fill the {label} typeahead. For EACH value: type it, WAIT for the suggestion menu to "
+                    f"show a matching option, then press Enter to commit it as a tag/pill. Do NOT add the "
+                    f"same value twice. Values: {vals}"
                 )
             else:  # Experience / Education: ROW repeater
                 entries = "; ".join(f"entry {i + 1}: {self._item_str(it)}" for i, it in enumerate(items))
+                # CRITICAL: the rows are ALREADY on the page (the deterministic engine mounted them). The
+                # agent must NOT click 'Add Another'/'Add' — that creates DUPLICATE empty rows (the 9-row
+                # bug). It only fills the fields still EMPTY in the existing rows.
                 instr = (
-                    f"Add {len(items)} {label} entr{'y' if len(items) == 1 else 'ies'}. Use the "
-                    f"'Add Another' button before each entry, then fill its fields by label. Dates "
-                    f"like '2021-06' go in the segmented month/year inputs. {entries}"
+                    f"The {label} rows already EXIST on the page — do NOT click 'Add Another' or 'Add' "
+                    f"(that makes duplicate empty rows). Fill ONLY the fields that are still EMPTY in the "
+                    f"existing rows, by label. For a searchable dropdown (School, Degree, Field of Study), "
+                    f"type the value, WAIT for the option to appear, then press Enter to commit. Dates like "
+                    f"'2021-06' go in the segmented month/year inputs. {entries}"
                 )
             res = await eng.agent_fill_section(session, page, section=label, instructions=instr, max_steps=18)
             out[label] = {"items": len(items), "residual_agent": True, **res}
