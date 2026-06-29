@@ -106,8 +106,35 @@ def pw():
     return "".join(c)
 
 
+_CREDS_FILE = OUT / "wd_creds.json"
+
+
+def creds_for(tenant):
+    """REUSE one throwaway account PER TENANT: create it once, then SIGN IN on every later run. Creating
+    a NEW account each run is exactly what trips Workday's Create-Account rate-limit / CAPTCHA (the
+    AUTH_FAILED we hit on Intel/Salesforce/HP after ~15-20 accounts/day). authenticate() already does
+    create-vs-sign-in (by verifyPassword), so reusing stored creds makes a repeat run SIGN IN."""
+    from ats_engine import Credentials
+
+    store = {}
+    if _CREDS_FILE.exists():
+        try:
+            store = json.loads(_CREDS_FILE.read_text())
+        except Exception:
+            store = {}
+    if tenant in store:
+        return Credentials(email=store[tenant]["email"], password=store[tenant]["password"])
+    c = {"email": f"jobapply.test.{secrets.randbelow(99999999)}@mailinator.com", "password": pw()}
+    store[tenant] = c
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        _CREDS_FILE.write_text(json.dumps(store, indent=2))
+    return Credentials(email=c["email"], password=c["password"])
+
+
 async def main():
-    from ats_engine import Credentials, run_wizard
+    from ats_engine import run_wizard
     from ats_workday import WorkdayAdapter
 
     tenant, host, site, pidx = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
@@ -131,13 +158,13 @@ async def main():
     for url in urls[:3]:
         # autofillWithResume (open_form's default) — the AUTH-verified path; applyManually auth-fails.
         # The resume parser pre-fills experience rows; the engine must RESPECT those (fill gaps only).
-        creds = Credentials(email=f"jobapply.test.{secrets.randbelow(99999999)}@mailinator.com", password=pw())
+        creds = creds_for(tenant)  # REUSE the tenant's account (sign in), don't create a new one each run
         print(f"[{tag}] {url.split('/job/')[-1][:50]}", flush=True)
         try:
             res = await asyncio.wait_for(
                 run_wizard(WorkdayAdapter(), url=url, profile=profile, resume=resume, headless=True,
                            allow_escalation=True, screenshot_path=str(OUT / f"{tag}.png"), creds=creds),
-                timeout=480)
+                timeout=780)
         except TimeoutError:
             print(f"[{tag}] TIMEOUT", flush=True)
             return
@@ -146,7 +173,6 @@ async def main():
             continue
         st = res.get("status", "?")
         steps = res.get("steps", [])
-        rep = next((s.get("repeaters") for s in steps if s.get("repeaters")), None)
         print(f"[{tag}] status={st} steps={len(steps)} cost=${res.get('cost', 0):.4f}", flush=True)
         if st in ("FILLED_TO_REVIEW", "FILLED") or any("xperience" in (s.get("name") or "") for s in steps):
             print(f"[{tag}] >>> REACHED+FILLED (screenshots: {tag}_step*.png / {tag}_review.png)", flush=True)
