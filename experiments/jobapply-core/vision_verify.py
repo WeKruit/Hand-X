@@ -110,9 +110,13 @@ async def visual_check(
     b64 = base64.b64encode(png).decode()
     if want is not None:
         prompt = (
-            f'This is a job-application web form. Does the field labeled "{target}" visibly contain '
-            f'the value "{want}"? Reply STRICT JSON: '
-            f'{{"filled": true|false, "value": "<visible text>", "matches": true|false}}.'
+            f'This is a job-application web form. Look at the field labeled "{target}". Set "matches"=true '
+            f'if it shows the value "{want}" OR a clearly EQUIVALENT / closest-available option that means '
+            f'the same thing — e.g. a fuller official name ("Computer and Information Science" for '
+            f'"Computer Science"; "University of California, Berkeley" for "UC Berkeley"; "United States of '
+            f'America (+1)" for "United States"), or all of several comma-separated items present as pills. '
+            f'Set "matches"=false ONLY if the field is blank or shows a clearly DIFFERENT thing. Reply STRICT '
+            f'JSON: {{"filled": true|false, "value": "<visible text>", "matches": true|false}}.'
         )
     else:
         prompt = (
