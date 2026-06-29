@@ -396,6 +396,12 @@ class WorkdayAdapter(ATSAdapter):
         return s["n"].lower() == "review" or s["i"] == s["t"]
 
     # -- locate / fill / read_back -----------------------------------------
+    @staticmethod
+    def _wsel(name: str, suffix: str = "") -> str:
+        """Wrapper selector matching EITHER the unique data-fkit-id (field.name post row-aware change)
+        or the data-automation-id (fallback); `suffix` is applied to BOTH branches."""
+        return f'[data-fkit-id="{name}"]{suffix}, [data-automation-id="{name}"]{suffix}'
+
     async def locate(self, page: Any, field: FormField) -> Any | None:
         # field.name is the UNIQUE data-fkit-id (repeater-row safe, e.g. "workExperience-225--jobTitle")
         # or, as fallback, the data-automation-id. Match by either so a single name resolves both.
@@ -470,9 +476,8 @@ class WorkdayAdapter(ATSAdapter):
         """Workday typeahead multiselect (`multiSelectContainer` + `selectinput`): type the value
         to filter, then commit the highlighted top match with a TRUSTED Enter (see below).
         Single-value (commit one); commit-then-add for repeaters is handled elsewhere."""
-        wrap = f'[data-automation-id="{field.name}"]'
-        inp = await eng.first(page, f'{wrap} [data-uxi-widget-type="selectinput"] input') or await eng.first(
-            page, f"{wrap} input"
+        inp = await eng.first(page, self._wsel(field.name, ' [data-uxi-widget-type="selectinput"] input')) or await eng.first(
+            page, self._wsel(field.name, " input")
         )
         if not inp:
             return False
@@ -496,7 +501,7 @@ class WorkdayAdapter(ATSAdapter):
     async def _listbox(self, page: Any, field: FormField, value: str) -> bool:
         """Workday button-listbox: click trigger -> options mount in the body portal
         `activeListContainer` -> click the matching promptOption."""
-        trig = await eng.first(page, f'[data-automation-id="{field.name}"] button')
+        trig = await eng.first(page, self._wsel(field.name, " button"))
         if not trig:
             return False
         with contextlib.suppress(Exception):
@@ -579,11 +584,11 @@ class WorkdayAdapter(ATSAdapter):
         LABEL does NOT check the React input (verified), so we resolve each option's text via
         label[for]=input.id and click the INPUT directly. Match label text exact -> contains -> the
         value attr (yes->true / no->false)."""
-        sel = f'[data-automation-id="{field.name}"]'
         want = eng.norm(value)
         yn = {"yes": "true", "no": "false", "true": "true", "false": "false"}.get(want)
         radios = await page.get_elements_by_css_selector(
-            f'{sel} input[type="radio"], {sel} [role="radio"], {sel} input[type="checkbox"], {sel} [role="checkbox"]'
+            ", ".join(self._wsel(field.name, x) for x in
+                      (' input[type="radio"]', ' [role="radio"]', ' input[type="checkbox"]', ' [role="checkbox"]'))
         )
         scored: list[tuple[Any, str, str]] = []
         for el in radios:
@@ -638,12 +643,11 @@ class WorkdayAdapter(ATSAdapter):
             return False
         # DomHand WORKDAY_SELECTORS month-segment variants: dateSectionMonth-input /
         # *dateSectionMonth* / placeholder MM.
-        wrap = f'[data-automation-id="{field.name}"]'
         seg = (
-            await eng.first(page, f'{wrap} [data-automation-id$="Month-input"]')
-            or await eng.first(page, f'{wrap} input[data-automation-id*="dateSectionMonth"]')
-            or await eng.first(page, f'{wrap} input[placeholder*="MM"]')
-            or await eng.first(page, f'{wrap} [role="spinbutton"]')
+            await eng.first(page, self._wsel(field.name, ' [data-automation-id$="Month-input"]'))
+            or await eng.first(page, self._wsel(field.name, ' input[data-automation-id*="dateSectionMonth"]'))
+            or await eng.first(page, self._wsel(field.name, ' input[placeholder*="MM"]'))
+            or await eng.first(page, self._wsel(field.name, ' [role="spinbutton"]'))
         )
         if not seg:
             return False
@@ -667,9 +671,9 @@ class WorkdayAdapter(ATSAdapter):
 
     async def _read_once(self, page: Any, field: FormField, value: str) -> bool:
         t = field.type
-        sel = f'[data-automation-id="{field.name}"]'
+        sel = self._wsel(field.name)
         if t == "file":
-            return (await eng.first(page, f'{sel} [data-automation-id="file-upload-successful"]')) is not None
+            return (await eng.first(page, self._wsel(field.name, ' [data-automation-id="file-upload-successful"]'))) is not None
         if t in ("input_text", "textarea", "select_native"):
             el = await self.locate(page, field)
             if not el:
