@@ -491,18 +491,31 @@ async def _add_row(page, sec: str) -> bool:
     return bool(clicked)
 
 
-async def ensure_rows(adapter, page, plan: dict) -> bool:
-    """Add Another until each section has at least as many rows as the plan. dup-guard: never add
-    PAST the plan count. Returns True if any row was added (caller re-reconciles)."""
+# ROW-repeater sections (each entry = an Add-Another row). Skills is a TAG (pills via chip put), NOT here.
+_ROW_SECTIONS = {"experience": ("experience", "work_experience"), "education": ("education",),
+                 "languages": ("languages",), "certifications": ("certifications",)}
+
+
+async def ensure_rows(adapter, page, profile: dict) -> bool:
+    """Add Another until each ROW-repeater section has at least as many rows as the PROFILE wants.
+    dup-guard: never add PAST the profile count. Returns True if any row was added (caller re-reconciles).
+
+    PROFILE-DRIVEN, not plan-driven: a COLLAPSED/empty section (0 mounted controls, e.g. experience
+    before any Add) has no detected fields, so a control-derived plan can't see it — the only way its
+    fields appear is to click Add. So we mount `len(profile[section])` rows per ROW-repeater section,
+    independent of current detection. Tag sections (skills) are filled by chip put(), not Add-Another."""
     added = False
-    for sec, blk in plan.items():
-        want = len(blk.get("rows", []))
-        for _ in range(8):
+    for sec, pkeys in _ROW_SECTIONS.items():
+        items = next((profile.get(k) for k in pkeys if profile.get(k)), None) or []
+        want = len(items)
+        if not want:
+            continue
+        for _ in range(want + 2):
             controls = await extract_live(page)
             have = len(_rows_of(controls, sec))
             if have >= want:
                 break
-            if not await _add_row(page, sec):
+            if not await _add_row(page, sec):  # section not on this page / no Add control -> stop
                 break
             added = True
     return added
@@ -510,17 +523,19 @@ async def ensure_rows(adapter, page, plan: dict) -> bool:
 
 async def fill_deterministic(adapter, session, page, profile: dict, llm, title: str = "",
                              max_rounds: int = 5) -> dict:
-    """The fixpoint reconcile-and-repair loop. plan = 1 semantic map call; then loop: extract -> add
-    missing rows (dup-guarded) -> reconcile(read-back) -> put() the MISSING/DIVERGED -> until the DOM
-    is stable. Returns a ledger summary. NEVER submits. Per-control agent escalation is the backstop."""
-    controls = await extract_live(page)
-    plan = await make_plan(llm, controls, profile, title)
-    summary = {"rounds": 0, "filled": 0, "rows_added": 0}
+    """The fixpoint reconcile-and-repair loop. FIRST mount rows from the profile (so collapsed sections'
+    fields exist), THEN one semantic map call, THEN loop: reconcile(read-back) -> put() MISSING/DIVERGED
+    -> until the DOM is stable. Returns a ledger summary. NEVER submits. Agent escalation is the backstop."""
+    rows_added = await ensure_rows(adapter, page, profile)  # bootstrap: mount rows so fields appear
+    controls = await extract_live(page)                     # now collapsed sections have controls
+    plan = await make_plan(llm, controls, profile, title)   # labels known -> values mapped
+    summary = {"rounds": 0, "filled": 0, "rows_added": int(rows_added)}
     last_todo = None
     for rnd in range(max_rounds):
         summary["rounds"] = rnd + 1
-        if await ensure_rows(adapter, page, plan):
+        if await ensure_rows(adapter, page, profile):       # idempotent (dup-guarded to profile count)
             summary["rows_added"] += 1
+            plan = await make_plan(llm, await extract_live(page), profile, title)  # re-plan new rows
         controls = await extract_live(page)
         readback = await read_live(page, controls)
         diff = reconcile(plan, controls, readback)

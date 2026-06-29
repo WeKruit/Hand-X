@@ -771,8 +771,14 @@ class WorkdayAdapter(ATSAdapter):
         gkey = os.environ.get("GOOGLE_API_KEY")
         llm = ChatGoogle(model="gemini-3.1-flash-lite", api_key=gkey) if gkey else None
         out: dict = {}
-        with contextlib.suppress(Exception):
+        try:
             out["deterministic"] = await wr.fill_deterministic(self, session, page, profile, llm)
+            print(f"  repeaters[deterministic]: {out['deterministic']}")
+        except Exception as exc:  # surface (not swallow) so the engine's failure is diagnosable
+            import traceback
+
+            out["deterministic_error"] = f"{type(exc).__name__}: {exc}"
+            print(f"  [wd_repeaters ERROR] {out['deterministic_error']}\n{traceback.format_exc()}")
         residual = {r.split("[")[0].split(".")[0] for r in (out.get("deterministic") or {}).get("residual", [])}
 
         # RESIDUAL backstop: only sections the deterministic loop could not fully close fall to the agent.
