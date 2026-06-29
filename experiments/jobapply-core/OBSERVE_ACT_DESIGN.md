@@ -703,3 +703,36 @@ expected — the win is on the rename/absent-aria tenant, which is why a capture
    envelope before promotion?
 7. **Multi-value detection.** Is `cardinality` from the label reliable enough to enter S_MULTI_LOOP, or do
    we also need a DOM signal (a pill container present) to confirm a field is multi-value before looping?
+
+---
+
+## 11. REUSE vs BUILD — `observe_act` is a deterministic orchestrator over browser-use's OWN primitives (research, 3 read-only agents over `browser_use/`)
+
+KEY FINDING: the PERCEPTION + ACTION layers this doc drafted from scratch **already exist** in the vendored browser-use library, and its interactivity detection is **already structure-agnostic** (the exact "don't rely on labels" goal). The EXPENSIVE part of browser-use is its **AGENT** (the vision loop we avoid); its **PRIMITIVES** (`DomService` + `tools` + `python_highlights`) are cheap, trusted-CDP, and tenant-agnostic. `observe_act` must **COMPOSE** them deterministically — NOT reinvent `_READ_DELTA_JS` / `mark_visible` / `pick_option_visually`.
+
+### REUSE (already in `browser_use/`, delete the drafted from-scratch versions)
+| Drafted as net-new | Replaced by browser-use | file:line |
+|---|---|---|
+| `mark_visible` / `_READ_DELTA_JS` (THE DELTA) | serializer `previous_cached_state` diff → `is_new` (`*[id]`) | `dom/serializer/serializer.py:617-727` |
+| element coords + visibility + "is it clickable" | `EnhancedDOMTreeNode`: backend_node_id + absolute bounds + is_visible + **structure-AGNOSTIC** interactivity (event-listeners / cursor:pointer / role / a11y props — NOT class/data-\*) | `dom/service.py`, `dom/serializer/clickable_elements.py:4-247` |
+| read the option list | `dropdown_options` — native `<select>` + ARIA combobox + `role=option/menuitem` + **custom/“Oracle Workday” widgets**, child-depth-4 | `tools/service.py:1555` |
+| select an option | `select_dropdown` — case-insensitive match, multi-strategy commit (value+events / aria-selected / custom-click) | `tools/service.py:1604` |
+| `pick_option_visually` trusted-click-at-coords | `_click_by_index` / `_click_by_coordinate` — **TRUSTED CDP** dispatchMouseEvent, scroll-into-view, **occlusion via `elementFromPoint` + reroute-to-topmost** | `tools/service.py:540/584`, `watchdogs/default_action_watchdog.py:1061` |
+| trusted Enter / ArrowDown / char-type | `input` (char-by-char trusted keys, React-aware clear+events) + `send_keys` | `tools/service.py:658/1385` |
+| scroll dropdown for off-screen / virtualized | `scroll` (page + element/wheel) | `tools/service.py:1280` |
+| set-of-marks "see option N → click element N" bridge | `create_highlighted_screenshot_async` + `selector_map[backend_node_id] → node` (**code EXISTS**, just not wired into the agent loop) | `browser/python_highlights.py:502`, `serializer.py:713` |
+
+### BUILD (the genuine net-new — a thin brain + the orchestrator)
+1. **Field-nature CLASSIFY** (closed-list / free-text / date / boolean / multi) from the VISIBLE label meaning + value — resolves Gap B. browser-use has **no** nature classifier.
+2. **Typeahead SEARCH-LOOP** — type partial → settle → re-read delta → variant retry (UCLA vs full name) → Other/skip. browser-use reads+selects but has **no** search/filter loop.
+3. **Value-aware VLM VERIFY + 3-way routing** (correct / empty=re-commit / wrong=re-search). browser-use has **no** deterministic vision read-back (only the agent loop + a post-input value compare); the highlighted-screenshot + cheap VLM glue exists, just compose it.
+4. **“wait for delta to SETTLE”** gate (browser-use uses fixed 0.3s/0.4s delays — no settle primitive).
+5. The **deterministic `observe_act` orchestrator** (the §2 state machine) composing 1–4 + the reused primitives, **without** the browser-use agent loop.
+
+### Net effect
+~**70% of the drafted from-scratch perception/action code disappears** (delta, coords, visibility, dropdown read/select, trusted click/type/scroll, set-of-marks — all reused). `observe_act` becomes a deterministic state machine calling browser-use's `DomService` + `tools`, driven by **1 cheap classify LLM + 1 cheap VLM verify**, skipping the expensive agent. Smaller, more robust, and **tenant-agnostic by construction** (browser-use's interactivity detection already is). The earlier §9 migration "Wave 1 = build the perception primitives" is REPLACED by "Wave 1 = thin adapters over `DomService`/`tools` + the classify/search/verify brain."
+
+### Caveats the research flagged (don't over-assume)
+- browser-use's `dropdown_options` ARIA path keys on `aria-controls`; the **no-aria-controls / virtualized** PayPal case still needs validation (its custom-widget + child-depth-4 fallback may or may not catch it — must test on a captured PayPal-class DOM).
+- visibility filter uses bounds+scroll, **not** z-index; the **click** layer does do `elementFromPoint` occlusion — so commit-time on-top is covered, read-time isn't (a hidden-but-bounded stale option could be listed → the VLM verify is the backstop).
+- the highlighted-screenshot is **not** wired into any loop today — composing it for the deterministic verify is part of BUILD #3.
