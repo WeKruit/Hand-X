@@ -924,6 +924,17 @@ class WorkdayAdapter(ATSAdapter):
                 return True
             if i + 1 < tries:
                 await asyncio.sleep(0.25)
+        # CHIP/SELECT: the DOM read-back compares by SUBSTRING and false-negatives a CANONICAL commit
+        # ("Computer Science" is not a substring of the committed "Computer and Information Science";
+        # "United States of America" vs "...(+1)"). That false-negative is what marks a committed chip
+        # residual -> the agent re-does it -> the timeout. Confirm SEMANTICALLY with the value-aware VLM
+        # (reuse the visuals primitive) before declaring failure.
+        if field.type in ("single_select", "multi_select") and session is not None:
+            with contextlib.suppress(Exception):
+                from vision_verify import _matches, visual_check
+
+                if _matches(await visual_check(session, field.label or field.name, want=value)):
+                    return True
         return False
 
     async def _read_once(self, page: Any, field: FormField, value: str) -> bool:

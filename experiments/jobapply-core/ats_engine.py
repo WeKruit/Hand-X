@@ -537,9 +537,15 @@ async def map_fields(llm: Any, fields: list[FormField], profile: dict, title: st
 # Empty fields (the failed target, or a not-yet-filled box) stay editable. Restored after the agent.
 _FREEZE_FILLED_JS = (
     "() => { let n=0; document.querySelectorAll('input,textarea,select').forEach(e => {"
-    " const filled = (e.type==='checkbox'||e.type==='radio') ? e.checked : ((e.value||'').trim().length>0);"
+    # A CHIP/typeahead input is EMPTY even when committed — its value lives in a `selectedItem` PILL in
+    # the surrounding multiSelect/select container. Without this the agent re-types committed chips
+    # (School / Field of Study / Skills), reopening the menu -> the residual-agent timeout. Treat a chip
+    # whose container holds a pill as filled, so it's frozen too.
+    " const box = e.closest('[data-automation-id=\"multiSelectContainer\"],[data-uxi-widget-type=\"selectinput\"]');"
+    " const pill = !!(box && box.querySelector('[data-automation-id=\"selectedItem\"]'));"
+    " const filled = (e.type==='checkbox'||e.type==='radio') ? e.checked : (((e.value||'').trim().length>0) || pill);"
     " if (filled && !e.readOnly && !e.disabled) {"
-    "   const lock = (e.tagName==='SELECT'||e.type==='checkbox'||e.type==='radio'||e.type==='file');"
+    "   const lock = (e.tagName==='SELECT'||e.type==='checkbox'||e.type==='radio'||e.type==='file'||pill);"
     "   e.setAttribute('data-gh-froze', lock ? 'd' : 'r'); if (lock) e.disabled = true; else e.readOnly = true; n++; }"
     " }); return n; }"
 )
