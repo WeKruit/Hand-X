@@ -27,6 +27,23 @@ from ats_engine import AdvanceResult, ATSAdapter, AuthResult, Credentials, FormF
 
 _DBG = bool(os.environ.get("WD_DEBUG"))
 
+_MATCH_LLM: Any = None
+
+
+def _match_llm() -> Any:
+    """The cheap text LLM (gemini-3.1-flash-lite) that makes the option-MATCH decision. ats_engine.
+    pick_dropdown is LLM-ONLY (directive #3): with llm=None it cannot decide and returns False, which
+    breaks the live single_select / Degree / School / Field commit path that routes to the vision
+    handoff. So _pick_option threads THIS real llm into pick_dropdown. Built once, reused."""
+    global _MATCH_LLM
+    if _MATCH_LLM is None:
+        with contextlib.suppress(Exception):
+            from vision_verify import _vlm
+
+            _MATCH_LLM = _vlm()
+    return _MATCH_LLM
+
+
 # Generic, tenant-independent step enumerator (see extract_step for the rationale).
 # Emits {index,total,name, fields:[{name=<full wrapper aid>, label, type, required, options}]}.
 _EXTRACT_STEP_JS = r"""
@@ -724,7 +741,7 @@ class WorkdayAdapter(ATSAdapter):
                 page,
                 value,
                 read_dom_options=_scoped_dom,
-                llm=None,
+                llm=_match_llm(),  # REAL cheap text LLM — pick_dropdown is LLM-only, must not be None
                 verify_label=verify_label or None,
                 vis_key=f"{verify_label or owned_id or 'listbox'}:{value}",
             )
