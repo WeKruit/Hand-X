@@ -88,7 +88,8 @@ def main() -> int:
         ("RECONCILE exact -> DONE", st("experience", "Job Title") == "DONE", st("experience", "Job Title")),
         ("RECONCILE semantic-equiv -> DONE", st("education", "Field of Study") == "DONE",
          st("education", "Field of Study")),
-        ("RECONCILE wrong -> DIVERGED", st("education", "Degree") == "DIVERGED", st("education", "Degree")),
+        ("RECONCILE respects autofill: filled (any value) -> DONE, not overwritten",
+         st("education", "Degree") == "DONE", st("education", "Degree")),
         ("RECONCILE row overflow detects extra DOM row (226)",
          diff_overflow.row_overflow.get("experience") == ["226"], diff_overflow.row_overflow),
     ]

@@ -17,6 +17,7 @@ sys.path.insert(0, BASE)
 from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(BASE + "/.env")
+os.environ.setdefault("GH_VERIFY_MAX_CALLS", "60")  # VLM read-back is ~$0.0006/call — verify liberally
 OUT = Path(BASE) / "runs" / "wd_multi"
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -114,12 +115,11 @@ async def main():
     if not urls:
         print(f"[{tag}] NO_JOBS", flush=True)
         return
-    for jurl in urls[:3]:
-        # applyManually = EMPTY form (no resume-upload page -> no agent upload-loop, no resume-vs-profile
-        # conflict). My engine mounts rows from the profile + fills from scratch — the clean test.
-        url = jurl.split("?")[0].rstrip("/") + "/apply/applyManually"
+    for url in urls[:3]:
+        # autofillWithResume (open_form's default) — the AUTH-verified path; applyManually auth-fails.
+        # The resume parser pre-fills experience rows; the engine must RESPECT those (fill gaps only).
         creds = Credentials(email=f"jobapply.test.{secrets.randbelow(99999999)}@mailinator.com", password=pw())
-        print(f"[{tag}] {jurl.split('/job/')[-1][:50]} (applyManually)", flush=True)
+        print(f"[{tag}] {url.split('/job/')[-1][:50]}", flush=True)
         try:
             res = await asyncio.wait_for(
                 run_wizard(WorkdayAdapter(), url=url, profile=profile, resume=resume, headless=True,

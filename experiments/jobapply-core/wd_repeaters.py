@@ -300,23 +300,19 @@ def reconcile(plan: dict, controls: list[Control], readback: dict | None = None)
                 ctrl = _match(controls, sec, dom_row, label) if dom_row is not None else None
                 got = readback.get(ctrl.fkit, "") if ctrl else ""
                 arche = ctrl.archetype() if ctrl else None
+                # RESPECT AUTOFILL — fill GAPS only. autofillWithResume pre-parses experience/education
+                # rows; a NON-EMPTY field is already done (resume's truth) and must NOT be re-filled or
+                # overwritten (that was the slowness + the dup). Only a genuinely EMPTY field gets filled.
                 if not v:
                     status = "DONE"                         # nothing intended
                 elif dom_row is None or ctrl is None:
                     status = "MISSING"                      # row not mounted / control absent -> Add+fill
-                elif arche in ("date", "textarea"):
-                    # a date reads back reformatted (ISO '2021-06' -> display '06/2021') and free-text
-                    # won't match verbatim — so NON-EMPTY = filled (the Ashby read-back lesson). Don't
-                    # string-compare, or we loop re-typing an already-filled field.
-                    status = "DONE" if got else "MISSING"
-                elif arche == "chip" and "," in v:
-                    # multi-pill tag (Skills): DONE only when EVERY item is a committed pill.
+                elif arche == "chip" and "," in v and got:
+                    # multi-pill tag (Skills): DONE only when EVERY item is a pill (else add the rest).
                     items = [nkey(x) for x in v.split(",") if x.strip()]
-                    status = "DONE" if got and all(it in nkey(got) for it in items) else "MISSING"
-                elif semantic_equal(v, got):
-                    status = "DONE" if got else "MISSING"
+                    status = "DONE" if all(it in nkey(got) for it in items) else "MISSING"
                 else:
-                    status = "DIVERGED" if got else "MISSING"
+                    status = "DONE" if got else "MISSING"   # filled (any value) = leave it; empty = fill
                 d.fields.append(FieldDiff(sec, j, label, v, status, ctrl))
         if len(dom_rows) > len(plan_rows):                  # dup-guard signal
             d.row_overflow[sec] = dom_rows[len(plan_rows):]
@@ -435,6 +431,20 @@ async def _locate(page, c: Control):
     from ats_engine import first
 
     return await first(page, f'[data-fkit-id="{c.fkit}"]') if c.fkit else None
+
+
+async def _vlm_filled(session, label: str) -> bool:
+    """Cheap-VLM ground-truth read-back (~$0.0006/call, cached per field+url): is the field labeled
+    `label` visibly filled? Used for the hard typeaheads where the DOM read-back is flaky — so we never
+    re-fill an already-filled field, and the residual is the TRUTH the user sees on screen."""
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        from vision_verify import visual_check
+
+        v = (await visual_check(session, label)) or ""
+        return '"filled":true' in v.replace(" ", "").lower()
+    return False
 
 
 async def _llm_pick(llm, value: str, options: list[str]) -> str | None:
@@ -665,6 +675,10 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
         slow: dict = {}
         for fd in todo:
             if fd.control:
+                # hard typeaheads: DOM read-back is flaky, so ask the cheap VLM if it's ALREADY filled
+                # ($0.0006, cached) before re-filling — kills the re-fill loop on a committed field.
+                if fd.control.archetype() in ("select", "chip") and await _vlm_filled(session, fd.control.label):
+                    continue
                 tp = time.monotonic()
                 ok = await put(adapter, session, page, fd.control, fd.intended, llm)
                 dt = time.monotonic() - tp
@@ -676,7 +690,15 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
         await asyncio.sleep(0.5)
     final_controls = await extract_live(page)
     final_diff = reconcile(plan, final_controls, await read_live(page, final_controls))
-    summary["residual"] = [f"{f.section}[{f.row}].{f.label}" for f in final_diff.todo()]
+    # VLM-confirm the residual: a typeahead the DOM reads empty may actually be filled on screen —
+    # the cheap VLM is the ground truth, so the residual reflects what the user would SEE, not a flaky read.
+    real_residual = []
+    for f in final_diff.todo():
+        if f.control and f.control.archetype() in ("select", "chip") and await _vlm_filled(session, f.label):
+            summary["filled"] += 1
+            continue
+        real_residual.append(f"{f.section}[{f.row}].{f.label}")
+    summary["residual"] = real_residual
     summary["secs"] = round(time.monotonic() - t0, 1)
     print(f"  [wd] TOTAL {summary['secs']}s filled={summary['filled']} residual={len(summary['residual'])}",
           flush=True)
