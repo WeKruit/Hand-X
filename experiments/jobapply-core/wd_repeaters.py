@@ -487,7 +487,11 @@ async def pick_smart(adapter, page, llm, value: str, tries: int = 8) -> bool:
         opts: list = []
         for o in raw:
             with contextlib.suppress(Exception):
-                t = norm(await o.evaluate("() => this.textContent || ''"))
+                # ONLY currently-VISIBLE options — the option portal is SHARED, so a closed widget's
+                # stale options linger hidden (e.g. School options while filling Skills). offsetParent
+                # is null for hidden/detached nodes, so this drops them. (matches _pick_option's guard.)
+                t = norm(await o.evaluate(
+                    "() => (this.offsetParent !== null || this.getClientRects().length) ? (this.textContent||'') : ''"))
                 if t:
                     opts.append((o, t))
         if not opts:
