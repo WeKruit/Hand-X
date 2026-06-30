@@ -87,6 +87,7 @@ _POLL_S = 0.30  # coarser than the old 0.12s — a menu still appears inside one
 _SETTLE_READS_CAP = 3  # HARD cap on get_state re-reads inside one settle (was effectively ~5-8)
 _SETTLE_STATIC_S = 0.6  # a click-open menu settles fast
 _SETTLE_SEARCH_S = 0.9  # an async typeahead needs longer
+_SETTLE_GEO_S = 1.6  # a geocomplete (react-select location) resolves suggestions over the network
 _LIST_LONG = 12  # cluster >= this -> type-to-filter first (S_CLOSED_LIST long path)
 _SCROLL_PX = 320  # one overlay page for the off-screen reread
 
@@ -129,6 +130,12 @@ class Ctx:
     value: str
     required: bool
     cardinality: str = "one"
+    # KIND HINT (the card-commit fix): the adapter's OWN parsed control type — radio | checkbox |
+    # single_select | select | dropdown | textarea | date | text | input_file | … — a reliable
+    # STRUCTURAL fact (the adapter read the real <input type>/<select> off the live form), NOT a
+    # renameable label. Honoured by ``_s2_classify`` to route a choice card to S_CHOICE / a custom
+    # select to the open+read path BEFORE the label-meaning LLM guess. "" -> no hint (today's path).
+    kind: str = ""
     resume: str | None = None
     llm: Any = None
 
@@ -196,6 +203,40 @@ def _node_role(node: Any) -> str:
     return ((getattr(ax, "role", None) or "") if ax else "").lower()
 
 
+# --------------------------------------------------------------------------- #
+# KIND-HINT routing (the card-commit fix). The adapter parsed each control's REAL type off the live
+# form (e.g. ats_lever._classify reads <input type=radio> / <select> / <textarea>); that authoritative
+# structural fact is carried as ctx.kind. We normalise the various adapter tags to ONE of the engine's
+# fill paths so a choice card commits by CLICKING its already-visible option (S_CHOICE) and a custom
+# dropdown opens+reads its options — BEFORE the label-meaning LLM mis-derives BOOLEAN/MULTI/SEARCH from
+# the question wording (the proven Lever mis-route). GENERIC: matched on the adapter's own type tag,
+# never a per-ATS string. An unknown/blank kind -> "" -> the engine falls through to today's classify.
+def normalize_kind(kind: str) -> str:
+    """Map an adapter control-type tag to a routing class: CHOICE | SELECT | TEXTAREA | DATE | "".
+
+    CHOICE   = radio / checkbox (options already on the page -> S_CHOICE, click the match).
+    SELECT   = single_select / multi_select / select / dropdown (custom dropdown -> open+read+commit).
+    TEXTAREA = textarea / open_ended free-text box -> the text path.
+    DATE     = a date control -> the date path.
+    ""       = text / file / unknown -> no override; the engine classifies as today.
+    """
+    k = (kind or "").strip().lower()
+    if not k:
+        return ""
+    if k in ("radio", "checkbox") or k.endswith("_radio") or k.endswith("_checkbox"):
+        return "CHOICE"
+    if "select" in k or k in ("dropdown", "combobox", "listbox"):
+        # single_select / multi_select / native_select / dropdown — a closed option set behind a
+        # (often custom) trigger. multi_select stays a list at the cardinality layer; routing-wise
+        # both open+read the same way (the MULTI loop is driven by ctx.nature/cardinality downstream).
+        return "SELECT"
+    if k in ("textarea", "open_ended"):
+        return "TEXTAREA"
+    if k == "date":
+        return "DATE"
+    return ""
+
+
 def classify_intrinsic(node: Any) -> str:
     """Intrinsic nature from DOM standards, or '' (fall through to label-meaning).
 
@@ -219,6 +260,30 @@ def classify_intrinsic(node: Any) -> str:
     if (tag == "input" and typ == "date") or role == "spinbutton":
         return "INTRINSIC_DATE"
     return ""
+
+
+def _is_plain_text_editable_or_combo(node: Any) -> bool:
+    """Can this control accept a filter KEYSTROKE? True for a plain text/textarea/contenteditable
+    OR a combobox/searchbox/autocomplete (which ``_is_plain_text_editable`` deliberately vetoes).
+    Used by the SELECT type-to-filter step (a custom dropdown's text input filters its option list).
+    A native <select> is NOT keystroke-fillable here (it was already handled by read_options)."""
+    if node is None:
+        return False
+    if _is_plain_text_editable(node):
+        return True
+    tag = _node_tag(node)
+    if tag == "select":
+        return False
+    role = _node_role(node)
+    if role in ("combobox", "searchbox"):
+        return True
+    if _node_attr(node, "aria-autocomplete") not in ("", "none"):
+        return True
+    # an <input> of a text-like type (even when a custom widget didn't set role) can take keystrokes.
+    if tag == "input":
+        typ = _node_attr(node, "type") or "text"
+        return typ in ("text", "email", "url", "tel", "search", "")
+    return False
 
 
 def _is_plain_text_editable(node: Any) -> bool:
@@ -292,6 +357,18 @@ def _option_texts(nodes: list[perc.DeltaNode]) -> list[str]:
     return out
 
 
+def _city_prefix(value: str) -> str:
+    """The leading comma-token of a location-shaped value — 'San Francisco, CA, USA' -> 'San
+    Francisco'. Returns '' when the value carries no comma (not location-shaped) so the geocomplete
+    city-prefix variant only fires for an actual 'City, …' string. GENERIC: no place dictionary, no
+    per-ATS rule — purely the first comma segment, which IS the city for a location field."""
+    v = (value or "").strip()
+    if "," not in v:
+        return ""
+    head = v.split(",")[0].strip()
+    return head if head and head.lower() != v.lower() else ""
+
+
 def _node_for_option(nodes: list[perc.DeltaNode], text: str) -> Any | None:
     want = perc._tokens(text)
     for d in nodes:
@@ -321,6 +398,7 @@ async def observe_act(session: Any, field: dict[str, Any] | Ctx) -> Outcome:
             value="" if field.get("value") is None else str(field.get("value")),
             required=bool(field.get("required", False)),
             cardinality=str(field.get("cardinality", "one")),
+            kind=str(field.get("kind", "") or ""),
             resume=field.get("resume"),
             llm=field.get("llm"),
         )
@@ -500,6 +578,35 @@ async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None
         if intrinsic == "INTRINSIC_DATE":
             return await _s_date(session, ctx)
 
+    # KIND-HINT route (the card-commit fix) — runs AFTER intrinsic (a true <input type=radio> /
+    # <select> is the strongest signal) but BEFORE the label-meaning LLM. The live Lever radios /
+    # custom selects often DON'T expose a standard type/role on the representative node the locate
+    # bound (a styled <label>-wrapped input, a button-trigger custom dropdown), so classify_intrinsic
+    # returns "" and the label-LLM mis-derives BOOLEAN/MULTI/SEARCH -> S3_OPEN/S4_SEARCH -> 0 opts ->
+    # ESCALATE (runs/final3/lever.json). The adapter ALREADY parsed the real control type; honour it.
+    routed = normalize_kind(ctx.kind)
+    if routed:
+        ctx.trace.append(f"kind-hint:{ctx.kind}->{routed}")
+        if routed == "CHOICE":
+            # radio/checkbox: the options are ALREADY VISIBLE in the located card. Read the group
+            # (scoped to ctx.card) and CLICK the matching option — never open a dropdown / type-search.
+            # Set nature to the ADAPTER'S intrinsic kind so the whole reliable-choice-commit verify
+            # path (DOM read-back primary, accept-on-UNKNOWN, recommit-by-click) applies unchanged.
+            ctx.nature = _kind_to_intrinsic(ctx.kind) or "INTRINSIC_RADIO"
+            return await _s_choice(session, ctx, state)
+        if routed == "SELECT":
+            # single/multi-select: a (often custom) dropdown — open + read its options + commit the
+            # match. Lever's custom select renders options only after a click, so S3_OPEN's click+
+            # settle+delta path is exactly right; a native <select> short-circuits via read_options.
+            ctx.nature = "MULTI" if ctx.cardinality == "many" else "CLOSED_LIST"
+            return await _s3_open(session, ctx)
+        if routed == "TEXTAREA":
+            ctx.nature = "FREE_TEXT"
+            return await _s_text_guard(session, ctx)
+        if routed == "DATE":
+            ctx.nature = "DATE"
+            return await _s_date(session, ctx)
+
     # label-meaning nature (§4.2) — one cheap LLM call, deterministic overrides in code (§4.3).
     # MULTI mis-route fix: a comma in the value is a multi signal ONLY for a genuine multi-value
     # label (Skills/Languages/Technologies). A single 'Current location' value "San Francisco, CA"
@@ -636,19 +743,41 @@ def _read_choice_group(state: perc.OAState, ctx: Ctx) -> list[tuple[str, Any]]:
     Falls back to the whole page when no card is known (a single standalone toggle). Each option's
     label is its own visible text (a radio's name IS its option, e.g. 'Yes'). Returns [(option, node)].
     """
-    want_kind = classify_intrinsic(ctx.node)
+    # The option kind we want to gather. Prefer the trigger node's OWN intrinsic kind (a real
+    # <input type=radio>); but on a custom card where the located representative does NOT expose a
+    # standard radio/checkbox type/role, fall back to the adapter's authoritative ctx.kind hint
+    # ('radio'->INTRINSIC_RADIO, 'checkbox'->INTRINSIC_CHECKBOX) so we still scope to the matching
+    # option controls. This is what makes a live Lever Yes/No card (styled inputs) read its options.
+    want_kind = classify_intrinsic(ctx.node) or _kind_to_intrinsic(ctx.kind)
     # Scope to the card subtree (grouped bind) — reuse perception's own structural walk — else page.
     pool = perc._controls_in(ctx.card) if ctx.card is not None else list(state.selector_map.values())
     out: list[tuple[str, Any]] = []
     for node in pool:
         if not perc.node_is_visible(node):
             continue
-        if classify_intrinsic(node) != want_kind:
+        # Match the option control by its OWN intrinsic kind; if the page's option inputs (like the
+        # trigger) are styled customs with no standard type, accept any fillable control in the card
+        # when we have a kind hint and no node here self-identifies — the card scoping is the guard.
+        nk = classify_intrinsic(node)
+        if want_kind and nk and nk != want_kind:
+            continue
+        if not want_kind and nk not in ("INTRINSIC_RADIO", "INTRINSIC_CHECKBOX"):
             continue
         label = perc.node_label_text(node)
         if label and label.strip():
             out.append((label.strip(), node))
     return out
+
+
+def _kind_to_intrinsic(kind: str) -> str:
+    """Map the adapter's CHOICE kind tag to the INTRINSIC_* the choice-group reader scopes on, so a
+    custom-styled radio/checkbox card (no standard type on the node) still gathers the right options."""
+    k = (kind or "").strip().lower()
+    if k == "radio" or k.endswith("_radio"):
+        return "INTRINSIC_RADIO"
+    if k == "checkbox" or k.endswith("_checkbox"):
+        return "INTRINSIC_CHECKBOX"
+    return ""
 
 
 # ---- S_NATIVE (native <select>) ----
@@ -703,8 +832,21 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
     cluster = await _settle(session, before, _SETTLE_STATIC_S)
     texts = _option_texts(cluster)
     if not texts:
-        ctx.trace.append("no-delta->search")
-        return await _s4_search(session, ctx)  # DISAMBIGUATE — never assume text
+        # CARD-COMMIT FIX: a CUSTOM dropdown (Lever single_select) renders its option list only AFTER
+        # a keystroke filters it — the bare click mounts no delta. When the adapter told us this is a
+        # SELECT (ctx.kind), TYPE the value to filter, settle, and re-read the delta BEFORE falling to
+        # the typeahead search. The control must be text-editable to accept a filter keystroke.
+        if normalize_kind(ctx.kind) == "SELECT" and _is_plain_text_editable_or_combo(ctx.node):
+            ctx.trace.append("select-type-to-filter")
+            before2 = await perc.get_state(session)
+            probe = ctx.value[: min(len(ctx.value), 6)] if len(ctx.value) > 6 else ctx.value
+            if await act.type_text(session, ctx.node, probe, clear=True):
+                cluster = await _settle(session, before2, _SETTLE_SEARCH_S)
+                texts = _option_texts(cluster)
+                ctx.trace.append(f"select-filter '{probe}' -> {len(texts)} opts")
+        if not texts:
+            ctx.trace.append("no-delta->search")
+            return await _s4_search(session, ctx)  # DISAMBIGUATE — never assume text
     ctx.trace.append(f"delta-cluster:{len(texts)}")
     return await _commit_from_options(session, ctx, texts, nodes=cluster)
 
@@ -754,6 +896,14 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
     # Precondition: the located element must be text-editable (a native <select> would have
     # been caught by intrinsic and routed to S_NATIVE).
     variants = await brain.query_variants(ctx.value, ctx.nature or "SEARCH", llm=ctx.llm)
+    # CARD-COMMIT FIX (geocomplete): a react-select location typeahead returns NOTHING for the full
+    # 'City, ST, USA' string — it matches on a short CITY prefix and resolves the rest async. Prepend
+    # the leading comma-token (the city) as a high-priority variant so the first probe is e.g.
+    # 'Detroit' not 'Detroit, MI, USA'. GENERIC: any comma-bearing SEARCH value (a location-shaped
+    # field); the existing pick_option still chooses the closest full option the geocomplete returns.
+    city_prefix = _city_prefix(ctx.value)
+    if city_prefix and city_prefix.lower() not in {v.lower() for v in variants}:
+        variants = [city_prefix, *variants]
     for q in variants:
         if ctx.search_tries >= VARIANT_CAP:
             break
@@ -769,7 +919,10 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
         # type the rest so a server-side filter sees the full distinctive query
         if len(q) > len(probe):
             await act.type_text(session, ctx.node, q[len(probe) :], clear=False)
-        cluster = await _settle(session, before, _SETTLE_SEARCH_S)
+        # a geocomplete (the city-prefix variant) resolves its suggestions async over the network —
+        # give it the longer settle so the option cluster mounts before we read the delta.
+        settle_s = _SETTLE_GEO_S if q == city_prefix else _SETTLE_SEARCH_S
+        cluster = await _settle(session, before, settle_s)
         texts = _option_texts(cluster)
         ctx.trace.append(f"search '{q}' -> {len(texts)} opts")
         if not texts:
@@ -1478,6 +1631,160 @@ async def _selftest() -> int:
     fd24 = {"label": "Skills", "value": "Python, Go", "required": False, "cardinality": "many", "llm": fake_llm}
     out24 = await observe_act(fs24, fd24)
     chk("genuine multi (Skills) still MULTI", fd24.get("_nature") == "MULTI", (out24, fd24.get("_nature")))
+
+    # ===== THE CARD-COMMIT FIX (the LAST gap, proven from runs/final3/lever.json) =====
+    # The live Lever screening CARDS are LOCATED (located:grouped) but the representative control does
+    # NOT self-identify as an intrinsic radio/checkbox/select (a styled custom proxy), so
+    # classify_intrinsic == "" and the label-LLM mis-derives BOOLEAN/MULTI/SEARCH -> the wrong path ->
+    # 0 opts -> ESCALATE. The ADAPTER already parsed each card's REAL type (radio|checkbox|
+    # single_select|textarea); that ``kind`` hint now routes correctly BEFORE the label-LLM guess.
+    from oa_observe_act_fakes import (
+        make_custom_choice_card,
+        make_custom_select_card,
+        make_single_input_card,
+    )
+
+    # (25) RADIO CARD via KIND HINT — the live mis-route case. A 'Yes/No' radio whose option controls
+    #      have NO standard type/role (classify_intrinsic == "") + a label that would classify BOOLEAN.
+    #      The kind='radio' hint MUST route to S_CHOICE (click the visible 'Yes'), NEVER S3_OPEN/S4_SEARCH.
+    auth_card = make_custom_choice_card(
+        "Are you legally authorized to work in the country for which you are applying?",
+        ["Yes", "No"],
+        base_bnid=1000,
+    )
+    fs25 = FakeSession(controls=auth_card, dom_values={auth_card[0].backend_node_id: "Yes"})
+    fd25 = {
+        "label": "Are you legally authorized to work in the country for which you are applying?",
+        "value": "Yes",
+        "required": True,
+        "kind": "radio",  # the adapter's authoritative control type
+        "llm": fake_llm,
+    }
+    out25 = await observe_act(fs25, fd25)
+    tr25 = fd25.get("_trace") or []
+    chk(
+        "RADIO card kind-hint -> S_CHOICE clicks 'Yes' (NOT S4_SEARCH) -> DONE",
+        out25 == DONE
+        and "kind-hint:radio->CHOICE" in tr25
+        and "S_CHOICE" in tr25
+        and "S4_SEARCH" not in tr25
+        and "S3_OPEN" not in tr25
+        and fd25.get("_committed") == "Yes",
+        (out25, fd25.get("_committed"), tr25),
+    )
+
+    # (26) CHECKBOX CARD via KIND HINT (Language Skills) — custom checkboxes, value 'English'. The
+    #      kind='checkbox' hint routes to S_CHOICE and CLICKS the 'English' box (NOT type-search 0 opts).
+    lang_card = make_custom_choice_card(
+        "Language Skill(s) (Check all that apply)",
+        ["English", "Spanish", "French"],
+        base_bnid=1020,
+    )
+    english = lang_card[0]
+    fs26 = FakeSession(controls=lang_card, dom_values={english.backend_node_id: "English"})
+    fd26 = {
+        "label": "Language Skill(s) (Check all that apply)",
+        "value": "English",
+        "required": True,
+        "kind": "checkbox",
+        "cardinality": "many",
+        "llm": fake_llm,
+    }
+    out26 = await observe_act(fs26, fd26)
+    tr26 = fd26.get("_trace") or []
+    chk(
+        "CHECKBOX card kind-hint -> S_CHOICE clicks 'English' (NOT S4_SEARCH) -> DONE",
+        out26 == DONE
+        and "kind-hint:checkbox->CHOICE" in tr26
+        and "S_CHOICE" in tr26
+        and "S4_SEARCH" not in tr26
+        and fd26.get("_committed") == "English",
+        (out26, fd26.get("_committed"), tr26),
+    )
+
+    # (27) SINGLE_SELECT CARD via KIND HINT — a CUSTOM combobox dropdown (NOT a native <select>):
+    #      read_options is empty, a bare click mounts NO delta, options render only after a filter
+    #      keystroke. kind='single_select' routes to S3_OPEN, which TYPES the value to filter and reads
+    #      the delta, then commits 'LinkedIn'. Proves the open+type-to-filter+read path for Lever selects.
+    hear = make_custom_select_card("Please tell us how you heard about this opportunity.", bnid=1040)
+    fs27 = FakeSession(
+        controls=[hear],
+        on_type_delta={hear.backend_node_id: [("LinkedIn", (100, 320)), ("Referral", (100, 350))]},
+        read_options_map={},  # custom widget exposes NO inspectable options
+        dom_values={hear.backend_node_id: "LinkedIn"},
+        verdict='{"filled": true, "matches": true}',
+    )
+    fd27 = {
+        "label": "Please tell us how you heard about this opportunity.",
+        "value": "LinkedIn",
+        "required": True,
+        "kind": "single_select",
+        "llm": fake_llm,
+    }
+    out27 = await observe_act(fs27, fd27)
+    tr27 = fd27.get("_trace") or []
+    chk(
+        "SINGLE_SELECT card kind-hint -> S3_OPEN type-to-filter reads + commits 'LinkedIn' -> DONE",
+        out27 == DONE
+        and "kind-hint:single_select->SELECT" in tr27
+        and "S3_OPEN" in tr27
+        and "select-type-to-filter" in tr27
+        and fd27.get("_committed") == "LinkedIn",
+        (out27, fd27.get("_committed"), tr27),
+    )
+
+    # (28) TEXTAREA CARD via KIND HINT — kind='textarea' routes to FREE_TEXT (the text path) even if
+    #      the label wording might tempt a different classify. Proves textarea kind -> S_TEXT.
+    why = make_single_input_card("Why do you want to work here?", bnid=1060, tag="textarea")
+    fs28 = FakeSession(controls=[why], dom_values={why.backend_node_id: "Because I admire the mission."})
+    fd28 = {
+        "label": "Why do you want to work here?",
+        "value": "Because I admire the mission.",
+        "required": True,
+        "kind": "textarea",
+        "llm": fake_llm,
+    }
+    out28 = await observe_act(fs28, fd28)
+    tr28 = fd28.get("_trace") or []
+    chk(
+        "TEXTAREA card kind-hint -> S_TEXT types value -> DONE",
+        out28 == DONE and "kind-hint:textarea->TEXTAREA" in tr28 and "S_TEXT" in tr28,
+        (out28, fs28.last_type_text, tr28),
+    )
+
+    # (29) LOCATION GEOCOMPLETE — the react-select location typeahead returns 0 opts for the full
+    #      'City, ST, USA', but matches on a short CITY PREFIX. S4_SEARCH must try the leading
+    #      comma-token ('Detroit') FIRST and commit the resolved suggestion. NO kind hint (a plain
+    #      text location field) — proves the generic city-prefix variant + longer geo settle.
+    loc = _mk(tag="input", role="combobox", attrs={"aria-autocomplete": "list"}, ax_name="Current location")
+    fs29 = FakeSession(
+        controls=[loc],
+        # the geocomplete only yields options for the city-prefix 'Detroit', NOT the full string.
+        on_type_delta={loc.backend_node_id: [("Detroit, MI, USA", (100, 250))]},
+        dom_values={loc.backend_node_id: "Detroit, MI, USA"},
+        verdict='{"filled": true, "matches": true}',
+    )
+    fd29 = {"label": "Current location", "value": "Detroit, MI, USA", "required": True, "llm": fake_llm}
+    out29 = await observe_act(fs29, fd29)
+    tr29 = fd29.get("_trace") or []
+    chk(
+        "LOCATION geocomplete -> city-prefix 'Detroit' variant tried first -> DONE",
+        out29 == DONE and any(t.startswith("search 'Detroit'") for t in tr29) and fd29.get("_committed"),
+        (out29, fd29.get("_committed"), tr29),
+    )
+
+    # (30) NO-REGRESS: a kind='text' (or no kind) field is UNTOUCHED by the hint route — it still
+    #      classifies via the label path (FREE_TEXT here). Proves the hint never hijacks plain text.
+    name30 = _mk(tag="input", typ="text", ax_name="First Name")
+    fs30 = FakeSession(controls=[name30], dom_values={name30.backend_node_id: "Diego"})
+    fd30 = {"label": "First Name", "value": "Diego", "required": True, "kind": "text", "llm": fake_llm}
+    out30 = await observe_act(fs30, fd30)
+    tr30 = fd30.get("_trace") or []
+    chk(
+        "kind='text' does NOT trigger a kind-hint route (plain text path intact)",
+        out30 == DONE and not any(t.startswith("kind-hint:") for t in tr30) and "S_TEXT" in tr30,
+        (out30, tr30),
+    )
 
     ok = True
     print("\n=== oa_observe_act offline self-test (fake session+llm, no browser/VLM, $0) ===")

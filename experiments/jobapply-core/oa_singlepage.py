@@ -190,7 +190,16 @@ class FieldResult:
 def _field_dict(field: eng.FormField, value: str, *, resume: str | None, llm: Any) -> dict[str, Any]:
     """The observe_act input for one discovered FormField. Multi-value labels (Skills/Languages,
     or a comma/semicolon-joined value) carry cardinality='many' so the state machine enters
-    S_MULTI_LOOP; everything else is 'one'."""
+    S_MULTI_LOOP; everything else is 'one'.
+
+    KIND HINT (the card-commit fix): we forward the adapter's OWN parsed control type as ``kind``.
+    The adapter scraped the live form schema and classified each control as radio | checkbox |
+    single_select | textarea | text | input_file etc. (e.g. ats_lever._classify reads the actual
+    ``<input type=radio>`` / ``<select>`` off the rendered DOM). That is a RELIABLE STRUCTURAL FACT
+    — not a renameable label. The engine honours it to route a choice card straight to S_CHOICE
+    (click the already-visible Yes/No) or a custom select to the open+read path, BEFORE the
+    label-meaning LLM guess that mis-derives BOOLEAN/MULTI/SEARCH from the question wording (the
+    proven Lever mis-route in runs/final3/lever.json). GENERIC — any ATS's adapter sets field.type."""
     label = field.label or field.name
     cardinality = "one"
     multi_label = any(k in label.lower() for k in ("skill", "language", "technolog"))
@@ -201,6 +210,7 @@ def _field_dict(field: eng.FormField, value: str, *, resume: str | None, llm: An
         "value": value,
         "required": bool(field.required),
         "cardinality": cardinality,
+        "kind": field.type or "",  # the adapter's REAL control type — the routing hint
         "resume": resume if field.source == "file" else None,
         "llm": llm,
     }
@@ -376,8 +386,7 @@ async def _fill_form(
         fd = _field_dict(f, value, resume=resume, llm=llm)
         if os.environ.get("OA_FIELD_TRACE"):
             print(
-                f"[FIELD-START] name={f.name[:28]} src={f.source} type={f.type} "
-                f"val={str(value)[:30]!r}",
+                f"[FIELD-START] name={f.name[:28]} src={f.source} type={f.type} val={str(value)[:30]!r}",
                 flush=True,
             )
         try:
@@ -413,9 +422,7 @@ async def _fill_form(
         # BOUNDED: on a never-idle SPA the terminal CDP screenshot can hang ~60s ("Runtime.evaluate did
         # not respond") AFTER the fill is already done — cap it so it can't push wall-clock past budget.
         with contextlib.suppress(Exception):
-            result["screenshot"] = await asyncio.wait_for(
-                eng._screenshot(session, page, screenshot_path), timeout=15.0
-            )
+            result["screenshot"] = await asyncio.wait_for(eng._screenshot(session, page, screenshot_path), timeout=15.0)
     with contextlib.suppress(Exception):
         result["final_url"] = await page.get_url()
 
@@ -485,7 +492,8 @@ def _print_report(
 
 
 def _load_profile(path: str) -> dict:
-    return json.loads(open(path, encoding="utf-8").read())
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 # --------------------------------------------------------------------------- #

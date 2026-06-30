@@ -420,6 +420,70 @@ def make_labelfree_choice_card(
     return make_choice_card(heading_text, options, base_bnid=base_bnid, kind=kind, top=top)
 
 
+def make_custom_choice_card(
+    question: str,
+    options: list[str],
+    *,
+    base_bnid: int,
+    visible: bool = True,
+    top: int = 240,
+) -> list[Any]:
+    """A LEVER-LIVE custom radio/checkbox card whose option controls DO NOT self-identify as
+    intrinsic radio/checkbox — a styled ``<div>``/``<a>`` proxy with NO ``type``/``role`` standard
+    attribute (only its visible option text). This is the proven live shape where ``classify_intrinsic``
+    returns "" and the label-LLM mis-derives BOOLEAN -> S3_OPEN -> search -> 0 opts -> ESCALATE.
+    The ADAPTER's ``kind`` hint ('radio'/'checkbox') is the ONLY signal that routes it to S_CHOICE.
+    Returns the option control nodes (heading/rows/card live in the tree via parent_node)."""
+    heading = _text_node(base_bnid, question, (100, top, 360, 18))
+    rows: list[Any] = [heading]
+    controls: list[Any] = []
+    for i, opt in enumerate(options):
+        cid = base_bnid + 1 + i
+        oy = top + 28 + i * 30
+        # A styled custom proxy that IS fillable (so the locate binds it) but does NOT self-identify
+        # as an intrinsic radio/checkbox: a text-typed input with NO radio/checkbox type or role. Its
+        # ax name is the option text (a human reads 'Yes'/'No'), but classify_intrinsic(node) == "" —
+        # exactly the live Lever shape where only the adapter's ctx.kind can route + scope the group.
+        ctrl = _control_node(
+            cid, tag="input", typ="text", role=None, box=(100, oy, 18, 18), visible=visible, ax_name=opt
+        )
+        otext = _text_node(cid * 100 + 7, opt, (124, oy, 120, 18))
+        row = _wrap(cid * 1000 + 3, [ctrl, otext], (100, oy, 240, 24))
+        rows.append(row)
+        controls.append(ctrl)
+    _wrap(base_bnid * 1000 + 9, rows, (100, top - 4, 380, 28 + 30 * len(options)))
+    return controls
+
+
+def make_custom_select_card(
+    question: str,
+    *,
+    bnid: int,
+    visible: bool = True,
+    top: int = 240,
+) -> Any:
+    """A LEVER-LIVE custom single_select card: a heading block + a combobox-style TEXT input trigger
+    (role=combobox, aria-autocomplete=list) that is NOT a native <select> — so ``read_options``
+    returns [] and a bare click mounts no delta (the options render only after a filter keystroke).
+    The adapter's ``kind='single_select'`` hint routes it to the open+TYPE-TO-FILTER+read path.
+    Returns the trigger control node (heading/wrappers live in the tree via parent_node)."""
+    heading_text = _text_node(bnid * 10 + 1, question, (100, top, 360, 18))
+    heading_block = _wrap(bnid * 10 + 3, [heading_text], (100, top, 360, 20))
+    ctrl = _control_node(
+        bnid,
+        tag="input",
+        typ="text",
+        role="combobox",
+        box=(100, top + 28, 320, 32),
+        visible=visible,
+        ax_name="",
+    )
+    ctrl.attributes["aria-autocomplete"] = "list"  # a filtering combobox, not a native select
+    field_wrap = _wrap(bnid * 10 + 4, [ctrl], (100, top + 24, 360, 40))
+    _wrap(bnid * 10 + 2, [heading_block, field_wrap], (100, top - 4, 380, 80))
+    return ctrl
+
+
 def make_single_input_card(
     question: str,
     *,
