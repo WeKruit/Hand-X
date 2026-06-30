@@ -130,7 +130,23 @@ async def run_single_page_oa(
     mapped = await eng.map_fields(llm, map_rows, profile, title) if map_rows else {}
 
     # navigate + reach the form (iframe drill / "Enter manually"), reused verbatim.
-    session = BrowserSession(browser_profile=BrowserProfile(headless=headless, keep_alive=True))
+    # HARDENED browser launch (env-tunable): a small viewport + stability flags + no extension
+    # download keep headless Chrome from going unresponsive on heavy SPA /apply pages (Lever/Ashby),
+    # which otherwise drops the CDP WebSocket -> every action waits out its 30-60s timeout.
+    _vw = int(os.environ.get("OA_VIEWPORT_W", "1280"))
+    _vh = int(os.environ.get("OA_VIEWPORT_H", "900"))
+    _hard_args = ["--disable-dev-shm-usage", "--disable-gpu"]
+    if os.environ.get("OA_NO_SANDBOX") == "1":
+        _hard_args.append("--no-sandbox")
+    session = BrowserSession(
+        browser_profile=BrowserProfile(
+            headless=headless,
+            keep_alive=True,
+            viewport={"width": _vw, "height": _vh},
+            enable_default_extensions=False,
+            args=_hard_args,
+        )
+    )
     await session.start()
     await session.navigate_to(url)
     await asyncio.sleep(2.5)
@@ -167,7 +183,11 @@ async def run_single_page_oa(
     oa.reset_page_vlm_backstop()
     per_field: list[FieldResult] = []
     t0 = time.monotonic()
-    for f in fields:
+    # FILE FIELDS LAST: a drag-drop resume dropzone (Lever/Ashby) kicks off heavy client-side
+    # processing on upload that can freeze the headless renderer; doing it AFTER the text fields
+    # means a wedge can't cost us the rest of the form. Stable sort keeps every other field's order.
+    fields_file_last = sorted(fields, key=lambda f: 1 if getattr(f, "source", "") == "file" else 0)
+    for f in fields_file_last:
         if f.source == "skip":
             continue
         value, src = eng._resolve(f, mapped, resume)
