@@ -388,11 +388,14 @@ async def cdp_set_file(session: Any, node: Any, path: str) -> bool:
     bnid = getattr(node, "backend_node_id", None)
     if node is None or bnid is None or not path:
         return False
+    import os
+
+    abspath = os.path.abspath(str(path))  # DOM.setFileInputFiles requires an ABSOLUTE path
 
     async def _do() -> bool:
         cdp_session = await session.cdp_client_for_node(node)
         await cdp_session.cdp_client.send.DOM.setFileInputFiles(
-            params={"files": [str(path)], "backendNodeId": int(bnid)},
+            params={"files": [abspath], "backendNodeId": int(bnid)},
             session_id=cdp_session.session_id,
         )
         return True

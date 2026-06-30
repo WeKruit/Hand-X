@@ -30,6 +30,7 @@ handle, no adapter ``locate`` — oa_perception.locate_field is the one structur
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import time
 from dataclasses import dataclass
@@ -667,7 +668,8 @@ async def _s_file_global(session: Any, ctx: Ctx, state: perc.OAState) -> Outcome
     # busy SPA — the Ashby cover-letter 2nd-dropzone HARD-FIELD-TIMEOUT). Fall back to the event-bus path.
     ok = await cdpa.cdp_set_file(session, node, str(path))
     if not ok:
-        ok = await act.upload_file(session, node, str(path))  # CDP-via-event-bus fallback, NO click
+        with contextlib.suppress(Exception):  # bounded: the event-bus upload hangs on some SPA dropzones
+            ok = await asyncio.wait_for(act.upload_file(session, node, str(path)), timeout=10.0)
     if not ok:
         ctx.trace.append("upload-failed")
         return ESCALATE if ctx.required else SKIP
