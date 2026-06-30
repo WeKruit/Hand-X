@@ -731,19 +731,61 @@ async def _visual_commit(session: Any, ctx: Ctx, candidates: list[Any]) -> bool:
     if perc.node_center(chosen) is None:
         ctx.trace.append("visual-choice:no-box")
         return False
-    # Click the option at its LIVE viewport-space center. NOT click_xy(node_center): node_center is
-    # the serializer's DOCUMENT-space rect, but the CDP mouse event is VIEWPORT-space — on a scrolled
-    # Lever form those differ by the scroll offset and the click misses (verify reads EMPTY -> the
-    # radio ESCALATEs). click_node_center resolves getBoundingClientRect (viewport-relative + scrolled
-    # into view) so the click lands on the real option.
-    ok = await act.click_node_center(session, chosen)
+    # COMBINE visual + DOM: the VLM said WHICH option (semantics), now the DOM gives the precise
+    # CLICKABLE target. The VLM often marks the option's TEXT span, but a styled-div radio only toggles
+    # when its real interactive element (the radio input / the <label> / the clickable option ROW) is
+    # clicked — clicking the text center misses the hotspot (the observed Lever failure). Resolve the
+    # chosen option to that element, then issue a TRUSTED direct-CDP click on it (real mouse event +
+    # elementFromPoint reroute + JS .click() fallback fires the React handler regardless of coordinate).
+    target = _resolve_choice_target(chosen, candidates)
+    ok = await act.click_node(session, target)
+    if not ok:
+        ok = await act.click_node_center(session, target)  # coordinate fallback
     if not ok:
         ctx.trace.append("visual-choice:click-failed")
         return False
     ctx.committed_text = perc.node_label_text(chosen) or perc.node_option_text(chosen) or ctx.value
-    ctx.node = chosen  # the verify oracle reads back the option we actually clicked
-    ctx.trace.append("visual-choice+cdp_click_center")
+    ctx.node = target  # the verify oracle reads back the option control we actually clicked
+    how = "self" if target is chosen else "resolved"
+    ctx.trace.append(f"visual-choice+cdp_click:{how}")
     return True
+
+
+def _resolve_choice_target(chosen: Any, candidates: list[Any]) -> Any:
+    """COMBINE: given the VLM-chosen option node (often its TEXT), return the real CLICKABLE element to
+    hit. Prefer (1) the chosen node if it is itself a radio/checkbox; (2) a radio/checkbox candidate in
+    the SAME horizontal row band (the styled circle sits left of the text); (3) the chosen node's nearest
+    interactive ancestor (the <label>/clickable option ROW that wraps circle+text); (4) the chosen node.
+    Pure DOM geometry/structure — generic, no per-ATS hook."""
+    if classify_intrinsic(chosen) in ("INTRINSIC_RADIO", "INTRINSIC_CHECKBOX"):
+        return chosen
+    cbox = perc.node_rect(chosen)
+    if cbox is not None:
+        cy = cbox[1] + cbox[3] / 2.0
+        # (2) a real radio/checkbox option control on the same row as the chosen text.
+        for n in candidates:
+            if n is chosen or classify_intrinsic(n) not in ("INTRINSIC_RADIO", "INTRINSIC_CHECKBOX"):
+                continue
+            nb = perc.node_rect(n)
+            if nb is not None and abs((nb[1] + nb[3] / 2.0) - cy) <= 16:
+                return n
+    # (3) the nearest interactive ancestor (the clickable option row / <label> wrapping circle+text).
+    parent = getattr(chosen, "parent_node", None)
+    hops = 0
+    while parent is not None and hops < 4:
+        tag = (getattr(parent, "node_name", "") or "").lower()
+        role = (getattr(getattr(parent, "ax_node", None), "role", None) or "").lower()
+        attrs = getattr(parent, "attributes", None) or {}
+        if tag == "label" or role in ("radio", "checkbox", "option", "button") or attrs.get("role") in (
+            "radio",
+            "checkbox",
+            "option",
+            "button",
+        ):
+            return parent
+        parent = getattr(parent, "parent_node", None)
+        hops += 1
+    return chosen
 
 
 # ---- S_CHOICE (radio / checkbox; options already on screen) ----
@@ -1964,12 +2006,11 @@ async def _selftest() -> int:
         restore_vlm(orig_vlm31)
     tr31 = fd31.get("_trace") or []
     chk(
-        "VISUAL radio: empty group -> set-of-marks 'Yes' -> cdp_click_center -> DONE",
+        "VISUAL radio: empty group -> set-of-marks 'Yes' -> combined cdp_click -> DONE",
         out31 == DONE
         and "choice-no-group" in tr31
-        and "visual-choice+cdp_click_center" in tr31
-        and fs31.last_click_xy is not None,
-        (out31, fs31.last_click_xy, tr31),
+        and any(t.startswith("visual-choice+cdp_click") for t in tr31),
+        (out31, tr31),
     )
 
     # (32) VISUAL RADIO on a SENSITIVE label — the live authorize/sponsorship/AI-consent case. The
@@ -1999,7 +2040,7 @@ async def _selftest() -> int:
     chk(
         "VISUAL radio fires BEFORE sensitive-guard -> DONE (no ESCALATE)",
         out32 == DONE
-        and "visual-choice+cdp_click_center" in tr32
+        and any(t.startswith("visual-choice+cdp_click") for t in tr32)
         and "sensitive->ESCALATE" not in tr32,
         (out32, tr32),
     )
