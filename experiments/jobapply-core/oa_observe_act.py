@@ -693,6 +693,59 @@ async def _s_file(session: Any, ctx: Ctx) -> Outcome:
     return DONE
 
 
+# --------------------------------------------------------------------------- #
+# VISUAL COMMIT FALLBACK (the LAST gap) — when the DOM option-read is EMPTY but the options
+# are VISIBLE on screen (Lever styled-div radios; a custom single_select / geocomplete whose
+# options render in a portal the delta misses). SCREENSHOT + set-of-marks over the visible
+# candidate option elements + VLM pick-by-VALUE -> click the chosen option BY COORDINATE.
+# GENERIC (no per-ATS string), FILL-ONLY, and a STRICT FALLBACK: it only runs when the DOM read
+# yielded nothing, so it never touches a standard widget that read its options fine. Bounded by
+# the SAME per-field VLM sub-budget (FIELD_VLM_CAP) the verify oracle + locate tiers share.
+# --------------------------------------------------------------------------- #
+async def _visual_commit(session: Any, ctx: Ctx, candidates: list[Any]) -> bool:
+    """SEE the rendered options + click the one meaning ctx.value BY COORDINATE. Returns True on a
+    committed click (ctx.committed_text set), False when the VLM finds nothing / budget spent / no box.
+
+    Reuses the EXISTING set-of-marks helper (``brain.pick_option_by_marks`` -> ``vision_verify``'s
+    screenshot+counter) and the EXISTING coordinate click (``act.click_xy`` -> ``cdp_click_xy``); it
+    adds no new perception/action — only the routing that the visible options ARE the option set when
+    the DOM read came back empty. Spends at most ONE VLM aid from the per-field sub-budget."""
+    cands = [c for c in candidates if c is not None and getattr(c, "backend_node_id", None) is not None]
+    if not cands:
+        return False
+    if ctx.vlm_used >= FIELD_VLM_CAP:
+        ctx.trace.append("visual-commit-budget")
+        return False
+    before_n = _vv_calls()
+    chosen = None
+    try:
+        chosen = await brain.pick_option_by_marks(session, ctx.value, cands, llm=ctx.llm)
+    except Exception:
+        chosen = None
+    spent = max(0, _vv_calls() - before_n)
+    if spent:
+        ctx.vlm_used += spent
+    if chosen is None:
+        ctx.trace.append("visual-choice:none")
+        return False
+    if perc.node_center(chosen) is None:
+        ctx.trace.append("visual-choice:no-box")
+        return False
+    # Click the option at its LIVE viewport-space center. NOT click_xy(node_center): node_center is
+    # the serializer's DOCUMENT-space rect, but the CDP mouse event is VIEWPORT-space — on a scrolled
+    # Lever form those differ by the scroll offset and the click misses (verify reads EMPTY -> the
+    # radio ESCALATEs). click_node_center resolves getBoundingClientRect (viewport-relative + scrolled
+    # into view) so the click lands on the real option.
+    ok = await act.click_node_center(session, chosen)
+    if not ok:
+        ctx.trace.append("visual-choice:click-failed")
+        return False
+    ctx.committed_text = perc.node_label_text(chosen) or perc.node_option_text(chosen) or ctx.value
+    ctx.node = chosen  # the verify oracle reads back the option we actually clicked
+    ctx.trace.append("visual-choice+cdp_click_center")
+    return True
+
+
 # ---- S_CHOICE (radio / checkbox; options already on screen) ----
 async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -> Outcome:
     if not ctx.guard():
@@ -706,7 +759,18 @@ async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -
         state = await perc.get_state(session)
     group = _read_choice_group(state, ctx)
     if not group:
-        # single standalone checkbox (consent / yes-no) — toggle on an affirmative value.
+        ctx.trace.append("choice-no-group")
+        # VISUAL FALLBACK (preferred over the standalone-checkbox heuristic): the DOM read found NO
+        # option controls (Lever radios are styled DIVs, not <input type=radio> — invisible to the
+        # structural scan but VISIBLE on screen). When the card holds >=2 visible candidate options,
+        # this is a multi-option choice, NOT a lone consent checkbox: SEE the options, VLM-pick the one
+        # meaning ctx.value, and click it BY COORDINATE. Only here (DOM read empty) — a standard radio
+        # group never reaches this. If the VLM finds nothing, fall through to the heuristics below.
+        cands = _visual_choice_candidates(state, ctx)
+        if len(cands) >= 2 and await _visual_commit(session, ctx, cands):
+            return await _s_verify(session, ctx)
+        # single standalone checkbox (consent / yes-no) — toggle on an affirmative value. Only when
+        # there was NOT a multi-option visual group above (a lone consent box has 0-1 candidate).
         if brain._norm_lower(ctx.value) in brain._BOOL_VALUES and brain._norm_lower(ctx.value) not in {
             "no",
             "false",
@@ -715,14 +779,20 @@ async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -
         }:
             await act.click_node(session, ctx.node)
             return await _s_verify(session, ctx)
-        ctx.trace.append("choice-no-group")
         return await _s_other_guard(session, ctx)
     texts = [t for t, _ in group]
     chosen = await brain.pick_option(ctx.value, texts, llm=ctx.llm)
-    if not chosen:
-        return await _s_other_guard(session, ctx)
-    node = dict(group).get(chosen)
-    if node is None:
+    node = dict(group).get(chosen) if chosen else None
+    if not chosen or node is None:
+        # The DOM group was found but the text-pick produced no usable option (Lever's styled-div
+        # radios often read back as bare markers / mismatched labels, so pick_option can't match the
+        # value against them even though the choices ARE on screen). Before falling to the Other-guard
+        # — which would ESCALATE a sensitive Yes/No card we CAN actually answer — try the VISUAL path:
+        # mark the visible option elements and VLM-pick the one meaning ctx.value, then click BY
+        # COORDINATE. Same generic fallback the empty-group branch uses, applied to the no-match case.
+        cands = _visual_choice_candidates(state, ctx)
+        if len(cands) >= 2 and await _visual_commit(session, ctx, cands):
+            return await _s_verify(session, ctx)
         return await _s_other_guard(session, ctx)
     ctx.committed_text = chosen
     # Point ctx.node at the CHOSEN option control (it was the representative until now for a grouped
@@ -767,6 +837,42 @@ def _read_choice_group(state: perc.OAState, ctx: Ctx) -> list[tuple[str, Any]]:
         if label and label.strip():
             out.append((label.strip(), node))
     return out
+
+
+def _visual_choice_candidates(state: perc.OAState, ctx: Ctx) -> list[Any]:
+    """The VISIBLE clickable option elements for the visual fallback when ``_read_choice_group`` was
+    empty (custom styled-div radios). Scoped GEOMETRICALLY to ctx.card's box when bound (so the marks
+    are THIS question's options, not the whole page), else the whole page. Drawn from browser-use's own
+    indexed-interactive set (``selector_map`` — which DOES include the clickable styled option rows on
+    a Lever card), filtered to visible + boxed. Generic: pure geometry + visibility, no fillable gate
+    (the styled proxies are NOT standard radios) and no per-ATS hook — the set-of-marks then numbers
+    them for the VLM to pick by value. Excludes the trigger node itself (it is not an option)."""
+    card_box = perc.node_rect(ctx.card) if ctx.card is not None else None
+    trigger_bnid = getattr(ctx.node, "backend_node_id", None)
+    out: list[Any] = []
+    seen: set[int] = set()
+    for node in state.selector_map.values():
+        bnid = getattr(node, "backend_node_id", None)
+        if bnid is None or bnid in seen or bnid == trigger_bnid:
+            continue
+        if not perc.node_is_visible(node):
+            continue
+        center = perc.node_center(node)
+        if center is None:  # no on-screen box -> nothing to mark/click
+            continue
+        if card_box is not None and not _center_in_box(center, card_box):
+            continue  # scope to the bound card so a multi-question page marks THIS question's options
+        seen.add(bnid)
+        out.append(node)
+    return out
+
+
+def _center_in_box(center: tuple[float, float], box: tuple[float, float, float, float]) -> bool:
+    """Is the point ``center`` (cx, cy) inside the document-space box (x, y, w, h)? A small margin
+    tolerates the option-row box extending a hair past the card heading wrapper."""
+    cx, cy = center
+    bx, by, bw, bh = box
+    return (bx - 8) <= cx <= (bx + bw + 8) and (by - 8) <= cy <= (by + bh + 8)
 
 
 def _kind_to_intrinsic(kind: str) -> str:
@@ -845,10 +951,36 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
                 texts = _option_texts(cluster)
                 ctx.trace.append(f"select-filter '{probe}' -> {len(texts)} opts")
         if not texts:
+            # VISUAL FALLBACK: the custom dropdown is OPEN (we clicked + filtered) but its option list
+            # rendered into a portal the DOM delta missed — yet the options are VISIBLE. SEE them: read
+            # the fresh state, mark the newly-rendered visible option elements, VLM-pick the one meaning
+            # ctx.value, click it BY COORDINATE. Only here (every DOM read came back empty).
+            cands = await _visual_dropdown_candidates(session, ctx, before)
+            if cands and await _visual_commit(session, ctx, cands):
+                if ctx.nature == "MULTI":
+                    return await _s_multi_loop(session, ctx)
+                return await _s_cascade(session, ctx)
             ctx.trace.append("no-delta->search")
             return await _s4_search(session, ctx)  # DISAMBIGUATE — never assume text
     ctx.trace.append(f"delta-cluster:{len(texts)}")
     return await _commit_from_options(session, ctx, texts, nodes=cluster)
+
+
+async def _visual_dropdown_candidates(session: Any, ctx: Ctx, before: perc.OAState) -> list[Any]:
+    """The VISIBLE option elements an OPEN custom dropdown rendered into a portal the delta missed.
+
+    The delta read found nothing, but the menu IS on screen. Re-read the state and return the visible
+    elements that are NEW vs ``before`` (the portal-rendered option cells) — generic, by appearance,
+    no per-ATS selector. Falls back to the page's newly-visible boxed elements when the delta-by-id is
+    empty (the portal may reuse ids). These are then marked + picked-by-value in ``_visual_commit``."""
+    after = await perc.get_state(session)
+    new = perc.delta(before, after)
+    cands = [d.node for d in new if d.node is not None and perc.node_center(d.node) is not None]
+    if cands:
+        return cands
+    # No id-delta (portal reused ids) — mark every visible boxed control on the page; the VLM picks
+    # the option whose text means ctx.value, so extra candidates are harmless (it returns -1 on none).
+    return [n for n in after.selector_map.values() if perc.node_is_visible(n) and perc.node_center(n) is not None]
 
 
 async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: list[perc.DeltaNode] | None) -> Outcome:
@@ -926,6 +1058,16 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
         texts = _option_texts(cluster)
         ctx.trace.append(f"search '{q}' -> {len(texts)} opts")
         if not texts:
+            # VISUAL FALLBACK (geocomplete): we typed the city prefix and the suggestion list IS
+            # rendered, but react-select painted it into a portal the delta never captured. SEE the
+            # suggestions: mark the newly-rendered visible rows + VLM-pick the one matching ctx.value +
+            # click BY COORDINATE. Only when this probe's DOM delta was empty (the options exist on
+            # screen). If the VLM also finds nothing -> advance to the next variant, as before.
+            cands = await _visual_dropdown_candidates(session, ctx, before)
+            if cands and await _visual_commit(session, ctx, cands):
+                if ctx.nature == "MULTI":
+                    return await _s_multi_loop(session, ctx)
+                return await _s_cascade(session, ctx)
             continue  # this variant produced nothing — advance
         chosen = await brain.pick_option(ctx.value, texts, llm=ctx.llm)
         if not chosen:
@@ -1784,6 +1926,137 @@ async def _selftest() -> int:
         "kind='text' does NOT trigger a kind-hint route (plain text path intact)",
         out30 == DONE and not any(t.startswith("kind-hint:") for t in tr30) and "S_TEXT" in tr30,
         (out30, tr30),
+    )
+
+    # ===== THE VISUAL COMMIT FALLBACK (the LAST gap, proven from runs/cards/lever.json) =====
+    # The custom Lever screening widgets do NOT expose options to standard DOM reads: radio cards are
+    # styled DIVs (not <input type=radio>) so _read_choice_group is EMPTY; a custom single_select and a
+    # geocomplete render their options into a portal the delta misses. The values are KNOWN and the
+    # options are VISIBLE — so we SEE them: screenshot + set-of-marks over the visible option elements +
+    # VLM pick-by-VALUE + click BY COORDINATE (cdp_click_xy). A STRICT FALLBACK (only when the DOM read
+    # came back empty) so it never touches a standard widget.
+    from oa_observe_act_fakes import (
+        install_marks_vlm,
+        make_visual_radio_card,
+        restore_vlm,
+    )
+
+    # (31) VISUAL RADIO COMMIT — the exact lever.json case. A custom Yes/No card whose options are
+    #      styled DIVs: located:grouped -> S_CHOICE -> _read_choice_group EMPTY (choice-no-group) ->
+    #      the VISUAL path marks the option divs, the VLM returns the 'Yes' div's bnid, and the engine
+    #      CLICKS IT BY COORDINATE (cdp_click_xy). DOM read-back ('Yes') then verifies CORRECT.
+    _vv._VLM_CALLS["n"] = 0
+    reset_page_vlm_backstop()
+    vcard = make_visual_radio_card("How should we contact you about this role?", ["Yes", "No"], base_bnid=1100)
+    yes_div = vcard[1]  # controls = [trigger, yes_div, no_div]
+    fs31 = FakeSession(controls=vcard, dom_values={yes_div.backend_node_id: "Yes"})
+    orig_vlm31 = install_marks_vlm(f'{{"mark": {yes_div.backend_node_id}}}')
+    try:
+        fd31 = {
+            "label": "How should we contact you about this role?",
+            "value": "Yes",
+            "required": True,
+            "kind": "radio",
+            "llm": fake_llm,
+        }
+        out31 = await observe_act(fs31, fd31)
+    finally:
+        restore_vlm(orig_vlm31)
+    tr31 = fd31.get("_trace") or []
+    chk(
+        "VISUAL radio: empty group -> set-of-marks 'Yes' -> cdp_click_center -> DONE",
+        out31 == DONE
+        and "choice-no-group" in tr31
+        and "visual-choice+cdp_click_center" in tr31
+        and fs31.last_click_xy is not None,
+        (out31, fs31.last_click_xy, tr31),
+    )
+
+    # (32) VISUAL RADIO on a SENSITIVE label — the live authorize/sponsorship/AI-consent case. The
+    #      visual path must fire BEFORE the sensitive Other-guard (which previously ESCALATED these),
+    #      so a sensitive Yes/No still commits visually when its value is known + visible.
+    _vv._VLM_CALLS["n"] = 0
+    scard = make_visual_radio_card(
+        "Are you legally authorized to work in the country for which you are applying?",
+        ["Yes", "No"],
+        base_bnid=1140,
+    )
+    yes_div2 = scard[1]
+    fs32 = FakeSession(controls=scard, dom_values={yes_div2.backend_node_id: "Yes"})
+    orig_vlm32 = install_marks_vlm(f'{{"mark": {yes_div2.backend_node_id}}}')
+    try:
+        fd32 = {
+            "label": "Are you legally authorized to work in the country for which you are applying?",
+            "value": "Yes",
+            "required": True,
+            "kind": "radio",
+            "llm": fake_llm,
+        }
+        out32 = await observe_act(fs32, fd32)
+    finally:
+        restore_vlm(orig_vlm32)
+    tr32 = fd32.get("_trace") or []
+    chk(
+        "VISUAL radio fires BEFORE sensitive-guard -> DONE (no ESCALATE)",
+        out32 == DONE
+        and "visual-choice+cdp_click_center" in tr32
+        and "sensitive->ESCALATE" not in tr32,
+        (out32, tr32),
+    )
+
+    # (33) VISUAL RADIO no-match -> the VLM returns -1 -> visual-choice:none -> the EXISTING guard
+    #      still runs (a sensitive label then ESCALATES, never a silent Other). Proves the fallback is
+    #      additive: when the VLM also finds nothing, behaviour is exactly as before the fix.
+    _vv._VLM_CALLS["n"] = 0
+    scard2 = make_visual_radio_card(
+        "Will you now or in the future require sponsorship for employment visa status?",
+        ["Yes", "No"],
+        base_bnid=1180,
+    )
+    fs33 = FakeSession(controls=scard2)
+    orig_vlm33 = install_marks_vlm('{"mark": -1}')  # the VLM finds no matching option
+    try:
+        fd33 = {
+            "label": "Will you now or in the future require sponsorship for employment visa status?",
+            "value": "No",
+            "required": True,
+            "kind": "radio",
+            "llm": fake_llm,
+        }
+        out33 = await observe_act(fs33, fd33)
+    finally:
+        restore_vlm(orig_vlm33)
+    tr33 = fd33.get("_trace") or []
+    chk(
+        "VISUAL radio no-match -> falls through to sensitive guard -> ESCALATE (additive)",
+        out33 == ESCALATE and "visual-choice:none" in tr33 and "sensitive->ESCALATE" in tr33,
+        (out33, tr33),
+    )
+
+    # (34) NO-REGRESS: a STANDARD radio card (intrinsic <input type=radio>, options readable by the DOM
+    #      group read) NEVER reaches the visual path — _read_choice_group succeeds, no screenshot/VLM
+    #      marks spend. Proves the visual fallback is a strict fallback gated on an EMPTY DOM read.
+    _vv._VLM_CALLS["n"] = 0
+    from oa_observe_act_fakes import make_choice_card
+
+    std = make_choice_card("Do you have a valid work permit?", ["Yes", "No"], base_bnid=1220, kind="radio")
+    fs34 = FakeSession(controls=std, dom_values={std[0].backend_node_id: "Yes"})
+    fd34 = {
+        "label": "Do you have a valid work permit?",
+        "value": "Yes",
+        "required": True,
+        "kind": "radio",
+        "llm": fake_llm,
+    }
+    out34 = await observe_act(fs34, fd34)
+    tr34 = fd34.get("_trace") or []
+    chk(
+        "STANDARD radio reads DOM group -> NO visual path, NO marks VLM spend",
+        out34 == DONE
+        and not any(t.startswith("visual-choice") for t in tr34)
+        and "choice-no-group" not in tr34
+        and fs34.vlm_calls == 0,
+        (out34, fs34.vlm_calls, tr34),
     )
 
     ok = True

@@ -539,6 +539,85 @@ async def pick_control_by_marks(session: Any, label_text: str, candidates: list[
     return by_id[mark]
 
 
+# --------------------------------------------------------------------------- #
+# 7. pick_option_by_marks — VISUAL OPTION COMMIT for a CUSTOM widget whose options the
+#    DOM option-read MISSES (Lever styled-div radios; a custom single_select / geocomplete
+#    that renders its options in a portal the delta never captures). The values are KNOWN and
+#    the options are VISIBLE on screen — so we SEE them: mark the candidate option elements on
+#    the screenshot (same set-of-marks as pick_control_by_marks, numbered by backend_node_id)
+#    and ask the cheap VLM which marked element is the option that MEANS ``value`` (e.g. 'Yes',
+#    'LinkedIn', the city). Returns the chosen NODE so the caller clicks it BY COORDINATE
+#    (node center -> cdp_click_xy). GENERIC — no per-ATS string, no label/aria/data-* hook; it
+#    works on ANY custom widget because it reads what is rendered, exactly as a human does.
+# --------------------------------------------------------------------------- #
+async def pick_option_by_marks(session: Any, value: str, candidates: list[Any], *, llm: Any = None) -> Any | None:
+    """Pick the rendered OPTION element that means ``value`` by ONE set-of-marks VLM look.
+
+    ``candidates`` are the VISIBLE clickable option elements (a styled-div radio group, the open
+    custom-dropdown option cells, the geocomplete suggestion rows). Each is boxed + numbered with its
+    backend_node_id on the screenshot (``create_highlighted_screenshot``, filter_highlight_ids=False);
+    the VLM returns the number of the option whose visible text means ``value``. ONE screenshot + ONE
+    cheap VLM call, counted through ``vision_verify``'s per-page/-field budget. Returns the chosen node,
+    or None on any failure / no clear pick (caller falls back). GENERIC — pure visual option read."""
+    cands = [c for c in candidates if getattr(c, "backend_node_id", None) is not None]
+    if not cands:
+        return None
+    # Budget guard: a capped page returns no pick without a screenshot (no spend).
+    if _vv._VLM_CALLS["n"] >= _vv.VLM_MAX_CALLS:
+        return None
+    png = await _oa_llm.bounded_screenshot(session)  # bounded — a stalled screenshot can't hang the field
+    if png is None:
+        return None
+    import base64
+
+    raw_b64 = base64.b64encode(png).decode()
+
+    # Build the set-of-marks: a selector_map of ONLY the candidate OPTION elements. Each draws a
+    # numbered box labeled with its backend_node_id (filter_highlight_ids=False), so the VLM's number
+    # maps straight back to the node.
+    by_id = {int(c.backend_node_id): c for c in cands}
+    try:
+        from browser_use.browser.python_highlights import create_highlighted_screenshot
+
+        marked_b64 = await create_highlighted_screenshot(raw_b64, by_id, filter_highlight_ids=False)
+    except Exception:
+        return None
+
+    legend = ", ".join(str(i) for i in by_id)
+    prompt = (
+        f"This is a job-application web form screenshot. Candidate selectable OPTIONS are outlined by "
+        f"dashed boxes, each labeled with a NUMBER ({legend}). I want to select the option that means "
+        f'"{value}". Reply STRICT JSON {{"mark": <the NUMBER of the boxed option whose visible text '
+        f'means "{value}" — the matching choice / Yes-No answer / dropdown item / location suggestion>}}.'
+        f' If NONE of the boxed options means "{value}", reply {{"mark": -1}}.'
+    )
+    try:
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+        msg: Any = UserMessage(
+            content=[
+                ContentPartTextParam(type="text", text=prompt),
+                ContentPartImageParam(
+                    type="image_url",
+                    image_url=ImageURL(url=f"data:image/png;base64,{marked_b64}", detail="low", media_type="image/png"),
+                ),
+            ]
+        )
+    except Exception:
+        msg = prompt
+    # BOUNDED + vision-fallback-capable (see pick_control_by_marks). None -> caller falls back.
+    resp = await _oa_llm.resilient_vlm([msg], primary=_vv._vlm())
+    if resp is None:
+        return None
+    reply = (getattr(resp, "completion", None) or str(resp)).strip()
+    _vv._VLM_CALLS["n"] += 1  # count the spend so the per-field VLM budget sees it (same as visual_check)
+
+    mark = _parse_mark(reply)
+    if mark is None or mark not in by_id:
+        return None
+    return by_id[mark]
+
+
 def _parse_mark(raw: str) -> int | None:
     """Tolerant parse of the VLM's {"mark": N} (or bare integer) reply -> int, or None."""
     import json

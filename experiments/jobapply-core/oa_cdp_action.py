@@ -310,6 +310,43 @@ async def cdp_click_xy(session: Any, node_for_session: Any, x: int, y: int) -> b
     return await _guarded(_do())
 
 
+# JS run ON the node: scroll it into view, then return its LIVE viewport-space center. getBoundingClientRect
+# is ALWAYS viewport-relative (already nets out page scroll + zoom), unlike the serializer's document-space
+# absolute_position — so clicking this center lands on the element no matter how far the page is scrolled.
+_RECT_CENTER_JS = r"""
+function() {
+  try { this.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
+  var r = this.getBoundingClientRect();
+  if (!r || (r.width <= 0 && r.height <= 0)) return null;
+  return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+}
+"""
+
+
+async def cdp_click_node_center(session: Any, node: Any) -> bool:
+    """Trusted CDP mouse click at the node's LIVE viewport-space center (the visual-commit click).
+
+    Why not ``cdp_click_xy(node_center(node))``: ``node_center`` reads the serializer's DOCUMENT-space
+    rect, but ``Input.dispatchMouseEvent`` takes VIEWPORT coords — on a scrolled page (Lever's long
+    form) the two diverge by the scroll offset and the click misses (observed: a 'Yes' radio clicked at
+    document-y while the viewport-y was hundreds of px lower -> verify EMPTY -> ESCALATE). This resolves
+    the node and asks the LIVE DOM for getBoundingClientRect (already viewport-relative + scrolled into
+    view), then clicks that center. Returns False on resolve/box failure (caller falls back)."""
+
+    async def _do() -> bool:
+        r = await _resolve(session, node)
+        if r is None:
+            return False
+        cdp_session, session_id, object_id = r
+        center = await _call_on(cdp_session, session_id, object_id, _RECT_CENTER_JS)
+        if not center or "x" not in center or "y" not in center:
+            return False
+        await _dispatch_mouse_click(cdp_session, session_id, float(center["x"]), float(center["y"]))
+        return True
+
+    return await _guarded(_do())
+
+
 # --------------------------------------------------------------------------- #
 # PUBLIC: cdp_type — focus + per-char trusted keystrokes (typeahead), else cdp_set_value.
 # --------------------------------------------------------------------------- #

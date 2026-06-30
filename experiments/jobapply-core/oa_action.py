@@ -71,6 +71,7 @@ from browser_use.dom.views import EnhancedDOMTreeNode
 
 __all__ = [
     "click_node",
+    "click_node_center",
     "click_xy",
     "press_key",
     "read_options",
@@ -219,6 +220,21 @@ async def click_xy(session: BrowserSession, x: int, y: int) -> bool:
     if _use_cdp():
         return await cdp.cdp_click_xy(session, None, int(x), int(y))
     return await _click_xy_eventbus(session, x, y)
+
+
+async def click_node_center(session: BrowserSession, node: EnhancedDOMTreeNode) -> bool:
+    """Trusted click at a node's LIVE viewport-space center (the visual-commit coordinate click).
+
+    The visual path picks a styled-div option node by set-of-marks and must click it BY COORDINATE
+    (the div is not a standard radio the event-bus ClickElementEvent fills). Routing through
+    ``cdp_click_node_center`` resolves the node's getBoundingClientRect (viewport-relative, scrolled
+    into view) so the click lands correctly even on a long scrolled form — fixing the document-vs-
+    viewport coordinate mismatch that made ``click_xy(node_center)`` miss. Falls back to the event-bus
+    coordinate click only when CDP is disabled."""
+    if _use_cdp():
+        return await cdp.cdp_click_node_center(session, node)
+    # eventbus fallback: best-effort document->viewport is not available here, so use the node click.
+    return await click_node(session, node)
 
 
 async def _click_xy_eventbus(session: BrowserSession, x: int, y: int) -> bool:

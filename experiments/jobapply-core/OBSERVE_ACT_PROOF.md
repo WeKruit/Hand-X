@@ -526,3 +526,74 @@ Lever/Ashby is gated entirely on the fallback provider key, which is absent. Wit
 set, the stalled cards get a fast second answer instead of escalating; without it the bound keeps the
 run alive and clean but leaves the gemini-stalled cards unfilled. Verdict: resilient layer SHIPS;
 re-run Lever/Ashby with `OPENAI_API_KEY` to confirm 99%.**
+
+---
+
+## Visual-commit — live results
+
+Re-ran GH → Lever → Ashby CLEAN + SEQUENTIAL (`pkill -9 -f browser-use-user-data-dir` before/after
+each, ONE ATS at a time, 200s loop-guard + pkill on kill). Env: `OA_FIELD_DEADLINE=30
+OA_LLM_TIMEOUT=6 OA_NO_SANDBOX=1 GH_VERIFY_MAX_CALLS=80` + the per-event TIMEOUT_* set;
+`GOOGLE_API_KEY + OPENAI_API_KEY + OA_FALLBACK_MODEL=gpt-5.4-mini` exported from `.env`.
+**0 crash on the fill loop, 0 zombies (confirmed `pgrep` == 0 after every run), all 3 runs FINISH.**
+
+| ATS | fill-rate | DONE | SKIP | ESCALATE | secs | status |
+|-----|-----------|------|------|----------|------|--------|
+| **GH** (Anthropic) | **1.00** | 16 | 3 | **0** | 56.8 | FILLED |
+| **Lever** (Palantir) | 0.643 | 9 | 6 | 5 | 155.7 | FILLED |
+| **Ashby** (Ramp) | 0.75 | 6 | 0 | 2 | 86.5 | FILLED |
+
+**GH = 100% (clean, first run).** Screenshot `runs/cards/gh.png` visually confirmed: name/email/phone/
+location, all demographic `<select>`s, both textareas, and the résumé file are committed; **Submit
+untouched.** 3 SKIP are blank-optional free-text. 0 ESCALATE.
+
+### Two real defects found + fixed this session
+
+1. **Page-level mapping call crashed the run (regression, now fixed).** `ats_engine.map_fields`
+   sends ONE large structured prompt (every field row + profile + JD) through
+   `oa_llm.ResilientLLM.ainvoke` → `resilient_text`, which was bound by the **per-FIELD**
+   `OA_LLM_TIMEOUT=6`. That 6s starved BOTH gemini and gpt-5.4-mini on the big batch and **raised
+   `RuntimeError: primary + fallback both unavailable` before the fill loop even started** (Lever
+   rc=1). Fix: a dedicated `OA_MAP_TIMEOUT` (default 30s) threaded through
+   `resilient_text`/`_bounded_invoke`; `ResilientLLM.ainvoke` now uses it. The tight per-field bound
+   is untouched. `oa_llm.py` self-test 8/8, ruff green. **After: Lever + Ashby finish rc=0.**
+
+2. **Visual-commit clicked DOCUMENT coords into a VIEWPORT-space CDP mouse event (now fixed).**
+   `_visual_commit` computed `node_center` (the serializer's **document**-space `absolute_position`)
+   and passed it to `click_xy` → `Input.dispatchMouseEvent`, which takes **viewport** coords. On
+   Lever's long scrolled form the two differ by the scroll offset, so the click missed (radio clicked
+   at e.g. `@1208,860` document-y while the real radio was hundreds of px up → verify EMPTY →
+   recommit-cap → ESCALATE). Fix: new `oa_cdp_action.cdp_click_node_center` resolves the node and
+   reads `getBoundingClientRect()` (always viewport-relative, scrolled into view) then clicks that
+   center; exposed as `oa_action.click_node_center`; `_visual_commit` uses it (trace
+   `visual-choice+cdp_click_center`). Also: when `_read_choice_group` finds a group but the text-pick
+   produces NO usable option (Lever styled-div radios read back as bare markers), `_s_choice` now
+   tries the VISUAL fallback BEFORE the Other-guard — so a sensitive Yes/No we CAN answer is no longer
+   escalated unseen. Offline 48/48 + cdp 32/32 + oa_llm 8/8 all PASS, ruff green.
+
+### What still fails on Lever/Ashby, and why (blunt)
+
+The visual path now **fires and clicks the correct viewport center** on Lever's custom radios + the
+how-heard select (trace shows `visual-choice+cdp_click_center` on 3 radios + 1 select). **But the
+click does not toggle them** — verify reads EMPTY (VLM screenshot read-back ALSO EMPTY), recommit ×2
+EMPTY, ESCALATE. Lever's `runs/cards/lever.png` confirms Work-Authorization Yes/No and AI-Notetaker
+remain **unselected** after the clicks. Root cause: the candidate node the set-of-marks VLM picks
+(drawn from `selector_map`, geometrically scoped to the card box) is a **label/wrapper div whose
+center is the option TEXT, not the radio's clickable circle** (which sits to its left); clicking the
+text center does not flip Lever's styled input. This is NOT a coordinate-space bug anymore (that is
+fixed) — it is **candidate precision** on Lever's specific DOM, which needs a live DOM inspection of
+the real clickable input element to resolve and could not be validated offline this session, so it was
+NOT shipped as a guess.
+
+Remaining ESCALATE per ATS:
+- **Lever (5):** Current location (geocomplete — react-select options never render to the delta OR as
+  visual candidates → `visual-choice:none`); authorized-to-work, sponsorship, AI-notetaker radios
+  (visual click lands on label-text, radio not toggled); how-heard single_select (same).
+- **Ashby (2):** payroll-location geocomplete (`visual-choice:none`, same portal issue as Lever
+  location); Cover Letter file (`HARD-FIELD-TIMEOUT` — slow OPTIONAL file field, agent-repairable).
+
+**Bottom line:** infra is bulletproof (3/3 finish, 0 crash, 0 zombies); **GH ships at 100% clean**;
+two genuine defects (mapping-timeout crash, document-vs-viewport click) are fixed and offline-proven.
+The last Lever/Ashby gap is custom-widget **candidate precision** (radio-circle hotspot + portal
+geocomplete options), not a state-machine or coordinate-space defect — it needs live-DOM hotspot
+resolution to close and was deliberately not shipped unvalidated.

@@ -48,6 +48,13 @@ from typing import Any
 # --------------------------------------------------------------------------- #
 OA_LLM_TIMEOUT = float(os.environ.get("OA_LLM_TIMEOUT", "5.0"))  # per-attempt bound (text + vlm)
 OA_LLM_RETRIES = int(os.environ.get("OA_LLM_RETRIES", "1"))  # ONE retry on the PRIMARY before fallback
+# The page-level field-mapping call (ats_engine.map_fields via ResilientLLM.ainvoke) is ONE large
+# structured prompt (every field row + profile + JD in a single request), not a per-field call. It
+# legitimately needs more wall-clock than the tight per-FIELD OA_LLM_TIMEOUT (which exists to fail a
+# stalled per-field gemini fast). Binding the mapping call to 6s starved BOTH providers and crashed
+# the run before the fill loop began (observed on Lever). Give the mapping call its own, larger
+# budget so it is still bounded (never an unbounded await) but has room to answer.
+OA_MAP_TIMEOUT = float(os.environ.get("OA_MAP_TIMEOUT", "30.0"))  # page-level mapping call bound
 
 # Fallback model defaults (overridable per-kind via env). Only consulted when the matching key exists.
 _DEFAULT_OPENAI_TEXT = "gpt-4o-mini"
@@ -163,6 +170,7 @@ async def resilient_text(
     *,
     model: str | None = None,
     primary: Any = None,
+    timeout: float | None = None,
 ) -> Any:
     """Bounded structured TEXT call. PRIMARY = ``primary`` (the caller's TokenCost-wrapped gemini) or
     a gemini built from env; wrapped in ``wait_for(OA_LLM_TIMEOUT)`` + ``OA_LLM_RETRIES`` retries. On a
@@ -177,7 +185,7 @@ async def resilient_text(
 
     # --- bounded PRIMARY (gemini) + ONE retry ---
     if prim is not None:
-        res = await _bounded_invoke(prim, messages, output_format, who="gemini(primary)")
+        res = await _bounded_invoke(prim, messages, output_format, who="gemini(primary)", timeout=timeout)
         if res is not None:
             return res
 
@@ -187,16 +195,18 @@ async def resilient_text(
         # No fallback key: stay bounded. Return None -> caller escalates (Gap B), never a hang.
         _log("text: primary bounded-out, NO fallback key -> None (caller escalates)")
         return None
-    res = await _bounded_invoke(fb, messages, output_format, who=f"{name}(fallback)")
+    res = await _bounded_invoke(fb, messages, output_format, who=f"{name}(fallback)", timeout=timeout)
     if res is None:
         _log(f"text: fallback {name} also bounded-out -> None (caller escalates)")
     return res
 
 
-async def _bounded_invoke(client: Any, messages: Any, output_format: Any, *, who: str) -> Any:
+async def _bounded_invoke(client: Any, messages: Any, output_format: Any, *, who: str, timeout: float | None = None) -> Any:
     """ONE provider, ``OA_LLM_RETRIES + 1`` bounded attempts. Each attempt is
-    ``asyncio.wait_for(OA_LLM_TIMEOUT)``. Returns the completion, or None when every attempt
-    timed out / errored. NEVER raises, NEVER waits unbounded."""
+    ``asyncio.wait_for(timeout or OA_LLM_TIMEOUT)``. Returns the completion, or None when every attempt
+    timed out / errored. NEVER raises, NEVER waits unbounded. ``timeout`` lets a page-level call (the
+    big mapping request) use a larger budget than the tight per-FIELD default."""
+    bound = timeout if timeout is not None else OA_LLM_TIMEOUT
     attempts = OA_LLM_RETRIES + 1
     for i in range(attempts):
         try:
@@ -204,12 +214,12 @@ async def _bounded_invoke(client: Any, messages: Any, output_format: Any, *, who
                 coro = client.ainvoke(messages, output_format=output_format)
             else:
                 coro = client.ainvoke(messages)
-            res = await asyncio.wait_for(coro, timeout=OA_LLM_TIMEOUT)
+            res = await asyncio.wait_for(coro, timeout=bound)
             if i > 0 or "fallback" in who:
                 _log(f"answered by {who} (attempt {i + 1}/{attempts})")
             return res
         except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041 — explicit on both for older runtimes
-            _log(f"{who} timed out >{OA_LLM_TIMEOUT}s (attempt {i + 1}/{attempts})")
+            _log(f"{who} timed out >{bound}s (attempt {i + 1}/{attempts})")
         except Exception as exc:
             _log(f"{who} error {type(exc).__name__} (attempt {i + 1}/{attempts})")
     return None
@@ -266,7 +276,9 @@ class ResilientLLM:
         object.__setattr__(self, "_inner", primary)
 
     async def ainvoke(self, messages: Any, output_format: Any = None) -> Any:
-        res = await resilient_text(messages, output_format, primary=self._inner)
+        # Page-level mapping call — ONE big structured request; use the larger OA_MAP_TIMEOUT budget,
+        # not the tight per-FIELD OA_LLM_TIMEOUT, so a legitimately slow batch answer is not bounded-out.
+        res = await resilient_text(messages, output_format, primary=self._inner, timeout=OA_MAP_TIMEOUT)
         if res is None:
             # primary AND fallback both unavailable: a single page-level mapping call must not silently
             # return None (callers read res.completion) — surface a clear, catchable error.

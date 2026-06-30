@@ -484,6 +484,52 @@ def make_custom_select_card(
     return ctrl
 
 
+def make_visual_radio_card(
+    question: str,
+    options: list[str],
+    *,
+    base_bnid: int,
+    top: int = 240,
+) -> list[Any]:
+    """A LEVER-LIVE custom radio card whose OPTIONS are styled non-fillable DIVs (no input/role) — the
+    exact shape proven from runs/cards/lever.json: located:grouped -> S_CHOICE -> ``_read_choice_group``
+    finds NO options (the styled divs are not <input type=radio>, and the bound trigger has no label) ->
+    the VISUAL fallback must SEE the option divs + click by coordinate.
+
+    Card layout: heading text + a VISIBLE fillable TRIGGER input with NO accessible name (so locate
+    binds the card via the grouped-widget tier through this trigger, but ``_read_choice_group`` yields
+    an empty group because no visible FILLABLE control carries an option label), followed by N visible
+    styled option DIVs (role-less, ax name = the option text, each with an on-screen box inside the
+    card). Returns [trigger, *option_divs] — ALL must go into the selector_map so the set-of-marks can
+    mark the option divs by backend_node_id. The trigger is controls[0]; option divs follow in order."""
+    # The heading is its OWN block (a separate sibling section above the control wrapper) — mirrors the
+    # real Lever shape, so the shallow ``_climb_wrapper`` stops at the inner field-wrapper (no heading)
+    # and Tier-2 SPATIAL cannot bind it; only the grouped-widget card tier reaches the heading and binds
+    # with ``ctx.card`` SET (which scopes ``_read_choice_group`` to the card's fillable controls).
+    heading_text = _text_node(base_bnid, question, (100, top, 360, 18))
+    heading_block = _wrap(base_bnid * 10 + 3, [heading_text], (100, top, 360, 20))
+    # the bound trigger: fillable + visible but UNLABELED (binds the card, contributes no group option)
+    trigger = _control_node(
+        base_bnid + 1, tag="input", typ="text", role="combobox", box=(100, top + 26, 18, 18), visible=True, ax_name=""
+    )
+    field_kids: list[Any] = [trigger]
+    option_divs: list[Any] = []
+    for i, opt in enumerate(options):
+        did = base_bnid + 10 + i
+        oy = top + 28 + i * 30
+        # a styled NON-FILLABLE option proxy: a DIV with NO type/role but the option text as its ax
+        # name — classify_intrinsic == "" and _is_fillable_control == False, so the group read skips it,
+        # but it IS visible with a box, so the VISUAL marks tier can number + click it.
+        div = _control_node(did, tag="div", typ=None, role=None, box=(124, oy, 120, 18), visible=True, ax_name=opt)
+        field_kids.append(div)
+        option_divs.append(div)
+    # field-wrapper: trigger + option divs (>1 child, but its text is only the option labels 'Yes'/'No',
+    # NOT the heading) — so ``_group_text(trigger)`` does NOT name the field and spatial misses.
+    field_wrap = _wrap(base_bnid * 10 + 4, field_kids, (100, top + 24, 360, 24 + 30 * len(options)))
+    _wrap(base_bnid * 10 + 2, [heading_block, field_wrap], (100, top - 4, 380, 60 + 30 * len(options)))
+    return [trigger, *option_divs]
+
+
 def make_single_input_card(
     question: str,
     *,
@@ -611,9 +657,16 @@ class _FakeCdpActionSession:
         if "this.click()" in fn:  # _JS_CLICK_JS — option-cell click commit (box-less fallback)
             self._record_click()
             return True
-        if "getBoundingClientRect" in fn:  # _RECT_JS — give the node's box so the mouse path is taken
+        if "getBoundingClientRect" in fn:  # _RECT_JS / _RECT_CENTER_JS — node box / viewport center
             rect = getattr(self._node, "absolute_position", None)
             if rect is not None and rect.width and rect.height:
+                # _RECT_CENTER_JS (visual-commit node-center click) returns the CENTER {x, y}; the older
+                # _RECT_JS returns the full box. Return both keys so either caller is served, and record
+                # the center as the visual-commit click coordinate for the assertion.
+                cx, cy = rect.x + rect.width / 2.0, rect.y + rect.height / 2.0
+                if "this.scrollIntoView" in fn:  # _RECT_CENTER_JS marker
+                    self._owner.last_click_xy = (int(cx), int(cy))
+                    return {"x": cx, "y": cy}
                 return {"x": rect.x, "y": rect.y, "width": rect.width, "height": rect.height}
             return None
         # default: the read oracle (_READ_VALUE_JS) -> the scripted live DOM value.
@@ -623,6 +676,10 @@ class _FakeCdpActionSession:
     def _on_mouse(self, params: dict) -> None:
         # cdp_click sends move/press/release; record a click on press (one logical click).
         if params.get("type") == "mousePressed":
+            # cdp_click_xy (coordinate-only click, root session, _node=None) records the (x,y) so the
+            # VISUAL-COMMIT fallback test can assert the engine clicked the option BY COORDINATE.
+            if self._node is None and ("x" in params and "y" in params):
+                self._owner.last_click_xy = (int(params["x"]), int(params["y"]))
             self._record_click()
 
     def _on_key(self, params: dict) -> None:
@@ -677,6 +734,7 @@ class FakeSession:
 
         # records for assertions
         self.last_click_text: str | None = None
+        self.last_click_xy: tuple[int, int] | None = None  # coordinate of a cdp_click_xy visual commit
         self.last_select_text: str | None = None
         self.last_type_text: str | None = None
         self.last_upload: str | None = None
