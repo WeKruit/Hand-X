@@ -287,7 +287,11 @@ async def run_single_page_oa(
     # SIGKILL of python (or any raise below) can no longer leave an orphaned browser.
     try:
         await session.start()
-        await session.navigate_to(url)
+        # A never-idle SPA /apply page can make NavigateToUrlEvent exceed its timeout even though the
+        # DOM is already rendered enough to fill. Don't let that KILL the run — suppress the nav timeout
+        # and proceed; we serialize the DOM directly (oa_perception.get_state) regardless of nav state.
+        with contextlib.suppress(Exception):
+            await session.navigate_to(url)
         await asyncio.sleep(2.5)
         page = await session.must_get_current_page()
         page = await adapter.open_form(session, page)
