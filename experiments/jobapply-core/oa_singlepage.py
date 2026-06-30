@@ -313,8 +313,11 @@ async def run_single_page_oa(
         )
     finally:
         # 1) ALWAYS ask browser-use to stop the browser (guarded — kill() must not mask the result).
+        #    BOUNDED: after a forced browser reset (a single_select typeahead can desync CDP ->
+        #    on_BrowserStopEvent), ``session.kill()`` itself can hang awaiting a dead target. Cap it so
+        #    teardown can never wedge the process — the hard browser-dir kill below is the real cleanup.
         with contextlib.suppress(Exception):
-            await session.kill()
+            await asyncio.wait_for(session.kill(), timeout=8.0)
         # 2) belt-and-braces: hard-kill anything STILL holding this run's user-data-dir (covers a
         #    kill() that raised or hung, and the SIGKILL-of-python case where kill() never ran).
         _kill_browser_for_dir(user_data_dir)
@@ -362,8 +365,23 @@ async def _fill_form(
             continue
         value, src = eng._resolve(f, mapped, resume)
         fd = _field_dict(f, value, resume=resume, llm=llm)
+        if os.environ.get("OA_FIELD_TRACE"):
+            print(
+                f"[FIELD-START] name={f.name[:28]} src={f.source} type={f.type} "
+                f"val={str(value)[:30]!r}",
+                flush=True,
+            )
         try:
-            outcome = await oa.observe_act(session, fd)
+            # HARD per-field wall-clock ceiling. ``observe_act``'s own ``FIELD_DEADLINE`` guard only
+            # fires BETWEEN states; a single blocking CDP await (a wedged UploadFile/dropdown event on
+            # a never-idle SPA) is not interrupted by it and would otherwise hang the WHOLE form. Wrap
+            # each field in ``asyncio.wait_for`` at FIELD_DEADLINE + a small margin so a wedged field
+            # is forcibly ESCALATED and the rest of the form keeps filling — the documented per-field
+            # ESCALATE production policy, not a process kill.
+            outcome = await asyncio.wait_for(oa.observe_act(session, fd), timeout=oa.FIELD_DEADLINE + 6.0)
+        except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041 — explicit for clarity
+            outcome = oa.ESCALATE
+            fd.setdefault("_trace", []).append("HARD-FIELD-TIMEOUT->ESCALATE")
         except Exception as exc:  # a single hard field must not abort the page (fill-only proof)
             outcome = oa.ESCALATE
             fd["_trace"] = [f"EXC:{type(exc).__name__}:{exc}"]

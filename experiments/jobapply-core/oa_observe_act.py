@@ -260,7 +260,9 @@ async def _settle(session: Any, before: perc.OAState, settle_s: float) -> list[p
     reads = 0
     while True:
         await asyncio.sleep(_POLL_S)
-        after = await perc.get_state(session)
+        # forward ``before`` as the serializer's previous_cached_state so its own is_new delta signal
+        # is preserved across the click/type that opened the menu (and the read stays bounded/fast).
+        after = await perc.get_state(session, previous=before)
         reads += 1
         last = perc.delta(before, after)
         ids = tuple(d.backend_node_id for d in last)
@@ -489,7 +491,10 @@ async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None
         if intrinsic == "INTRINSIC_FILE":
             return await _s_file(session, ctx)
         if intrinsic in ("INTRINSIC_RADIO", "INTRINSIC_CHECKBOX"):
-            return await _s_choice(session, ctx)
+            # SNAPSHOT REUSE: the radio/checkbox options are STATIC siblings already present in the
+            # locate snapshot (no click reveals them) — pass it through so _s_choice reads the group
+            # from the SAME serialize, never a second full-page get_state per choice field.
+            return await _s_choice(session, ctx, state)
         if intrinsic == "INTRINSIC_SELECT":
             return await _s_native(session, ctx)
         if intrinsic == "INTRINSIC_DATE":
@@ -582,13 +587,16 @@ async def _s_file(session: Any, ctx: Ctx) -> Outcome:
 
 
 # ---- S_CHOICE (radio / checkbox; options already on screen) ----
-async def _s_choice(session: Any, ctx: Ctx) -> Outcome:
+async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S_CHOICE")
-    # The group's options are siblings already rendered. Read them from the live state and
-    # let the cheap picker choose; commit by TRUSTED click on the resolved control.
-    state = await perc.get_state(session)
+    # The group's options are siblings already rendered. SNAPSHOT REUSE: prefer the locate snapshot
+    # handed down from classify (the static radio/checkbox group is already in it) — only serialize
+    # afresh if the caller had none (e.g. a re-entry). This removes a full-page get_state per choice
+    # field, a primary cost on a heavy SPA.
+    if state is None:
+        state = await perc.get_state(session)
     group = _read_choice_group(state, ctx)
     if not group:
         # single standalone checkbox (consent / yes-no) — toggle on an affirmative value.

@@ -25,7 +25,9 @@ NOTE: this is perception only. No clicks, no typing, no commits live here.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import os
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -52,7 +54,11 @@ class OAState:
     selector_map: dict[int, Any]  # dict[int, EnhancedDOMTreeNode]
     url: str = ""
     title: str = ""
-    raw: Any = field(default=None, repr=False)  # the BrowserStateSummary, for callers
+    raw: Any = field(default=None, repr=False)  # the BrowserStateSummary OR SerializedDOMState, for callers
+    # The browser-use ``SerializedDOMState`` this snapshot came from, carried so the NEXT direct
+    # serialize can pass it as ``previous_cached_state`` (the serializer's own delta/is_new signal,
+    # serializer.py:712-723). None on the get_browser_state_summary fallback path (the fakes).
+    dom_state: Any = field(default=None, repr=False)
 
 
 @dataclass
@@ -200,9 +206,18 @@ _FILLABLE_ROLES = {
 
 
 def _is_fillable_control(node: Any) -> bool:
+    attrs = getattr(node, "attributes", None) or {}
+    # A file input is NEVER a generic locate candidate. It is reached ONLY via the dedicated
+    # file path (_s_file_global, source=="file"); letting it into the generic candidate set lets a
+    # non-file field (a location typeahead, a language checkbox) bind to a nearby hidden zero-box
+    # input[type=file] and get classified INTRINSIC_FILE -> the value is "uploaded" as a string via
+    # setFileInputFiles, which corrupts the SPA's state (observed on Lever element 73 / Ashby
+    # element 27 -> browser reset -> wedge). Excluding it here costs nothing: real file fields do
+    # not use this ranker at all.
+    if _tag(node) == "input" and (attrs.get("type") or "").lower() == "file":
+        return False
     if _tag(node) in _FILLABLE_TAGS:
         return True
-    attrs = getattr(node, "attributes", None) or {}
     if attrs.get("contenteditable") in ("", "true"):
         return True
     role = (attrs.get("role") or "").lower()
@@ -217,23 +232,178 @@ def _is_fillable_control(node: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def get_state(session: Any, *, include_screenshot: bool = False) -> OAState:
-    """Snapshot the current page via browser-use's DomService.
+# BUILD FIX (the LAST blocker): the READ path must NOT go through the readiness/serialize-heavy
+# event-bus watchdog. ``get_browser_state_summary`` dispatches ``BrowserStateRequestEvent``, whose
+# handler (DOMWatchdog.on_BrowserStateRequestEvent) does a stability sleep + tabs + screenshot +
+# page_info + popup scan AND shares the bubus EventBus per-handler timeout with the other watchdogs
+# (DownloadsWatchdog etc.). On a never-idle Lever/Ashby /apply SPA a TRANSIENT renderer/CDP stall on
+# ANY of those sub-steps trips the 30s bus ceiling and ESCALATES every field after the first
+# (runs/oa_live/lever2.log). The WRITE path was already fixed by going DIRECT-CDP (oa_cdp_action);
+# this is the READ equivalent: call ``DomService.get_serialized_dom_tree`` DIRECTLY — no event bus,
+# no screenshot, no network-idle wait, no tabs — wrapped in a HARD ``asyncio.wait_for`` so a single
+# wedged CDP round-trip fails FAST and we reuse the last-good snapshot instead of hanging 30s.
+DOM_SNAPSHOT_TIMEOUT = float(os.environ.get("OA_DOM_SNAPSHOT_TIMEOUT", "5.0"))
 
-    Reuses `BrowserSession.get_browser_state_summary` (browser/session.py:1535),
-    which dispatches the BrowserStateRequestEvent -> DomService.get_serialized_dom_tree
-    -> the serializer that builds `selector_map[backend_node_id] -> EnhancedDOMTreeNode`.
-    `cached=False` forces a fresh read (we need the live post-click DOM for deltas).
+# Per-session last-good snapshot, so a transient serialize stall reuses the previous DOM rather than
+# returning an empty map (which would lose every located field). Keyed by id(session) (the live
+# BrowserSession is a stable object for the run); cleared implicitly when the session is GC'd.
+_LAST_GOOD: dict[int, OAState] = {}
+# Session ids that have produced >=1 direct serialize — i.e. REAL BrowserSessions. Used so the read-fail
+# fallback never re-dispatches the 30s-hanging event-bus summary on a real session (even post-reset when
+# agent_focus_target_id is cleared), while offline fakes (never direct-capable) still use the event bus.
+_DIRECT_CAPABLE: set[int] = set()
+
+
+async def _serialize_direct(session: Any, previous: OAState | None) -> OAState | None:
+    """Serialize the page via ``DomService.get_serialized_dom_tree`` DIRECTLY, bypassing the event bus.
+
+    Returns an OAState, or None when this session has no direct DomService path (the offline fakes,
+    which only implement ``get_browser_state_summary`` — they take the fallback). Wrapped by the
+    caller in ``asyncio.wait_for`` so it can never hang the field loop.
+
+    REAL browser-use API used (verified, file:line):
+      * ``session._dom_watchdog`` -> ``DOMWatchdog`` (browser/session.py:1706); its cached
+        ``_dom_service`` (watchdog dom_watchdog.py:43/542) keeps the per-target CDP session warm.
+      * ``DomService(browser_session=…, …)`` (dom/service.py:46) when no watchdog service exists yet.
+      * ``DomService.get_serialized_dom_tree(previous_cached_state=…) -> (SerializedDOMState,
+        EnhancedDOMTreeNode, timing_info)`` (dom/service.py:1004). The serializer computes ``is_new``
+        by diffing against ``previous_cached_state`` (serializer.py:712-723) — the SAME delta signal
+        we already reuse — so passing the last snapshot's ``dom_state`` preserves it for free.
+      * ``session.update_cached_selector_map(selector_map)`` (session.py:2368) keeps the rest of
+        browser-use consistent (the write watchdog reads the cached map for occluded-node clicks).
+      * url/title via ``get_current_page_url`` / ``get_current_page_title`` (session.py:2320/2327) —
+        these read ``session_manager.get_target(...)`` SYNCHRONOUSLY (no event bus, no network).
     """
-    summary = await session.get_browser_state_summary(include_screenshot=include_screenshot, cached=False)
+    watchdog = getattr(session, "_dom_watchdog", None)
+    # Need a live target to serialize; the direct DomService asserts agent_focus_target_id is set.
+    if getattr(session, "agent_focus_target_id", None) is None:
+        return None
+
+    dom_service = getattr(watchdog, "_dom_service", None) if watchdog is not None else None
+    if dom_service is None:
+        # No watchdog service yet (first read) — construct one bound to this session, mirroring the
+        # watchdog's own construction (dom_watchdog.py:542-550) so paint-order/iframe knobs match.
+        try:
+            from browser_use.dom.service import DomService
+        except Exception:
+            return None
+        profile = getattr(session, "browser_profile", None)
+        dom_service = DomService(
+            browser_session=session,
+            cross_origin_iframes=getattr(profile, "cross_origin_iframes", False),
+            paint_order_filtering=getattr(profile, "paint_order_filtering", True),
+            max_iframes=getattr(profile, "max_iframes", 100),
+            max_iframe_depth=getattr(profile, "max_iframe_depth", 5),
+        )
+        if watchdog is not None:
+            # cache it on the watchdog so subsequent reads reuse the warm service (and the watchdog's
+            # own state stays coherent if a full get_browser_state_summary is ever taken later).
+            with contextlib.suppress(Exception):
+                watchdog._dom_service = dom_service
+
+    prev_dom_state = previous.dom_state if previous is not None else None
+    serialized, _enhanced, _timing = await dom_service.get_serialized_dom_tree(previous_cached_state=prev_dom_state)
+    selector_map = dict(serialized.selector_map) if serialized else {}
+
+    # keep browser-use's cached selector map current (occluded-click fallback reads it).
+    with contextlib.suppress(Exception):
+        session.update_cached_selector_map(serialized.selector_map if serialized else {})
+
+    url = ""
+    title = ""
+    with contextlib.suppress(Exception):
+        url = await session.get_current_page_url() or ""
+    with contextlib.suppress(Exception):
+        title = await session.get_current_page_title() or ""
+
+    return OAState(selector_map=selector_map, url=url, title=title, raw=serialized, dom_state=serialized)
+
+
+async def get_state(session: Any, *, include_screenshot: bool = False, previous: OAState | None = None) -> OAState:
+    """Snapshot the current page — FAST + BOUNDED, never the 30s event-bus hang.
+
+    Primary path: ``DomService.get_serialized_dom_tree`` DIRECT (no event bus, no screenshot, no
+    network-idle wait), under a hard ``DOM_SNAPSHOT_TIMEOUT``. On timeout/error we reuse the last-good
+    snapshot for this session (so a transient stall never wipes the located fields). The OAState /
+    selector_map / delta contract is IDENTICAL to before — ``delta(before, after)`` still diffs the
+    same ``selector_map`` keys.
+
+    Fallback path (offline fakes / a session with no direct DomService): the original
+    ``get_browser_state_summary`` read. ``include_screenshot`` is accepted for signature compatibility
+    but the direct path never captures one (the marks tier takes its own screenshot when needed).
+
+    ``previous`` (the last OAState) is forwarded to the serializer as ``previous_cached_state`` so its
+    own ``is_new`` delta signal is preserved across reads — passing it is free and keeps the diff
+    robust to React re-render churn.
+    """
+    # DIAGNOSTIC-ONLY get_state timing (default OFF): when OA_GETSTATE_LOG is set, append one line per
+    # call recording elapsed seconds + outcome. Pure instrumentation — zero effect on fill behavior.
+    _gs_log = os.environ.get("OA_GETSTATE_LOG")
+    _gs_t0 = __import__("time").monotonic() if _gs_log else 0.0
+
+    prev = previous if previous is not None else _LAST_GOOD.get(id(session))
+
+    direct = None
+    timed_out = False
+    try:
+        # asyncio.TimeoutError (== builtin TimeoutError) on a wedged serialize, plus any CDP/socket
+        # error, all degrade to the last-good-snapshot reuse below — never a 30s hang.
+        direct = await asyncio.wait_for(_serialize_direct(session, prev), timeout=DOM_SNAPSHOT_TIMEOUT)
+    except TimeoutError:
+        timed_out = True
+    except Exception:
+        direct = None
+    if direct is not None:
+        _LAST_GOOD[id(session)] = direct
+        _DIRECT_CAPABLE.add(id(session))  # mark this as a REAL session (gates the read-fail fallback)
+        _gs_record(_gs_log, _gs_t0, "direct", len(direct.selector_map))
+        return direct
+
+    # Direct serialize failed. Reuse the last-good snapshot for any session that has EVER produced one
+    # via the direct path (a real BrowserSession — marked in _DIRECT_CAPABLE on first success). This
+    # covers defect B: after a browser RESET ``agent_focus_target_id`` is cleared so the live ``has_direct``
+    # check goes False, but the session is still a real one whose event-bus summary HANGS 30s — so we must
+    # NOT fall through to it. Offline fakes never direct-succeed, so they are not in the set and correctly
+    # use the event-bus read below (which returns their live map).
+    if id(session) in _DIRECT_CAPABLE:
+        last = _LAST_GOOD.get(id(session))
+        if last is not None:
+            _gs_record(_gs_log, _gs_t0, "timeout-reuse" if timed_out else "reuse", len(last.selector_map))
+            return last
+        _gs_record(_gs_log, _gs_t0, "empty", 0)  # real session, first read failed, no history -> bounded empty (never the 30s bus)
+        return OAState(selector_map={})
+
+    # Offline fakes only (never direct-capable) — original event-bus read. If even that fails and we
+    # later HAVE a last-good snapshot, reuse it rather than hang/empty.
+    try:
+        summary = await session.get_browser_state_summary(include_screenshot=include_screenshot, cached=False)
+    except Exception:
+        last = _LAST_GOOD.get(id(session))
+        if last is not None:
+            return last
+        raise
     dom_state = summary.dom_state
     selector_map = dict(dom_state.selector_map) if dom_state else {}
-    return OAState(
+    state = OAState(
         selector_map=selector_map,
         url=getattr(summary, "url", "") or "",
         title=getattr(summary, "title", "") or "",
         raw=summary,
+        dom_state=dom_state,
     )
+    _LAST_GOOD[id(session)] = state
+    _gs_record(_gs_log, _gs_t0, "summary", len(selector_map))
+    return state
+
+
+def _gs_record(log_path: str | None, t0: float, kind: str, n: int) -> None:
+    """DIAGNOSTIC-ONLY: append one get_state-timing line. No-op unless OA_GETSTATE_LOG is set."""
+    if not log_path:
+        return
+    import time as _t
+
+    with contextlib.suppress(Exception), open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(f"{_t.monotonic() - t0:.3f}\t{kind}\t{n}\n")
 
 
 def locate_field_ranked(state: OAState, label_text: str) -> list[tuple[Any, float]]:
@@ -859,7 +1029,150 @@ def _selftest() -> None:
     plain = _make_node(950, tag="input", role="textbox", ax_name="", box=(100, 100, 200, 30))
     assert _marks_candidates(OAState(selector_map={950: plain})) == [], "plain text input excluded from marks"
 
-    print("oa_perception self-test OK: locate_field + delta + option-text + coords + grouped-widget + marks")
+    # ---- THE LAST-BLOCKER FIX: BOUNDED + DIRECT get_state (no event-bus hang) + snapshot reuse. ----
+    _selftest_get_state()
+
+    print(
+        "oa_perception self-test OK: locate_field + delta + option-text + coords + grouped-widget + "
+        "marks + bounded-direct-get_state"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# get_state self-test — proves the READ path: (a) DIRECT DomService serialize bypasses the
+# event-bus entirely, (b) a hung serialize is bounded by DOM_SNAPSHOT_TIMEOUT and falls back to the
+# last-good snapshot (NEVER the 30s hang), (c) ``previous`` flows to the serializer as
+# previous_cached_state (snapshot-reuse delta), (d) a session with no direct path degrades to
+# get_browser_state_summary. No browser, no network, $0.
+# --------------------------------------------------------------------------- #
+def _selftest_get_state() -> None:
+    import asyncio as _aio
+    import time as _time
+
+    class _FakeSerialized:
+        def __init__(self, selector_map: dict[int, Any]) -> None:
+            self.selector_map = selector_map
+
+    class _FakeDomService:
+        """Records the previous_cached_state it is handed (snapshot-reuse proof) and returns a
+        scripted serialized DOM state directly — the DIRECT path, no event bus."""
+
+        def __init__(self, selector_map: dict[int, Any]) -> None:
+            self._sm = selector_map
+            self.prev_seen: list[Any] = []
+            self.calls = 0
+
+        async def get_serialized_dom_tree(self, previous_cached_state: Any = None):
+            self.calls += 1
+            self.prev_seen.append(previous_cached_state)
+            return _FakeSerialized(dict(self._sm)), None, {}
+
+    class _FakeWatchdog:
+        def __init__(self, dom_service: Any) -> None:
+            self._dom_service = dom_service
+
+    class _DirectSession:
+        """A session exposing the DIRECT serialize path: _dom_watchdog._dom_service + a set
+        agent_focus_target_id + the synchronous url/title reads + update_cached_selector_map."""
+
+        def __init__(self, dom_service: Any) -> None:
+            self._dom_watchdog = _FakeWatchdog(dom_service)
+            self.agent_focus_target_id = "tgt-1"
+            self.cached_map: Any = None
+            self.summary_calls = 0
+
+        def update_cached_selector_map(self, sm: Any) -> None:
+            self.cached_map = sm
+
+        async def get_current_page_url(self) -> str:
+            return "https://x/apply"
+
+        async def get_current_page_title(self) -> str:
+            return "Apply"
+
+        async def get_browser_state_summary(self, *, include_screenshot: bool = False, cached: bool = False) -> Any:
+            self.summary_calls += 1
+            raise AssertionError("DIRECT path must NOT fall through to get_browser_state_summary")
+
+    async def _run() -> None:
+        _LAST_GOOD.clear()
+        node = _make_node(1, tag="input", role="textbox", ax_name="First Name", box=(0, 0, 10, 10))
+        svc = _FakeDomService({1: node})
+        sess = _DirectSession(svc)
+
+        # (a) DIRECT serialize — no event bus, selector_map carried through, cached map updated.
+        s1 = await get_state(sess)
+        assert s1.selector_map == {1: node}, "direct serialize selector_map"
+        assert sess.summary_calls == 0, "must NOT use the event-bus summary path"
+        assert sess.cached_map is not None, "update_cached_selector_map called"
+        assert svc.prev_seen[0] is None, "first read has no previous_cached_state"
+
+        # (c) snapshot-reuse: passing ``previous`` flows to the serializer as previous_cached_state.
+        s2 = await get_state(sess, previous=s1)
+        assert svc.prev_seen[1] is s1.dom_state, "previous flows as previous_cached_state"
+        # and with NO explicit previous, the per-session last-good is used as previous (free reuse).
+        await get_state(sess)
+        assert svc.prev_seen[2] is s2.dom_state, "last-good auto-used as previous_cached_state"
+
+    _aio.run(_run())
+
+    # (b) BOUNDED: a serialize that hangs past DOM_SNAPSHOT_TIMEOUT returns the LAST-GOOD snapshot
+    #     fast, never the 30s event-bus hang. We shrink the timeout for the test.
+    async def _run_hang() -> None:
+        global DOM_SNAPSHOT_TIMEOUT
+        node = _make_node(2, tag="input", ax_name="Last Name", box=(0, 0, 10, 10))
+
+        class _HangService:
+            async def get_serialized_dom_tree(self, previous_cached_state: Any = None):
+                await asyncio.sleep(999)  # never settles — the SPA stall
+
+        class _HangSession(_DirectSession):
+            async def get_browser_state_summary(self, *, include_screenshot: bool = False, cached: bool = False) -> Any:
+                # the fallback should NOT be reached either — a last-good snapshot exists.
+                self.summary_calls += 1
+                return type("S", (), {"dom_state": type("D", (), {"selector_map": {2: node}})()})()
+
+        _LAST_GOOD.clear()
+        good_svc = _FakeDomService({2: node})
+        hs = _HangSession(good_svc)
+        good = await get_state(hs)  # primes last-good
+        # swap in the hanging service; next read must time out -> reuse last-good.
+        hs._dom_watchdog._dom_service = _HangService()
+        saved = DOM_SNAPSHOT_TIMEOUT
+        DOM_SNAPSHOT_TIMEOUT = 0.15
+        try:
+            t0 = _time.monotonic()
+            reused = await get_state(hs)
+            elapsed = _time.monotonic() - t0
+        finally:
+            DOM_SNAPSHOT_TIMEOUT = saved
+        assert elapsed < 1.0, f"bounded read must return fast, not 30s: {elapsed:.2f}s"
+        assert reused is good, "hung serialize reuses the last-good snapshot"
+
+    _aio.run(_run_hang())
+
+    # (d) NO direct path (no agent_focus_target_id) -> degrade to get_browser_state_summary (the fakes).
+    async def _run_fallback() -> None:
+        node = _make_node(3, tag="input", ax_name="Email", box=(0, 0, 10, 10))
+
+        class _SummaryOnlySession:
+            agent_focus_target_id = None  # no live target -> no direct serialize
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def get_browser_state_summary(self, *, include_screenshot: bool = False, cached: bool = False) -> Any:
+                self.calls += 1
+                return type(
+                    "S", (), {"dom_state": type("D", (), {"selector_map": {3: node}})(), "url": "u", "title": "t"}
+                )()
+
+        _LAST_GOOD.clear()
+        ss = _SummaryOnlySession()
+        st = await get_state(ss)
+        assert ss.calls == 1 and st.selector_map == {3: node}, "no-direct-path degrades to summary"
+
+    _aio.run(_run_fallback())
 
 
 if __name__ == "__main__":
