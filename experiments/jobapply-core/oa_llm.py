@@ -252,6 +252,31 @@ def _build_primary_vlm() -> Any | None:
     return ChatGoogle(model=os.environ.get("GH_VERIFY_MODEL", "gemini-3.1-flash-lite"), api_key=key)
 
 
+class ResilientLLM:
+    """Wrap a primary (gemini) client so EVERY ``.ainvoke`` is bounded + falls over to the configured
+    fallback provider — for call sites that invoke ``llm.ainvoke`` DIRECTLY (e.g. ``ats_engine.map_fields``,
+    the one structured label->value mapping call) without per-site changes. A gemini 503/"high demand" or
+    a stall on such a raw call would otherwise propagate and KILL the whole run (observed on Lever/Ashby);
+    routed through here it fails over to gpt-5.4-mini instead. Other attribute access proxies to the inner
+    client so TokenCost / model-name introspection still work. Pass this ONLY to the raw-ainvoke sites; the
+    oa_brain/vision_verify sites already call resilient_text/resilient_vlm and must keep the PLAIN client
+    (double-wrapping would nest the timeouts)."""
+
+    def __init__(self, primary: Any) -> None:
+        object.__setattr__(self, "_inner", primary)
+
+    async def ainvoke(self, messages: Any, output_format: Any = None) -> Any:
+        res = await resilient_text(messages, output_format, primary=self._inner)
+        if res is None:
+            # primary AND fallback both unavailable: a single page-level mapping call must not silently
+            # return None (callers read res.completion) — surface a clear, catchable error.
+            raise RuntimeError("oa_llm.ResilientLLM: primary + fallback both unavailable")
+        return res
+
+    def __getattr__(self, name: str) -> Any:  # proxy everything else to the wrapped client
+        return getattr(object.__getattribute__(self, "_inner"), name)
+
+
 # --------------------------------------------------------------------------- #
 # OFFLINE self-test — fake 'gemini' (stalls) + fake 'openai' (answers), $0, no network.
 # Asserts: (1) a stalled primary fails fast and the fallback answers; (2) with NO fallback key the

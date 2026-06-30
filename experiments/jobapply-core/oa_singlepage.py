@@ -239,7 +239,12 @@ async def run_single_page_oa(
 
     # step 2 — the ONE structured mapping call (label -> value), reused verbatim.
     map_rows = [f for f in fields if f.needs_map]
-    mapped = await eng.map_fields(llm, map_rows, profile, title) if map_rows else {}
+    # map_fields is a RAW llm.ainvoke (gemini); wrap it in the resilient layer so a gemini 503/"high
+    # demand" or stall fails over to the configured fallback (gpt-5.4-mini) instead of killing the run.
+    # observe_act keeps the PLAIN llm — oa_brain already routes its calls through resilient_text.
+    import oa_llm
+
+    mapped = await eng.map_fields(oa_llm.ResilientLLM(llm), map_rows, profile, title) if map_rows else {}
 
     # navigate + reach the form (iframe drill / "Enter manually"), reused verbatim.
     # HARDENED browser launch (env-tunable): a small viewport + stability flags + no extension
