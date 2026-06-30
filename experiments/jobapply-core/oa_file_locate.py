@@ -31,6 +31,7 @@ trap is exactly why these are studied):
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import oa_perception as perc
@@ -157,7 +158,8 @@ async def is_already_uploaded(session: Any, node: Any) -> bool:
     backend_node_id = getattr(node, "backend_node_id", None)
     if backend_node_id is None:
         return False
-    try:
+
+    async def _probe() -> bool:
         cdp_session = await session.cdp_client_for_node(node)
         session_id = cdp_session.session_id
         resolved = await cdp_session.cdp_client.send.DOM.resolveNode(
@@ -176,10 +178,16 @@ async def is_already_uploaded(session: Any, node: Any) -> bool:
             },
             session_id=session_id,
         )
+        val = ((result or {}).get("result") or {}).get("value")
+        return bool(val and str(val).strip())
+
+    # BOUNDED: on a busy SPA (Ashby after the resume upload) these CDP reads can hang and eat the whole
+    # FIELD_DEADLINE -> the cover-letter field HARD-FIELD-TIMEOUTs. Cap them; on timeout assume not-uploaded
+    # (the caller then uploads — a slow read must never silently skip, and a re-upload is idempotent).
+    try:
+        return await asyncio.wait_for(_probe(), timeout=4.0)
     except Exception:
         return False
-    val = ((result or {}).get("result") or {}).get("value")
-    return bool(val and str(val).strip())
 
 
 # --------------------------------------------------------------------------- #
