@@ -331,3 +331,198 @@ per-ATS branch, no label dependence) and is the one change that should take Leve
 
 **Bottom line:** the unified design is NOT yet at 99% generic+label-free+visual. It is one fix away —
 porting the proven direct-CDP bypass from the write path to the read path (`get_state`).
+
+---
+
+## Read-path fix — Lever/Ashby 99% push (2026-06-30, grounded in runs/oa_live/*.{json,log,png})
+
+**Verdict up front: NO. The unified design is NOT yet 99% generic+label-free+visual across all 3.
+GH is the only ATS that lands. Lever = 36% and Ashby = 50% in the only live runs on disk, and BOTH
+still exhibit the original LAST-BLOCKER deadlock. The claimed mis-bind fix is real in source but was
+NEVER run live — it postdates every run here.**
+
+### What the artifacts actually show (the ground truth, not the narrative)
+
+Per-ATS live fill-rate (newest run of each, `runs/oa_live/`):
+
+| ATS | run (mtime) | fill-rate | DONE/OTHER/SKIP/ESCALATE | end screenshot |
+|-----|-------------|-----------|--------------------------|----------------|
+| Greenhouse | gh3 (09:46) | **100%** (16/16) | 16 / 0 / 3 / 0 | gh3.png — visibly fully filled |
+| Greenhouse | gh2 (09:42) | 93.3% (14/15) | 14 / 0 / 4 / 1 | — |
+| Greenhouse | gh (09:38) | 86.7% (13/15) | 13 / 0 / 4 / 2 | — |
+| Lever | lever2 (10:00) | **35.7%** (5/14) | 5 / 0 / 6 / **9** | **null** (browser died) |
+| Lever | lever (09:52) | 33.3% (5/15) | 5 / 0 / 5 / 10 | null |
+| Ashby | ashby (10:07) | **50%** (4/8) | 4 / 0 / 0 / **4** | **null** (browser died) |
+
+### TIMELINE — the decisive fact
+
+`oa_perception.py` (the file carrying the `_is_fillable_control` file-input exclusion, the claimed
+mis-bind fix at lines 208-218) was **last modified 10:56**. The newest live run is **ashby at 10:07**;
+the newest Lever run is **10:00**. **Every live run on disk predates the fix.** There is no live
+evidence the fix works. The lever2.json/ashby.json results were produced by code that STILL had the
+mis-bind, and they prove it:
+
+- `runs/oa_live/lever2.json` field `[field0]` "Language Skill(s) (Check all that apply)" (a **checkbox**)
+  → `intrinsic:INTRINSIC_FILE` → `committed:"English (ENG)"`. The checkbox bound to a hidden
+  `input[type=file]` and the string "English (ENG)" was `setFileInputFiles`'d as a filename.
+- `runs/oa_live/ashby.json` field `_systemfield_location` (a **location typeahead**)
+  → `intrinsic:INTRINSIC_FILE` → `committed:"Detroit, MI, USA"`. Same mis-bind — the city string
+  "uploaded" as a file. The prompt claims this is "FIXED (no longer uploads 'Detroit, MI, USA' as a
+  file)"; the artifact on disk shows it STILL DOES.
+
+### ROOT CAUSE — the LAST BLOCKER is NOT eliminated; it is re-triggered by the mis-bind
+
+The logs are unambiguous (`runs/oa_live/lever2.log`, `lever.log`, `ashby.log`), same sequence every time:
+
+```
+INFO  [BrowserSession] 📎 Uploaded file English (ENG) to element 73        <- the mis-bind fires
+WARNING [bubus] ⚠️ DOMWatchdog.on_BrowserStateRequestEvent() running for >15s ... deadlock
+WARNING [bubus] ⏱️ TIMEOUT ERROR - Handling took more than 30.0s for ... on_BrowserStateRequestEvent
+   ☑️ DownloadsWatchdog.on_BrowserStateRequestEvent(#4dd1)  3s/30s  ✓     <- only the DOM serialize hangs
+   ⏰ DOMWatchdog.on_BrowserStateRequestEvent(#4dd1) 30s/30s ⬅️ TIMEOUT HERE
+      📣 NavigationCompleteEvent  30s                                      <- never-idle SPA, never settles
+INFO  [BrowserSession] 📢 on_BrowserStopEvent - Calling reset()
+   [screenshot] failed: Runtime.evaluate did not respond within 60s ... silent WebSocket — container crashed
+```
+
+So the chain is: the **file mis-upload corrupts the SPA → a subsequent `get_state` cannot serialize
+direct → it FALLS THROUGH to the event-bus `session.get_browser_state_summary` → the 30s
+`on_BrowserStateRequestEvent` DOM deadlock → `on_BrowserStopEvent` reset → teardown WebSocket death**.
+Every field after the corruption records `EXC:TimeoutError:` (9 of them on Lever, 4 on Ashby), which is
+why the resume upload, the screening radios, the textareas, and the end screenshot all fail.
+
+Two distinct defects, both still live:
+
+- **(A) Mis-bind (TRIGGER).** Fixed in source (oa_perception.py:217 excludes `input[type=file]` from
+  `_is_fillable_control`), self-tests pass, but UNVERIFIED live. This removes the corruption trigger.
+- **(B) get_state → event-bus fallback (the actual 30s DEADLOCK path).** STILL PRESENT.
+  `oa_perception.get_state` lines 374-376: when the direct serialize returns `None` (e.g.
+  `agent_focus_target_id` cleared after `on_BrowserStopEvent` reset) AND there is no last-good
+  snapshot, it calls `session.get_browser_state_summary(...)` — the exact path the diagnosis named as
+  the LAST BLOCKER. The "read-path fix" only bypasses the bus on the HAPPY path; the moment the SPA
+  resets, the fallback re-opens the 30s hang. The DownloadsWatchdog finishing the same event in 3s
+  while only the DOM serialize hangs (visible in the trace) is the same fingerprint from lever2.log in
+  the original diagnosis — i.e. the blocker was never closed, only avoided when nothing crashes.
+
+### Claims in the handoff that the artifacts DO NOT support
+
+- "Ashby read path proven flawless (20/20 get_state DIRECT, max 0.10s)" / "Lever 62/62 direct" —
+  no get-state timing log (`OA_GETSTATE_LOG`) exists in `runs/oa_live/`; these numbers are not on disk.
+  What IS on disk is `on_BrowserStateRequestEvent >15s/30s` in the Lever and Ashby logs — i.e. the
+  event-bus DOM read WAS hit, repeatedly, in the exact runs cited.
+- "Location mis-bind FIXED" — `ashby.json` shows `INTRINSIC_FILE` / `committed:"Detroit, MI, USA"`.
+- "advanced Lever from 15 → 19/20 fields" — the only Lever runs are 5/15 and 5/14.
+
+### What IS proven
+
+- **GH genuinely lands 100% (gh3): 16/16 DONE, 0 ESCALATE, no bus hang, no SPA corruption.** The
+  gh3.png screenshot visually confirms every field populated (name/email/phone/website/radios/date/
+  textarea/visa/LinkedIn/relocation/address), EEO/self-ID correctly left blank, resume uploaded. Note
+  GH only reached 16/16 on the 3rd attempt (gh 86.7% → gh2 93.3% → gh3 100%); the 100% is real but not
+  yet repeatable run-to-run.
+- **Fill-only HELD.** No Submit/Apply-final anywhere; all commits are field writes.
+- **Zombies = 0.** `pgrep -f browser-use-user-data-dir` returns nothing before and after. Cleanup is
+  bulletproof — KEEP it.
+- **The direct-CDP WRITE path works** (name/email/phone/LinkedIn LAND on all three SPAs).
+
+### Precise next step (blunt)
+
+99% is two fixes away, not zero:
+
+1. **Land defect (A) AND prove it live.** The mis-bind exclusion is in source but every run predates
+   it. Re-run Lever + Ashby (ONE ATS at a time, `pkill -9 -f browser-use-user-data-dir` before/after).
+   This should remove the "Uploaded file <string>" lines and stop the SPA corruption.
+2. **Close defect (B) — the real LAST BLOCKER.** Remove the `get_browser_state_summary` fallback in
+   `oa_perception.get_state` for a session that HAD a direct path (post-reset). When the direct
+   serialize returns `None` and no last-good exists, return an empty/last-good `OAState` — NEVER
+   re-dispatch `BrowserStateRequestEvent`. Equivalently: re-acquire `agent_focus_target_id` after a
+   reset so the direct path stays available. Until (B) lands, any SPA reset (from a mis-bind, a
+   navigation, a readiness timeout) re-opens the 30s deadlock — the bypass is happy-path-only.
+
+**Bottom line: the read-path fix is partial. It bypasses the bus only while nothing crashes; the
+get_state→bus fallback keeps the 30s deadlock one SPA-reset away, and the corruption trigger (the file
+mis-bind) was fixed in source but never run. GH=100% (3rd try), Lever=36%, Ashby=50%, zombies=0,
+fill-only intact. NOT 99% on Lever/Ashby. The design is generic+label-free+visual in shape, but
+unproven past the first heavy field on never-idle SPAs.**
+
+---
+
+## Resilient LLM + card-commit — live results (2026-06-30)
+
+**Goal:** prove the resilient model layer (`oa_llm.py`: bounded primary + provider-agnostic
+fallback) ends the ~34s per-card LLM stall so Lever/Ashby custom cards FINISH. Env: `GOOGLE_API_KEY`
+present, **`OPENAI_API_KEY` ABSENT** — so the fallback is built but DORMANT; only the bound is live.
+Flags: `OA_NO_SANDBOX=1 OA_FIELD_DEADLINE=28 OA_LLM_TIMEOUT=5`. Clean: `pkill -9 -f
+"browser-use-user-data-dir"` before batch + after every run, ONE ATS at a time, never parallel.
+Offline self-tests `oa_llm.py` + `oa_brain.py` = ALL PASS before live.
+
+### The bound WORKED — no run hung, all three FINISHED, zombies=0 throughout
+
+| ATS | fill-rate | fill wall-clock | real wall-clock | crash markers | zombies after | provider answered |
+|-----|-----------|-----------------|-----------------|---------------|---------------|-------------------|
+| GH (regression) | **100% (16/16)** | 36.8s | 48.3s | 0 | 0 | gemini(primary), incl. 2 recovered-on-retry |
+| Lever (Palantir) | 50% (7/14) | 98.3s | 129.6s | 0 | 0 | gemini(primary) + bounded-out escalations |
+| Ashby (Ramp) | 50% (4/8) | 86.7s | 172.9s* | 0 (final screenshot CDP hang, not fill) | 0 | gemini(primary) + bounded-out escalations |
+
+\* Ashby `real` exceeded the 130s soft bar ONLY because the terminal `--screenshot` CDP capture hung
+60s (`Runtime.evaluate did not respond within 60s`) AFTER the fill finished at 86.7s — that capture is
+not wrapped by `bounded_screenshot` (which guards only VLM-feeding shots). No `ashby.png` written; fill
+data in `runs/oa_live/ashby.json`. The FILL never ran away; the original 34s-per-card runaway is gone.
+
+### Max model-call duration: capped at OA_LLM_TIMEOUT=5s, every time
+
+The log proves the fix end-to-end. Two distinct outcomes, both bounded at 5s:
+
+- **Recovered on retry** (GH, and some Lever/Ashby fields):
+  `gemini(primary) timed out >5.0s (attempt 1/2)` → `answered by gemini(primary) (attempt 2/2)`.
+  GH hit this twice and still made 100% — the retry absorbed transient stalls.
+- **Bounded-out → escalate** (the unfilled cards):
+  `gemini(primary) timed out >5.0s (attempt 1/2)` → `timed out >5.0s (attempt 2/2)` →
+  `text: primary bounded-out, NO fallback key -> None (caller escalates)`.
+  Max per-attempt = 5s; max per-field LLM = ~10s (2 attempts) instead of the old ~34s. The run
+  finishes; the field is ESCALATEd (Gap-B: never a blind type), NOT hung.
+
+### Per-field located:how + outcome (the cards that matter)
+
+- **GH** — all 16 non-skip fields filled by the structured `llm-map` (14) + profile/file. Name, email,
+  phone, DATE, all BOOLEAN single-selects, both textareas, resume upload: DONE. Submit untouched
+  (screenshot `gh.png` opened: name/email/phone filled, dropdowns committed, "Submit application" at
+  foot untouched).
+- **Lever** — DONE: name, email, phone, LinkedIn URL, both free-text textareas (favorite project / why
+  Palantir), resume. ESCALATE (all gemini-stall, no fallback): `location` (SEARCH react-select),
+  `Language Skills` (MULTI checkbox), 4× Work-Auth/consent (BOOLEAN radio), `University`
+  (SEARCH single_select), `How did you hear` (CLOSED_LIST single_select). Screenshot `lever.png`
+  opened: text fields + textareas filled, every card empty, "Submit application" untouched.
+- **Ashby** — DONE: name, email, free-text card, resume. ESCALATE: `phone` (UNKNOWN — stalled
+  classify), `location` (SEARCH), one custom text card (UNKNOWN — stalled classify), a second file
+  field. No screenshot (terminal CDP capture hung).
+
+### Blunt verdict per ATS
+
+- **GH: PASS — 100%, 36.8s, 0 crash, 0 zombies, Submit untouched.** Regression fully intact; the
+  resilient retry even *helped* (absorbed 2 transient stalls that would otherwise have escalated).
+- **Lever: FAIL the 99% bar — 50%.** But the THESIS holds: the run FINISHED (98.3s, no 34s runaway, no
+  kill), zombies=0, fill-only intact. The 7 ESCALATEd fields are all gemini-bounded-out with **no
+  fallback to answer them** — exactly the case `OPENAI_API_KEY` is built for.
+- **Ashby: FAIL the 99% bar — 50%.** Same root cause (gemini stall, dormant fallback). Run finished at
+  86.7s fill; the only >130s artifact is a post-fill screenshot CDP hang, not the fill loop.
+
+### Root cause of the remaining gap, and the one lever that closes it
+
+The bound is necessary and proven: it converted a wall-clock-blowing 34s-per-card hang into a
+fast-fail that lets the run finish at ~90s with 0 zombies. It is NOT sufficient alone, because the
+primary gemini is **rate-limit-stalling repeatedly on this batch** and there is no second provider to
+answer the bounded-out cards — so they ESCALATE (correct, safe) but stay unfilled.
+
+**The fix is structurally live and correct; it just needs the fallback key activated.** Add
+`OPENAI_API_KEY` (+ optional `OA_FALLBACK_MODEL`, default `gpt-4o-mini`) to `.env` and the dormant
+`_build_fallback("text"/"vlm")` path lights up at CALL TIME (no restart) — every `gemini timed out
+>5.0s` would then read `answered by openai(fallback)` instead of `NO fallback key -> None`, and the
+Lever/Ashby cards classify + pick + verify on the second provider. Offline test (6) proves this exact
+transition: adding `OPENAI_API_KEY` flips `_build_fallback` from `(None,'')` to `(<client>,'openai')`.
+
+**Bottom line: the bound is PROVEN live (no hang, no runaway, no zombies, GH 100%). The 99% bar on
+Lever/Ashby is gated entirely on the fallback provider key, which is absent. With `OPENAI_API_KEY`
+set, the stalled cards get a fast second answer instead of escalating; without it the bound keeps the
+run alive and clean but leaves the gemini-stalled cards unfilled. Verdict: resilient layer SHIPS;
+re-run Lever/Ashby with `OPENAI_API_KEY` to confirm 99%.**

@@ -34,6 +34,7 @@ import contextlib
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+import oa_llm as _oa_llm
 import vision_verify as _vv
 import wd_repeaters as _wr
 
@@ -205,10 +206,15 @@ async def _classify_llm(label_text: str, value: str, *, llm: Any) -> tuple[str, 
         "(Skills, Languages, Technologies); else 'one'. Reply strictly."
     )
     with contextlib.suppress(Exception):
-        res = await llm.ainvoke(
+        # BOUNDED + fallback-capable: a stalled gemini fails fast (OA_LLM_TIMEOUT) and a second
+        # provider answers, instead of an unbounded ainvoke hanging the field ~34s. None -> UNKNOWN.
+        res = await _oa_llm.resilient_text(
             [SystemMessage(content=system), UserMessage(content=f"label: {label_text!r}\nvalue: {value!r}")],
             output_format=_Nat,
+            primary=llm,
         )
+        if res is None:
+            return None
         base = (res.completion.nature or "").strip().lower()
         card = (res.completion.cardinality or "one").strip().lower()
         if base not in _MODEL_TO_NATURE:
@@ -269,10 +275,14 @@ async def _variant_llm(value: str, *, llm: Any) -> list[str]:
         "Do not invent unrelated entities. Reply strictly."
     )
     with contextlib.suppress(Exception):
-        res = await llm.ainvoke(
+        # BOUNDED + fallback-capable (see _classify_llm). None -> [] (caller degrades to [value, prefix]).
+        res = await _oa_llm.resilient_text(
             [SystemMessage(content=system), UserMessage(content=f"value: {value!r}")],
             output_format=_Vars,
+            primary=llm,
         )
+        if res is None:
+            return []
         return [s.strip() for s in (res.completion.variants or []) if s and s.strip()]
     return []
 
@@ -405,9 +415,8 @@ async def pick_control_by_vision(
     # Budget guard: a capped page returns the sentinel without a screenshot (no spend).
     if _vv._VLM_CALLS["n"] >= _vv.VLM_MAX_CALLS:
         return None
-    try:
-        png = await session.take_screenshot()
-    except Exception:
+    png = await _oa_llm.bounded_screenshot(session)  # bounded — a stalled screenshot can't hang the field
+    if png is None:
         return None
     import base64
 
@@ -434,11 +443,12 @@ async def pick_control_by_vision(
         )
     except Exception:
         msg = prompt
-    try:
-        resp = await _vv._vlm().ainvoke([msg])
-        raw = (getattr(resp, "completion", None) or str(resp)).strip()
-    except Exception:
+    # BOUNDED + vision-fallback-capable: a stalled gemini-vision fails fast and (if keyed) a vision
+    # fallback answers; None -> caller falls back (no unbounded ainvoke).
+    resp = await _oa_llm.resilient_vlm([msg], primary=_vv._vlm())
+    if resp is None:
         return None
+    raw = (getattr(resp, "completion", None) or str(resp)).strip()
     _vv._VLM_CALLS["n"] += 1  # count the spend so the per-field budget sees it (same as visual_check)
 
     idx = _parse_index(raw)
@@ -477,9 +487,8 @@ async def pick_control_by_marks(session: Any, label_text: str, candidates: list[
     # Budget guard: a capped page returns no pick without a screenshot (no spend).
     if _vv._VLM_CALLS["n"] >= _vv.VLM_MAX_CALLS:
         return None
-    try:
-        png = await session.take_screenshot()
-    except Exception:
+    png = await _oa_llm.bounded_screenshot(session)  # bounded — a stalled screenshot can't hang the field
+    if png is None:
         return None
     import base64
 
@@ -517,11 +526,11 @@ async def pick_control_by_marks(session: Any, label_text: str, candidates: list[
         )
     except Exception:
         msg = prompt
-    try:
-        resp = await _vv._vlm().ainvoke([msg])
-        reply = (getattr(resp, "completion", None) or str(resp)).strip()
-    except Exception:
+    # BOUNDED + vision-fallback-capable (see pick_control_by_vision). None -> caller falls back.
+    resp = await _oa_llm.resilient_vlm([msg], primary=_vv._vlm())
+    if resp is None:
         return None
+    reply = (getattr(resp, "completion", None) or str(resp)).strip()
     _vv._VLM_CALLS["n"] += 1  # count the spend so the per-field VLM budget sees it (same as visual_check)
 
     mark = _parse_mark(reply)

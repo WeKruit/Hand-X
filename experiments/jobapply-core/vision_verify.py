@@ -103,10 +103,11 @@ async def visual_check(
         if _VLM_CALLS["n"] >= VLM_MAX_CALLS:
             return '{"filled": null, "capped": true}'  # budget spent — caller stays silent
 
-    try:
-        png = await session.take_screenshot()  # bytes (PNG)
-    except Exception as exc:
-        return f'{{"filled": null, "error": "screenshot: {exc}"}}'
+    import oa_llm as _oa_llm
+
+    png = await _oa_llm.bounded_screenshot(session)  # bytes (PNG), bounded — None on timeout/error
+    if png is None:
+        return '{"filled": null, "error": "screenshot bounded-out"}'
     b64 = base64.b64encode(png).decode()
     if want is not None:
         prompt = (
@@ -137,8 +138,14 @@ async def visual_check(
         )
     except Exception:
         msg = prompt
+    # BOUNDED + vision-fallback-capable: a stalled gemini-vision fails fast (OA_LLM_TIMEOUT) and a
+    # vision fallback answers when keyed; None -> a bounded error sentinel (never an unbounded ainvoke).
     try:
-        resp = await _vlm().ainvoke([msg])
+        import oa_llm as _oa_llm
+
+        resp = await _oa_llm.resilient_vlm([msg], primary=_vlm())
+        if resp is None:
+            return '{"filled": null, "error": "vlm bounded-out (no fallback)"}'
         verdict = (getattr(resp, "completion", None) or str(resp)).strip()
     except Exception as exc:
         return f'{{"filled": null, "error": "{type(exc).__name__}: {exc}"}}'
@@ -200,9 +207,10 @@ async def read_options_visually(session: Any, *, key: str | None = None, use_cac
         if _VLM_CALLS["n"] >= VLM_MAX_CALLS:
             return []  # budget spent — caller uses its DOM read
 
-    try:
-        png = await session.take_screenshot()
-    except Exception:
+    import oa_llm as _oa_llm
+
+    png = await _oa_llm.bounded_screenshot(session)
+    if png is None:
         return []
     b64 = base64.b64encode(png).decode()
     prompt = (
@@ -225,8 +233,13 @@ async def read_options_visually(session: Any, *, key: str | None = None, use_cac
         )
     except Exception:
         msg = prompt
+    # BOUNDED + vision-fallback-capable (see visual_check). None -> [] (caller uses its DOM read).
     try:
-        resp = await _vlm().ainvoke([msg])
+        import oa_llm as _oa_llm
+
+        resp = await _oa_llm.resilient_vlm([msg], primary=_vlm())
+        if resp is None:
+            return []
         raw = (getattr(resp, "completion", None) or str(resp)).strip()
     except Exception:
         return []

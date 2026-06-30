@@ -212,7 +212,7 @@ def extract_offline(html: str) -> list[Control]:
 
     controls: list[Control] = []
     raw = tree.xpath(
-        '//input|//select|//textarea|//*[@role="spinbutton"]|//*[@role="listbox"]' '|//button[@aria-haspopup="listbox"]'
+        '//input|//select|//textarea|//*[@role="spinbutton"]|//*[@role="listbox"]|//button[@aria-haspopup="listbox"]'
     )
     for el in raw:
         wrapper_aid, in_ms, fkit = "", False, el.get("data-fkit-id") or ""
@@ -526,7 +526,12 @@ async def _llm_pick(llm, value: str, options: list[str]) -> str | None:
         choice: str  # EXACT option text from the list, or "NONE"
 
     with contextlib.suppress(Exception):
-        res = await llm.ainvoke(
+        # BOUNDED + fallback-capable: route the per-field pick through oa_llm so a stalled gemini fails
+        # fast (OA_LLM_TIMEOUT) and a second provider answers, instead of an unbounded ainvoke hanging
+        # the field. None -> treated as no-pick (caller's Other-guard / revalue), never a hang.
+        import oa_llm as _oa_llm
+
+        res = await _oa_llm.resilient_text(
             [
                 SystemMessage(
                     content="Pick the option that best matches the wanted value — closest meaning "
@@ -536,7 +541,10 @@ async def _llm_pick(llm, value: str, options: list[str]) -> str | None:
                 UserMessage(content=f"wanted: {value!r}\noptions: {options}"),
             ],
             output_format=_Pick,
+            primary=llm,
         )
+        if res is None:
+            return None
         c = (res.completion.choice or "").strip()
         out = None if c.upper() == "NONE" or not c else c
         _PICK_CACHE[ckey] = out  # memoise so identical later picks (proficiency selects) are instant
@@ -985,7 +993,9 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
         ):
             await session.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=sid)
         await press_key_trusted(session, page, key="Escape", code="Escape", vk=27)
-        await page.evaluate("() => { if(document.activeElement&&document.activeElement.blur) document.activeElement.blur(); }")
+        await page.evaluate(
+            "() => { if(document.activeElement&&document.activeElement.blur) document.activeElement.blur(); }"
+        )
         await asyncio.sleep(0.8)
     final_controls = await extract_live(page)
     final_diff = reconcile(plan, final_controls, await read_live(page, final_controls))
@@ -1018,14 +1028,17 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
             from ats_engine import press_key_trusted
 
             await press_key_trusted(session, page, key="Escape", code="Escape", vk=27)
-            await page.evaluate("() => { if(document.activeElement&&document.activeElement.blur) document.activeElement.blur(); }")
+            await page.evaluate(
+                "() => { if(document.activeElement&&document.activeElement.blur) document.activeElement.blur(); }"
+            )
             await asyncio.sleep(0.8)
         with contextlib.suppress(Exception):
             sid = page.session_id
             if hasattr(sid, "__await__"):
                 sid = await sid
             r = await session.cdp_client.send.Page.captureScreenshot(
-                params={"format": "png", "captureBeyondViewport": True}, session_id=sid)
+                params={"format": "png", "captureBeyondViewport": True}, session_id=sid
+            )
             pathlib.Path(shot_path).write_bytes(base64.b64decode(r["data"]))
             print(f"  [wd] My-Experience screenshot -> {shot_path}", flush=True)
         # OFFLINE DIAGNOSIS dump: save the live My-Experience DOM so language/skill detection can be
@@ -1077,11 +1090,17 @@ def _plan_skeleton(controls: list[Control], profile: dict) -> dict:
             # assume the applicant is a PROFICIENT English speaker. Only skipped when the profile DOES
             # specify languages (then those are used verbatim). Proficiency values map via the LLM/VLM
             # to the form's scale ('Native or Bilingual' -> '5 - Native…' / 'Fluent').
-            items = [{
-                "language": "English", "fluent": "yes", "comprehension": "Native or Bilingual",
-                "overall": "Native or Bilingual", "reading": "Native or Bilingual",
-                "speaking": "Native or Bilingual", "writing": "Native or Bilingual",
-            }]
+            items = [
+                {
+                    "language": "English",
+                    "fluent": "yes",
+                    "comprehension": "Native or Bilingual",
+                    "overall": "Native or Bilingual",
+                    "reading": "Native or Bilingual",
+                    "speaking": "Native or Bilingual",
+                    "writing": "Native or Bilingual",
+                }
+            ]
         if not items:
             continue
         labels = list(labelset.values())

@@ -401,7 +401,12 @@ async def _fill_form(
     secs = round(time.monotonic() - t0, 1)
     usage = await tc.get_usage_summary()
     if screenshot_path:
-        result["screenshot"] = await eng._screenshot(session, page, screenshot_path)
+        # BOUNDED: on a never-idle SPA the terminal CDP screenshot can hang ~60s ("Runtime.evaluate did
+        # not respond") AFTER the fill is already done — cap it so it can't push wall-clock past budget.
+        with contextlib.suppress(Exception):
+            result["screenshot"] = await asyncio.wait_for(
+                eng._screenshot(session, page, screenshot_path), timeout=15.0
+            )
     with contextlib.suppress(Exception):
         result["final_url"] = await page.get_url()
 
