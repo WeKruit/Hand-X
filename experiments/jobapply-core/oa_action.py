@@ -51,6 +51,9 @@ HARD: fill-only. Nothing here submits a form; the only key helper sends individu
 from __future__ import annotations
 
 import json
+import os
+
+import oa_cdp_action as cdp
 
 from browser_use.browser.events import (
     ClickCoordinateEvent,
@@ -76,6 +79,24 @@ __all__ = [
     "type_text",
     "upload_file",
 ]
+
+
+# ---------------------------------------------------------------------------
+# ACTION BACKEND (BUILD FIX A) — direct-CDP is the DEFAULT for the write primitives
+# (type/click/select), so they NEVER wait on browser-use's readiness watchdog. On a
+# never-idle SPA /apply page (Lever / Ashby) the event-bus path's watchdog handlers wait for
+# page readiness / navigation that never settles -> 30-60s TimeoutError per action -> fields
+# ESCALATE. The direct-CDP path (oa_cdp_action) sets values + dispatches trusted events straight
+# via CDP (the SAME resolveNode + callFunctionOn / Input.* plumbing the watchdog uses) WITHOUT
+# that wait, mirroring the OLD direct-Playwright filler that hit ~99%.
+#
+# OA_ACTION_BACKEND=eventbus reverts to the original event-bus wrappers (the documented fallback).
+# read_options / upload_file / scroll / press_key stay on the event-bus path: their watchdog
+# handlers are read-only or one-shot (no readiness loop) and re-implementing the dropdown/file/
+# scroll watchdogs would duplicate browser-use, not bypass a hang.
+# ---------------------------------------------------------------------------
+def _use_cdp() -> bool:
+    return os.environ.get("OA_ACTION_BACKEND", "cdp").lower() != "eventbus"
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +153,21 @@ async def read_options(session: BrowserSession, node: EnhancedDOMTreeNode) -> li
 
 
 async def select_option(session: BrowserSession, node: EnhancedDOMTreeNode, text: str) -> bool:
-    """Commit a dropdown option by exact text via `SelectDropdownOptionEvent`.
+    """Commit a dropdown option by text. DEFAULT = direct-CDP (oa_cdp_action.cdp_select) so a
+    native <select> commit never waits on the readiness watchdog; falls back to the event-bus
+    `SelectDropdownOptionEvent` path when OA_ACTION_BACKEND=eventbus.
+
+    cdp_select handles native <select> (the intrinsic S_NATIVE / S_RECOMMIT path). For an
+    ARIA/custom dropdown the cdp path returns False (no native <select>) and the state machine's
+    delta/click commit (click_node on the option cell) is the right tool — so a False here simply
+    routes the caller to its click path, exactly as before."""
+    if _use_cdp():
+        return await cdp.cdp_select(session, node, text)
+    return await _select_option_eventbus(session, node, text)
+
+
+async def _select_option_eventbus(session: BrowserSession, node: EnhancedDOMTreeNode, text: str) -> bool:
+    """Event-bus fallback: commit via `SelectDropdownOptionEvent`.
 
     Mirrors tools/service.py:1604 / watchdog :3651: case-insensitive match with a
     multi-strategy commit (native value+events / aria-selected / custom click). The handler
@@ -152,7 +187,17 @@ async def select_option(session: BrowserSession, node: EnhancedDOMTreeNode, text
 
 
 async def click_node(session: BrowserSession, node: EnhancedDOMTreeNode) -> bool:
-    """TRUSTED CDP click on a DOM node via `ClickElementEvent` (tools/service.py:611).
+    """Click a DOM node. DEFAULT = direct-CDP (oa_cdp_action.cdp_click): a trusted
+    Input.dispatchMouseEvent at the node center (move/press/release), JS this.click() fallback for
+    box-less/occluded nodes — NO readiness wait, works on radios/checkboxes/option cells. Falls
+    back to the event-bus `ClickElementEvent` path when OA_ACTION_BACKEND=eventbus."""
+    if _use_cdp():
+        return await cdp.cdp_click(session, node)
+    return await _click_node_eventbus(session, node)
+
+
+async def _click_node_eventbus(session: BrowserSession, node: EnhancedDOMTreeNode) -> bool:
+    """Event-bus fallback: TRUSTED CDP click via `ClickElementEvent` (tools/service.py:611).
 
     The watchdog (on_ClickElementEvent :338) scrolls into view and dispatches a real
     `Input.dispatchMouseEvent`, with `elementFromPoint` occlusion detection + reroute to the
@@ -167,7 +212,17 @@ async def click_node(session: BrowserSession, node: EnhancedDOMTreeNode) -> bool
 
 
 async def click_xy(session: BrowserSession, x: int, y: int) -> bool:
-    """TRUSTED CDP click at absolute viewport coordinates via `ClickCoordinateEvent`.
+    """Click at absolute viewport coordinates. DEFAULT = direct-CDP
+    (oa_cdp_action.cdp_click_xy): a trusted Input.dispatchMouseEvent at (x,y) on the root CDP
+    session — NO readiness wait. Falls back to the event-bus `ClickCoordinateEvent` path when
+    OA_ACTION_BACKEND=eventbus."""
+    if _use_cdp():
+        return await cdp.cdp_click_xy(session, None, int(x), int(y))
+    return await _click_xy_eventbus(session, x, y)
+
+
+async def _click_xy_eventbus(session: BrowserSession, x: int, y: int) -> bool:
+    """Event-bus fallback: TRUSTED CDP click at absolute coords via `ClickCoordinateEvent`.
 
     Mirrors tools/service.py:557 (`force=True` skips the file-input/select safety gate — the
     caller has already decided this is a plain clickable point, e.g. an option cell's center).
@@ -184,8 +239,38 @@ async def click_xy(session: BrowserSession, x: int, y: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _is_typeahead(node: EnhancedDOMTreeNode) -> bool:
+    """A combobox / autocomplete control needs REAL per-char keystrokes (debounced search/XHR);
+    a plain text input/textarea can take a single React-aware value set (faster, one round-trip).
+    Read off STANDARD DOM (role / aria-autocomplete) — no renameable key."""
+    attrs = getattr(node, "attributes", None) or {}
+    role = (attrs.get("role") or "").lower()
+    if not role:
+        ax = getattr(node, "ax_node", None)
+        role = ((getattr(ax, "role", None) or "") if ax else "").lower()
+    if role == "combobox" or role == "searchbox":
+        return True
+    aa = (attrs.get("aria-autocomplete") or "").lower()
+    return aa not in ("", "none")
+
+
 async def type_text(session: BrowserSession, node: EnhancedDOMTreeNode, text: str, clear: bool = True) -> bool:
-    """Char-by-char TRUSTED type into a node via `TypeTextEvent` (tools/service.py:683).
+    """Enter text into a node. DEFAULT = direct-CDP (oa_cdp_action.cdp_type), NO readiness wait:
+      * combobox / aria-autocomplete  -> per-char trusted Input.dispatchKeyEvent (typeahead: the
+        page's debounced search/XHR fires — what the §5 search-loop needs), clear-first via the
+        React-aware native setter.
+      * plain text / textarea / date  -> one React-aware value set (native setter + input/change),
+        fast and reliable.
+    Falls back to the event-bus `TypeTextEvent` (char-by-char) when OA_ACTION_BACKEND=eventbus."""
+    if _use_cdp():
+        return await cdp.cdp_type(session, node, text, keystrokes=_is_typeahead(node), clear=clear)
+    return await _type_text_eventbus(session, node, text, clear)
+
+
+async def _type_text_eventbus(
+    session: BrowserSession, node: EnhancedDOMTreeNode, text: str, clear: bool = True
+) -> bool:
+    """Event-bus fallback: char-by-char TRUSTED type via `TypeTextEvent` (tools/service.py:683).
 
     The watchdog (on_TypeTextEvent :798) focuses the element, optionally React-aware clears it
     (`clear=True`), then emits per-keystroke trusted key events so debounced search/XHR fires —

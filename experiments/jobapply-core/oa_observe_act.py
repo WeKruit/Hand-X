@@ -67,7 +67,13 @@ REVALUE_CAP = 2  # WRONG_VALUE re-search, clear-first
 CASCADE_CAP = 2  # sub-option recursion depth
 MULTI_CAP = 8  # multi-value pick loop
 STEP_CAP = 40  # GLOBAL per-field state entries
-FIELD_DEADLINE = 15.0  # GLOBAL per-field wall-clock (seconds)
+# GLOBAL per-field wall-clock (seconds). Env-tunable. Raised from 15->28: the bottleneck on a clean
+# env is NOT a wedged page (those are bounded by the per-action CDP timeout + STEP_CAP) but the
+# stacked latency of the cheap gemini classify + pick + verify calls — a single network spike on ONE
+# of them used to blow the 15s budget and ESCALATE a field that would otherwise fill (observed: a
+# different field times out each run, always "TERMINATE:deadline" right after a slow LLM call). 28s
+# absorbs a spike while STEP_CAP=40 + the 4s per-CDP-action timeout still stop a genuinely stuck field.
+FIELD_DEADLINE = float(os.environ.get("OA_FIELD_DEADLINE", "28.0"))
 FIELD_VERIFY_CAP = 3  # per-FIELD verify attempts total (DOM read-back + VLM aids combined)
 FIELD_VLM_CAP = 2  # per-FIELD VLM-aid sub-budget (DOM-first means the VLM is rarely needed)
 
@@ -360,7 +366,9 @@ async def _s1_locate(session: Any, ctx: Ctx) -> Outcome:
     # FIX 1: tiered locate — STRUCTURE first, VISUAL PROXIMITY aid, GROUPED-WIDGET card-heading bind,
     # VLM disambiguate. Binds an unlabeled card input (Lever) the way a human does — by the question
     # text sitting near it; a non-text card (radio/checkbox/select/textarea) binds via its card heading.
-    node, how, card = await perc.locate_field_tiered(state, ctx.label, vlm_pick=_make_vlm_pick(session, ctx))
+    node, how, card = await perc.locate_field_tiered(
+        state, ctx.label, vlm_pick=_make_vlm_pick(session, ctx), marks_pick=_make_marks_pick(session, ctx)
+    )
     # FIX (below-the-fold): a question lower on the page may have its card marked not-visible, so the
     # locate sees no control. Scroll the page down one viewport and re-locate, BOUNDED — a question
     # must not be missed just for sitting below the fold, but we never loop forever chasing one.
@@ -405,7 +413,9 @@ async def _scroll_locate(session: Any, ctx: Ctx, state: perc.OAState) -> tuple[A
         ctx.scroll_reads += 1
         await act.scroll(session, None, _SCROLL_PX)
         state = await perc.get_state(session)
-        node, how, card = await perc.locate_field_tiered(state, ctx.label, vlm_pick=_make_vlm_pick(session, ctx))
+        node, how, card = await perc.locate_field_tiered(
+            state, ctx.label, vlm_pick=_make_vlm_pick(session, ctx), marks_pick=_make_marks_pick(session, ctx)
+        )
         ctx.trace.append(f"scroll-locate#{ctx.scroll_reads}:{'hit' if node is not None else 'miss'}")
         if node is not None:
             return (node, how, card, state)
@@ -439,6 +449,34 @@ def _make_vlm_pick(session: Any, ctx: Ctx) -> Any:
     return _pick
 
 
+def _make_marks_pick(session: Any, ctx: Ctx) -> Any:
+    """A bounded VISUAL SET-OF-MARKS bind callback for locate Tier-2d (a label-free non-text card).
+
+    Returns an async ``(label, [candidate_nodes]) -> node | None`` that marks the candidate controls
+    on the page screenshot (browser-use ``create_highlighted_screenshot``) and asks the cheap VLM
+    which marked control is the answer for this question. AID only — it spends from the SAME per-field
+    VLM sub-budget the verify oracle + Tier-3 use (``FIELD_VLM_CAP``), so locate + verify together
+    never over-spend the VLM on one field. Returns None (caller falls back) when the budget is spent
+    or no VLM/llm is available."""
+
+    async def _pick(label: str, cands: list[Any]) -> Any:
+        if ctx.vlm_used >= FIELD_VLM_CAP or not cands:
+            return None
+        before_n = _vv_calls()
+        chosen = None
+        try:
+            chosen = await brain.pick_control_by_marks(session, label, cands, llm=ctx.llm)
+        except Exception:
+            chosen = None
+        spent = max(0, _vv_calls() - before_n)
+        if spent:
+            ctx.vlm_used += spent
+            ctx.trace.append("locate-marks-aid")
+        return chosen
+
+    return _pick
+
+
 # ---- S2_CLASSIFY ----
 async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None) -> Outcome:
     if not ctx.guard():
@@ -458,9 +496,15 @@ async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None
             return await _s_date(session, ctx)
 
     # label-meaning nature (§4.2) — one cheap LLM call, deterministic overrides in code (§4.3).
+    # MULTI mis-route fix: a comma in the value is a multi signal ONLY for a genuine multi-value
+    # label (Skills/Languages/Technologies). A single 'Current location' value "San Francisco, CA"
+    # carries a comma but is ONE value — gate value_is_list on is_multi_label so it never forces
+    # MULTI (which would type "San Francisco" then "CA" as two pills). known_multi already carries
+    # the runner's authoritative cardinality.
+    multi_label = brain.is_multi_label(ctx.label) or ctx.cardinality == "many"
     hints = brain.ClassifyHints(
         known_multi=(ctx.cardinality == "many"),
-        value_is_list=("," in ctx.value or ";" in ctx.value),
+        value_is_list=(multi_label and ("," in ctx.value or ";" in ctx.value)),
     )
     nature = await brain.classify_nature(ctx.label, ctx.value, hints, llm=ctx.llm)
     ctx.nature = nature
@@ -1367,6 +1411,65 @@ async def _selftest() -> int:
         out21 == DONE and any(t.startswith("scroll-locate#") and t.endswith("hit") for t in tr21),
         (out21, tr21),
     )
+
+    # (22) BUILD FIX C — VISUAL SET-OF-MARKS bind of a LABEL-FREE card. A radio group whose HEADING
+    #      ("Work eligibility") shares NO tokens with the question ("Are you authorized to work?") —
+    #      structure (radios named Yes/No), shallow spatial, AND grouped-text ALL miss. The marks tier
+    #      screenshots + marks the candidate radios and the (fake) VLM returns the 'Yes' radio's bnid;
+    #      it routes to _s_choice (intrinsic radio) and DOM-verifies CORRECT. Proves the visual bridge
+    #      binds a card with no structural label, the way a human SEES it.
+    from oa_observe_act_fakes import install_marks_vlm, make_labelfree_choice_card, restore_vlm
+
+    _vv._VLM_CALLS["n"] = 0
+    reset_page_vlm_backstop()
+    lf = make_labelfree_choice_card("Work eligibility", ["Yes", "No"], base_bnid=900, kind="radio")
+    yes_bnid = lf[0].backend_node_id
+    fs22 = FakeSession(controls=lf, dom_values={yes_bnid: "Yes"})
+    orig_vlm = install_marks_vlm(f'{{"mark": {yes_bnid}}}')
+    try:
+        fd22 = {"label": "Are you authorized to work?", "value": "Yes", "required": True, "llm": fake_llm}
+        out22 = await observe_act(fs22, fd22)
+    finally:
+        restore_vlm(orig_vlm)
+    tr22 = fd22.get("_trace") or []
+    chk(
+        "LABEL-FREE card bound by VISUAL set-of-marks -> _s_choice 'Yes' -> DONE",
+        out22 == DONE and "located:marks" in tr22 and fd22.get("_committed") == "Yes",
+        (out22, fd22.get("_committed"), tr22),
+    )
+    chk("marks tier spent the VLM aid (set-of-marks)", "locate-marks-aid" in tr22, tr22)
+
+    # (23) BUILD FIX C — LOCATION classifies as SEARCH, never MULTI. A single 'Current location' value
+    #      that carries a comma ("San Francisco, CA") must NOT be split across pills. Drive a combobox
+    #      location field with a comma value and assert the nature is SEARCH (the search-loop), the
+    #      typeahead path — not MULTI / S_MULTI_LOOP.
+    loc = _mk(tag="input", role="combobox", attrs={"aria-autocomplete": "list"}, ax_name="Current location")
+    fs23 = FakeSession(
+        controls=[loc],
+        on_type_delta={loc.backend_node_id: [("San Francisco, CA, United States", (100, 250))]},
+        dom_values={loc.backend_node_id: "San Francisco, CA, United States"},
+        verdict='{"filled": true, "matches": true}',
+    )
+    fd23 = {"label": "Current location", "value": "San Francisco, CA", "required": True, "llm": fake_llm}
+    out23 = await observe_act(fs23, fd23)
+    tr23 = fd23.get("_trace") or []
+    chk(
+        "LOCATION w/ comma -> SEARCH (not MULTI), search-loop fires",
+        fd23.get("_nature") == "SEARCH" and "S4_SEARCH" in tr23 and "S_MULTI_LOOP" not in tr23,
+        (out23, fd23.get("_nature"), tr23),
+    )
+
+    # (24) BUILD FIX C — a GENUINE multi field (Skills) with a comma value STILL classifies MULTI.
+    #      Proves the classify tightening did not regress real multi-value fields.
+    skills = _mk(tag="input", role="combobox", attrs={"aria-autocomplete": "list"}, ax_name="Skills")
+    fs24 = FakeSession(
+        controls=[skills],
+        on_type_delta={skills.backend_node_id: [("Python", (100, 250))]},
+        dom_values={skills.backend_node_id: "Python"},
+    )
+    fd24 = {"label": "Skills", "value": "Python, Go", "required": False, "cardinality": "many", "llm": fake_llm}
+    out24 = await observe_act(fs24, fd24)
+    chk("genuine multi (Skills) still MULTI", fd24.get("_nature") == "MULTI", (out24, fd24.get("_nature")))
 
     ok = True
     print("\n=== oa_observe_act offline self-test (fake session+llm, no browser/VLM, $0) ===")

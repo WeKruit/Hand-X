@@ -452,18 +452,43 @@ def locate_field(state: OAState, label_text: str) -> EnhancedDOMTreeNode | None:
     return ranked[0][0]
 
 
+def _group_container(node: Any, *, max_up: int = _CARD_MAX_UP) -> Any | None:
+    """Climb from a control to the smallest ancestor whose subtree holds >1 control of THIS control's
+    intrinsic kind — the radio/checkbox GROUP container. Used to scope a choice group when a card was
+    bound VISUALLY (set-of-marks) and so no heading-text card is known: the choice-group reader must
+    still pick from THIS question's options, not the whole page. Returns that ancestor, or None when
+    the control is a lone single-value widget (a textarea/select — no group to scope). Pure DOM
+    structure on ``parent_node`` / ``children_nodes`` — no renameable hook."""
+    from oa_observe_act import classify_intrinsic  # local import: observe_act imports perception
+
+    want_kind = classify_intrinsic(node)
+    if want_kind not in ("INTRINSIC_RADIO", "INTRINSIC_CHECKBOX"):
+        return None  # only choice groups need a scoped container; a select/textarea is self-scoped
+    cur = node
+    for _ in range(max_up):
+        parent = getattr(cur, "parent_node", None)
+        if parent is None:
+            break
+        cur = parent
+        same = [c for c in _controls_in(cur) if classify_intrinsic(c) == want_kind]
+        if len(same) > 1:
+            return cur
+    return None
+
+
 async def locate_field_tiered(
     state: OAState,
     label_text: str,
     *,
     vlm_pick: Any = None,
+    marks_pick: Any = None,
 ) -> tuple[Any, str, Any]:
     """Locate the control for `label_text` by STRUCTURE first, VISUAL PROXIMITY aid, then VLM.
 
-    Returns ``(node, how, card)`` with ``how`` in {"structure", "spatial", "grouped", "vlm"}, or
-    ``(None, "", None)`` when nothing plausible exists. ``card`` is the enclosing question-card node
-    when the bind came from the grouped-widget tier (so the choice-group reader can scope a radio
-    group to THIS question), else None. GENERIC — no per-ATS code.
+    Returns ``(node, how, card)`` with ``how`` in {"structure", "spatial", "grouped", "vlm", "marks"},
+    or ``(None, "", None)`` when nothing plausible exists. ``card`` is the enclosing question-card node
+    when the bind came from the grouped-widget OR the visual set-of-marks tier (so the choice-group
+    reader can scope a radio group to THIS question), else None. GENERIC — no per-ATS code.
 
       TIER 1 STRUCTURE: rank visible fillable controls by accessible-name token overlap
         (``locate_field_ranked``; ax_node.name already resolves <label for>/aria-labelledby/
@@ -476,6 +501,13 @@ async def locate_field_tiered(
         text contains the heading, return a representative control inside it. Returns ("grouped", card).
       TIER 3 VLM: only when >=2 candidates tie spatially, ask the optional ``vlm_pick`` callback
         (an async (label, [nodes]) -> node | None) to disambiguate. AID only, bounded, never primary.
+      TIER 2d VISUAL SET-OF-MARKS: the LAST resort when STRUCTURE + spatial + grouped-text all miss
+        a non-text card (a heading sharing NO tokens with any control — a rich/imaged heading). Mark
+        the candidate controls on the screenshot (browser-use ``create_highlighted_screenshot``,
+        numbered by backend_node_id) and ask the optional ``marks_pick`` callback (an async
+        (label, [nodes]) -> node | None) which marked control is the answer for this question. Binds
+        a card the way a HUMAN SEES it, no label. Returns ("marks", card) — the card is the picked
+        control's choice-group container (scopes a radio group), or None for a lone textarea/select.
     """
     target = _tokens(label_text)
     if not target:
@@ -526,10 +558,59 @@ async def locate_field_tiered(
         node, card = grouped
         return (node, "grouped", card)
 
+    # ---- TIER 2d: VISUAL SET-OF-MARKS — bind a label-free card the way a human SEES it ----
+    # Structure + spatial + grouped-text all failed to NAME this control (its heading shares no
+    # tokens with any control — e.g. an imaged/rich heading, an icon radio group). Mark the
+    # candidate non-text controls on the screenshot and let the VLM pick which one is THIS question.
+    if marks_pick is not None:
+        marks_cands = _marks_candidates(state)
+        if marks_cands:
+            picked = None
+            with contextlib.suppress(Exception):
+                picked = await marks_pick(label_text, marks_cands)
+            if picked is not None:
+                card = _group_container(picked)  # scope a choice group to this question; None if lone
+                return (picked, "marks", card)
+
     # Tier 1 had only a weak match but nothing else bound -> take the weak structural node.
     if ranked:
         return (ranked[0][0], "structure", None)
     return (None, "", None)
+
+
+def _marks_candidates(state: OAState) -> list[Any]:
+    """The non-text fillable controls to offer the visual set-of-marks pick: radio/checkbox/select/
+    textarea (and combobox), with a real on-page box. We EXCLUDE plain single-line text inputs — a
+    label-free card that defeats structure+spatial+grouped is the non-text widget case the marks tier
+    exists for, and including every text box would bloat the marks (and risk a wrong bind). One
+    representative per radio/checkbox group is not needed: the VLM picks any option, and the choice-
+    group reader re-scopes from it. Returns visible, boxed candidates in document order."""
+    out: list[Any] = []
+    for n in state.selector_map.values():
+        if not node_is_visible(n) or not _is_fillable_control(n):
+            continue
+        if node_rect(n) is None:
+            continue
+        tag = _tag(n)
+        attrs = getattr(n, "attributes", None) or {}
+        typ = (attrs.get("type") or "").lower()
+        role = (attrs.get("role") or "").lower()
+        ax = getattr(n, "ax_node", None)
+        ax_role = ((getattr(ax, "role", None) or "") if ax else "").lower()
+        is_plain_text = (
+            tag == "input"
+            and typ in ("", "text", "email", "url", "tel", "search")
+            and role
+            not in (
+                "combobox",
+                "radio",
+                "checkbox",
+            )
+        )
+        if is_plain_text and ax_role not in ("combobox",):
+            continue  # skip bare text inputs — the marks tier is for non-text card widgets
+        out.append(n)
+    return out
 
 
 def _disambiguate_spatial(state: OAState, target: set[str], cands: list[Any]) -> Any | None:
@@ -747,7 +828,38 @@ def _selftest() -> None:
     # NEGATIVE: a label naming no card on the page binds nothing (no false positive).
     assert locate_grouped_widget(gstate, "What is your favorite color?") is None, "no spurious grouped bind"
 
-    print("oa_perception self-test OK: locate_field + delta + option-text + coords + grouped-widget")
+    # ---- BUILD FIX C: VISUAL SET-OF-MARKS tier (Tier-2d) on a LABEL-FREE card ----
+    # A radio card whose HEADING ("Work eligibility") shares no tokens with the question we search
+    # ("Are you authorized to work?"): structure, spatial, AND grouped-text all miss, so the tiered
+    # locate falls through to marks_pick. We feed a fake marks_pick that returns the first radio.
+    import asyncio as _aio
+
+    lf = make_choice_card("Work eligibility", ["Yes", "No"], base_bnid=900, kind="radio", top=240)
+    lfstate = OAState(selector_map={n.backend_node_id: n for n in lf}, url="https://x/apply")
+    target_label = "Are you authorized to work?"
+    # all heading-text tiers must MISS (no token overlap with the question).
+    assert locate_field_ranked(lfstate, target_label) == [], "structure must miss the label-free card"
+    assert locate_grouped_widget(lfstate, target_label) is None, "grouped-text must miss the label-free card"
+
+    # marks candidates = the radios (non-text controls), filtered to visible+boxed.
+    mc = _marks_candidates(lfstate)
+    assert {n.backend_node_id for n in mc} == {n.backend_node_id for n in lf}, "marks candidates = the radios"
+
+    async def _fake_marks_pick(label: str, cands: list[Any]) -> Any:
+        return cands[0]  # pick the 'Yes' radio
+
+    node, how, card = _aio.run(locate_field_tiered(lfstate, target_label, marks_pick=_fake_marks_pick))
+    assert how == "marks" and node is lf[0], f"marks tier must bind the label-free card: {how}"
+    # the marks bind returns a choice-group CARD (the radio group container) so _s_choice scopes to it.
+    assert card is not None, "marks bind of a radio group returns a scoping card"
+    scoped = {n.backend_node_id for n in _controls_in(card)}
+    assert scoped == {n.backend_node_id for n in lf}, f"group container scopes exactly the card radios: {scoped}"
+
+    # marks tier excludes a PLAIN TEXT input (it is for non-text widgets); a lone text box is not offered.
+    plain = _make_node(950, tag="input", role="textbox", ax_name="", box=(100, 100, 200, 30))
+    assert _marks_candidates(OAState(selector_map={950: plain})) == [], "plain text input excluded from marks"
+
+    print("oa_perception self-test OK: locate_field + delta + option-text + coords + grouped-widget + marks")
 
 
 if __name__ == "__main__":

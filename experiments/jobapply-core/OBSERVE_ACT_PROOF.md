@@ -249,3 +249,85 @@ lower concurrency for Ashby — not the verify path.
 **Artifacts:** `runs/oa_proof_concurrent/records.json` (aggregate + per-run), `perfield/*.json` (full
 per-field traces with `verify-src` tags), `shots/*.png` (8 end-of-fill, Submit untouched),
 `CONCURRENT_REPORT.md`; solo-Ashby control: `runs/oa_ashby_solo/ashby_solo.json` (+ `.png`).
+
+---
+
+## 2026-06-30 — 99% push — direct-CDP + visual-bind + clean lifecycle
+
+**Verdict: NOT at 99% generically. Greenhouse PASSES (100%); Lever and Ashby FAIL on a single
+shared root cause — the READ/perception path, not the write path, not crashes.**
+
+### Per-ATS live fill-rate (this push)
+
+| ATS | Fill | DONE / non-skip | ESCALATE | Crash markers | Secs | Run |
+|-----|------|-----------------|----------|---------------|------|-----|
+| **Greenhouse** | **100%** | 16/16 | 0 | 0 | 65.1 | `runs/oa_live/gh3.json` + `gh3.png` |
+| **Lever** | **36%** | 5/14 | 9 | 0 | 298.9 | `runs/oa_live/lever2.json` + `lever2.log` |
+| **Ashby** | **50%** | 4/8 | 4 | 0 | 63.9 | `runs/oa_live/ashby.json` + `ashby.log` |
+
+Zero orphan browsers before AND after the sweep (`pgrep -f browser-use-user-data-dir == 0`).
+Fill-only held on all three — every run reached an end-of-fill state with NO submit control touched
+(GH screenshot shows the "Submit application" button untouched; Lever/Ashby never reached submit
+because fields escalated mid-form).
+
+### Greenhouse — PASS, visually confirmed (gh3.png / gh3_top.png)
+
+All 16 fillable fields committed and visible in the screenshot: First=Pyry, Last=Halonen,
+Email=pyry.halonen.test@example.com, Phone mask-reformatted to `+1 415 555 0177`, Country +1,
+Resume bar present, Website, in-person combobox=Yes, AI-Policy=Yes, interviewed-before=No,
+visa/relocation=No, start-date=2026-09-01, the address combobox, and the "Why Anthropic?" textarea.
+The 3 SKIPs are 2 optional free-text questions with no mapped value + the EEO block left blank by the
+`_SENSITIVE_TOKENS` guard — correctly EXCLUDED from the denominator, not failures. GH's `/jobs/<id>`
+page is server-rendered and DOES go idle, so the watchdog's full-page serialize returns fast — which
+is exactly why GH works and the SPAs don't.
+
+### Lever + Ashby — FAIL, ONE shared root cause: the perception path still routes through the watchdog
+
+Both fail with the identical signature. After the first field that needs a live re-serialize (Lever:
+the `location` geocomplete; Ashby: the `location` field), EVERY subsequent field throws a bare
+`EXC:TimeoutError` with an empty trace — it throws BEFORE `S0_GUARD`, i.e. inside `_s1_locate`'s very
+first `perc.get_state` call. `lever2.log` shows the smoking gun on every field:
+
+```
+DOMWatchdog.on_BrowserStateRequestEvent ⌛️ 30s/30s  ⬅️ TIMEOUT HERE
+```
+
+**Root cause (source-confirmed, not inferred):** the WRITE path was correctly made direct-CDP — basic
+text on Lever DOES land (name/email/phone/LinkedIn DONE), proving the write watchdog-bypass works on a
+never-idle SPA. But the READ/perception path was NOT. `oa_perception.get_state` (line 228) calls
+`session.get_browser_state_summary(cached=False)`, which dispatches `BrowserStateRequestEvent ->
+DOMWatchdog.on_BrowserStateRequestEvent -> DomService.get_serialized_dom_tree`. On a never-idle
+`/apply` SPA the serializer waits for a page-readiness/idle condition that never settles and hits the
+30s cap on EVERY call. The state machine calls `get_state` on EVERY field (`_s1_locate`, `_settle`,
+`S3_OPEN`, `S4_SEARCH`, `S_CHOICE`) and the verify oracle reads DOM state too — so with
+FIELD_DEADLINE=28s, the first `get_state` overruns the budget and the field escalates with the raw
+`TimeoutError`. This is the SAME class of bug the write path already solved: a watchdog readiness gate
+on a page that never goes idle.
+
+The remaining-field list per ATS is therefore NOT a per-field matching problem — it is uniform:
+
+* **Lever (9 ESCALATE):** `location` (geocomplete, search-exhausted then no-escape), then
+  authorized-to-work radio, sponsorship radio, "how did you hear" select, 2 textareas
+  (favorite-project, why-Palantir), AI-notetaker consent radio, marketing-consent checkbox, and the
+  resume file — all 8 after `location` died with `EXC:TimeoutError` (never classified).
+* **Ashby (4 ESCALATE):** LinkedIn text, the exceptional-performance text, resume file, cover-letter
+  file — all 4 with `EXC:TimeoutError` after the `location` field.
+
+Note these would otherwise fill: they are mapped, intrinsic-typed, and the matching/brain layer is the
+same one that hit 100% on GH. The ONLY thing standing between Lever/Ashby and ~99% is the read path.
+
+### Precise next step (single fix, generic, label-free)
+
+Make the READ path bypass the watchdog the same way the WRITE path does — read the serialized DOM via
+the direct-CDP plumbing `oa_dom_value` already proves (`cdp_client_for_node -> DOM.resolveNode ->
+Runtime.callFunctionOn`, or a direct `DOM.getDocument` / `DOMSnapshot.captureSnapshot` over the CDP
+session), instead of `session.get_browser_state_summary(cached=False)` which goes through
+`BrowserStateRequestEvent -> DOMWatchdog` and waits for an idle that a never-idle SPA never reaches.
+Concretely: give `oa_perception.get_state` a direct-CDP snapshot path that does NOT await page
+readiness — build `selector_map` from a CDP DOM/AX snapshot taken immediately, bypassing the watchdog's
+idle gate. This is the read-side mirror of the already-landed write fix; it is fully generic (no
+per-ATS branch, no label dependence) and is the one change that should take Lever and Ashby from
+36%/50% to the GH-class ~99%, since their matching/brain/verify layers already work.
+
+**Bottom line:** the unified design is NOT yet at 99% generic+label-free+visual. It is one fix away —
+porting the proven direct-CDP bypass from the write path to the read path (`get_state`).

@@ -91,12 +91,36 @@ class ClassifyHints:
 
     options        : non-empty -> nature coerced to CLOSED_LIST (or BOOLEAN if options ⊆ yes/no)
     known_multi    : a known multi-value label (Skills/Languages/Technologies) -> MULTI
-    value_is_list  : the value is a comma-joined set the caller wants spread across pills -> MULTI
+    value_is_list  : the value is a comma-joined set the caller wants spread across pills.
+
+    MULTI mis-route fix: ``value_is_list`` ALONE is NOT a multi signal — a single location/city
+    value ("San Francisco, CA") naturally carries a comma, and the old "comma -> MULTI" rule sent
+    it to S_MULTI_LOOP and tried to type "San Francisco" then "CA" as separate pills. A comma only
+    means MULTI when the FIELD genuinely takes many values, i.e. ``known_multi`` is also set (a
+    Skills/Languages/Technologies label). So MULTI now requires ``known_multi`` (a real multi-value
+    field); a comma in the value of a single-value field is ignored here and the field classifies on
+    its label meaning (a location -> SEARCH).
     """
 
     options: list[str] = field(default_factory=list)
     known_multi: bool = False
     value_is_list: bool = False
+
+
+# Label tokens that genuinely mark a MULTI-value field (N values into one widget -> pills). The ONLY
+# things that license the comma-in-value -> MULTI route; a location/city comma must never reach it.
+_MULTI_LABEL_TOKENS: frozenset[str] = frozenset(
+    {"skill", "skills", "language", "languages", "technology", "technologies", "tool", "tools"}
+)
+
+
+def is_multi_label(label_text: str) -> bool:
+    """True iff the field's VISIBLE label names a genuine multi-value field (Skills/Languages/
+    Technologies/Tools). Used to gate the comma-in-value -> MULTI route so a single location/city
+    value with a comma ("San Francisco, CA") is NEVER spread across pills. Substring match on the
+    label's lower-cased tokens — no per-ATS string, purely the human-readable label meaning."""
+    low = (label_text or "").lower()
+    return any(tok in low for tok in _MULTI_LABEL_TOKENS)
 
 
 # --------------------------------------------------------------------------- #
@@ -114,7 +138,7 @@ async def classify_nature(
     Deterministic post-conditions (§4.3) are applied in CODE *before and after* the model so
     a model wobble cannot defeat a known fact:
       * ``hints.options`` non-empty  -> CLOSED_LIST (BOOLEAN if those options are just yes/no)
-      * ``hints.known_multi`` / ``hints.value_is_list`` -> MULTI
+      * ``hints.known_multi``         -> MULTI (a comma in the value alone does NOT — see ClassifyHints)
       * a bare yes/no/agree value     -> BOOLEAN
 
     Gap-B safety: the model's ``free_text`` answer is the ONLY path to FREE_TEXT, and it is a
@@ -131,7 +155,11 @@ async def classify_nature(
             return "BOOLEAN"
         if opt_keys:
             return "CLOSED_LIST"
-    if h.known_multi or h.value_is_list:
+    # MULTI requires a GENUINE multi-value field (known_multi). A comma in the value (value_is_list)
+    # is only honoured WHEN the field is also a known multi-value field — otherwise a single location
+    # value "San Francisco, CA" would be split across pills (the location -> MULTI mis-route). A bare
+    # comma on a single-value field is ignored here; the field classifies on its label meaning below.
+    if h.known_multi:
         return "MULTI"
     if _norm_lower(value) in _BOOL_VALUES:
         return "BOOLEAN"
@@ -419,6 +447,108 @@ async def pick_control_by_vision(
     return candidates[idx]
 
 
+# --------------------------------------------------------------------------- #
+# 6. pick_control_by_marks — VISUAL SET-OF-MARKS bind for a LABEL-FREE card.
+#    The locate LAST RESORT when STRUCTURE + spatial + grouped-text all miss (a non-text
+#    card whose heading shares NO tokens with any control — a rich/imaged heading, an icon
+#    radio group). We mark the candidate controls on the screenshot the way browser-use's own
+#    set-of-marks does (numbered boxes) and ask the cheap VLM which marked control is the answer
+#    for THIS question — binding a card the way a HUMAN SEES it, with no renameable label.
+#
+#    REAL set-of-marks API (verified, NOT guessed):
+#      browser_use/browser/python_highlights.py:409 create_highlighted_screenshot(
+#          screenshot_b64, selector_map, ..., filter_highlight_ids=False) — draws a numbered
+#      dashed box per element; with filter_highlight_ids=False the overlay number is EXACTLY
+#      ``str(element.backend_node_id)`` (process_element_highlight :396). So a selector_map of
+#      ONLY the candidate controls yields a screenshot where each candidate is boxed + labeled
+#      with its backend_node_id, and the VLM's chosen number maps straight back to the node.
+# --------------------------------------------------------------------------- #
+async def pick_control_by_marks(session: Any, label_text: str, candidates: list[Any], *, llm: Any = None) -> Any | None:
+    """Bind a label-free card by VISUAL set-of-marks: mark the candidate controls on the page
+    screenshot (browser-use ``create_highlighted_screenshot``, numbered by backend_node_id) and ask
+    the cheap VLM which marked control is the input for the question ``label_text``. ONE screenshot +
+    ONE cheap VLM call, counted through ``vision_verify``'s per-page/-field budget. Returns the chosen
+    node, or None on any failure / no clear pick (caller falls back). GENERIC — no label/aria/data-*."""
+    cands = [c for c in candidates if getattr(c, "backend_node_id", None) is not None]
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    # Budget guard: a capped page returns no pick without a screenshot (no spend).
+    if _vv._VLM_CALLS["n"] >= _vv.VLM_MAX_CALLS:
+        return None
+    try:
+        png = await session.take_screenshot()
+    except Exception:
+        return None
+    import base64
+
+    raw_b64 = base64.b64encode(png).decode()
+
+    # Build the set-of-marks: a selector_map of ONLY the candidate controls. Each draws a numbered
+    # box labeled with its backend_node_id (filter_highlight_ids=False), so the VLM's number == node.
+    by_id = {int(c.backend_node_id): c for c in cands}
+    try:
+        from browser_use.browser.python_highlights import create_highlighted_screenshot
+
+        marked_b64 = await create_highlighted_screenshot(raw_b64, by_id, filter_highlight_ids=False)
+    except Exception:
+        return None
+
+    legend = ", ".join(str(i) for i in by_id)
+    prompt = (
+        f"This is a job-application web form screenshot with candidate input controls outlined by "
+        f'dashed boxes, each labeled with a NUMBER ({legend}). The question is "{label_text}". '
+        f'Reply STRICT JSON {{"mark": <the NUMBER of the boxed control that is the ANSWER for this '
+        f"question — the input/radio/checkbox/select/textarea sitting directly under or beside that "
+        f'question heading>}}. If none of the boxed controls fits, reply {{"mark": -1}}.'
+    )
+    try:
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+        msg: Any = UserMessage(
+            content=[
+                ContentPartTextParam(type="text", text=prompt),
+                ContentPartImageParam(
+                    type="image_url",
+                    image_url=ImageURL(url=f"data:image/png;base64,{marked_b64}", detail="low", media_type="image/png"),
+                ),
+            ]
+        )
+    except Exception:
+        msg = prompt
+    try:
+        resp = await _vv._vlm().ainvoke([msg])
+        reply = (getattr(resp, "completion", None) or str(resp)).strip()
+    except Exception:
+        return None
+    _vv._VLM_CALLS["n"] += 1  # count the spend so the per-field VLM budget sees it (same as visual_check)
+
+    mark = _parse_mark(reply)
+    if mark is None or mark not in by_id:
+        return None
+    return by_id[mark]
+
+
+def _parse_mark(raw: str) -> int | None:
+    """Tolerant parse of the VLM's {"mark": N} (or bare integer) reply -> int, or None."""
+    import json
+    import re as _re
+
+    s = (raw or "").strip()
+    with contextlib.suppress(Exception):
+        m = _re.search(r"\{.*\}", s, _re.DOTALL)
+        if m:
+            obj = json.loads(m.group(0).replace("'", '"'))
+            if isinstance(obj.get("mark"), int):
+                return obj["mark"]
+    with contextlib.suppress(Exception):
+        m = _re.search(r"-?\d+", s)
+        if m:
+            return int(m.group(0))
+    return None
+
+
 def _parse_index(raw: str) -> int | None:
     """Tolerant parse of the VLM's {"index": N} reply -> int, or None."""
     import json
@@ -579,6 +709,26 @@ async def _selftest() -> int:
     chk("yes value -> BOOLEAN (no llm)", n_bool_val == "BOOLEAN", n_bool_val)
     n_multi = await classify_nature("Languages", "x", ClassifyHints(known_multi=True), llm=llm)
     chk("hints.known_multi -> MULTI", n_multi == "MULTI", n_multi)
+
+    # BUILD FIX C — value_is_list ALONE no longer forces MULTI (the location mis-route). A comma in a
+    # single-value field's value must NOT split it across pills; only known_multi makes a field MULTI.
+    n_comma_only = await classify_nature(
+        "Current location", "San Francisco, CA", ClassifyHints(value_is_list=True), llm=llm
+    )
+    chk(
+        "value_is_list alone -> NOT MULTI (location mis-route fix)",
+        n_comma_only != "MULTI",
+        n_comma_only,
+    )
+    # is_multi_label: only genuine multi labels (Skills/Languages/Technologies/Tools), never a location.
+    chk(
+        "is_multi_label: Skills/Languages yes, location/city no",
+        is_multi_label("Technical Skills")
+        and is_multi_label("Languages")
+        and not is_multi_label("Current location")
+        and not is_multi_label("City"),
+        (is_multi_label("Technical Skills"), is_multi_label("Current location")),
+    )
     chk(
         "classify return is always a Nature member",
         all(
@@ -695,6 +845,24 @@ async def _selftest() -> int:
     )
 
     _vv.visual_check = orig_visual_check  # type: ignore[assignment]
+
+    # --- _parse_mark (set-of-marks reply parse, pure, $0) ---
+    chk("_parse_mark JSON", _parse_mark('{"mark": 642}') == 642, _parse_mark('{"mark": 642}'))
+    chk("_parse_mark JSON single-quote", _parse_mark("{'mark': 7}") == 7, _parse_mark("{'mark': 7}"))
+    chk("_parse_mark bare int", _parse_mark("the answer is 13") == 13, _parse_mark("the answer is 13"))
+    chk("_parse_mark -1 (no fit)", _parse_mark('{"mark": -1}') == -1, _parse_mark('{"mark": -1}'))
+    chk("_parse_mark garbage -> None", _parse_mark("nope") is None, _parse_mark("nope"))
+
+    # --- pick_control_by_marks: single candidate short-circuits to it (no screenshot, no VLM) ---
+    class _N:
+        def __init__(self, b: int) -> None:
+            self.backend_node_id = b
+
+    one = _N(99)
+    picked_one = await pick_control_by_marks(None, "Q", [one], llm=llm)
+    chk("pick_control_by_marks single candidate -> that node", picked_one is one, picked_one)
+    picked_none = await pick_control_by_marks(None, "Q", [], llm=llm)
+    chk("pick_control_by_marks no candidates -> None", picked_none is None, picked_none)
 
     ok = True
     print("\n=== oa_brain offline self-test (fake llm, no browser/VLM, $0) ===")

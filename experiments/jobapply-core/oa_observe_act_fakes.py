@@ -403,6 +403,23 @@ def make_choice_card(
     return controls
 
 
+def make_labelfree_choice_card(
+    heading_text: str,
+    options: list[str],
+    *,
+    base_bnid: int,
+    kind: str = "radio",
+    top: int = 240,
+) -> list[Any]:
+    """A radio/checkbox card whose visible HEADING shares NO tokens with the question we search for —
+    e.g. an imaged/rich heading rendered as unrelated alt text ('Work eligibility' for the question
+    'Are you authorized to work?'). Structure (radios named 'Yes'/'No'), shallow spatial, AND the
+    grouped-text card tier all MISS (the heading does not name the field), so ONLY the VISUAL
+    set-of-marks tier can bind it. Same DOM shape as ``make_choice_card`` — returns the option controls.
+    """
+    return make_choice_card(heading_text, options, base_bnid=base_bnid, kind=kind, top=top)
+
+
 def make_single_input_card(
     question: str,
     *,
@@ -458,6 +475,108 @@ def _hidden_file_input(bnid: int, *, name: str = "resume") -> Any:
     )
 
 
+# --------------------------------------------------------------------------- #
+# A fake CDP session that backs the DIRECT-CDP action backend (oa_cdp_action, the DEFAULT) offline.
+# It interprets exactly the CDP calls oa_cdp_action issues:
+#   DOM.resolveNode        -> {object:{objectId}}        (resolve always succeeds for a real bnid)
+#   Runtime.callFunctionOn -> reads the JS body to decide:
+#       * read oracle (_READ_VALUE_JS)  -> the scripted read_value
+#       * set value (_SET_VALUE_JS)     -> echoes the arg (success) + records last_type_text
+#       * select   (_SELECT_JS)         -> returns the wanted text + records last_select_text
+#       * this.click() (_JS_CLICK_JS)   -> records last_click_text for an option node, True
+#       * getBoundingClientRect (_RECT_JS) -> the node's box (so cdp_click takes the mouse path)
+#   DOM.focus              -> noop
+#   Input.dispatchMouseEvent / dispatchKeyEvent -> record a click / type + mount on-click/on-type delta
+# This routes the CDP backend onto the SAME FakeSession recorders the event-bus _handle uses, so the
+# state-machine self-test asserts identically on either backend. $0, no browser, no network.
+# --------------------------------------------------------------------------- #
+class _FakeCdpActionSession:
+    def __init__(self, owner: FakeSession, node: Any, *, read_value: str) -> None:
+        self.session_id = "sess-fake"
+        self._owner = owner
+        self._node = node
+        self._bnid = getattr(node, "backend_node_id", None)
+        self._read_value = read_value
+        self._typed = ""  # accumulates keystrokes for a typeahead type (per-char dispatch)
+        self.cdp_client = type("C", (), {"send": self._Send(self)})()
+
+    class _Send:
+        def __init__(self, sess: _FakeCdpActionSession) -> None:
+            outer = sess
+
+            async def _resolve(params: Any = None, session_id: Any = None) -> dict:
+                return {"object": {"objectId": f"obj-{outer._bnid}"}}
+
+            async def _call(params: Any = None, session_id: Any = None) -> dict:
+                fn = (params or {}).get("functionDeclaration", "")
+                args = [a.get("value") for a in (params or {}).get("arguments", [])]
+                return {"result": {"value": outer._run_js(fn, args)}}
+
+            async def _focus(params: Any = None, session_id: Any = None) -> dict:
+                return {}
+
+            async def _mouse(params: Any = None, session_id: Any = None) -> dict:
+                outer._on_mouse(params or {})
+                return {}
+
+            async def _key(params: Any = None, session_id: Any = None) -> dict:
+                outer._on_key(params or {})
+                return {}
+
+            self.DOM = type("DOM", (), {"resolveNode": staticmethod(_resolve), "focus": staticmethod(_focus)})()
+            self.Runtime = type("Runtime", (), {"callFunctionOn": staticmethod(_call)})()
+            self.Input = type(
+                "Input",
+                (),
+                {"dispatchMouseEvent": staticmethod(_mouse), "dispatchKeyEvent": staticmethod(_key)},
+            )()
+
+    # -- JS body dispatch (callFunctionOn) -------------------------------------
+    def _run_js(self, fn: str, args: list[Any]) -> Any:
+        if "selectedIndex" in fn:  # _SELECT_JS — record the committed select text
+            want = str(args[0]) if args else ""
+            self._owner.last_select_text = want
+            return want  # non-empty -> cdp_select True
+        if "nativeSetter" in fn:  # _SET_VALUE_JS (unique marker) — echo the arg
+            text = str(args[0]) if args else ""
+            if text != "":  # a clear ('') must NOT overwrite last_type_text
+                self._owner.last_type_text = text
+                if self._bnid in self._owner._on_type:  # a value-set on a search box mounts its delta
+                    self._owner._mount(self._owner._on_type[self._bnid])
+            return text  # cdp_set_value success = echo == text
+        if "this.click()" in fn:  # _JS_CLICK_JS — option-cell click commit (box-less fallback)
+            self._record_click()
+            return True
+        if "getBoundingClientRect" in fn:  # _RECT_JS — give the node's box so the mouse path is taken
+            rect = getattr(self._node, "absolute_position", None)
+            if rect is not None and rect.width and rect.height:
+                return {"x": rect.x, "y": rect.y, "width": rect.width, "height": rect.height}
+            return None
+        # default: the read oracle (_READ_VALUE_JS) -> the scripted live DOM value.
+        return self._read_value
+
+    # -- Input dispatch (trusted mouse / key) ----------------------------------
+    def _on_mouse(self, params: dict) -> None:
+        # cdp_click sends move/press/release; record a click on press (one logical click).
+        if params.get("type") == "mousePressed":
+            self._record_click()
+
+    def _on_key(self, params: dict) -> None:
+        # cdp_type keystroke path sends keyDown/char/keyUp; accumulate the chars then mount delta.
+        if params.get("type") == "char":
+            self._typed += str(params.get("text", ""))
+            self._owner.last_type_text = self._typed
+            if self._bnid in self._owner._on_type and self._typed:
+                self._owner._mount(self._owner._on_type[self._bnid])
+
+    def _record_click(self) -> None:
+        node = self._node
+        if self._bnid in self._owner._on_click:  # the trigger control opening a menu
+            self._owner._mount(self._owner._on_click[self._bnid])
+        elif node is not None and (getattr(node, "attributes", {}) or {}).get("role") == "option":
+            self._owner.last_click_text = self._owner._opt_text_for_node(node)
+
+
 class FakeSession:
     """The offline stand-in for browser_use.BrowserSession used by the state machine tests."""
 
@@ -472,6 +591,7 @@ class FakeSession:
         verdict: str = '{"filled": true, "matches": true}',
         verdict_sequence: list[str] | None = None,
         url: str = "https://example.test/apply",
+        marks_reply: str | None = None,
     ) -> None:
         self._base = {c.backend_node_id: c for c in controls}
         self._live: dict[int, Any] = dict(self._base)
@@ -485,6 +605,10 @@ class FakeSession:
         self._verdict = verdict
         self._vseq = list(verdict_sequence or [])
         self._url = url
+        # marks_reply: the raw text the fake VLM returns for the set-of-marks pick (e.g.
+        # '{"mark": 642}'). When set, ``_install_marks_vlm`` is used so brain.pick_control_by_marks
+        # resolves to the node whose backend_node_id == that mark — no real VLM, no network.
+        self.marks_reply = marks_reply
         self.event_bus = _FakeBus(self)
 
         # records for assertions
@@ -506,19 +630,38 @@ class FakeSession:
     async def get_current_page_url(self) -> str:
         return self._url
 
-    # -- DOM read-back entrypoint (oa_dom_value.read_dom_value) ------------------
-    # read_dom_value resolves a node to an objectId then callFunctionOn-reads its value. We serve
-    # the scripted dom_values[backend_node_id] (default "" -> visual-only, falls to the VLM aid).
+    # -- DOM read-back + DIRECT-CDP WRITE entrypoint ----------------------------
+    # Both the read oracle (oa_dom_value.read_dom_value) AND the DIRECT-CDP action backend
+    # (oa_cdp_action.*, the SPA-hang fix that is now the DEFAULT) resolve a node via
+    # cdp_client_for_node -> DOM.resolveNode -> Runtime.callFunctionOn / Input.*. We return ONE fake
+    # CDP session serving BOTH: the scripted read value for the read oracle, AND the same write
+    # side-effects the event-bus _handle records (last_type_text / last_select_text / last_click_text
+    # + the scripted delta mount), so the WHOLE state machine runs identically on the CDP backend
+    # with NO browser, NO network.
     async def cdp_client_for_node(self, node: Any) -> Any:
-        from oa_dom_value import _FakeCdpSend, _FakeCdpSession
-
         bnid = getattr(node, "backend_node_id", None)
         val = self._dom_values.get(bnid, "")
-        return _FakeCdpSession(_FakeCdpSend(object_id="obj", value=val))
+        return _FakeCdpActionSession(self, node, read_value=val)
+
+    async def get_or_create_cdp_session(self, target_id: Any = None, focus: bool = True) -> Any:
+        # root session for a coordinate-only click (oa_cdp_action.cdp_click_xy fallback path).
+        return _FakeCdpActionSession(self, None, read_value="")
+
+    async def get_element_coordinates(self, backend_node_id: int, cdp_session: Any) -> Any:
+        from browser_use.dom.views import DOMRect
+
+        node = self._live.get(backend_node_id) or self._base.get(backend_node_id)
+        rect = getattr(node, "absolute_position", None) if node is not None else None
+        if rect is not None and rect.width and rect.height:
+            return DOMRect(x=rect.x, y=rect.y, width=rect.width, height=rect.height)
+        return None
 
     # -- verify entrypoints (only reached if visual_check is NOT patched) --------
     async def take_screenshot(self) -> bytes:
-        return b"\x89PNG\r\n"
+        # A REAL minimal PNG so browser-use's set-of-marks (create_highlighted_screenshot, which
+        # PIL-decodes the bytes) succeeds offline — the marks-tier locate path needs a decodable
+        # image. Pre-existing tests that only patch visual_check never inspect these bytes.
+        return _blank_png()
 
     # -- action dispatch --------------------------------------------------------
     def _mount(self, cluster: list[tuple[str, tuple[int, int]]]) -> None:
@@ -597,6 +740,56 @@ class _ScrollRevealSession(FakeSession):
                 node.is_visible = True  # the card scrolled into the viewport -> now visible
             return _FakeEvent(None)
         return super()._handle(event)
+
+
+# --------------------------------------------------------------------------- #
+# Set-of-marks locate test doubles: a real blank PNG + a fake VLM that returns a
+# scripted {"mark": N} reply for brain.pick_control_by_marks, so the VISUAL bind path
+# (Tier-2d) is proven OFFLINE — no real VLM, no network ($0). pick_control_by_marks calls
+# vision_verify._vlm().ainvoke([msg]) directly (no output_format), so we stub _vv._vlm.
+# --------------------------------------------------------------------------- #
+_PNG_CACHE: dict[str, bytes] = {}
+
+
+def _blank_png() -> bytes:
+    if "p" not in _PNG_CACHE:
+        import io
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGBA", (400, 300), (255, 255, 255, 255)).save(buf, format="PNG")
+        _PNG_CACHE["p"] = buf.getvalue()
+    return _PNG_CACHE["p"]
+
+
+class _MarksReply:
+    """Mimics a browser-use LLM response: a ``.completion`` string the marks parser reads."""
+
+    def __init__(self, text: str) -> None:
+        self.completion = text
+
+
+class _FakeMarksVLM:
+    def __init__(self, reply: str) -> None:
+        self._reply = reply
+
+    async def ainvoke(self, messages: Any) -> _MarksReply:  # no output_format — matches the marks call
+        return _MarksReply(self._reply)
+
+
+def install_marks_vlm(reply: str) -> Any:
+    """Install a fake ``vision_verify._vlm`` that returns ``reply`` (e.g. '{"mark": 642}') for the
+    set-of-marks pick. Returns the ORIGINAL ``_vlm`` so the caller can restore it. The per-page VLM
+    counter is bumped by pick_control_by_marks itself (same as live), so per-field budget accounting
+    is exercised too."""
+    orig = _brain._vv._vlm
+    _brain._vv._vlm = lambda: _FakeMarksVLM(reply)  # type: ignore[assignment]
+    return orig
+
+
+def restore_vlm(orig: Any) -> None:
+    _brain._vv._vlm = orig  # type: ignore[assignment]
 
 
 # --------------------------------------------------------------------------- #

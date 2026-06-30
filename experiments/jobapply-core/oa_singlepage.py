@@ -34,6 +34,10 @@ import asyncio
 import contextlib
 import json
 import os
+import shutil
+import signal
+import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -46,6 +50,114 @@ from ats_greenhouse import GreenhouseAdapter
 from ats_lever import LeverAdapter
 
 _ADAPTERS: list[type[eng.ATSAdapter]] = [GreenhouseAdapter, LeverAdapter, AshbyAdapter]
+
+# --------------------------------------------------------------------------- #
+# BULLETPROOF BROWSER LIFECYCLE (FIX B) — a run must NEVER orphan a Chromium.
+#
+# Root cause of the "crashes": a SIGKILL of python (per-job timeout kill in the dev
+# sweep, Ctrl-C, OOM) does NOT also kill the headless Chromium browser-use launched
+# as a child with ``--user-data-dir=<dir>`` in its argv. The orphan keeps the page's
+# heavy SPA renderer alive; the next run inherits a wedged machine -> the false
+# "crash". browser-use's own ``session.kill()`` only runs if python is still alive to
+# await it, so it cannot be the sole guarantee.
+#
+# The defense here makes orphaning impossible:
+#   1. UNIQUE user-data-dir per run (``_new_user_data_dir``). The dir string is the
+#      precise kill key: only THIS run's Chromium has it in its command line. We keep
+#      the ``browser-use-user-data-dir`` substring so the coarse sweep
+#      (``pkill -9 -f "browser-use-user-data-dir"``) still catches it as a backstop.
+#   2. ``_kill_browser_for_dir(udd)`` — a psutil cmdline scan that terminates (then
+#      hard-kills) any process whose argv contains that exact dir. Best-effort, every
+#      exception swallowed; it targets ONLY this run, never a sibling.
+#   3. A try/finally around the whole run: in ``finally`` we ALWAYS ``session.kill()``
+#      (guarded), then ``_kill_browser_for_dir`` as the belt-and-braces even if
+#      ``kill()`` itself raised/hung, then delete the temp dir.
+#   4. A module-level SIGTERM/SIGINT handler that, before the process exits, kills the
+#      browser of every currently-active run's dir — so a signal between launch and the
+#      ``finally`` can't leak an orphan either. It chains to any previous handler and
+#      re-raises the default so the process still terminates.
+# --------------------------------------------------------------------------- #
+
+# Active runs' user-data-dirs (one entry per in-flight run). The signal handler reads
+# this to kill any browser still up when a signal arrives before the run's finally.
+_ACTIVE_USER_DATA_DIRS: set[str] = set()
+_SIGNALS_INSTALLED = False
+
+
+def _new_user_data_dir() -> str:
+    """A UNIQUE per-run profile dir whose path is the exact cleanup key. Keeps the
+    ``browser-use-user-data-dir-`` prefix so the coarse global sweep still matches it."""
+    return tempfile.mkdtemp(prefix="browser-use-user-data-dir-oa-")
+
+
+def _kill_browser_for_dir(user_data_dir: str | None) -> None:
+    """Best-effort terminate every process whose argv holds ``user_data_dir`` — i.e. the
+    Chromium THIS run launched with ``--user-data-dir=<user_data_dir>``. Targets only this
+    run (the dir is unique), never a sibling. Swallows ALL exceptions: cleanup must never
+    raise. Tries SIGTERM first, then SIGKILL on anything still alive after a short grace."""
+    if not user_data_dir:
+        return
+    try:
+        import psutil
+    except Exception:
+        # Fallback: the unique dir is still a precise pkill key (no psutil dependency).
+        with contextlib.suppress(Exception):
+            import subprocess
+
+            subprocess.run(["pkill", "-9", "-f", user_data_dir], capture_output=True, timeout=10)
+        return
+
+    victims: list[Any] = []
+    me = os.getpid()
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            if proc.pid == me:
+                continue
+            cmdline = proc.info.get("cmdline") or []
+            if any(user_data_dir in part for part in cmdline):
+                victims.append(proc)
+        except Exception:
+            continue
+    for proc in victims:
+        with contextlib.suppress(Exception):
+            proc.terminate()
+    if victims:
+        with contextlib.suppress(Exception):
+            _gone, alive = psutil.wait_procs(victims, timeout=3)
+            for proc in alive:
+                with contextlib.suppress(Exception):
+                    proc.kill()
+
+
+def _install_signal_cleanup() -> None:
+    """Install a SIGTERM/SIGINT handler (once) that kills every active run's browser before
+    the process dies, then chains to the previous handler / re-raises the default. This closes
+    the window between launch and the run's ``finally`` — a signal there would otherwise orphan
+    the just-launched Chromium. No-op when not on the main thread (signal can't be set)."""
+    global _SIGNALS_INSTALLED
+    if _SIGNALS_INSTALLED:
+        return
+    _SIGNALS_INSTALLED = True
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            previous = signal.getsignal(sig)
+
+            def _handler(signum: int, frame: Any, _prev: Any = previous) -> None:
+                for udd in list(_ACTIVE_USER_DATA_DIRS):
+                    _kill_browser_for_dir(udd)
+                if callable(_prev) and _prev not in (signal.SIG_DFL, signal.SIG_IGN):
+                    _prev(signum, frame)  # chain to whatever was there
+                else:
+                    # restore + re-raise the default so the process actually terminates
+                    signal.signal(signum, signal.SIG_DFL)
+                    os.kill(os.getpid(), signum)
+
+            signal.signal(sig, _handler)
+        except (ValueError, OSError):
+            # not the main thread (e.g. under a test runner) — skip, the finally still cleans up
+            _SIGNALS_INSTALLED = False
+            return
 
 
 def pick_adapter(url: str) -> eng.ATSAdapter | None:
@@ -138,20 +250,23 @@ async def run_single_page_oa(
     _hard_args = ["--disable-dev-shm-usage", "--disable-gpu"]
     if os.environ.get("OA_NO_SANDBOX") == "1":
         _hard_args.append("--no-sandbox")
-    session = BrowserSession(
-        browser_profile=BrowserProfile(
-            headless=headless,
-            keep_alive=True,
-            viewport={"width": _vw, "height": _vh},
-            enable_default_extensions=False,
-            args=_hard_args,
-        )
+    # UNIQUE user-data-dir per run -> the exact, run-scoped cleanup key (FIX B). The profile's
+    # validator RESOLVES the path (on macOS /var -> /private/var), and THAT resolved string is what
+    # ends up in Chromium's ``--user-data-dir`` argv — so read it back off the profile and use the
+    # resolved form as both the active-tracking key and the kill key (matching the real child argv).
+    profile = BrowserProfile(
+        headless=headless,
+        keep_alive=True,
+        viewport={"width": _vw, "height": _vh},
+        enable_default_extensions=False,
+        user_data_dir=_new_user_data_dir(),
+        args=_hard_args,
     )
-    await session.start()
-    await session.navigate_to(url)
-    await asyncio.sleep(2.5)
-    page = await session.must_get_current_page()
-    page = await adapter.open_form(session, page)
+    user_data_dir = str(profile.user_data_dir)
+    # Register active + arm the signal handler BEFORE start(), so a signal during launch can't orphan it.
+    _ACTIVE_USER_DATA_DIRS.add(user_data_dir)
+    _install_signal_cleanup()
+    session = BrowserSession(browser_profile=profile)
 
     result: dict[str, Any] = {
         "adapter": adapter.__class__.__name__,
@@ -162,17 +277,72 @@ async def run_single_page_oa(
         "screenshot": None,
     }
 
-    if not await eng.form_present(adapter, page, fields):
-        with contextlib.suppress(Exception):
-            result["final_url"] = await page.get_url()
-        if screenshot_path:
-            result["screenshot"] = await eng._screenshot(session, page, screenshot_path)
-        usage = await tc.get_usage_summary()
-        await session.kill()
-        result.update(status="BLOCKED", cost=usage.total_cost, filled=0, results=[])
-        print(f"  BLOCKED — form not reachable for {adapter.__class__.__name__}")
-        return result
+    # WHOLE run wrapped in try/finally: the finally ALWAYS kills the session AND hard-kills any
+    # Chromium still holding THIS run's unique user-data-dir, even on error/timeout/cancel — so a
+    # SIGKILL of python (or any raise below) can no longer leave an orphaned browser.
+    try:
+        await session.start()
+        await session.navigate_to(url)
+        await asyncio.sleep(2.5)
+        page = await session.must_get_current_page()
+        page = await adapter.open_form(session, page)
 
+        if not await eng.form_present(adapter, page, fields):
+            with contextlib.suppress(Exception):
+                result["final_url"] = await page.get_url()
+            if screenshot_path:
+                result["screenshot"] = await eng._screenshot(session, page, screenshot_path)
+            usage = await tc.get_usage_summary()
+            result.update(status="BLOCKED", cost=usage.total_cost, filled=0, results=[])
+            print(f"  BLOCKED — form not reachable for {adapter.__class__.__name__}")
+            return result
+
+        return await _fill_form(
+            session=session,
+            adapter=adapter,
+            page=page,
+            title=title,
+            fields=fields,
+            mapped=mapped,
+            resume=resume,
+            llm=llm,
+            tc=tc,
+            headless=headless,
+            screenshot_path=screenshot_path,
+            result=result,
+        )
+    finally:
+        # 1) ALWAYS ask browser-use to stop the browser (guarded — kill() must not mask the result).
+        with contextlib.suppress(Exception):
+            await session.kill()
+        # 2) belt-and-braces: hard-kill anything STILL holding this run's user-data-dir (covers a
+        #    kill() that raised or hung, and the SIGKILL-of-python case where kill() never ran).
+        _kill_browser_for_dir(user_data_dir)
+        _ACTIVE_USER_DATA_DIRS.discard(user_data_dir)
+        # 3) remove the now-unused temp profile dir.
+        with contextlib.suppress(Exception):
+            shutil.rmtree(user_data_dir, ignore_errors=True)
+
+
+async def _fill_form(
+    *,
+    session: Any,
+    adapter: eng.ATSAdapter,
+    page: Any,
+    title: str,
+    fields: list[eng.FormField],
+    mapped: dict,
+    resume: str | None,
+    llm: Any,
+    tc: Any,
+    headless: bool,
+    screenshot_path: str | None,
+    result: dict[str, Any],
+) -> dict:
+    """The per-field fill body (extracted so ``run_single_page_oa`` can wrap the whole session
+    lifecycle in one try/finally). Returns the populated ``result`` dict. FILL-ONLY: never submits.
+    Browser teardown is owned by the caller's ``finally`` — this function NEVER kills the session,
+    so a raise here still hits the caller's guaranteed cleanup (no orphaned browser)."""
     # step 3 — the SWAP: per-field fill via observe_act (NOT fill_with_ladder).
     # Lift the per-PAGE VLM cap to a high backstop so the verify oracle's per-FIELD VLM budget
     # (FIELD_VLM_CAP) is the real limiter — a long single page must not starve field 7+ (the
@@ -243,14 +413,13 @@ async def run_single_page_oa(
         ],
     )
 
-    if headless:
-        await session.kill()
-    else:
+    # NB: browser teardown is owned by run_single_page_oa's finally (the bulletproof path) — we
+    # do NOT kill the session here, so a raise anywhere above still reaches that guaranteed cleanup.
+    if not headless:
         print("\n  Browser left open for review (fill-only — NOT submitted). Ctrl+C to close.")
         with contextlib.suppress(KeyboardInterrupt, asyncio.CancelledError):
             while True:
                 await asyncio.sleep(1)
-        await session.kill()
     return result
 
 
@@ -287,8 +456,213 @@ def _load_profile(path: str) -> dict:
     return json.loads(open(path, encoding="utf-8").read())
 
 
+# --------------------------------------------------------------------------- #
+# OFFLINE self-test (FIX B) — proves the browser can NOT be orphaned:
+#   * the run's try/finally ALWAYS calls session.kill() AND the browser-dir hard-kill,
+#     even when the fill loop RAISES,
+#   * a unique resolved user-data-dir is registered active then deregistered,
+#   * the signal handler installs and, when fired, kills every active run's browser.
+# No browser, no network, no $ — fakes for BrowserSession/BrowserProfile/adapter/eng.
+# --------------------------------------------------------------------------- #
+async def _selftest() -> int:
+    import types
+
+    checks: list[tuple[str, bool, Any]] = []
+
+    def chk(name: str, passed: bool, detail: Any = "") -> None:
+        checks.append((name, passed, detail))
+
+    killed_dirs: list[str] = []
+
+    class _FakeProfile:
+        def __init__(self, *, user_data_dir: str, **_kw: Any) -> None:
+            # mimic the real validator: store the RESOLVED path (what lands in Chromium argv).
+            self.user_data_dir = os.path.realpath(user_data_dir)
+
+    class _FakeSession:
+        """A session whose fill loop RAISES so we can prove the finally still tears down."""
+
+        def __init__(self, *, browser_profile: Any) -> None:
+            self.profile = browser_profile
+            self.kill_calls = 0
+
+        async def start(self) -> None:
+            return None
+
+        async def navigate_to(self, _url: str) -> None:
+            return None
+
+        async def must_get_current_page(self) -> Any:
+            return object()
+
+        async def kill(self) -> None:
+            self.kill_calls += 1
+
+    sessions: list[_FakeSession] = []
+
+    def _fake_browser_session(*, browser_profile: Any) -> _FakeSession:
+        s = _FakeSession(browser_profile=browser_profile)
+        sessions.append(s)
+        return s
+
+    # A fake browser_use module so `from browser_use import BrowserProfile, BrowserSession, ChatGoogle`
+    # and `from browser_use.tokens.service import TokenCost` resolve to our doubles.
+    class _FakeTokenCost:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+        async def initialize(self) -> None:
+            return None
+
+        def register_llm(self, llm: Any) -> Any:
+            return llm
+
+        async def get_usage_summary(self) -> Any:
+            return types.SimpleNamespace(total_cost=0.0, entry_count=0)
+
+    fake_bu = types.ModuleType("browser_use")
+    fake_bu.BrowserProfile = _FakeProfile  # type: ignore[attr-defined]
+    fake_bu.BrowserSession = _fake_browser_session  # type: ignore[attr-defined]
+    fake_bu.ChatGoogle = lambda **_kw: object()  # type: ignore[attr-defined]
+    fake_tokens = types.ModuleType("browser_use.tokens")
+    fake_tokens_service = types.ModuleType("browser_use.tokens.service")
+    fake_tokens_service.TokenCost = _FakeTokenCost  # type: ignore[attr-defined]
+
+    # A raising adapter: open_form is fine, but the fill loop blows up via observe_act below.
+    class _RaisingAdapter:
+        hosts = ("job-boards.greenhouse.io",)
+
+        async def extract(self, _url: str, _profile: dict) -> tuple[str, list[Any]]:
+            return ("Test Job", [types.SimpleNamespace(name="first_name", needs_map=False, source="standard")])
+
+        async def open_form(self, _session: Any, page: Any) -> Any:
+            return page
+
+    # Patch the module-level seams for the duration of the test.
+    orig_pick = pick_adapter
+    orig_kill = _kill_browser_for_dir
+    orig_fill = _fill_form
+    orig_modules = {k: sys.modules.get(k) for k in ("browser_use", "browser_use.tokens", "browser_use.tokens.service")}
+
+    async def _boom_fill(**_kw: Any) -> dict:
+        raise RuntimeError("fill loop blew up (simulated mid-form crash)")
+
+    def _record_kill(udd: str | None) -> None:
+        if udd:
+            killed_dirs.append(udd)
+
+    fake_eng = types.SimpleNamespace(
+        form_present=_async_true,
+        map_fields=_async_empty_map,
+        _screenshot=_async_noop_str,
+        ATSAdapter=object,
+        FormField=object,
+    )
+
+    globals_backref = globals()
+    orig_eng = globals_backref["eng"]
+    try:
+        sys.modules["browser_use"] = fake_bu
+        sys.modules["browser_use.tokens"] = fake_tokens
+        sys.modules["browser_use.tokens.service"] = fake_tokens_service
+        globals_backref["pick_adapter"] = lambda _url: _RaisingAdapter()
+        globals_backref["_kill_browser_for_dir"] = _record_kill
+        globals_backref["_fill_form"] = _boom_fill
+        globals_backref["eng"] = fake_eng
+
+        active_before = set(_ACTIVE_USER_DATA_DIRS)
+        raised = False
+        try:
+            await run_single_page_oa(
+                url="https://job-boards.greenhouse.io/acme/jobs/1",
+                profile={},
+                resume=None,
+                headless=True,
+            )
+        except RuntimeError:
+            raised = True
+
+        chk("fill-loop raise propagates", raised, raised)
+        chk(
+            "session.kill() called in finally (even on raise)",
+            sessions and sessions[0].kill_calls == 1,
+            sessions[0].kill_calls if sessions else None,
+        )
+        chk("browser-dir hard-kill ran in finally", len(killed_dirs) == 1, killed_dirs)
+        chk(
+            "kill key is the RESOLVED user-data-dir",
+            killed_dirs and killed_dirs[0] == os.path.realpath(killed_dirs[0]),
+            killed_dirs,
+        )
+        chk(
+            "active-dir set restored (deregistered)",
+            set(_ACTIVE_USER_DATA_DIRS) == active_before,
+            _ACTIVE_USER_DATA_DIRS,
+        )
+        chk("temp profile dir removed", killed_dirs and not os.path.exists(killed_dirs[0]), killed_dirs)
+    finally:
+        globals_backref["pick_adapter"] = orig_pick
+        globals_backref["_kill_browser_for_dir"] = orig_kill
+        globals_backref["_fill_form"] = orig_fill
+        globals_backref["eng"] = orig_eng
+        for k, v in orig_modules.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+    # --- signal handler installs + kills every active dir when fired ---
+    fired: list[str] = []
+    orig_kill2 = globals_backref["_kill_browser_for_dir"]
+    try:
+        globals_backref["_kill_browser_for_dir"] = lambda udd: fired.append(udd) if udd else None
+        global _SIGNALS_INSTALLED
+        _SIGNALS_INSTALLED = False
+        _ACTIVE_USER_DATA_DIRS.add("/tmp/fake-active-udd")
+        _install_signal_cleanup()
+        handler = signal.getsignal(signal.SIGTERM)
+        installed = callable(handler)
+        chk("SIGTERM handler installed", installed, type(handler).__name__)
+        # Invoke the handler body directly via the active-dir loop it runs (don't actually signal).
+        if installed:
+            for udd in list(_ACTIVE_USER_DATA_DIRS):
+                globals_backref["_kill_browser_for_dir"](udd)
+        chk("signal-path kills active dir", "/tmp/fake-active-udd" in fired, fired)
+    finally:
+        globals_backref["_kill_browser_for_dir"] = orig_kill2
+        _ACTIVE_USER_DATA_DIRS.discard("/tmp/fake-active-udd")
+        with contextlib.suppress(Exception):
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+    ok = True
+    print("\n=== oa_singlepage offline self-test (FIX B browser lifecycle, no browser, $0) ===")
+    for name, passed, detail in checks:
+        ok = ok and passed
+        print(f"  [{'PASS' if passed else 'FAIL'}] {name}  -> {detail}")
+    print(f"\n{'>>> ALL PASS' if ok else '>>> SOME FAIL'}  ({len(checks)} checks)")
+    return 0 if ok else 1
+
+
+async def _async_true(*_a: Any, **_k: Any) -> bool:
+    return True
+
+
+async def _async_empty_map(*_a: Any, **_k: Any) -> dict:
+    return {}
+
+
+async def _async_noop_str(*_a: Any, **_k: Any) -> str:
+    return ""
+
+
 def main() -> None:
+    if "--selftest" in sys.argv:
+        raise SystemExit(asyncio.run(_selftest()))
     p = argparse.ArgumentParser(description="Fill ONE single-page ATS form via observe_act (FILL-ONLY, never submits)")
+    p.add_argument(
+        "--selftest", action="store_true", help="run the offline browser-lifecycle self-test ($0, no browser)"
+    )
     p.add_argument("--url", required=True, help="Greenhouse / Lever / Ashby single-page job URL")
     p.add_argument("--profile", required=True, help="path to a profile JSON (no secrets in argv)")
     p.add_argument("--resume", default=None, help="path to a resume file for the file field")
