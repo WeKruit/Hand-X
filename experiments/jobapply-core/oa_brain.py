@@ -340,6 +340,104 @@ async def _dom_value_matches(value: str, dom_value: str, *, llm: Any) -> bool:
     return picked is not None and _norm_lower(picked) == nd
 
 
+# --------------------------------------------------------------------------- #
+# 5. pick_control_by_vision — locate Tier-3 AID: VLM disambiguates a SPATIAL TIE only.
+#    Used ONLY when >=2 candidate controls tie spatially for one question (oa_perception's
+#    structure + spatial tiers could not separate them). Bounded, AID-only, never primary.
+# --------------------------------------------------------------------------- #
+async def pick_control_by_vision(
+    session: Any, label_text: str, candidates: list[Any], *, llm: Any = None
+) -> Any | None:
+    """Pick which candidate control belongs to the question ``label_text`` by ONE cheap VLM look.
+
+    Each candidate is captioned by its question-group text + on-page box position (reusing
+    ``oa_perception._group_text`` / ``node_rect`` — the same 'what the agent sees' signals the
+    spatial tier uses). The VLM is shown the page screenshot and asked WHICH numbered candidate is
+    the input for this question; we map its choice back to the node. Spends exactly ONE call through
+    ``vision_verify``'s screenshot+counter so the caller's per-field VLM budget accounts for it.
+    Returns the chosen node, or None on any failure / no clear pick (caller falls back)."""
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    import oa_perception as _perc
+
+    captions: list[str] = []
+    for i, n in enumerate(candidates):
+        gt = ""
+        with contextlib.suppress(Exception):
+            gt = _perc._group_text(n)
+        rect = None
+        with contextlib.suppress(Exception):
+            rect = _perc.node_rect(n)
+        pos = f"box≈(x={int(rect[0])},y={int(rect[1])})" if rect else "box≈unknown"
+        captions.append(f"[{i}] {gt[:80] or '(no text)'} — {pos}")
+
+    # Budget guard: a capped page returns the sentinel without a screenshot (no spend).
+    if _vv._VLM_CALLS["n"] >= _vv.VLM_MAX_CALLS:
+        return None
+    try:
+        png = await session.take_screenshot()
+    except Exception:
+        return None
+    import base64
+
+    b64 = base64.b64encode(png).decode()
+    prompt = (
+        f'This is a job-application web form. The question is "{label_text}". Below are candidate '
+        f"input controls, each numbered, with the visible text near it and its on-page position:\n"
+        + "\n".join(captions)
+        + '\nReply STRICT JSON {"index": <the number of the control that is the ANSWER box for this '
+        "question>} — the input sitting directly under / beside that question. If none clearly fits, "
+        'reply {"index": -1}.'
+    )
+    try:
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+        msg: Any = UserMessage(
+            content=[
+                ContentPartTextParam(type="text", text=prompt),
+                ContentPartImageParam(
+                    type="image_url",
+                    image_url=ImageURL(url=f"data:image/png;base64,{b64}", detail="low", media_type="image/png"),
+                ),
+            ]
+        )
+    except Exception:
+        msg = prompt
+    try:
+        resp = await _vv._vlm().ainvoke([msg])
+        raw = (getattr(resp, "completion", None) or str(resp)).strip()
+    except Exception:
+        return None
+    _vv._VLM_CALLS["n"] += 1  # count the spend so the per-field budget sees it (same as visual_check)
+
+    idx = _parse_index(raw)
+    if idx is None or idx < 0 or idx >= len(candidates):
+        return None
+    return candidates[idx]
+
+
+def _parse_index(raw: str) -> int | None:
+    """Tolerant parse of the VLM's {"index": N} reply -> int, or None."""
+    import json
+    import re as _re
+
+    s = (raw or "").strip()
+    with contextlib.suppress(Exception):
+        m = _re.search(r"\{.*\}", s, _re.DOTALL)
+        if m:
+            obj = json.loads(m.group(0).replace("'", '"'))
+            if isinstance(obj.get("index"), int):
+                return obj["index"]
+    with contextlib.suppress(Exception):
+        m = _re.search(r"-?\d+", s)
+        if m:
+            return int(m.group(0))
+    return None
+
+
 def route_verdict(verdict: str) -> Verdict:
     """Pure mapping of a raw ``visual_check`` reply -> the 3-way (+UNKNOWN) ``Verdict`` (§6.1):
         matches==true                  -> CORRECT

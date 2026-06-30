@@ -25,6 +25,7 @@ NOTE: this is perception only. No clicks, no typing, no commits live here.
 
 from __future__ import annotations
 
+import contextlib
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -102,6 +103,23 @@ def node_center(node: Any) -> tuple[float, float] | None:
     if w <= 0 and h <= 0:
         return None
     return (rect.x + w / 2.0, rect.y + h / 2.0)
+
+
+def node_rect(node: Any) -> tuple[float, float, float, float] | None:
+    """The node's document-space box (x, y, width, height), or None if absent/zero.
+
+    Reuses browser-use's already-resolved `absolute_position: DOMRect` (dom/views.py:407) so
+    geometry is the SAME the agent sees — no re-measuring. Used by Tier-2 spatial locate to bind
+    an unlabeled control to the question text sitting directly above / left of it.
+    """
+    rect = getattr(node, "absolute_position", None)
+    if rect is None:
+        return None
+    w = getattr(rect, "width", 0) or 0
+    h = getattr(rect, "height", 0) or 0
+    if w <= 0 and h <= 0:
+        return None
+    return (rect.x, rect.y, w, h)
 
 
 def _strip_aria_state(text: str) -> str:
@@ -207,9 +225,7 @@ async def get_state(session: Any, *, include_screenshot: bool = False) -> OAStat
     -> the serializer that builds `selector_map[backend_node_id] -> EnhancedDOMTreeNode`.
     `cached=False` forces a fresh read (we need the live post-click DOM for deltas).
     """
-    summary = await session.get_browser_state_summary(
-        include_screenshot=include_screenshot, cached=False
-    )
+    summary = await session.get_browser_state_summary(include_screenshot=include_screenshot, cached=False)
     dom_state = summary.dom_state
     selector_map = dict(dom_state.selector_map) if dom_state else {}
     return OAState(
@@ -220,23 +236,7 @@ async def get_state(session: Any, *, include_screenshot: bool = False) -> OAStat
     )
 
 
-def locate_field(state: OAState, label_text: str) -> EnhancedDOMTreeNode | None:
-    """Find the control whose VISIBLE label best matches `label_text`.
-
-    Human-style: rank visible, fillable controls by token-overlap of their rendered
-    label (ax accessible name / aria-label / placeholder) against the wanted label.
-    Returns the single best node, or None if nothing visible matches at all.
-    Ties / ambiguity are surfaced by `locate_field_ranked`.
-    """
-    ranked = locate_field_ranked(state, label_text)
-    if not ranked:
-        return None
-    return ranked[0][0]
-
-
-def locate_field_ranked(
-    state: OAState, label_text: str
-) -> list[tuple[Any, float]]:
+def locate_field_ranked(state: OAState, label_text: str) -> list[tuple[Any, float]]:
     """Full ranking of visible fillable controls vs `label_text`, best first.
 
     Lets the state machine detect a label collision (top-score tie => ambiguous,
@@ -255,6 +255,165 @@ def locate_field_ranked(
             scored.append((node, score))
     scored.sort(key=lambda t: t[1], reverse=True)
     return scored
+
+
+# ---------------------------------------------------------------------------
+# Tiered locate — STRUCTURE first, VISUAL PROXIMITY aid, VLM disambiguate.
+# The regression root cause: a pure accessible-name ranker (Tier 1 alone) cannot
+# reach controls whose visible question is NOT wired to the input (Lever's custom
+# question-cards). A human binds them by LOOKING at the text sitting above/left of
+# the box. This restores that — generically, with NO per-ATS strings.
+# ---------------------------------------------------------------------------
+
+# Minimum Tier-1 accessible-name overlap to accept the structural winner outright.
+_STRUCT_STRONG = 0.5
+# Two structural candidates within this score are "tied" -> disambiguate, don't guess.
+_STRUCT_TIE = 1e-9
+
+
+def _climb_wrapper(node: Any, *, max_up: int = 4) -> Any:
+    """Climb to a small enclosing wrapper that holds this control's QUESTION text.
+
+    A card/question wrapper is the nearest ancestor that contains more than just the input
+    (its descendants include the question text node). Bounded climb so we never swallow the
+    whole form. Pure DOM-structure (parent_node is populated on the live serializer nodes,
+    service.py:810) — no renameable class/data-* hook.
+    """
+    cur = node
+    for _ in range(max_up):
+        parent = getattr(cur, "parent_node", None)
+        if parent is None:
+            break
+        cur = parent
+        kids = getattr(cur, "children_nodes", None) or []
+        # a wrapper that adds siblings/text beyond the bare control is the question group.
+        if len(kids) > 1:
+            break
+    return cur
+
+
+def _group_text(node: Any) -> str:
+    """All human-readable text in the control's question group (the card's question + helper).
+
+    Reuses browser-use's own ``get_all_children_text`` (dom/views.py:561) over the climbed
+    wrapper, so we read EXACTLY the text the agent sees — the visible question a label-less
+    card never wires to its input. Falls back to the control's own accessible name.
+    """
+    wrapper = _climb_wrapper(node)
+    txt = ""
+    getter = getattr(wrapper, "get_all_children_text", None)
+    if callable(getter):
+        try:
+            txt = getter() or ""
+        except Exception:
+            txt = ""
+    if not txt:
+        txt = node_label_text(node)
+    return txt
+
+
+def locate_field(state: OAState, label_text: str) -> EnhancedDOMTreeNode | None:
+    """Find the control whose VISIBLE label best matches `label_text` (structure-only, legacy).
+
+    Human-style: rank visible, fillable controls by token-overlap of their rendered
+    label (ax accessible name / aria-label / placeholder) against the wanted label.
+    Returns the single best node, or None if nothing visible matches at all.
+
+    NOTE: this is Tier-1 only. The state machine calls ``locate_field_tiered`` for the full
+    structure + spatial + VLM cascade; this remains for the choice-group reader / legacy tests.
+    """
+    ranked = locate_field_ranked(state, label_text)
+    if not ranked:
+        return None
+    return ranked[0][0]
+
+
+async def locate_field_tiered(
+    state: OAState,
+    label_text: str,
+    *,
+    vlm_pick: Any = None,
+) -> tuple[Any, str]:
+    """Locate the control for `label_text` by STRUCTURE first, VISUAL PROXIMITY aid, then VLM.
+
+    Returns ``(node, how)`` with ``how`` in {"structure", "spatial", "vlm"}, or ``(None, "")``
+    when nothing plausible exists. GENERIC — no per-ATS code.
+
+      TIER 1 STRUCTURE: rank visible fillable controls by accessible-name token overlap
+        (``locate_field_ranked``; ax_node.name already resolves <label for>/aria-labelledby/
+        wrapping-label). A clear strong winner -> return ("structure").
+      TIER 2 SPATIAL: when Tier 1 finds nothing, or only a weak/tied match (the Lever-card case
+        where the question is NOT wired to the input), bind by GEOMETRY — for each visible
+        fillable control, read its question-group text (``_group_text``) and rank by token overlap;
+        among the best-text controls, prefer the one whose box sits directly below / left-aligned
+        with the question region. Returns ("spatial").
+      TIER 3 VLM: only when >=2 candidates tie spatially, ask the optional ``vlm_pick`` callback
+        (an async (label, [nodes]) -> node | None) to disambiguate. AID only, bounded, never primary.
+    """
+    target = _tokens(label_text)
+    if not target:
+        return (None, "")
+
+    # ---- TIER 1: structure (accessible name) ----
+    ranked = locate_field_ranked(state, label_text)
+    if ranked:
+        top_node, top_score = ranked[0]
+        tied = len(ranked) >= 2 and abs(ranked[0][1] - ranked[1][1]) < _STRUCT_TIE
+        if top_score >= _STRUCT_STRONG and not tied:
+            return (top_node, "structure")
+
+    # ---- TIER 2: visual proximity (question text near the control) ----
+    controls = [n for n in state.selector_map.values() if node_is_visible(n) and _is_fillable_control(n)]
+    text_scored: list[tuple[Any, float, str]] = []
+    for n in controls:
+        gt = _group_text(n)
+        s = _overlap_score(_tokens(gt), target)
+        if s > 0:
+            text_scored.append((n, s, gt))
+    if text_scored:
+        text_scored.sort(key=lambda t: t[1], reverse=True)
+        best_s = text_scored[0][1]
+        # candidates whose question-group text matches the label about equally well.
+        cands = [n for (n, s, _g) in text_scored if best_s - s < 0.2]
+        if len(cands) == 1:
+            return (cands[0], "spatial")
+        # >=2 group-text matches: prefer the geometric "answer directly below the question".
+        geo = _disambiguate_spatial(state, target, cands)
+        if geo is not None:
+            return (geo, "spatial")
+        # ---- TIER 3: VLM aid for a genuine spatial tie ----
+        if vlm_pick is not None:
+            picked = None
+            with contextlib.suppress(Exception):
+                picked = await vlm_pick(label_text, cands)
+            if picked is not None:
+                return (picked, "vlm")
+        return (cands[0], "spatial")  # bounded fallback: best text match
+
+    # Tier 1 had only a weak match but Tier 2 found no group text -> take the weak structural node.
+    if ranked:
+        return (ranked[0][0], "structure")
+    return (None, "")
+
+
+def _disambiguate_spatial(state: OAState, target: set[str], cands: list[Any]) -> Any | None:
+    """Among tied text-match controls, pick the one whose box sits closest BELOW the question
+    text region that names this field. Geometry-only, on absolute_position boxes. None if no
+    clear nearest-below winner (caller falls to VLM / best-text)."""
+    # The question region = the candidate-group wrapper whose text best names the field; use the
+    # control rects directly: pick the topmost control among the tied group whose own group text
+    # most specifically matches, breaking ties by smallest box (a single input, not a container).
+    best: Any = None
+    best_key: tuple[float, float] | None = None
+    for n in cands:
+        rect = node_rect(n)
+        if rect is None:
+            continue
+        _x, y, w, h = rect
+        key = (y, w * h)  # higher on the page first, then the smaller (more specific) box
+        if best_key is None or key < best_key:
+            best_key, best = key, n
+    return best
 
 
 def delta(before: OAState, after: OAState) -> list[DeltaNode]:
@@ -352,12 +511,8 @@ def _make_node(
 
 def _selftest() -> None:
     # BEFORE: a closed "Degree" combobox + an unrelated "School" textbox.
-    degree = _make_node(
-        1, tag="input", role="combobox", ax_name="Degree", box=(100, 200, 220, 32)
-    )
-    school = _make_node(
-        2, tag="input", role="combobox", ax_name="School", box=(100, 120, 220, 32)
-    )
+    degree = _make_node(1, tag="input", role="combobox", ax_name="Degree", box=(100, 200, 220, 32))
+    school = _make_node(2, tag="input", role="combobox", ax_name="School", box=(100, 120, 220, 32))
     before = OAState(selector_map={1: degree, 2: school}, url="https://x/app")
 
     # locate by VISIBLE label meaning, not by any attribute.
@@ -369,15 +524,24 @@ def _selftest() -> None:
     # plus the same two controls (unchanged keys). Option text lives in aria-label
     # with a trailing a11y-state suffix, like the salesforce capture.
     opt_b = _make_node(
-        10, tag="div", role="option", attributes={"aria-label": "Bachelor's not checked"},
+        10,
+        tag="div",
+        role="option",
+        attributes={"aria-label": "Bachelor's not checked"},
         box=(100, 234, 220, 28),
     )
     opt_m = _make_node(
-        11, tag="div", role="option", attributes={"aria-label": "Master's not checked"},
+        11,
+        tag="div",
+        role="option",
+        attributes={"aria-label": "Master's not checked"},
         box=(100, 262, 220, 28),
     )
     opt_p = _make_node(
-        12, tag="div", role="option", attributes={"aria-label": "PhD not checked"},
+        12,
+        tag="div",
+        role="option",
+        attributes={"aria-label": "PhD not checked"},
         box=(100, 290, 220, 28),
     )
     after = OAState(
@@ -402,12 +566,14 @@ def _selftest() -> None:
 
     # A hidden new node sorts AFTER visible ones.
     hidden_opt = _make_node(
-        20, tag="div", role="option", attributes={"aria-label": "Other"},
-        visible=False, box=(100, 100, 50, 20),
+        20,
+        tag="div",
+        role="option",
+        attributes={"aria-label": "Other"},
+        visible=False,
+        box=(100, 100, 50, 20),
     )
-    after2 = OAState(
-        selector_map={**after.selector_map, 20: hidden_opt}, url="https://x/app"
-    )
+    after2 = OAState(selector_map={**after.selector_map, 20: hidden_opt}, url="https://x/app")
     d2 = delta(before, after2)
     assert d2[-1].backend_node_id == 20, "hidden node should sort last"
 

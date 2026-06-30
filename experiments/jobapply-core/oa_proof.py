@@ -443,6 +443,26 @@ def _record_from_result(rec: RunRecord, res: dict, *, fallback_secs: float) -> R
     return rec
 
 
+# ---------------------------------------------------------------------------------------------
+# TIMEOUT POLICY (DEV harness vs PRODUCTION engine) — read this before touching the kill path.
+#
+# PRODUCTION (the real fill engine, oa_observe_act): a stuck/slow REQUIRED field ESCALATES, it is
+# NEVER process-killed. observe_act bounds every field by FIELD_DEADLINE / STEP_CAP; when a field
+# overruns, the per-field guard returns ESCALATE (required) or SKIP (optional) so the field is
+# handed to the agent of last resort and the rest of the form keeps filling. That per-field
+# ESCALATE is the production default and is owned by the engine, not by any process supervisor.
+#
+# DEV SWEEP (this harness): each (url x profile) job runs in its OWN OS subprocess under a per-JOB
+# wall-clock. The subprocess hard-kill on that per-job timeout is a DEV-ONLY convenience — it stops
+# one wedged headless browser (the §7 "hangs in teardown" mode) from stalling a batch of dozens of
+# jobs. It is NOT how production handles a slow field. The --on-timeout knob makes this explicit:
+#   * kill     (default for the dev sweep): SIGKILL the child on per-job timeout, record TIMEOUT.
+#   * escalate (production-shaped):         do NOT kill mid-fill — let the child keep running to
+#                                           completion (the engine's own per-field ESCALATE/DEADLINE
+#                                           bounds it from inside), then record the job as ESCALATE.
+# In neither mode does the harness invent fill logic or override the engine's per-field outcome;
+# --on-timeout only governs the harness's process-supervision policy at the per-JOB boundary.
+# ---------------------------------------------------------------------------------------------
 async def run_matrix(
     jobs: list[Job],
     *,
@@ -450,9 +470,15 @@ async def run_matrix(
     timeout: float,
     out_dir: Path,
     resume: str | None,
+    on_timeout: str = "kill",
 ) -> list[RunRecord]:
     """Run every job in its OWN OS subprocess, bounded by a PROCESS Semaphore. Concurrency is N
-    separate interpreters (each with its own verify globals) — NOT N coroutines sharing one."""
+    separate interpreters (each with its own verify globals) — NOT N coroutines sharing one.
+
+    ``on_timeout`` governs ONLY the harness's per-JOB process-supervision policy (see the policy
+    block above): ``kill`` SIGKILLs a wedged child (dev sweep default); ``escalate`` leaves the
+    child running and records the job as ESCALATE, mirroring the engine's per-field ESCALATE which
+    is the real production behavior for a slow/stuck field. It never alters fill logic."""
     shots = out_dir / "shots"
     profiles_dir = out_dir / "profiles"
     perfield = out_dir / "perfield"
@@ -477,6 +503,7 @@ async def run_matrix(
             t0 = time.monotonic()
             print(f"[{idx:03d}] SPAWN {c['ats']}/{c['org']} x {p['nick']}  {c['url']}")
             proc: asyncio.subprocess.Process | None = None
+            escalated = False  # set when --on-timeout escalate trips on the per-job wall-clock
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *argv,
@@ -487,17 +514,32 @@ async def run_matrix(
                 try:
                     out_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
                 except TimeoutError:
-                    # Kill the child (and let it die) so one stuck headless browser can't stall the
-                    # sweep — the §7 "hangs in teardown" failure mode, now isolated to one process.
-                    with contextlib.suppress(ProcessLookupError):
-                        proc.kill()
-                    with contextlib.suppress(Exception):
-                        await asyncio.wait_for(proc.wait(), timeout=10)
-                    rec.status = "TIMEOUT"
-                    rec.secs = round(time.monotonic() - t0, 1)
-                    rec.error = f"per-job timeout {timeout}s (child killed)"
-                    print(f"[{idx:03d}] TIMEOUT after {timeout}s — killed pid {proc.pid}")
-                    return rec
+                    if on_timeout == "escalate":
+                        # PRODUCTION-SHAPED: do NOT kill mid-fill. The engine's own per-field
+                        # ESCALATE/FIELD_DEADLINE bounds a stuck field from inside; let the child
+                        # finish and record the job as ESCALATE (best-effort). We still wait so the
+                        # subprocess is reaped, but with no kill — the per-job timeout only marks it.
+                        with contextlib.suppress(Exception):
+                            out_bytes, _ = await proc.communicate()
+                        escalated = True
+                        rec.status = "ESCALATE"
+                        rec.secs = round(time.monotonic() - t0, 1)
+                        rec.error = f"per-job timeout {timeout}s (escalated, child not killed)"
+                        print(f"[{idx:03d}] ESCALATE after {timeout}s — child left to finish (pid {proc.pid})")
+                        # fall through to read whatever JSON the child managed to write
+                    else:
+                        # DEV SWEEP default: kill the child (and let it die) so one stuck headless
+                        # browser can't stall the sweep — the §7 "hangs in teardown" failure mode,
+                        # now isolated to one process. NOT how production handles a slow field.
+                        with contextlib.suppress(ProcessLookupError):
+                            proc.kill()
+                        with contextlib.suppress(Exception):
+                            await asyncio.wait_for(proc.wait(), timeout=10)
+                        rec.status = "TIMEOUT"
+                        rec.secs = round(time.monotonic() - t0, 1)
+                        rec.error = f"per-job timeout {timeout}s (child killed)"
+                        print(f"[{idx:03d}] TIMEOUT after {timeout}s — killed pid {proc.pid}")
+                        return rec
             except Exception as exc:  # spawn failure must not abort the sweep
                 rec.status = "ERROR"
                 rec.secs = round(time.monotonic() - t0, 1)
@@ -512,14 +554,19 @@ async def run_matrix(
         with contextlib.suppress(Exception):
             res = json.loads(out_json.read_text(encoding="utf-8"))
         if res is None:
-            rec.status = "ERROR"
-            rec.secs = secs
-            tail = (out_bytes.decode("utf-8", "replace")[-400:] if out_bytes else "").strip()
-            rec.error = f"child rc={rc}, no JSON result. stdout tail: {tail}"
-            print(f"[{idx:03d}] ERROR child produced no JSON (rc={rc})")
+            # An escalated job that never wrote JSON stays ESCALATE (the engine was mid-fill at the
+            # per-job wall-clock), NOT ERROR — that is the production-shaped outcome we recorded.
+            if not escalated:
+                rec.status = "ERROR"
+                rec.secs = secs
+                tail = (out_bytes.decode("utf-8", "replace")[-400:] if out_bytes else "").strip()
+                rec.error = f"child rc={rc}, no JSON result. stdout tail: {tail}"
+                print(f"[{idx:03d}] ERROR child produced no JSON (rc={rc})")
             return rec
 
         _record_from_result(rec, res, fallback_secs=secs)
+        if escalated:
+            rec.status = "ESCALATE"  # per-job timeout policy overrides the child's own terminal
         print(
             f"[{idx:03d}] DONE   {rec.status}  fill_rate={rec.fill_rate:.0%}  "
             f"filled={rec.filled}/{rec.fillable}  ${rec.cost:.4f}  {rec.secs}s"
@@ -547,7 +594,7 @@ def aggregate(records: list[RunRecord]) -> dict:
             a["filled"] += r.filled
             a["fillable"] += r.fillable
             a["cost"] += r.cost
-        elif r.status in ("BLOCKED", "TIMEOUT", "ERROR", "NO_ADAPTER"):
+        elif r.status in ("BLOCKED", "TIMEOUT", "ESCALATE", "ERROR", "NO_ADAPTER"):
             a["blocked"] += 1
         for f in r.fails:
             fail_counter[_failure_bucket(f)] += 1
@@ -565,7 +612,9 @@ def aggregate(records: list[RunRecord]) -> dict:
         "overall": {
             "runs_total": len(records),
             "runs_filled": len(completed),
-            "runs_blocked": sum(1 for r in records if r.status in ("BLOCKED", "TIMEOUT", "ERROR", "NO_ADAPTER")),
+            "runs_blocked": sum(
+                1 for r in records if r.status in ("BLOCKED", "TIMEOUT", "ESCALATE", "ERROR", "NO_ADAPTER")
+            ),
             "fields_filled": overall_filled,
             "fields_fillable": overall_fillable,
             "fill_rate": round(overall_filled / overall_fillable, 3) if overall_fillable else 0.0,
@@ -738,7 +787,17 @@ def main() -> None:
     p.add_argument("--max-runs", type=int, default=18, help="cap total company x profile runs")
     p.add_argument("--concurrency", type=int, default=4, help="max concurrent child PROCESSES (<=4)")
     p.add_argument("--serial", action="store_true", help="force concurrency=1 (no process overlap)")
-    p.add_argument("--timeout", type=float, default=200.0, help="per-job timeout seconds (kills child)")
+    p.add_argument("--timeout", type=float, default=200.0, help="per-job timeout seconds")
+    p.add_argument(
+        "--on-timeout",
+        choices=("kill", "escalate"),
+        default="kill",
+        help=(
+            "per-JOB timeout policy (harness process-supervision only): 'kill' SIGKILLs the wedged "
+            "child (dev-sweep default); 'escalate' leaves it running and records ESCALATE, mirroring "
+            "the engine's per-FIELD ESCALATE which is the real production default for a stuck field"
+        ),
+    )
     p.add_argument("--resume", default=None, help="optional resume file path for the file field")
     p.add_argument("--out", default="runs/oa_proof", help="output dir (json + shots + per-field)")
     p.add_argument("--md", default=None, help="markdown report path (default OBSERVE_ACT_PROOF.md)")
@@ -780,6 +839,7 @@ def main() -> None:
             timeout=args.timeout,
             out_dir=out_dir,
             resume=args.resume,
+            on_timeout=args.on_timeout,
         )
     )
 

@@ -184,6 +184,115 @@ def _opt_node(text: str, center: tuple[int, int]) -> Any:
 _opt_node._n = 0  # type: ignore[attr-defined]
 
 
+def make_card(question: str, *, input_bnid: int, role: str = "textbox", box=(100, 240, 220, 32)) -> Any:
+    """Build a LEVER-STYLE custom question-card: a wrapper holding the visible QUESTION text and an
+    input that is NOT wired to it (no <label for>, no aria-label == the question). The input's
+    accessible name is blank, so Tier-1 structure CANNOT bind it — only Tier-2 spatial can, by
+    reading the wrapper's text via ``get_all_children_text`` (the real browser-use API). Returns the
+    input node (with parent_node/children_nodes linkage populated, exactly like the live serializer)."""
+    from browser_use.dom.views import DOMRect, EnhancedDOMTreeNode, NodeType
+
+    x, y, w, h = box
+    # the visible question text node (non-interactive — lives in the tree, not the selector_map).
+    text_node = EnhancedDOMTreeNode(
+        node_id=input_bnid * 10 + 1,
+        backend_node_id=input_bnid * 10 + 1,
+        node_type=NodeType.TEXT_NODE,
+        node_name="#text",
+        node_value=question,
+        attributes={},
+        is_scrollable=False,
+        is_visible=True,
+        absolute_position=DOMRect(x=x, y=y - 24, width=w, height=18),
+        target_id="t",
+        frame_id=None,
+        session_id=None,
+        content_document=None,
+        shadow_root_type=None,
+        shadow_roots=None,
+        parent_node=None,
+        children_nodes=[],
+        ax_node=None,
+        snapshot_node=None,
+    )
+    # the input — NO ax name matching the question (the un-wired card input).
+    inp = EnhancedDOMTreeNode(
+        node_id=input_bnid,
+        backend_node_id=input_bnid,
+        node_type=NodeType.ELEMENT_NODE,
+        node_name="INPUT",
+        node_value="",
+        attributes={"type": "text", "role": role},
+        is_scrollable=False,
+        is_visible=True,
+        absolute_position=DOMRect(x=x, y=y, width=w, height=h),
+        target_id="t",
+        frame_id=None,
+        session_id=None,
+        content_document=None,
+        shadow_root_type=None,
+        shadow_roots=None,
+        parent_node=None,
+        children_nodes=[],
+        ax_node=None,
+        snapshot_node=None,
+    )
+    # the card wrapper holding BOTH (so _climb_wrapper finds it and get_all_children_text reads Q).
+    wrapper = EnhancedDOMTreeNode(
+        node_id=input_bnid * 10 + 2,
+        backend_node_id=input_bnid * 10 + 2,
+        node_type=NodeType.ELEMENT_NODE,
+        node_name="DIV",
+        node_value="",
+        attributes={"class": "application-question"},
+        is_scrollable=False,
+        is_visible=True,
+        absolute_position=DOMRect(x=x, y=y - 24, width=w, height=h + 24),
+        target_id="t",
+        frame_id=None,
+        session_id=None,
+        content_document=None,
+        shadow_root_type=None,
+        shadow_roots=None,
+        parent_node=None,
+        children_nodes=[text_node, inp],
+        ax_node=None,
+        snapshot_node=None,
+    )
+    text_node.parent_node = wrapper
+    inp.parent_node = wrapper
+    return inp
+
+
+def _hidden_file_input(bnid: int, *, name: str = "resume") -> Any:
+    """A HIDDEN / zero-box ``input[type=file]`` — the normal shape on GH/Lever/Ashby (a styled
+    'Attach' button proxies for it). is_visible=False + a zero box, so the label ranker can't see
+    it; only the GLOBAL file path (which scans ALL file inputs incl. hidden) reaches it."""
+    from browser_use.dom.views import DOMRect, EnhancedDOMTreeNode, NodeType
+
+    return EnhancedDOMTreeNode(
+        node_id=bnid,
+        backend_node_id=bnid,
+        node_type=NodeType.ELEMENT_NODE,
+        node_name="INPUT",
+        node_value="",
+        attributes={"type": "file", "name": name},
+        is_scrollable=False,
+        is_visible=False,
+        absolute_position=DOMRect(x=0, y=0, width=0, height=0),
+        target_id="t",
+        frame_id=None,
+        session_id=None,
+        content_document=None,
+        shadow_root_type=None,
+        shadow_roots=None,
+        parent_node=None,
+        children_nodes=[],
+        ax_node=None,
+        snapshot_node=None,
+    )
+
+
 class FakeSession:
     """The offline stand-in for browser_use.BrowserSession used by the state machine tests."""
 
@@ -220,9 +329,13 @@ class FakeSession:
         self.last_upload: str | None = None
         self.keys: list[str] = []
         self.vlm_calls = 0  # incremented by the patched visual_check (per-field VLM accounting)
+        self.state_reads = 0  # FIX 3: counts FULL-page get_state serializes (the cost we cut)
 
     # -- perception entrypoint --------------------------------------------------
     async def get_browser_state_summary(self, *, include_screenshot: bool = False, cached: bool = False) -> Any:
+        # FIX 3 accounting: every call here is one full-page serialize — the expensive op the
+        # speed fix bounds. The tests assert a normal field stays <= a few of these.
+        self.state_reads += 1
         return _FakeSummary(dict(self._live), self._url)
 
     async def get_current_page_url(self) -> str:

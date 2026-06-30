@@ -37,6 +37,7 @@ from typing import Any
 
 import oa_action as act
 import oa_brain as brain
+import oa_file_locate as filoc
 import oa_perception as perc
 
 # --------------------------------------------------------------------------- #
@@ -47,6 +48,13 @@ OTHER = "OTHER"  # required, no exact match -> a genuine "Other"/"Prefer not" es
 SKIP = "SKIP"  # optional & blank / optional & unmatchable -> left blank (agent-repairable)
 ESCALATE = "ESCALATE"  # required & unfillable deterministically -> caller's agent of last resort
 Outcome = str
+
+# PRODUCTION TIMEOUT POLICY (do not "fix" this into a process kill): when a REQUIRED field overruns
+# its per-field budget (FIELD_DEADLINE / STEP_CAP), the guard returns ESCALATE so the field is handed
+# to the agent of last resort and the rest of the form keeps filling — the engine NEVER kills the
+# process to deal with a slow field. The hard subprocess kill in oa_proof.py is a DEV-SWEEP-ONLY
+# convenience for one wedged headless browser; oa_proof.py --on-timeout escalate mirrors THIS
+# per-field ESCALATE as the production-shaped behavior. See the policy block in oa_proof.run_matrix.
 
 # --------------------------------------------------------------------------- #
 # Per-field caps (§6.2). Per-axis + GLOBAL backstop.
@@ -63,7 +71,13 @@ FIELD_VERIFY_CAP = 3  # per-FIELD verify attempts total (DOM read-back + VLM aid
 FIELD_VLM_CAP = 2  # per-FIELD VLM-aid sub-budget (DOM-first means the VLM is rarely needed)
 
 # Settle timings (§3.5). Bounded poll, no fixed long sleeps.
-_POLL_S = 0.12
+# FIX 3 (speed): _settle used to re-serialize the WHOLE page every 0.12s for up to ~0.9s —
+# 5-9 get_state/field on a heavy react-select page (~17s/field on Ashby). We KEEP the delta/visual
+# signal but call it FAR fewer times: a coarser poll interval and a HARD cap on re-reads. A
+# click-open menu mounts within one or two reads; we settle as soon as the delta is non-empty and
+# stable, so a typical field now costs <=2-3 get_state.
+_POLL_S = 0.30  # coarser than the old 0.12s — a menu still appears inside one interval
+_SETTLE_READS_CAP = 3  # HARD cap on get_state re-reads inside one settle (was effectively ~5-8)
 _SETTLE_STATIC_S = 0.6  # a click-open menu settles fast
 _SETTLE_SEARCH_S = 0.9  # an async typeahead needs longer
 _LIST_LONG = 12  # cluster >= this -> type-to-filter first (S_CLOSED_LIST long path)
@@ -226,18 +240,27 @@ def _is_plain_text_editable(node: Any) -> bool:
 # settle deadline. Returns the delta vs `before`.
 # --------------------------------------------------------------------------- #
 async def _settle(session: Any, before: perc.OAState, settle_s: float) -> list[perc.DeltaNode]:
+    """Bounded poll over browser-use's delta signal — FIX 3: FAR fewer get_state, delta KEPT.
+
+    Settles as soon as the delta is NON-EMPTY and stable across two coarse reads (a click-open menu
+    appears within one or two reads), and is HARD-capped at ``_SETTLE_READS_CAP`` re-reads so a heavy
+    react-select page can never spend 5-9 full-page serializes on one field. The delta/visual signal
+    is unchanged — we just consult it a couple of times, not a dozen."""
     deadline = time.monotonic() + settle_s
     prev_ids: tuple[int, ...] | None = None
     last: list[perc.DeltaNode] = []
+    reads = 0
     while True:
         await asyncio.sleep(_POLL_S)
         after = await perc.get_state(session)
+        reads += 1
         last = perc.delta(before, after)
         ids = tuple(d.backend_node_id for d in last)
-        if prev_ids is not None and ids == prev_ids:
-            return last  # two identical reads -> settled
+        # settle on a NON-EMPTY stable delta (the menu mounted and held) — the common fast exit.
+        if ids and prev_ids is not None and ids == prev_ids:
+            return last
         prev_ids = ids
-        if time.monotonic() >= deadline:
+        if reads >= _SETTLE_READS_CAP or time.monotonic() >= deadline:
             return last
 
 
@@ -304,7 +327,9 @@ async def observe_act(session: Any, field: dict[str, Any] | Ctx) -> Outcome:
 # ---- S0_GUARD ----
 async def _s0_guard(session: Any, ctx: Ctx) -> Outcome:
     ctx.trace.append("S0_GUARD")
-    if not ctx.value.strip():
+    # A file field carries its payload in ``resume`` (the value may be blank) — it is NOT a blank
+    # field, so the blank->SKIP gate must not swallow it before the global file path runs.
+    if not ctx.value.strip() and not ctx.resume:
         ctx.trace.append("blank->SKIP")
         return SKIP
     return await _s1_locate(session, ctx)
@@ -315,21 +340,68 @@ async def _s1_locate(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S1_LOCATE")
+    # FIX 3 (speed): ONE full-page get_state here; it is forwarded to classify so a normal field
+    # never re-serializes just to classify the control it already located.
     state = await perc.get_state(session)
-    ranked = perc.locate_field_ranked(state, ctx.label)
-    if not ranked:
+
+    # FIX 2 (global file path): a resume/CV/cover-letter field's input[type=file] is usually
+    # HIDDEN / zero-box, so the generic label ranker returns no-control. Route it to the dedicated
+    # GLOBAL file path BEFORE generic locate — it scans ALL file inputs (incl. hidden) and matches
+    # by tokens via the LLM picker. The file signal is the resume path the runner attaches to a
+    # file-source field; GENERIC (no per-ATS string, no per-ATS branch).
+    if ctx.resume:
+        fout = await _s_file_global(session, ctx, state)
+        if fout is not None:
+            return fout
+        # else: no file input on the page -> fall through to generic locate (mis-tagged field).
+
+    # FIX 1: tiered locate — STRUCTURE first, VISUAL PROXIMITY aid, VLM disambiguate. Binds an
+    # unlabeled card input (Lever) the way a human does — by the question text sitting near it.
+    node, how = await perc.locate_field_tiered(state, ctx.label, vlm_pick=_make_vlm_pick(session, ctx))
+    if node is None:
         ctx.trace.append("no-control")
         return ESCALATE if ctx.required else SKIP
-    ctx.node = ranked[0][0]
-    # label-collision (repeaters with two "Degree") -> force a value-verify later (§6 fast-path off)
-    if len(ranked) >= 2 and abs(ranked[0][1] - ranked[1][1]) < 1e-9:
-        ctx.ambiguous = True
-        ctx.trace.append("ambiguous-label")
-    return await _s2_classify(session, ctx)
+    ctx.node = node
+    ctx.trace.append(f"located:{how}")
+    # label-collision (repeaters with two "Degree"): a structural tie forces a value-verify later
+    # (§6 fast-path off). Only the structure tier can produce a true accessible-name collision.
+    if how == "structure":
+        ranked = perc.locate_field_ranked(state, ctx.label)
+        if len(ranked) >= 2 and abs(ranked[0][1] - ranked[1][1]) < 1e-9:
+            ctx.ambiguous = True
+            ctx.trace.append("ambiguous-label")
+    return await _s2_classify(session, ctx, state)
+
+
+def _make_vlm_pick(session: Any, ctx: Ctx) -> Any:
+    """A bounded VLM disambiguation callback for locate Tier-3 (a genuine spatial tie only).
+
+    Returns an async ``(label, [candidate_nodes]) -> node | None`` that asks the per-field VLM
+    budget to pick which candidate control belongs to the question. AID only — it spends from the
+    SAME per-field VLM sub-budget the verify oracle uses (``FIELD_VLM_CAP``) so locate + verify
+    together never over-spend the VLM on one field. Returns None (caller falls back) when the
+    budget is spent or no VLM/llm is available."""
+
+    async def _pick(label: str, cands: list[Any]) -> Any:
+        if ctx.vlm_used >= FIELD_VLM_CAP or not cands:
+            return None
+        before_n = _vv_calls()
+        chosen = None
+        try:
+            chosen = await brain.pick_control_by_vision(session, label, cands, llm=ctx.llm)
+        except Exception:
+            chosen = None
+        spent = max(0, _vv_calls() - before_n)
+        if spent:
+            ctx.vlm_used += spent
+            ctx.trace.append("locate-vlm-aid")
+        return chosen
+
+    return _pick
 
 
 # ---- S2_CLASSIFY ----
-async def _s2_classify(session: Any, ctx: Ctx) -> Outcome:
+async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S2_CLASSIFY")
@@ -371,7 +443,40 @@ async def _s2_classify(session: Any, ctx: Ctx) -> Outcome:
     return ESCALATE if ctx.required else SKIP
 
 
-# ---- S_FILE ----
+# ---- S_FILE_GLOBAL (FIX 2: the dedicated file path, any ATS) ----
+async def _s_file_global(session: Any, ctx: Ctx, state: perc.OAState) -> Outcome | None:
+    """GLOBAL deterministic file upload — finds the file input even when it is HIDDEN / zero-box.
+
+    Returns an Outcome (DONE/SKIP/ESCALATE) when this page has a file input to handle, or ``None``
+    when there is NO file input at all (the resume-tagged field was mis-tagged -> caller falls back
+    to generic locate). GENERIC, no per-ATS code:
+      1. ``find_file_input`` scans ALL input[type=file] (incl. hidden) and picks the best by tokens.
+      2. ``is_already_uploaded`` reads whether a file is already attached -> idempotent DONE.
+      3. else ``act.upload_file`` (CDP setFileInputFiles — NO OS picker)."""
+    node = await filoc.find_file_input(state, ctx.label, llm=ctx.llm)
+    if node is None:
+        return None  # no file input on the page -> not actually a file field here
+    ctx.node = node
+    ctx.nature = "INTRINSIC_FILE"
+    ctx.trace.append("S_FILE_GLOBAL")
+    path = ctx.resume or ctx.value
+    if not path:
+        return SKIP
+    # idempotent: if a file is already attached / shown, do NOT re-upload (read-if-we've-uploaded).
+    if await filoc.is_already_uploaded(session, node):
+        ctx.trace.append("already-uploaded->DONE")
+        ctx.committed_text = str(path)
+        return DONE
+    ok = await act.upload_file(session, node, str(path))  # CDP only, NO click (no OS picker)
+    if not ok:
+        ctx.trace.append("upload-failed")
+        return ESCALATE if ctx.required else SKIP
+    ctx.committed_text = str(path)
+    ctx.trace.append("uploaded")
+    return DONE
+
+
+# ---- S_FILE (intrinsic-located file input — falls back to the global locator if hidden) ----
 async def _s_file(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
@@ -379,6 +484,11 @@ async def _s_file(session: Any, ctx: Ctx) -> Outcome:
     path = ctx.resume or ctx.value
     if not path:
         return SKIP
+    # idempotent guard even on the intrinsic path (a re-run must not double-upload).
+    if await filoc.is_already_uploaded(session, ctx.node):
+        ctx.trace.append("already-uploaded->DONE")
+        ctx.committed_text = str(path)
+        return DONE
     ok = await act.upload_file(session, ctx.node, str(path))  # CDP only, NO click (no OS picker)
     if not ok:
         ctx.trace.append("upload-failed")
@@ -881,7 +991,7 @@ async def _selftest() -> int:
     chk("non-sensitive label free", not _is_sensitive("Degree"))
 
     # --- whole-machine over a scripted FAKE session ---
-    from oa_observe_act_fakes import FakeSession, GenericFakeLLM  # helpers alongside the tests
+    from oa_observe_act_fakes import FakeSession, GenericFakeLLM, make_card  # helpers alongside the tests
 
     fake_llm = GenericFakeLLM()
 
@@ -1013,6 +1123,68 @@ async def _selftest() -> int:
         "per-FIELD VLM budget caps at <=FIELD_VLM_CAP",
         fs11.vlm_calls <= FIELD_VLM_CAP,
         (out11, fs11.vlm_calls, FIELD_VLM_CAP),
+    )
+
+    # (12) FIX 1 — LEVER-CARD SPATIAL LOCATE: an input whose visible question is NOT wired to it
+    #      (blank accessible name) is bound by Tier-2 spatial proximity (the wrapper's question text),
+    #      then typed + DOM-verified. Tier-1 structure alone would have returned no-control.
+    _vv._VLM_CALLS["n"] = 0
+    card_input = make_card("Why do you want to work here?", input_bnid=4242, role="textbox")
+    fs12 = FakeSession(
+        controls=[card_input],
+        dom_values={card_input.backend_node_id: "Because I love the mission."},  # DOM read-back truth
+        verdict='{"filled": true, "matches": true}',
+    )
+    fd12 = {
+        "label": "Why do you want to work here?",
+        "value": "Because I love the mission.",
+        "required": True,
+        "llm": fake_llm,
+    }
+    out12 = await observe_act(fs12, fd12)
+    located_spatial = "located:spatial" in (fd12.get("_trace") or [])
+    chk("Lever-card bound by SPATIAL locate -> DONE", out12 == DONE and located_spatial, (out12, fd12.get("_trace")))
+
+    # (13) FIX 2 — GLOBAL FILE PATH finds a HIDDEN input[type=file] (no readable label) and uploads it.
+    from oa_observe_act_fakes import _hidden_file_input  # builder for a zero-box file input
+
+    hidden_file = _hidden_file_input(5252)
+    fs13 = FakeSession(controls=[hidden_file])
+    out13 = await observe_act(
+        fs13,
+        {"label": "Resume/CV", "value": "", "required": True, "resume": "/fixtures/test_resume.pdf", "llm": fake_llm},
+    )
+    chk(
+        "hidden file input found + uploaded -> DONE",
+        out13 == DONE and fs13.last_upload == "/fixtures/test_resume.pdf",
+        (out13, fs13.last_upload),
+    )
+
+    # (14) FIX 2 — ALREADY-UPLOADED is idempotent: a file already attached returns DONE, NO re-upload.
+    hidden_file2 = _hidden_file_input(5353)
+    fs14 = FakeSession(
+        controls=[hidden_file2],
+        dom_values={hidden_file2.backend_node_id: "FILE:resume.pdf"},  # is_already_uploaded -> True
+    )
+    out14 = await observe_act(
+        fs14,
+        {"label": "Resume", "value": "", "required": True, "resume": "/fixtures/test_resume.pdf", "llm": fake_llm},
+    )
+    chk(
+        "already-uploaded -> DONE, NO re-upload",
+        out14 == DONE and fs14.last_upload is None,
+        (out14, fs14.last_upload),
+    )
+
+    # (15) FIX 3 — a normal text field costs FEW full-page get_state serializes (<=3). The locate does
+    #      ONE; verify uses the cheap CDP single-node read (NOT get_state). No settle on a plain field.
+    name15 = _mk(tag="input", typ="text", ax_name="Last Name")
+    fs15 = FakeSession(controls=[name15], dom_values={name15.backend_node_id: "Halonen"})
+    out15 = await observe_act(fs15, {"label": "Last Name", "value": "Halonen", "required": True, "llm": fake_llm})
+    chk(
+        "FIX 3: normal field uses <=3 get_state",
+        out15 == DONE and fs15.state_reads <= 3,
+        (out15, fs15.state_reads),
     )
 
     ok = True
