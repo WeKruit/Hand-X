@@ -30,6 +30,7 @@ handle, no adapter ``locate`` — oa_perception.locate_field is the one structur
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass
 from dataclasses import field as dc_field
@@ -363,7 +364,13 @@ async def _s1_locate(session: Any, ctx: Ctx) -> Outcome:
     # FIX (below-the-fold): a question lower on the page may have its card marked not-visible, so the
     # locate sees no control. Scroll the page down one viewport and re-locate, BOUNDED — a question
     # must not be missed just for sitting below the fold, but we never loop forever chasing one.
-    if node is None:
+    # SCROLL-LOCATE is OFF by default: on a heavy SPA (Lever/Ashby) a per-field scroll + FULL
+    # get_state re-serialize, repeated for every unbound card, piles enough CDP load to make headless
+    # Chrome go unresponsive (silent WebSocket) — i.e. it caused the very loop/crash it was meant to
+    # avoid. Gate it behind OA_SCROLL_LOCATE=1 until below-fold binding is done from the full DOM
+    # (browser-use's trusted click auto-scrolls a node into view, so a below-fold card can be bound
+    # WITHOUT a heavy re-serialize). Default-off keeps the engine fast and crash-free.
+    if node is None and os.environ.get("OA_SCROLL_LOCATE") == "1":
         node, how, card, state = await _scroll_locate(session, ctx, state)
     if node is None:
         ctx.trace.append("no-control")
@@ -1349,10 +1356,14 @@ async def _selftest() -> int:
         "required": True,
         "llm": fake_llm,
     }
-    out21 = await observe_act(fs21, fd21)
+    os.environ["OA_SCROLL_LOCATE"] = "1"  # scroll-locate is opt-in (heavy on live SPAs); enable it for this path's test
+    try:
+        out21 = await observe_act(fs21, fd21)
+    finally:
+        os.environ.pop("OA_SCROLL_LOCATE", None)
     tr21 = fd21.get("_trace") or []
     chk(
-        "BELOW-THE-FOLD card found after bounded scroll -> DONE",
+        "BELOW-THE-FOLD card found after bounded scroll (opt-in) -> DONE",
         out21 == DONE and any(t.startswith("scroll-locate#") and t.endswith("hit") for t in tr21),
         (out21, tr21),
     )
