@@ -663,7 +663,11 @@ async def _s_file_global(session: Any, ctx: Ctx, state: perc.OAState) -> Outcome
         ctx.trace.append("already-uploaded->DONE")
         ctx.committed_text = str(path)
         return DONE
-    ok = await act.upload_file(session, node, str(path))  # CDP only, NO click (no OS picker)
+    # DIRECT-CDP setFileInputFiles FIRST (no event-bus UploadFileEvent, whose readiness wait hangs on a
+    # busy SPA — the Ashby cover-letter 2nd-dropzone HARD-FIELD-TIMEOUT). Fall back to the event-bus path.
+    ok = await cdpa.cdp_set_file(session, node, str(path))
+    if not ok:
+        ok = await act.upload_file(session, node, str(path))  # CDP-via-event-bus fallback, NO click
     if not ok:
         ctx.trace.append("upload-failed")
         return ESCALATE if ctx.required else SKIP

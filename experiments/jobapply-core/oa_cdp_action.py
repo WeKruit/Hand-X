@@ -381,6 +381,30 @@ function(want){
 """
 
 
+async def cdp_set_file(session: Any, node: Any, path: str) -> bool:
+    """Attach a file to an input[type=file] via DIRECT CDP DOM.setFileInputFiles (no OS picker, no
+    event-bus UploadFileEvent whose readiness wait HANGS on a busy SPA — the Ashby 2nd-dropzone case).
+    Bounded. Returns True on success."""
+    bnid = getattr(node, "backend_node_id", None)
+    if node is None or bnid is None or not path:
+        return False
+
+    async def _do() -> bool:
+        cdp_session = await session.cdp_client_for_node(node)
+        await cdp_session.cdp_client.send.DOM.setFileInputFiles(
+            params={"files": [str(path)], "backendNodeId": int(bnid)},
+            session_id=cdp_session.session_id,
+        )
+        return True
+
+    try:
+        return await asyncio.wait_for(_do(), timeout=CDP_ACTION_TIMEOUT)
+    except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041
+        return False
+    except Exception:
+        return False
+
+
 async def cdp_set_text_in_container(session: Any, container_node: Any, value: str) -> str:
     """Set the text input inside ``container_node`` to ``value`` via the native setter + input/change (the
     proven ats_lever._location trick for a React autocomplete that reverts el.fill). Returns the set value
