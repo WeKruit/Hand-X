@@ -1163,30 +1163,17 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
         return await _s_text(session, ctx)
     # GEOCOMPLETE fill-only (the proven ats_lever._location trick): a React location autocomplete returns
     # no usable suggestion for a synthetic search, but fill-only only needs the value VISIBLY present +
-    # read-back to pass — we do NOT need to commit a geocode pick. Set the value via the native setter +
-    # input/change (cdp_set_value) so React keeps it, then verify. Only for a typeahead text control.
-    if _is_typeahead_text(ctx.node):
-        ok = await cdpa.cdp_set_value(session, ctx.node, ctx.value)
-        if ok:
+    # read-back to pass — we do NOT need a geocode pick. Find the text input inside the location card and
+    # SET its value via the native setter + input/change (cdp_set_text_in_container) so React keeps it.
+    container = ctx.card if ctx.card is not None else ctx.node
+    if container is not None:
+        set_val = await cdpa.cdp_set_text_in_container(session, container, ctx.value)
+        if set_val:
             ctx.committed_text = ctx.value
             ctx.trace.append("geocomplete->set-value")
             return await _s_verify(session, ctx)
     ctx.trace.append("search-exhausted")
     return await _s_other_guard(session, ctx)
-
-
-def _is_typeahead_text(node: Any) -> bool:
-    """A text input/combobox you can type into (the geocomplete location field) — used to fall back to a
-    direct value-set when the typeahead surfaced no options. input/textarea/contenteditable or role=combobox."""
-    if node is None:
-        return False
-    tag = _node_tag(node)
-    if tag in ("input", "textarea"):
-        typ = _node_attr(node, "type") or "text"
-        return typ in ("text", "search", "email", "url", "tel", "")
-    if _node_attr(node, "contenteditable") in ("", "true"):
-        return True
-    return _node_role(node) == "combobox"
 
 
 # ---- S_TEXT_GUARD / S_TEXT ----

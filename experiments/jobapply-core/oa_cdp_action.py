@@ -361,6 +361,47 @@ async def cdp_select_in_container(session: Any, container_node: Any, value: str)
         return ""
 
 
+# JS: find the text input within `this` (the location card / control) and SET its value via the native
+# setter + input/change so a React-controlled autocomplete keeps it (el.fill reverts). Mirrors the proven
+# ats_lever._location. Returns the set value, or "".
+_SET_TEXT_IN_CONTAINER_JS = r"""
+function(want){
+  if(!want) return "";
+  let el = null;
+  if(this.matches && this.matches('input,textarea')) el = this;
+  if(!el) el = this.querySelector('input[type=text],input[type=search],input[type=email],input[type=url],input[type=tel],input:not([type]),textarea,input[role=combobox]');
+  if(!el) return "";
+  const proto = el.tagName==='TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto,'value').set;
+  setter.call(el, want);
+  el.dispatchEvent(new Event('input',{bubbles:true}));
+  el.dispatchEvent(new Event('change',{bubbles:true}));
+  return el.value || want;
+}
+"""
+
+
+async def cdp_set_text_in_container(session: Any, container_node: Any, value: str) -> str:
+    """Set the text input inside ``container_node`` to ``value`` via the native setter + input/change (the
+    proven ats_lever._location trick for a React autocomplete that reverts el.fill). Returns the set value
+    or "". Used as the geocomplete fill-only fallback when a typeahead surfaced no options."""
+
+    async def _do() -> str:
+        r = await _resolve(session, container_node)
+        if r is None:
+            return ""
+        cdp_session, session_id, object_id = r
+        got = await _call_on(cdp_session, session_id, object_id, _SET_TEXT_IN_CONTAINER_JS, args=[str(value)])
+        return str(got).strip() if got else ""
+
+    try:
+        return await asyncio.wait_for(_do(), timeout=CDP_ACTION_TIMEOUT)
+    except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041
+        return ""
+    except Exception:
+        return ""
+
+
 # --------------------------------------------------------------------------- #
 # PUBLIC: cdp_click — trusted Input.dispatchMouseEvent at the node center, JS-click fallback.
 # --------------------------------------------------------------------------- #
