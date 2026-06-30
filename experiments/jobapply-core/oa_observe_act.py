@@ -128,6 +128,7 @@ class Ctx:
     # resolved during the run
     nature: str = ""
     node: Any = None  # the located EnhancedDOMTreeNode (the trigger/control)
+    card: Any = None  # the enclosing question-card node (grouped-widget bind) -> scopes the choice group
     committed_text: str = ""  # EXACT option string we committed (for §6 cross-check)
     queries_tried: list[str] = dc_field(default_factory=list)
     ambiguous: bool = False
@@ -355,13 +356,20 @@ async def _s1_locate(session: Any, ctx: Ctx) -> Outcome:
             return fout
         # else: no file input on the page -> fall through to generic locate (mis-tagged field).
 
-    # FIX 1: tiered locate — STRUCTURE first, VISUAL PROXIMITY aid, VLM disambiguate. Binds an
-    # unlabeled card input (Lever) the way a human does — by the question text sitting near it.
-    node, how = await perc.locate_field_tiered(state, ctx.label, vlm_pick=_make_vlm_pick(session, ctx))
+    # FIX 1: tiered locate — STRUCTURE first, VISUAL PROXIMITY aid, GROUPED-WIDGET card-heading bind,
+    # VLM disambiguate. Binds an unlabeled card input (Lever) the way a human does — by the question
+    # text sitting near it; a non-text card (radio/checkbox/select/textarea) binds via its card heading.
+    node, how, card = await perc.locate_field_tiered(state, ctx.label, vlm_pick=_make_vlm_pick(session, ctx))
+    # FIX (below-the-fold): a question lower on the page may have its card marked not-visible, so the
+    # locate sees no control. Scroll the page down one viewport and re-locate, BOUNDED — a question
+    # must not be missed just for sitting below the fold, but we never loop forever chasing one.
+    if node is None:
+        node, how, card, state = await _scroll_locate(session, ctx, state)
     if node is None:
         ctx.trace.append("no-control")
         return ESCALATE if ctx.required else SKIP
     ctx.node = node
+    ctx.card = card
     ctx.trace.append(f"located:{how}")
     # label-collision (repeaters with two "Degree"): a structural tie forces a value-verify later
     # (§6 fast-path off). Only the structure tier can produce a true accessible-name collision.
@@ -371,6 +379,30 @@ async def _s1_locate(session: Any, ctx: Ctx) -> Outcome:
             ctx.ambiguous = True
             ctx.trace.append("ambiguous-label")
     return await _s2_classify(session, ctx, state)
+
+
+async def _scroll_locate(session: Any, ctx: Ctx, state: perc.OAState) -> tuple[Any, str, Any, perc.OAState]:
+    """BOUNDED scroll-into-view re-locate for a card below the fold (FIX point 3).
+
+    A question lower on the page can have its card marked not-visible by browser-use, so the first
+    locate returns no control. We scroll the PAGE down one viewport (reusing ``act.scroll`` — the
+    same trusted CDP wheel the option-reread uses) and re-serialize, at most ``SCROLL_CAP`` times,
+    re-running the full tiered locate each step. Returns the first non-None bind plus the fresh state
+    (so the caller classifies on the post-scroll DOM), or the last (None, "", None, state). Hard-capped
+    — never a scroll loop; if the card never appears within the bound we give up and the field
+    escalates/skips as before."""
+    how = ""
+    card = None
+    node = None
+    while ctx.scroll_reads < SCROLL_CAP:
+        ctx.scroll_reads += 1
+        await act.scroll(session, None, _SCROLL_PX)
+        state = await perc.get_state(session)
+        node, how, card = await perc.locate_field_tiered(state, ctx.label, vlm_pick=_make_vlm_pick(session, ctx))
+        ctx.trace.append(f"scroll-locate#{ctx.scroll_reads}:{'hit' if node is not None else 'miss'}")
+        if node is not None:
+            return (node, how, card, state)
+    return (None, how, card, state)
 
 
 def _make_vlm_pick(session: Any, ctx: Ctx) -> Any:
@@ -527,17 +559,29 @@ async def _s_choice(session: Any, ctx: Ctx) -> Outcome:
     if node is None:
         return await _s_other_guard(session, ctx)
     ctx.committed_text = chosen
+    # Point ctx.node at the CHOSEN option control (it was the representative until now for a grouped
+    # bind) so the verify oracle reads back the control we actually committed, not the group's first
+    # option — the DOM read-back then checks the real selected radio/checkbox.
+    ctx.node = node
     await act.click_node(session, node)  # TRUSTED click on the visible proxy / input
     return await _s_verify(session, ctx)
 
 
 def _read_choice_group(state: perc.OAState, ctx: Ctx) -> list[tuple[str, Any]]:
-    """All radio/checkbox options visible in the page that belong to this field's group.
-    Structure-agnostic: a control whose intrinsic kind matches the trigger AND whose label
-    overlaps the field label region. Returns [(option_label, node)]."""
+    """The radio/checkbox options that belong to THIS question's group, scoped to its card.
+
+    Structure-agnostic: a control whose intrinsic kind matches the trigger. When the field was bound
+    via the grouped-widget tier (``ctx.card`` set), we scope the scan to that CARD's subtree so a
+    multi-question page picks the RIGHT options for THIS question — the prior whole-page scan grouped
+    by intrinsic-kind across ALL questions and so could pull another question's Yes/No into this group.
+    Falls back to the whole page when no card is known (a single standalone toggle). Each option's
+    label is its own visible text (a radio's name IS its option, e.g. 'Yes'). Returns [(option, node)].
+    """
     want_kind = classify_intrinsic(ctx.node)
+    # Scope to the card subtree (grouped bind) — reuse perception's own structural walk — else page.
+    pool = perc._controls_in(ctx.card) if ctx.card is not None else list(state.selector_map.values())
     out: list[tuple[str, Any]] = []
-    for node in state.selector_map.values():
+    for node in pool:
         if not perc.node_is_visible(node):
             continue
         if classify_intrinsic(node) != want_kind:
@@ -1185,6 +1229,132 @@ async def _selftest() -> int:
         "FIX 3: normal field uses <=3 get_state",
         out15 == DONE and fs15.state_reads <= 3,
         (out15, fs15.state_reads),
+    )
+
+    # ---- THE GAP FIX: grouped-widget locate binds a question HEADING to its non-text card control(s).
+    from oa_observe_act_fakes import (  # card builders + below-the-fold session
+        _ScrollRevealSession,
+        make_choice_card,
+        make_single_input_card,
+    )
+
+    # (16) RADIO CARD: heading "Are you authorized to work?" + two radios (Yes/No) NOT wired to the
+    #      heading. Tier-1/shallow-spatial miss (the radios' own names are 'Yes'/'No'); the grouped
+    #      tier binds the card -> INTRINSIC_RADIO -> _s_choice picks 'Yes' -> DOM read-back CORRECT.
+    yes_no = make_choice_card("Are you authorized to work?", ["Yes", "No"], base_bnid=600, kind="radio")
+    fs16 = FakeSession(
+        controls=yes_no,
+        dom_values={yes_no[0].backend_node_id: "Yes"},  # the 'Yes' radio reads back checked
+    )
+    fd16 = {"label": "Are you authorized to work?", "value": "Yes", "required": True, "llm": fake_llm}
+    out16 = await observe_act(fs16, fd16)
+    tr16 = fd16.get("_trace") or []
+    chk(
+        "RADIO card bound by GROUPED locate -> _s_choice 'Yes' -> DONE",
+        out16 == DONE and "located:grouped" in tr16 and fd16.get("_committed") == "Yes",
+        (out16, fd16.get("_committed"), tr16),
+    )
+
+    # (17) CHECKBOX CARD: heading "Language Skill(s) (Check all that apply)" + 3 checkboxes; value
+    #      'Spanish' -> grouped bind -> INTRINSIC_CHECKBOX -> _s_choice picks 'Spanish' (NOT English/
+    #      French) -> DOM CORRECT. Proves the choice group is SCOPED to this card's options.
+    langs = make_choice_card(
+        "Language Skill(s) (Check all that apply)", ["English", "Spanish", "French"], base_bnid=620, kind="checkbox"
+    )
+    spanish = langs[1]
+    fs17 = FakeSession(controls=langs, dom_values={spanish.backend_node_id: "Spanish"})
+    fd17 = {
+        "label": "Language Skill(s) (Check all that apply)",
+        "value": "Spanish",
+        "required": True,
+        "llm": fake_llm,
+    }
+    out17 = await observe_act(fs17, fd17)
+    tr17 = fd17.get("_trace") or []
+    chk(
+        "CHECKBOX card bound + scoped -> _s_choice 'Spanish' -> DONE",
+        out17 == DONE and "located:grouped" in tr17 and fd17.get("_committed") == "Spanish",
+        (out17, fd17.get("_committed"), tr17),
+    )
+
+    # (18) SINGLE_SELECT CARD: heading "How did you hear about us?" + a native <select> NOT wired to
+    #      the heading -> grouped bind -> INTRINSIC_SELECT -> _s_native picks 'LinkedIn' -> fast-path DONE.
+    hear = make_single_input_card("How did you hear about us?", bnid=640, tag="select")
+    fs18 = FakeSession(
+        controls=[hear],
+        read_options_map={hear.backend_node_id: ["LinkedIn", "Referral", "Job board"]},
+        verdict='{"filled": true, "matches": true}',
+    )
+    fd18 = {"label": "How did you hear about us?", "value": "LinkedIn", "required": True, "llm": fake_llm}
+    out18 = await observe_act(fs18, fd18)
+    tr18 = fd18.get("_trace") or []
+    chk(
+        "SINGLE_SELECT card bound by GROUPED locate -> _s_native -> DONE",
+        out18 == DONE and "located:grouped" in tr18 and fs18.last_select_text == "LinkedIn",
+        (out18, fs18.last_select_text, tr18),
+    )
+
+    # (19) TEXTAREA CARD: heading "Why do you want to work at Palantir?" + a textarea NOT wired to it
+    #      -> grouped bind -> FREE_TEXT -> _s_text types the value -> DOM read-back CORRECT.
+    why = make_single_input_card("Why do you want to work at Palantir?", bnid=660, tag="textarea")
+    fs19 = FakeSession(
+        controls=[why],
+        dom_values={why.backend_node_id: "Because I admire the mission."},
+        verdict='{"filled": true, "matches": true}',
+    )
+    fd19 = {
+        "label": "Why do you want to work at Palantir?",
+        "value": "Because I admire the mission.",
+        "required": True,
+        "llm": fake_llm,
+    }
+    out19 = await observe_act(fs19, fd19)
+    tr19 = fd19.get("_trace") or []
+    chk(
+        "TEXTAREA card bound by GROUPED locate -> _s_text -> DONE",
+        out19 == DONE and "located:grouped" in tr19 and fs19.last_type_text == "Because I admire the mission.",
+        (out19, fs19.last_type_text, tr19),
+    )
+
+    # (20) CHOICE-GROUP SCOPING: two radio cards on ONE page (authorize Yes/No + sponsorship Yes/No).
+    #      Filling the sponsorship question must pick from ITS card, not the authorize card — proves
+    #      _read_choice_group is scoped to the bound card, not grouped by intrinsic-kind page-wide.
+    auth = make_choice_card("Are you legally authorized to work?", ["Yes", "No"], base_bnid=700, kind="radio", top=200)
+    spon = make_choice_card("Will you require visa sponsorship?", ["Yes", "No"], base_bnid=720, kind="radio", top=400)
+    fs20 = FakeSession(
+        controls=auth + spon,
+        dom_values={spon[1].backend_node_id: "No"},  # the sponsorship 'No' radio reads back checked
+    )
+    fd20 = {"label": "Will you require visa sponsorship?", "value": "No", "required": True, "llm": fake_llm}
+    out20 = await observe_act(fs20, fd20)
+    tr20 = fd20.get("_trace") or []
+    # The committed node must be the SPONSORSHIP card's 'No' (bnid in spon), never the authorize card's.
+    chk(
+        "CHOICE GROUP scoped to the RIGHT card (sponsorship 'No')",
+        out20 == DONE and "located:grouped" in tr20 and fd20.get("_committed") == "No",
+        (out20, fd20.get("_committed"), tr20),
+    )
+
+    # (21) BELOW-THE-FOLD: a textarea card initially not-visible becomes visible after a bounded scroll;
+    #      the scroll-locate re-locate binds it. Proves a question is not missed just for being lower.
+    below = make_single_input_card("Tell us about a project you are proud of?", bnid=680, tag="textarea", visible=False)
+    fs21 = _ScrollRevealSession(
+        controls=[below],
+        reveal_bnid=below.backend_node_id,
+        dom_values={below.backend_node_id: "I built a compiler."},
+    )
+    fd21 = {
+        "label": "Tell us about a project you are proud of?",
+        "value": "I built a compiler.",
+        "required": True,
+        "llm": fake_llm,
+    }
+    out21 = await observe_act(fs21, fd21)
+    tr21 = fd21.get("_trace") or []
+    chk(
+        "BELOW-THE-FOLD card found after bounded scroll -> DONE",
+        out21 == DONE and any(t.startswith("scroll-locate#") and t.endswith("hit") for t in tr21),
+        (out21, tr21),
     )
 
     ok = True

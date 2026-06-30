@@ -75,7 +75,7 @@ def _parse_pick_payload(payload: str) -> tuple[str, list[str]]:
             import ast
 
             parsed = ast.literal_eval(tail)
-            if isinstance(parsed, (list, tuple)):
+            if isinstance(parsed, list | tuple):
                 opts = [str(x) for x in parsed]
         except Exception:
             opts = []
@@ -264,6 +264,171 @@ def make_card(question: str, *, input_bnid: int, role: str = "textbox", box=(100
     return inp
 
 
+def _text_node(bnid: int, text: str, box: tuple[int, int, int, int]) -> Any:
+    """A non-interactive heading text node (lives in the tree, NOT in the selector_map)."""
+    from browser_use.dom.views import DOMRect, EnhancedDOMTreeNode, NodeType
+
+    x, y, w, h = box
+    return EnhancedDOMTreeNode(
+        node_id=bnid,
+        backend_node_id=bnid,
+        node_type=NodeType.TEXT_NODE,
+        node_name="#text",
+        node_value=text,
+        attributes={},
+        is_scrollable=False,
+        is_visible=True,
+        absolute_position=DOMRect(x=x, y=y, width=w, height=h),
+        target_id="t",
+        frame_id=None,
+        session_id=None,
+        content_document=None,
+        shadow_root_type=None,
+        shadow_roots=None,
+        parent_node=None,
+        children_nodes=[],
+        ax_node=None,
+        snapshot_node=None,
+    )
+
+
+def _control_node(
+    bnid: int, *, tag: str, typ: str | None, role: str | None, box, visible=True, ax_name: str | None = None
+) -> Any:
+    """A fillable control. ``ax_name`` is the control's OWN accessible name: for a radio/checkbox option
+    it is the OPTION text ('Yes'/'No') — browser-use resolves the wrapping <label> into the ax name, so
+    options ARE named, but the QUESTION HEADING is a separate un-wired card node above them (the gap).
+    For a textarea/select card we leave ax_name blank (the heading is the only text), so Tier-1 cannot
+    bind it and only the grouped-widget card-heading tier can."""
+    from browser_use.dom.views import DOMRect, EnhancedAXNode, EnhancedDOMTreeNode, NodeType
+
+    attrs: dict[str, str] = {}
+    if typ:
+        attrs["type"] = typ
+    if role:
+        attrs["role"] = role
+    ax = None
+    if ax_name is not None:
+        ax = EnhancedAXNode(
+            ax_node_id=f"ax{bnid}",
+            ignored=False,
+            role=role,
+            name=ax_name,
+            description=None,
+            properties=None,
+            child_ids=None,
+        )
+    x, y, w, h = box
+    return EnhancedDOMTreeNode(
+        node_id=bnid,
+        backend_node_id=bnid,
+        node_type=NodeType.ELEMENT_NODE,
+        node_name=tag.upper(),
+        node_value="",
+        attributes=attrs,
+        is_scrollable=False,
+        is_visible=visible,
+        absolute_position=DOMRect(x=x, y=y, width=w, height=h),
+        target_id="t",
+        frame_id=None,
+        session_id=None,
+        content_document=None,
+        shadow_root_type=None,
+        shadow_roots=None,
+        parent_node=None,
+        children_nodes=[],
+        ax_node=ax,
+        snapshot_node=None,
+    )
+
+
+def _wrap(bnid: int, children: list[Any], box) -> Any:
+    """A card/section DIV wrapper holding a heading + control rows, with parent/child linkage set
+    exactly like the live serializer (so ``get_all_children_text`` reads the heading + option text)."""
+    from browser_use.dom.views import DOMRect, EnhancedDOMTreeNode, NodeType
+
+    x, y, w, h = box
+    node = EnhancedDOMTreeNode(
+        node_id=bnid,
+        backend_node_id=bnid,
+        node_type=NodeType.ELEMENT_NODE,
+        node_name="DIV",
+        node_value="",
+        attributes={},
+        is_scrollable=False,
+        is_visible=True,
+        absolute_position=DOMRect(x=x, y=y, width=w, height=h),
+        target_id="t",
+        frame_id=None,
+        session_id=None,
+        content_document=None,
+        shadow_root_type=None,
+        shadow_roots=None,
+        parent_node=None,
+        children_nodes=children,
+        ax_node=None,
+        snapshot_node=None,
+    )
+    for c in children:
+        c.parent_node = node
+    return node
+
+
+def make_choice_card(
+    question: str,
+    options: list[str],
+    *,
+    base_bnid: int,
+    kind: str = "radio",
+    visible: bool = True,
+    top: int = 240,
+) -> list[Any]:
+    """LEVER-STYLE grouped radio/checkbox card: a card holding a heading + N option ROWS, each row a
+    ``<label>`` wrapping the option ``<input type=radio|checkbox>`` (blank accessible name) and the
+    option's own text node ('Yes'/'No'). The heading is NOT wired to any input. Returns the list of
+    OPTION CONTROL nodes to drop into the selector_map (the heading/rows/card live only in the tree,
+    reachable from each control's ``parent_node`` chain — exactly the live serializer shape)."""
+    heading = _text_node(base_bnid, question, (100, top, 360, 18))
+    rows: list[Any] = [heading]
+    controls: list[Any] = []
+    for i, opt in enumerate(options):
+        cid = base_bnid + 1 + i
+        oy = top + 28 + i * 30
+        ctrl = _control_node(cid, tag="input", typ=kind, role=kind, box=(100, oy, 18, 18), visible=visible, ax_name=opt)
+        otext = _text_node(cid * 100 + 7, opt, (124, oy, 120, 18))
+        row = _wrap(cid * 1000 + 3, [ctrl, otext], (100, oy, 240, 24))
+        rows.append(row)
+        controls.append(ctrl)
+    _wrap(base_bnid * 1000 + 9, rows, (100, top - 4, 380, 28 + 30 * len(options)))
+    return controls
+
+
+def make_single_input_card(
+    question: str,
+    *,
+    bnid: int,
+    tag: str = "textarea",
+    typ: str | None = None,
+    role: str | None = None,
+    visible: bool = True,
+    top: int = 240,
+) -> Any:
+    """A card with a heading BLOCK + a SINGLE un-wired control nested in its own field-wrapper — the
+    real Lever shape where the heading is a separate sibling section above the control's wrapper, so
+    the shallow ``_climb_wrapper`` stops at the inner field-wrapper (no heading) and ONLY the grouped-
+    widget card tier reaches the heading via ``get_all_children_text``. Returns the control node."""
+    heading_text = _text_node(bnid * 10 + 1, question, (100, top, 360, 18))
+    heading_block = _wrap(bnid * 10 + 3, [heading_text], (100, top, 360, 20))  # heading is its own block
+    ctrl = _control_node(bnid, tag=tag, typ=typ, role=role, box=(100, top + 28, 320, 32), visible=visible)
+    # the control's own field-wrapper holds the control + an adornment (clear icon) — >1 child but NO
+    # heading, so the shallow _climb_wrapper STOPS here and reads no heading; only the grouped card tier
+    # (which climbs to the section whose text contains the heading) can bind it. Mirrors the real shape.
+    icon = _text_node(bnid * 10 + 5, "", (420, top + 28, 16, 16))  # a non-heading adornment node
+    field_wrap = _wrap(bnid * 10 + 4, [ctrl, icon], (100, top + 24, 360, 40))
+    _wrap(bnid * 10 + 2, [heading_block, field_wrap], (100, top - 4, 380, 80))
+    return ctrl
+
+
 def _hidden_file_input(bnid: int, *, name: str = "resume") -> Any:
     """A HIDDEN / zero-box ``input[type=file]`` — the normal shape on GH/Lever/Ashby (a styled
     'Attach' button proxies for it). is_visible=False + a zero box, so the label ranker can't see
@@ -414,6 +579,24 @@ class FakeSession:
         if self._vseq:
             return self._vseq.pop(0)
         return self._verdict
+
+
+class _ScrollRevealSession(FakeSession):
+    """A FakeSession whose ``reveal_bnid`` control starts NOT-VISIBLE and flips visible on the first
+    ScrollEvent — emulates a card below the fold that browser-use only marks visible after scrolling.
+    Proves the engine's bounded scroll-into-view re-locate (``_scroll_locate``) finds a low question."""
+
+    def __init__(self, *, reveal_bnid: int, **kw: Any) -> None:
+        super().__init__(**kw)
+        self._reveal_bnid = reveal_bnid
+
+    def _handle(self, event: Any) -> _FakeEvent:
+        if type(event).__name__ == "ScrollEvent":
+            node = self._base.get(self._reveal_bnid)
+            if node is not None:
+                node.is_visible = True  # the card scrolled into the viewport -> now visible
+            return _FakeEvent(None)
+        return super()._handle(event)
 
 
 # --------------------------------------------------------------------------- #

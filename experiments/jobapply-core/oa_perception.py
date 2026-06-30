@@ -312,6 +312,130 @@ def _group_text(node: Any) -> str:
     return txt
 
 
+# Minimum card-text token-overlap with the question label to accept an ancestor as THE card that
+# holds this control's heading. The heading is one node among many in a card's text, so we want a
+# solid majority of the (short) label's tokens present — not a single incidental word.
+_CARD_TEXT_MATCH = 0.6
+# Bounded climb for the card search — a card/section is a few levels up from the bare control, never
+# the whole form. Larger than _climb_wrapper's 4 because a grouped control (radio inside a <label>
+# inside a fieldset inside the question card) sits deeper below its heading than a bare text input.
+_CARD_MAX_UP = 8
+
+
+def _all_children_text(node: Any) -> str:
+    """browser-use's own ``get_all_children_text`` over ``node`` (dom/views.py:561), or ''.
+    Reads EXACTLY the visible text the agent sees in this subtree (the card heading + helper +
+    option labels), so a heading never wired to its control is still readable by structure."""
+    getter = getattr(node, "get_all_children_text", None)
+    if not callable(getter):
+        return ""
+    try:
+        return getter() or ""
+    except Exception:
+        return ""
+
+
+def _card_wrapper(node: Any, target: set[str], *, max_up: int = _CARD_MAX_UP) -> Any | None:
+    """Climb to the nearest ancestor CARD whose visible text contains the question heading.
+
+    A label-less card (Lever screening question) puts its question text in a separate HEADING node
+    ABOVE the control — not in the control's own accessible name, and (for a grouped radio/checkbox)
+    not even in the small wrapper ``_climb_wrapper`` stops at (that is just the ``<label>Yes</label>``
+    row). We climb further, bounded, and accept the FIRST ancestor whose ``get_all_children_text``
+    token-overlap with the wanted label clears ``_CARD_TEXT_MATCH`` — i.e. the section that actually
+    renders this question's heading. Pure DOM structure + the agent's own text (no class/data-* hook).
+    Returns that card node, or None if no ancestor within the bound names the field.
+    """
+    if not target:
+        return None
+    cur = node
+    for _ in range(max_up):
+        parent = getattr(cur, "parent_node", None)
+        if parent is None:
+            break
+        cur = parent
+        if _overlap_score(_tokens(_all_children_text(cur)), target) >= _CARD_TEXT_MATCH:
+            return cur
+    return None
+
+
+def _controls_in(card: Any) -> list[Any]:
+    """Every fillable control in this card's subtree, in document order (DFS).
+    Generic structural walk over ``children_nodes`` — the same tree ``get_all_children_text`` reads."""
+    out: list[Any] = []
+
+    def walk(n: Any) -> None:
+        kids = getattr(n, "children_nodes", None) or []
+        for k in kids:
+            if _is_fillable_control(k):
+                out.append(k)
+            walk(k)
+
+    walk(card)
+    return out
+
+
+def locate_grouped_widget(state: OAState, label_text: str) -> tuple[Any, Any] | None:
+    """Bind a QUESTION HEADING to its non-text card control(s) by structure + spatial proximity.
+
+    The gap (proven on Lever): a radio/checkbox/single_select/textarea whose question is a separate
+    card HEADING is missed by Tier-1 (the control's own name is 'Yes'/'No'/empty) AND by the shallow
+    Tier-2 ``_group_text`` (which only reaches the bare option row). This finds the control's enclosing
+    CARD (``_card_wrapper`` — the ancestor whose visible text contains the heading), then returns a
+    REPRESENTATIVE fillable control inside that card: the topmost-then-leftmost one at/below the
+    heading region. ``classify_intrinsic`` on that node then routes radio/checkbox -> ``_s_choice``,
+    select -> ``_s_native``, textarea -> ``_s_text`` through the engine's EXISTING fill paths.
+
+    Returns ``(control_node, card_node)`` — the card is handed to the choice-group reader so a radio
+    group is scoped to THIS question, not the whole page. None if no card names the field. GENERIC —
+    no per-ATS strings, binds purely by the heading text + box geometry.
+    """
+    target = _tokens(label_text)
+    if not target:
+        return None
+    best: tuple[float, Any, Any] | None = None  # (card_text_score, control, card)
+    seen_cards: set[int] = set()
+    for ctrl in state.selector_map.values():
+        if not node_is_visible(ctrl) or not _is_fillable_control(ctrl):
+            continue
+        card = _card_wrapper(ctrl, target)
+        if card is None:
+            continue
+        cid = getattr(card, "backend_node_id", None)
+        if cid in seen_cards:
+            continue
+        seen_cards.add(cid)
+        score = _overlap_score(_tokens(_all_children_text(card)), target)
+        rep = _representative_control(card)
+        if rep is None:
+            continue
+        if best is None or score > best[0]:
+            best = (score, rep, card)
+    if best is None:
+        return None
+    return (best[1], best[2])
+
+
+def _representative_control(card: Any) -> Any | None:
+    """The control to bind for a card: topmost-then-leftmost-then-smallest fillable control inside it.
+    For a radio/checkbox group this is the FIRST option (its intrinsic kind is what ``classify_intrinsic``
+    routes on); for a single textarea/select it is that control. Geometry-only on absolute_position."""
+    controls = _controls_in(card)
+    if not controls:
+        return None
+    best: Any = None
+    best_key: tuple[float, float, float] | None = None
+    for n in controls:
+        rect = node_rect(n)
+        y = rect[1] if rect else float("inf")
+        x = rect[0] if rect else float("inf")
+        area = (rect[2] * rect[3]) if rect else float("inf")
+        key = (y, x, area)
+        if best_key is None or key < best_key:
+            best_key, best = key, n
+    return best
+
+
 def locate_field(state: OAState, label_text: str) -> EnhancedDOMTreeNode | None:
     """Find the control whose VISIBLE label best matches `label_text` (structure-only, legacy).
 
@@ -333,26 +457,29 @@ async def locate_field_tiered(
     label_text: str,
     *,
     vlm_pick: Any = None,
-) -> tuple[Any, str]:
+) -> tuple[Any, str, Any]:
     """Locate the control for `label_text` by STRUCTURE first, VISUAL PROXIMITY aid, then VLM.
 
-    Returns ``(node, how)`` with ``how`` in {"structure", "spatial", "vlm"}, or ``(None, "")``
-    when nothing plausible exists. GENERIC — no per-ATS code.
+    Returns ``(node, how, card)`` with ``how`` in {"structure", "spatial", "grouped", "vlm"}, or
+    ``(None, "", None)`` when nothing plausible exists. ``card`` is the enclosing question-card node
+    when the bind came from the grouped-widget tier (so the choice-group reader can scope a radio
+    group to THIS question), else None. GENERIC — no per-ATS code.
 
       TIER 1 STRUCTURE: rank visible fillable controls by accessible-name token overlap
         (``locate_field_ranked``; ax_node.name already resolves <label for>/aria-labelledby/
         wrapping-label). A clear strong winner -> return ("structure").
-      TIER 2 SPATIAL: when Tier 1 finds nothing, or only a weak/tied match (the Lever-card case
-        where the question is NOT wired to the input), bind by GEOMETRY — for each visible
-        fillable control, read its question-group text (``_group_text``) and rank by token overlap;
-        among the best-text controls, prefer the one whose box sits directly below / left-aligned
-        with the question region. Returns ("spatial").
+      TIER 2 SPATIAL: a single control whose own shallow question-group text (``_group_text``) names
+        the field — the proven label-less TEXT-input case (Lever 'Preferred Name'). Returns ("spatial").
+      TIER 2b GROUPED-WIDGET: when no single control's shallow text matches (a radio/checkbox/select/
+        textarea whose question is a separate card HEADING above it — the control's own text is just
+        'Yes'/'No'/empty), bind via ``locate_grouped_widget``: find the enclosing CARD whose visible
+        text contains the heading, return a representative control inside it. Returns ("grouped", card).
       TIER 3 VLM: only when >=2 candidates tie spatially, ask the optional ``vlm_pick`` callback
         (an async (label, [nodes]) -> node | None) to disambiguate. AID only, bounded, never primary.
     """
     target = _tokens(label_text)
     if not target:
-        return (None, "")
+        return (None, "", None)
 
     # ---- TIER 1: structure (accessible name) ----
     ranked = locate_field_ranked(state, label_text)
@@ -360,9 +487,9 @@ async def locate_field_tiered(
         top_node, top_score = ranked[0]
         tied = len(ranked) >= 2 and abs(ranked[0][1] - ranked[1][1]) < _STRUCT_TIE
         if top_score >= _STRUCT_STRONG and not tied:
-            return (top_node, "structure")
+            return (top_node, "structure", None)
 
-    # ---- TIER 2: visual proximity (question text near the control) ----
+    # ---- TIER 2: visual proximity (shallow question text near a single control) ----
     controls = [n for n in state.selector_map.values() if node_is_visible(n) and _is_fillable_control(n)]
     text_scored: list[tuple[Any, float, str]] = []
     for n in controls:
@@ -376,24 +503,33 @@ async def locate_field_tiered(
         # candidates whose question-group text matches the label about equally well.
         cands = [n for (n, s, _g) in text_scored if best_s - s < 0.2]
         if len(cands) == 1:
-            return (cands[0], "spatial")
+            return (cands[0], "spatial", None)
         # >=2 group-text matches: prefer the geometric "answer directly below the question".
         geo = _disambiguate_spatial(state, target, cands)
         if geo is not None:
-            return (geo, "spatial")
+            return (geo, "spatial", None)
         # ---- TIER 3: VLM aid for a genuine spatial tie ----
         if vlm_pick is not None:
             picked = None
             with contextlib.suppress(Exception):
                 picked = await vlm_pick(label_text, cands)
             if picked is not None:
-                return (picked, "vlm")
-        return (cands[0], "spatial")  # bounded fallback: best text match
+                return (picked, "vlm", None)
+        return (cands[0], "spatial", None)  # bounded fallback: best text match
 
-    # Tier 1 had only a weak match but Tier 2 found no group text -> take the weak structural node.
+    # ---- TIER 2b: GROUPED WIDGET — a card heading binds its non-text control(s) ----
+    # The shallow ``_group_text`` only reaches the bare option row of a radio/checkbox (text 'Yes'),
+    # never the card heading; and a textarea/select card's heading is a separate node above it. Climb
+    # to the enclosing card whose visible text holds the heading and bind a representative control.
+    grouped = locate_grouped_widget(state, label_text)
+    if grouped is not None:
+        node, card = grouped
+        return (node, "grouped", card)
+
+    # Tier 1 had only a weak match but nothing else bound -> take the weak structural node.
     if ranked:
-        return (ranked[0][0], "structure")
-    return (None, "")
+        return (ranked[0][0], "structure", None)
+    return (None, "", None)
 
 
 def _disambiguate_spatial(state: OAState, target: set[str], cands: list[Any]) -> Any | None:
@@ -577,7 +713,41 @@ def _selftest() -> None:
     d2 = delta(before, after2)
     assert d2[-1].backend_node_id == 20, "hidden node should sort last"
 
-    print("oa_perception self-test OK: locate_field + delta + option-text + coords")
+    # ---- GROUPED-WIDGET locate (the gap fix): a card heading binds its non-text controls. ----
+    # Built with the same fakes the state-machine tests use (local import — fakes imports this module,
+    # so the import lives inside the function to avoid an import-time cycle).
+    from oa_observe_act_fakes import make_choice_card, make_single_input_card
+
+    # Two radio cards on one page (authorize + sponsorship) — the page-wide grouping hazard.
+    auth = make_choice_card("Are you legally authorized to work?", ["Yes", "No"], base_bnid=800, kind="radio", top=200)
+    spon = make_choice_card("Will you require visa sponsorship?", ["Yes", "No"], base_bnid=820, kind="radio", top=400)
+    gstate = OAState(selector_map={n.backend_node_id: n for n in (auth + spon)}, url="https://x/apply")
+
+    # Tier-1 structure cannot bind the heading: the only matches are radios whose own name is
+    # 'Yes'/'No', which share NO tokens with the question -> the ranker returns nothing.
+    assert locate_field_ranked(gstate, "Will you require visa sponsorship?") == [], "structure must miss the heading"
+    g = locate_grouped_widget(gstate, "Will you require visa sponsorship?")
+    assert g is not None, "grouped-widget must bind the sponsorship card"
+    rep, card = g
+    # the representative is a radio IN the sponsorship card (one of spon), NEVER the authorize card.
+    spon_ids = {n.backend_node_id for n in spon}
+    auth_ids = {n.backend_node_id for n in auth}
+    assert rep.backend_node_id in spon_ids, f"bound rep not in sponsorship card: {rep.backend_node_id}"
+    # the card subtree contains ONLY this question's controls (scoping) — no authorize radios.
+    scoped = {n.backend_node_id for n in _controls_in(card)}
+    assert scoped <= spon_ids and not (scoped & auth_ids), f"choice group not scoped: {scoped}"
+    assert scoped == spon_ids, f"scoped group must be exactly the sponsorship radios: {scoped}"
+
+    # A single-control card (textarea nested in its own field-wrapper, heading a sibling block) binds.
+    ta_card = make_single_input_card("What is your proudest accomplishment?", bnid=860, tag="textarea", top=600)
+    tstate = OAState(selector_map={ta_card.backend_node_id: ta_card}, url="https://x/apply")
+    gt = locate_grouped_widget(tstate, "What is your proudest accomplishment?")
+    assert gt is not None and gt[0].backend_node_id == ta_card.backend_node_id, "textarea card must bind"
+
+    # NEGATIVE: a label naming no card on the page binds nothing (no false positive).
+    assert locate_grouped_widget(gstate, "What is your favorite color?") is None, "no spurious grouped bind"
+
+    print("oa_perception self-test OK: locate_field + delta + option-text + coords + grouped-widget")
 
 
 if __name__ == "__main__":
