@@ -264,6 +264,56 @@ async def cdp_select(session: Any, node: Any, text: str) -> bool:
     return await _guarded(_do())
 
 
+# JS: within `this` (the card/group container) find the radio/checkbox input whose VALUE attr (or its
+# wrapping <label> text) matches `want`, exact then substring, click it + fire input/change (React).
+# Mirrors the proven ats_lever._click_option: Lever radios are REAL inputs (often visually HIDDEN behind
+# a styled label) carrying value="<option label>" — invisible to a visible-only scan but reachable in the
+# full DOM. Returns the matched value string, or "" when nothing matched. Generic standard-DOM.
+_CHOOSE_OPTION_JS = r"""
+function(want){
+  const norm = s => (s||'').replace(/\s+/g,'').toLowerCase();
+  const w = norm(want);
+  if(!w) return "";
+  const inputs = [...this.querySelectorAll('input[type=radio],input[type=checkbox]')];
+  if(!inputs.length) return "";
+  const valOf = el => norm(el.getAttribute('value')||el.value||'');
+  const labOf = el => { const L = el.closest('label'); let t = norm(L?L.textContent:''); if(!t) t = norm(el.getAttribute('aria-label')||''); return t; };
+  let t = inputs.find(el => valOf(el)===w) || inputs.find(el => labOf(el)===w);
+  if(!t) t = inputs.find(el => { const v=valOf(el); return v && (v.includes(w)||w.includes(v)); });
+  if(!t) t = inputs.find(el => { const l=labOf(el); return l && (l.includes(w)||w.includes(l)); });
+  if(!t) return "";
+  t.click();
+  t.dispatchEvent(new Event('input',{bubbles:true}));
+  t.dispatchEvent(new Event('change',{bubbles:true}));
+  return el_val(t);
+  function el_val(el){ return (el.getAttribute('value')||el.value||labOf(el)||want); }
+}
+"""
+
+
+async def cdp_choose_option(session: Any, container_node: Any, value: str) -> str:
+    """Commit a radio/checkbox GROUP the proven Lever way: scan the container's REAL inputs (incl.
+    visually-hidden ones a visible-only selector_map misses), match the one whose VALUE attr / wrapping
+    <label> means ``value``, ``.click()`` it + fire input/change. Returns the matched option string, or
+    "" when no input matched (caller falls back to the visual path). Generic — any real radio/checkbox
+    group, no per-ATS hook."""
+
+    async def _do() -> str:
+        r = await _resolve(session, container_node)
+        if r is None:
+            return ""
+        cdp_session, session_id, object_id = r
+        got = await _call_on(cdp_session, session_id, object_id, _CHOOSE_OPTION_JS, args=[str(value)])
+        return str(got).strip() if got else ""
+
+    try:
+        return await asyncio.wait_for(_do(), timeout=CDP_ACTION_TIMEOUT)
+    except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041
+        return ""
+    except Exception:
+        return ""
+
+
 # --------------------------------------------------------------------------- #
 # PUBLIC: cdp_click — trusted Input.dispatchMouseEvent at the node center, JS-click fallback.
 # --------------------------------------------------------------------------- #

@@ -38,6 +38,7 @@ from typing import Any
 
 import oa_action as act
 import oa_brain as brain
+import oa_cdp_action as cdpa
 import oa_file_locate as filoc
 import oa_perception as perc
 
@@ -793,6 +794,24 @@ async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S_CHOICE")
+    # PROVEN DOM-DIRECT COMMIT FIRST (the ats_lever._click_option interaction, generalised): scan the
+    # card's REAL radio/checkbox inputs — INCLUDING the visually-hidden ones a visible-only selector_map
+    # misses (Lever hides the real <input value="Yes"> behind a styled <label>) — match the input whose
+    # value attr / wrapping label means ctx.value, and .click() it + fire input/change so React commits.
+    # This is generic (any real radio/checkbox group) and reliable, so it precedes the group-read and the
+    # visual fallback. A successful match IS the commit (the old filler trusted target.click() likewise).
+    container = ctx.card if ctx.card is not None else ctx.node
+    if container is not None:
+        matched = await cdpa.cdp_choose_option(session, container, ctx.value)
+        if matched:
+            # The JS found a real input whose value/label matches, clicked it, and fired input/change —
+            # a reliable commit (the proven ats_lever path returned True on this click). Trust it as DONE
+            # rather than a DOM read-back of the trigger node (which can't see a hidden radio's checked
+            # state and would false-negative -> recommit loop).
+            ctx.committed_text = matched
+            ctx.trace.append(f"choice-dom-direct:{matched[:20]}")
+            return DONE
+
     # The group's options are siblings already rendered. SNAPSHOT REUSE: prefer the locate snapshot
     # handed down from classify (the static radio/checkbox group is already in it) — only serialize
     # afresh if the caller had none (e.g. a re-entry). This removes a full-page get_state per choice
