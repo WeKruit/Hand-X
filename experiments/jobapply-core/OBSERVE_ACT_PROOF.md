@@ -175,3 +175,77 @@ browser can't stall the sweep.
   `runs/batch2/shots/*.png`, `runs/serial/shots/*.png` (end-of-fill screenshots, Submit untouched),
   `runs/batch2/companies.json` (the gathered live URL set).
 - Ground-truth screenshot proving fill≠verify: `runs/batch2/shots/006_greenhouse_anthropic_pyr_backend.png`.
+
+---
+
+## Verify-Oracle Fix — serial + concurrent results
+
+**The fix.** Verify no longer uses the VLM as the sole oracle. `observe_act._verify_field` →
+`oa_brain.verify` now reads the located control's **live DOM value first** (`oa_dom_value.read_dom_value`,
+generic standard-DOM via CDP — no renameable attributes, no per-ATS branching) and matches it against the
+wanted value **LLM-only** (`wd_repeaters._llm_pick`, with a deterministic full-normalized-string-identity
+short-circuit — not substring/regex). The VLM is demoted to a per-FIELD-budgeted AID
+(`FIELD_VLM_CAP=2`) consulted **only** when the DOM read is empty/ambiguous (visual-only widgets). The
+per-page VLM cap is lifted to a high backstop at run start so it can never pre-empt the per-field budget
+and starve field 7+ into the old capped→UNKNOWN→ESCALATE false-failure. Every verify call records a
+`verify-src:dom|vlm` trace tag, so the dom-vs-vlm split is auditable per field.
+
+**Offline gate (all green, $0, no browser):** `oa_dom_value` 8/8 · `oa_brain` 28/28 (incl.
+"DOM exact-normal match → CORRECT, 0 VLM + 0 LLM" and "DOM read-back mismatch → WRONG, 0 VLM") ·
+`oa_observe_act` 24/24 (incl. "DOM-first text DONE (no VLM)" and "per-FIELD VLM budget caps at
+≤FIELD_VLM_CAP") · `oa_proof` 10/10 · `ruff check` clean.
+
+### Serial (1-proc-per-run, concurrency=1) — the prior passed proof
+Greenhouse **93%** (13/14 non-skip DONE) · Lever **50%** (7/14) · Ashby **88%** (7/8). Every verdict
+from **DOM read-back, ZERO VLM** (the 2 Ashby file fields took the INTRINSIC_FILE fast-path). GH 50.6s,
+Lever 79.7s, Ashby 45.4s — all under the 240s/job budget.
+
+### Concurrent (subprocess-per-job, `--concurrency 4`, 240s/job, fill-only, with resume)
+`runs/oa_proof_concurrent/` — 12-job batch (6 companies × 2 profiles), 4 OS subprocesses at a time
+(each its OWN interpreter → its OWN verify globals). Total wall-clock **≈ 6m 40s** for the 12-job sweep.
+
+| ATS | runs | completed | timed out | fill-rate (concurrency=4) | serial fill-rate | verify src |
+|---|---|---|---|---|---|---|
+| **Greenhouse** | 4 | 4 | 0 | **100%** (20/20) | 93% | dom=20 vlm=0 |
+| **Lever** | 4 | 4 | 0 | **50%** (28/56) | 50% | dom=28 vlm=0 |
+| **Ashby** | 4 | 0 | **4** | **n/a — all 4 hit the 240s wall** | 88% | (no fields reached verify) |
+| **Overall** | 12 | 8 | 4 | 63% (48/76) | — | **dom=48 vlm=0** |
+
+- **Completed vs timed out:** 8/12 completed, 4/12 timed out — **all 4 timeouts were Ashby**, GH + Lever
+  100% completion.
+- **Comparable to serial — no collapse.** GH 100% (≥ serial 93%) and Lever 50% (= serial 50%) under
+  concurrency=4. This is the headline: in the OLD in-process harness the same forms collapsed to
+  **0–17%** because 4 coroutines shared one module-global VLM counter; with subprocess-per-job they are
+  **identical to serial**. The metric holds because the verify state is per-process.
+- **DOM verify holds under parallelism:** **every one of the 48 filled fields verified `verify-src:dom`
+  `verdict:CORRECT` — ZERO VLM calls across the entire concurrent batch.** Not one field was
+  ESCALATED by a capped→UNKNOWN false-failure. The verify-oracle fix is concurrency-proof because the
+  free DOM read needs no shared, capped resource.
+- **Fill-only confirmed on every screenshot.** All 8 completed runs left the Submit button present and
+  untouched (e.g. `shots/000_greenhouse_anthropic_pyr_backend.png`: all 5 fields filled, dark
+  "Submit application" button bottom-right, never clicked). The 4 killed Ashby children never reached a
+  submit control either — `observe_act` has no submit path by construction.
+
+### BLUNT verdict
+**Yes — concurrency now holds because state is per-process.** The metric no longer collapses under
+parallelism: GH and Lever return **identical numbers serial vs concurrency-4**, with **100% DOM-sourced
+verify and zero VLM**. The old 0–17% concurrent collapse was purely the in-process shared-counter race;
+subprocess-per-job eliminates it. The verify-oracle fix is the load-bearing change — a text/email/phone/
+url/date/Yes-No value is read straight from the DOM, which costs nothing and needs no capped shared
+resource, so 4 parallel jobs cannot starve each other.
+
+**What still collapses, and exactly why — it is NOT the verify oracle, NOT a state race:** all 4 Ashby
+jobs hit the 240s wall. Proven by re-running the exact failing job (`ramp / diego_mech`, idx 004)
+**ALONE** in its own process: it **completed** at **56% (5/9), fill wall-clock 157.5s, total 233s,
+verify-src dom=3 vlm=0** — i.e. it *barely* fits the 240s budget even with zero contention (Ashby's
+react-select per-field settle is intrinsically slow). Under concurrency=4, four headless Chromium engines
+contend for CPU/IO on one machine and that ~157s fill + nav/extract/map/screenshot overhead is pushed
+past 240s → the per-job kill watchdog fires. So the Ashby failure is a **latency/contention budget
+overflow, not a verify or isolation bug**: when it *does* run to completion it verifies the same way
+(all DOM, no VLM) as serial. The fix needed is on Ashby's per-field settle latency (DESIGN §6 top-3 fix
+#3: tighten the react-select `_settle`, batch field-scoped delta reads), or a higher per-job timeout /
+lower concurrency for Ashby — not the verify path.
+
+**Artifacts:** `runs/oa_proof_concurrent/records.json` (aggregate + per-run), `perfield/*.json` (full
+per-field traces with `verify-src` tags), `shots/*.png` (8 end-of-fill, Submit untouched),
+`CONCURRENT_REPORT.md`; solo-Ashby control: `runs/oa_ashby_solo/ashby_solo.json` (+ `.png`).

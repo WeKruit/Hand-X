@@ -59,6 +59,8 @@ CASCADE_CAP = 2  # sub-option recursion depth
 MULTI_CAP = 8  # multi-value pick loop
 STEP_CAP = 40  # GLOBAL per-field state entries
 FIELD_DEADLINE = 15.0  # GLOBAL per-field wall-clock (seconds)
+FIELD_VERIFY_CAP = 3  # per-FIELD verify attempts total (DOM read-back + VLM aids combined)
+FIELD_VLM_CAP = 2  # per-FIELD VLM-aid sub-budget (DOM-first means the VLM is rarely needed)
 
 # Settle timings (§3.5). Bounded poll, no fixed long sleeps.
 _POLL_S = 0.12
@@ -123,6 +125,11 @@ class Ctx:
     cascade_depth: int = 0
     scroll_reads: int = 0
     multi_done: int = 0
+
+    # per-FIELD verify budget (§6.1 oracle fix): DOM read-back is primary + free; the VLM is a
+    # budgeted AID. verify_used counts EVERY verify call (DOM+VLM); vlm_used counts only VLM aids.
+    verify_used: int = 0
+    vlm_used: int = 0
 
     # GLOBAL backstops
     steps: int = 0
@@ -643,18 +650,67 @@ async def _s_multi_loop(session: Any, ctx: Ctx) -> Outcome:
     return await _s_verify(session, ctx)
 
 
-# ---- S_VERIFY (value-aware VLM + 3-way routing, §6) ----
+# ---- verify oracle wrapper: DOM read-back FIRST, VLM as a per-FIELD-budgeted AID (§6.1) ----
+async def _verify_field(session: Any, ctx: Ctx, *, key: str) -> str:
+    """Run ONE value-aware verify of the located control via the DOM-first oracle.
+
+    Enforces the per-FIELD budget (NOT per-page, so a huge single page never starves field 7+):
+      * ``FIELD_VERIFY_CAP`` total verify attempts (DOM read-back + VLM aids combined),
+      * ``FIELD_VLM_CAP`` VLM aids — DOM read-back is free and primary, the VLM is only an aid
+        when the DOM read is empty/ambiguous, so ``allow_vlm`` is False once the field's VLM
+        sub-budget is spent (then ``brain.verify`` returns EMPTY/UNKNOWN without spending).
+
+    The per-PAGE ``vision_verify.VLM_MAX_CALLS`` gate still exists as a backstop, but the page is
+    set to a HIGH backstop at run start (see ``reset_page_vlm_backstop``) so it cannot pre-empt the
+    per-field budget on a long single page (the field-7+ starvation root cause)."""
+    if ctx.verify_used >= FIELD_VERIFY_CAP:
+        ctx.trace.append("verify-cap")
+        return "UNKNOWN"
+    ctx.verify_used += 1
+    allow_vlm = ctx.vlm_used < FIELD_VLM_CAP
+    # snapshot the page VLM counter to detect whether the AID was actually spent.
+    before_n = _vv_calls()
+    verdict = await brain.verify(
+        session, ctx.label, ctx.value, node=ctx.node, llm=ctx.llm, key=key, use_cache=True, allow_vlm=allow_vlm
+    )
+    spent = max(0, _vv_calls() - before_n)
+    if spent:
+        ctx.vlm_used += spent
+    # Record the verdict SOURCE so the proof can audit dom-vs-vlm per field (no per-ATS branching;
+    # purely derived from whether the VLM AID was actually consulted on this verify call).
+    ctx.trace.append(f"verify-src:{'vlm' if spent else 'dom'}")
+    return verdict
+
+
+def _vv_calls() -> int:
+    """Current per-page VLM call count (vision_verify's module counter), for per-field accounting."""
+    import vision_verify as _vv
+
+    return int(_vv._VLM_CALLS.get("n", 0))
+
+
+def reset_page_vlm_backstop(high: int = 10_000) -> None:
+    """Lift the per-PAGE VLM cap to a high backstop so the per-FIELD budget (FIELD_VLM_CAP) is the
+    real limiter on a long single page. The runner calls this once per page/record; the per-field
+    budget then prevents any single field from over-spending the VLM. (Keeps the cache, which is
+    correct + free.)"""
+    import vision_verify as _vv
+
+    _vv.VLM_MAX_CALLS = int(high)
+
+
+# ---- S_VERIFY (DOM read-back primary + VLM aid + 3-way routing, §6) ----
 async def _s_verify(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S_VERIFY")
-    # Fast-path skip ONLY on a deterministic DOM-identity commit (§6.1, tightened):
-    # intrinsic select / native — the commit is mechanically reliable and not ambiguous.
+    # §6.1 fast-path: a deterministic DOM-identity commit (native select / file) is mechanically
+    # reliable — return DONE without any read-back, as today.
     if ctx.nature in ("INTRINSIC_SELECT", "INTRINSIC_FILE") and ctx.committed_text and not ctx.ambiguous:
         ctx.trace.append("fast-path-DONE")
         return DONE
 
-    verdict = await brain.verify(session, ctx.label, ctx.value, key=ctx.label, use_cache=True)
+    verdict = await _verify_field(session, ctx, key=ctx.label)
     ctx.trace.append(f"verdict:{verdict}")
     if verdict == "CORRECT":
         return DONE
@@ -685,8 +741,9 @@ async def _s_recommit(session: Any, ctx: Ctx) -> Outcome:
         await act.type_text(session, ctx.node, ctx.value, clear=True)
     else:
         await act.click_node(session, ctx.node)
-    # fresh verify key so the re-read is not served the cached stale EMPTY (§6.2)
-    verdict = await brain.verify(session, ctx.label, ctx.value, key=f"{ctx.label}:commit#{ctx.commit_tries}")
+    # fresh verify key so the re-read is not served the cached stale EMPTY (§6.2); DOM-first +
+    # per-field budget enforced via _verify_field.
+    verdict = await _verify_field(session, ctx, key=f"{ctx.label}:commit#{ctx.commit_tries}")
     ctx.trace.append(f"recommit-verdict:{verdict}")
     if verdict == "CORRECT":
         return DONE
@@ -912,6 +969,51 @@ async def _selftest() -> int:
     ctx = Ctx(label="Loop", value="x", required=False)
     ctx.steps = STEP_CAP  # next guard trips
     chk("guard trips at cap", ctx.guard() is False)
+
+    # (9) DOM-FIRST verify ORACLE: a plain text control whose live DOM value == want verifies
+    #     CORRECT with ZERO VLM calls (the whole point — free DOM read-back is the truth).
+    import vision_verify as _vv
+
+    _vv._VLM_CALLS["n"] = 0
+    reset_page_vlm_backstop()
+    name_node = _mk(tag="input", typ="text", ax_name="First Name")
+    fs9 = FakeSession(
+        controls=[name_node],
+        dom_values={name_node.backend_node_id: "Pyry"},  # the control already holds the value
+        verdict='{"filled": true, "matches": true}',  # would say CORRECT too, but must NOT be reached
+    )
+    out9 = await observe_act(fs9, {"label": "First Name", "value": "Pyry", "required": True, "llm": fake_llm})
+    chk("DOM-first text DONE (no VLM)", out9 == DONE and fs9.vlm_calls == 0, (out9, fs9.vlm_calls))
+
+    # (10) VISUAL-ONLY widget: DOM read empty -> the engine consults the VLM AID (>=1 call).
+    _vv._VLM_CALLS["n"] = 0
+    widget = _mk(tag="textarea", ax_name="Why do you want to work here?")
+    fs10 = FakeSession(
+        controls=[widget],
+        dom_values={},  # read_dom_value -> "" (visual-only) -> VLM aid path
+        verdict='{"filled": true, "matches": true}',
+    )
+    out10 = await observe_act(
+        fs10,
+        {"label": "Why do you want to work here?", "value": "Because.", "required": True, "llm": fake_llm},
+    )
+    chk("visual-only consults VLM aid", out10 == DONE and fs10.vlm_calls >= 1, (out10, fs10.vlm_calls))
+
+    # (11) per-FIELD VLM budget caps at <=FIELD_VLM_CAP: a visual-only field that keeps reading EMPTY
+    #      (commit never registers) must stop spending the VLM at FIELD_VLM_CAP aids, never per-page.
+    _vv._VLM_CALLS["n"] = 0
+    stubborn = _mk(tag="textarea", ax_name="Stuck Field")
+    fs11 = FakeSession(
+        controls=[stubborn],
+        dom_values={},  # always visual-only -> every verify is a VLM aid
+        verdict='{"filled": false, "value": ""}',  # always EMPTY -> recommit loop drives more verifies
+    )
+    out11 = await observe_act(fs11, {"label": "Stuck Field", "value": "x", "required": False, "llm": fake_llm})
+    chk(
+        "per-FIELD VLM budget caps at <=FIELD_VLM_CAP",
+        fs11.vlm_calls <= FIELD_VLM_CAP,
+        (out11, fs11.vlm_calls, FIELD_VLM_CAP),
+    )
 
     ok = True
     print("\n=== oa_observe_act offline self-test (fake session+llm, no browser/VLM, $0) ===")

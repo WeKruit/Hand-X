@@ -158,6 +158,13 @@ async def run_single_page_oa(
         return result
 
     # step 3 — the SWAP: per-field fill via observe_act (NOT fill_with_ladder).
+    # Lift the per-PAGE VLM cap to a high backstop so the verify oracle's per-FIELD VLM budget
+    # (FIELD_VLM_CAP) is the real limiter — a long single page must not starve field 7+ (the
+    # capped->UNKNOWN->ESCALATE false-failure this fix removes). DOM read-back stays free + primary.
+    import vision_verify as _vv
+
+    _vv.reset_visual_cache()
+    oa.reset_page_vlm_backstop()
     per_field: list[FieldResult] = []
     t0 = time.monotonic()
     for f in fields:

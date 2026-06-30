@@ -5,19 +5,30 @@ WHAT IT DOES
      PUBLIC discovery APIs (no scraping, no auth), keeping only OPEN engineering-ish roles that
      expose a real apply form. Deduped, capped per ATS.
   2. Build a (company URL x profile) MATRIX from oa_profiles.PROFILES.
-  3. Run ``oa_singlepage.run_single_page_oa`` over the matrix, FILL-ONLY / NEVER SUBMIT, with a
-     CONCURRENCY CAP (<=4 headless browsers via an asyncio.Semaphore) and a PER-JOB TIMEOUT.
-  4. Record per run: ATS, fill-rate (% non-skip required+optional fields the state machine drove to
-     a DONE/OTHER terminal), outcome histogram, cost, seconds, a screenshot path, and the failure
-     taxonomy (ESCALATE traces bucketed by widget-shape / field-kind).
-  5. Emit a JSON blob (full per-field detail) + an aggregated markdown report.
+  3. Run each matrix cell in ITS OWN OS SUBPROCESS — ``oa_singlepage.py --url … --profile … --json …
+     --screenshot …`` — bounded by a PROCESS Semaphore (``--concurrency N``) and a per-job timeout.
+     ``oa_singlepage`` is already 1-process-1-run with a JSON result, so it is REUSED verbatim; this
+     harness adds NO fill logic of its own.
+  4. Aggregate the per-job JSON result files into the matrix report: ATS, fill-rate (% non-skip
+     fields the state machine drove to a DONE/OTHER terminal), outcome histogram, cost, seconds, a
+     screenshot path, and the failure taxonomy (ESCALATE traces bucketed by widget-shape/field-kind).
+  5. Emit a JSON blob (aggregate + per-run records) + an aggregated markdown report.
+
+WHY SUBPROCESSES (FIX 1B): ``observe_act``'s verify state (the per-page VLM cache + call counter in
+``vision_verify``) is a MODULE GLOBAL. That is CORRECT for production — 1 OS process == 1 application
+run — but the old harness ran the whole matrix as N coroutines in ONE process behind an asyncio
+Semaphore, so all "concurrent" jobs shared (and raced on) that one global counter. The fix is real
+process isolation: each (url, profile) job gets its OWN interpreter, so its verify counter is its own.
+Concurrency is now N OS PROCESSES, not N coroutines. ``--serial`` forces concurrency=1 (no overlap).
 
 HARD CONSTRAINTS (inherited from oa_singlepage, re-asserted here):
   * FILL-ONLY — never clicks Submit/Apply-final. The single-page adapters have no next_step and
-    ``observe_act`` never clicks an advance/submit control. This harness only ever calls
-    ``run_single_page_oa`` and reads its result dict.
-  * No secrets in CLI args — the GOOGLE_API_KEY comes from .env via load_dotenv, never argv.
-  * ``.venv/bin/python`` — the vendored browser_use import.
+    ``observe_act`` never clicks an advance/submit control. The spawned ``oa_singlepage`` only ever
+    calls ``run_single_page_oa``; this harness only reads the JSON it writes.
+  * No secrets in CLI args — the GOOGLE_API_KEY comes from .env (inherited into the child env), never
+    argv. The profile (synthetic PII) and resume are passed as FILE PATHS, never inline values.
+  * ``.venv/bin/python`` — the spawned interpreter is this file's own ``sys.executable`` (the venv
+    python that carries the vendored browser_use); the child re-imports browser_use itself.
   * Throwaway data only — oa_profiles carries synthetic PII.
 
 The harness SUPPORTS the full 50x10 sweep (``--companies 50 --profiles 10``); a representative
@@ -26,6 +37,8 @@ batch is run with smaller caps and ``--max-runs``.
 Usage:
     .venv/bin/python oa_proof.py --companies 18 --profiles 3 --max-runs 18 \
         --concurrency 4 --timeout 200 --out runs/oa_proof_batch1
+    .venv/bin/python oa_proof.py --serial …            # concurrency=1, no overlap
+    .venv/bin/python oa_proof.py --self-test           # offline argv-builder check, no browsers
 """
 
 from __future__ import annotations
@@ -36,6 +49,7 @@ import contextlib
 import json
 import os
 import ssl
+import sys
 import time
 import urllib.request
 from collections import Counter, defaultdict
@@ -46,14 +60,23 @@ from urllib.parse import urlparse
 HERE = Path(__file__).resolve().parent
 
 # Local convenience: pick up .env (GOOGLE_API_KEY) like jobapply.py does — NEVER from argv.
+# The child oa_singlepage processes inherit this environment, so the key reaches them WITHOUT
+# ever appearing on a command line (no secrets in argv).
 with contextlib.suppress(Exception):
     from dotenv import load_dotenv
 
     load_dotenv(HERE / ".env")
 
-import oa_observe_act as oa  # noqa: E402  (after dotenv, before the heavy browser import)
+# Terminal-outcome constants for the failure taxonomy (oa.SKIP / oa.ESCALATE).
+import oa_observe_act as oa  # noqa: E402
 from oa_profiles import PROFILES  # noqa: E402
-from oa_singlepage import run_single_page_oa  # noqa: E402
+
+# The single-page runner is invoked AS A SUBPROCESS (see build_job_argv), NOT imported and called.
+# That isolation is the whole point of FIX 1B: the per-page verify globals in vision_verify
+# (_VCACHE / _VLM_CALLS) live in each CHILD interpreter, one per run, so they cannot be shared or
+# raced across the matrix. (The parent does transitively import browser_use via oa_observe_act, but
+# it never RUNS observe_act / vision_verify — it only reads each child's JSON result file.)
+SINGLEPAGE = HERE / "oa_singlepage.py"
 
 # ---------------------------------------------------------------------------------------------
 # Company seed lists. These are well-known orgs with PUBLIC, OPEN job boards on each ATS. The
@@ -61,24 +84,78 @@ from oa_singlepage import run_single_page_oa  # noqa: E402
 # dead/empty board is simply skipped. (No auth, no rate-limited account — public read-only APIs.)
 # ---------------------------------------------------------------------------------------------
 GREENHOUSE_ORGS = [
-    "anthropic", "databricks", "stripe", "airbnb", "dropbox", "discord", "robinhood",
-    "instacart", "cruise", "samsara", "gitlab", "benchling", "ramp", "scaleai", "figma",
+    "anthropic",
+    "databricks",
+    "stripe",
+    "airbnb",
+    "dropbox",
+    "discord",
+    "robinhood",
+    "instacart",
+    "cruise",
+    "samsara",
+    "gitlab",
+    "benchling",
+    "ramp",
+    "scaleai",
+    "figma",
 ]
 LEVER_ORGS = [
-    "palantir", "netflix", "spotify", "plaid", "brex", "match", "leagueapps", "voleon",
-    "kraken", "nielsen", "swing-education", "verkada", "attentive", "ro",
+    "palantir",
+    "netflix",
+    "spotify",
+    "plaid",
+    "brex",
+    "match",
+    "leagueapps",
+    "voleon",
+    "kraken",
+    "nielsen",
+    "swing-education",
+    "verkada",
+    "attentive",
+    "ro",
 ]
 ASHBY_ORGS = [
-    "ramp", "openai", "linear", "notion", "vanta", "runway", "deel", "mercury",
-    "cursor", "clay", "rippling", "loops", "watershed", "replit",
+    "ramp",
+    "openai",
+    "linear",
+    "notion",
+    "vanta",
+    "runway",
+    "deel",
+    "mercury",
+    "cursor",
+    "clay",
+    "rippling",
+    "loops",
+    "watershed",
+    "replit",
 ]
 
 # Keep the proof on real application forms (engineering-ish roles tend to have the richest forms:
 # resume + EEO + free-text + repeaters). A loose keyword gate, not a hard requirement.
 ENG_HINTS = (
-    "engineer", "software", "developer", "swe", "backend", "frontend", "full stack",
-    "full-stack", "infrastructure", "platform", "data", "machine learning", "ml ",
-    "security", "sre", "reliability", "devops", "ios", "android", "mobile",
+    "engineer",
+    "software",
+    "developer",
+    "swe",
+    "backend",
+    "frontend",
+    "full stack",
+    "full-stack",
+    "infrastructure",
+    "platform",
+    "data",
+    "machine learning",
+    "ml ",
+    "security",
+    "sre",
+    "reliability",
+    "devops",
+    "ios",
+    "android",
+    "mobile",
 )
 
 _UA = {"User-Agent": "Mozilla/5.0 (oa-proof; research; fill-only)"}
@@ -97,7 +174,9 @@ def _ssl_ctx() -> ssl.SSLContext:
 _SSL = _ssl_ctx()
 
 
-def _http_json(url: str, *, method: str = "GET", body: bytes | None = None, headers: dict | None = None, timeout: float = 20.0):
+def _http_json(
+    url: str, *, method: str = "GET", body: bytes | None = None, headers: dict | None = None, timeout: float = 20.0
+):
     req = urllib.request.Request(url, data=body, method=method, headers={**_UA, **(headers or {})})
     with urllib.request.urlopen(req, timeout=timeout, context=_SSL) as r:  # (trusted ATS hosts only)
         return json.loads(r.read().decode("utf-8"))
@@ -171,7 +250,7 @@ def gather_ashby(org: str, per_org: int) -> list[dict]:
             body=body,
             headers={"Content-Type": "application/json"},
         )
-        jb = ((data.get("data") or {}).get("jobBoard") or {})
+        jb = (data.get("data") or {}).get("jobBoard") or {}
         for j in jb.get("jobPostings", []) or []:
             if not _is_eng(j.get("title", "")):
                 continue
@@ -237,7 +316,7 @@ class RunRecord:
     title: str
     url: str
     profile: str
-    status: str = ""           # FILLED | BLOCKED | NO_ADAPTER | TIMEOUT | ERROR
+    status: str = ""  # FILLED | BLOCKED | NO_ADAPTER | TIMEOUT | ERROR
     fields_total: int = 0
     fill_rate: float = 0.0
     filled: int = 0
@@ -247,7 +326,7 @@ class RunRecord:
     secs: float = 0.0
     screenshot: str | None = None
     error: str = ""
-    fails: list[dict] = field(default_factory=list)   # [{name,label,type,nature,trace}] for ESCALATE
+    fails: list[dict] = field(default_factory=list)  # [{name,label,type,nature,trace}] for ESCALATE
 
 
 def _failure_bucket(rec_field: dict) -> str:
@@ -281,87 +360,173 @@ def _failure_bucket(rec_field: dict) -> str:
     return "other-uncategorized"
 
 
+@dataclass
+class Job:
+    """One matrix cell = one (company, profile) pair, run in its own OS subprocess."""
+
+    idx: int
+    company: dict
+    profile: dict
+
+
+def build_matrix(companies: list[dict], profiles: list[dict], max_runs: int) -> list[Job]:
+    """Each company paired with profiles round-robin so all profiles get exercised and we don't run
+    the whole 10x for every company when max_runs is small. Offline-pure (no I/O) for testability."""
+    jobs: list[Job] = []
+    for ci, c in enumerate(companies):
+        jobs.append(Job(idx=len(jobs), company=c, profile=profiles[ci % len(profiles)]))
+        if len(profiles) > 1:  # a second varied profile per company spreads profile coverage
+            jobs.append(Job(idx=len(jobs), company=c, profile=profiles[(ci + 1) % len(profiles)]))
+    jobs = jobs[:max_runs]
+    for i, j in enumerate(jobs):  # re-index after the cap so idx is dense 0..n-1
+        j.idx = i
+    return jobs
+
+
+def build_job_argv(
+    job: Job,
+    *,
+    profile_path: Path,
+    json_path: Path,
+    screenshot_path: Path,
+    resume: str | None,
+    python: str | None = None,
+) -> list[str]:
+    """Construct the EXACT subprocess argv for one job — a single 1-process-1-run invocation of
+    ``oa_singlepage.py``. PURE (no spawning, no I/O): the proof's DRY/offline self-test calls this to
+    assert the argv shape WITHOUT launching a browser.
+
+    SECURITY: only file paths and the (public) job URL go on argv — the profile (synthetic PII) and
+    resume are passed BY PATH, never inline; GOOGLE_API_KEY is inherited via the environment, never
+    here. The interpreter is this process's own ``sys.executable`` (the venv python with vendored
+    browser_use), so the child re-imports browser_use itself."""
+    argv = [
+        python or sys.executable,
+        str(SINGLEPAGE),
+        "--url",
+        job.company["url"],
+        "--profile",
+        str(profile_path),
+        "--json",
+        str(json_path),
+        "--screenshot",
+        str(screenshot_path),
+    ]
+    if resume:
+        argv += ["--resume", str(resume)]
+    return argv
+
+
+def _record_from_result(rec: RunRecord, res: dict, *, fallback_secs: float) -> RunRecord:
+    """Fold an oa_singlepage JSON result dict into a RunRecord (shared by live + future replay)."""
+    rec.status = res.get("status", "?")
+    rec.fields_total = res.get("fields_total", 0)
+    rec.fill_rate = res.get("fill_rate", 0.0)
+    rec.filled = res.get("filled", 0)
+    rec.outcomes = res.get("outcomes")
+    rec.cost = res.get("cost", 0.0)
+    rec.secs = res.get("secs", fallback_secs)
+    rec.screenshot = res.get("screenshot")
+    results = res.get("results") or []
+    rec.fillable = sum(1 for r in results if r.get("outcome") != oa.SKIP)
+    rec.fails = [
+        {
+            "name": r.get("name"),
+            "label": r.get("label"),
+            "type": r.get("type"),
+            "nature": r.get("nature"),
+            "trace": r.get("trace"),
+        }
+        for r in results
+        if r.get("outcome") == oa.ESCALATE
+    ]
+    return rec
+
+
 async def run_matrix(
-    companies: list[dict],
-    profiles: list[dict],
+    jobs: list[Job],
     *,
     concurrency: int,
     timeout: float,
-    max_runs: int,
     out_dir: Path,
     resume: str | None,
 ) -> list[RunRecord]:
+    """Run every job in its OWN OS subprocess, bounded by a PROCESS Semaphore. Concurrency is N
+    separate interpreters (each with its own verify globals) — NOT N coroutines sharing one."""
     shots = out_dir / "shots"
-    shots.mkdir(parents=True, exist_ok=True)
-
-    # Build the matrix: each company paired with profiles round-robin so all profiles get exercised
-    # and we don't run the whole 10x for every company when max_runs is small.
-    pairs: list[tuple[dict, dict]] = []
-    for i, c in enumerate(companies):
-        p = profiles[i % len(profiles)]
-        pairs.append((c, p))
-        # if we have headroom, add a second varied profile per company (spreads profile coverage)
-        if len(profiles) > 1:
-            pairs.append((c, profiles[(i + 1) % len(profiles)]))
-    pairs = pairs[:max_runs]
+    profiles_dir = out_dir / "profiles"
+    perfield = out_dir / "perfield"
+    for d in (shots, profiles_dir, perfield):
+        d.mkdir(parents=True, exist_ok=True)
 
     sem = asyncio.Semaphore(concurrency)
     records: list[RunRecord] = []
 
-    async def one(idx: int, c: dict, p: dict) -> RunRecord:
+    async def one(job: Job) -> RunRecord:
+        c, p, idx = job.company, job.profile, job.idx
         rec = RunRecord(idx=idx, ats=c["ats"], org=c["org"], title=c["title"], url=c["url"], profile=p["nick"])
-        ss = str(shots / f"{idx:03d}_{c['ats']}_{c['org']}_{p['nick']}.png")
+        tag = f"{idx:03d}_{c['ats']}_{c['org']}_{p['nick']}"
+        ss = shots / f"{tag}.png"
+        out_json = perfield / f"{idx:03d}.json"
+        # Write the synthetic profile to a file so it is passed BY PATH, never inline on argv.
+        prof_path = profiles_dir / f"{tag}.json"
+        prof_path.write_text(json.dumps(p), encoding="utf-8")
+        argv = build_job_argv(job, profile_path=prof_path, json_path=out_json, screenshot_path=ss, resume=resume)
+
         async with sem:
             t0 = time.monotonic()
-            print(f"[{idx:03d}] START {c['ats']}/{c['org']} x {p['nick']}  {c['url']}")
+            print(f"[{idx:03d}] SPAWN {c['ats']}/{c['org']} x {p['nick']}  {c['url']}")
+            proc: asyncio.subprocess.Process | None = None
             try:
-                res = await asyncio.wait_for(
-                    run_single_page_oa(
-                        url=c["url"], profile=p, resume=resume, headless=True, screenshot_path=ss
-                    ),
-                    timeout=timeout,
+                proc = await asyncio.create_subprocess_exec(
+                    *argv,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    cwd=str(HERE),
                 )
-            except TimeoutError:
-                rec.status = "TIMEOUT"
-                rec.secs = round(time.monotonic() - t0, 1)
-                rec.error = f"per-job timeout {timeout}s"
-                print(f"[{idx:03d}] TIMEOUT after {timeout}s")
-                return rec
-            except Exception as exc:  # one bad URL must not abort the sweep
+                try:
+                    out_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                except TimeoutError:
+                    # Kill the child (and let it die) so one stuck headless browser can't stall the
+                    # sweep — the §7 "hangs in teardown" failure mode, now isolated to one process.
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(proc.wait(), timeout=10)
+                    rec.status = "TIMEOUT"
+                    rec.secs = round(time.monotonic() - t0, 1)
+                    rec.error = f"per-job timeout {timeout}s (child killed)"
+                    print(f"[{idx:03d}] TIMEOUT after {timeout}s — killed pid {proc.pid}")
+                    return rec
+            except Exception as exc:  # spawn failure must not abort the sweep
                 rec.status = "ERROR"
                 rec.secs = round(time.monotonic() - t0, 1)
-                rec.error = f"{type(exc).__name__}: {exc}"
+                rec.error = f"spawn {type(exc).__name__}: {exc}"
                 print(f"[{idx:03d}] ERROR {rec.error}")
                 return rec
 
-        rec.status = res.get("status", "?")
-        rec.fields_total = res.get("fields_total", 0)
-        rec.fill_rate = res.get("fill_rate", 0.0)
-        rec.filled = res.get("filled", 0)
-        rec.outcomes = res.get("outcomes")
-        rec.cost = res.get("cost", 0.0)
-        rec.secs = res.get("secs", round(time.monotonic() - t0, 1))
-        rec.screenshot = res.get("screenshot")
-        results = res.get("results") or []
-        rec.fillable = sum(1 for r in results if r.get("outcome") != oa.SKIP)
-        rec.fails = [
-            {"name": r.get("name"), "label": r.get("label"), "type": r.get("type"),
-             "nature": r.get("nature"), "trace": r.get("trace")}
-            for r in results
-            if r.get("outcome") == oa.ESCALATE
-        ]
+        rc = proc.returncode
+        secs = round(time.monotonic() - t0, 1)
+        # The child writes its full result to out_json; that file is the source of truth.
+        res: dict | None = None
+        with contextlib.suppress(Exception):
+            res = json.loads(out_json.read_text(encoding="utf-8"))
+        if res is None:
+            rec.status = "ERROR"
+            rec.secs = secs
+            tail = (out_bytes.decode("utf-8", "replace")[-400:] if out_bytes else "").strip()
+            rec.error = f"child rc={rc}, no JSON result. stdout tail: {tail}"
+            print(f"[{idx:03d}] ERROR child produced no JSON (rc={rc})")
+            return rec
+
+        _record_from_result(rec, res, fallback_secs=secs)
         print(
             f"[{idx:03d}] DONE   {rec.status}  fill_rate={rec.fill_rate:.0%}  "
             f"filled={rec.filled}/{rec.fillable}  ${rec.cost:.4f}  {rec.secs}s"
         )
-        # dump the full per-field detail next to the screenshot for later inspection
-        with contextlib.suppress(Exception):
-            (out_dir / "perfield").mkdir(exist_ok=True)
-            with open(out_dir / "perfield" / f"{idx:03d}.json", "w", encoding="utf-8") as fh:
-                json.dump(res, fh, indent=2, default=str)
         return rec
 
-    tasks = [asyncio.create_task(one(i, c, p)) for i, (c, p) in enumerate(pairs)]
+    tasks = [asyncio.create_task(one(j)) for j in jobs]
     for t in asyncio.as_completed(tasks):
         records.append(await t)
     records.sort(key=lambda r: r.idx)
@@ -423,19 +588,25 @@ def write_markdown(records: list[RunRecord], agg: dict, out_md: Path) -> None:
 
     ov = agg["overall"]
     L("## Headline\n")
-    L(f"- **Runs:** {ov['runs_filled']} filled / {ov['runs_total']} attempted "
-             f"({ov['runs_blocked']} blocked/timeout/error)")
+    L(
+        f"- **Runs:** {ov['runs_filled']} filled / {ov['runs_total']} attempted "
+        f"({ov['runs_blocked']} blocked/timeout/error)"
+    )
     L(f"- **Companies:** {ov['companies']}  |  **Profiles:** {ov['profiles']}")
-    L(f"- **Overall fill-rate:** **{ov['fill_rate']:.0%}** "
-             f"({ov['fields_filled']}/{ov['fields_fillable']} non-skip fields reached a DONE/OTHER terminal)")
+    L(
+        f"- **Overall fill-rate:** **{ov['fill_rate']:.0%}** "
+        f"({ov['fields_filled']}/{ov['fields_fillable']} non-skip fields reached a DONE/OTHER terminal)"
+    )
     L(f"- **Cost:** ${ov['total_cost']:.4f} total, ${ov['avg_cost_per_run']:.4f}/run avg\n")
 
     L("## Fill-rate by ATS\n")
     L("| ATS | runs | blocked | fields filled | fillable | fill-rate | cost |")
     L("|---|---|---|---|---|---|---|")
     for ats, v in sorted(agg["by_ats"].items()):
-        L(f"| {ats} | {v['runs']} | {v['blocked']} | {v['filled']} | {v['fillable']} "
-                 f"| {v['fill_rate']:.0%} | ${v['cost']:.4f} |")
+        L(
+            f"| {ats} | {v['runs']} | {v['blocked']} | {v['filled']} | {v['fillable']} "
+            f"| {v['fill_rate']:.0%} | ${v['cost']:.4f} |"
+        )
     L("")
 
     L("## Failure taxonomy (ESCALATE fields, bucketed by widget shape / field kind)\n")
@@ -453,11 +624,110 @@ def write_markdown(records: list[RunRecord], agg: dict, out_md: Path) -> None:
     L("|---|---|---|---|---|---|---|---|---|---|")
     for r in records:
         ss = Path(r.screenshot).name if r.screenshot else (r.error or "-")
-        L(f"| {r.idx} | {r.ats} | {r.org} | {r.profile} | {r.status} | {r.fill_rate:.0%} "
-                 f"| {r.filled}/{r.fillable} | ${r.cost:.4f} | {r.secs} | {ss} |")
+        L(
+            f"| {r.idx} | {r.ats} | {r.org} | {r.profile} | {r.status} | {r.fill_rate:.0%} "
+            f"| {r.filled}/{r.fillable} | ${r.cost:.4f} | {r.secs} | {ss} |"
+        )
     L("")
 
     out_md.write_text("\n".join(out), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------------------------
+# Offline self-test — proves the matrix builder + the argv builder WITHOUT spawning any browser
+# (no network, no $). This is the DRY check the BUILD task asks for: assert the subprocess argv
+# shape is correct and carries NO secrets, and that concurrency is process-based.
+# ---------------------------------------------------------------------------------------------
+def _self_test() -> int:
+    checks: list[tuple[str, bool, object]] = []
+
+    def chk(name: str, passed: bool, detail: object = "") -> None:
+        checks.append((name, passed, detail))
+
+    companies = [
+        {
+            "ats": "greenhouse",
+            "org": "acme",
+            "title": "Backend Engineer",
+            "url": "https://job-boards.greenhouse.io/acme/jobs/123",
+        },
+        {"ats": "lever", "org": "beta", "title": "SRE", "url": "https://jobs.lever.co/beta/abc-def"},
+    ]
+    profiles = [{"nick": "pyr_backend"}, {"nick": "maya_ml"}]
+
+    # --- matrix builder: dense idx, round-robin profiles, max_runs cap ---
+    jobs = build_matrix(companies, profiles, max_runs=99)
+    chk("matrix: 2 companies x2 profiles -> 4 jobs", len(jobs) == 4, len(jobs))
+    chk("matrix: idx dense 0..n-1", [j.idx for j in jobs] == [0, 1, 2, 3], [j.idx for j in jobs])
+    capped = build_matrix(companies, profiles, max_runs=3)
+    chk("matrix: max_runs caps + re-indexes", [j.idx for j in capped] == [0, 1, 2], [j.idx for j in capped])
+
+    # --- argv builder: exact shape, file-paths-only, no secrets ---
+    job = jobs[0]
+    argv = build_job_argv(
+        job,
+        profile_path=Path("/out/profiles/000_greenhouse_acme_pyr_backend.json"),
+        json_path=Path("/out/perfield/000.json"),
+        screenshot_path=Path("/out/shots/000.png"),
+        resume="/fixtures/test_resume.pdf",
+        python="/venv/bin/python",
+    )
+    expected = [
+        "/venv/bin/python",
+        str(SINGLEPAGE),
+        "--url",
+        "https://job-boards.greenhouse.io/acme/jobs/123",
+        "--profile",
+        "/out/profiles/000_greenhouse_acme_pyr_backend.json",
+        "--json",
+        "/out/perfield/000.json",
+        "--screenshot",
+        "/out/shots/000.png",
+        "--resume",
+        "/fixtures/test_resume.pdf",
+    ]
+    chk("argv: exact shape", argv == expected, argv)
+    chk("argv: spawns oa_singlepage.py", argv[1].endswith("oa_singlepage.py"), argv[1])
+    chk(
+        "argv: profile passed BY PATH (file, not inline dict)",
+        "--profile" in argv and argv[argv.index("--profile") + 1].endswith(".json"),
+    )
+    # No secret/value tokens on argv — only flags, paths, and the public URL.
+    joined = " ".join(argv).lower()
+    chk("argv: no GOOGLE_API_KEY token", "google_api_key" not in joined and "api_key" not in joined)
+    chk("argv: no inline email/PII", "@example.com" not in joined and "pyry" not in joined)
+
+    # --- argv builder: resume omitted -> no --resume flag ---
+    argv_nores = build_job_argv(
+        job,
+        profile_path=Path("/p.json"),
+        json_path=Path("/j.json"),
+        screenshot_path=Path("/s.png"),
+        resume=None,
+        python="/venv/bin/python",
+    )
+    chk("argv: --resume omitted when no resume", "--resume" not in argv_nores, argv_nores)
+
+    # --- default interpreter is THIS venv python (carries vendored browser_use) ---
+    argv_def = build_job_argv(
+        job,
+        profile_path=Path("/p.json"),
+        json_path=Path("/j.json"),
+        screenshot_path=Path("/s.png"),
+        resume=None,
+    )
+    chk("argv: default python == sys.executable", argv_def[0] == sys.executable, argv_def[0])
+
+    ok = all(passed for _, passed, _ in checks)
+    print("\n=== oa_proof offline self-test (matrix + argv builder, no spawn, $0) ===")
+    for name, passed, detail in checks:
+        print(f"  [{'PASS' if passed else 'FAIL'}] {name}  -> {detail}")
+    print(f"\n{'>>> ALL PASS' if ok else '>>> SOME FAIL'}  ({len(checks)} checks)")
+    print(
+        "  Concurrency model: N OS PROCESSES (asyncio.create_subprocess_exec + a process "
+        "Semaphore), NOT N coroutines — each child has its own verify globals."
+    )
+    return 0 if ok else 1
 
 
 def main() -> None:
@@ -466,13 +736,18 @@ def main() -> None:
     p.add_argument("--per-org", type=int, default=2, help="max postings per org (board)")
     p.add_argument("--profiles", type=int, default=3, help="how many of the 10 profiles to use")
     p.add_argument("--max-runs", type=int, default=18, help="cap total company x profile runs")
-    p.add_argument("--concurrency", type=int, default=4, help="max concurrent headless browsers (<=4)")
-    p.add_argument("--timeout", type=float, default=200.0, help="per-job timeout seconds")
+    p.add_argument("--concurrency", type=int, default=4, help="max concurrent child PROCESSES (<=4)")
+    p.add_argument("--serial", action="store_true", help="force concurrency=1 (no process overlap)")
+    p.add_argument("--timeout", type=float, default=200.0, help="per-job timeout seconds (kills child)")
     p.add_argument("--resume", default=None, help="optional resume file path for the file field")
     p.add_argument("--out", default="runs/oa_proof", help="output dir (json + shots + per-field)")
     p.add_argument("--md", default=None, help="markdown report path (default OBSERVE_ACT_PROOF.md)")
     p.add_argument("--urls-only", action="store_true", help="just gather + print URLs, do not run")
+    p.add_argument("--self-test", action="store_true", help="offline argv-builder check, spawns nothing")
     args = p.parse_args()
+
+    if args.self_test:
+        raise SystemExit(_self_test())
 
     if not os.environ.get("GOOGLE_API_KEY"):
         raise SystemExit("GOOGLE_API_KEY not set (put it in .env — never in argv)")
@@ -482,8 +757,7 @@ def main() -> None:
 
     print(f"Gathering up to {args.companies} live postings across Greenhouse / Lever / Ashby …")
     companies = gather_companies(args.companies, per_org=args.per_org)
-    print(f"  gathered {len(companies)} postings: "
-          f"{Counter(c['ats'] for c in companies)}")
+    print(f"  gathered {len(companies)} postings: " f"{Counter(c['ats'] for c in companies)}")
     (out_dir / "companies.json").write_text(json.dumps(companies, indent=2), encoding="utf-8")
 
     if args.urls_only:
@@ -492,13 +766,20 @@ def main() -> None:
         return
 
     profiles = PROFILES[: args.profiles]
-    concurrency = min(args.concurrency, 4)  # HARD cap <=4
+    concurrency = 1 if args.serial else min(args.concurrency, 4)  # --serial wins; else HARD cap <=4
+    jobs = build_matrix(companies, profiles, args.max_runs)
+    print(
+        f"  matrix: {len(jobs)} jobs, concurrency={concurrency} "
+        f"({'serial — no overlap' if concurrency == 1 else f'up to {concurrency} child processes'})"
+    )
 
     records = asyncio.run(
         run_matrix(
-            companies, profiles,
-            concurrency=concurrency, timeout=args.timeout, max_runs=args.max_runs,
-            out_dir=out_dir, resume=args.resume,
+            jobs,
+            concurrency=concurrency,
+            timeout=args.timeout,
+            out_dir=out_dir,
+            resume=args.resume,
         )
     )
 
@@ -512,10 +793,16 @@ def main() -> None:
 
     ov = agg["overall"]
     print("\n" + "=" * 84)
-    print(f"  PROOF COMPLETE — {ov['runs_filled']}/{ov['runs_total']} runs filled, "
-          f"overall fill-rate {ov['fill_rate']:.0%}, ${ov['total_cost']:.4f}")
-    print("  by ATS: " + "  ".join(f"{k}={v['fill_rate']:.0%}({v['filled']}/{v['fillable']})"
-                                     for k, v in sorted(agg['by_ats'].items())))
+    print(
+        f"  PROOF COMPLETE — {ov['runs_filled']}/{ov['runs_total']} runs filled, "
+        f"overall fill-rate {ov['fill_rate']:.0%}, ${ov['total_cost']:.4f}"
+    )
+    print(
+        "  by ATS: "
+        + "  ".join(
+            f"{k}={v['fill_rate']:.0%}({v['filled']}/{v['fillable']})" for k, v in sorted(agg["by_ats"].items())
+        )
+    )
     print(f"  failure taxonomy: {agg['failure_taxonomy']}")
     print(f"  report: {md}")
     print("=" * 84)

@@ -264,36 +264,80 @@ async def pick_option(value: str, option_texts: list[str], *, llm: Any = None) -
 
 
 # --------------------------------------------------------------------------- #
-# 4. verify — value-aware VLM, 3-way routing (§6.1). Routing contract below.
+# 4. verify — DOM read-back FIRST (free), VLM as a budgeted AID (§6.1).
+#    The verify ORACLE: a text/email/phone/url/date value is ALREADY in the DOM
+#    (the control's .value / selected option / committed chip) — read it back for
+#    free and LLM-match it; only consult the (capped, slow) VLM when the DOM read is
+#    empty/ambiguous OR the widget is visual-only. Per-FIELD VLM budget, not per-page.
 # --------------------------------------------------------------------------- #
 async def verify(
     session: Any,
     label_text: str,
     value: str,
     *,
+    node: Any = None,
+    llm: Any = None,
     key: str | None = None,
     use_cache: bool = True,
+    allow_vlm: bool = True,
 ) -> Verdict:
-    """Value-aware visual read-back of one field, mapped to the §6.1 3-way verdict.
+    """Value-aware read-back of one field -> the §6.1 3-way (+UNKNOWN) verdict.
 
-    Reuses ``vision_verify.visual_check(want=value)`` (the value-aware ~$0.0006 VLM, cached per
-    (url|label|want), capped 6/page) and parses its verdict with the SAME ``_matches`` / ``_is_filled``
-    the rest of the engine uses, so the oracle is identical everywhere.
+    DOM-FIRST oracle (the whole point — free, instant, no VLM):
+      1. Read the located control's CURRENT live value via ``oa_dom_value.read_dom_value`` (input/
+         textarea ``.value``, native <select> selected text, contenteditable text, committed
+         combobox/react-select single-value or chip text — all generic standard-DOM, no renameable
+         attribute). Normalize + LLM-match it against ``value`` (reuse ``pick_option`` -> ``_llm_pick``;
+         LLM-only, NO substring/regex):
+            DOM value present & matches ``value``     -> CORRECT  (ZERO VLM calls)
+            DOM value present & does NOT match        -> WRONG
+            DOM value empty/unreadable                -> step 2 (do NOT conclude EMPTY for a visual widget)
 
-    ROUTING CONTRACT (what the caller's S_VERIFY must do with each return):
-        CORRECT  - field visibly shows ``value`` (or a clearly-equivalent option) -> DONE.
-        EMPTY    - field reads BLANK: the commit never registered -> S_RECOMMIT
-                   (re-issue the SAME commit on the resolved element, fresh verify key; NEVER a new query).
-        WRONG    - field is filled but with a DIFFERENT, non-blank value -> S_REVALUE
-                   (clear the wrong value, then re-search with the next UNUSED variant; capped).
-        UNKNOWN  - VLM capped / errored / returned filled:null -> the caller's §6.3 policy
-                   (required SEARCH/lagged -> ESCALATE, never DONE; optional -> SKIP; intrinsic/native
-                   reliable-commit -> the caller may accept on its own free DOM read, not on this verdict).
+      2. VLM AID (only on an empty/ambiguous DOM read, and only if ``allow_vlm`` and the per-field
+         VLM budget allows): ``vision_verify.visual_check(want=value)`` parsed by ``route_verdict``.
+         When the VLM is not consulted (budget spent / disallowed) we return EMPTY if the DOM was
+         readably blank for a plain text control, else UNKNOWN.
 
-    ``key`` overrides the cache identity (default: the label) so a re-commit's re-read uses a
-    FRESH key (e.g. ``f"{label}:commit#2"``) and is not served the cached stale EMPTY (§6.2)."""
+    ``node`` is the located EnhancedDOMTreeNode (enables the free DOM read; without it we go
+    straight to the VLM aid as the legacy path did). ``llm`` powers the DOM-value match. ``key``
+    overrides the VLM cache identity so a re-commit's re-read uses a FRESH key (§6.2)."""
+    # --- step 1: free DOM read-back ------------------------------------------
+    dom_val = ""
+    if node is not None:
+        from oa_dom_value import read_dom_value
+
+        with contextlib.suppress(Exception):
+            dom_val = await read_dom_value(session, node)
+
+    if dom_val:
+        matched = await _dom_value_matches(value, dom_val, llm=llm)
+        if matched:
+            return "CORRECT"  # free truth — no VLM spent (the whole point)
+        return "WRONG"  # a definite, different non-blank value is in the control
+
+    # --- step 2: VLM AID (empty/ambiguous DOM read OR visual-only widget) -----
+    if not allow_vlm:
+        # caller's per-field VLM budget spent / disallowed -> don't spend.
+        return "EMPTY" if node is not None else "UNKNOWN"
     verdict = await _vv.visual_check(session, label_text, want=value, key=key, use_cache=use_cache)
     return route_verdict(verdict)
+
+
+async def _dom_value_matches(value: str, dom_value: str, *, llm: Any) -> bool:
+    """Does the read-back DOM ``dom_value`` mean the same as the wanted ``value``? LLM-only match
+    (reuse the memoised ``_llm_pick`` over a 2-option set), with a deterministic exact-normal-equality
+    short-circuit (NOT substring/regex — full normalized-string identity, which IS deterministic and
+    cheap). The picker is asked to choose between the read-back value and a sentinel; choosing the
+    read-back == "means the same"."""
+    nv, nd = _norm_lower(value), _norm_lower(dom_value)
+    if nv and nv == nd:
+        return True  # exact normalized identity — deterministic, no LLM
+    if llm is None:
+        return False  # no matcher -> cannot affirm equivalence -> treat as WRONG (route to revalue)
+    # LLM picker: which of {dom_value, "<no match>"} best matches the wanted value?
+    sentinel = "— none of these —"
+    picked = await _wr._llm_pick(llm, value, [dom_value, sentinel])
+    return picked is not None and _norm_lower(picked) == nd
 
 
 def route_verdict(verdict: str) -> Verdict:
@@ -484,6 +528,75 @@ async def _selftest() -> int:
     for raw, want in cases:
         got = route_verdict(raw)
         chk(f"route_verdict {want}", got == want, f"{got} <- {raw}")
+
+    # --- DOM-first verify ORACLE (the fix): DOM read-back is PRIMARY, VLM is the AID ---
+    # A counting VLM stub installed over vision_verify.visual_check so we can assert call-count.
+    vlm_calls = {"n": 0}
+    orig_visual_check = _vv.visual_check
+
+    async def _counting_visual_check(session: Any, target: str, **kw: Any) -> str:
+        vlm_calls["n"] += 1
+        # the visual-only fake's value is visibly present
+        return '{"filled": true, "value": "x", "matches": true}'
+
+    _vv.visual_check = _counting_visual_check  # type: ignore[assignment]
+
+    # A node + session whose live DOM value is scripted (reuse oa_dom_value's fake CDP session).
+    from oa_dom_value import _FakeNode, _FakeValueSession
+
+    fake_node = _FakeNode(7)
+
+    # (a) DOM value == want -> CORRECT with ZERO VLM calls (the whole point).
+    vlm_calls["n"] = 0
+    sess_match = _FakeValueSession(value="Pyry Halonen")
+    v_dom_correct = await verify(sess_match, "Full name", "Pyry Halonen", node=fake_node, llm=llm)
+    chk(
+        "DOM read-back match -> CORRECT, 0 VLM calls",
+        v_dom_correct == "CORRECT" and vlm_calls["n"] == 0,
+        (v_dom_correct, vlm_calls["n"]),
+    )
+
+    # (b) DOM value present but DIFFERENT -> WRONG, still ZERO VLM calls.
+    vlm_calls["n"] = 0
+    sess_wrong = _FakeValueSession(value="Someone Else")
+    v_dom_wrong = await verify(sess_wrong, "Full name", "Pyry Halonen", node=fake_node, llm=llm)
+    chk(
+        "DOM read-back mismatch -> WRONG, 0 VLM calls",
+        v_dom_wrong == "WRONG" and vlm_calls["n"] == 0,
+        (v_dom_wrong, vlm_calls["n"]),
+    )
+
+    # (c) visual-only widget (DOM read empty) -> consults the VLM AID (exactly 1 call).
+    vlm_calls["n"] = 0
+    sess_empty = _FakeValueSession(value="")  # read_dom_value -> "" (visual-only)
+    v_visual = await verify(sess_empty, "Some widget", "x", node=fake_node, llm=llm, allow_vlm=True)
+    chk(
+        "DOM empty -> VLM AID consulted (1 call) -> CORRECT",
+        v_visual == "CORRECT" and vlm_calls["n"] == 1,
+        (v_visual, vlm_calls["n"]),
+    )
+
+    # (d) DOM empty + VLM disallowed (per-field budget spent) -> EMPTY, NO VLM call.
+    vlm_calls["n"] = 0
+    v_nobudget = await verify(sess_empty, "Some widget", "x", node=fake_node, llm=llm, allow_vlm=False)
+    chk(
+        "DOM empty + budget spent -> EMPTY, 0 VLM calls",
+        v_nobudget == "EMPTY" and vlm_calls["n"] == 0,
+        (v_nobudget, vlm_calls["n"]),
+    )
+
+    # (e) exact normalized identity matches WITHOUT consuming an LLM call.
+    calls_pre = llm.calls
+    sess_exact = _FakeValueSession(value="  PYRY  halonen ")
+    vlm_calls["n"] = 0
+    v_exact = await verify(sess_exact, "Full name", "Pyry Halonen", node=fake_node, llm=llm)
+    chk(
+        "DOM exact-normal match -> CORRECT, 0 VLM + 0 LLM",
+        v_exact == "CORRECT" and vlm_calls["n"] == 0 and llm.calls == calls_pre,
+        (v_exact, vlm_calls["n"], llm.calls - calls_pre),
+    )
+
+    _vv.visual_check = orig_visual_check  # type: ignore[assignment]
 
     ok = True
     print("\n=== oa_brain offline self-test (fake llm, no browser/VLM, $0) ===")

@@ -194,6 +194,7 @@ class FakeSession:
         on_click_delta: dict[int, list[tuple[str, tuple[int, int]]]] | None = None,
         on_type_delta: dict[int, list[tuple[str, tuple[int, int]]]] | None = None,
         read_options_map: dict[int, list[str]] | None = None,
+        dom_values: dict[int, str] | None = None,
         verdict: str = '{"filled": true, "matches": true}',
         verdict_sequence: list[str] | None = None,
         url: str = "https://example.test/apply",
@@ -203,6 +204,10 @@ class FakeSession:
         self._on_click = on_click_delta or {}
         self._on_type = on_type_delta or {}
         self._read_options = read_options_map or {}
+        # dom_values: backend_node_id -> the live DOM value read_dom_value should return for that
+        # control. Default {} -> read_dom_value returns "" (visual-only) and verify falls to the VLM
+        # aid (the scripted verdict), preserving every pre-existing test's behaviour.
+        self._dom_values = dom_values or {}
         self._verdict = verdict
         self._vseq = list(verdict_sequence or [])
         self._url = url
@@ -214,6 +219,7 @@ class FakeSession:
         self.last_type_text: str | None = None
         self.last_upload: str | None = None
         self.keys: list[str] = []
+        self.vlm_calls = 0  # incremented by the patched visual_check (per-field VLM accounting)
 
     # -- perception entrypoint --------------------------------------------------
     async def get_browser_state_summary(self, *, include_screenshot: bool = False, cached: bool = False) -> Any:
@@ -221,6 +227,16 @@ class FakeSession:
 
     async def get_current_page_url(self) -> str:
         return self._url
+
+    # -- DOM read-back entrypoint (oa_dom_value.read_dom_value) ------------------
+    # read_dom_value resolves a node to an objectId then callFunctionOn-reads its value. We serve
+    # the scripted dom_values[backend_node_id] (default "" -> visual-only, falls to the VLM aid).
+    async def cdp_client_for_node(self, node: Any) -> Any:
+        from oa_dom_value import _FakeCdpSend, _FakeCdpSession
+
+        bnid = getattr(node, "backend_node_id", None)
+        val = self._dom_values.get(bnid, "")
+        return _FakeCdpSession(_FakeCdpSend(object_id="obj", value=val))
 
     # -- verify entrypoints (only reached if visual_check is NOT patched) --------
     async def take_screenshot(self) -> bytes:
@@ -295,7 +311,11 @@ class FakeSession:
 async def _fake_visual_check(
     session: Any, target: str, *, want: Any = None, key: Any = None, use_cache: bool = True
 ) -> str:
+    # Count the VLM aid on the session AND bump vision_verify's per-page counter so the engine's
+    # per-field accounting (_verify_field -> _vv_calls()) observes the spend, exactly like live.
+    _brain._vv._VLM_CALLS["n"] = _brain._vv._VLM_CALLS.get("n", 0) + 1
     if isinstance(session, FakeSession):
+        session.vlm_calls += 1
         return session.next_verdict()
     # unknown session in a test -> a neutral "correct" so nothing hangs
     return '{"filled": true, "matches": true}'
