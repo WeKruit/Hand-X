@@ -314,6 +314,53 @@ async def cdp_choose_option(session: Any, container_node: Any, value: str) -> st
         return ""
 
 
+# JS: within `this` (the card/group container) find a native <select> and set its option matching `want`
+# (text or value, exact then substring) by selectedIndex + fire input/change. Mirrors the proven
+# ats_lever._select_native: browser-use's select_option matches by VALUE via CDP and SILENTLY no-ops on
+# Lever's React selects; selectedIndex + a dispatched change is the deterministic path. Returns the
+# committed option text, or "".
+_SELECT_IN_CONTAINER_JS = r"""
+function(want){
+  const norm = s => (s||'').replace(/\s+/g,'').toLowerCase();
+  const w = norm(want);
+  if(!w) return "";
+  const sels = [...this.querySelectorAll('select')];
+  for(const e of sels){
+    const opts = [...e.options];
+    let idx = opts.findIndex(o => norm(o.textContent)===w || norm(o.value)===w);
+    if(idx<0) idx = opts.findIndex(o => { const t=norm(o.textContent); return t && (t.includes(w)||w.includes(t)); });
+    if(idx<0) continue;
+    e.selectedIndex = idx;
+    e.dispatchEvent(new Event('input',{bubbles:true}));
+    e.dispatchEvent(new Event('change',{bubbles:true}));
+    return opts[idx].textContent || opts[idx].value || want;
+  }
+  return "";
+}
+"""
+
+
+async def cdp_select_in_container(session: Any, container_node: Any, value: str) -> str:
+    """Commit a native <select> the proven Lever way: find the <select> in the container, set its option
+    matching ``value`` (text/value, exact then substring) by selectedIndex + fire input/change (React).
+    Returns the committed option text, or "" when no <select>/option matched. Generic; no per-ATS hook."""
+
+    async def _do() -> str:
+        r = await _resolve(session, container_node)
+        if r is None:
+            return ""
+        cdp_session, session_id, object_id = r
+        got = await _call_on(cdp_session, session_id, object_id, _SELECT_IN_CONTAINER_JS, args=[str(value)])
+        return str(got).strip() if got else ""
+
+    try:
+        return await asyncio.wait_for(_do(), timeout=CDP_ACTION_TIMEOUT)
+    except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041
+        return ""
+    except Exception:
+        return ""
+
+
 # --------------------------------------------------------------------------- #
 # PUBLIC: cdp_click — trusted Input.dispatchMouseEvent at the node center, JS-click fallback.
 # --------------------------------------------------------------------------- #

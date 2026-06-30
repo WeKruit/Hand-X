@@ -643,6 +643,8 @@ class _FakeCdpActionSession:
 
     # -- JS body dispatch (callFunctionOn) -------------------------------------
     def _run_js(self, fn: str, args: list[Any]) -> Any:
+        if "input[type=radio]" in fn or "querySelectorAll('select')" in fn:  # _CHOOSE_OPTION_JS /
+            return ""  # _SELECT_IN_CONTAINER_JS — fake cards don't model real inputs/selects -> no match
         if "selectedIndex" in fn:  # _SELECT_JS — record the committed select text
             want = str(args[0]) if args else ""
             self._owner.last_select_text = want

@@ -988,6 +988,16 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S3_OPEN")
+    # PROVEN native-<select> commit FIRST (ats_lever._select_native, generalised): browser-use's
+    # select_option no-ops on Lever's React selects; setting selectedIndex by option text + firing change
+    # is the deterministic path. Scan the card container for a <select> and commit it directly.
+    container = ctx.card if ctx.card is not None else ctx.node
+    if container is not None:
+        sel = await cdpa.cdp_select_in_container(session, container, ctx.value)
+        if sel:
+            ctx.committed_text = sel
+            ctx.trace.append(f"select-dom-direct:{sel[:20]}")
+            return DONE
     # First try the cheap inspectable read (native/ARIA/custom dropdown_options).
     inspect = await act.read_options(session, ctx.node)
     if inspect:
@@ -1151,8 +1161,32 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
     if _is_plain_text_editable(ctx.node) and ctx.nature == "FREE_TEXT":
         ctx.trace.append("no-overlay->text(free_text_ok)")
         return await _s_text(session, ctx)
+    # GEOCOMPLETE fill-only (the proven ats_lever._location trick): a React location autocomplete returns
+    # no usable suggestion for a synthetic search, but fill-only only needs the value VISIBLY present +
+    # read-back to pass — we do NOT need to commit a geocode pick. Set the value via the native setter +
+    # input/change (cdp_set_value) so React keeps it, then verify. Only for a typeahead text control.
+    if _is_typeahead_text(ctx.node):
+        ok = await cdpa.cdp_set_value(session, ctx.node, ctx.value)
+        if ok:
+            ctx.committed_text = ctx.value
+            ctx.trace.append("geocomplete->set-value")
+            return await _s_verify(session, ctx)
     ctx.trace.append("search-exhausted")
     return await _s_other_guard(session, ctx)
+
+
+def _is_typeahead_text(node: Any) -> bool:
+    """A text input/combobox you can type into (the geocomplete location field) — used to fall back to a
+    direct value-set when the typeahead surfaced no options. input/textarea/contenteditable or role=combobox."""
+    if node is None:
+        return False
+    tag = _node_tag(node)
+    if tag in ("input", "textarea"):
+        typ = _node_attr(node, "type") or "text"
+        return typ in ("text", "search", "email", "url", "tel", "")
+    if _node_attr(node, "contenteditable") in ("", "true"):
+        return True
+    return _node_role(node) == "combobox"
 
 
 # ---- S_TEXT_GUARD / S_TEXT ----
