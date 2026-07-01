@@ -848,6 +848,19 @@ class WorkdayAdapter(ATSAdapter):
                 if vis == "Y":
                     menu = True
                     break
+        if not menu:
+            # VISION BACKSTOP (was never wired here — _listbox/_pick_option got the vision handoff,
+            # _multiselect predates it and its false-positive read_back masked the gap): the DOM can
+            # false-empty a menu that IS rendered. One cached screenshot read settles it; only when
+            # DOM **and** vision agree there is no menu do we declare it un-openable.
+            with contextlib.suppress(Exception):
+                from vision_verify import read_options_visually
+
+                vis_opts = await read_options_visually(session, key=f"msel:{field.name}:{value}")
+                if vis_opts:
+                    menu = True
+                    if _DBG:
+                        print(f"   [msel {field.name}] DOM saw no menu, VISION sees {len(vis_opts)} options")
         ok = False
         if menu:
             # trusted Enter commits the highlighted top match; some widgets need ArrowDown first.
@@ -878,7 +891,7 @@ class WorkdayAdapter(ATSAdapter):
                 with contextlib.suppress(Exception):
                     opts = await self._read_options_live(page, field)
                 why = (
-                    "field EMPTY — nothing committed (no matching/highlighted option)"
+                    ("menu never opened (DOM+VISION agree)" if not menu else "menu open but nothing committed")
                     if not got
                     else f"committed {got!r} but LLM says it is NOT {value!r}"
                 )
