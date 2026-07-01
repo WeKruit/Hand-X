@@ -507,6 +507,10 @@ async def _vlm_filled(session, label: str, value: str) -> bool:
     return False
 
 
+_MAX_PICK_OPTS = 60  # BOUNDED LLM input (directive): type-to-filter already narrows a searchable taxonomy
+# (School/Field/Skills — thousands of entries) to a handful; this HARD-caps the pathological unfiltered
+# listbox so the pick prompt can never blow up. The correct option for a searchable field is always in the
+# filtered top, so the cap never drops it in practice.
 _PICK_CACHE: dict = {}  # (value, options) -> chosen text. The 5 language-proficiency selects share the
 # SAME value ("Native or Bilingual") AND options ("1-Beginner".."5-Native") — without this each fires its
 # own ~3s LLM call (the 15s/field the user hit). Identical (value,options) -> ONE call, reused.
@@ -520,6 +524,7 @@ async def _llm_pick(llm, value: str, options: list[str]) -> str | None:
 
     if llm is None or not options:
         return None
+    options = options[:_MAX_PICK_OPTS]  # bound the prompt payload (see _MAX_PICK_OPTS)
     ckey = (norm(value).lower(), tuple(options))
     if ckey in _PICK_CACHE:
         return _PICK_CACHE[ckey]
