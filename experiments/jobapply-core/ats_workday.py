@@ -485,41 +485,64 @@ class WorkdayAdapter(ATSAdapter):
         with no error). The file FormField is source='skip', so this is the ONLY path that touches it."""
         if not (resume or "").strip():
             return False
-        for sel in self._FILE_INPUT_SELECTORS:
-            fel = await eng.first(page, sel)
-            if not fel:
-                continue
-            # IDEMPOTENT GATE: a "file-upload-successful" marker anywhere in this input's wrapper means
-            # the resume is already attached for this step — do NOT re-push (avoids dup/overwrite loops).
-            done = False
+
+        async def _all_file_inputs() -> list[Any]:
+            for sel in self._FILE_INPUT_SELECTORS:
+                with contextlib.suppress(Exception):
+                    got = await page.get_elements_by_css_selector(sel)
+                    if got:
+                        return got
+            return []
+
+        async def _is_filled(fel: Any) -> bool:
+            # THIS specific input is done iff it holds a file OR its OWN wrapper shows the success marker.
+            # Scoped to the input's own wrapper — NOT the whole page — so a PRIOR step's filled Autofill
+            # input never masks the current EMPTY required one (that false-positive was the recurring bug:
+            # the required My-Experience Resume/CV stayed empty and fell to the looping agent).
             with contextlib.suppress(Exception):
-                done = bool(
+                return bool(
                     await fel.evaluate(
-                        "() => { const w=this.closest('[data-automation-id=\"file-upload-drop-zone\"]')"
+                        "() => { if (this.files && this.files.length) return true;"
+                        " const w=this.closest('[data-automation-id=\"file-upload-drop-zone\"]')"
                         " || this.closest('[data-automation-id^=\"formField-\"]') || this.parentElement;"
                         " return !!(w && w.querySelector('[data-automation-id=\"file-upload-successful\"]')); }"
                     )
                 )
-            if done:
-                return False
-            # Push bytes, then CONFIRM the success marker mounted. A Workday upload endpoint can
-            # transiently NETWORK-ERROR (observed live on Alteryx step 3: "Alert - Upload a file:
-            # Network Error", input left EMPTY while validation still demands it). The old code returned
-            # True on marker lag, so the wizard advanced into a "file required" block it could not clear.
-            # A manual re-push succeeded — so RETRY the push until the marker confirms, never declaring
-            # success on an unconfirmed upload.
-            for attempt in range(3):
-                ok = await eng.upload_file(session, page, fel, resume)
-                if _DBG:
-                    print(f"   [upload_resume] sel={sel!r} attempt={attempt} pushed={ok}")
-                if ok:
-                    for _ in range(8):
-                        await asyncio.sleep(0.4)
-                        if await eng.first(page, '[data-automation-id="file-upload-successful"]'):
-                            return True
-                # marker never mounted (network error / lag) — re-scan the input and retry the push
-                fel = await eng.first(page, sel) or fel
             return False
+
+        # Pick the EMPTY file input (the one this step actually requires). A step can hold MULTIPLE file
+        # inputs; upload to the one that is EMPTY, never bail because a DIFFERENT input is already done.
+        # Poll briefly for an input that mounts async after the step renders.
+        target: Any = None
+        for _ in range(4):
+            for fel in await _all_file_inputs():
+                if not await _is_filled(fel):
+                    target = fel
+                    break
+            if target is not None:
+                break
+            await asyncio.sleep(0.6)
+        if target is None:
+            return False  # no EMPTY file input on this step -> already uploaded / none present. No-op.
+
+        # Push bytes, then CONFIRM this input's marker. Workday's upload endpoint transiently
+        # NETWORK-ERRORs (input left empty while validation still demands it) -> RETRY the push until the
+        # target's file-upload-successful marker confirms; never declare success on an unconfirmed upload.
+        for attempt in range(3):
+            ok = await eng.upload_file(session, page, target, resume)
+            if _DBG:
+                print(f"   [upload_resume] attempt={attempt} pushed={ok}")
+            if ok:
+                for _ in range(8):
+                    await asyncio.sleep(0.4)
+                    if await _is_filled(target):
+                        return True
+            # marker never mounted (network error / lag) -> re-scan for the empty input and retry.
+            with contextlib.suppress(Exception):
+                for fel in await _all_file_inputs():
+                    if not await _is_filled(fel):
+                        target = fel
+                        break
         return False
 
     # repeater sections are owned by fill_repeaters (wd_repeaters), NOT the per-field schema ladder —
