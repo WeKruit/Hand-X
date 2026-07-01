@@ -228,6 +228,14 @@ async def upload_file(session: Any, page: Any, file_el: Any, path: str) -> bool:
             params={"files": [str(Path(path).resolve())], "backendNodeId": bnid},
             session_id=sid,
         )
+        # Workday's React autofill/validation listens for a `change` event; a raw CDP setFileInputFiles
+        # does NOT reliably fire it, so the file attaches but the résumé-PARSE never triggers (the legacy
+        # DomHand used Playwright setInputFiles, which fires input+change). Dispatch them explicitly.
+        with contextlib.suppress(Exception):
+            await file_el.evaluate(
+                "() => { this.dispatchEvent(new Event('input', {bubbles:true}));"
+                " this.dispatchEvent(new Event('change', {bubbles:true})); }"
+            )
         return True
     except Exception as exc:
         print(f"   [upload] CDP setFileInputFiles failed: {exc}")
