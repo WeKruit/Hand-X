@@ -301,11 +301,14 @@ class AshbyAdapter(ATSAdapter):
 
     async def _has_radios(self, page: Any, path: str) -> bool:
         try:
-            return bool(await page.evaluate(
+            # page.evaluate() returns a STRING repr -> bool('false') == True. Compare the string, never
+            # bool() it (see _fill's `str(res).lower()=='true'` above). This was ALWAYS True before.
+            r = await page.evaluate(
                 "(p) => { const w = document.querySelector(`[data-field-path=\"${p}\"]`);"
                 " return !!(w && w.querySelector('input[type=radio]')); }",
                 path,
-            ))
+            )
+            return str(r).lower() == "true"
         except Exception:
             return False
 
