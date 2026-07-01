@@ -856,8 +856,17 @@ async def install_submit_guard(page: Any) -> None:
 # L3 agent. Text/textarea/email/tel included: on Workday a freshly-typed input frequently serializes
 # blank mid-render, and re-filling a text field is safe/idempotent-or-cheap to visually confirm.
 _VLM_RESCUE_TYPES = {
-    "single_select", "multi_select", "radio", "checkbox", "date", "select_native",
-    "text", "textarea", "email", "tel", "number",
+    "single_select",
+    "multi_select",
+    "radio",
+    "checkbox",
+    "date",
+    "select_native",
+    "text",
+    "textarea",
+    "email",
+    "tel",
+    "number",
 }
 
 # Anti-cascade: max L3 agent escalations allowed PER STEP. Once this many fields on one step have
@@ -1193,173 +1202,186 @@ async def run_wizard(
     result: dict = {"adapter": adapter.__class__.__name__, "title": title, "url": url, "steps": []}
 
     session = BrowserSession(browser_profile=BrowserProfile(headless=headless, keep_alive=True))
-    await session.start()
-    await session.navigate_to(url)
-    await asyncio.sleep(2.5)
-    page = await session.must_get_current_page()
-    page = await adapter.open_form(session, page)  # job page -> Apply -> Apply Manually
+    try:
+        await session.start()
+        await session.navigate_to(url)
+        await asyncio.sleep(2.5)
+        page = await session.must_get_current_page()
+        page = await adapter.open_form(session, page)  # job page -> Apply -> Apply Manually
 
-    auth = await adapter.authenticate(session, page, creds)  # the account gate (Workday step 1)
-    if not auth.ok:
-        return await _wizard_halt(result, "AUTH_FAILED", auth.reason, tc, session)
-    if auth.needs_verification:
-        return await _wizard_halt(result, "EMAIL_VERIFICATION_REQUIRED", auth.reason, tc, session)
+        auth = await adapter.authenticate(session, page, creds)  # the account gate (Workday step 1)
+        if not auth.ok:
+            return await _wizard_halt(result, "AUTH_FAILED", auth.reason, tc, session)
+        if auth.needs_verification:
+            return await _wizard_halt(result, "EMAIL_VERIFICATION_REQUIRED", auth.reason, tc, session)
 
-    # HARD SAFETY: keep the final Submit/Finish button disabled for the ENTIRE wizard (SPA-
-    # persistent interval) so neither the deterministic path nor an agent can finalize the
-    # application — we always STOP at Review for a human to submit.
-    await install_submit_guard(page)
+        # HARD SAFETY: keep the final Submit/Finish button disabled for the ENTIRE wizard (SPA-
+        # persistent interval) so neither the deterministic path nor an agent can finalize the
+        # application — we always STOP at Review for a human to submit.
+        await install_submit_guard(page)
 
-    seen: set[int] = set()
-    for _ in range(12):  # MAX_STEPS guardrail
-        await install_submit_guard(page)  # re-assert each iteration (cheap; idempotent)
-        with contextlib.suppress(Exception):
-            from vision_verify import reset_visual_cache
-
-            reset_visual_cache()  # fresh per-step VLM budget for the read-back rescue
-        t0 = time.monotonic()
-        c0 = (await tc.get_usage_summary()).total_cost
-        step = await adapter.extract_step(session, page, profile)
-        # RESUME UPLOAD — DETERMINISTIC-ONLY (directive #1). Scan the live page FRESH every step for the
-        # file input and push bytes via CDP; idempotent (skips if already uploaded). Runs BEFORE per-field
-        # fill / fill_repeaters and CANNOT escalate to an agent. No-op on single-page adapters.
-        with contextlib.suppress(Exception):
-            if await adapter.upload_resume(session, page, resume):
-                print("  resume: uploaded deterministically (CDP)")
-        if os.environ.get("GH_DUMP"):  # capture each step's live DOM for OFFLINE detector dev (no live reruns)
+        seen: set[int] = set()
+        for _ in range(12):  # MAX_STEPS guardrail
+            await install_submit_guard(page)  # re-assert each iteration (cheap; idempotent)
             with contextlib.suppress(Exception):
-                html = await page.evaluate("() => document.documentElement.outerHTML")
-                dp = Path(os.environ["GH_DUMP"])
-                dp.mkdir(parents=True, exist_ok=True)
-                (dp / f"step{step.index:02d}_{(step.name or 'step').replace(' ', '_')[:24]}.html").write_text(html)
-                print(f"   [dump] step {step.index} '{step.name}' ({len(html) // 1024}KB)")
-        if step.is_review or await adapter.is_complete(session, page):
-            result["status"] = "FILLED_TO_REVIEW"  # STOP — never submit
+                from vision_verify import reset_visual_cache
+
+                reset_visual_cache()  # fresh per-step VLM budget for the read-back rescue
+            t0 = time.monotonic()
+            c0 = (await tc.get_usage_summary()).total_cost
+            step = await adapter.extract_step(session, page, profile)
+            # RESUME UPLOAD — DETERMINISTIC-ONLY (directive #1). Scan the live page FRESH every step for the
+            # file input and push bytes via CDP; idempotent (skips if already uploaded). Runs BEFORE per-field
+            # fill / fill_repeaters and CANNOT escalate to an agent. No-op on single-page adapters.
+            with contextlib.suppress(Exception):
+                if await adapter.upload_resume(session, page, resume):
+                    print("  resume: uploaded deterministically (CDP)")
+            if os.environ.get("GH_DUMP"):  # capture each step's live DOM for OFFLINE detector dev (no live reruns)
+                with contextlib.suppress(Exception):
+                    html = await page.evaluate("() => document.documentElement.outerHTML")
+                    dp = Path(os.environ["GH_DUMP"])
+                    dp.mkdir(parents=True, exist_ok=True)
+                    (dp / f"step{step.index:02d}_{(step.name or 'step').replace(' ', '_')[:24]}.html").write_text(html)
+                    print(f"   [dump] step {step.index} '{step.name}' ({len(html) // 1024}KB)")
+            if step.is_review or await adapter.is_complete(session, page):
+                result["status"] = "FILLED_TO_REVIEW"  # STOP — never submit
+                shot = None
+                if screenshot_path:  # capture the final Review page as proof of completion
+                    shot = await _screenshot(session, page, screenshot_path.replace(".png", "_review.png"))
+                    result["review_screenshot"] = shot
+                result["steps"].append(
+                    {
+                        "name": step.name or "Review",
+                        "index": step.index,
+                        "total": step.total,
+                        "tiers": {},
+                        "seconds": round(time.monotonic() - t0, 1),
+                        "cost": round((await tc.get_usage_summary()).total_cost - c0, 5),
+                        "agent_used": False,
+                        "screenshot": shot,
+                    }
+                )
+                break
+            if step.index in seen:  # progress-monotonicity guard
+                return await _wizard_halt(result, "STEP_STALLED", f"re-entered step {step.index}", tc, session)
+            seen.add(step.index)
+
+            map_rows = [f for f in step.fields if f.needs_map]
+            mapped = await map_fields(llm, map_rows, profile, title) if map_rows else {}
+            rows: list[_Row] = []
+            esc_used = 0  # anti-cascade: cap L3 agents PER STEP so a false-negating widget can't runaway
+            for f in step.fields:
+                if f.source == "skip":
+                    continue
+                value, src = _resolve(f, mapped, resume)
+                allow = allow_escalation and esc_used < _STEP_ESC_BUDGET
+                tier = await fill_with_ladder(adapter, session, page, f, value, llm, resume, allow)
+                if allow and tier in ("L3", "FAIL"):
+                    esc_used += 1
+                    with contextlib.suppress(Exception):
+                        page = await session.must_get_current_page()  # L3 re-attached CDP; re-acquire handle
+                rows.append(_Row(name=f.name, type=f.type, src=src, tier=tier))
+
+            # off-schema repeater sections on this step (My Experience: work experience / education /
+            # skills / languages). No-op (returns {}) on steps without a repeater — the adapter gates
+            # on section headings. The agent freezes filled fields + submit stays disabled.
+            repeaters_used = False
+            with contextlib.suppress(Exception):
+                rep = await adapter.fill_repeaters(session, page, profile)
+                if rep:
+                    repeaters_used = True
+                    print(f"  repeaters: {rep}")
+                page = await session.must_get_current_page()  # agent_fill_section re-attaches CDP
+
+            # Deterministically answer any REQUIRED screening/eligibility radio the LLM map left empty
+            # (Intel gates My-Information on 'previously employed by Intel?') — the cheap LLM decides the
+            # ordinary external-applicant answer, the robust _click_radio commits via CDP — BEFORE the agent
+            # ever sees it (that React radio always looped a vision agent). Workday-only (single-page adapters
+            # don't define the method, so it's a no-op there).
+            if hasattr(adapter, "answer_required_choices"):
+                with contextlib.suppress(Exception):
+                    n = await adapter.answer_required_choices(session, page, profile=profile)
+                    if n:
+                        print(f"  [wd] answered {n} required screening choice(s) deterministically")
+                        page = await session.must_get_current_page()
+
+            # screenshot the deterministically-filled step BEFORE advancing (the agent, if invoked,
+            # advances to the NEXT page, so capture this page now).
             shot = None
-            if screenshot_path:  # capture the final Review page as proof of completion
-                shot = await _screenshot(session, page, screenshot_path.replace(".png", "_review.png"))
-                result["review_screenshot"] = shot
+            if screenshot_path:
+                shot = await _screenshot(session, page, screenshot_path.replace(".png", f"_step{step.index}.png"))
+
+            # Deterministic fill got the values in but the platform may reject a field's FORMAT/choice
+            # on advance — and once it rejects a Save, NO deterministic re-fill re-arms it (verified).
+            # So on a validation block, hand the recovery to an agent that fixes the flagged field(s)
+            # AND clicks the advance button itself (the only thing that re-arms the form). Advancement
+            # is verified by re-reading the step; if the agent didn't advance, the monotonicity guard
+            # at the top of the loop turns the repeated step into an honest STEP_STALLED halt.
+            agent_used = False
+            adv = await adapter.next_step(session, page)
+            if not adv.ok:
+                errs = await adapter.validation_errors(page)
+                if errs:
+                    print(f"  [agent-repair] advance blocked by validation: {errs}")
+                    # RESUME stays DETERMINISTIC (directive #1): if an error names the file/resume, push the
+                    # bytes via CDP HERE and then ADVANCE deterministically — NEVER hand the file to the agent,
+                    # which network-errors + LOOPS on the dropzone (the "Loop detection nudge" hang). Only fall
+                    # to the agent for NON-file errors, or if the deterministic file-fix still doesn't advance.
+                    if any(re.search(r"resume|cv|upload|file|attach", e, re.I) for e in errs):
+                        with contextlib.suppress(Exception):
+                            if await adapter.upload_resume(session, page, resume):
+                                print("  [agent-repair] resume re-uploaded deterministically (CDP)")
+                        with contextlib.suppress(Exception):
+                            await adapter.next_step(session, page)
+                            moved0 = await adapter.extract_step(session, page, profile)
+                            if (
+                                moved0.index != step.index
+                                or moved0.is_review
+                                or await adapter.is_complete(session, page)
+                            ):
+                                adv = AdvanceResult(ok=True, page=page)  # advanced deterministically; skip the agent
+                                errs = []
+                    if errs and not adv.ok:  # non-file errors, or the deterministic file-fix didn't advance
+                        agent_used = True
+                        await repair_and_advance(
+                            session, page, errs, adapter.advance_label, agent_llm=agent_llm, resume=resume
+                        )
+                        page = await session.must_get_current_page()
+                        moved = await adapter.extract_step(session, page, profile)
+                        if moved.index != step.index or moved.is_review or await adapter.is_complete(session, page):
+                            adv = AdvanceResult(ok=True, page=page)  # the agent advanced the step
+
             result["steps"].append(
                 {
-                    "name": step.name or "Review",
+                    "name": step.name,
                     "index": step.index,
                     "total": step.total,
-                    "tiers": {},
+                    "tiers": {
+                        t: sum(1 for r in rows if r.tier == t) for t in ("L1", "L2", "L3", "vlm", "blank", "FAIL")
+                    },
                     "seconds": round(time.monotonic() - t0, 1),
                     "cost": round((await tc.get_usage_summary()).total_cost - c0, 5),
-                    "agent_used": False,
+                    "agent_used": agent_used or repeaters_used,
+                    "repeaters": repeaters_used,
                     "screenshot": shot,
                 }
             )
-            break
-        if step.index in seen:  # progress-monotonicity guard
-            return await _wizard_halt(result, "STEP_STALLED", f"re-entered step {step.index}", tc, session)
-        seen.add(step.index)
+            if not adv.ok:
+                return await _wizard_halt(result, "ADVANCE_FAILED", adv.blocked_reason, tc, session)
+            page = adv.page or await session.must_get_current_page()
 
-        map_rows = [f for f in step.fields if f.needs_map]
-        mapped = await map_fields(llm, map_rows, profile, title) if map_rows else {}
-        rows: list[_Row] = []
-        esc_used = 0  # anti-cascade: cap L3 agents PER STEP so a false-negating widget can't runaway
-        for f in step.fields:
-            if f.source == "skip":
-                continue
-            value, src = _resolve(f, mapped, resume)
-            allow = allow_escalation and esc_used < _STEP_ESC_BUDGET
-            tier = await fill_with_ladder(adapter, session, page, f, value, llm, resume, allow)
-            if allow and tier in ("L3", "FAIL"):
-                esc_used += 1
-                with contextlib.suppress(Exception):
-                    page = await session.must_get_current_page()  # L3 re-attached CDP; re-acquire handle
-            rows.append(_Row(name=f.name, type=f.type, src=src, tier=tier))
-
-        # off-schema repeater sections on this step (My Experience: work experience / education /
-        # skills / languages). No-op (returns {}) on steps without a repeater — the adapter gates
-        # on section headings. The agent freezes filled fields + submit stays disabled.
-        repeaters_used = False
+        usage = await tc.get_usage_summary()
+        result.setdefault("status", "FILLED_TO_REVIEW")
+        result["cost"] = usage.total_cost
+        print(f"  wizard steps filled: {len(result['steps'])}   cost ${usage.total_cost:.5f}   (stopped before Submit)")
+        await session.kill()
+        return result
+    finally:
+        # LEAK-PROOF: any crash in the wizard (e.g. a CDP 'Client is not started' teardown) must
+        # NOT leave a live browser behind — the caller's retry-next-req loop would stack a second
+        # browser on top of it (chromium runaway). kill is idempotent; normal returns already killed.
         with contextlib.suppress(Exception):
-            rep = await adapter.fill_repeaters(session, page, profile)
-            if rep:
-                repeaters_used = True
-                print(f"  repeaters: {rep}")
-            page = await session.must_get_current_page()  # agent_fill_section re-attaches CDP
-
-        # Deterministically answer any REQUIRED screening/eligibility radio the LLM map left empty
-        # (Intel gates My-Information on 'previously employed by Intel?') — the cheap LLM decides the
-        # ordinary external-applicant answer, the robust _click_radio commits via CDP — BEFORE the agent
-        # ever sees it (that React radio always looped a vision agent). Workday-only (single-page adapters
-        # don't define the method, so it's a no-op there).
-        if hasattr(adapter, "answer_required_choices"):
-            with contextlib.suppress(Exception):
-                n = await adapter.answer_required_choices(session, page, profile=profile)
-                if n:
-                    print(f"  [wd] answered {n} required screening choice(s) deterministically")
-                    page = await session.must_get_current_page()
-
-        # screenshot the deterministically-filled step BEFORE advancing (the agent, if invoked,
-        # advances to the NEXT page, so capture this page now).
-        shot = None
-        if screenshot_path:
-            shot = await _screenshot(session, page, screenshot_path.replace(".png", f"_step{step.index}.png"))
-
-        # Deterministic fill got the values in but the platform may reject a field's FORMAT/choice
-        # on advance — and once it rejects a Save, NO deterministic re-fill re-arms it (verified).
-        # So on a validation block, hand the recovery to an agent that fixes the flagged field(s)
-        # AND clicks the advance button itself (the only thing that re-arms the form). Advancement
-        # is verified by re-reading the step; if the agent didn't advance, the monotonicity guard
-        # at the top of the loop turns the repeated step into an honest STEP_STALLED halt.
-        agent_used = False
-        adv = await adapter.next_step(session, page)
-        if not adv.ok:
-            errs = await adapter.validation_errors(page)
-            if errs:
-                print(f"  [agent-repair] advance blocked by validation: {errs}")
-                # RESUME stays DETERMINISTIC (directive #1): if an error names the file/resume, push the
-                # bytes via CDP HERE and then ADVANCE deterministically — NEVER hand the file to the agent,
-                # which network-errors + LOOPS on the dropzone (the "Loop detection nudge" hang). Only fall
-                # to the agent for NON-file errors, or if the deterministic file-fix still doesn't advance.
-                if any(re.search(r"resume|cv|upload|file|attach", e, re.I) for e in errs):
-                    with contextlib.suppress(Exception):
-                        if await adapter.upload_resume(session, page, resume):
-                            print("  [agent-repair] resume re-uploaded deterministically (CDP)")
-                    with contextlib.suppress(Exception):
-                        await adapter.next_step(session, page)
-                        moved0 = await adapter.extract_step(session, page, profile)
-                        if moved0.index != step.index or moved0.is_review or await adapter.is_complete(session, page):
-                            adv = AdvanceResult(ok=True, page=page)  # advanced deterministically; skip the agent
-                            errs = []
-                if errs and not adv.ok:  # non-file errors, or the deterministic file-fix didn't advance
-                    agent_used = True
-                    await repair_and_advance(
-                        session, page, errs, adapter.advance_label, agent_llm=agent_llm, resume=resume
-                    )
-                    page = await session.must_get_current_page()
-                    moved = await adapter.extract_step(session, page, profile)
-                    if moved.index != step.index or moved.is_review or await adapter.is_complete(session, page):
-                        adv = AdvanceResult(ok=True, page=page)  # the agent advanced the step
-
-        result["steps"].append(
-            {
-                "name": step.name,
-                "index": step.index,
-                "total": step.total,
-                "tiers": {t: sum(1 for r in rows if r.tier == t) for t in ("L1", "L2", "L3", "vlm", "blank", "FAIL")},
-                "seconds": round(time.monotonic() - t0, 1),
-                "cost": round((await tc.get_usage_summary()).total_cost - c0, 5),
-                "agent_used": agent_used or repeaters_used,
-                "repeaters": repeaters_used,
-                "screenshot": shot,
-            }
-        )
-        if not adv.ok:
-            return await _wizard_halt(result, "ADVANCE_FAILED", adv.blocked_reason, tc, session)
-        page = adv.page or await session.must_get_current_page()
-
-    usage = await tc.get_usage_summary()
-    result.setdefault("status", "FILLED_TO_REVIEW")
-    result["cost"] = usage.total_cost
-    print(f"  wizard steps filled: {len(result['steps'])}   cost ${usage.total_cost:.5f}   (stopped before Submit)")
-    await session.kill()
-    return result
+            await session.kill()
 
 
 async def _wizard_halt(result: dict, status: str, reason: str, tc: Any, session: Any) -> dict:
