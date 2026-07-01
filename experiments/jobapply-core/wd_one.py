@@ -346,30 +346,48 @@ async def main():
     if not urls:
         print(f"[{tag}] NO_JOBS", flush=True)
         return
+
+    async def _attempt(url, creds):
+        # 1400s/URL: My Experience (experience+education+skills+languages) is agent-heavy and runs ~15 min
+        # alone — the old 780s timed out mid-education so NO tenant reached Review. seq10.sh caps the tenant.
+        return await asyncio.wait_for(
+            run_wizard(
+                WorkdayAdapter(),
+                url=url,
+                profile=profile,
+                resume=resume,
+                headless=True,
+                allow_escalation=True,
+                screenshot_path=str(OUT / f"{tag}.png"),
+                creds=creds,
+            ),
+            timeout=1400,
+        )
+
     for url in urls[:3]:
         # autofillWithResume (open_form's default) — the AUTH-verified path; applyManually auth-fails.
         # The resume parser pre-fills experience rows; the engine must RESPECT those (fill gaps only).
-        creds = creds_for(tenant)  # REUSE the tenant's account (sign in), don't create a new one each run
         print(f"[{tag}] {url.split('/job/')[-1][:50]}", flush=True)
-        try:
-            res = await asyncio.wait_for(
-                run_wizard(
-                    WorkdayAdapter(),
-                    url=url,
-                    profile=profile,
-                    resume=resume,
-                    headless=True,
-                    allow_escalation=True,
-                    screenshot_path=str(OUT / f"{tag}.png"),
-                    creds=creds,
-                ),
-                timeout=780,
-            )
-        except TimeoutError:
-            print(f"[{tag}] TIMEOUT", flush=True)
-            return
-        except Exception as exc:
-            print(f"[{tag}] ERROR {type(exc).__name__}: {exc}", flush=True)
+        creds = creds_for(tenant)  # REUSE the tenant's account (sign in), don't create a new one each run
+        res = None
+        for _try in range(2):  # sign-in; if the tracked account is REJECTED, rotate to a FRESH create once
+            try:
+                res = await _attempt(url, creds)
+            except TimeoutError:
+                print(f"[{tag}] TIMEOUT", flush=True)
+                return
+            except Exception as exc:
+                print(f"[{tag}] ERROR {type(exc).__name__}: {exc}", flush=True)
+                res = None
+                break
+            # A tracked account Workday no longer accepts must NOT be retried as-is — mint a fresh account
+            # (existing=False -> authenticate() takes the CREATE path) and try this same url once more.
+            if _try == 0 and res.get("status") == "AUTH_FAILED" and "SIGN_IN" in (res.get("reason") or ""):
+                print(f"[{tag}] tracked account rejected -> minting FRESH account (rotate)", flush=True)
+                creds = rotate_creds(tenant)
+                continue
+            break
+        if res is None:
             continue
         st = res.get("status", "?")
         steps = res.get("steps", [])
