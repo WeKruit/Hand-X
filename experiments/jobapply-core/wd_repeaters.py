@@ -443,7 +443,7 @@ READ_ALL_JS = r"""
     // reconcile re-committed a field the resume-autofill already filled -> leaked to the slow agent.
     const ms = root.closest('[data-automation-id="multiSelectContainer"]')
             || root.querySelector('[data-automation-id="multiSelectContainer"]');
-    if (ms) return [...ms.querySelectorAll('[data-automation-id="selectedItem"]')].map(p=>norm(p.textContent)).join(', ');
+    if (ms) return [...ms.querySelectorAll('[data-automation-id="selectedItem"],[data-automation-id="multiSelectPill"]')].map(p=>norm(p.textContent)).join(', ');
     const el = root.querySelector('input,textarea,select,[role="spinbutton"]') || root;
     if (el.getAttribute && (el.getAttribute('type')==='checkbox' || el.getAttribute('role')==='checkbox'))
       return (el.checked||el.getAttribute('aria-checked')==='true') ? 'true' : '';

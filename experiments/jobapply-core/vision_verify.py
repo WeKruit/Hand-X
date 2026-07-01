@@ -116,8 +116,15 @@ async def visual_check(
             f'the same thing — e.g. a fuller official name ("Computer and Information Science" for '
             f'"Computer Science"; "University of California, Berkeley" for "UC Berkeley"; "United States of '
             f'America (+1)" for "United States"), or all of several comma-separated items present as pills. '
-            f'Set "matches"=false ONLY if the field is blank or shows a clearly DIFFERENT thing. Reply STRICT '
-            f'JSON: {{"filled": true|false, "value": "<visible text>", "matches": true|false}}.'
+            # typed-residue false-positive (verified live): raw text sitting in a tag/typeahead SEARCH BOX
+            # looks 'filled' but is NOT committed — only a pill/tag chip (with its x/remove control) or a
+            # selected option counts. Plain text inputs (name/city) still count by their text.
+            f"IMPORTANT: for a tag/multi-select field, TEXT STILL SITTING IN THE SEARCH BOX does NOT count "
+            f"— it must appear as a COMMITTED pill/tag chip (usually with an x/remove control) or a "
+            f"selected option; if the value is only typed in the search box, set matches=false. "
+            f'Set "matches"=false ONLY if the field is blank, uncommitted as above, or shows a clearly '
+            f'DIFFERENT thing. Reply STRICT JSON: {{"filled": true|false, "value": "<visible text>", '
+            f'"matches": true|false}}.'
         )
     else:
         prompt = (

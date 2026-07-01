@@ -808,9 +808,11 @@ class WorkdayAdapter(ATSAdapter):
         # box, and both the wrapper-text and the VLM read that residue as 'filled' (verified live:
         # Skills showed literal typed 'Python', zero pills, yet read_back said committed=True). Count
         # selectedItem pills before/after — the widget's only true commit signal.
+        # both pill aids — legacy DomHand knew selectedItem AND multiSelectPill (tenant-varying)
         pills_js = (
             "() => document.querySelectorAll("
-            f"'{self._wsel(field.name, ' [data-automation-id=\"selectedItem\"]')}'"
+            f"'{self._wsel(field.name, ' [data-automation-id=\"selectedItem\"]')}, "
+            f"{self._wsel(field.name, ' [data-automation-id=\"multiSelectPill\"]')}'"
             ").length"
         )
 
@@ -1300,6 +1302,8 @@ class WorkdayAdapter(ATSAdapter):
                     # a genuine "select all that apply" multiselect is left untouched).
                     already = await page.get_elements_by_css_selector(
                         self._wsel(f.name, ' [data-automation-id="selectedItem"]')
+                        + ", "
+                        + self._wsel(f.name, ' [data-automation-id="multiSelectPill"]')
                     )
                     if already:
                         continue
@@ -1434,7 +1438,7 @@ class WorkdayAdapter(ATSAdapter):
             got = await page.evaluate(
                 f"() => {{ const w=document.querySelector('{sel}'); if(!w) return '';"
                 " const norm=s=>(s||'').replace(/\\s+/g,' ').trim();"
-                " const pills=[...w.querySelectorAll('[data-automation-id=\"selectedItem\"]')]"
+                ' const pills=[...w.querySelectorAll(\'[data-automation-id="selectedItem"],[data-automation-id="multiSelectPill"]\')]'
                 ".map(e=>norm(e.textContent)).filter(Boolean);"
                 " if(pills.length) return pills.join(', ');"
                 " const b=w.querySelector('button'); const t=b?norm(b.textContent):'';"
@@ -1548,7 +1552,7 @@ class WorkdayAdapter(ATSAdapter):
             with contextlib.suppress(Exception):
                 txt = await page.evaluate(
                     f"() => {{ const w=document.querySelector('{sel}'); if(!w) return '';"
-                    " const pills=[...w.querySelectorAll('[data-automation-id=\\\"selectedItem\\\"]')]"
+                    ' const pills=[...w.querySelectorAll(\'[data-automation-id=\\"selectedItem\\"],[data-automation-id=\\"multiSelectPill\\"]\')]'
                     ".map(e=>e.textContent).join(' '); return (pills||'')+' '+(w.textContent||''); }}"
                 )
                 return bool(eng.norm(value)) and eng.norm(value) in eng.norm(txt)
