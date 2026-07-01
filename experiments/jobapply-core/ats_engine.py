@@ -851,7 +851,20 @@ async def install_submit_guard(page: Any) -> None:
 
 # field types whose deterministic read-back is prone to false-negatives (custom widgets the
 # serialized DOM mis-reads) — worth a cheap VLM glance before re-filling / escalating.
-_VLM_RESCUE_TYPES = {"single_select", "multi_select", "radio", "checkbox", "date", "select_native"}
+# Widget types whose serialized DOM false-negatives on a busy SPA while the field is VISIBLY filled.
+# A cheap cached VLM glance confirms them instead of paying for (and fragmenting the session with) an
+# L3 agent. Text/textarea/email/tel included: on Workday a freshly-typed input frequently serializes
+# blank mid-render, and re-filling a text field is safe/idempotent-or-cheap to visually confirm.
+_VLM_RESCUE_TYPES = {
+    "single_select", "multi_select", "radio", "checkbox", "date", "select_native",
+    "text", "textarea", "email", "tel", "number",
+}
+
+# Anti-cascade: max L3 agent escalations allowed PER STEP. Once this many fields on one step have
+# needed the agent, the rest of that step fills deterministically only (allow_escalation=False). One
+# false-negating widget must never spawn N agents — each agent opens/switches tabs and fragments the
+# shared CDP session, and unbounded escalation is exactly the chromium runaway we saw (36 procs).
+_STEP_ESC_BUDGET = 3
 
 
 async def _vlm_filled(session: Any, field: FormField, value: str) -> bool:
@@ -1098,15 +1111,18 @@ async def run_single_page(
         return result
 
     report: list[_Row] = []
+    esc_used = 0  # anti-cascade: L3 agents spent on THIS step
     for f in fields:
         if f.source == "skip":
             continue
         value, src = _resolve(f, mapped, resume)
-        tier = await fill_with_ladder(adapter, session, page, f, value, llm, resume, allow_escalation)  # steps 3-4
+        allow = allow_escalation and esc_used < _STEP_ESC_BUDGET
+        tier = await fill_with_ladder(adapter, session, page, f, value, llm, resume, allow)  # steps 3-4
         # ONLY refresh the page handle when an L3 escalation actually ran (it re-attaches the
         # CDP client). Doing it on every FAIL is harmful: must_get_current_page() can latch a
         # stray about:blank target, after which all remaining fields fill on a blank page.
-        if allow_escalation and tier in ("L3", "FAIL"):
+        if allow and tier in ("L3", "FAIL"):
+            esc_used += 1
             with contextlib.suppress(Exception):
                 page = await session.must_get_current_page()
         report.append(_Row(name=f.name, type=f.type, src=src, tier=tier))
@@ -1243,11 +1259,17 @@ async def run_wizard(
         map_rows = [f for f in step.fields if f.needs_map]
         mapped = await map_fields(llm, map_rows, profile, title) if map_rows else {}
         rows: list[_Row] = []
+        esc_used = 0  # anti-cascade: cap L3 agents PER STEP so a false-negating widget can't runaway
         for f in step.fields:
             if f.source == "skip":
                 continue
             value, src = _resolve(f, mapped, resume)
-            tier = await fill_with_ladder(adapter, session, page, f, value, llm, resume, allow_escalation)
+            allow = allow_escalation and esc_used < _STEP_ESC_BUDGET
+            tier = await fill_with_ladder(adapter, session, page, f, value, llm, resume, allow)
+            if allow and tier in ("L3", "FAIL"):
+                esc_used += 1
+                with contextlib.suppress(Exception):
+                    page = await session.must_get_current_page()  # L3 re-attached CDP; re-acquire handle
             rows.append(_Row(name=f.name, type=f.type, src=src, tier=tier))
 
         # off-schema repeater sections on this step (My Experience: work experience / education /
