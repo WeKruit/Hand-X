@@ -716,29 +716,14 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
                 )
                 return True
         return False
-    if a == "select":  # button-listbox: open, TYPE-to-filter if searchable, then pick from the portal
-        import contextlib
+    if a == "select":  # button-listbox: DELEGATE to the adapter's _listbox — trusted trigger click +
+        # no-blur typing + commit-by-node + Escape disarm (the proven path). This branch previously
+        # re-implemented it with a SYNTHETIC trig.click() that often never opened the menu (verified
+        # live: Degree -> 'NO options (dom+vision both empty — menu not open?)' -> residual -> agent).
+        from ats_engine import FormField
 
-        trig = await first(page, f"{base} button")
-        if not trig:
-            return False
-        with contextlib.suppress(Exception):
-            await trig.click()
-        await _wait_options_change(page, [])  # bounded: wait for the menu/search input to mount
-        # a SEARCHABLE listbox (e.g. Degree) shows NO options until you type — find the revealed input
-        # and type the value to filter; an inline listbox just shows them (no input -> skip).
-        inp = (
-            await first(page, f"{base} input")
-            or await first(page, '[data-automation-id="activeListContainer"] input')
-            or await first(page, 'input[aria-autocomplete="list"]')
-        )
-        if inp:
-            base_opts = [t for _, t in await _read_visible_options(page)]
-            with contextlib.suppress(Exception):
-                await inp.fill(value)
-            await _wait_options_change(page, base_opts)  # bounded: wait for the filter to re-render
-        # exact -> contains -> LLM closest; vision reads the rendered options + verifies the committed value
-        return await pick_smart(adapter, page, llm, value, session=session, verify_label=c.label)
+        fld = FormField(name=c.fkit, type="single_select", label=c.label, source="standard")
+        return await adapter._listbox(session, page, fld, value)
     if a == "chip":  # typeahead TAG (Skills) / education searchable chip: REUSE the proven adapter
         # multiselect commit (type -> filter -> TRUSTED ENTER on the highlighted top -> read_back). One
         # pill per comma-item. No bespoke re-implementation — _multiselect already handles the widget.
