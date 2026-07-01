@@ -44,6 +44,51 @@ def _match_llm() -> Any:
     return _MATCH_LLM
 
 
+_VALUE_MATCH_CACHE: dict = {}
+
+
+async def _llm_value_matches(committed: str, wanted: str) -> bool:
+    """LLM-ENRICHED verifier (directive: matching must be LLM, not substring, to be generic). Judge whether
+    the option ACTUALLY committed satisfies the INTENDED value on a CLOSED taxonomy whose wording we can
+    NEVER guarantee matches the profile ("Master's Degree" vs 'Masters'; 'Electrical and Computer
+    Engineering' vs 'Electrical Engineering and Computer Science'; 'United States' vs '...(+1)'). Accepts
+    abbreviation / word-order / synonym / suffix differences; rejects a genuinely DIFFERENT thing (wrong
+    degree level, unrelated field). BOUNDED input by design: exactly TWO short strings (truncated to 160
+    chars) — never the option list, so the prompt can't blow up on a 5000-item school taxonomy. Cached on
+    (committed, wanted) so a repeated verify costs ZERO extra calls."""
+    c, w = eng.norm(committed)[:160], eng.norm(wanted)[:160]
+    if not c or not w:
+        return False
+    if c.lower() == w.lower():
+        return True
+    ckey = (c.lower(), w.lower())
+    if ckey in _VALUE_MATCH_CACHE:
+        return _VALUE_MATCH_CACHE[ckey]
+    ans = False
+    with contextlib.suppress(Exception):
+        import oa_llm
+
+        from browser_use.llm.messages import SystemMessage, UserMessage
+
+        res = await oa_llm.resilient_text(
+            [
+                SystemMessage(
+                    content=(
+                        "You verify ONE form dropdown selection. Reply ONLY 'YES' or 'NO'. YES if the SELECTED "
+                        "option is a correct or closest match for the INTENDED value on a closed list where the "
+                        "wording differs (abbreviation, word order, synonym, suffix like '(+1)' or a degree "
+                        "level phrased differently). NO only if SELECTED is a genuinely DIFFERENT thing (a "
+                        "different field of study, a wrong degree level, an unrelated option)."
+                    )
+                ),
+                UserMessage(content=f"INTENDED: {w}\nSELECTED: {c}\nIs SELECTED a correct match? YES or NO."),
+            ]
+        )
+        ans = (res or "").strip().upper().startswith("Y")
+    _VALUE_MATCH_CACHE[ckey] = ans
+    return ans
+
+
 # Generic, tenant-independent step enumerator (see extract_step for the rationale).
 # Emits {index,total,name, fields:[{name=<full wrapper aid>, label, type, required, options}]}.
 _EXTRACT_STEP_JS = r"""
@@ -1165,6 +1210,24 @@ class WorkdayAdapter(ATSAdapter):
         )
         return await _set(inp, f"{mm}/{dd}/{yyyy}")
 
+    async def _committed_value(self, page: Any, field: FormField) -> str:
+        """The BOUNDED committed value for the LLM verifier: the selectedItem pills (multiselect) or the
+        button's chosen label (single_select) — '' when only the 'Select One' placeholder shows (a real
+        empty). Truncated to 160 chars so the LLM input stays small no matter how long the widget text is."""
+        sel = self._wsel(field.name)
+        with contextlib.suppress(Exception):
+            got = await page.evaluate(
+                f"() => {{ const w=document.querySelector('{sel}'); if(!w) return '';"
+                " const norm=s=>(s||'').replace(/\\s+/g,' ').trim();"
+                " const pills=[...w.querySelectorAll('[data-automation-id=\"selectedItem\"]')]"
+                ".map(e=>norm(e.textContent)).filter(Boolean);"
+                " if(pills.length) return pills.join(', ');"
+                " const b=w.querySelector('button'); const t=b?norm(b.textContent):'';"
+                " return /^(select one|select\\.\\.\\.|choose one)$/i.test(t) ? '' : t; }}"
+            )
+            return (got or "").strip()[:160]
+        return ""
+
     async def read_back(self, session: Any, page: Any, field: FormField, value: str) -> bool:
         # A widget's commit (listbox button text, radio check, pill) can lag the click by a
         # re-render, so an immediate single read false-negatives — POLL the check (returns the
@@ -1180,12 +1243,21 @@ class WorkdayAdapter(ATSAdapter):
         # "United States of America" vs "...(+1)"). That false-negative is what marks a committed chip
         # residual -> the agent re-does it -> the timeout. Confirm SEMANTICALLY with the value-aware VLM
         # (reuse the visuals primitive) before declaring failure.
-        if field.type in ("single_select", "multi_select") and session is not None:
-            with contextlib.suppress(Exception):
-                from vision_verify import _matches, visual_check
+        if field.type in ("single_select", "multi_select"):
+            # LLM-ENRICHED verify (directive: matching must be LLM, not substring, to be generic). The free
+            # substring pass above false-negatives a CORRECT closest pick whenever the closed taxonomy words
+            # the option differently than the profile. So read the BOUNDED committed value (pills / selected
+            # label; '' for the 'Select One' placeholder) and let the cheap text LLM judge committed-vs-wanted
+            # — input is TWO short strings, never the option list. Cached, so a repeat costs nothing.
+            committed = await self._committed_value(page, field)
+            if committed and await _llm_value_matches(committed, value):
+                return True
+            if session is not None:  # DOM read empty (false-empty widget) -> value-aware VLM ground truth
+                with contextlib.suppress(Exception):
+                    from vision_verify import _matches, visual_check
 
-                if _matches(await visual_check(session, field.label or field.name, want=value)):
-                    return True
+                    if _matches(await visual_check(session, field.label or field.name, want=value)):
+                        return True
         return False
 
     async def _read_once(self, page: Any, field: FormField, value: str) -> bool:
@@ -1325,10 +1397,15 @@ class WorkdayAdapter(ATSAdapter):
                 # bug). It only fills the fields still EMPTY in the existing rows.
                 instr = (
                     f"The {label} rows already EXIST on the page — do NOT click 'Add Another' or 'Add' "
-                    f"(that makes duplicate empty rows). Fill ONLY the fields that are still EMPTY in the "
-                    f"existing rows, by label. For a searchable dropdown (School, Degree, Field of Study), "
-                    f"type the value, WAIT for the option to appear, then press Enter to commit. Dates like "
-                    f"'2021-06' go in the segmented month/year inputs. {entries}"
+                    f"(that makes duplicate empty rows). RESPECT EXISTING VALUES: a field/pill that already "
+                    f"shows ANY value is DONE — do NOT clear it, correct it, re-type it, or re-search it, "
+                    f"EVEN IF the value looks wrong or doesn't match (a pre-filled value counts as complete). "
+                    f"Fill ONLY fields that are completely EMPTY. For a searchable dropdown (School, Degree, "
+                    f"Field of Study) that is EMPTY: type the value, WAIT for the option, press Enter. If NO "
+                    f"option appears after ONE search, LEAVE that field empty and move on — do NOT retry the "
+                    f"same search or type broader terms (that loops until timeout). Dates like '2021-06' go in "
+                    f"the segmented month/year inputs. Once every EMPTY field has been tried once, call done. "
+                    f"{entries}"
                 )
             res = await eng.agent_fill_section(session, page, section=label, instructions=instr, max_steps=18)
             out[label] = {"items": len(items), "residual_agent": True, **res}
