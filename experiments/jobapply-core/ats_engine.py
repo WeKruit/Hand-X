@@ -1291,19 +1291,29 @@ async def run_wizard(
             errs = await adapter.validation_errors(page)
             if errs:
                 print(f"  [agent-repair] advance blocked by validation: {errs}")
-                # RESUME stays DETERMINISTIC even during validation repair (directive #1): if an error
-                # names the resume/file upload, push the bytes via CDP HERE — never let the agent (which
-                # network-errors + loops on upload) handle the file. Re-runs the idempotent scan.
+                # RESUME stays DETERMINISTIC (directive #1): if an error names the file/resume, push the
+                # bytes via CDP HERE and then ADVANCE deterministically — NEVER hand the file to the agent,
+                # which network-errors + LOOPS on the dropzone (the "Loop detection nudge" hang). Only fall
+                # to the agent for NON-file errors, or if the deterministic file-fix still doesn't advance.
                 if any(re.search(r"resume|cv|upload|file|attach", e, re.I) for e in errs):
                     with contextlib.suppress(Exception):
                         if await adapter.upload_resume(session, page, resume):
                             print("  [agent-repair] resume re-uploaded deterministically (CDP)")
-                agent_used = True
-                await repair_and_advance(session, page, errs, adapter.advance_label, agent_llm=agent_llm, resume=resume)
-                page = await session.must_get_current_page()
-                moved = await adapter.extract_step(session, page, profile)
-                if moved.index != step.index or moved.is_review or await adapter.is_complete(session, page):
-                    adv = AdvanceResult(ok=True, page=page)  # the agent advanced the step
+                    with contextlib.suppress(Exception):
+                        await adapter.next_step(session, page)
+                        moved0 = await adapter.extract_step(session, page, profile)
+                        if moved0.index != step.index or moved0.is_review or await adapter.is_complete(session, page):
+                            adv = AdvanceResult(ok=True, page=page)  # advanced deterministically; skip the agent
+                            errs = []
+                if errs and not adv.ok:  # non-file errors, or the deterministic file-fix didn't advance
+                    agent_used = True
+                    await repair_and_advance(
+                        session, page, errs, adapter.advance_label, agent_llm=agent_llm, resume=resume
+                    )
+                    page = await session.must_get_current_page()
+                    moved = await adapter.extract_step(session, page, profile)
+                    if moved.index != step.index or moved.is_review or await adapter.is_complete(session, page):
+                        adv = AdvanceResult(ok=True, page=page)  # the agent advanced the step
 
         result["steps"].append(
             {
