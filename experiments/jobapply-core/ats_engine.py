@@ -626,6 +626,24 @@ def _strip_urls(text: str) -> str:
     return re.sub(r"\b(?:https?://|www\.)\S+", "[link removed]", text or "")
 
 
+async def _ensure_cdp_live(session: Any) -> None:
+    """Repair the shared CDP client after an L3 browser_use.Agent — REACTIVELY. Agent teardown on a
+    keep_alive session is inconsistent in 0.13.1: sometimes it nulls the client (next deterministic op
+    throws 'Client is not started'), sometimes it leaves a LIVE websocket. Neither prior guard was
+    correct: an UNCONDITIONAL session.connect() tears down a live socket ('connect() called but CDP
+    client already exists! Cleaning up old connection' -> WebSocket closed -> FATAL), while guarding on
+    session.is_cdp_connected skips needed reconnects because that flag LIES (reads True when dead).
+    So PROBE with a real CDP round-trip and reconnect ONLY when the probe actually fails."""
+    try:
+        page = await session.must_get_current_page()
+        await page.evaluate("() => 1")  # real Runtime.evaluate round-trip; throws iff the client is dead
+        return  # live — must NOT reconnect (would destroy the working socket)
+    except Exception:
+        pass
+    with contextlib.suppress(Exception):
+        await session.connect()  # genuinely dead -> rebuild the root client + watchdogs
+
+
 async def escalate(
     session: Any, agent_llm: Any, page: Any, field: FormField, value: str, resume: str | None = None
 ) -> bool:
@@ -660,16 +678,10 @@ async def escalate(
         print(f"   [L3] agent failed for {field.name}: {exc}")
         return False
     finally:
-        # browser_use.Agent teardown stops the shared CDP client even on a keep_alive
-        # session (agent/service.py close()), which would break every field/screenshot
-        # after this one. Re-attach to the still-running browser via the stored cdp_url.
-        with contextlib.suppress(Exception):
-            # UNCONDITIONAL reconnect: classic browser_use.Agent.close() stops + nulls the SESSION
-            # event bus on keep_alive even when the CDP websocket still reads OPEN, so
-            # is_cdp_connected LIES (True) and a guarded reconnect gets skipped -> the next
-            # deterministic cdp_client op throws "Client is not started". connect() stops the stale
-            # root client and rebuilds it (re-arming the watchdogs/bus), always clean. (beta-agent eval)
-            await session.connect()
+        # browser_use.Agent teardown may or may not drop the shared CDP client. Repair it REACTIVELY
+        # (probe-then-reconnect) — an unconditional reconnect here was DESTROYING live sockets and
+        # killing the whole wizard after the first escalation.
+        await _ensure_cdp_live(session)
         await _unfreeze(session)  # ALWAYS unlock — else subsequent deterministic fills hit frozen fields
 
 
@@ -730,9 +742,7 @@ async def agent_fill_section(
         print(f"   [agent:{section}] {exc}")
         ok = False
     finally:
-        with contextlib.suppress(Exception):  # Agent.close() drops the shared CDP client — re-attach
-            if not session.is_cdp_connected:
-                await session.connect()
+        await _ensure_cdp_live(session)  # probe-then-reconnect (see escalate); the is_cdp_connected guard lied
         with contextlib.suppress(Exception):
             await page.evaluate(restore_js)
         await _unfreeze(session)  # unlock the frozen filled fields
@@ -819,9 +829,7 @@ async def repair_and_advance(
     except Exception as exc:
         print(f"   [agent:repair] {exc}")
     finally:
-        with contextlib.suppress(Exception):  # Agent.close() drops the shared CDP client — re-attach
-            if not session.is_cdp_connected:
-                await session.connect()
+        await _ensure_cdp_live(session)  # probe-then-reconnect (see escalate); the is_cdp_connected guard lied
         # NOTE: the submit-guard is intentionally LEFT installed — the final Submit must stay
         # disabled for the rest of the wizard so nothing finalizes the application.
     return True
