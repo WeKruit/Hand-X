@@ -68,6 +68,7 @@ class FormField:
 class Credentials:
     email: str
     password: str  # never via CLI args — env / secret bootstrap (see project memory)
+    existing: bool = False  # True = a previously-created account -> SIGN IN (reuse), never re-create
 
 
 @dataclass
@@ -557,7 +558,7 @@ _FREEZE_FILLED_JS = (
     # the surrounding multiSelect/select container. Without this the agent re-types committed chips
     # (School / Field of Study / Skills), reopening the menu -> the residual-agent timeout. Treat a chip
     # whose container holds a pill as filled, so it's frozen too.
-    " const box = e.closest('[data-automation-id=\"multiSelectContainer\"],[data-uxi-widget-type=\"selectinput\"]');"
+    ' const box = e.closest(\'[data-automation-id="multiSelectContainer"],[data-uxi-widget-type="selectinput"]\');'
     " const pill = !!(box && box.querySelector('[data-automation-id=\"selectedItem\"]'));"
     " const filled = (e.type==='checkbox'||e.type==='radio') ? e.checked : (((e.value||'').trim().length>0) || pill);"
     " if (filled && !e.readOnly && !e.disabled) {"
@@ -661,8 +662,12 @@ async def escalate(
         # session (agent/service.py close()), which would break every field/screenshot
         # after this one. Re-attach to the still-running browser via the stored cdp_url.
         with contextlib.suppress(Exception):
-            if not session.is_cdp_connected:
-                await session.connect()
+            # UNCONDITIONAL reconnect: classic browser_use.Agent.close() stops + nulls the SESSION
+            # event bus on keep_alive even when the CDP websocket still reads OPEN, so
+            # is_cdp_connected LIES (True) and a guarded reconnect gets skipped -> the next
+            # deterministic cdp_client op throws "Client is not started". connect() stops the stale
+            # root client and rebuilds it (re-arming the watchdogs/bus), always clean. (beta-agent eval)
+            await session.connect()
         await _unfreeze(session)  # ALWAYS unlock — else subsequent deterministic fills hit frozen fields
 
 

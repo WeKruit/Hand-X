@@ -203,11 +203,20 @@ async def _ordinary_answer(llm: Any, question: str, options: list[str]) -> str |
         res = await llm.ainvoke(
             [
                 SystemMessage(
-                    content="A typical EXTERNAL job applicant is answering a REQUIRED screening/"
-                    "eligibility question truthfully. Assume the ordinary applicant: is NOT a current or "
-                    "former employee of the hiring company and has no prior offer/contract/conflict with "
-                    "it; IS legally authorized to work; IS 18 or older; does NOT decline to answer. Pick "
-                    "the option reflecting that ordinary truthful answer — mind the question's polarity. "
+                    content="A typical EXTERNAL job applicant is answering a REQUIRED application question. "
+                    "Choose the option an ordinary applicant would pick, by question TYPE:\n"
+                    "1) ELIGIBILITY / SCREENING (work authorization, age, prior/current employment with the "
+                    "company, sponsorship, conflicts, relatives): answer TRUTHFULLY for the ordinary applicant "
+                    "— is NOT a current/former employee and has no prior conflict (-> No); IS legally "
+                    "authorized to work and IS 18+ (-> Yes); requires sponsorship -> No. Mind polarity.\n"
+                    "2) VOLUNTARY DEMOGRAPHIC / EEO SELF-IDENTIFICATION (ethnicity, race, gender, "
+                    "Hispanic/Latino, veteran status, disability, sexual orientation): DECLINE — pick the "
+                    "option meaning 'I don't wish to answer' / 'Decline to self-identify' / 'Prefer not to "
+                    "answer' / 'I do not wish to disclose'. If no such decline option exists, reply 'NONE'.\n"
+                    "3) HOW/WHERE the applicant heard about the role, or their source/referral channel: prefer "
+                    "'LinkedIn'; if not an option, 'Other'; if neither, the first non-placeholder option.\n"
+                    "4) PREFERRED / SPOKEN LANGUAGE: pick the option for 'English' (or the one containing "
+                    "'English'); if absent, the first non-placeholder option.\n"
                     "Reply the EXACT option text from the list, or 'NONE' if none fit."
                 ),
                 UserMessage(content=f"question: {question!r}\noptions: {options}"),
@@ -301,8 +310,28 @@ class WorkdayAdapter(ATSAdapter):
             )
             await self._settle(page)
 
-        # 2. Ensure CREATE-ACCOUNT mode (we register a fresh per-tenant account). DomHand rule:
-        #    verifyPassword present == Create Account; never toggle once there.
+        # 2a. SIGN IN to a TRACKED account (reuse — Workday rate-limits repeated creates, so a
+        #     previously-created account must sign in, never re-register). Ensure we are on the
+        #     SIGN-IN form (a verifyPassword field means we're on the Create form -> signInLink back).
+        if creds.existing:
+            if await eng.first(page, '[data-automation-id="verifyPassword"]'):
+                await self._click_aid(page, "signInLink")
+                await self._settle(page)
+            await self._fill_aid(page, "email", creds.email)
+            await self._fill_aid(page, "password", creds.password)
+            await self._click_aid(page, "signInSubmitButton")
+            await self._settle(page)
+            page = await session.must_get_current_page()
+            # success == past the gate: the wizard form is present and no password field remains.
+            if await eng.first(
+                page, '[data-automation-id="progressBar"], [data-automation-id^="formField-"]'
+            ) and not await eng.first(page, '[data-automation-id="password"]'):
+                return AuthResult(ok=True)
+            # sign-in rejected (deleted account / wrong password) — signal the CALLER to rotate to a
+            # fresh account + re-store (email generation belongs to the caller, not here).
+            return AuthResult(ok=False, reason="SIGN_IN_FAILED: tracked account rejected — rotate + recreate.")
+
+        # 2b. CREATE a fresh account. Ensure CREATE-ACCOUNT mode (verifyPassword present == Create form).
         if not await eng.first(page, '[data-automation-id="verifyPassword"]'):
             await self._click_aid(page, "createAccountLink")  # sign-in screen -> register
             await self._settle(page)
@@ -325,7 +354,9 @@ class WorkdayAdapter(ATSAdapter):
                 reason="Workday wants an emailed verification code (poll the inbox / HITL).",
             )
         if await eng.first(page, '[data-automation-id="email"]'):  # still on the auth screen
-            return AuthResult(ok=False, reason="Create Account did not advance (validation / CAPTCHA?).")
+            return AuthResult(
+                ok=False, reason="Create Account did not advance (validation / CAPTCHA / already exists?)."
+            )
         return AuthResult(ok=True)  # reached the form (no-verification tenant, e.g. Intel)
 
     # -- extract_step: progressBar + GENERIC field enumeration -------------
@@ -343,6 +374,28 @@ class WorkdayAdapter(ATSAdapter):
     #     option ("Yes"/"No"). The field meaning is decided by LABEL downstream, never the aid.
     async def extract_step(self, session: Any, page: Any, profile: dict) -> Step:
         await self._await_step_mounted(page)  # widgets mount async after a step transition
+        # Workday transient error ("Something went wrong — please refresh the page and then try again"):
+        # the step renders NO fields and NO advance button. RELOAD the current URL (deterministic
+        # recovery — the browser-use agent would refresh too) then re-mount, and re-assert the
+        # submit-guard (a reload clears injected JS). Bounded so a persistently-broken page can't loop.
+        for _ in range(2):
+            broken = False
+            with contextlib.suppress(Exception):
+                broken = (
+                    str(
+                        await page.evaluate(
+                            "() => /something went wrong|please refresh the page/i.test((document.body||{}).innerText||'')"
+                        )
+                    ).lower()
+                    == "true"
+                )
+            if not broken:
+                break
+            print("  [wd] step errored ('Something went wrong') — reloading page", flush=True)
+            with contextlib.suppress(Exception):
+                await session.navigate_to(await page.get_url())
+                await self._await_step_mounted(page)
+                await eng.install_submit_guard(page)
         meta = await page.evaluate(_EXTRACT_STEP_JS)
         import json
 
@@ -416,16 +469,23 @@ class WorkdayAdapter(ATSAdapter):
                 )
             if done:
                 return False
-            ok = await eng.upload_file(session, page, fel, resume)
-            if _DBG:
-                print(f"   [upload_resume] sel={sel!r} pushed={ok}")
-            # confirm the upload registered before declaring success; the success marker mounts async.
-            if ok:
-                for _ in range(6):
-                    await asyncio.sleep(0.4)
-                    if await eng.first(page, '[data-automation-id="file-upload-successful"]'):
-                        return True
-                return True  # bytes pushed via CDP; marker may simply lag — never fall to the agent
+            # Push bytes, then CONFIRM the success marker mounted. A Workday upload endpoint can
+            # transiently NETWORK-ERROR (observed live on Alteryx step 3: "Alert - Upload a file:
+            # Network Error", input left EMPTY while validation still demands it). The old code returned
+            # True on marker lag, so the wizard advanced into a "file required" block it could not clear.
+            # A manual re-push succeeded — so RETRY the push until the marker confirms, never declaring
+            # success on an unconfirmed upload.
+            for attempt in range(3):
+                ok = await eng.upload_file(session, page, fel, resume)
+                if _DBG:
+                    print(f"   [upload_resume] sel={sel!r} attempt={attempt} pushed={ok}")
+                if ok:
+                    for _ in range(8):
+                        await asyncio.sleep(0.4)
+                        if await eng.first(page, '[data-automation-id="file-upload-successful"]'):
+                            return True
+                # marker never mounted (network error / lag) — re-scan the input and retry the push
+                fel = await eng.first(page, sel) or fel
             return False
         return False
 
@@ -579,6 +639,18 @@ class WorkdayAdapter(ATSAdapter):
         if t == "multi_select":
             return await self._multiselect(session, page, field, value)
         if t == "date":
+            # A bare "Date" field (Voluntary/Self-Identify signature date) or an empty required date
+            # must be TODAY — Workday validates "Enter today's date". A specific date (Start Date, DOB)
+            # keeps the mapped value. Uses the local system date.
+            if not (value or "").strip() or eng.norm(field.label or "") in (
+                "date",
+                "todaysdate",
+                "signaturedate",
+                "dateofsignature",
+            ):
+                import datetime
+
+                value = datetime.date.today().isoformat()
             return await self._date(page, field, value)
         return False
 
@@ -688,6 +760,33 @@ class WorkdayAdapter(ATSAdapter):
             ' [data-automation-id="promptOption"], [data-automation-id="menuItem"],'
             ' [role="listbox"] [role="option"]'  # DomHand WORKDAY_SELECTORS generic fallback
         )
+
+    async def _read_options_live(self, page: Any, field: FormField) -> list[str]:
+        """Open a single_select/multiselect's listbox, read its RAW (non-normalized) option texts,
+        then close. Workday loads options ONLY on open, so extract_step reports none — this fetches
+        them so answer_required_choices can decide a decline/default answer for a required field the
+        LLM map left empty (e.g. Voluntary EEO). Best-effort; returns [] on any failure."""
+        raw: list[str] = []
+        with contextlib.suppress(Exception):
+            trig = await eng.first(page, self._wsel(field.name, " button"))
+            if not trig:
+                return raw
+            await trig.click()
+            await asyncio.sleep(0.7)
+            inp = await eng.first(page, self._wsel(field.name, " input")) or await eng.first(
+                page, '[data-automation-id="activeListContainer"] input'
+            )
+            owned = ""
+            if inp:
+                owns = (await inp.get_attribute("aria-controls")) or (await inp.get_attribute("aria-owns")) or ""
+                owned = owns.split()[0] if owns.split() else ""
+            for o in await page.get_elements_by_css_selector(self._opt_selector(owned)):
+                t = ((await o.evaluate("() => (this.textContent||'').trim()")) or "").strip()
+                if t:
+                    raw.append(t)
+            with contextlib.suppress(Exception):
+                await page.evaluate("() => document.body.click()")  # close the menu without committing
+        return raw
 
     async def _option_texts(self, page: Any, owned_id: str) -> list[str]:
         """VISIBLE option texts in the scoped listbox (normalized). Used to snapshot the pre-type
@@ -884,18 +983,77 @@ class WorkdayAdapter(ATSAdapter):
         with contextlib.suppress(Exception):
             step = await self.extract_step(session, page, {})
             for f in step.fields:
-                if f.type not in ("radio", "checkbox") or not f.required or not f.options:
+                if not f.required:
                     continue
-                already = await page.get_elements_by_css_selector(
-                    self._wsel(f.name, ' input:checked') + ", " + self._wsel(f.name, ' [aria-checked="true"]')
-                )
-                if already:
-                    continue  # the map already answered it — don't disturb
-                opts = [o for o in f.options if o and not eng.norm(o).lower().startswith("select")]
-                choice = await _ordinary_answer(llm, f.label, opts)
-                if choice and await self._click_radio(session, page, f, choice):
-                    answered += 1
-                    print(f"  [wd] screening answered: {f.label[:48]!r} -> {choice!r}", flush=True)
+                if f.type in ("radio", "checkbox"):
+                    opts = [o for o in (f.options or []) if o and not eng.norm(o).lower().startswith("select")]
+                    if not opts:
+                        continue
+                    already = await page.get_elements_by_css_selector(
+                        self._wsel(f.name, " input:checked") + ", " + self._wsel(f.name, ' [aria-checked="true"]')
+                    )
+                    if already:
+                        continue  # the map already answered it — don't disturb
+                    choice = await _ordinary_answer(llm, f.label, opts)
+                    if (
+                        choice
+                        and await self._click_radio(session, page, f, choice)
+                        and await self.read_back(session, page, f, choice)
+                    ):
+                        answered += 1
+                        print(f"  [wd] screening answered (verified): {f.label[:48]!r} -> {choice!r}", flush=True)
+                elif f.type == "single_select":
+                    # REQUIRED Workday DROPDOWN the map left on "Select One": Yes/No eligibility (authorized
+                    # to work?, 18+?, prior worker?, relatives?, sponsorship?) OR a VOLUNTARY EEO self-ID
+                    # (ethnicity / gender / Hispanic / veteran -> DECLINE). Workday loads options ONLY on
+                    # open, so extract_step reports none — READ THEM LIVE, then _ordinary_answer decides
+                    # (eligibility: truthful Yes/No; EEO: 'I don't wish to answer') and _listbox commits.
+                    cur = ""
+                    with contextlib.suppress(Exception):
+                        btn = await eng.first(page, self._wsel(f.name, " button"))
+                        if btn:
+                            cur = (await btn.evaluate("() => (this.textContent||'').trim()")) or ""
+                    if cur and not eng.norm(cur).startswith("selectone"):
+                        continue  # already has a selection — don't disturb
+                    opts = f.options or await self._read_options_live(page, f)
+                    opts = [o for o in opts if o and not eng.norm(o).lower().startswith("select")]
+                    if not opts:
+                        continue
+                    choice = await _ordinary_answer(llm, f.label, opts)
+                    if (
+                        choice
+                        and await self._listbox(session, page, f, choice)
+                        and await self.read_back(session, page, f, choice)
+                    ):
+                        answered += 1
+                        print(
+                            f"  [wd] required dropdown answered (verified): {f.label[:48]!r} -> {choice!r}", flush=True
+                        )
+                elif f.type == "multi_select":
+                    # REQUIRED Workday multiselect the map left EMPTY — chiefly "How Did You Hear About
+                    # Us?". Read options live; _ordinary_answer defaults (LinkedIn -> Other -> first) and
+                    # _multiselect commits. Skip if a pill is already present, or the LLM returns NONE (so
+                    # a genuine "select all that apply" multiselect is left untouched).
+                    already = await page.get_elements_by_css_selector(
+                        self._wsel(f.name, ' [data-automation-id="selectedItem"]')
+                    )
+                    if already:
+                        continue
+                    opts = f.options or await self._read_options_live(page, f)
+                    opts = [o for o in opts if o and not eng.norm(o).lower().startswith("select")]
+                    if not opts:
+                        continue
+                    choice = await _ordinary_answer(llm, f.label, opts)
+                    if (
+                        choice
+                        and await self._multiselect(session, page, f, choice)
+                        and await self.read_back(session, page, f, choice)
+                    ):
+                        answered += 1
+                        print(
+                            f"  [wd] required multiselect answered (verified): {f.label[:48]!r} -> {choice!r}",
+                            flush=True,
+                        )
         return answered
 
     async def _date(self, page: Any, field: FormField, value: str) -> bool:
@@ -907,29 +1065,47 @@ class WorkdayAdapter(ATSAdapter):
         if len(parts) < 2:
             return False
         mm, yyyy = parts[1].zfill(2), parts[0]
-        has_day = False
-        with contextlib.suppress(Exception):
-            has_day = bool(await eng.first(page, self._wsel(field.name, ' [data-automation-id*="dateSectionDay"]')))
-        if has_day:
-            dd = parts[2].zfill(2) if len(parts) >= 3 else "01"
-            digits = f"{mm}{dd}{yyyy}"
-        else:
-            digits = f"{mm}{yyyy}"
-        # DomHand WORKDAY_SELECTORS month-segment variants: dateSectionMonth-input /
-        # *dateSectionMonth* / placeholder MM.
-        seg = (
-            await eng.first(page, self._wsel(field.name, ' [data-automation-id$="Month-input"]'))
-            or await eng.first(page, self._wsel(field.name, ' input[data-automation-id*="dateSectionMonth"]'))
-            or await eng.first(page, self._wsel(field.name, ' input[placeholder*="MM"]'))
-            or await eng.first(page, self._wsel(field.name, ' [role="spinbutton"]'))
-        )
-        if not seg:
+        dd = parts[2].zfill(2) if len(parts) >= 3 else "01"
+
+        async def _set(el: Any, v: str) -> bool:
+            if not el or not v:
+                return False
+            with contextlib.suppress(Exception):
+                await el.click()
+                await el.fill(v)  # fill() clears the segment first — replaces stale garbage (e.g. Year 3020)
+                await el.evaluate(
+                    "() => { this.dispatchEvent(new Event('input',{bubbles:true}));"
+                    " this.dispatchEvent(new Event('change',{bubbles:true})); }"
+                )
+                return True
             return False
-        with contextlib.suppress(Exception):
-            await seg.click()  # click before typing (DomHand rule)
-            await seg.fill(digits)
-            return True
-        return False
+
+        async def _seg(token: str) -> Any:
+            return await eng.first(
+                page, self._wsel(field.name, f' input[data-automation-id="{token}"]')
+            ) or await eng.first(page, f'input[data-automation-id="{token}"]')
+
+        # (1) SEGMENTED spinbuttons — set EACH segment SEPARATELY (mm, dd, yyyy). Typing the whole
+        # "MMDDYYYY" into the Month segment relies on keystroke auto-advance and MANGLES some widgets
+        # (Self-Identify signature date landed 'Year 3020'). Experience/Education are MM/YYYY (no Day).
+        month = await _seg("dateSectionMonth-input")
+        if month:
+            day = await _seg("dateSectionDay-input")  # absent on MM/YYYY widgets
+            year = await _seg("dateSectionYear-input")
+            ok = await _set(month, mm)
+            if day and len(parts) >= 3:
+                await _set(day, dd)
+            if year:
+                await _set(year, yyyy)
+            return ok
+
+        # (2) PLAIN date <input> — type the displayed MM/DD/YYYY, like a human.
+        inp = (
+            await eng.first(page, self._wsel(field.name, ' input[type="text"]'))
+            or await eng.first(page, self._wsel(field.name, " input"))
+            or await self.locate(page, field)
+        )
+        return await _set(inp, f"{mm}/{dd}/{yyyy}")
 
     async def read_back(self, session: Any, page: Any, field: FormField, value: str) -> bool:
         # A widget's commit (listbox button text, radio check, pill) can lag the click by a

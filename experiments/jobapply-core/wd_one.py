@@ -12,7 +12,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-BASE = "/Users/adam/Desktop/WeKruit/VALET & GH/Hand-X/.claude/worktrees/sweet-shtern-067600/experiments/jobapply-core"
+BASE = str(Path(__file__).resolve().parent)  # this worktree's jobapply-core (was hardcoded to another worktree)
 sys.path.insert(0, BASE)
 from dotenv import load_dotenv  # noqa: E402
 
@@ -22,55 +22,197 @@ OUT = Path(BASE) / "runs" / "wd_multi"
 OUT.mkdir(parents=True, exist_ok=True)
 
 PROFILES = [
-    {"_name": "jordan", "first_name": "Jordan", "last_name": "Rivera", "email": "jordan.r.demo@example.com",
-     "phone": "415-555-0142", "address": "500 Mission St", "city": "San Francisco", "state": "California",
-     "postal_code": "94105", "country": "United States of America",
-     "experience": [{"title": "Senior Software Engineer", "company": "Acme Corp", "location": "San Francisco, CA",
-                     "summary": "Led backend distributed systems.", "start": "2021-06", "current": True},
-                    {"title": "Software Engineer", "company": "Beta Labs", "location": "Austin, TX",
-                     "summary": "Built REST APIs.", "start": "2018-01", "end": "2021-05"}],
-     "education": [{"university": "University of California, Berkeley", "degree": "Bachelor's Degree", "major": "Computer Science", "gpa": "3.8"}],
-     "skills": ["Python", "Go", "Kubernetes", "PostgreSQL"]},
-    {"_name": "priya", "first_name": "Priya", "last_name": "Sharma", "email": "priya.s.demo@example.com",
-     "phone": "512-555-0173", "address": "200 Congress Ave", "city": "Austin", "state": "Texas",
-     "postal_code": "78701", "country": "United States of America",
-     "experience": [{"title": "Machine Learning Engineer", "company": "DataWorks", "location": "Austin, TX",
-                     "summary": "Trained recommendation models.", "start": "2020-03", "current": True},
-                    {"title": "Data Scientist", "company": "Insight Co", "location": "Dallas, TX",
-                     "summary": "Built analytics pipelines.", "start": "2017-09", "end": "2020-02"}],
-     "education": [{"university": "University of Texas at Austin", "degree": "Master's Degree",
-                    "major": "Electrical and Computer Engineering", "gpa": "3.9"}],
-     "skills": ["Python", "TensorFlow", "SQL", "Spark"]},
-    {"_name": "marcus", "first_name": "Marcus", "last_name": "Johnson", "email": "marcus.j.demo@example.com",
-     "phone": "404-555-0118", "address": "100 Peachtree St", "city": "Atlanta", "state": "Georgia",
-     "postal_code": "30303", "country": "United States of America",
-     "experience": [{"title": "Mechanical Engineer", "company": "Lockheed", "location": "Atlanta, GA",
-                     "summary": "Designed propulsion components.", "start": "2019-05", "current": True},
-                    {"title": "Design Engineer", "company": "GE Aviation", "location": "Cincinnati, OH",
-                     "summary": "CAD + simulation.", "start": "2016-06", "end": "2019-04"}],
-     "education": [{"university": "Georgia Institute of Technology", "degree": "Bachelor's Degree",
-                    "major": "Mechanical Engineering", "gpa": "3.6"}],
-     "skills": ["SolidWorks", "MATLAB", "Python", "ANSYS"]},
-    {"_name": "sofia", "first_name": "Sofia", "last_name": "Garcia", "email": "sofia.g.demo@example.com",
-     "phone": "305-555-0190", "address": "1 Biscayne Blvd", "city": "Miami", "state": "Florida",
-     "postal_code": "33132", "country": "United States of America",
-     "experience": [{"title": "Financial Analyst", "company": "Citi", "location": "Miami, FL",
-                     "summary": "Built forecasting models.", "start": "2021-01", "current": True},
-                    {"title": "Business Analyst", "company": "Deloitte", "location": "Tampa, FL",
-                     "summary": "Process optimization.", "start": "2018-07", "end": "2020-12"}],
-     "education": [{"university": "University of Florida", "degree": "Bachelor's Degree",
-                    "major": "Economics", "gpa": "3.7"}],
-     "skills": ["Excel", "SQL", "Tableau", "Python"]},
-    {"_name": "wei", "first_name": "Wei", "last_name": "Chen", "email": "wei.c.demo@example.com",
-     "phone": "206-555-0155", "address": "400 Pine St", "city": "Seattle", "state": "Washington",
-     "postal_code": "98101", "country": "United States of America",
-     "experience": [{"title": "Research Scientist", "company": "Allen Institute", "location": "Seattle, WA",
-                     "summary": "GPU-accelerated deep learning.", "start": "2020-09", "current": True},
-                    {"title": "Software Engineer", "company": "Amazon", "location": "Seattle, WA",
-                     "summary": "Distributed training infra.", "start": "2017-01", "end": "2020-08"}],
-     "education": [{"university": "University of Washington", "degree": "Doctorate (PhD)",
-                    "major": "Computer Science", "gpa": "4.0"}],
-     "skills": ["C++", "CUDA", "PyTorch", "Python"]},
+    {
+        "_name": "jordan",
+        "first_name": "Jordan",
+        "last_name": "Rivera",
+        "email": "jordan.r.demo@example.com",
+        "phone": "415-555-0142",
+        "address": "500 Mission St",
+        "city": "San Francisco",
+        "state": "California",
+        "postal_code": "94105",
+        "country": "United States of America",
+        "how_did_you_hear": "LinkedIn",
+        "experience": [
+            {
+                "title": "Senior Software Engineer",
+                "company": "Acme Corp",
+                "location": "San Francisco, CA",
+                "summary": "Led backend distributed systems.",
+                "start": "2021-06",
+                "current": True,
+            },
+            {
+                "title": "Software Engineer",
+                "company": "Beta Labs",
+                "location": "Austin, TX",
+                "summary": "Built REST APIs.",
+                "start": "2018-01",
+                "end": "2021-05",
+            },
+        ],
+        "education": [
+            {
+                "university": "University of California, Berkeley",
+                "degree": "Bachelor's Degree",
+                "major": "Computer Science",
+                "gpa": "3.8",
+            }
+        ],
+        "skills": ["Python", "Go", "Kubernetes", "PostgreSQL"],
+    },
+    {
+        "_name": "priya",
+        "first_name": "Priya",
+        "last_name": "Sharma",
+        "email": "priya.s.demo@example.com",
+        "phone": "512-555-0173",
+        "address": "200 Congress Ave",
+        "city": "Austin",
+        "state": "Texas",
+        "postal_code": "78701",
+        "country": "United States of America",
+        "experience": [
+            {
+                "title": "Machine Learning Engineer",
+                "company": "DataWorks",
+                "location": "Austin, TX",
+                "summary": "Trained recommendation models.",
+                "start": "2020-03",
+                "current": True,
+            },
+            {
+                "title": "Data Scientist",
+                "company": "Insight Co",
+                "location": "Dallas, TX",
+                "summary": "Built analytics pipelines.",
+                "start": "2017-09",
+                "end": "2020-02",
+            },
+        ],
+        "education": [
+            {
+                "university": "University of Texas at Austin",
+                "degree": "Master's Degree",
+                "major": "Electrical and Computer Engineering",
+                "gpa": "3.9",
+            }
+        ],
+        "skills": ["Python", "TensorFlow", "SQL", "Spark"],
+    },
+    {
+        "_name": "marcus",
+        "first_name": "Marcus",
+        "last_name": "Johnson",
+        "email": "marcus.j.demo@example.com",
+        "phone": "404-555-0118",
+        "address": "100 Peachtree St",
+        "city": "Atlanta",
+        "state": "Georgia",
+        "postal_code": "30303",
+        "country": "United States of America",
+        "experience": [
+            {
+                "title": "Mechanical Engineer",
+                "company": "Lockheed",
+                "location": "Atlanta, GA",
+                "summary": "Designed propulsion components.",
+                "start": "2019-05",
+                "current": True,
+            },
+            {
+                "title": "Design Engineer",
+                "company": "GE Aviation",
+                "location": "Cincinnati, OH",
+                "summary": "CAD + simulation.",
+                "start": "2016-06",
+                "end": "2019-04",
+            },
+        ],
+        "education": [
+            {
+                "university": "Georgia Institute of Technology",
+                "degree": "Bachelor's Degree",
+                "major": "Mechanical Engineering",
+                "gpa": "3.6",
+            }
+        ],
+        "skills": ["SolidWorks", "MATLAB", "Python", "ANSYS"],
+    },
+    {
+        "_name": "sofia",
+        "first_name": "Sofia",
+        "last_name": "Garcia",
+        "email": "sofia.g.demo@example.com",
+        "phone": "305-555-0190",
+        "address": "1 Biscayne Blvd",
+        "city": "Miami",
+        "state": "Florida",
+        "postal_code": "33132",
+        "country": "United States of America",
+        "experience": [
+            {
+                "title": "Financial Analyst",
+                "company": "Citi",
+                "location": "Miami, FL",
+                "summary": "Built forecasting models.",
+                "start": "2021-01",
+                "current": True,
+            },
+            {
+                "title": "Business Analyst",
+                "company": "Deloitte",
+                "location": "Tampa, FL",
+                "summary": "Process optimization.",
+                "start": "2018-07",
+                "end": "2020-12",
+            },
+        ],
+        "education": [
+            {"university": "University of Florida", "degree": "Bachelor's Degree", "major": "Economics", "gpa": "3.7"}
+        ],
+        "skills": ["Excel", "SQL", "Tableau", "Python"],
+    },
+    {
+        "_name": "wei",
+        "first_name": "Wei",
+        "last_name": "Chen",
+        "email": "wei.c.demo@example.com",
+        "phone": "206-555-0155",
+        "address": "400 Pine St",
+        "city": "Seattle",
+        "state": "Washington",
+        "postal_code": "98101",
+        "country": "United States of America",
+        "experience": [
+            {
+                "title": "Research Scientist",
+                "company": "Allen Institute",
+                "location": "Seattle, WA",
+                "summary": "GPU-accelerated deep learning.",
+                "start": "2020-09",
+                "current": True,
+            },
+            {
+                "title": "Software Engineer",
+                "company": "Amazon",
+                "location": "Seattle, WA",
+                "summary": "Distributed training infra.",
+                "start": "2017-01",
+                "end": "2020-08",
+            },
+        ],
+        "education": [
+            {
+                "university": "University of Washington",
+                "degree": "Doctorate (PhD)",
+                "major": "Computer Science",
+                "gpa": "4.0",
+            }
+        ],
+        "skills": ["C++", "CUDA", "PyTorch", "Python"],
+    },
 ]
 
 # NOTE: languages are NOT set on the test profiles — the ENGINE defaults English-proficient when a
@@ -82,12 +224,16 @@ PROFILES = [
 def fetch_job(tenant, host, site):
     try:
         import certifi
+
         ctx = ssl.create_default_context(cafile=certifi.where())
     except Exception:
         ctx = ssl.create_default_context()
     body = json.dumps({"appliedFacets": {}, "limit": 20, "offset": 0, "searchText": "software engineer"}).encode()
-    req = urllib.request.Request(f"https://{host}/wday/cxs/{tenant}/{site}/jobs",
-                                 data=body, headers={"Content-Type": "application/json", "Accept": "application/json"})
+    req = urllib.request.Request(
+        f"https://{host}/wday/cxs/{tenant}/{site}/jobs",
+        data=body,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+    )
     with urllib.request.urlopen(req, timeout=20, context=ctx) as r:
         jp = json.loads(r.read().decode()).get("jobPostings", [])
     return [f"https://{host}/en-US/{site}" + j["externalPath"] for j in jp[:6]]
@@ -117,14 +263,39 @@ def creds_for(tenant):
         except Exception:
             store = {}
     if tenant in store:
-        return Credentials(email=store[tenant]["email"], password=store[tenant]["password"])
-    c = {"email": f"jobapply.test.{secrets.randbelow(99999999)}@mailinator.com", "password": pw()}
+        # REUSE a tracked account -> SIGN IN (existing=True), never re-create (Workday rate-limits creates).
+        return Credentials(email=store[tenant]["email"], password=store[tenant]["password"], existing=True)
+    c = {
+        "email": f"jobapply.test.{secrets.randbelow(99999999)}@mailinator.com",
+        "password": os.environ.get("WD_PASSWORD") or pw(),
+    }
     store[tenant] = c
     import contextlib
 
     with contextlib.suppress(Exception):
         _CREDS_FILE.write_text(json.dumps(store, indent=2))
-    return Credentials(email=c["email"], password=c["password"])
+    return Credentials(email=c["email"], password=c["password"], existing=False)
+
+
+def rotate_creds(tenant):
+    """A tracked account failed to SIGN IN (deleted / wrong password) — mint a FRESH one, OVERWRITE the
+    store (keep tracking authoritative), and return it as a CREATE (existing=False)."""
+    import contextlib
+
+    from ats_engine import Credentials
+
+    store = {}
+    if _CREDS_FILE.exists():
+        with contextlib.suppress(Exception):
+            store = json.loads(_CREDS_FILE.read_text())
+    c = {
+        "email": f"jobapply.test.{secrets.randbelow(99999999)}@mailinator.com",
+        "password": os.environ.get("WD_PASSWORD") or pw(),
+    }
+    store[tenant] = c
+    with contextlib.suppress(Exception):
+        _CREDS_FILE.write_text(json.dumps(store, indent=2))
+    return Credentials(email=c["email"], password=c["password"], existing=False)
 
 
 async def main():
@@ -138,6 +309,8 @@ async def main():
     os.environ["WD_MYEXP_SHOT"] = str(OUT / f"{tag}_myexp.png")  # robust My-Experience filled screenshot
     os.environ["WD_MYEXP_DOM"] = str(OUT / f"{tag}_myexp.html")  # live DOM dump for offline lang/skill diagnosis
     resume = BASE + "/../../examples/resume.pdf"
+    if not Path(resume).exists():
+        resume = BASE + "/fixtures/test_resume.pdf"
     if not Path(resume).exists():
         resume = None
     print(f"=== {tag} ===", flush=True)
@@ -156,9 +329,18 @@ async def main():
         print(f"[{tag}] {url.split('/job/')[-1][:50]}", flush=True)
         try:
             res = await asyncio.wait_for(
-                run_wizard(WorkdayAdapter(), url=url, profile=profile, resume=resume, headless=True,
-                           allow_escalation=True, screenshot_path=str(OUT / f"{tag}.png"), creds=creds),
-                timeout=780)
+                run_wizard(
+                    WorkdayAdapter(),
+                    url=url,
+                    profile=profile,
+                    resume=resume,
+                    headless=True,
+                    allow_escalation=True,
+                    screenshot_path=str(OUT / f"{tag}.png"),
+                    creds=creds,
+                ),
+                timeout=780,
+            )
         except TimeoutError:
             print(f"[{tag}] TIMEOUT", flush=True)
             return
