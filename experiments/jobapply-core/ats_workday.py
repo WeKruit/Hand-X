@@ -46,6 +46,40 @@ def _match_llm() -> Any:
 
 _VALUE_MATCH_CACHE: dict = {}
 
+# Free-text fields whose committed WORDING legitimately varies from the profile (autocomplete
+# canonicalises 'Google' -> 'Google LLC'; 'San Francisco, CA' vs '..., California'; 'UC Berkeley' vs
+# 'University of California, Berkeley') -> substring false-negatives a CORRECT fill. These get the same
+# LLM-closest verify as selects. EXCLUDES exact fields (name/phone/email/date/gpa/postal/salary/number),
+# which must match literally and are decided by the substring pass alone.
+_SEMANTIC_TEXT_KW = (
+    "location",
+    "city",
+    "town",
+    "state",
+    "country",
+    "school",
+    "universit",
+    "college",
+    "institution",
+    "academy",
+    "company",
+    "employer",
+    "organi",
+    "title",
+    "position",
+    "role",
+    "major",
+    "discipline",
+    "field of study",
+    "department",
+    "industry",
+)
+
+
+def _is_semantic_text(label: str) -> bool:
+    lo = (label or "").lower()
+    return any(k in lo for k in _SEMANTIC_TEXT_KW)
+
 
 async def _llm_value_matches(committed: str, wanted: str) -> bool:
     """LLM-ENRICHED verifier (directive: matching must be LLM, not substring, to be generic). Judge whether
@@ -1211,9 +1245,20 @@ class WorkdayAdapter(ATSAdapter):
         return await _set(inp, f"{mm}/{dd}/{yyyy}")
 
     async def _committed_value(self, page: Any, field: FormField) -> str:
-        """The BOUNDED committed value for the LLM verifier: the selectedItem pills (multiselect) or the
-        button's chosen label (single_select) — '' when only the 'Select One' placeholder shows (a real
-        empty). Truncated to 160 chars so the LLM input stays small no matter how long the widget text is."""
+        """The BOUNDED committed value for the LLM verifier — the DOM half of the DOM+visual read. Text /
+        textarea -> input value; single_select -> the chosen button label; multi_select -> the selectedItem
+        pills. '' for an empty/'Select One' placeholder. Truncated to 160 chars so the LLM input stays small
+        no matter how long the widget text is."""
+        if field.type in ("input_text", "textarea", "select_native"):
+            el = await self.locate(page, field)
+            if not el:
+                return ""
+            with contextlib.suppress(Exception):
+                got = await el.evaluate(
+                    "() => this.tagName==='SELECT' ? (this.options[this.selectedIndex]||{}).text||'' : (this.value||'')"
+                )
+                return eng.norm(got or "")[:160]
+            return ""
         sel = self._wsel(field.name)
         with contextlib.suppress(Exception):
             got = await page.evaluate(
@@ -1226,6 +1271,19 @@ class WorkdayAdapter(ATSAdapter):
                 " return /^(select one|select\\.\\.\\.|choose one)$/i.test(t) ? '' : t; }}"
             )
             return (got or "").strip()[:160]
+        return ""
+
+    async def _visual_value(self, session: Any, field: FormField, want: str) -> str:
+        """The VISUAL half of the DOM+visual committed read: the field's CURRENT on-screen value read by
+        the VLM (visual_check returns {"value": "<visible text>"}). Used when the busy SPA serializes a
+        FILLED field blank so the DOM read comes back '' — vision sees what the user sees. Bounded to 160."""
+        with contextlib.suppress(Exception):
+            import json as _json
+
+            from vision_verify import visual_check
+
+            d = _json.loads(await visual_check(session, field.label or field.name, want=want))
+            return eng.norm(str(d.get("value") or ""))[:160]
         return ""
 
     async def read_back(self, session: Any, page: Any, field: FormField, value: str) -> bool:
@@ -1243,16 +1301,23 @@ class WorkdayAdapter(ATSAdapter):
         # "United States of America" vs "...(+1)"). That false-negative is what marks a committed chip
         # residual -> the agent re-does it -> the timeout. Confirm SEMANTICALLY with the value-aware VLM
         # (reuse the visuals primitive) before declaring failure.
-        if field.type in ("single_select", "multi_select"):
-            # LLM-ENRICHED verify (directive: matching must be LLM, not substring, to be generic). The free
-            # substring pass above false-negatives a CORRECT closest pick whenever the closed taxonomy words
-            # the option differently than the profile. So read the BOUNDED committed value (pills / selected
-            # label; '' for the 'Select One' placeholder) and let the cheap text LLM judge committed-vs-wanted
-            # — input is TWO short strings, never the option list. Cached, so a repeat costs nothing.
+        # LLM-ENRICHED fuzzy verify (directive: matching must be LLM, not substring, to be generic). The free
+        # substring pass above false-negatives a CORRECT fill whenever the committed WORDING differs from the
+        # profile: a closed-taxonomy select (always) OR a free-text SEMANTIC field (location/school/company/
+        # title/field/major — autocomplete canonicalises them). Exact fields (name/phone/email/date/gpa/
+        # postal/number) are NOT fuzzy-matched: substring already decided them and a wrong value stays False.
+        fuzzy = field.type in ("single_select", "multi_select") or (
+            field.type in ("input_text", "textarea") and _is_semantic_text(field.label or field.name)
+        )
+        if fuzzy:
+            # COMBINE DOM + VISUAL for the committed value (DOM false-empties on the busy SPA), then let the
+            # cheap text LLM judge committed-vs-wanted — 2 short strings, cached, never the option list.
             committed = await self._committed_value(page, field)
+            if not committed and session is not None:
+                committed = await self._visual_value(session, field, value)
             if committed and await _llm_value_matches(committed, value):
                 return True
-            if session is not None:  # DOM read empty (false-empty widget) -> value-aware VLM ground truth
+            if session is not None:  # last resort: the value-aware VLM verdict (matches bool)
                 with contextlib.suppress(Exception):
                     from vision_verify import _matches, visual_check
 
