@@ -78,6 +78,11 @@ STEP_CAP = 40  # GLOBAL per-field state entries
 FIELD_DEADLINE = float(os.environ.get("OA_FIELD_DEADLINE", "28.0"))
 FIELD_VERIFY_CAP = 3  # per-FIELD verify attempts total (DOM read-back + VLM aids combined)
 FIELD_VLM_CAP = 2  # per-FIELD VLM-aid sub-budget (DOM-first means the VLM is rarely needed)
+# Proven-path delegation bounds: the adapter's fill()/read_back() are CDP round-trips on a
+# possibly-busy SPA. Cap each so a wedged proven commit can't eat the whole FIELD_DEADLINE —
+# on timeout we fall through to the generic engine, never hang.
+ADAPTER_COMMIT_TIMEOUT = float(os.environ.get("OA_ADAPTER_COMMIT_TIMEOUT", "12.0"))
+ADAPTER_VERIFY_TIMEOUT = float(os.environ.get("OA_ADAPTER_VERIFY_TIMEOUT", "6.0"))
 
 # Settle timings (§3.5). Bounded poll, no fixed long sleeps.
 # FIX 3 (speed): _settle used to re-serialize the WHOLE page every 0.12s for up to ~0.9s —
@@ -140,6 +145,17 @@ class Ctx:
     kind: str = ""
     resume: str | None = None
     llm: Any = None
+
+    # PROVEN-PATH DELEGATION (the abstraction-layer reuse): when the run has a per-archetype
+    # adapter (Greenhouse/Lever/Ashby/Workday), the COMMIT is the adapter's battle-tested
+    # ``fill()`` (_fill_date / _location / _select_native / _combobox / _click_option) and the
+    # VERIFY is its ``read_back()`` (lenient _is_open_ended for date/textarea). The generic engine
+    # below is the FALLBACK — used only when there is no adapter (an unseen ATS) or the proven
+    # commit fails its own read-back. ``field_obj`` is the adapter's original FormField (carries
+    # name/selector/source); ``page`` is the BrowserSession page handle the adapter needs.
+    adapter: Any = None
+    page: Any = None
+    field_obj: Any = None
 
     # resolved during the run
     nature: str = ""
@@ -403,6 +419,9 @@ async def observe_act(session: Any, field: dict[str, Any] | Ctx) -> Outcome:
             kind=str(field.get("kind", "") or ""),
             resume=field.get("resume"),
             llm=field.get("llm"),
+            adapter=field.get("adapter"),
+            page=field.get("page"),
+            field_obj=field.get("field_obj"),
         )
     )
     out = await _s0_guard(session, ctx)
@@ -422,7 +441,66 @@ async def _s0_guard(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.value.strip() and not ctx.resume:
         ctx.trace.append("blank->SKIP")
         return SKIP
+    # PROVEN-PATH FIRST: if this run has a per-archetype adapter, commit via its battle-tested
+    # fill()+read_back() before the generic engine. DONE on a verified proven commit; otherwise
+    # fall through to the generic locate/classify/commit as the fallback aid.
+    proven = await _s_adapter(session, ctx)
+    if proven is not None:
+        return proven
     return await _s1_locate(session, ctx)
+
+
+# ---- PROVEN-PATH DELEGATION (commit = adapter.fill, verify = adapter.read_back) ----
+async def _s_adapter(session: Any, ctx: Ctx) -> Outcome | None:
+    """Reuse the per-archetype adapter's proven interaction for ONE field.
+
+    Returns DONE when the adapter commits a value its OWN read-back confirms; returns None to fall
+    through to the generic engine (no adapter, file field, proven commit missed, or read-back
+    unconfirmed). NEVER raises into the engine — a wedged proven CDP call is bounded and degrades
+    to the generic path. This is the abstraction-layer reuse: the generic engine orchestrates
+    (locate/verify/escalate/order/file/repeaters + VLM aid); the COMMIT delegates to proven code.
+    """
+    if ctx.adapter is None or ctx.page is None or ctx.field_obj is None:
+        return None
+    # File fields keep the dedicated GLOBAL file path (DOM.setFileInputFiles, absolute path,
+    # ordered last) — the adapter's dropzone upload is the documented renderer-freeze. Let the
+    # generic locate route ctx.resume to _s_file_global.
+    if ctx.resume:
+        return None
+    ctx.trace.append("S_ADAPTER")
+    try:
+        ok = await asyncio.wait_for(
+            ctx.adapter.fill(session, ctx.page, ctx.field_obj, ctx.value, None),
+            timeout=ADAPTER_COMMIT_TIMEOUT,
+        )
+    except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041
+        ctx.trace.append("adapter.fill:timeout->generic")
+        return None
+    except Exception as exc:
+        ctx.trace.append(f"adapter.fill:exc:{type(exc).__name__}->generic")
+        return None
+    if not ok:
+        ctx.trace.append("adapter.fill:miss->generic")
+        return None
+    # VERIFY with the proven read_back — lenient for date/textarea/open-ended (_is_open_ended),
+    # exact option-text for select/choice. Reuses the adapter's own oracle, not a generic rewrite.
+    try:
+        verified = await asyncio.wait_for(
+            ctx.adapter.read_back(session, ctx.page, ctx.field_obj, ctx.value),
+            timeout=ADAPTER_VERIFY_TIMEOUT,
+        )
+    except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041
+        verified = False
+    except Exception:
+        verified = False
+    if verified:
+        ctx.committed_text = ctx.value
+        ctx.trace.append("adapter:DONE")
+        return DONE
+    # Proven commit happened but its read-back was not confirmed -> let the generic verify/recommit
+    # engine take over (it may confirm a value the adapter wrote, or re-commit a better option).
+    ctx.trace.append("adapter.read_back:unconfirmed->generic")
+    return None
 
 
 # ---- S1_LOCATE ----
@@ -783,11 +861,16 @@ def _resolve_choice_target(chosen: Any, candidates: list[Any]) -> Any:
         tag = (getattr(parent, "node_name", "") or "").lower()
         role = (getattr(getattr(parent, "ax_node", None), "role", None) or "").lower()
         attrs = getattr(parent, "attributes", None) or {}
-        if tag == "label" or role in ("radio", "checkbox", "option", "button") or attrs.get("role") in (
-            "radio",
-            "checkbox",
-            "option",
-            "button",
+        if (
+            tag == "label"
+            or role in ("radio", "checkbox", "option", "button")
+            or attrs.get("role")
+            in (
+                "radio",
+                "checkbox",
+                "option",
+                "button",
+            )
         ):
             return parent
         parent = getattr(parent, "parent_node", None)
@@ -2053,9 +2136,7 @@ async def _selftest() -> int:
     tr31 = fd31.get("_trace") or []
     chk(
         "VISUAL radio: empty group -> set-of-marks 'Yes' -> combined cdp_click -> DONE",
-        out31 == DONE
-        and "choice-no-group" in tr31
-        and any(t.startswith("visual-choice+cdp_click") for t in tr31),
+        out31 == DONE and "choice-no-group" in tr31 and any(t.startswith("visual-choice+cdp_click") for t in tr31),
         (out31, tr31),
     )
 
@@ -2144,6 +2225,118 @@ async def _selftest() -> int:
         and "choice-no-group" not in tr34
         and fs34.vlm_calls == 0,
         (out34, fs34.vlm_calls, tr34),
+    )
+
+    # ===== PROVEN-PATH DELEGATION (the abstraction-layer reuse) =====
+    # When the run carries a per-archetype adapter, the COMMIT is the adapter's proven
+    # fill()+read_back() and the generic engine is the FALLBACK. These four cases pin the contract:
+    # verified proven commit short-circuits the generic engine; an unverified / missed / file-field
+    # commit degrades cleanly to the generic path.
+    class _FakeAdapter:
+        def __init__(self, fill_ok: bool, read_ok: bool):
+            self._fill_ok, self._read_ok = fill_ok, read_ok
+            self.fill_calls, self.read_calls = 0, 0
+
+        async def fill(self, _session, _page, _field, _value, _resume):
+            self.fill_calls += 1
+            return self._fill_ok
+
+        async def read_back(self, _session, _page, _field, _value):
+            self.read_calls += 1
+            return self._read_ok
+
+    _fobj = _mk(tag="select", ax_name="Country")  # any FormField-stand-in; the fake adapter ignores it
+    _fpage = object()
+
+    # (35) adapter.fill TRUE + read_back TRUE -> DONE via proven path, generic locate NEVER runs.
+    ad35 = _FakeAdapter(fill_ok=True, read_ok=True)
+    fs35 = FakeSession(controls=[])  # no controls: if generic locate ran it would no-control->ESCALATE
+    fd35 = {
+        "label": "What is your current country of residence?",
+        "value": "United States",
+        "required": True,
+        "adapter": ad35,
+        "page": _fpage,
+        "field_obj": _fobj,
+        "llm": fake_llm,
+    }
+    out35 = await observe_act(fs35, fd35)
+    tr35 = fd35.get("_trace") or []
+    chk(
+        "PROVEN commit: adapter.fill+read_back -> DONE, generic engine NOT entered",
+        out35 == DONE
+        and "adapter:DONE" in tr35
+        and "S1_LOCATE" not in tr35
+        and fd35.get("_committed") == "United States"
+        and ad35.fill_calls == 1
+        and ad35.read_calls == 1,
+        (out35, tr35),
+    )
+
+    # (36) adapter.fill TRUE but read_back FALSE -> fall through to the generic engine (which then
+    #      binds + DOM-verifies the value the adapter actually wrote). Proves unconfirmed != failure.
+    ad36 = _FakeAdapter(fill_ok=True, read_ok=False)
+    name36 = _mk(tag="input", typ="text", ax_name="Pronouns")
+    fs36 = FakeSession(controls=[name36], dom_values={name36.backend_node_id: "they/them"})
+    fd36 = {
+        "label": "Your Pronouns",
+        "value": "they/them",
+        "required": True,
+        "adapter": ad36,
+        "page": _fpage,
+        "field_obj": _fobj,
+        "llm": fake_llm,
+    }
+    out36 = await observe_act(fs36, fd36)
+    tr36 = fd36.get("_trace") or []
+    chk(
+        "PROVEN unconfirmed: read_back False -> generic engine takes over -> DONE",
+        out36 == DONE and "adapter.read_back:unconfirmed->generic" in tr36 and "S1_LOCATE" in tr36,
+        (out36, tr36),
+    )
+
+    # (37) adapter.fill FALSE (proven path could not commit) -> generic engine takes over.
+    ad37 = _FakeAdapter(fill_ok=False, read_ok=False)
+    name37 = _mk(tag="input", typ="text", ax_name="First Name")
+    fs37 = FakeSession(controls=[name37], dom_values={name37.backend_node_id: "Pyry"})
+    fd37 = {
+        "label": "First Name",
+        "value": "Pyry",
+        "required": True,
+        "adapter": ad37,
+        "page": _fpage,
+        "field_obj": _fobj,
+        "llm": fake_llm,
+    }
+    out37 = await observe_act(fs37, fd37)
+    tr37 = fd37.get("_trace") or []
+    chk(
+        "PROVEN miss: adapter.fill False -> generic engine takes over -> DONE",
+        out37 == DONE and "adapter.fill:miss->generic" in tr37 and ad37.read_calls == 0 and "S1_LOCATE" in tr37,
+        (out37, tr37),
+    )
+
+    # (38) FILE field (resume set) -> proven delegation is SKIPPED (the dropzone upload is the
+    #      documented renderer-freeze); the dedicated global-file path keeps ownership. No S_ADAPTER.
+    ad38 = _FakeAdapter(fill_ok=True, read_ok=True)
+    hidden_file38 = _mk(tag="input", typ="file", ax_name="")
+    fs38 = FakeSession(controls=[hidden_file38])
+    fd38 = {
+        "label": "Resume",
+        "value": "",
+        "required": True,
+        "resume": "/tmp/resume.pdf",
+        "adapter": ad38,
+        "page": _fpage,
+        "field_obj": _fobj,
+        "llm": fake_llm,
+    }
+    out38 = await observe_act(fs38, fd38)
+    tr38 = fd38.get("_trace") or []
+    chk(
+        "FILE field bypasses proven delegation (global file path owns it) -> no S_ADAPTER, fill not called",
+        "S_ADAPTER" not in tr38 and ad38.fill_calls == 0,
+        (out38, tr38),
     )
 
     ok = True

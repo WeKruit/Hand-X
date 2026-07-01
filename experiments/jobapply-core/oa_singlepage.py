@@ -187,7 +187,15 @@ class FieldResult:
         return self.outcome in (oa.DONE, oa.OTHER)
 
 
-def _field_dict(field: eng.FormField, value: str, *, resume: str | None, llm: Any) -> dict[str, Any]:
+def _field_dict(
+    field: eng.FormField,
+    value: str,
+    *,
+    resume: str | None,
+    llm: Any,
+    adapter: Any = None,
+    page: Any = None,
+) -> dict[str, Any]:
     """The observe_act input for one discovered FormField. Multi-value labels (Skills/Languages,
     or a comma/semicolon-joined value) carry cardinality='many' so the state machine enters
     S_MULTI_LOOP; everything else is 'one'.
@@ -213,6 +221,11 @@ def _field_dict(field: eng.FormField, value: str, *, resume: str | None, llm: An
         "kind": field.type or "",  # the adapter's REAL control type — the routing hint
         "resume": resume if field.source == "file" else None,
         "llm": llm,
+        # PROVEN-PATH DELEGATION: hand the engine the adapter + page + original FormField so the
+        # COMMIT can run the adapter's battle-tested fill()/read_back() before the generic engine.
+        "adapter": adapter,
+        "page": page,
+        "field_obj": field,
     }
 
 
@@ -383,7 +396,7 @@ async def _fill_form(
         if f.source == "skip":
             continue
         value, src = eng._resolve(f, mapped, resume)
-        fd = _field_dict(f, value, resume=resume, llm=llm)
+        fd = _field_dict(f, value, resume=resume, llm=llm, adapter=adapter, page=page)
         if os.environ.get("OA_FIELD_TRACE"):
             print(
                 f"[FIELD-START] name={f.name[:28]} src={f.source} type={f.type} val={str(value)[:30]!r}",
