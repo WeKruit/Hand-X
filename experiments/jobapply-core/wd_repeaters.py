@@ -754,7 +754,9 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
     if a == "date":
         from ats_engine import FormField
 
-        return await adapter._date(page, FormField(name=c.fkit, type="date", label=c.label, source="standard"), value)
+        return await adapter._date(
+            session, page, FormField(name=c.fkit, type="date", label=c.label, source="standard"), value
+        )
     return False
 
 

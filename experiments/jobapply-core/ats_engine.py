@@ -265,6 +265,26 @@ async def press_key_trusted(session: Any, page: Any, *, key: str, code: str, vk:
         return False
 
 
+async def type_text_trusted(session: Any, page: Any, text: str) -> bool:
+    """TRUSTED character typing via CDP keyDown(text)+keyUp per char — for widgets that ignore
+    synthetic .fill()/JS keys (Workday's segmented date spinbuttons REDISTRIBUTE a programmatic
+    fill across segments via their auto-advance; real keystrokes are segmented correctly by the
+    widget itself). Caller must have focused the first segment."""
+    try:
+        sid = await page.session_id
+        for ch in text:
+            vk = ord(ch.upper()) if ch.isalnum() else 0
+            for kind in ("keyDown", "keyUp"):
+                params = {"type": kind, "key": ch, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk}
+                if kind == "keyDown":
+                    params["text"] = ch
+                await session.cdp_client.send.Input.dispatchKeyEvent(params=params, session_id=sid)
+            await asyncio.sleep(0.05)
+        return True
+    except Exception:
+        return False
+
+
 async def press_enter_trusted(session: Any, page: Any) -> bool:
     """TRUSTED Enter — commits the highlighted option (Caller must have focused/typed first)."""
     return await press_key_trusted(session, page, key="Enter", code="Enter", vk=13)
@@ -399,6 +419,9 @@ async def pick_dropdown(
             options = vis_opts
             used_vision = True
     if not options:
+        # DIAGNOSTIC (was a silent False that made listbox failures undebuggable): neither the DOM
+        # portal nor the screenshot shows options -> the menu simply isn't open/rendered.
+        print(f"  [pick_dropdown] want={value!r} NO options (dom+vision both empty — menu not open?)", flush=True)
         return False
 
     # 3. MATCH is LLM-ONLY — no regex/substring; the LLM picks the single best option text, then
@@ -898,10 +921,14 @@ async def _vlm_filled(session: Any, field: FormField, value: str) -> bool:
     if field.type not in _VLM_RESCUE_TYPES:
         return False
     with contextlib.suppress(Exception):
-        from vision_verify import _is_filled, visual_check
+        from vision_verify import _matches, visual_check
 
-        verdict = await visual_check(session, target=field.label or field.name, key=field.name)
-        return _is_filled(verdict)
+        # VALUE-AWARE (was presence-only): 'is it filled?' rubber-stamps a WRONG committed value as
+        # done — verified live: a garbage 02/02/2006 date read 'visually filled' and the ladder
+        # reported tier=vlm, leaving a validation error that blocked the advance. Ask 'does it show
+        # MY value?' instead; the VLM judges semantically (canonical wording still passes).
+        verdict = await visual_check(session, target=field.label or field.name, key=field.name, want=value)
+        return _matches(verdict)
     return False
 
 

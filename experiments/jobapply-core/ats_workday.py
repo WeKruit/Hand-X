@@ -792,7 +792,7 @@ class WorkdayAdapter(ATSAdapter):
                 import datetime
 
                 value = datetime.date.today().isoformat()
-            return await self._date(page, field, value)
+            return await self._date(session, page, field, value)
         return False
 
     async def _multiselect(self, session: Any, page: Any, field: FormField, value: str) -> bool:
@@ -864,10 +864,23 @@ class WorkdayAdapter(ATSAdapter):
         reflects the typed filter, then abort FAST if it stays stale — no fixed-sleep spin."""
         trig = await eng.first(page, self._wsel(field.name, " button"))
         if not trig:
+            if _DBG:  # DIAGNOSTIC: silent False was undebuggable — say WHICH selector missed
+                print(f"   [listbox {field.name}] NO trigger button for wsel({field.name!r})")
             return False
-        with contextlib.suppress(Exception):
-            await trig.click()
-        await asyncio.sleep(0.4)
+        # TRUSTED click: a synthetic .click() does NOT reliably open the React listbox (verified live —
+        # the same widget opened on some attempts, not others; identical to the React-radio finding).
+        # click_trusted dispatches a real CDP pointer event; fall back to synthetic if unavailable.
+        if not await eng.click_trusted(session, page, trig):
+            with contextlib.suppress(Exception):
+                await trig.click()
+        # The menu's options render ASYNC after the click — a fixed short sleep snapshots an EMPTY
+        # portal, and everything downstream reads 0 options -> silent False (L1 failed on EVERY
+        # Voluntary listbox this way; L2 only passed by luck of the second click's timing). POLL until
+        # options are actually visible, bounded ~2s.
+        for _ in range(8):
+            await asyncio.sleep(0.25)
+            if await self._option_texts(page, ""):
+                break
         # The input the trigger owns. Prefer a field-scoped input; only fall back to the shared
         # portal input. Scope the option read to the container this input declares it controls.
         inp = (
@@ -888,11 +901,23 @@ class WorkdayAdapter(ATSAdapter):
             before = await self._option_texts(page, owned_id)
             with contextlib.suppress(Exception):
                 await inp.fill(value)
-            return await self._pick_option(
+            if _DBG:
+                print(f"   [listbox {field.name}] SEARCHABLE owned={owned_id!r} before[:4]={before[:4]}")
+            ok = await self._pick_option(
                 session, page, value, owned_id=owned_id, before=before, searchable=True, verify_label=field.label
             )
-        # non-searchable inline listbox: options already shown, click the best (no Enter to commit).
-        return await self._pick_option(session, page, value, owned_id=owned_id, before=None, searchable=False)
+        else:
+            # non-searchable inline listbox: options already shown, click the best (no Enter to commit).
+            if _DBG:
+                print(f"   [listbox {field.name}] INLINE owned={owned_id!r}")
+            ok = await self._pick_option(session, page, value, owned_id=owned_id, before=None, searchable=False)
+        if _DBG and not ok:  # DIAGNOSTIC on failure: the actual committed value + the rendered options
+            got = await self._committed_value(page, field)
+            opts = await self._option_texts(page, owned_id)
+            print(
+                f"   [listbox {field.name}] value={value!r} committed=False -> now shows {got!r} | opts[:8]={opts[:8]}"
+            )
+        return ok
 
     # The option portal is shared: bare `promptOption`/`menuItem` aids from PREVIOUSLY-opened
     # widgets persist in the DOM (hidden), so an unscoped query mixes a closed widget's STALE
@@ -1223,11 +1248,13 @@ class WorkdayAdapter(ATSAdapter):
                         )
         return answered
 
-    async def _date(self, page: Any, field: FormField, value: str) -> bool:
-        """Segmented date spinbuttons — type continuous digits (Workday auto-advances). SEGMENT-AWARE:
-        Experience/Education dates are MM/YYYY (no Day segment); My-Information dates are MM/DD/YYYY.
-        Inserting a day into a MM/YYYY widget overflows the Year ('2021-06' -> garbage 'Year 6012'),
-        so only include the day when the widget actually HAS a Day segment."""
+    async def _date(self, session: Any, page: Any, field: FormField, value: str) -> bool:
+        """Segmented date spinbuttons. SEGMENT-AWARE: Experience/Education dates are MM/YYYY (no Day
+        segment); My-Information dates are MM/DD/YYYY. VERIFIED LIVE: programmatic .fill() per segment
+        gets REDISTRIBUTED by the widget's auto-advance ('07' into Month reads back '12'; digits spill
+        into neighbors -> garbage like 02/02/2006 that Workday then rejects with 'Enter today's date').
+        So type the digits as TRUSTED CDP keystrokes into the first segment — the widget's own
+        auto-advance segments them correctly — then VERIFY each segment and report the truth."""
         parts = (value or "").split("-")  # ISO YYYY-MM-DD or YYYY-MM
         if len(parts) < 2:
             return False
@@ -1237,14 +1264,26 @@ class WorkdayAdapter(ATSAdapter):
         async def _set(el: Any, v: str) -> bool:
             if not el or not v:
                 return False
-            with contextlib.suppress(Exception):
-                await el.click()
-                await el.fill(v)  # fill() clears the segment first — replaces stale garbage (e.g. Year 3020)
-                await el.evaluate(
-                    "() => { this.dispatchEvent(new Event('input',{bubbles:true}));"
-                    " this.dispatchEvent(new Event('change',{bubbles:true})); }"
-                )
-                return True
+            # VERIFY-AND-RETRY: a spinbutton segment can silently reject fill() (verified live — a
+            # stale draft's 02/02/2006 survived a 'successful' fill, then Workday's 'Enter today's
+            # date' validation blocked the advance while the presence-only VLM called it filled).
+            # Read the segment back; one clear-first retry; report the TRUTH so the ladder escalates.
+            for _ in range(2):
+                with contextlib.suppress(Exception):
+                    await el.click()
+                    await el.fill(v)
+                    await el.evaluate(
+                        "() => { this.dispatchEvent(new Event('input',{bubbles:true}));"
+                        " this.dispatchEvent(new Event('change',{bubbles:true})); }"
+                    )
+                await asyncio.sleep(0.15)
+                got = ""
+                with contextlib.suppress(Exception):
+                    got = str(await el.evaluate("() => this.value || this.textContent || ''")).strip()
+                if got.lstrip("0") == v.lstrip("0") and got != "":
+                    return True
+            if _DBG:
+                print(f"   [date] segment refused {v!r} (still {got!r})")
             return False
 
         async def _seg(token: str) -> Any:
@@ -1252,19 +1291,34 @@ class WorkdayAdapter(ATSAdapter):
                 page, self._wsel(field.name, f' input[data-automation-id="{token}"]')
             ) or await eng.first(page, f'input[data-automation-id="{token}"]')
 
-        # (1) SEGMENTED spinbuttons — set EACH segment SEPARATELY (mm, dd, yyyy). Typing the whole
-        # "MMDDYYYY" into the Month segment relies on keystroke auto-advance and MANGLES some widgets
-        # (Self-Identify signature date landed 'Year 3020'). Experience/Education are MM/YYYY (no Day).
+        # (1) SEGMENTED spinbuttons — TRUSTED-type the digit stream into the focused Month segment;
+        # the widget's own auto-advance routes digits to Day/Year. (Per-segment .fill() is what
+        # scrambled: the widget redistributes programmatic values across segments.)
         month = await _seg("dateSectionMonth-input")
         if month:
             day = await _seg("dateSectionDay-input")  # absent on MM/YYYY widgets
             year = await _seg("dateSectionYear-input")
-            ok = await _set(month, mm)
-            if day and len(parts) >= 3:
-                await _set(day, dd)
-            if year:
-                await _set(year, yyyy)
-            return ok
+            digits = mm + (dd if day else "") + yyyy
+
+            async def _seg_val(el: Any) -> str:
+                with contextlib.suppress(Exception):
+                    return str(await el.evaluate("() => this.value || this.textContent || ''")).strip()
+                return ""
+
+            for _try in range(2):
+                with contextlib.suppress(Exception):
+                    await month.click()  # focus the FIRST segment; typing flows from here
+                await eng.type_text_trusted(session, page, digits)
+                want = [mm, dd if day else dd, yyyy]
+                got: list[str] = []
+                for _ in range(6):  # segments re-render async — poll ~1.5s (a single 0.3s read false-FAILed
+                    await asyncio.sleep(0.25)  # a CORRECTLY-typed date, verified: CDP read 7/1/2026 post-FAIL)
+                    got = [await _seg_val(month), (await _seg_val(day)) if day else dd, await _seg_val(year)]
+                    if all(g.lstrip("0") == w.lstrip("0") and g for g, w in zip(got, want, strict=False)):
+                        return True
+                if _DBG:
+                    print(f"   [date] trusted-typed {digits!r}, segments read {got} want {want} (try {_try + 1}/2)")
+            return False
 
         # (2) PLAIN date <input> — type the displayed MM/DD/YYYY, like a human.
         inp = (
@@ -1286,6 +1340,20 @@ class WorkdayAdapter(ATSAdapter):
             with contextlib.suppress(Exception):
                 got = await el.evaluate(
                     "() => this.tagName==='SELECT' ? (this.options[this.selectedIndex]||{}).text||'' : (this.value||'')"
+                )
+                return eng.norm(got or "")[:160]
+            return ""
+        if field.type in ("checkbox", "radio"):
+            # GROUP commit = the CHECKED option's LABEL (the single-box read of only the FIRST input
+            # false-negatives a group where the value names another option — verified live: disability
+            # 'No, I do not have a disability' was checked yet read_back said FAIL).
+            with contextlib.suppress(Exception):
+                got = await page.evaluate(
+                    f"() => {{ const w=document.querySelector('{self._wsel(field.name)}'); if(!w) return '';"
+                    " const c=[...w.querySelectorAll('input[type=checkbox],[role=checkbox],input[type=radio],[role=radio]')]"
+                    ".find(i=>i.checked||i.getAttribute('aria-checked')==='true'); if(!c) return '';"
+                    " let t=''; if(c.id){const l=document.querySelector('label[for=\"'+c.id+'\"]'); if(l) t=l.textContent;}"
+                    " return (t||c.getAttribute('value')||'').trim(); }"
                 )
                 return eng.norm(got or "")[:160]
             return ""
@@ -1326,8 +1394,16 @@ class WorkdayAdapter(ATSAdapter):
         # ways — a coincidental substring is a FALSE match ('Engineer' in 'Sales Engineer'; '555' in
         # '415-555-0142') and a canonicalised commit is a FALSE miss. Exact fields (name/phone/email/date/
         # gpa/postal/number) are decided by the literal _read_once and never fuzzy-matched (wrong stays False).
-        fuzzy = field.type in ("single_select", "multi_select") or (
-            field.type in ("input_text", "textarea") and _is_semantic_text(field.label or field.name)
+        fuzzy = (
+            field.type in ("single_select", "multi_select")
+            or (field.type in ("input_text", "textarea") and _is_semantic_text(field.label or field.name))
+            # checkbox/radio GROUP whose value NAMES an option ('No, I do not have a disability') —
+            # the literal single-box read false-negatives; the committed label needs the LLM judge.
+            # Boolean yes/no checkboxes stay on the literal path.
+            or (
+                field.type in ("checkbox", "radio")
+                and eng.norm(value).lower() not in ("yes", "no", "true", "false", "1", "0", "y", "n")
+            )
         )
         if fuzzy:
             # POLL the commit re-render. committed value = DOM (cheap) first; _llm_value_matches is the
