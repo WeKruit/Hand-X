@@ -1290,39 +1290,42 @@ class WorkdayAdapter(ATSAdapter):
         # A widget's commit (listbox button text, radio check, pill) can lag the click by a
         # re-render, so an immediate single read false-negatives — POLL the check (returns the
         # instant it passes, so a correct fill costs nothing extra).
+        # Fields whose committed WORDING can legitimately differ from the profile — a closed-taxonomy select
+        # (always) or a free-text SEMANTIC field (location/school/company/title/field/major, canonicalised by
+        # autocomplete). For THESE the LLM is the SOLE match authority: a substring test is unreliable BOTH
+        # ways — a coincidental substring is a FALSE match ('Engineer' in 'Sales Engineer'; '555' in
+        # '415-555-0142') and a canonicalised commit is a FALSE miss. Exact fields (name/phone/email/date/
+        # gpa/postal/number) are decided by the literal _read_once and never fuzzy-matched (wrong stays False).
+        fuzzy = field.type in ("single_select", "multi_select") or (
+            field.type in ("input_text", "textarea") and _is_semantic_text(field.label or field.name)
+        )
+        if fuzzy:
+            # POLL the commit re-render. committed value = DOM (cheap) first; _llm_value_matches is the
+            # authority (it exact-equals for free, else asks the LLM — NEVER substring). On a DOM false-empty
+            # read the value VISUALLY, then LLM. Last resort: the value-aware VLM verdict.
+            for i in range(3):
+                committed = await self._committed_value(page, field)
+                if committed and await _llm_value_matches(committed, value):
+                    return True
+                if i + 1 < 3:
+                    await asyncio.sleep(0.25)
+            if session is not None:
+                committed = await self._visual_value(session, field, value)
+                if committed and await _llm_value_matches(committed, value):
+                    return True
+                with contextlib.suppress(Exception):
+                    from vision_verify import _matches, visual_check
+
+                    if _matches(await visual_check(session, field.label or field.name, want=value)):
+                        return True
+            return False
+        # EXACT fields: literal check, polled for the commit re-render (a wrong value must stay False).
         tries = 1 if field.type in ("input_text", "textarea", "file") else 3
         for i in range(tries):
             if await self._read_once(page, field, value):
                 return True
             if i + 1 < tries:
                 await asyncio.sleep(0.25)
-        # CHIP/SELECT: the DOM read-back compares by SUBSTRING and false-negatives a CANONICAL commit
-        # ("Computer Science" is not a substring of the committed "Computer and Information Science";
-        # "United States of America" vs "...(+1)"). That false-negative is what marks a committed chip
-        # residual -> the agent re-does it -> the timeout. Confirm SEMANTICALLY with the value-aware VLM
-        # (reuse the visuals primitive) before declaring failure.
-        # LLM-ENRICHED fuzzy verify (directive: matching must be LLM, not substring, to be generic). The free
-        # substring pass above false-negatives a CORRECT fill whenever the committed WORDING differs from the
-        # profile: a closed-taxonomy select (always) OR a free-text SEMANTIC field (location/school/company/
-        # title/field/major — autocomplete canonicalises them). Exact fields (name/phone/email/date/gpa/
-        # postal/number) are NOT fuzzy-matched: substring already decided them and a wrong value stays False.
-        fuzzy = field.type in ("single_select", "multi_select") or (
-            field.type in ("input_text", "textarea") and _is_semantic_text(field.label or field.name)
-        )
-        if fuzzy:
-            # COMBINE DOM + VISUAL for the committed value (DOM false-empties on the busy SPA), then let the
-            # cheap text LLM judge committed-vs-wanted — 2 short strings, cached, never the option list.
-            committed = await self._committed_value(page, field)
-            if not committed and session is not None:
-                committed = await self._visual_value(session, field, value)
-            if committed and await _llm_value_matches(committed, value):
-                return True
-            if session is not None:  # last resort: the value-aware VLM verdict (matches bool)
-                with contextlib.suppress(Exception):
-                    from vision_verify import _matches, visual_check
-
-                    if _matches(await visual_check(session, field.label or field.name, want=value)):
-                        return True
         return False
 
     async def _read_once(self, page: Any, field: FormField, value: str) -> bool:
