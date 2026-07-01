@@ -436,7 +436,12 @@ READ_ALL_JS = r"""
   const norm = s => (s||'').replace(/\s+/g,' ').trim();
   const readOne = (fkit) => {
     const root = document.querySelector('[data-fkit-id="'+fkit+'"]'); if (!root) return '';
-    const ms = root.closest('[data-automation-id="multiSelectContainer"]');
+    // The multiSelectContainer can be an ANCESTOR (fkit on the input) OR a DESCENDANT (fkit on the
+    // formField wrapper — every education searchable field: School/Degree/Field of Study). .closest()
+    // only walks UP, so it MISSED the descendant case -> a pre-filled pill read as '' (false-empty) ->
+    // reconcile re-committed a field the resume-autofill already filled -> leaked to the slow agent.
+    const ms = root.closest('[data-automation-id="multiSelectContainer"]')
+            || root.querySelector('[data-automation-id="multiSelectContainer"]');
     if (ms) return [...ms.querySelectorAll('[data-automation-id="selectedItem"]')].map(p=>norm(p.textContent)).join(', ');
     const el = root.querySelector('input,textarea,select,[role="spinbutton"]') || root;
     if (el.getAttribute && (el.getAttribute('type')==='checkbox' || el.getAttribute('role')==='checkbox'))
