@@ -19,6 +19,7 @@ North-star: anything a human can do, the agent decides, the deterministic layer 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 from dataclasses import dataclass, field
 
@@ -731,11 +732,31 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
 
         fld = FormField(name=c.fkit, type="multi_select", label=c.label, source="standard")
         items = [x.strip() for x in value.split(",")] if "," in value else [value]
+        # DELTA-ONLY: a Workday multiselect TOGGLES — re-committing an already-present pill REMOVES it
+        # (verified live: a second pass wiped Python/Kubernetes/PostgreSQL while chasing the missing
+        # 'Go'). Read the pills ALREADY there and type only the genuinely missing items. Pill text is
+        # CANONICALISED by the taxonomy ('Go' -> 'Go Programming Language'), so presence is judged by
+        # the LLM (exact-equality shortcut first) — never substring (matching directive).
+        have: list[str] = []
+        with contextlib.suppress(Exception):
+            got = await adapter._committed_value(page, fld)
+            have = [p.strip() for p in got.split(",") if p.strip()]
+
+        async def _present(it: str) -> bool:
+            if any(p.lower() == it.lower() for p in have):
+                return True
+            from ats_workday import _llm_value_matches
+
+            for p in have:
+                if await _llm_value_matches(p, it):  # cached; 2 short strings
+                    return True
+            return False
+
         added = 0
         for it in items:
-            if it and await adapter._multiselect(session, page, fld, it):
+            if it and not await _present(it) and await adapter._multiselect(session, page, fld, it):
                 added += 1
-        return added > 0
+        return added > 0 or bool(have)
     if a == "date":
         from ats_engine import FormField
 

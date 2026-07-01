@@ -804,28 +804,66 @@ class WorkdayAdapter(ATSAdapter):
         ) or await eng.first(page, self._wsel(field.name, " input"))
         if not inp:
             return False
+        # COMMIT MARKER = the PILL COUNT, not read_back: a failed Enter leaves the TYPED TEXT in the
+        # box, and both the wrapper-text and the VLM read that residue as 'filled' (verified live:
+        # Skills showed literal typed 'Python', zero pills, yet read_back said committed=True). Count
+        # selectedItem pills before/after — the widget's only true commit signal.
+        pills_js = (
+            "() => document.querySelectorAll("
+            f"'{self._wsel(field.name, ' [data-automation-id=\"selectedItem\"]')}'"
+            ").length"
+        )
+
+        async def _pills() -> int:
+            with contextlib.suppress(Exception):
+                return int(str(await page.evaluate(pills_js)).strip() or "0")
+            return 0
+
+        n0 = await _pills()
         with contextlib.suppress(Exception):
             await inp.click()
-            await inp.fill(value)
-        # The multiselect's option portal also contains the committed PILL's sub-elements
-        # (menuItem>selectedItem>promptOption), so clicking "an option" mis-targets the pill while
-        # the widget auto-commits its highlighted top option on blur (observed: a wrong "Albania"
-        # pill). Instead, type-to-filter then commit the highlighted top match with a TRUSTED CDP
-        # Enter — synthetic keys are ignored by the widget. Verified: 'United States' -> pill
-        # 'United States of America (+1)'.
-        await asyncio.sleep(0.5)  # let the typeahead filter + highlight the top match
-        await eng.press_enter_trusted(session, page)
-        await asyncio.sleep(0.3)
-        ok = await self.read_back(session, page, field, value)
-        if not ok:
-            # Some Workday/Salesforce typeaheads (the multi-pill Skills field) do NOT auto-highlight the
-            # top match, so a plain Enter commits nothing. ArrowDown highlights the first suggestion, then
-            # Enter commits it — same primitive, just the keyboard-nav the widget needs.
-            await eng.press_key_trusted(session, page, key="ArrowDown", code="ArrowDown", vk=40)
-            await asyncio.sleep(0.2)
+            await inp.fill("")  # clear any residue first
+        # TRUSTED keystrokes (matching _listbox): a programmatic fill() stops triggering the widget's
+        # search once the widget has state (verified live: the menu rendered on the fresh widget, then
+        # NEVER again across passes — while real typing always brings it up).
+        if not await eng.type_text_trusted(session, page, value):
+            with contextlib.suppress(Exception):
+                await inp.fill(value)  # offline/no-CDP fallback
+        # WAIT for the suggestion menu (async taxonomy fetch) BEFORE Enter — an Enter with no menu
+        # commits NOTHING and strands the typed text (the false-'filled' above). Bounded ~2.5s poll.
+        menu = False
+        for _ in range(10):
+            await asyncio.sleep(0.25)
+            with contextlib.suppress(Exception):
+                vis = str(
+                    await page.evaluate(
+                        "() => { const o=[...document.querySelectorAll("
+                        '\'[data-automation-id="promptOption"],[role="option"]\')]'
+                        ".filter(e=>e.offsetParent!==null && !e.closest('[data-automation-id=\"selectedItemList\"]'));"
+                        " return o.length>0 ? 'Y' : 'N'; }"
+                    )
+                ).strip()
+                if vis == "Y":
+                    menu = True
+                    break
+        ok = False
+        if menu:
+            # trusted Enter commits the highlighted top match; some widgets need ArrowDown first.
             await eng.press_enter_trusted(session, page)
-            await asyncio.sleep(0.3)
-            ok = await self.read_back(session, page, field, value)
+            await asyncio.sleep(0.4)
+            ok = (await _pills()) > n0
+            if not ok:
+                await eng.press_key_trusted(session, page, key="ArrowDown", code="ArrowDown", vk=40)
+                await asyncio.sleep(0.2)
+                await eng.press_enter_trusted(session, page)
+                await asyncio.sleep(0.4)
+                ok = (await _pills()) > n0
+        if not ok:
+            # CLEAR the typed residue (it visually poisons the box + blocks validation) and close the
+            # menu without committing.
+            with contextlib.suppress(Exception):
+                await inp.fill("")
+            await eng.press_key_trusted(session, page, key="Escape", code="Escape", vk=27)
         if _DBG:
             if ok:
                 print(f"   [msel {field.name}] value={value!r} committed=True")
