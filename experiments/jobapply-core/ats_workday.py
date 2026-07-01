@@ -1347,3 +1347,70 @@ class WorkdayAdapter(ATSAdapter):
             )
             return int(d or 0)
         return 0
+
+
+# --------------------------------------------------------------------------- #
+# Offline self-test — the deterministic DECISION plumbing that needs no browser.
+# `python ats_workday.py --selftest`  ($0, no network, no browser).
+# --------------------------------------------------------------------------- #
+async def _selftest() -> int:
+    checks: list[tuple[str, bool]] = []
+
+    def chk(name: str, ok: bool) -> None:
+        checks.append((name, bool(ok)))
+
+    # _ordinary_answer plumbing: hands the question+options to the LLM, returns the EXACT choice,
+    # maps NONE / blank / no-llm / no-options -> None. (The DECISION policy lives in the system
+    # prompt and is exercised live; here we pin the wiring so a refactor can't silently break it.)
+    class _Comp:
+        def __init__(self, choice: str) -> None:
+            self.choice = choice
+
+    class _Res:
+        def __init__(self, choice: str) -> None:
+            self.completion = _Comp(choice)
+
+    class _FakeLLM:
+        def __init__(self, choice: str) -> None:
+            self._choice = choice
+            self.last = ""
+
+        async def ainvoke(self, messages, output_format=None):
+            self.last = " ".join(str(getattr(m, "content", m)) for m in messages)
+            return _Res(self._choice)
+
+    yes = _FakeLLM("Yes")
+    r = await _ordinary_answer(yes, "Are you authorized to work?", ["Yes", "No"])
+    chk("returns the exact LLM choice", r == "Yes")
+    chk("the option list is handed to the LLM", "Yes" in yes.last and "No" in yes.last)
+    chk("the question is handed to the LLM", "authorized to work" in yes.last)
+    chk("the system prompt carries the EEO-decline policy", "decline" in yes.last.lower())
+    chk("the system prompt carries the source->LinkedIn policy", "linkedin" in yes.last.lower())
+    chk("the system prompt carries the language->English policy", "english" in yes.last.lower())
+    chk("NONE -> None", (await _ordinary_answer(_FakeLLM("NONE"), "q", ["a", "b"])) is None)
+    chk("blank choice -> None", (await _ordinary_answer(_FakeLLM(""), "q", ["a", "b"])) is None)
+    chk("no llm -> None", (await _ordinary_answer(None, "q", ["a"])) is None)
+    chk("no options -> None", (await _ordinary_answer(_FakeLLM("a"), "q", [])) is None)
+    rd = await _ordinary_answer(
+        _FakeLLM("I don't wish to answer"),
+        "Please select the ethnicity which most describes you",
+        ["White", "Asian", "I don't wish to answer"],
+    )
+    chk("EEO decline choice passes through", rd == "I don't wish to answer")
+
+    chk("Workday host recognized", any(h in "acme.wd1.myworkdayjobs.com" for h in WorkdayAdapter.hosts))
+    chk("multi_page flag set", WorkdayAdapter.multi_page is True)
+
+    ok = all(p for _, p in checks)
+    print("\n=== ats_workday offline self-test (fake LLM, no browser, $0) ===")
+    for name, passed in checks:
+        print(f"  [{'PASS' if passed else 'FAIL'}] {name}")
+    print(f"\n{'>>> ALL PASS' if ok else '>>> SOME FAIL'}  ({len(checks)} checks)")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--selftest" in sys.argv:
+        raise SystemExit(asyncio.run(_selftest()))
