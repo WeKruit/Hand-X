@@ -576,25 +576,29 @@ class WorkdayAdapter(ATSAdapter):
         async def _is_filled(fel: Any) -> bool:
             # THIS specific input is done iff it holds a file OR its OWN wrapper shows the success marker.
             # Scoped to the input's own wrapper — NOT the whole page — so a PRIOR step's filled Autofill
-            # input never masks the current EMPTY required one (that false-positive was the recurring bug:
-            # the required My-Experience Resume/CV stayed empty and fell to the looping agent).
+            # input never masks the current EMPTY required one.
+            # BUG (the recurring 'upload keeps failing'): Element.evaluate() returns a STRING repr, so
+            # bool(evaluate("()=>false")) == bool("false") == True -> EVERY input looked already-filled ->
+            # upload_resume never found an empty target -> the resume never uploaded. Return an unambiguous
+            # sentinel and compare the STRING, never bool() the evaluate result.
             with contextlib.suppress(Exception):
-                return bool(
-                    await fel.evaluate(
-                        "() => { if (this.files && this.files.length) return true;"
-                        " const w=this.closest('[data-automation-id=\"file-upload-drop-zone\"]')"
-                        " || this.closest('[data-automation-id^=\"formField-\"]') || this.parentElement;"
-                        " return !!(w && w.querySelector('[data-automation-id=\"file-upload-successful\"]')); }"
-                    )
+                r = await fel.evaluate(
+                    "() => { if (this.files && this.files.length) return 'Y';"
+                    " const w=this.closest('[data-automation-id=\"file-upload-drop-zone\"]')"
+                    " || this.closest('[data-automation-id^=\"formField-\"]') || this.parentElement;"
+                    " return (w && w.querySelector('[data-automation-id=\"file-upload-successful\"]')) ? 'Y' : 'N'; }"
                 )
+                return str(r).strip() == "Y"
             return False
 
         # Pick the EMPTY file input (the one this step actually requires). A step can hold MULTIPLE file
         # inputs; upload to the one that is EMPTY, never bail because a DIFFERENT input is already done.
         # Poll briefly for an input that mounts async after the step renders.
         target: Any = None
+        scanned: list[Any] = []
         for _ in range(4):
-            for fel in await _all_file_inputs():
+            scanned = await _all_file_inputs()
+            for fel in scanned:
                 if not await _is_filled(fel):
                     target = fel
                     break
@@ -602,6 +606,8 @@ class WorkdayAdapter(ATSAdapter):
                 break
             await asyncio.sleep(0.6)
         if target is None:
+            if _DBG:  # DIAGNOSTIC (not a bare no-op): say WHY nothing uploaded this step
+                print(f"   [upload_resume] no empty target — scanned {len(scanned)} input(s), all filled/none present")
             return False  # no EMPTY file input on this step -> already uploaded / none present. No-op.
 
         # Push bytes, then CONFIRM this input's marker. Workday's upload endpoint transiently
@@ -1095,7 +1101,13 @@ class WorkdayAdapter(ATSAdapter):
             clicker = (await eng.first(page, f'label[for="{iid}"]')) if iid else None
             if await eng.click_trusted(session, page, clicker or target):
                 await asyncio.sleep(0.2)
-                if await target.evaluate("() => this.checked===true || this.getAttribute('aria-checked')==='true'"):
+                # evaluate() returns a STRING repr -> `if await evaluate("()=>bool")` is ALWAYS truthy
+                # ('false' is a non-empty string). Return a sentinel and compare, or a click that DIDN'T
+                # flip the radio would still report committed=True.
+                checked = await target.evaluate(
+                    "() => (this.checked===true || this.getAttribute('aria-checked')==='true') ? 'Y' : 'N'"
+                )
+                if str(checked).strip() == "Y":
                     return True
         # FALLBACK (DomHand _CLICK_BINARY_FIELD_JS pattern): native .click() on the label/wrapper + fire
         # input/change so React registers it; last-resort plain CDP click. Skip if already checked.
