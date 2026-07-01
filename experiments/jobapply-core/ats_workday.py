@@ -821,7 +821,25 @@ class WorkdayAdapter(ATSAdapter):
             await asyncio.sleep(0.3)
             ok = await self.read_back(session, page, field, value)
         if _DBG:
-            print(f"   [msel {field.name}] value={value!r} committed={ok}")
+            if ok:
+                print(f"   [msel {field.name}] value={value!r} committed=True")
+            else:
+                # DIAGNOSTIC, not just a verifier: on failure surface the ACTUAL committed value + the
+                # rendered options so the 'why' is IN THE LOG (empty commit? wrong option? no match in the
+                # list?) — no more inferring the reason later from an offline DOM dump.
+                got = await self._committed_value(page, field)
+                opts = []
+                with contextlib.suppress(Exception):
+                    opts = await self._read_options_live(page, field)
+                why = (
+                    "field EMPTY — nothing committed (no matching/highlighted option)"
+                    if not got
+                    else f"committed {got!r} but LLM says it is NOT {value!r}"
+                )
+                print(
+                    f"   [msel {field.name}] value={value!r} committed=False -> {why} | "
+                    f"rendered_options[:12]={opts[:12]}"
+                )
         return ok
 
     async def _listbox(self, session: Any, page: Any, field: FormField, value: str) -> bool:
