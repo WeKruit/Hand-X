@@ -881,13 +881,19 @@ class WorkdayAdapter(ATSAdapter):
             await asyncio.sleep(0.25)
             if await self._option_texts(page, ""):
                 break
-        # The input the trigger owns. Prefer a field-scoped input; only fall back to the shared
-        # portal input. Scope the option read to the container this input declares it controls.
-        inp = (
-            await eng.first(page, self._wsel(field.name, " input"))
-            or await eng.first(page, '[data-automation-id="activeListContainer"] input')
-            or await eng.first(page, 'input[aria-autocomplete="list"]')
+        # Type ONLY into a VISIBLE search box INSIDE the open portal (that's where a human types; it
+        # filters). NEVER click/type the wrapper's hidden value-holder input: clicking it is a click
+        # OUTSIDE the open menu -> BLUR closes it (verified live on nvidia Country: options vanished,
+        # every later read empty) and a blur on a typed widget can auto-commit garbage ('Zimbabwe').
+        inp = await eng.first(page, '[data-automation-id="activeListContainer"] input') or await eng.first(
+            page, 'input[aria-autocomplete="list"]'
         )
+        if inp is not None:
+            vis = ""
+            with contextlib.suppress(Exception):
+                vis = str(await inp.evaluate("() => this.offsetParent !== null ? 'Y' : 'N'")).strip()
+            if vis != "Y":
+                inp = None  # hidden -> treat as NO search box (plain listbox)
         owned_id = ""
         if inp:
             with contextlib.suppress(Exception):
@@ -895,28 +901,42 @@ class WorkdayAdapter(ATSAdapter):
                 owned_id = owns.split()[0] if owns.split() else ""
         if inp:
             # snapshot the option texts BEFORE typing — _pick_option polls until they CHANGE, so a
-            # frozen shared list is detected (stale N times) instead of spun against. On that frozen
-            # detection it HANDS OFF to the shared VISUAL primitive (reads the rendered options from a
-            # screenshot — no DOM lag — and commits trusted Enter + value-verifies).
+            # frozen shared list is detected (stale N times) instead of spun against.
             before = await self._option_texts(page, owned_id)
             with contextlib.suppress(Exception):
-                await inp.fill(value)
+                await inp.click()  # inside the menu — no blur
+            # TRUSTED keystrokes, not .fill(): the React search box ignores a programmatic fill.
+            if not await eng.type_text_trusted(session, page, value):
+                with contextlib.suppress(Exception):
+                    await inp.fill(value)  # offline/no-CDP fallback
             if _DBG:
                 print(f"   [listbox {field.name}] SEARCHABLE owned={owned_id!r} before[:4]={before[:4]}")
             ok = await self._pick_option(
                 session, page, value, owned_id=owned_id, before=before, searchable=True, verify_label=field.label
             )
         else:
-            # non-searchable inline listbox: options already shown, click the best (no Enter to commit).
+            # NO search box (plain listbox, incl. ~250-option country lists): every option node is
+            # ALREADY in the DOM portal — do NOT type (type-ahead letter-jump cycles the highlight and
+            # a later blur auto-commits it; verified dead end). Straight to commit-by-node
+            # (exact/LLM pick -> scrollIntoView -> trusted-click) via _pick_option's inline path.
             if _DBG:
-                print(f"   [listbox {field.name}] INLINE owned={owned_id!r}")
-            ok = await self._pick_option(session, page, value, owned_id=owned_id, before=None, searchable=False)
-        if _DBG and not ok:  # DIAGNOSTIC on failure: the actual committed value + the rendered options
-            got = await self._committed_value(page, field)
-            opts = await self._option_texts(page, owned_id)
-            print(
-                f"   [listbox {field.name}] value={value!r} committed=False -> now shows {got!r} | opts[:8]={opts[:8]}"
+                print(f"   [listbox {field.name}] PLAIN (no search box) -> commit-by-node")
+            ok = await self._pick_option(
+                session, page, value, owned_id=owned_id, before=None, searchable=False, verify_label=field.label
             )
+        if not ok:
+            # DISARM the failed widget: typed text + an open menu AUTO-COMMITS the highlighted option on
+            # blur (verified live: Country want='United States of America' -> a wrong 'Zimbabwe' landed
+            # when the NEXT field's click blurred this one; then State served Zimbabwe provinces and
+            # committed 'Mashonaland East' the same way — a poisoned cascade). Trusted Escape closes the
+            # menu WITHOUT committing, so a failed pick leaves the field EMPTY, not wrong.
+            await eng.press_key_trusted(session, page, key="Escape", code="Escape", vk=27)
+            if _DBG:  # DIAGNOSTIC on failure: the actual committed value + the rendered options
+                got = await self._committed_value(page, field)
+                opts = await self._option_texts(page, owned_id)
+                print(
+                    f"   [listbox {field.name}] value={value!r} committed=False -> now shows {got!r} | opts[:8]={opts[:8]}"
+                )
         return ok
 
     # The option portal is shared: bare `promptOption`/`menuItem` aids from PREVIOUSLY-opened
@@ -1046,35 +1066,49 @@ class WorkdayAdapter(ATSAdapter):
             if not opts:
                 continue
             cur_set = {t for _, t in opts}
-            # SEARCHABLE: require the list to have CHANGED from the pre-type snapshot before trusting
-            # it (else it's the frozen shared list). After N=3 stale reads -> VLM screenshot read.
+
+            # COMMIT-BY-NODE (the generic primitive, verified live on nvidia Country ~250 options):
+            # ALL rendered option nodes are ALREADY in the DOM portal — no filtering, no scrolling
+            # lottery, no viewport-limited VLM. Exact-match else LLM-pick the TEXT, scrollIntoView
+            # the node, TRUSTED-click it. (Type-ahead was a dead end: letters single-jump/cycle the
+            # highlight — 'united' landed 'U. S. Virgin Islands'; a blur then auto-commits garbage.)
+            async def _commit_node(pairs: list[tuple[Any, str]]) -> bool:
+                node = next((o for o, t in pairs if t and t == want), None)
+                if node is None:
+                    from wd_repeaters import _llm_pick
+
+                    choice = await _llm_pick(_match_llm(), value, [t for _, t in pairs])
+                    if choice:
+                        cl = eng.norm(choice)
+                        node = next((o for o, t in pairs if t == cl), None)
+                if node is None:
+                    return False
+                with contextlib.suppress(Exception):
+                    await node.evaluate("() => this.scrollIntoView({block:'center'})")
+                await asyncio.sleep(0.2)
+                if not await eng.click_trusted(session, page, node):
+                    with contextlib.suppress(Exception):
+                        await node.click()
+                await asyncio.sleep(0.4)
+                return True
+
+            # SEARCHABLE: a list UNCHANGED from the pre-type snapshot usually means the filter didn't
+            # run — but the full option set being in the DOM is FINE for commit-by-node. Try it after
+            # the stale bound; vision only when the DOM genuinely has no matching node.
             if searchable and before is not None and cur_set == before_set:
                 stale_reads += 1
                 if _DBG:
                     print(f"      [pick] STALE (==before) read {stale_reads}/3 — frozen shared list?")
                 if stale_reads >= 3:
+                    if await _commit_node(opts):
+                        return True
                     return await _vision_handoff()
                 continue
             if _DBG:
                 print(f"      [pick] want={want!r} visible[:6]={[t for _, t in opts[:6]]}")
-            # MATCH is LLM-ONLY (directive #3): the DOM gives only a fast EXACT-equality shortcut
-            # (identity, not a heuristic). ANY non-exact decision — 'United States' vs 'United States
-            # of America', 'BS' vs "Bachelor's Degree" — is the LLM's, made by the shared visual+LLM
-            # picker (_vision_handoff reads the rendered options and lets the cheap flash-lite pick).
-            # No startswith / contains / reverse-contains guessing here.
-            exact = next((o for o, txt in opts if txt and txt == want), None)
-            if exact is None:
-                return await _vision_handoff()  # LLM picks over the real rendered options
-            # COMMIT the exact match: searchable -> trusted Enter on the highlighted top match (input
-            # still focused from _listbox's fill); inline -> click the matched node directly.
-            if searchable:
-                ok = await eng.press_enter_trusted(session, page)
-                await asyncio.sleep(0.4)
-                return ok
-            with contextlib.suppress(Exception):
-                await exact.click()
+            if await _commit_node(opts):
                 return True
-            return False
+            return await _vision_handoff()  # DOM had no matching node -> read the screen
         # bound reached without a confident DOM match -> last-resort vision read (searchable only)
         return await _vision_handoff() if searchable else False
 
