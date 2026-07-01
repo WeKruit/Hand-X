@@ -184,11 +184,14 @@ _ROW_COUNT_JS = r"""
 """
 
 
-async def _ordinary_answer(llm: Any, question: str, options: list[str]) -> str | None:
-    """The cheap LLM DECIDES the ordinary external-applicant answer to a required screening / eligibility
-    question — polarity-aware so 'prior employee of Intel?' -> No while '18 or older?' / 'authorized to
-    work?' -> Yes. Returns the EXACT option text, or None. (Decision = LLM; the commit is deterministic.)"""
+async def _ordinary_answer(llm: Any, question: str, options: list[str], profile: dict | None = None) -> str | None:
+    """The cheap LLM decides the answer to a REQUIRED screening / eligibility / EEO question the map left
+    empty, USING the profile when it discloses the attribute — a disclosed gender / ethnicity / sexual
+    orientation / veteran / disability / visa is MATCHED (never declined), and only an attribute the
+    profile is SILENT on is declined; identity/demographics the profile omits are NEVER guessed. Returns
+    the EXACT option text, or None. (Decision = LLM; the commit is deterministic.)"""
     import contextlib
+    import json
 
     if llm is None or not options:
         return None
@@ -199,27 +202,57 @@ async def _ordinary_answer(llm: Any, question: str, options: list[str]) -> str |
     class _Ans(BaseModel):
         choice: str  # EXACT option text from the list, or "NONE"
 
+    facts = ""
+    if profile:
+        keys = (
+            "gender",
+            "race_ethnicity",
+            "hispanic_or_latino",
+            "veteran_status",
+            "disability_status",
+            "sexual_orientation",
+            "gender_identity",
+            "transgender",
+            "pronoun",
+            "work_authorization",
+            "authorized_to_work_us",
+            "requires_sponsorship",
+            "visa_status",
+            "citizenship",
+            "willing_to_relocate",
+            "salary_expectation",
+            "notice_period",
+            "security_clearance",
+            "criminal_history",
+        )
+        disclosed = {k: profile[k] for k in keys if str(profile.get(k) or "").strip()}
+        if disclosed:
+            facts = "\nPROFILE FACTS (authoritative — use when the question asks about one): " + json.dumps(disclosed)
+
     with contextlib.suppress(Exception):
         res = await llm.ainvoke(
             [
                 SystemMessage(
-                    content="A typical EXTERNAL job applicant is answering a REQUIRED application question. "
-                    "Choose the option an ordinary applicant would pick, by question TYPE:\n"
-                    "1) ELIGIBILITY / SCREENING (work authorization, age, prior/current employment with the "
-                    "company, sponsorship, conflicts, relatives): answer TRUTHFULLY for the ordinary applicant "
-                    "— is NOT a current/former employee and has no prior conflict (-> No); IS legally "
-                    "authorized to work and IS 18+ (-> Yes); requires sponsorship -> No. Mind polarity.\n"
-                    "2) VOLUNTARY DEMOGRAPHIC / EEO SELF-IDENTIFICATION (ethnicity, race, gender, "
-                    "Hispanic/Latino, veteran status, disability, sexual orientation): DECLINE — pick the "
-                    "option meaning 'I don't wish to answer' / 'Decline to self-identify' / 'Prefer not to "
-                    "answer' / 'I do not wish to disclose'. If no such decline option exists, reply 'NONE'.\n"
-                    "3) HOW/WHERE the applicant heard about the role, or their source/referral channel: prefer "
-                    "'LinkedIn'; if not an option, 'Other'; if neither, the first non-placeholder option.\n"
-                    "4) PREFERRED / SPOKEN LANGUAGE: pick the option for 'English' (or the one containing "
-                    "'English'); if absent, the first non-placeholder option.\n"
+                    content="A job applicant is answering a REQUIRED application question. Choose the EXACT "
+                    "option that best fits, by question TYPE:\n"
+                    "1) ELIGIBILITY / SCREENING (work authorization, age, prior/current employment, "
+                    "sponsorship, conflicts, relatives, relocation, clearance, criminal history): answer from "
+                    "the PROFILE FACTS when they cover it; otherwise the ordinary truthful default — NOT a "
+                    "current/former employee and no prior conflict (-> No); IS authorized to work and IS 18+ "
+                    "(-> Yes); requires sponsorship -> No unless the profile says otherwise. Mind polarity.\n"
+                    "2) VOLUNTARY DEMOGRAPHIC / EEO (gender, race/ethnicity, Hispanic/Latino, veteran, "
+                    "disability, SEXUAL ORIENTATION, gender identity / transgender, pronouns): if the PROFILE "
+                    "FACTS DISCLOSE that attribute, pick the option MATCHING the disclosed value (do NOT "
+                    "decline a disclosed attribute). ONLY when the profile is silent on it, pick the option "
+                    "meaning 'I don't wish to answer' / 'Decline to self-identify' / 'Prefer not to answer'; if "
+                    "no decline option exists, reply 'NONE'. NEVER guess a demographic the profile omits.\n"
+                    "3) HOW/WHERE the applicant heard / referral source: prefer 'LinkedIn'; else 'Other'; else "
+                    "the first non-placeholder option.\n"
+                    "4) PREFERRED / SPOKEN LANGUAGE: pick 'English' (or the option containing 'English'); else "
+                    "the first non-placeholder option.\n"
                     "Reply the EXACT option text from the list, or 'NONE' if none fit."
                 ),
-                UserMessage(content=f"question: {question!r}\noptions: {options}"),
+                UserMessage(content=f"question: {question!r}\noptions: {options}{facts}"),
             ],
             output_format=_Ans,
         )
@@ -966,7 +999,9 @@ class WorkdayAdapter(ATSAdapter):
             return True
         return False
 
-    async def answer_required_choices(self, session: Any, page: Any, llm: Any = None) -> int:
+    async def answer_required_choices(
+        self, session: Any, page: Any, llm: Any = None, profile: dict | None = None
+    ) -> int:
         """Deterministically answer REQUIRED radio / checkbox-group screening questions the LLM map
         left empty — e.g. Intel gates My-Information on 'Are you currently or have you previously been
         employed by Intel?'. That React radio NEVER committed deterministically (it always fell to a
@@ -994,7 +1029,7 @@ class WorkdayAdapter(ATSAdapter):
                     )
                     if already:
                         continue  # the map already answered it — don't disturb
-                    choice = await _ordinary_answer(llm, f.label, opts)
+                    choice = await _ordinary_answer(llm, f.label, opts, profile)
                     if (
                         choice
                         and await self._click_radio(session, page, f, choice)
@@ -1019,7 +1054,7 @@ class WorkdayAdapter(ATSAdapter):
                     opts = [o for o in opts if o and not eng.norm(o).lower().startswith("select")]
                     if not opts:
                         continue
-                    choice = await _ordinary_answer(llm, f.label, opts)
+                    choice = await _ordinary_answer(llm, f.label, opts, profile)
                     if (
                         choice
                         and await self._listbox(session, page, f, choice)
@@ -1043,7 +1078,7 @@ class WorkdayAdapter(ATSAdapter):
                     opts = [o for o in opts if o and not eng.norm(o).lower().startswith("select")]
                     if not opts:
                         continue
-                    choice = await _ordinary_answer(llm, f.label, opts)
+                    choice = await _ordinary_answer(llm, f.label, opts, profile)
                     if (
                         choice
                         and await self._multiselect(session, page, f, choice)
@@ -1387,6 +1422,15 @@ async def _selftest() -> int:
     chk("the system prompt carries the EEO-decline policy", "decline" in yes.last.lower())
     chk("the system prompt carries the source->LinkedIn policy", "linkedin" in yes.last.lower())
     chk("the system prompt carries the language->English policy", "english" in yes.last.lower())
+    chk("the system prompt carries the sexual-orientation policy", "sexual orientation" in yes.last.lower())
+    # profile-aware EEO: a DISCLOSED attribute is matched (not declined), and the profile facts reach the LLM.
+    gp = _FakeLLM("Male")
+    rm = await _ordinary_answer(
+        gp, "Please select your gender", ["Male", "Female", "I don't wish to answer"], {"gender": "Male"}
+    )
+    chk("disclosed EEO from profile is MATCHED (not declined)", rm == "Male")
+    chk("profile facts are handed to the LLM", "Male" in gp.last and "gender" in gp.last.lower())
+    chk("system prompt: do NOT decline a disclosed attribute", "disclosed attribute" in gp.last.lower())
     chk("NONE -> None", (await _ordinary_answer(_FakeLLM("NONE"), "q", ["a", "b"])) is None)
     chk("blank choice -> None", (await _ordinary_answer(_FakeLLM(""), "q", ["a", "b"])) is None)
     chk("no llm -> None", (await _ordinary_answer(None, "q", ["a"])) is None)

@@ -481,10 +481,12 @@ For EVERY field, return an object {name, value, why}. Rules:
 - If the field has OPTIONS, `value` MUST be EXACTLY one of those option strings, copied \
 verbatim. Pick the option the profile best supports. For a yes/no question, reason from the \
 profile (e.g. "authorized to work in Japan?" -> the profile is US-authorized only -> "No"). \
-For demographic / EEO questions (gender, race/ethnicity, veteran, disability, sexual \
-orientation): if the profile DISCLOSES that attribute, pick the option matching it; ONLY if the \
-profile does not disclose it, choose a "Prefer not to say" / "I don't wish to answer" / "Decline" \
-option.
+For demographic / EEO questions (gender, race/ethnicity, Hispanic or Latino, veteran, disability, \
+sexual orientation, gender identity / transgender status, pronouns): if the profile DISCLOSES that \
+attribute (profile keys gender, race_ethnicity, hispanic_or_latino, veteran_status, \
+disability_status, sexual_orientation, gender_identity, transgender, pronoun), pick the option \
+matching it; ONLY if the profile does not disclose it, choose a "Prefer not to say" / "I don't wish \
+to answer" / "Decline" option.
 - SCREENING / ELIGIBILITY yes-no questions: answer the safe, TRUTHFUL default for an ordinary \
 applicant rather than leaving a required question blank. Work-authorization / visa-sponsorship / \
 citizenship / export-control questions -> answer from the profile (work_authorization, \
@@ -1266,7 +1268,7 @@ async def run_wizard(
         # don't define the method, so it's a no-op there).
         if hasattr(adapter, "answer_required_choices"):
             with contextlib.suppress(Exception):
-                n = await adapter.answer_required_choices(session, page)
+                n = await adapter.answer_required_choices(session, page, profile=profile)
                 if n:
                     print(f"  [wd] answered {n} required screening choice(s) deterministically")
                     page = await session.must_get_current_page()

@@ -34,6 +34,30 @@ PROFILES = [
         "postal_code": "94105",
         "country": "United States of America",
         "how_did_you_hear": "LinkedIn",
+        # EEO / demographic / visa — ALL profile-driven. The engine fills each from these values; it
+        # DECLINES only a field the profile genuinely leaves empty, and NEVER guesses. (Directive: EEO
+        # incl. sexual orientation, and visa/work-authorization, come from the user profile.)
+        "gender": "Male",
+        "race_ethnicity": "Asian",
+        "hispanic_or_latino": "No",
+        "veteran_status": "I am not a protected veteran",
+        "disability_status": "No, I do not have a disability",
+        "sexual_orientation": "Heterosexual",
+        "gender_identity": "Cisgender",
+        "transgender": "No",
+        "pronoun": "He/Him",
+        # visa / work authorization
+        "work_authorization": "Authorized to work in the US",
+        "authorized_to_work_us": "Yes",
+        "requires_sponsorship": "No",
+        "visa_status": "U.S. Citizen",
+        "citizenship": "United States",
+        # other common screening (profile-driven; neutral defaults handled by the engine when absent)
+        "willing_to_relocate": "Yes",
+        "salary_expectation": "180000",
+        "notice_period": "2 weeks",
+        "security_clearance": "None",
+        "criminal_history": "No",
         "experience": [
             {
                 "title": "Senior Software Engineer",
