@@ -1473,13 +1473,15 @@ class WorkdayAdapter(ATSAdapter):
         residual = {r.split("[")[0].split(".")[0] for r in (out.get("deterministic") or {}).get("residual", [])}
 
         # RESIDUAL backstop: only sections the deterministic loop could not fully close fall to the agent.
-        headings = [h for h in await self._page_headings(page) if len(h) <= 40]
-        for key, keywords, is_tag in self._REPEATERS:
+        # TITLE-IGNORANT gate: `residual` is the set of repeater sections the deterministic loop found by
+        # data-fkit-id STRUCTURE (workExperience-*/education-* — Workday-internal, tenant/heading-independent)
+        # and could not fully close. Gate the agent on THAT alone — a heading-keyword match here would let a
+        # tenant relabel or localization ('Employment History', a translated heading) skip a section that
+        # structurally EXISTS. The HARD GATE above (an "Add Another" affordance) already prevents mis-firing.
+        for key, _keywords, is_tag in self._REPEATERS:
             items = profile.get(key) or []
             if not items or key not in residual:
                 continue
-            if not any(any(kw in h for kw in keywords) for h in headings):
-                continue  # section not on THIS page — generic gate, no hardcoded aid
             label = key.capitalize()
             if is_tag:  # Skills / Languages / Certs: typeahead tags
                 vals = ", ".join(self._item_str(it) for it in items)
@@ -1522,21 +1524,6 @@ class WorkdayAdapter(ATSAdapter):
                 parts.append(f"{k.replace('_', ' ')}='{str(v)[:300]}'")
             return ", ".join(parts)
         return str(item)
-
-    async def _page_headings(self, page: Any) -> list[str]:
-        """Lower-cased visible section headings/labels — used to GENERICALLY detect which repeater
-        sections are present (heading keyword match), independent of any tenant-specific aid."""
-        with contextlib.suppress(Exception):
-            raw = await page.evaluate(
-                "() => JSON.stringify([...document.querySelectorAll("
-                '\'h1,h2,h3,h4,[data-automation-id*="title"],[data-automation-id*="Title"],'
-                "[data-automation-id*=\"pageHeader\"]')].map(e=>(e.textContent||'').replace(/\\s+/g,' ')"
-                ".trim().toLowerCase()).filter(Boolean).slice(0,60))"
-            )
-            import json
-
-            return json.loads(raw) if raw else []
-        return []
 
     # -- helpers -----------------------------------------------------------
     async def _settle(self, page: Any, seconds: float = 2.0) -> None:
