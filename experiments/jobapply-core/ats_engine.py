@@ -1260,6 +1260,10 @@ async def run_single_page(
     await asyncio.sleep(2.5)
     page = await session.must_get_current_page()
     page = await adapter.open_form(session, page)  # reach the form (iframe-embed / wall / apply)
+    # SUBMIT-GUARD (hard rule: NEVER submit). The single-page path relied only on "deterministic never
+    # clicks Submit + escalation off" — fragile once L3/escalation is enabled. Install the structural
+    # guard here too (parity with run_wizard) so a real Submit button is disabled regardless of tier.
+    await install_submit_guard(page)
 
     result: dict = {
         "adapter": adapter.__class__.__name__,
