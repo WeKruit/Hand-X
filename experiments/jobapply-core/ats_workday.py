@@ -969,6 +969,8 @@ class WorkdayAdapter(ATSAdapter):
                 owns = (await inp.get_attribute("aria-controls")) or (await inp.get_attribute("aria-owns")) or ""
                 owned = owns.split()[0] if owns.split() else ""
 
+            matched_text: dict = {"t": ""}  # exact rendered text of the matched row (for atomic commit)
+
             async def _rows() -> list[tuple[Any, str]]:
                 # DEDUPED visible rows: a row's parent+child both match the option selector, so the
                 # same text read twice — keep the FIRST node per text (clicking either lands the row).
@@ -984,7 +986,10 @@ class WorkdayAdapter(ATSAdapter):
                 return out
 
             async def _pick_row(rows: list[tuple[Any, str]]) -> Any | None:
+                mtxt = next((t for o, t in rows if t == eng.norm(value) or _bare_eq(t, value)), None)
                 target = next((o for o, t in rows if t == eng.norm(value) or _bare_eq(t, value)), None)
+                if target is not None and mtxt:
+                    matched_text["t"] = mtxt
                 if target is None and rows:
                     from wd_repeaters import _llm_pick
 
@@ -993,9 +998,32 @@ class WorkdayAdapter(ATSAdapter):
                         target = next((o for o, t in rows if t == eng.norm(choice)), None)
                         if target is not None:
                             self._chosen[field.name] = choice  # pick-time canonical answer (verify honors it)
+                            matched_text["t"] = eng.norm(choice)
                 return target
 
             async def _click_row(target: Any) -> None:
+                # ATOMIC JS COMMIT FIRST (the autodesk stale-node fix): re-find the option BY TEXT and
+                # fire a full pointer/mouse event sequence in ONE page.evaluate — no handle round-trip,
+                # so the virtualizer cannot re-render between find and click. Handle-based clicks failed
+                # because reading the row's rect / scrollIntoView fires a scroll event that re-renders
+                # and detaches the node (verified: US matched every window, never committed).
+                mt = matched_text["t"]
+                if mt:
+                    with contextlib.suppress(Exception):
+                        r = await page.evaluate(
+                            "(want) => { const norm=s=>(s||'').replace(/\\s+/g,'').toLowerCase();"
+                            " const o=[...document.querySelectorAll('[data-automation-id=\"promptOption\"],[role=\"option\"]')]"
+                            ".filter(e=>e.offsetParent!==null && !e.closest('[data-automation-id=\"selectedItemList\"]'));"
+                            " const el=o.find(e=>norm(e.textContent)===want); if(!el) return 'no-el';"
+                            " const rc=el.getBoundingClientRect(); const cx=rc.left+rc.width/2, cy=rc.top+rc.height/2;"
+                            " const opts={bubbles:true,cancelable:true,view:window,clientX:cx,clientY:cy,button:0};"
+                            " for(const ty of ['pointerdown','mousedown','pointerup','mouseup','click'])"
+                            "  el.dispatchEvent(new MouseEvent(ty,opts)); return 'clicked'; }",
+                            mt,
+                        )
+                        if str(r) == "clicked":
+                            await asyncio.sleep(0.5)
+                            return
                 # CLICK BY CAPTURED COORDS, NOT scrollIntoView (the autodesk-class fix): the matched row
                 # is ALREADY in the rendered window (offsetParent!=null), and a scrollIntoView fires a
                 # scroll event that makes the virtualizer RE-RENDER — detaching `target` so the trusted
@@ -1061,6 +1089,7 @@ class WorkdayAdapter(ATSAdapter):
                             c = prop
                     if c is not None:
                         self._chosen[field.name] = c[1]
+                        matched_text["t"] = c[1]
                     return c[0] if c else None
 
                 async def _bail() -> Any | None:
