@@ -1486,6 +1486,17 @@ async def run_wizard(
                         # matching — the substring directive doesn't apply.
                         with contextlib.suppress(Exception):
                             redo = await fields_from_errors(errs, step.fields, llm=agent_llm)
+                            if not redo:
+                                # VLM reader (user directive: 'VLM can help here too'): the text
+                                # readers found no owner — ask ONE screenshot which fields are
+                                # VISIBLY flagged, then map those runtime labels back to fields.
+                                with contextlib.suppress(Exception):
+                                    from vision_verify import flagged_fields_visually
+
+                                    seen = {norm(x) for x in await flagged_fields_visually(session)}
+                                    redo = [f for f in step.fields if f.label and norm(f.label) in seen]
+                                    if redo:
+                                        print(f"  [validation-fix] VLM flagged: {[f.label for f in redo][:6]}")
                             for f in redo[:8]:
                                 value, _src = _resolve(f, mapped, resume)
                                 if (value or "").strip():
@@ -1494,6 +1505,14 @@ async def run_wizard(
                                         allow_escalation=False,
                                     )
                                     print(f"  [validation-fix] refill {(f.label or f.name)[:40]!r} -> {tier}")
+                            if not redo and hasattr(adapter, "fill_repeaters"):
+                                # REPEATER rung: the named fields (language grid, row dates) live
+                                # inside repeater sections that step.fields does not carry — ONE
+                                # idempotent fixpoint re-run reads everything back and fills only
+                                # what is genuinely MISSING (respect-autofill + SKIP rules apply).
+                                print("  [validation-fix] no step-level owner — re-running repeaters fixpoint")
+                                await adapter.fill_repeaters(session, page, profile)
+                                redo = step.fields[:1]  # mark work done so we re-advance below
                             if redo:
                                 await adapter.next_step(session, page)
                                 moved0 = await adapter.extract_step(session, page, profile)

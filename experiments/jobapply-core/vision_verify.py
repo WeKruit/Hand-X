@@ -196,6 +196,41 @@ def _parse_str_list(raw: str) -> list[str]:
     return uniq
 
 
+async def flagged_fields_visually(session: Any) -> list[str]:
+    """FIX-LOOP vision reader (user directive: 'VLM can help here too'): when the DOM/text readers
+    can't tie an advance-blocking message to concrete fields, ONE low-detail screenshot names the
+    fields VISIBLY flagged as invalid (red border/asterisk banner/error text under the input).
+    Uncached (post-write state), bounded like every VLM call. [] on any failure — never blocks."""
+    import oa_llm as _oa_llm
+
+    png = await _oa_llm.bounded_screenshot(session)
+    if png is None:
+        return []
+    b64 = base64.b64encode(png).decode()
+    prompt = (
+        "This job-application form failed to advance. Some fields are visibly marked as having "
+        "validation errors (red outline, error text beneath them, or listed in an error banner). "
+        "Reply ONLY a STRICT JSON array of the LABELS of those flagged fields, exactly as shown, "
+        'e.g. ["Postal Code", "State"]. If none are visibly flagged, reply [].'
+    )
+    try:
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+        msg = UserMessage(
+            content=[
+                ContentPartTextParam(type="text", text=prompt),
+                ContentPartImageParam(
+                    type="image_url",
+                    image_url=ImageURL(url=f"data:image/png;base64,{b64}", detail="low", media_type="image/png"),
+                ),
+            ]
+        )
+        res = await _oa_llm.resilient_vlm([msg], primary=_vlm())
+        return _parse_str_list(res or "[]")[:8]
+    except Exception:
+        return []
+
+
 async def read_options_visually(session: Any, *, key: str | None = None, use_cache: bool = True) -> list[str]:
     """Read the ACTUALLY-RENDERED options of the currently-open dropdown/menu from ONE low-detail
     screenshot — no DOM lag, no stale shared portal. This is the matching fix: the DOM option portal
