@@ -1025,10 +1025,31 @@ class WorkdayAdapter(ATSAdapter):
                         rows_h = await _rows()
                         if rows_h and rows_h[-1][1] != lt:
                             break
+                    if rows_h and rows_h[-1][1] == lt:
+                        # FALLBACK A (live-proven on the autodesk variant where scrollIntoView, wheel
+                        # AND arrows all no-op): scroll the options' own scrollable ancestor directly.
+                        # activeListContainer is a ~151px strip over ~7500px of rows; scrollTop
+                        # assignment fires NATIVE scroll events the virtualizer obeys.
+                        with contextlib.suppress(Exception):
+                            await page.evaluate(
+                                "(n) => { const opt=[...document.querySelectorAll("
+                                '\'[data-automation-id="promptOption"],[role="option"]\')]'
+                                ".find(e=>e.offsetParent!==null && !e.closest('[data-automation-id=\"selectedItemList\"]'));"
+                                " let a=opt?opt.parentElement:null;"
+                                " while(a && a!==document.body){"
+                                "  if(a.scrollHeight>a.clientHeight+5){ a.scrollTop+=Math.max(a.clientHeight-20,100)*n; return 'Y:'+a.scrollTop; }"
+                                "  a=a.parentElement; }"
+                                " return 'N'; }",
+                                1,
+                            )
+                        for _w in range(4):
+                            await asyncio.sleep(0.3)
+                            rows_h = await _rows()
+                            if rows_h and rows_h[-1][1] != lt:
+                                break
                     if rows_h and rows_h[-1][1] == lt and session is not None:
-                        # scrollIntoView is a NO-OP on some tenant widget variants (verified live:
-                        # alteryx + autodesk stuck on the A-window while paypal/hp scrolled fine) —
-                        # fall back to a TRUSTED mouse-wheel over the menu, the human-generic scroll.
+                        # FALLBACK B: trusted mouse-wheel over the menu (hover first — some widgets
+                        # gate wheel on pointer position).
                         with contextlib.suppress(Exception):
                             box = await rows_h[-1][0].evaluate(
                                 "() => { const r=this.getBoundingClientRect();"
@@ -1036,6 +1057,11 @@ class WorkdayAdapter(ATSAdapter):
                             )
                             x, y = (float(v) for v in str(box).split(","))
                             sid = await page.session_id
+                            await session.cdp_client.send.Input.dispatchMouseEvent(
+                                params={"type": "mouseMoved", "x": x, "y": max(y, 10), "buttons": 0},
+                                session_id=sid,
+                            )
+                            await asyncio.sleep(0.15)
                             await session.cdp_client.send.Input.dispatchMouseEvent(
                                 params={"type": "mouseWheel", "x": x, "y": max(y, 10),
                                         "deltaX": 0, "deltaY": 420},
