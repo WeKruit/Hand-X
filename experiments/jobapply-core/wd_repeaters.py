@@ -1046,7 +1046,17 @@ async def fill_deterministic(adapter, session, page, profile: dict, llm, title: 
                 ):
                     continue
                 tp = time.monotonic()
-                ok = await put(adapter, session, page, fd.control, fd.intended, llm)
+                try:
+                    ok = await put(adapter, session, page, fd.control, fd.intended, llm)
+                except Exception as exc:
+                    # CRASH CONTAINMENT (generic): one field's exception must never kill the page
+                    # engine — paypal lost Degree+Overall because ONE msel diagnostic raised and the
+                    # whole fixpoint loop died. Blast radius = this field (residual), loop continues.
+                    print(
+                        f"  [wd] put ERROR {fd.section}[{fd.row}].{fd.label}: {type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    ok = False
                 dt = time.monotonic() - tp
                 slow[fd.control.archetype()] = slow.get(fd.control.archetype(), 0.0) + dt
                 if ok:
