@@ -936,6 +936,10 @@ class WorkdayAdapter(ATSAdapter):
         ok = False
         pairs: list[tuple[Any, str]] = []
         node = None
+        last_window: list[str] = []  # the hunt's REAL final window (diagnostic truth). MUST init here:
+        # declared inside `if menu:` it is function-local-everywhere yet unassigned on the no-menu
+        # path — the diagnostic below then raised UnboundLocalError and KILLED the whole repeaters
+        # engine (verified live on paypal round-2: 'deterministic_error: UnboundLocalError').
         if menu:
             owned = ""
             with contextlib.suppress(Exception):
@@ -976,8 +980,6 @@ class WorkdayAdapter(ATSAdapter):
                     with contextlib.suppress(Exception):
                         await target.click()
                 await asyncio.sleep(0.5)
-
-            last_window: list[str] = []  # the REAL final window the hunt saw (diagnostic truth)
 
             async def _hunt(rows_now: list[tuple[Any, str]]) -> Any | None:
                 nonlocal last_window
