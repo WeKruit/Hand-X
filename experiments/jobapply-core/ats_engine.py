@@ -1430,7 +1430,39 @@ async def run_wizard(
                             ):
                                 adv = AdvanceResult(ok=True, page=page)  # advanced deterministically; skip the agent
                                 errs = []
-                    if errs and not adv.ok:  # non-file errors, or the deterministic file-fix didn't advance
+                    if errs and not adv.ok:
+                        # DETERMINISTIC FIX LOOP (L1 first, agent last): Workday's validation text
+                        # CONTAINS the runtime labels of the offending fields — refill exactly those
+                        # through the same ladder (escalation off), then re-advance. The old finding
+                        # "no deterministic re-fill re-arms a rejected Save" predates trusted CDP
+                        # input; the repair agent proved trusted refill+Save re-arms the form, so L1
+                        # gets first shot. Label-in-error is field SELECTION (idempotent), not value
+                        # matching — the substring directive doesn't apply.
+                        with contextlib.suppress(Exception):
+                            ek = norm(" ".join(errs))
+                            redo = [f for f in step.fields if f.label and norm(f.label) and norm(f.label) in ek]
+                            for f in redo[:8]:
+                                value, _src = _resolve(f, mapped, resume)
+                                if (value or "").strip():
+                                    tier = await fill_with_ladder(
+                                        adapter, session, page, f, value, agent_llm, resume,
+                                        allow_escalation=False,
+                                    )
+                                    print(f"  [validation-fix] refill {(f.label or f.name)[:40]!r} -> {tier}")
+                            if redo:
+                                await adapter.next_step(session, page)
+                                moved0 = await adapter.extract_step(session, page, profile)
+                                if (
+                                    moved0.index != step.index
+                                    or moved0.is_review
+                                    or await adapter.is_complete(session, page)
+                                ):
+                                    adv = AdvanceResult(ok=True, page=page)
+                                    errs = []
+                                    print("  [validation-fix] advanced deterministically — agent skipped")
+                                else:
+                                    errs = await adapter.validation_errors(page) or errs
+                    if errs and not adv.ok:  # the deterministic fix loop didn't clear it -> agent
                         agent_used = True
                         await repair_and_advance(
                             session, page, errs, adapter.advance_label, agent_llm=agent_llm, resume=resume
