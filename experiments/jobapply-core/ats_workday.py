@@ -996,6 +996,31 @@ class WorkdayAdapter(ATSAdapter):
                 return target
 
             async def _click_row(target: Any) -> None:
+                # CLICK BY CAPTURED COORDS, NOT scrollIntoView (the autodesk-class fix): the matched row
+                # is ALREADY in the rendered window (offsetParent!=null), and a scrollIntoView fires a
+                # scroll event that makes the virtualizer RE-RENDER — detaching `target` so the trusted
+                # click lands on a stale node and commits nothing (verified live: US matched every window
+                # yet never committed). Grab the current rect FIRST, trusted-click those coords directly.
+                box = None
+                with contextlib.suppress(Exception):
+                    raw = await target.evaluate(
+                        "() => { const r=this.getBoundingClientRect();"
+                        " return (r.width&&r.height)?(r.left+r.width/2)+','+(r.top+r.height/2):''; }"
+                    )
+                    if raw:
+                        x, y = (float(v) for v in str(raw).split(","))
+                        box = (x, y)
+                if box is not None and session is not None:
+                    with contextlib.suppress(Exception):
+                        sid = await page.session_id
+                        for ev in (
+                            {"type": "mousePressed", "x": box[0], "y": box[1], "button": "left", "buttons": 1, "clickCount": 1},
+                            {"type": "mouseReleased", "x": box[0], "y": box[1], "button": "left", "buttons": 0, "clickCount": 1},
+                        ):
+                            await session.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=sid)
+                        await asyncio.sleep(0.5)
+                        return
+                # fallback (offline / no rect): the legacy scrollIntoView + handle click
                 with contextlib.suppress(Exception):
                     await target.evaluate("() => this.scrollIntoView({block:'center'})")
                 await asyncio.sleep(0.2)
