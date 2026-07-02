@@ -1048,23 +1048,24 @@ class WorkdayAdapter(ATSAdapter):
                             if rows_h and rows_h[-1][1] != lt:
                                 break
                     if rows_h and rows_h[-1][1] == lt and session is not None:
-                        # FALLBACK B: trusted mouse-wheel over the menu (hover first — some widgets
-                        # gate wheel on pointer position).
+                        # FALLBACK B: trusted mouse-wheel over the OPTIONS CONTAINER CENTER (not the
+                        # last-row rect — that sits at the container edge / outside it, so the wheel
+                        # landed on nothing; verified live the container center is the scroll target).
+                        # Some virtualizers ignore scrollTop but obey a real wheel event.
                         with contextlib.suppress(Exception):
-                            box = await rows_h[-1][0].evaluate(
-                                "() => { const r=this.getBoundingClientRect();"
-                                " return (r.left+r.width/2)+','+(r.top-30); }"
+                            box = await page.evaluate(
+                                "() => { const ac=document.querySelector('[data-automation-id=\"activeListContainer\"]');"
+                                " if(!ac) return ''; const r=ac.getBoundingClientRect();"
+                                " return (r.left+r.width/2)+','+(r.top+r.height/2); }"
                             )
                             x, y = (float(v) for v in str(box).split(","))
                             sid = await page.session_id
                             await session.cdp_client.send.Input.dispatchMouseEvent(
-                                params={"type": "mouseMoved", "x": x, "y": max(y, 10), "buttons": 0},
-                                session_id=sid,
+                                params={"type": "mouseMoved", "x": x, "y": y, "buttons": 0}, session_id=sid,
                             )
                             await asyncio.sleep(0.15)
                             await session.cdp_client.send.Input.dispatchMouseEvent(
-                                params={"type": "mouseWheel", "x": x, "y": max(y, 10),
-                                        "deltaX": 0, "deltaY": 420},
+                                params={"type": "mouseWheel", "x": x, "y": y, "deltaX": 0, "deltaY": 600},
                                 session_id=sid,
                             )
                         for _w in range(4):

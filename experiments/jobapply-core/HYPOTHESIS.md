@@ -133,3 +133,23 @@ Any Workday fill problem decomposes into exactly these; a fix must be GENERIC wi
 
 Simulating human behavior (trusted input) + seeing values (observe) + context (LLM) spans all four —
 that is why the class is closeable, not eternal.
+
+## 9. Live finding 2026-07-02: the autodesk (wd1) scroll-only virtualizer — a real OBSERVE-tier boundary
+
+countryPhoneCode committed=True DETERMINISTICALLY on paypal/hp/adobe/blueorigin (wd5/wd108 variants —
+their virtualizer re-renders on scrollIntoView; bare-eq then commits the '(+1)' row). The autodesk wd1
+variant is DIFFERENT and was tested LIVE against FOUR scroll mechanisms — ALL no-op (window frozen at
+the A-Z first page, afghanistan→azerbaijan, n=30):
+  1. type-to-filter  — input.value becomes 'united', list unchanged (this widget has no search filter)
+  2. scrollIntoView(last row) — no re-render
+  3. scrollTop += clientHeight on activeListContainer — container moved 0→4000 of 7500, rows FROZEN
+  4. trusted CDP mouseWheel at container center — no re-render
+  5. trusted ArrowDown batches — no re-render
+activeListContainer geometry: clientHeight 151, scrollHeight 7500 (~240 rows windowed to 30).
+CONCLUSION: this is a genuine DOM-OBSERVE limit, not a matcher/commit bug — the deterministic tier
+cannot page this virtualizer. Correct generic handling per §8: it escalates to the VISION+agent tier
+(L3) which sees the rendered strip via screenshot and scrolls via the agent's real browser actions.
+The 4 scroll rungs are KEPT (fail-safe, cheap, and they DO carry the wd5-class variants); autodesk's
+phone field is a recorded vision-tier case, NOT a deterministic gap to keep patching. Do not thrash a
+6th scroll guess on it — the tier boundary is proven. Open (deferred): confirm the L3 agent commits it
+via vision, and probe whether a per-window aria-posinset/setsize read exposes the full set another way.
