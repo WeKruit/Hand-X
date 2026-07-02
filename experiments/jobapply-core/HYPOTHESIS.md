@@ -112,3 +112,24 @@ email-verify auto-skip). Goal: ~20 different Workday jobs filled to Review. Swee
 | OOPIF iframes (Greenhouse embeds) | embedded boards unreachable | CDP flatten attach; HITL interim | days |
 | Page-level vision reconcile | per-field VLM latency adds up | 1 screenshot → all pairs → diff | half-day |
 | browser_use argless-braced evaluate | wrapper throws in-page | args-form convention (done hot paths); patch vendored lib later | trivial/site |
+
+## 8. The four capability categories (user's frame, 2026-07-02 — every problem files under one)
+
+Any Workday fill problem decomposes into exactly these; a fix must be GENERIC within its category:
+
+1. **OBSERVE** — see what a human sees: DOM read of rendered rows/values, vision when DOM is blind,
+   scrolling as part of observation (virtualized lists: type-filter → scrollIntoView → trusted wheel →
+   trusted ArrowDown focus-follow → [scrollbar drag, build-on-demand]). Human-input closure argument:
+   a widget none of the five moves can scroll is one a human cannot scroll either.
+2. **MATCH** — decide which observed value equals the wanted value: ONE normalizer both sides
+   (eng.norm ∘ paren-strip), exact/bare first ($0), text-LLM over DOM texts for semantics,
+   errored-LLM = unknown, never "no".
+3. **COMMIT** — make the widget take it: trusted-click the matched node, pill-delta/native marker
+   polled as the only truth, drill-down for category menus, exclusive removal for wrong pills,
+   disarm on failure (click-outside + Escape).
+4. **KNOW WHAT TO PUT IN** — the value side: profile map, reasonable defaults (worked-here→No),
+   closest-available policy, attestation carve-outs, respect-autofill; residual + human review when
+   genuinely unknowable.
+
+Simulating human behavior (trusted input) + seeing values (observe) + context (LLM) spans all four —
+that is why the class is closeable, not eternal.
