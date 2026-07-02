@@ -921,6 +921,28 @@ class WorkdayAdapter(ATSAdapter):
         if not await eng.type_text_trusted(session, page, value):
             with contextlib.suppress(Exception):
                 await inp.fill(value)  # offline/no-CDP fallback
+        # TYPE-AHEAD ENTER COMMIT FIRST (live-proven on the autodesk wd1 virtualizer where scroll/click
+        # is hopeless — the option renders OUTSIDE the 151px clip so no click can land): the widget keeps
+        # a type-ahead buffer that matches the FULL typed value and commits the matching option on Enter,
+        # even though the visible list never filters. Type the value (done above) -> Enter -> pill delta.
+        # Costs nothing on widgets where it doesn't apply (Enter without a match just does nothing, and
+        # the menu-wait + commit-by-node path below still runs).
+        if session is not None:
+            await asyncio.sleep(0.6)
+            await eng.press_enter_trusted(session, page)
+            if await _committed_delta():
+                # verify the NEW pill actually matches (a type-ahead Enter could commit a wrong
+                # highlighted option on a different widget) — accept only a bare-eq/LLM match.
+                committed = await self._committed_value(page, field)
+                new_pills = [p.strip() for p in (committed or "").split(",") if p.strip()]
+                good = any(_bare_eq(p, value) for p in new_pills)
+                if not good and new_pills:
+                    good = await _llm_value_matches(new_pills[-1], value)
+                if good:
+                    self._chosen[field.name] = value
+                    if _DBG:
+                        print(f"   [msel {field.name}] type-ahead Enter commit OK (pills {n0}->{n0 + 1})")
+                    return True
         # WAIT for the suggestion menu (async taxonomy fetch) BEFORE Enter — an Enter with no menu
         # commits NOTHING and strands the typed text (the false-'filled' above). Bounded ~2.5s poll.
         menu = False
