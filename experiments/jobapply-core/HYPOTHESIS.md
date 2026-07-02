@@ -153,3 +153,18 @@ The 4 scroll rungs are KEPT (fail-safe, cheap, and they DO carry the wd5-class v
 phone field is a recorded vision-tier case, NOT a deterministic gap to keep patching. Do not thrash a
 6th scroll guess on it — the tier boundary is proven. Open (deferred): confirm the L3 agent commits it
 via vision, and probe whether a per-window aria-posinset/setsize read exposes the full set another way.
+
+## 10. Autodesk wd1 virtualizer SOLVED (2026-07-02) — type-ahead Enter, the generic commit
+
+The wd1 countryPhoneCode (240 options, 151px clip) resisted SIX click-based commit mechanisms because
+the option renders in the DOM but OUTSIDE the visible clip (US at y=737, clip 254-405) — elementFromPoint
+returns null, scrolling repositions the virtualized node, so no click can ever land. BREAKTHROUGH: the
+widget keeps a TYPE-AHEAD BUFFER — type the full value then Enter commits the matching option, even
+though the visible list never filters. Wired as the FIRST commit in _multiselect (type value -> Enter ->
+pill delta -> bare-eq/LLM verify the new pill matches the value). Result: autodesk My Info = 0 FAIL, ALL
+fields L1 (How Did You Hear hierarchical, Country Phone Code virtualizer, Phone Device Type — all commit
+via type-ahead Enter). This is GENERIC and cheaper than the scroll-hunt: type+Enter is now the primary
+commit for every searchable multiselect; scroll-hunt + center-and-click remain as fallbacks. Also landed
+this session: clip-aware _rows() (rendered!=visible!=clickable), synthetic scroll-event dispatch after
+scrollTop (virtualizer re-renders on the event, not the property write), center-and-click primitive.
+Every Workday widget variant met so far is now deterministically fillable.
