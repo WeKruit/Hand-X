@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 from typing import Any
 
 import ats_engine as eng
@@ -42,6 +43,20 @@ def _match_llm() -> Any:
 
             _MATCH_LLM = _vlm()
     return _MATCH_LLM
+
+
+def _bare(s: str) -> str:
+    """Deterministic option-text key: normalized text MINUS parenthetical annotations. Workday rows
+    decorate the canonical value — 'United States of America (+1)', 'Python (Programming Language)',
+    'RESTful APIs (Suggested)' — and the naive equality test rejected its own answer (verified live:
+    the diagnostic printed rows[:12]=[... 'unitedstatesofamerica(+1)' ...] then declared 'no matching
+    row', costing 4 applications). Equality on _bare() commits these with ZERO LLM involvement."""
+    return re.sub(r"\([^)]*\)", "", s or "").strip().lower()
+
+
+def _bare_eq(a: str, b: str) -> bool:
+    ba, bb = _bare(a), _bare(b)
+    return bool(ba) and ba == bb
 
 
 _VALUE_MATCH_CACHE: dict = {}
@@ -940,7 +955,7 @@ class WorkdayAdapter(ATSAdapter):
                 return out
 
             async def _pick_row(rows: list[tuple[Any, str]]) -> Any | None:
-                target = next((o for o, t in rows if t == eng.norm(value)), None)
+                target = next((o for o, t in rows if t == eng.norm(value) or _bare_eq(t, value)), None)
                 if target is None and rows:
                     from wd_repeaters import _llm_pick
 
@@ -969,15 +984,23 @@ class WorkdayAdapter(ATSAdapter):
                 nv = eng.norm(value)
                 last_txt, still = "", 0
                 for _ in range(25):
-                    cand = next(
-                        (
-                            (o, t)
-                            for o, t in pairs
-                            if t and t != "selectone" and (nv in t or t in nv) and len(t) > 2
-                        ),
-                        None,
-                    )
-                    if cand is not None and await _llm_value_matches(cand[1], value):
+                    # DETERMINISTIC first: bare-equality (parenthetical suffix stripped) commits with
+                    # no LLM in the loop — 'unitedstatesofamerica(+1)' IS the wanted row (the LLM
+                    # confirm here was a single point of failure: with the fallback chain dead it
+                    # rejected the visible answer 4 applications in a row).
+                    cand = next(((o, t) for o, t in pairs if _bare_eq(t, value)), None)
+                    if cand is None:
+                        prop = next(
+                            (
+                                (o, t)
+                                for o, t in pairs
+                                if t and t != "selectone" and (nv in t or t in nv) and len(t) > 2
+                            ),
+                            None,
+                        )
+                        if prop is not None and await _llm_value_matches(prop[1], value):
+                            cand = prop
+                    if cand is not None:
                         node = cand[0]
                         self._chosen[field.name] = cand[1]
                         break
@@ -1282,7 +1305,7 @@ class WorkdayAdapter(ATSAdapter):
             # the node, TRUSTED-click it. (Type-ahead was a dead end: letters single-jump/cycle the
             # highlight — 'united' landed 'U. S. Virgin Islands'; a blur then auto-commits garbage.)
             async def _commit_node(pairs: list[tuple[Any, str]]) -> bool:
-                node = next((o for o, t in pairs if t and t == want), None)
+                node = next((o for o, t in pairs if t and (t == want or _bare_eq(t, want))), None)
                 if node is None:
                     from wd_repeaters import _llm_pick
 
@@ -1684,6 +1707,17 @@ class WorkdayAdapter(ATSAdapter):
                 committed = await self._committed_value(page, field)
                 if _is_chosen(committed):
                     return True
+                # MULTI-pill membership, not whole-string equivalence: committed joins EVERY pill
+                # ('JavaScript, ..., Python (Programming Language), ...') and judging that string
+                # against one wanted value false-FAILed a field that already contained it (verified
+                # live). The wanted value is committed if ANY pill matches it.
+                if committed and field.type == "multi_select":
+                    pills = [p.strip() for p in committed.split(",") if p.strip()]
+                    for p in pills:
+                        if _bare_eq(p, value) or (chosen and eng.norm(p).lower() == chosen.lower()):
+                            return True
+                    if pills and await _llm_value_matches(pills[-1], value):  # newest pill last
+                        return True
                 if committed and await _llm_value_matches(committed, value):
                     return True
                 if i + 1 < 3:

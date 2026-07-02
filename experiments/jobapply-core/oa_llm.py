@@ -116,7 +116,12 @@ def _build_fallback(kind: str) -> tuple[Any, str]:
     if _openai_primary_on():
         gkey = os.environ.get("GOOGLE_API_KEY")
         if gkey:
-            model = (vlm_model or "gemini-3.1-flash-lite") if kind == "vlm" else (text_model or "gemini-3.1-flash-lite")
+            # honor OA_FALLBACK_MODEL only if it names a GOOGLE model — a stale openai name here
+            # (OA_FALLBACK_MODEL=gpt-5.4-mini from the old topology) built ChatGoogle('gpt-5.4-mini')
+            # -> 404 NOT_FOUND on EVERY fallback call, silently killing the whole chain (verified
+            # live on the nvidia sweep run: 'models/gpt-5.4-mini is not found for API version v1beta').
+            want = vlm_model if kind == "vlm" else text_model
+            model = want if (want or "").startswith("gemini") else "gemini-3.1-flash-lite"
             return _cached("google", model, kind, lambda: _mk_google(model, gkey)), "google"
 
     if openai_key:

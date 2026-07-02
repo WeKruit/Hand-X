@@ -321,6 +321,15 @@ def reconcile(plan: dict, controls: list[Control], readback: dict | None = None)
     Pure: classifies DONE / MISSING / DIVERGED; flags unplanned-required + row overflow (dup-guard)."""
     readback = readback or {}
     d = Diff()
+    # AUTOFILL-OWNED rows: résumé parse pre-fills rows that need NOT correspond to the plan's entries
+    # (verified live: 6 mounted rows vs a 2-entry plan — plan row j lands on a stranger's row; writing
+    # the plan's End Date there is WRONG DATA, and flagging it as MISSING bought a no-op agent per
+    # tenant). A row with ≥2 committed fields belongs to the résumé — its empty cells are SKIP.
+    row_fill: dict = {}
+    for c in controls:
+        if c.sect() and c.row:
+            k = (c.sect(), c.row)
+            row_fill[k] = row_fill.get(k, 0) + (1 if norm(readback.get(c.fkit, "")) else 0)
     for sec, blk in plan.items():
         plan_rows = blk.get("rows", [])
         dom_rows = _rows_of(controls, sec)
@@ -348,8 +357,12 @@ def reconcile(plan: dict, controls: list[Control], readback: dict | None = None)
                     # multi-pill tag (Skills): DONE only when EVERY item is a pill (else add the rest).
                     items = [nkey(x) for x in v.split(",") if x.strip()]
                     status = "DONE" if all(it in nkey(got) for it in items) else "MISSING"
+                elif got:
+                    status = "DONE"  # filled (any value) = leave it (respect autofill)
+                elif dom_row and row_fill.get((sec, dom_row), 0) >= 2:
+                    status = "SKIP"  # autofill-owned row — its gaps are the résumé's, not the plan's
                 else:
-                    status = "DONE" if got else "MISSING"  # filled (any value) = leave it; empty = fill
+                    status = "MISSING"
                 d.fields.append(FieldDiff(sec, j, label, v, status, ctrl))
         if len(dom_rows) > len(plan_rows):  # dup-guard signal
             d.row_overflow[sec] = dom_rows[len(plan_rows) :]
@@ -761,14 +774,23 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
         have = [p.strip() for p in got.split(",") if p.strip()]
 
         async def _present(it: str) -> bool:
-            if any(p.lower() == it.lower() for p in have):
-                return True
-            from ats_workday import _llm_value_matches
+            from ats_workday import _bare_eq, _llm_value_matches
 
+            # deterministic first: 'Python (Programming Language)' / '... (Suggested)' IS 'Python'
+            if any(p.lower() == it.lower() or _bare_eq(p, it) for p in have):
+                return True
             for p in have:
                 if await _llm_value_matches(p, it):  # cached; 2 short strings
                     return True
             return False
+
+        # RESPECT AUTOFILL on single-value chips (agreed policy — the agent prompt already codifies
+        # it): a chip that HOLDS a committed value is COMPLETE even when it differs from the profile
+        # ('University of California, Davis' from the résumé vs profile 'Berkeley'). Re-typing burned
+        # 2 rounds + a verify-noop agent per tenant and can only replace résumé truth with a guess.
+        if have and len(items) == 1 and not await _present(items[0]):
+            print(f"  [chip {c.fkit}] autofill kept: {have[0]!r} (profile wanted {items[0]!r})", flush=True)
+            return True
 
         added = 0
         for it in items:

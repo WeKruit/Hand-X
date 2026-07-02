@@ -653,8 +653,16 @@ def _strip_urls(text: str) -> str:
     """Adobe bad-seed fix: a Workday validation message can contain a token that LOOKS like a
     URL (e.g. 'https://value.Error' / a hallucinated link), which browser-use will obediently
     NAVIGATE to — losing the form. Strip anything URL-shaped out of the repair seed text so the
-    agent only ever reads field-level instructions, never a destination to open."""
-    return re.sub(r"\b(?:https?://|www\.)\S+", "[link removed]", text or "")
+    agent only ever reads field-level instructions, never a destination to open.
+
+    HARDENED (verified live on autodesk): browser-use's task preprocessor also matches BARE
+    domain-shaped tokens and prepends https:// itself — the concatenated error text '...must have
+    a value.Error-Country...' became a navigation to 'https://value.Error', which wiped a fully
+    filled page. So: strip explicit links, strip bare word.tld tokens, and break every
+    dot-followed-by-letter junction so nothing in the seed can ever parse as a domain."""
+    t = re.sub(r"\b(?:https?://|www\.)\S+", "[link removed]", text or "")
+    t = re.sub(r"\b\S+\.(?:com|org|net|io|co|ai|dev|app)\b\S*", "[link removed]", t)
+    return re.sub(r"\.(?=[A-Za-z])", ". ", t)
 
 
 async def _ensure_cdp_live(session: Any) -> None:
@@ -772,7 +780,12 @@ async def agent_fill_section(
             use_vision="auto",
             available_file_paths=[resume] if resume else None,
         )
-        await agent.run(max_steps=max_steps, on_step_end=hook)
+        hist = await agent.run(max_steps=max_steps, on_step_end=hook)
+        # HONEST bookkeeping (verified live: 'agent_ok': True was recorded for section agents whose
+        # judge verdict was FAIL and who changed NOTHING) — agent_ok must reflect the agent's own
+        # done-success, not merely 'the agent ran without raising'.
+        with contextlib.suppress(Exception):
+            ok = hist.is_successful() is True
     except Exception as exc:
         print(f"   [agent:{section}] {exc}")
         ok = False
