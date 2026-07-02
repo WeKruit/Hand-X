@@ -61,6 +61,26 @@ def _bare_eq(a: str, b: str) -> bool:
     return bool(ba) and ba == bb
 
 
+# Direct scrollTop drive for the option portal's scrollable ancestor (args-form evaluate — the
+# proven shape). Modes: 'down' = one clientHeight step; 'up' = one step back; 'bottom' = teleport to
+# scrollHeight (the ONLY write the autodesk wd1 virtualizer re-renders on — verified live).
+_SCROLL_DRIVE_JS = (
+    "(mode) => { const opt=[...document.querySelectorAll("
+    "'[data-automation-id=\"promptOption\"],[role=\"option\"]')]"
+    ".find(e=>e.offsetParent!==null && !e.closest('[data-automation-id=\"selectedItemList\"]'));"
+    " let a=opt?opt.parentElement:null;"
+    " while(a && a!==document.body){"
+    "  if(a.scrollHeight>a.clientHeight+5){"
+    "   const step=Math.max(a.clientHeight-20,100);"
+    "   if(mode==='bottom') a.scrollTop=a.scrollHeight;"
+    "   else if(mode==='up') a.scrollTop=Math.max(a.scrollTop-step,0);"
+    "   else a.scrollTop+=step;"
+    "   return 'Y:'+a.scrollTop; }"
+    "  a=a.parentElement; }"
+    " return 'N'; }"
+)
+
+
 _VALUE_MATCH_CACHE: dict = {}
 
 # Free-text fields whose committed WORDING legitimately varies from the profile (autocomplete
@@ -992,6 +1012,7 @@ class WorkdayAdapter(ATSAdapter):
                 rows_h = rows_now
                 nv = eng.norm(value)
                 last_txt, still = "", 0
+                teleported = False
                 for _ in range(25):
                     last_window = [t for _, t in rows_h]
                     cand = next(((o, t) for o, t in rows_h if _bare_eq(t, value)), None)
@@ -1015,73 +1036,51 @@ class WorkdayAdapter(ATSAdapter):
                     if lt == last_txt:
                         still += 1
                         if still >= 2:
-                            return None  # bottom reached (rendered window stopped moving)
+                            if teleported:
+                                return None  # up-walk exhausted — every window was rendered and read
+                            # TELEPORT TO BOTTOM (live-proven on the autodesk wd1 variant): mid-list
+                            # scrollTop writes and every input mechanism are IGNORED by this
+                            # virtualizer, but a jump to scrollHeight forces a re-render
+                            # (verified: st=7090 -> 'United State .. Wallis and Futuna'). After the
+                            # teleport we walk UP by steps so every window between gets rendered+read.
+                            teleported = True
+                            still = 0
+                            with contextlib.suppress(Exception):
+                                await page.evaluate(_SCROLL_DRIVE_JS, "bottom")
+                            for _w in range(5):
+                                await asyncio.sleep(0.3)
+                                rows_h = await _rows()
+                                if rows_h and rows_h[-1][1] != lt:
+                                    break
+                            if _DBG and rows_h:
+                                print(f"   [msel hunt {field.name}] TELEPORT bottom -> last={rows_h[-1][1]!r}")
+                            continue
                     else:
                         still, last_txt = 0, lt
-                    with contextlib.suppress(Exception):
-                        await rows_h[-1][0].evaluate("() => this.scrollIntoView({block:'start'})")
-                    for _w in range(4):  # WAIT-UNTIL-CHANGED: a fixed beat under-waits the virtualizer
-                        await asyncio.sleep(0.3)  # (verified: the hunt stalled in the B's of ~240 rows)
-                        rows_h = await _rows()
-                        if rows_h and rows_h[-1][1] != lt:
-                            break
-                    if rows_h and rows_h[-1][1] == lt:
-                        # FALLBACK A (live-proven on the autodesk variant where scrollIntoView, wheel
-                        # AND arrows all no-op): scroll the options' own scrollable ancestor directly.
-                        # activeListContainer is a ~151px strip over ~7500px of rows; scrollTop
-                        # assignment fires NATIVE scroll events the virtualizer obeys.
+                    if not teleported:
+                        # primary drive DOWN: scrollIntoView (carries the wd5-class variants), then a
+                        # direct scrollTop step on the scrollable ancestor as first fallback.
                         with contextlib.suppress(Exception):
-                            await page.evaluate(
-                                "(n) => { const opt=[...document.querySelectorAll("
-                                '\'[data-automation-id="promptOption"],[role="option"]\')]'
-                                ".find(e=>e.offsetParent!==null && !e.closest('[data-automation-id=\"selectedItemList\"]'));"
-                                " let a=opt?opt.parentElement:null;"
-                                " while(a && a!==document.body){"
-                                "  if(a.scrollHeight>a.clientHeight+5){ a.scrollTop+=Math.max(a.clientHeight-20,100)*n; return 'Y:'+a.scrollTop; }"
-                                "  a=a.parentElement; }"
-                                " return 'N'; }",
-                                1,
-                            )
-                        for _w in range(4):
+                            await rows_h[-1][0].evaluate("() => this.scrollIntoView({block:'start'})")
+                        for _w in range(4):  # WAIT-UNTIL-CHANGED: a fixed beat under-waits the virtualizer
                             await asyncio.sleep(0.3)
                             rows_h = await _rows()
                             if rows_h and rows_h[-1][1] != lt:
                                 break
-                    if rows_h and rows_h[-1][1] == lt and session is not None:
-                        # FALLBACK B: trusted mouse-wheel over the OPTIONS CONTAINER CENTER (not the
-                        # last-row rect — that sits at the container edge / outside it, so the wheel
-                        # landed on nothing; verified live the container center is the scroll target).
-                        # Some virtualizers ignore scrollTop but obey a real wheel event.
+                        if rows_h and rows_h[-1][1] == lt:
+                            with contextlib.suppress(Exception):
+                                await page.evaluate(_SCROLL_DRIVE_JS, "down")
+                            for _w in range(4):
+                                await asyncio.sleep(0.3)
+                                rows_h = await _rows()
+                                if rows_h and rows_h[-1][1] != lt:
+                                    break
+                    else:
+                        # post-teleport drive UP: pure scrollTop steps (scrollIntoView on the last row
+                        # would fight the up-walk by scrolling DOWN again).
                         with contextlib.suppress(Exception):
-                            box = await page.evaluate(
-                                "() => { const ac=document.querySelector('[data-automation-id=\"activeListContainer\"]');"
-                                " if(!ac) return ''; const r=ac.getBoundingClientRect();"
-                                " return (r.left+r.width/2)+','+(r.top+r.height/2); }"
-                            )
-                            x, y = (float(v) for v in str(box).split(","))
-                            sid = await page.session_id
-                            await session.cdp_client.send.Input.dispatchMouseEvent(
-                                params={"type": "mouseMoved", "x": x, "y": y, "buttons": 0}, session_id=sid,
-                            )
-                            await asyncio.sleep(0.15)
-                            await session.cdp_client.send.Input.dispatchMouseEvent(
-                                params={"type": "mouseWheel", "x": x, "y": y, "deltaX": 0, "deltaY": 600},
-                                session_id=sid,
-                            )
+                            await page.evaluate(_SCROLL_DRIVE_JS, "up")
                         for _w in range(4):
-                            await asyncio.sleep(0.3)
-                            rows_h = await _rows()
-                            if rows_h and rows_h[-1][1] != lt:
-                                break
-                    if rows_h and rows_h[-1][1] == lt and session is not None:
-                        # LEGACY DomHand rung (genericConfig.arrowScrollToOption): trusted ArrowDown
-                        # batches make the widget's OWN focus-follow render the next window — the
-                        # widget-native scroll that works where scrollIntoView AND wheel both no-op.
-                        # 10/batch so 25 hunt iterations can traverse a ~250-row country list.
-                        for _k in range(10):
-                            await eng.press_key_trusted(session, page, key="ArrowDown", code="ArrowDown", vk=40)
-                            await asyncio.sleep(0.08)
-                        for _w in range(3):
                             await asyncio.sleep(0.3)
                             rows_h = await _rows()
                             if rows_h and rows_h[-1][1] != lt:
