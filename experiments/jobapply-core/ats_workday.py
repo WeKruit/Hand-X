@@ -344,6 +344,12 @@ class WorkdayAdapter(ATSAdapter):
     hosts = ("myworkdayjobs.com", "myworkday.com", "myworkdaysite.com")
     multi_page = True
 
+    def __init__(self) -> None:
+        # pick-time canonical choices, {field.name: chosen option text}. When the tenant's list lacks
+        # the profile wording (no 'Mobile' -> picker chose 'Home Cellular'), the CHOICE is the right
+        # answer — read_back accepts committed==chosen instead of re-litigating the mapping.
+        self._chosen: dict[str, str] = {}
+
     # -- extract: title only; fields come per-step --------------------------
     async def extract(self, url: str, profile: dict) -> tuple[str, list[FormField]]:
         return "Workday Application", []
@@ -795,10 +801,14 @@ class WorkdayAdapter(ATSAdapter):
             return await self._date(session, page, field, value)
         return False
 
-    async def _multiselect(self, session: Any, page: Any, field: FormField, value: str) -> bool:
+    async def _multiselect(
+        self, session: Any, page: Any, field: FormField, value: str, exclusive: bool = True
+    ) -> bool:
         """Workday typeahead multiselect (`multiSelectContainer` + `selectinput`): type the value
-        to filter, then commit the highlighted top match with a TRUSTED Enter (see below).
-        Single-value (commit one); commit-then-add for repeaters is handled elsewhere."""
+        to filter, then COMMIT-BY-NODE the matching row (trusted click), pill delta as the marker.
+        exclusive=True (ladder single-value fills): the field must end holding exactly `value` —
+        non-matching pills are REMOVED first (DELETE_charm). Chip put() passes exclusive=False so
+        adding one skill never trims its sibling pills."""
         inp = await eng.first(
             page, self._wsel(field.name, ' [data-uxi-widget-type="selectinput"] input')
         ) or await eng.first(page, self._wsel(field.name, " input"))
@@ -822,6 +832,46 @@ class WorkdayAdapter(ATSAdapter):
             return 0
 
         n0 = await _pills()
+        # EXCLUSIVE delta-correct: a WRONG committed pill must go, not merely be flagged (verified live:
+        # the vlm tier once committed 'Albania (+355)' for 'United States of America'). Remove every
+        # pill that does not match `value` (exact else LLM judge) via its DELETE_charm.
+        if exclusive and n0 > 0:
+            removed = 0
+            with contextlib.suppress(Exception):
+                charms = await page.get_elements_by_css_selector(
+                    self._wsel(field.name, ' [data-automation-id="DELETE_charm"]')
+                )
+                for ch in charms:
+                    t = eng.norm(
+                        str(
+                            await ch.evaluate(
+                                "() => { const p=this.closest('[data-automation-id=\"selectedItem\"],"
+                                "[data-automation-id=\"multiSelectPill\"]'); return p?(p.textContent||''):''; }"
+                            )
+                        )
+                        or ""
+                    )
+                    if not t or t == eng.norm(value) or await _llm_value_matches(t, value):
+                        continue  # the right pill stays
+                    if not await eng.click_trusted(session, page, ch):
+                        with contextlib.suppress(Exception):
+                            await ch.click()
+                    removed += 1
+                    await asyncio.sleep(0.4)
+            if removed:
+                if _DBG:
+                    print(f"   [msel {field.name}] removed {removed} non-matching pill(s)")
+                n0 = await _pills()
+
+        async def _committed_delta() -> bool:
+            # the pill can mount SECONDS after the click (verified live: 'Xing' rendered after both the
+            # single-shot delta AND read_back's window closed) — poll, don't single-read.
+            for _ in range(6):
+                if (await _pills()) > n0:
+                    return True
+                await asyncio.sleep(0.4)
+            return (await _pills()) > n0
+
         with contextlib.suppress(Exception):
             await inp.click()
             await inp.fill("")  # clear any residue first
@@ -861,44 +911,150 @@ class WorkdayAdapter(ATSAdapter):
                     menu = True
                     if _DBG:
                         print(f"   [msel {field.name}] DOM saw no menu, VISION sees {len(vis_opts)} options")
+        # COMMIT-BY-NODE, never blind Enter (verified live on nvidia's suggestion-only Skills: the
+        # menu renders a "No Items." row that MATCHES promptOption/[role=option] — a blind Enter on it
+        # commits nothing, and on a real row it commits the TOP row, not the matching one). Read the
+        # VISIBLE rows of the open menu, exact-match else LLM-pick the TEXT, trusted-click that node,
+        # then verify by PILL DELTA (the widget's only true commit signal).
         ok = False
+        pairs: list[tuple[Any, str]] = []
+        node = None
         if menu:
-            # trusted Enter commits the highlighted top match; some widgets need ArrowDown first.
-            await eng.press_enter_trusted(session, page)
-            await asyncio.sleep(0.4)
-            ok = (await _pills()) > n0
-            if not ok:
-                await eng.press_key_trusted(session, page, key="ArrowDown", code="ArrowDown", vk=40)
+            owned = ""
+            with contextlib.suppress(Exception):
+                owns = (await inp.get_attribute("aria-controls")) or (await inp.get_attribute("aria-owns")) or ""
+                owned = owns.split()[0] if owns.split() else ""
+
+            async def _rows() -> list[tuple[Any, str]]:
+                # DEDUPED visible rows: a row's parent+child both match the option selector, so the
+                # same text read twice — keep the FIRST node per text (clicking either lands the row).
+                out: list[tuple[Any, str]] = []
+                seen: set[str] = set()
+                with contextlib.suppress(Exception):
+                    for o in await page.get_elements_by_css_selector(self._opt_selector(owned)):
+                        vis = (await o.evaluate(self._VISIBLE_TEXT_JS)) or ""
+                        t = eng.norm(vis)
+                        if t and t not in seen:
+                            seen.add(t)
+                            out.append((o, t))
+                return out
+
+            async def _pick_row(rows: list[tuple[Any, str]]) -> Any | None:
+                target = next((o for o, t in rows if t == eng.norm(value)), None)
+                if target is None and rows:
+                    from wd_repeaters import _llm_pick
+
+                    choice = await _llm_pick(_match_llm(), value, [t for _, t in rows])
+                    if choice:
+                        target = next((o for o, t in rows if t == eng.norm(choice)), None)
+                        if target is not None:
+                            self._chosen[field.name] = choice  # pick-time canonical answer (verify honors it)
+                return target
+
+            async def _click_row(target: Any) -> None:
+                with contextlib.suppress(Exception):
+                    await target.evaluate("() => this.scrollIntoView({block:'center'})")
                 await asyncio.sleep(0.2)
+                if not await eng.click_trusted(session, page, target):
+                    with contextlib.suppress(Exception):
+                        await target.click()
+                await asyncio.sleep(0.5)
+
+            pairs = await _rows()
+            node = await _pick_row(pairs)
+            if node is None and pairs:
+                # VIRTUALIZED list (verified live: countryPhoneCode renders ~12 of ~240 rows and the
+                # typed filter does nothing): scroll pages by pulling the LAST rendered row into view,
+                # substring only PROPOSES a candidate, the LLM judge confirms (matching directive).
+                nv = eng.norm(value)
+                last_txt, still = "", 0
+                for _ in range(25):
+                    cand = next(
+                        (
+                            (o, t)
+                            for o, t in pairs
+                            if t and t != "selectone" and (nv in t or t in nv) and len(t) > 2
+                        ),
+                        None,
+                    )
+                    if cand is not None and await _llm_value_matches(cand[1], value):
+                        node = cand[0]
+                        self._chosen[field.name] = cand[1]
+                        break
+                    if not pairs:
+                        break
+                    lt = pairs[-1][1]
+                    if lt == last_txt:
+                        still += 1
+                        if still >= 2:
+                            break  # bottom reached (rendered window stopped moving)
+                    else:
+                        still, last_txt = 0, lt
+                    with contextlib.suppress(Exception):
+                        await pairs[-1][0].evaluate("() => this.scrollIntoView({block:'start'})")
+                    for _w in range(4):  # WAIT-UNTIL-CHANGED: a fixed beat under-waits the virtualizer
+                        await asyncio.sleep(0.3)  # (verified: the hunt stalled in the B's of ~240 rows)
+                        pairs = await _rows()
+                        if pairs and pairs[-1][1] != lt:
+                            break
+                    if _DBG and pairs:
+                        print(f"   [msel hunt {field.name}] window last={pairs[-1][1]!r}")
+            if node is not None:
+                await _click_row(node)
+                ok = await _committed_delta()
+                if not ok:
+                    # HIERARCHICAL menu (verified live: 'How Did You Hear' renders CATEGORY rows —
+                    # Social Media > LinkedIn): clicking a category re-renders the menu with leaves
+                    # instead of committing. If the rows CHANGED, pick once more at the leaf level.
+                    sub = await _rows()
+                    if sub and [t for _, t in sub] != [t for _, t in pairs]:
+                        leaf = await _pick_row(sub)
+                        if leaf is not None:
+                            await _click_row(leaf)
+                            ok = await _committed_delta()
+            elif not pairs:
+                # DOM reads no rows but vision confirmed a menu — the legacy trusted-Enter dance is
+                # the only remaining commit path (top match is pre-highlighted by the typed filter).
                 await eng.press_enter_trusted(session, page)
-                await asyncio.sleep(0.4)
-                ok = (await _pills()) > n0
+                ok = await _committed_delta()
+                if not ok:
+                    await eng.press_key_trusted(session, page, key="ArrowDown", code="ArrowDown", vk=40)
+                    await asyncio.sleep(0.2)
+                    await eng.press_enter_trusted(session, page)
+                    ok = await _committed_delta()
+            # pairs present but NO match (e.g. only a "No Items." row): no commit attempt — an Enter
+            # here can only commit a WRONG row. Fall through to the clean disarm + residual.
+        if _DBG and not ok:
+            # DIAGNOSTIC uses the rows ALREADY read while the menu was OPEN — the old code read options
+            # AFTER the Escape disarm below, so it always printed [] and hid the real reason.
+            got = await self._committed_value(page, field)
+            why = (
+                ("menu never opened (DOM+VISION agree)" if not menu else "menu open but no matching row")
+                if not got
+                else f"committed {got!r} but LLM says it is NOT {value!r}"
+            )
+            print(
+                f"   [msel {field.name}] value={value!r} committed=False -> {why} | "
+                f"rows[:12]={[t for _, t in pairs][:12]}"
+            )
         if not ok:
             # CLEAR the typed residue (it visually poisons the box + blocks validation) and close the
-            # menu without committing.
+            # menu without committing. This widget family closes on CLICK-OUTSIDE, not Escape
+            # (verified live: the menu was left hanging over the footer after a failed hunt) —
+            # trusted click in the empty left margin first, then Escape as belt-and-braces.
             with contextlib.suppress(Exception):
                 await inp.fill("")
-            await eng.press_key_trusted(session, page, key="Escape", code="Escape", vk=27)
-        if _DBG:
-            if ok:
-                print(f"   [msel {field.name}] value={value!r} committed=True")
-            else:
-                # DIAGNOSTIC, not just a verifier: on failure surface the ACTUAL committed value + the
-                # rendered options so the 'why' is IN THE LOG (empty commit? wrong option? no match in the
-                # list?) — no more inferring the reason later from an offline DOM dump.
-                got = await self._committed_value(page, field)
-                opts = []
+            if session is not None:
                 with contextlib.suppress(Exception):
-                    opts = await self._read_options_live(page, field)
-                why = (
-                    ("menu never opened (DOM+VISION agree)" if not menu else "menu open but nothing committed")
-                    if not got
-                    else f"committed {got!r} but LLM says it is NOT {value!r}"
-                )
-                print(
-                    f"   [msel {field.name}] value={value!r} committed=False -> {why} | "
-                    f"rendered_options[:12]={opts[:12]}"
-                )
+                    sid = await page.session_id
+                    for ev in (
+                        {"type": "mousePressed", "x": 6, "y": 300, "button": "left", "buttons": 1, "clickCount": 1},
+                        {"type": "mouseReleased", "x": 6, "y": 300, "button": "left", "buttons": 0, "clickCount": 1},
+                    ):
+                        await session.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=sid)
+            await eng.press_key_trusted(session, page, key="Escape", code="Escape", vk=27)
+        elif _DBG:
+            print(f"   [msel {field.name}] value={value!r} committed=True (pills {n0}->{n0 + 1})")
         return ok
 
     async def _listbox(self, session: Any, page: Any, field: FormField, value: str) -> bool:
@@ -1130,10 +1286,17 @@ class WorkdayAdapter(ATSAdapter):
                 if node is None:
                     from wd_repeaters import _llm_pick
 
-                    choice = await _llm_pick(_match_llm(), value, [t for _, t in pairs])
+                    texts, _seen = [], set()
+                    for _, t in pairs:  # dedup (parent+child rows read twice) — keep LLM input clean
+                        if t not in _seen:
+                            _seen.add(t)
+                            texts.append(t)
+                    choice = await _llm_pick(_match_llm(), value, texts)
                     if choice:
                         cl = eng.norm(choice)
                         node = next((o for o, t in pairs if t == cl), None)
+                        if node is not None and verify_label:
+                            self._chosen[verify_label] = choice  # pick-time canonical answer
                 if node is None:
                     return False
                 with contextlib.suppress(Exception):
@@ -1398,7 +1561,7 @@ class WorkdayAdapter(ATSAdapter):
                 with contextlib.suppress(Exception):
                     await month.click()  # focus the FIRST segment; typing flows from here
                 await eng.type_text_trusted(session, page, digits)
-                want = [mm, dd if day else dd, yyyy]
+                want = [mm, dd, yyyy]  # day-less widget: got[1] echoes dd so the compare is a no-op
                 got: list[str] = []
                 for _ in range(6):  # segments re-render async — poll ~1.5s (a single 0.3s read false-FAILed
                     await asyncio.sleep(0.25)  # a CORRECTLY-typed date, verified: CDP read 7/1/2026 post-FAIL)
@@ -1432,32 +1595,42 @@ class WorkdayAdapter(ATSAdapter):
                 )
                 return eng.norm(got or "")[:160]
             return ""
+        # ARGS-form evaluate (the shape wd_repeaters.READ_ALL_JS proves live) — the argless braced
+        # wrapper threw an in-page Uncaught for these scripts while the IDENTICAL JS ran clean over
+        # raw CDP; passing the selector as an argument avoids that wrapper path entirely.
         if field.type in ("checkbox", "radio"):
             # GROUP commit = the CHECKED option's LABEL (the single-box read of only the FIRST input
             # false-negatives a group where the value names another option — verified live: disability
             # 'No, I do not have a disability' was checked yet read_back said FAIL).
-            with contextlib.suppress(Exception):
+            try:
                 got = await page.evaluate(
-                    f"() => {{ const w=document.querySelector('{self._wsel(field.name)}'); if(!w) return '';"
+                    "(sel) => { const w=document.querySelector(sel); if(!w) return '';"
                     " const c=[...w.querySelectorAll('input[type=checkbox],[role=checkbox],input[type=radio],[role=radio]')]"
                     ".find(i=>i.checked||i.getAttribute('aria-checked')==='true'); if(!c) return '';"
                     " let t=''; if(c.id){const l=document.querySelector('label[for=\"'+c.id+'\"]'); if(l) t=l.textContent;}"
-                    " return (t||c.getAttribute('value')||'').trim(); }"
+                    " return (t||c.getAttribute('value')||'').trim(); }",
+                    self._wsel(field.name),
                 )
                 return eng.norm(got or "")[:160]
+            except Exception as exc:
+                if _DBG:
+                    print(f"   [_committed_value {field.name}] EVAL ERROR {type(exc).__name__}: {str(exc)[:400]}")
             return ""
-        sel = self._wsel(field.name)
-        with contextlib.suppress(Exception):
+        try:
             got = await page.evaluate(
-                f"() => {{ const w=document.querySelector('{sel}'); if(!w) return '';"
+                "(sel) => { const w=document.querySelector(sel); if(!w) return '';"
                 " const norm=s=>(s||'').replace(/\\s+/g,' ').trim();"
                 ' const pills=[...w.querySelectorAll(\'[data-automation-id="selectedItem"],[data-automation-id="multiSelectPill"]\')]'
                 ".map(e=>norm(e.textContent)).filter(Boolean);"
                 " if(pills.length) return pills.join(', ');"
                 " const b=w.querySelector('button'); const t=b?norm(b.textContent):'';"
-                " return /^(select one|select\\.\\.\\.|choose one)$/i.test(t) ? '' : t; }}"
+                " return /^(select one|select\\.\\.\\.|choose one)$/i.test(t) ? '' : t; }",
+                self._wsel(field.name),
             )
             return (got or "").strip()[:160]
+        except Exception as exc:  # NEVER silent — a broken committed read poisons every verify above it
+            if _DBG:
+                print(f"   [_committed_value {field.name}] EVAL ERROR {type(exc).__name__}: {str(exc)[:400]}")
         return ""
 
     async def _visual_value(self, session: Any, field: FormField, want: str) -> str:
@@ -1469,7 +1642,7 @@ class WorkdayAdapter(ATSAdapter):
 
             from vision_verify import visual_check
 
-            d = _json.loads(await visual_check(session, field.label or field.name, want=want))
+            d = _json.loads(await visual_check(session, field.label or field.name, want=want, use_cache=False))
             return eng.norm(str(d.get("value") or ""))[:160]
         return ""
 
@@ -1498,20 +1671,35 @@ class WorkdayAdapter(ATSAdapter):
             # POLL the commit re-render. committed value = DOM (cheap) first; _llm_value_matches is the
             # authority (it exact-equals for free, else asks the LLM — NEVER substring). On a DOM false-empty
             # read the value VISUALLY, then LLM. Last resort: the value-aware VLM verdict.
+            # PICK-TIME CHOICE FIRST: when the picker LLM already mapped the profile value onto this
+            # tenant's closest option (no 'Mobile' -> chose 'Home Cellular'), committed==chosen IS
+            # success — re-litigating chosen-vs-profile here failed a correctly-filled field (verified).
+            chosen = eng.norm(self._chosen.get(field.name) or self._chosen.get(field.label or "") or "")
+
+            def _is_chosen(committed: str) -> bool:
+                return bool(committed and chosen and eng.norm(committed).lower() == chosen.lower())
+
+            committed = ""
             for i in range(3):
                 committed = await self._committed_value(page, field)
+                if _is_chosen(committed):
+                    return True
                 if committed and await _llm_value_matches(committed, value):
                     return True
                 if i + 1 < 3:
                     await asyncio.sleep(0.25)
+            if _DBG:
+                print(f"   [read_back {field.name}] dom={committed!r} chosen={chosen!r} want={value!r} -> visual")
             if session is not None:
                 committed = await self._visual_value(session, field, value)
+                if _is_chosen(committed):
+                    return True
                 if committed and await _llm_value_matches(committed, value):
                     return True
                 with contextlib.suppress(Exception):
                     from vision_verify import _matches, visual_check
 
-                    if _matches(await visual_check(session, field.label or field.name, want=value)):
+                    if _matches(await visual_check(session, field.label or field.name, want=value, use_cache=False)):
                         return True
             return False
         # EXACT fields: literal check, polled for the commit re-render (a wrong value must stay False).

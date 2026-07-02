@@ -503,7 +503,7 @@ async def _vlm_filled(session, label: str, value: str) -> bool:
     with contextlib.suppress(Exception):
         from vision_verify import _matches, visual_check
 
-        v = (await visual_check(session, label, want=value)) or ""
+        v = (await visual_check(session, label, want=value, use_cache=False)) or ""
         return _matches(v)
     return False
 
@@ -524,6 +524,7 @@ async def _llm_pick(llm, value: str, options: list[str]) -> str | None:
     import contextlib
 
     if llm is None or not options:
+        print(f"  [llm_pick] want={value!r} -> no llm ({llm is None}) / no options ({not options})", flush=True)
         return None
     options = options[:_MAX_PICK_OPTS]  # bound the prompt payload (see _MAX_PICK_OPTS)
     ckey = (norm(value).lower(), tuple(options))
@@ -545,9 +546,14 @@ async def _llm_pick(llm, value: str, options: list[str]) -> str | None:
         res = await _oa_llm.resilient_text(
             [
                 SystemMessage(
-                    content="Pick the option that best matches the wanted value — closest meaning "
-                    "or abbreviation (e.g. 'B.S.' -> \"Bachelor's Degree\"; 'Python' -> the nearest "
-                    "skill). Reply the EXACT option text from the list, or 'NONE' if truly none fit."
+                    content="Pick the option a human applicant would select for the wanted value — "
+                    "closest meaning or abbreviation (e.g. 'B.S.' -> \"Bachelor's Degree\"; 'Python' -> "
+                    "the nearest skill). If no option matches directly, still pick the CLOSEST REASONABLE "
+                    "one (e.g. wanted 'Mobile' with only ['Home','Home Cellular'] -> 'Home Cellular'). "
+                    "If the options look like CATEGORIES of a hierarchical menu, pick the category that "
+                    "would CONTAIN the wanted value (e.g. wanted 'LinkedIn' -> 'Social Media'). Reply the "
+                    "EXACT option text from the list. Reply 'NONE' ONLY when every option is clearly "
+                    "unrelated to the wanted value (a placeholder like 'Select One' never counts as a match)."
                 ),
                 UserMessage(content=f"wanted: {value!r}\noptions: {options}"),
             ],
@@ -555,11 +561,14 @@ async def _llm_pick(llm, value: str, options: list[str]) -> str | None:
             primary=llm,
         )
         if res is None:
+            print(f"  [llm_pick] want={value!r} -> LLM unanswered (timeout/None)", flush=True)
             return None
         c = (res.completion.choice or "").strip()
         out = None if c.upper() == "NONE" or not c else c
+        print(f"  [llm_pick] want={value!r} opts[:6]={options[:6]} -> {out!r}", flush=True)
         _PICK_CACHE[ckey] = out  # memoise so identical later picks (proficiency selects) are instant
         return out
+    print(f"  [llm_pick] want={value!r} -> EXCEPTION in pick call (suppressed)", flush=True)
     return None
 
 
@@ -738,9 +747,18 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
         # CANONICALISED by the taxonomy ('Go' -> 'Go Programming Language'), so presence is judged by
         # the LLM (exact-equality shortcut first) — never substring (matching directive).
         have: list[str] = []
-        with contextlib.suppress(Exception):
+        got = ""
+        try:
             got = await adapter._committed_value(page, fld)
-            have = [p.strip() for p in got.split(",") if p.strip()]
+        except Exception as exc:  # NEVER silent: a broken existing-pills read is what enabled the wipe
+            print(f"  [chip {c.fkit}] _committed_value ERROR {type(exc).__name__}: {exc}", flush=True)
+        if not got and session is not None:
+            # DOM read '' does not mean empty — the VISUAL read is the other half of the committed-value
+            # oracle (a busy SPA serializes filled widgets blank). Ask the VLM what the field SHOWS.
+            with contextlib.suppress(Exception):
+                got = await adapter._visual_value(session, fld, value)
+        print(f"  [chip {c.fkit}] existing={got!r}", flush=True)
+        have = [p.strip() for p in got.split(",") if p.strip()]
 
         async def _present(it: str) -> bool:
             if any(p.lower() == it.lower() for p in have):
@@ -754,7 +772,8 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
 
         added = 0
         for it in items:
-            if it and not await _present(it) and await adapter._multiselect(session, page, fld, it):
+            # exclusive=False: adding one skill must NEVER trim sibling pills (suggested skills are legit)
+            if it and not await _present(it) and await adapter._multiselect(session, page, fld, it, exclusive=False):
                 added += 1
         return added > 0 or bool(have)
     if a == "date":
@@ -811,7 +830,7 @@ async def _chip_commit_visual(session, page, label: str, item: str, llm=None) ->
     await eng_press_enter(session, page)
     await asyncio.sleep(0.4)
     with contextlib.suppress(Exception):
-        return _matches(await visual_check(session, label, want=item))
+        return _matches(await visual_check(session, label, want=item, use_cache=False))
     return True
 
 
@@ -843,8 +862,36 @@ _HEAD_KW = {
 # never by button text. The add control is matched GENERICALLY so any tenant label works: its
 # data-automation-id contains 'add' (add-button / addButton / ...) OR its visible text STARTS WITH 'add'
 # ('Add', 'Add Another', 'Add Experience', '+ Add', 'Add another work experience' ...).
-_FIND_ADD_JS = r"""(kw) => {
+_FIND_ADD_JS = r"""(args) => {
+  const [sec, kw] = args;  // sec = canonical section key; kw = heading keyword (fallback only)
   const norm = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const isAdd = el => {
+    const aid=(el.getAttribute('data-automation-id')||'').toLowerCase();
+    const t=(el.textContent||'').trim().toLowerCase();
+    return (aid.includes('add') || /^\+?\s*add\b/.test(t)) && t.length<40;
+  };
+  const center = el => { el.scrollIntoView({block:'center'});
+    const r=el.getBoundingClientRect();
+    return (r.width && r.height) ? JSON.stringify({x:r.left+r.width/2, y:r.top+r.height/2}) : ''; };
+  // STRUCTURAL (title-ignorant, verified live on nvidia): an Add control belongs to the section whose
+  // fkit rows live in its NEAREST fkit-holding ancestor (experience Add's parent panel holds
+  // workExperience-*; education Add's holds education-*). Heading text never consulted.
+  const SEC = {workexperience:'experience',experience:'experience',education:'education',
+               skills:'skills',skill:'skills',languages:'languages',language:'languages',
+               certifications:'certifications',certification:'certifications'};
+  const secOf = fk => { const m=(fk||'').split('--')[0].replace(/-\d+$/,'').toLowerCase(); return SEC[m]||m; };
+  const adds = [...document.querySelectorAll('button,[role="button"]')].filter(isAdd);
+  for (const b of adds) {
+    let a = b.parentElement, hops = 0;
+    while (a && a !== document.body && hops < 12) {
+      const n = a.querySelector && a.querySelector('[data-fkit-id]');
+      if (n) { if (secOf(n.getAttribute('data-fkit-id')) === sec) { const c = center(b); if (c) return c; } break; }
+      a = a.parentElement; hops++;
+    }
+  }
+  // FALLBACK (zero-row collapsed section: no fkit anywhere to anchor on): nearest-heading document
+  // order — the only signal left. Known ceiling: a tenant that RENAMES the heading AND starts the
+  // section collapsed defeats this; structural above covers every mounted/autofilled case.
   const KW = ['experience','education','skill','language','certification'];
   const nodes = [...document.querySelectorAll('*')];
   const isHead = el => /^(H1|H2|H3|H4)$/.test(el.tagName) || el.getAttribute('role')==='heading'
@@ -856,16 +903,9 @@ _FIND_ADD_JS = r"""(kw) => {
     if(myPos!==-1 && KW.some(k=>k!==kw && t.includes(k))) { nextPos=i; break; }
   }
   if(myPos===-1) return '';
-  const isAdd = el => {
-    const aid=(el.getAttribute('data-automation-id')||'').toLowerCase();
-    const t=(el.textContent||'').trim().toLowerCase();
-    return (aid.includes('add') || /^\+?\s*add\b/.test(t)) && t.length<40;
-  };
   for (let i=myPos+1;i<nextPos && i<nodes.length;i++){ const el=nodes[i];
     if((el.tagName==='BUTTON'||el.getAttribute('role')==='button') && isAdd(el)){
-      el.scrollIntoView({block:'center'});
-      const r=el.getBoundingClientRect();
-      if(r.width && r.height) return JSON.stringify({x:r.left+r.width/2, y:r.top+r.height/2});
+      const c = center(el); if (c) return c;
     }
   }
   return ''; }"""
@@ -883,7 +923,7 @@ async def _add_row(session, page, sec: str) -> bool:
     kw = _HEAD_KW.get(sec, sec)
     box = None
     with contextlib.suppress(Exception):
-        raw = await page.evaluate(_FIND_ADD_JS, kw)
+        raw = await page.evaluate(_FIND_ADD_JS, [sec, kw])
         box = json.loads(raw) if isinstance(raw, str) and raw else None
     if not isinstance(box, dict):
         return False

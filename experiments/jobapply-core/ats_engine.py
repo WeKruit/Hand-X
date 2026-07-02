@@ -482,7 +482,7 @@ async def pick_dropdown(
         return True
     await asyncio.sleep(0.4)
     with contextlib.suppress(Exception):
-        verdict = await visual_check(session, verify_label, want=value)
+        verdict = await visual_check(session, verify_label, want=value, use_cache=False)
         return _matches(verdict)
     return False
 
@@ -927,7 +927,7 @@ async def _vlm_filled(session: Any, field: FormField, value: str) -> bool:
         # done — verified live: a garbage 02/02/2006 date read 'visually filled' and the ladder
         # reported tier=vlm, leaving a validation error that blocked the advance. Ask 'does it show
         # MY value?' instead; the VLM judges semantically (canonical wording still passes).
-        verdict = await visual_check(session, target=field.label or field.name, key=field.name, want=value)
+        verdict = await visual_check(session, target=field.label or field.name, key=field.name, want=value, use_cache=False)
         return _matches(verdict)
     return False
 
