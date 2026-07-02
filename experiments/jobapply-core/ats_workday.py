@@ -975,25 +975,23 @@ class WorkdayAdapter(ATSAdapter):
                         await target.click()
                 await asyncio.sleep(0.5)
 
-            pairs = await _rows()
-            node = await _pick_row(pairs)
-            if node is None and pairs:
+            async def _hunt(rows_now: list[tuple[Any, str]]) -> Any | None:
                 # VIRTUALIZED list (verified live: countryPhoneCode renders ~12 of ~240 rows and the
-                # typed filter does nothing): scroll pages by pulling the LAST rendered row into view,
-                # substring only PROPOSES a candidate, the LLM judge confirms (matching directive).
+                # typed filter does nothing): scroll pages by pulling the LAST rendered row into view.
+                # DETERMINISTIC first — bare-equality (parenthetical suffix stripped) commits with no
+                # LLM in the loop ('unitedstatesofamerica(+1)' IS the wanted row; the LLM confirm was
+                # a single point of failure that rejected the visible answer 4 applications in a row).
+                # Substring only PROPOSES; the LLM judge confirms (matching directive).
+                rows_h = rows_now
                 nv = eng.norm(value)
                 last_txt, still = "", 0
                 for _ in range(25):
-                    # DETERMINISTIC first: bare-equality (parenthetical suffix stripped) commits with
-                    # no LLM in the loop — 'unitedstatesofamerica(+1)' IS the wanted row (the LLM
-                    # confirm here was a single point of failure: with the fallback chain dead it
-                    # rejected the visible answer 4 applications in a row).
-                    cand = next(((o, t) for o, t in pairs if _bare_eq(t, value)), None)
+                    cand = next(((o, t) for o, t in rows_h if _bare_eq(t, value)), None)
                     if cand is None:
                         prop = next(
                             (
                                 (o, t)
-                                for o, t in pairs
+                                for o, t in rows_h
                                 if t and t != "selectone" and (nv in t or t in nv) and len(t) > 2
                             ),
                             None,
@@ -1001,37 +999,46 @@ class WorkdayAdapter(ATSAdapter):
                         if prop is not None and await _llm_value_matches(prop[1], value):
                             cand = prop
                     if cand is not None:
-                        node = cand[0]
                         self._chosen[field.name] = cand[1]
-                        break
-                    if not pairs:
-                        break
-                    lt = pairs[-1][1]
+                        return cand[0]
+                    if not rows_h:
+                        return None
+                    lt = rows_h[-1][1]
                     if lt == last_txt:
                         still += 1
                         if still >= 2:
-                            break  # bottom reached (rendered window stopped moving)
+                            return None  # bottom reached (rendered window stopped moving)
                     else:
                         still, last_txt = 0, lt
                     with contextlib.suppress(Exception):
-                        await pairs[-1][0].evaluate("() => this.scrollIntoView({block:'start'})")
+                        await rows_h[-1][0].evaluate("() => this.scrollIntoView({block:'start'})")
                     for _w in range(4):  # WAIT-UNTIL-CHANGED: a fixed beat under-waits the virtualizer
                         await asyncio.sleep(0.3)  # (verified: the hunt stalled in the B's of ~240 rows)
-                        pairs = await _rows()
-                        if pairs and pairs[-1][1] != lt:
+                        rows_h = await _rows()
+                        if rows_h and rows_h[-1][1] != lt:
                             break
-                    if _DBG and pairs:
-                        print(f"   [msel hunt {field.name}] window last={pairs[-1][1]!r}")
+                    if _DBG and rows_h:
+                        print(f"   [msel hunt {field.name}] window last={rows_h[-1][1]!r}")
+                return None
+
+            pairs = await _rows()
+            node = await _pick_row(pairs)
+            if node is None and pairs:
+                node = await _hunt(pairs)
             if node is not None:
                 await _click_row(node)
                 ok = await _committed_delta()
                 if not ok:
                     # HIERARCHICAL menu (verified live: 'How Did You Hear' renders CATEGORY rows —
                     # Social Media > LinkedIn): clicking a category re-renders the menu with leaves
-                    # instead of committing. If the rows CHANGED, pick once more at the leaf level.
+                    # instead of committing. If the rows CHANGED, pick at the leaf level — and HUNT
+                    # the submenu too (verified on autodesk: the socialnetworking submenu window
+                    # rendered only ['other']; LinkedIn sat below the fold and was never scrolled to).
                     sub = await _rows()
                     if sub and [t for _, t in sub] != [t for _, t in pairs]:
                         leaf = await _pick_row(sub)
+                        if leaf is None:
+                            leaf = await _hunt(sub)
                         if leaf is not None:
                             await _click_row(leaf)
                             ok = await _committed_delta()
