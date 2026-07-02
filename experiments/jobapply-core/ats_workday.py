@@ -46,12 +46,14 @@ def _match_llm() -> Any:
 
 
 def _bare(s: str) -> str:
-    """Deterministic option-text key: normalized text MINUS parenthetical annotations. Workday rows
+    """Deterministic option-text key: canonical text MINUS parenthetical annotations. Workday rows
     decorate the canonical value — 'United States of America (+1)', 'Python (Programming Language)',
-    'RESTful APIs (Suggested)' — and the naive equality test rejected its own answer (verified live:
-    the diagnostic printed rows[:12]=[... 'unitedstatesofamerica(+1)' ...] then declared 'no matching
-    row', costing 4 applications). Equality on _bare() commits these with ZERO LLM involvement."""
-    return re.sub(r"\([^)]*\)", "", s or "").strip().lower()
+    'RESTful APIs (Suggested)'. MUST squash the SAME way row texts are read (eng.norm =
+    whitespace-removed + lowercased) — the row text arrives as 'unitedstatesofamerica(+1)' while the
+    wanted value is 'United States of America'; a strip().lower() that KEEPS spaces made these unequal
+    and the hunt scrolled the whole A-Z list past the visible answer (verified live on paypal: the
+    U-window rendered, bare-eq still missed on the spaces). Strip parens THEN eng.norm."""
+    return eng.norm(re.sub(r"\([^)]*\)", "", s or ""))
 
 
 def _bare_eq(a: str, b: str) -> bool:
@@ -975,7 +977,10 @@ class WorkdayAdapter(ATSAdapter):
                         await target.click()
                 await asyncio.sleep(0.5)
 
+            last_window: list[str] = []  # the REAL final window the hunt saw (diagnostic truth)
+
             async def _hunt(rows_now: list[tuple[Any, str]]) -> Any | None:
+                nonlocal last_window
                 # VIRTUALIZED list (verified live: countryPhoneCode renders ~12 of ~240 rows and the
                 # typed filter does nothing): scroll pages by pulling the LAST rendered row into view.
                 # DETERMINISTIC first — bare-equality (parenthetical suffix stripped) commits with no
@@ -986,6 +991,7 @@ class WorkdayAdapter(ATSAdapter):
                 nv = eng.norm(value)
                 last_txt, still = "", 0
                 for _ in range(25):
+                    last_window = [t for _, t in rows_h]
                     cand = next(((o, t) for o, t in rows_h if _bare_eq(t, value)), None)
                     if cand is None:
                         prop = next(
@@ -1063,9 +1069,10 @@ class WorkdayAdapter(ATSAdapter):
                 if not got
                 else f"committed {got!r} but LLM says it is NOT {value!r}"
             )
+            shown = (last_window or [t for _, t in pairs])[:14]  # the hunt's LAST window, not stale pre-hunt pairs
             print(
                 f"   [msel {field.name}] value={value!r} committed=False -> {why} | "
-                f"rows[:12]={[t for _, t in pairs][:12]}"
+                f"last_window[:14]={shown}"
             )
         if not ok:
             # CLEAR the typed residue (it visually poisons the box + blocks validation) and close the
