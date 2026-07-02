@@ -337,7 +337,12 @@ async def main():
     tag = f"{tenant}_{pname}"
     os.environ["WD_MYEXP_SHOT"] = str(OUT / f"{tag}_myexp.png")  # robust My-Experience filled screenshot
     os.environ["WD_MYEXP_DOM"] = str(OUT / f"{tag}_myexp.html")  # live DOM dump for offline lang/skill diagnosis
-    resume = BASE + "/../../examples/resume.pdf"
+    # PER-PROFILE resume (gen_resumes.py): resume and profile are ONE identity, so Workday's
+    # autofill pre-fills the SAME values L1 would fill — no more rival truth sources (the
+    # Chantilly-VA-vs-Miami postal clash, Spencer's phone in Marcus's app). Fallback = shared.
+    resume = BASE + f"/fixtures/resumes/{pname}.pdf"
+    if not Path(resume).exists():
+        resume = BASE + "/../../examples/resume.pdf"
     if not Path(resume).exists():
         resume = BASE + "/fixtures/test_resume.pdf"
     if not Path(resume).exists():
