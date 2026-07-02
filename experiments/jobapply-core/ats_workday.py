@@ -971,14 +971,31 @@ class WorkdayAdapter(ATSAdapter):
 
             matched_text: dict = {"t": ""}  # exact rendered text of the matched row (for atomic commit)
 
+            # IN-CLIP text read (the autodesk root-cause fix): a virtualized option can be in the DOM
+            # with offsetParent!=null yet scrolled FAR OUTSIDE the container's ~151px visible clip
+            # (verified live: US row at y=737, clip 254-405) — a click at its coords hits NOTHING. So a
+            # row counts as readable/clickable ONLY when its center-y sits inside the scroll container's
+            # visible rect. Returns '' for a clipped or hidden row.
+            inclip_text_js = (
+                "() => { if (this.closest('[data-automation-id=\"selectedItemList\"]')) return '';"
+                " const r=this.getBoundingClientRect();"
+                " if (!(r.width>0 && r.height>0 && this.offsetParent!==null)) return '';"
+                " const ac=this.closest('[data-automation-id=\"activeListContainer\"]')"
+                "   || (document.querySelector('[data-automation-id=\"activeListContainer\"]'));"
+                " if (ac){ const c=ac.getBoundingClientRect(); const cy=r.top+r.height/2;"
+                "   if (cy < c.top-1 || cy > c.bottom+1) return ''; }"
+                " return this.textContent || ''; }"
+            )
+
             async def _rows() -> list[tuple[Any, str]]:
-                # DEDUPED visible rows: a row's parent+child both match the option selector, so the
-                # same text read twice — keep the FIRST node per text (clicking either lands the row).
+                # DEDUPED IN-CLIP rows: a row's parent+child both match the option selector, so the same
+                # text read twice — keep the FIRST node per text (clicking either lands the row). Clipped
+                # rows are excluded (see inclip_text_js) so a matched row is ALWAYS clickable.
                 out: list[tuple[Any, str]] = []
                 seen: set[str] = set()
                 with contextlib.suppress(Exception):
                     for o in await page.get_elements_by_css_selector(self._opt_selector(owned)):
-                        vis = (await o.evaluate(self._VISIBLE_TEXT_JS)) or ""
+                        vis = (await o.evaluate(inclip_text_js)) or ""
                         t = eng.norm(vis)
                         if t and t not in seen:
                             seen.add(t)
