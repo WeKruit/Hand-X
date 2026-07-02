@@ -1001,54 +1001,48 @@ class WorkdayAdapter(ATSAdapter):
                             matched_text["t"] = eng.norm(choice)
                 return target
 
+            coords_js = (
+                "(want) => { const norm=s=>(s||'').replace(/\\s+/g,'').toLowerCase();"
+                " const o=[...document.querySelectorAll('[data-automation-id=\"promptOption\"],[role=\"option\"]')]"
+                ".filter(e=>e.offsetParent!==null && !e.closest('[data-automation-id=\"selectedItemList\"]'));"
+                " const el=o.find(e=>norm(e.textContent)===want); if(!el) return '';"
+                " const rc=el.getBoundingClientRect();"
+                " return (rc.width&&rc.height)?(rc.left+rc.width/2)+','+(rc.top+rc.height/2):''; }"
+            )
+
+            async def _trusted_click_xy(x: float, y: float) -> None:
+                sid = await page.session_id
+                for ev in (
+                    {"type": "mouseMoved", "x": x, "y": y, "buttons": 0},
+                    {"type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1},
+                    {"type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1},
+                ):
+                    await session.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=sid)
+
             async def _click_row(target: Any) -> None:
-                # ATOMIC JS COMMIT FIRST (the autodesk stale-node fix): re-find the option BY TEXT and
-                # fire a full pointer/mouse event sequence in ONE page.evaluate — no handle round-trip,
-                # so the virtualizer cannot re-render between find and click. Handle-based clicks failed
-                # because reading the row's rect / scrollIntoView fires a scroll event that re-renders
-                # and detaches the node (verified: US matched every window, never committed).
+                # TRUSTED CDP CLICK AT FRESH COORDS (the autodesk commit fix): this widget's React ignores
+                # SYNTHETIC events (JS .dispatchEvent never commits — verified), so only an isTrusted CDP
+                # click works. Handle/scrollIntoView clicks detach the node on the re-render; captured
+                # coords go stale when the row shifts. So: fetch the row's CURRENT center by TEXT and
+                # trusted-click it in the tightest loop, re-fetching each try so a shifted row self-corrects.
                 mt = matched_text["t"]
-                if mt:
-                    with contextlib.suppress(Exception):
-                        r = await page.evaluate(
-                            "(want) => { const norm=s=>(s||'').replace(/\\s+/g,'').toLowerCase();"
-                            " const o=[...document.querySelectorAll('[data-automation-id=\"promptOption\"],[role=\"option\"]')]"
-                            ".filter(e=>e.offsetParent!==null && !e.closest('[data-automation-id=\"selectedItemList\"]'));"
-                            " const el=o.find(e=>norm(e.textContent)===want); if(!el) return 'no-el';"
-                            " const rc=el.getBoundingClientRect(); const cx=rc.left+rc.width/2, cy=rc.top+rc.height/2;"
-                            " const opts={bubbles:true,cancelable:true,view:window,clientX:cx,clientY:cy,button:0};"
-                            " for(const ty of ['pointerdown','mousedown','pointerup','mouseup','click'])"
-                            "  el.dispatchEvent(new MouseEvent(ty,opts)); return 'clicked'; }",
-                            mt,
-                        )
-                        if str(r) == "clicked":
-                            await asyncio.sleep(0.5)
-                            return
-                # CLICK BY CAPTURED COORDS, NOT scrollIntoView (the autodesk-class fix): the matched row
-                # is ALREADY in the rendered window (offsetParent!=null), and a scrollIntoView fires a
-                # scroll event that makes the virtualizer RE-RENDER — detaching `target` so the trusted
-                # click lands on a stale node and commits nothing (verified live: US matched every window
-                # yet never committed). Grab the current rect FIRST, trusted-click those coords directly.
-                box = None
-                with contextlib.suppress(Exception):
-                    raw = await target.evaluate(
-                        "() => { const r=this.getBoundingClientRect();"
-                        " return (r.width&&r.height)?(r.left+r.width/2)+','+(r.top+r.height/2):''; }"
-                    )
-                    if raw:
-                        x, y = (float(v) for v in str(raw).split(","))
-                        box = (x, y)
-                if box is not None and session is not None:
-                    with contextlib.suppress(Exception):
-                        sid = await page.session_id
-                        for ev in (
-                            {"type": "mousePressed", "x": box[0], "y": box[1], "button": "left", "buttons": 1, "clickCount": 1},
-                            {"type": "mouseReleased", "x": box[0], "y": box[1], "button": "left", "buttons": 0, "clickCount": 1},
-                        ):
-                            await session.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=sid)
-                        await asyncio.sleep(0.5)
-                        return
-                # fallback (offline / no rect): the legacy scrollIntoView + handle click
+                if mt and session is not None:
+                    n_before = await _pills()
+                    for _ in range(5):
+                        raw = ""
+                        with contextlib.suppress(Exception):
+                            raw = str(await page.evaluate(coords_js, mt) or "")
+                        if raw:
+                            with contextlib.suppress(Exception):
+                                x, y = (float(v) for v in raw.split(","))
+                                await _trusted_click_xy(x, y)
+                                await asyncio.sleep(0.5)
+                                if (await _pills()) > n_before:
+                                    return
+                        else:
+                            await asyncio.sleep(0.25)
+                    return
+                # fallback (offline / no matched text): the legacy scrollIntoView + handle click
                 with contextlib.suppress(Exception):
                     await target.evaluate("() => this.scrollIntoView({block:'center'})")
                 await asyncio.sleep(0.2)
