@@ -951,6 +951,52 @@ async def _vlm_filled(session: Any, field: FormField, value: str) -> bool:
     return False
 
 
+async def fields_from_errors(errs: list[str], fields: list[FormField], llm: Any = None) -> list[FormField]:
+    """GENERIC reader of the advance-blocking message -> which fields to refill at L1.
+    Two readers, merged: (1) deterministic label-containment (fast, exact, zero cost);
+    (2) the CHEAP LLM as semantic authority — required for localized text, label-less messages
+    ('33132 is not a valid postal code for Virginia' -> Postal Code AND State), and indirect
+    references. Over-selection is safe (refill is idempotent, values come from the profile);
+    under-selection costs a 10-minute agent run — so both readers always contribute.
+    Bounded inputs (errors 800 chars, <=60 labels); errored LLM contributes nothing (never blocks)."""
+    ek = norm(" ".join(errs))
+    picked: dict[str, FormField] = {}
+    for f in fields:
+        if f.label and len(norm(f.label)) >= 3 and norm(f.label) in ek:
+            picked[f.name] = f
+    if llm is not None:
+        with contextlib.suppress(Exception):
+            import oa_llm as _oal
+            from pydantic import BaseModel
+
+            from browser_use.llm.messages import SystemMessage, UserMessage
+
+            class _Sel(BaseModel):
+                labels: list[str]
+
+            labels = [f.label for f in fields if f.label][:60]
+            res = await _oal.resilient_text(
+                [
+                    SystemMessage(
+                        content="A form failed to advance with the validation message(s) below. "
+                        "From the provided field labels, return the labels of EVERY field the "
+                        "message says is missing, invalid, or inconsistent — including fields the "
+                        "message references indirectly (a postal-code-vs-state mismatch implicates "
+                        "BOTH 'Postal Code' and 'State'). Return only labels from the list."
+                    ),
+                    UserMessage(content=f"messages: {' | '.join(errs)[:800]}\nfield labels: {labels}"),
+                ],
+                output_format=_Sel,
+                primary=llm,
+            )
+            if res is not None:
+                want = {norm(x) for x in (res.completion.labels or [])[:8]}
+                for f in fields:
+                    if f.label and norm(f.label) in want:
+                        picked.setdefault(f.name, f)
+    return list(picked.values())[:8]
+
+
 _URL_FIELD_RE = re.compile(r"url|linkedin|website|github|portfolio", re.I)
 _BARE_DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(/\S*)?$", re.I)
 
@@ -1439,8 +1485,7 @@ async def run_wizard(
                         # gets first shot. Label-in-error is field SELECTION (idempotent), not value
                         # matching — the substring directive doesn't apply.
                         with contextlib.suppress(Exception):
-                            ek = norm(" ".join(errs))
-                            redo = [f for f in step.fields if f.label and norm(f.label) and norm(f.label) in ek]
+                            redo = await fields_from_errors(errs, step.fields, llm=agent_llm)
                             for f in redo[:8]:
                                 value, _src = _resolve(f, mapped, resume)
                                 if (value or "").strip():
