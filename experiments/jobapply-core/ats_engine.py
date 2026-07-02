@@ -636,6 +636,48 @@ _ANTI_LOOP_RULES = (
 )
 
 
+def capture_l3_history(hist: Any, tag: str) -> None:
+    """Persist a browser-use Agent run so an L3 escalation is NEVER re-debugged (user directive: 'download
+    the script from browser use for our escalate & auto improve'). Writes two files under GH_L3_LEARN_DIR
+    (default runs/l3_learn/): (1) <tag>.json — the FULL AgentHistoryList (replayable, human-readable);
+    (2) appends one line to corpus.jsonl — a distilled {tag, success, secs, actions:[{name, params,
+    selector}]} record that the auto-improve pass mines to promote a repeated agent action into an L1
+    rule. Best-effort; a capture failure never affects the run."""
+    import contextlib
+    import json
+    import os
+    import pathlib
+
+    out_dir = pathlib.Path(os.environ.get("GH_L3_LEARN_DIR", "runs/l3_learn"))
+    with contextlib.suppress(Exception):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", tag)[:120]
+        with contextlib.suppress(Exception):
+            hist.save_to_file(str(out_dir / f"{safe}.json"))  # full replayable history
+        # distilled corpus line: the successful ACTIONS + their interacted selectors = the learn signal
+        actions = []
+        with contextlib.suppress(Exception):
+            for a in hist.model_actions():  # list[dict]: {action_name: params, interacted_element: {...}}
+                name = next((k for k in a if k != "interacted_element"), "?")
+                el = a.get("interacted_element") or {}
+                sel = ""
+                if isinstance(el, dict):
+                    sel = el.get("css_selector") or el.get("xpath") or el.get("tag_name") or ""
+                elif el:
+                    sel = str(getattr(el, "css_selector", "") or getattr(el, "xpath", "") or "")[:200]
+                actions.append({"name": name, "params": a.get(name), "selector": str(sel)[:200]})
+        rec = {"tag": safe, "success": None, "secs": None, "final": None, "actions": actions}
+        with contextlib.suppress(Exception):
+            rec["success"] = hist.is_successful()
+        with contextlib.suppress(Exception):
+            rec["secs"] = round(hist.total_duration_seconds() or 0, 1)
+        with contextlib.suppress(Exception):
+            rec["final"] = str(hist.final_result() or "")[:300]
+        with (out_dir / "corpus.jsonl").open("a") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        print(f"   [L3-capture] {safe} -> {out_dir}/ (actions={len(actions)} success={rec['success']})")
+
+
 def _wizard_agent_kit() -> tuple[Any, Any]:
     """Build the (tools, on_step_end_hook) the single-page path uses, for a wizard agent.
     tools carries verify_field_visually; the hook is the cached/capped/nudge-only loop guard
@@ -711,7 +753,8 @@ async def escalate(
             use_vision="auto",
             available_file_paths=[resume] if resume else None,
         )
-        await agent.run(max_steps=4, on_step_end=hook)
+        hist = await agent.run(max_steps=4, on_step_end=hook)
+        capture_l3_history(hist, f"field_{field.name}")
         return True
     except Exception as exc:
         print(f"   [L3] agent failed for {field.name}: {exc}")
@@ -781,6 +824,7 @@ async def agent_fill_section(
             available_file_paths=[resume] if resume else None,
         )
         hist = await agent.run(max_steps=max_steps, on_step_end=hook)
+        capture_l3_history(hist, f"section_{section}")
         # HONEST bookkeeping (verified live: 'agent_ok': True was recorded for section agents whose
         # judge verdict was FAIL and who changed NOTHING) — agent_ok must reflect the agent's own
         # done-success, not merely 'the agent ran without raising'.
@@ -875,7 +919,8 @@ async def repair_and_advance(
             use_vision=True,
             available_file_paths=[resume] if resume else None,
         )
-        await agent.run(max_steps=max_steps, on_step_end=hook)
+        hist = await agent.run(max_steps=max_steps, on_step_end=hook)
+        capture_l3_history(hist, "repair_" + re.sub(r"[^A-Za-z0-9]+", "_", " ".join(errors)[:40]))
     except Exception as exc:
         print(f"   [agent:repair] {exc}")
     finally:
