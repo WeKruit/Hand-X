@@ -1016,31 +1016,48 @@ class WorkdayAdapter(ATSAdapter):
                 nv = eng.norm(value)
                 last_txt, still = "", 0
                 teleported = False
-                for _ in range(25):
-                    last_window = [t for _, t in rows_h]
-                    cand = next(((o, t) for o, t in rows_h if _bare_eq(t, value)), None)
-                    if cand is None:
+
+                async def _scan(rows: list[tuple[Any, str]]) -> Any | None:
+                    # match this window: bare-eq (deterministic, no LLM), else substring PROPOSES + LLM
+                    # confirms. Extracted so EVERY return-None path re-reads and scans first — the
+                    # matching row demonstrably renders in the final window (…unitedstatesofamerica(+1)…)
+                    # but a scroll/read timing gap let it slip between iterations.
+                    c = next(((o, t) for o, t in rows if _bare_eq(t, value)), None)
+                    if c is None:
                         prop = next(
                             (
                                 (o, t)
-                                for o, t in rows_h
+                                for o, t in rows
                                 if t and t != "selectone" and (nv in t or t in nv) and len(t) > 2
                             ),
                             None,
                         )
                         if prop is not None and await _llm_value_matches(prop[1], value):
-                            cand = prop
-                    if cand is not None:
-                        self._chosen[field.name] = cand[1]
-                        return cand[0]
+                            c = prop
+                    if c is not None:
+                        self._chosen[field.name] = c[1]
+                    return c[0] if c else None
+
+                async def _bail() -> Any | None:
+                    # last-chance: re-read the CURRENT rendered window and scan once more before giving up
+                    fresh = await _rows()
+                    if fresh:
+                        return await _scan(fresh)
+                    return None
+
+                for _ in range(25):
+                    last_window = [t for _, t in rows_h]
+                    hit = await _scan(rows_h)
+                    if hit is not None:
+                        return hit
                     if not rows_h:
-                        return None
+                        return await _bail()
                     lt = rows_h[-1][1]
                     if lt == last_txt:
                         still += 1
                         if still >= 2:
                             if teleported:
-                                return None  # up-walk exhausted — every window was rendered and read
+                                return await _bail()  # up-walk exhausted — final scan of the current window
                             # TELEPORT TO BOTTOM (live-proven on the autodesk wd1 variant): mid-list
                             # scrollTop writes and every input mechanism are IGNORED by this
                             # virtualizer, but a jump to scrollHeight forces a re-render
@@ -1090,7 +1107,7 @@ class WorkdayAdapter(ATSAdapter):
                                 break
                     if _DBG and rows_h:
                         print(f"   [msel hunt {field.name}] window last={rows_h[-1][1]!r}")
-                return None
+                return await _bail()
 
             pairs = await _rows()
             node = await _pick_row(pairs)
