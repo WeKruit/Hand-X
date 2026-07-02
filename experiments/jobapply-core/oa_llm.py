@@ -172,7 +172,11 @@ def _mk_google(model: str, api_key: str) -> Any:
 # kind -> model: 'text'/'vlm' = value reads & option picks (nano-grade OCR work);
 #                'agent'      = L3 escalation + page-level label->value mapping (needs the mini tier).
 # --------------------------------------------------------------------------- #
-_OPENAI_PRIMARY_DEFAULTS = {"text": "gpt-5.4-nano", "vlm": "gpt-5.4-nano", "agent": "gpt-5.4-mini"}
+# 'agent' defaults DISABLED ('' -> None): live sweep showed gpt-5.4-mini inside the browser-use Agent
+# loop emitting 'Invalid JSON: trailing characters' with NO fallback_llm — the one unprotected path
+# (reads/picks go through the resilient chain; the Agent loop does not). Nano stays on reads per scope
+# ("mainly use nano for reading values"). Re-enable via OA_OPENAI_AGENT_MODEL once the JSON parse is fixed.
+_OPENAI_PRIMARY_DEFAULTS = {"text": "gpt-5.4-nano", "vlm": "gpt-5.4-nano", "agent": ""}
 
 
 def _openai_primary_on() -> bool:
@@ -186,6 +190,8 @@ def openai_primary_llm(kind: str = "text") -> Any | None:
     if not _openai_primary_on():
         return None
     model = os.environ.get(f"OA_OPENAI_{kind.upper()}_MODEL", _OPENAI_PRIMARY_DEFAULTS.get(kind, "gpt-5.4-nano"))
+    if not model:  # '' = this kind stays on the caller's gemini (agent tier — see defaults note)
+        return None
     return _cached("openai", model, kind, lambda: _mk_openai(model, os.environ["OPENAI_API_KEY"]))
 
 
