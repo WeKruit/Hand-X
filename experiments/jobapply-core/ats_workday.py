@@ -1046,6 +1046,19 @@ class WorkdayAdapter(ATSAdapter):
                             rows_h = await _rows()
                             if rows_h and rows_h[-1][1] != lt:
                                 break
+                    if rows_h and rows_h[-1][1] == lt and session is not None:
+                        # LEGACY DomHand rung (genericConfig.arrowScrollToOption): trusted ArrowDown
+                        # batches make the widget's OWN focus-follow render the next window — the
+                        # widget-native scroll that works where scrollIntoView AND wheel both no-op.
+                        # 10/batch so 25 hunt iterations can traverse a ~250-row country list.
+                        for _k in range(10):
+                            await eng.press_key_trusted(session, page, key="ArrowDown", code="ArrowDown", vk=40)
+                            await asyncio.sleep(0.08)
+                        for _w in range(3):
+                            await asyncio.sleep(0.3)
+                            rows_h = await _rows()
+                            if rows_h and rows_h[-1][1] != lt:
+                                break
                     if _DBG and rows_h:
                         print(f"   [msel hunt {field.name}] window last={rows_h[-1][1]!r}")
                 return None
