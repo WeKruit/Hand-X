@@ -75,6 +75,9 @@ _SCROLL_DRIVE_JS = (
     "   if(mode==='bottom') a.scrollTop=a.scrollHeight;"
     "   else if(mode==='up') a.scrollTop=Math.max(a.scrollTop-step,0);"
     "   else a.scrollTop+=step;"
+    # CRITICAL (live-proven on autodesk wd1): the virtualizer re-renders on the scroll EVENT, and a
+    # programmatic .scrollTop assignment does NOT reliably fire its listener - dispatch one explicitly.
+    "   a.dispatchEvent(new Event('scroll',{bubbles:true}));"
     "   return 'Y:'+a.scrollTop; }"
     "  a=a.parentElement; }"
     " return 'N'; }"
