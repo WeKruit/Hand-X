@@ -1025,6 +1025,27 @@ class WorkdayAdapter(ATSAdapter):
                         rows_h = await _rows()
                         if rows_h and rows_h[-1][1] != lt:
                             break
+                    if rows_h and rows_h[-1][1] == lt and session is not None:
+                        # scrollIntoView is a NO-OP on some tenant widget variants (verified live:
+                        # alteryx + autodesk stuck on the A-window while paypal/hp scrolled fine) —
+                        # fall back to a TRUSTED mouse-wheel over the menu, the human-generic scroll.
+                        with contextlib.suppress(Exception):
+                            box = await rows_h[-1][0].evaluate(
+                                "() => { const r=this.getBoundingClientRect();"
+                                " return (r.left+r.width/2)+','+(r.top-30); }"
+                            )
+                            x, y = (float(v) for v in str(box).split(","))
+                            sid = await page.session_id
+                            await session.cdp_client.send.Input.dispatchMouseEvent(
+                                params={"type": "mouseWheel", "x": x, "y": max(y, 10),
+                                        "deltaX": 0, "deltaY": 420},
+                                session_id=sid,
+                            )
+                        for _w in range(4):
+                            await asyncio.sleep(0.3)
+                            rows_h = await _rows()
+                            if rows_h and rows_h[-1][1] != lt:
+                                break
                     if _DBG and rows_h:
                         print(f"   [msel hunt {field.name}] window last={rows_h[-1][1]!r}")
                 return None
