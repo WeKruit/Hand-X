@@ -1102,6 +1102,9 @@ class WorkdayAdapter(ATSAdapter):
                 nv = eng.norm(value)
                 last_txt, still = "", 0
                 teleported = False
+                import time as _time
+
+                hunt_t0 = _time.monotonic()
 
                 async def _scan(rows: list[tuple[Any, str]]) -> Any | None:
                     # match this window: bare-eq (deterministic, no LLM), else substring PROPOSES + LLM
@@ -1133,6 +1136,11 @@ class WorkdayAdapter(ATSAdapter):
                     return None
 
                 for _ in range(25):
+                    if _time.monotonic() - hunt_t0 > 35:
+                        # TIME BUDGET (paypal burned 147.8s hunting an UNFILLABLE 'No Items' taxonomy):
+                        # a hunt that hasn't matched in 35s is chasing an absent option — bail to the
+                        # final scan; the residual/defaults path owns it from there.
+                        return await _bail()
                     last_window = [t for _, t in rows_h]
                     hit = await _scan(rows_h)
                     if hit is not None:

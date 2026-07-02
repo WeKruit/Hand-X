@@ -793,10 +793,22 @@ async def put(adapter, session, page, c: Control, value: str, llm=None) -> bool:
             return True
 
         added = 0
+        misses = 0
         for it in items:
             # exclusive=False: adding one skill must NEVER trim sibling pills (suggested skills are legit)
-            if it and not await _present(it) and await adapter._multiselect(session, page, fld, it, exclusive=False):
+            if not it or await _present(it):
+                continue
+            if await adapter._multiselect(session, page, fld, it, exclusive=False):
                 added += 1
+                misses = 0
+            else:
+                misses += 1
+                if misses >= 2:
+                    # TAXONOMY DEAD (suggestion-only list wiped / 'No Items' for every query — verified
+                    # live): two consecutive unfillable items means the rest fail identically; stop
+                    # burning ~35s per sibling and let the residual report own it.
+                    print(f"  [chip {c.fkit}] taxonomy dead after 2 misses — skipping remaining items", flush=True)
+                    break
         return added > 0 or bool(have)
     if a == "date":
         from ats_engine import FormField
