@@ -951,6 +951,27 @@ async def _vlm_filled(session: Any, field: FormField, value: str) -> bool:
     return False
 
 
+_URL_FIELD_RE = re.compile(r"url|linkedin|website|github|portfolio", re.I)
+_BARE_DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(/\S*)?$", re.I)
+
+
+def _norm_url_value(field: FormField, value: str) -> str:
+    """Normalize a URL-ish value for a URL-ish field: résumés carry bare 'linkedin.com/in/x' and
+    Workday validators demand a full scheme'd URL (live evidence: 'Invalid LinkedIn URL' recurred on
+    5 tenants; the nvidia repair only passed as 'https://www...in/x/'). Scheme + trailing slash for
+    path URLs; non-URL fields and already-schemed values pass through untouched."""
+    v = (value or "").strip()
+    if not v or "://" in v:
+        return value
+    label = f"{field.label or ''} {field.name or ''}"
+    if _URL_FIELD_RE.search(label) and _BARE_DOMAIN_RE.match(v):
+        v = "https://" + ("www." if v.lower().startswith("linkedin.com") else "") + v
+        if "/" in v.split("://", 1)[1] and not v.endswith("/"):
+            v += "/"
+        return v
+    return value
+
+
 async def fill_with_ladder(
     adapter: ATSAdapter,
     session: Any,
@@ -971,6 +992,7 @@ async def fill_with_ladder(
     """
     if not (value or "").strip():  # nothing to fill (incl. a file field with no path)
         return "blank"
+    value = _norm_url_value(field, value)
 
     filled = await adapter.fill(session, page, field, value, resume)
     if filled and await adapter.read_back(session, page, field, value):

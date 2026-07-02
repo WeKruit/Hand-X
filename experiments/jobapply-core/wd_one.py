@@ -34,6 +34,7 @@ PROFILES = [
         "postal_code": "94105",
         "country": "United States of America",
         "how_did_you_hear": "LinkedIn",
+        "linkedin": "https://www.linkedin.com/in/jordan-rivera-demo/",
         # EEO / demographic / visa — ALL profile-driven. The engine fills each from these values; it
         # DECLINES only a field the profile genuinely leaves empty, and NEVER guesses. (Directive: EEO
         # incl. sexual orientation, and visa/work-authorization, come from the user profile.)
@@ -88,6 +89,7 @@ PROFILES = [
     },
     {
         "_name": "priya",
+        "linkedin": "https://www.linkedin.com/in/priya-sharma-demo/",
         "first_name": "Priya",
         "last_name": "Sharma",
         "email": "priya.s.demo@example.com",
@@ -127,6 +129,7 @@ PROFILES = [
     },
     {
         "_name": "marcus",
+        "linkedin": "https://www.linkedin.com/in/marcus-johnson-demo/",
         "first_name": "Marcus",
         "last_name": "Johnson",
         "email": "marcus.j.demo@example.com",
@@ -166,6 +169,7 @@ PROFILES = [
     },
     {
         "_name": "sofia",
+        "linkedin": "https://www.linkedin.com/in/sofia-martinez-demo/",
         "first_name": "Sofia",
         "last_name": "Garcia",
         "email": "sofia.g.demo@example.com",
@@ -200,6 +204,7 @@ PROFILES = [
     },
     {
         "_name": "wei",
+        "linkedin": "https://www.linkedin.com/in/wei-chen-demo/",
         "first_name": "Wei",
         "last_name": "Chen",
         "email": "wei.c.demo@example.com",
