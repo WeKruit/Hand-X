@@ -1174,11 +1174,72 @@ class WorkdayAdapter(ATSAdapter):
                         print(f"   [msel hunt {field.name}] window last={rows_h[-1][1]!r}")
                 return await _bail()
 
+            # DIRECT CENTER-AND-CLICK (the autodesk commit primitive): the virtualized option renders in
+            # the DOM near the current scroll but is usually OUTSIDE the ~151px visible clip, so no click
+            # can land. Instead of walking windows and clicking-in-place, SCROLL the exact-or-bare-matching
+            # option to the clip CENTER (scrollTop + a real scroll event so the virtualizer re-renders),
+            # then trusted-click its now-in-clip coords. Bare-eq is applied IN-JS so decorations
+            # ('(+1)') don't defeat the match. Only fires when the value is known (skip for open menus w/o value).
+            center_js = (
+                "(want) => { const norm=s=>(s||'').replace(/\\s+/g,'').toLowerCase();"
+                " const bare=s=>norm(s).replace(/\\([^)]*\\)/g,'');"
+                " const ac=document.querySelector('[data-automation-id=\"activeListContainer\"]'); if(!ac) return '';"
+                " const o=[...document.querySelectorAll('[data-automation-id=\"promptOption\"],[role=\"option\"]')]"
+                ".filter(e=>!e.closest('[data-automation-id=\"selectedItemList\"]'));"
+                " const w=bare(want);"
+                " const el=o.find(e=>bare(e.textContent)===w); if(!el) return 'no-el';"
+                " const er=el.getBoundingClientRect(), cr=ac.getBoundingClientRect();"
+                " const posInContent = er.top - cr.top + ac.scrollTop;"
+                " ac.scrollTop = posInContent - ac.clientHeight/2 + er.height/2;"
+                " ac.dispatchEvent(new Event('scroll',{bubbles:true})); return 'centered'; }"
+            )
+            coords_after_center_js = (
+                "(want) => { const norm=s=>(s||'').replace(/\\s+/g,'').toLowerCase();"
+                " const bare=s=>norm(s).replace(/\\([^)]*\\)/g,'');"
+                " const ac=document.querySelector('[data-automation-id=\"activeListContainer\"]'); if(!ac) return '';"
+                " const cr=ac.getBoundingClientRect();"
+                " const o=[...document.querySelectorAll('[data-automation-id=\"promptOption\"],[role=\"option\"]')]"
+                ".filter(e=>!e.closest('[data-automation-id=\"selectedItemList\"]'));"
+                " const w=bare(want); const el=o.find(e=>bare(e.textContent)===w); if(!el) return '';"
+                " const r=el.getBoundingClientRect(); const cy=r.top+r.height/2;"
+                " if(cy<cr.top-1||cy>cr.bottom+1) return 'clipped';"  # still outside clip -> not clickable yet
+                " return (r.left+r.width/2)+','+cy; }"
+            )
+
+            async def _center_and_commit() -> bool:
+                if session is None or not (value or "").strip():
+                    return False
+                n_before = await _pills()
+                for _try in range(10):  # each try: ensure US in DOM (teleport if needed) -> center -> click
+                    with contextlib.suppress(Exception):
+                        r = str(await page.evaluate(center_js, value) or "")
+                        if r == "no-el":  # not rendered near current scroll — teleport to bottom (US region)
+                            await page.evaluate(_SCROLL_DRIVE_JS, "bottom")
+                            await asyncio.sleep(0.5)
+                            continue
+                    await asyncio.sleep(0.5)  # let the centered re-render settle
+                    with contextlib.suppress(Exception):
+                        c = str(await page.evaluate(coords_after_center_js, value) or "")
+                        if c and c not in ("clipped",):
+                            x, y = (float(v) for v in c.split(","))
+                            await _trusted_click_xy(x, y)
+                            await asyncio.sleep(0.5)
+                            if (await _pills()) > n_before:
+                                self._chosen[field.name] = value
+                                if _DBG:
+                                    print(f"   [msel {field.name}] center-and-commit OK (pills {n_before}->{n_before + 1})")
+                                return True
+                    await asyncio.sleep(0.25)
+                return False
+
             pairs = await _rows()
             node = await _pick_row(pairs)
-            if node is None and pairs:
+            ok = await _center_and_commit()  # try the direct primitive first (handles the clipped virtualizer)
+            if ok:
+                node = None  # committed — skip the walk
+            if not ok and node is None and pairs:
                 node = await _hunt(pairs)
-            if node is not None:
+            if not ok and node is not None:
                 await _click_row(node)
                 ok = await _committed_delta()
                 if not ok:
