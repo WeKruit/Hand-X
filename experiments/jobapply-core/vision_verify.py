@@ -60,9 +60,11 @@ def _matches(verdict: str) -> bool:
 
 
 def _vlm() -> Any:
+    import oa_llm
+
     from browser_use import ChatGoogle  # cheap VLM; swap to ChatOpenAI(base_url=…) for local Qwen2.5-VL
 
-    return ChatGoogle(model=VERIFY_MODEL, api_key=os.environ.get("GOOGLE_API_KEY"))
+    return oa_llm.openai_primary_llm("vlm") or ChatGoogle(model=VERIFY_MODEL, api_key=os.environ.get("GOOGLE_API_KEY"))
 
 
 async def _current_url(session: Any) -> str:

@@ -253,7 +253,8 @@ async def run_single_page_oa(
     tc = TokenCost(include_cost=True)
     await tc.initialize()
     llm = tc.register_llm(
-        ChatGoogle(
+        __import__("oa_llm").openai_primary_llm("agent")
+        or ChatGoogle(
             model="gemini-3-flash-preview",
             api_key=os.environ.get("GOOGLE_API_KEY"),
             thinking_level="minimal",

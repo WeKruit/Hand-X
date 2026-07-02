@@ -111,6 +111,14 @@ def _build_fallback(kind: str) -> tuple[Any, str]:
     text_model = os.environ.get("OA_FALLBACK_MODEL")
     vlm_model = os.environ.get("OA_FALLBACK_VLM_MODEL") or os.environ.get("OA_FALLBACK_MODEL")
 
+    # OA_PRIMARY=openai: the primary IS openai, so the fallback must be the OTHER vendor — gemini
+    # flash-lite (cross-vendor diversity: uncorrelated errors is the whole point of the second reader).
+    if _openai_primary_on():
+        gkey = os.environ.get("GOOGLE_API_KEY")
+        if gkey:
+            model = (vlm_model or "gemini-3.1-flash-lite") if kind == "vlm" else (text_model or "gemini-3.1-flash-lite")
+            return _cached("google", model, kind, lambda: _mk_google(model, gkey)), "google"
+
     if openai_key:
         model = (vlm_model or _DEFAULT_OPENAI_VLM) if kind == "vlm" else (text_model or _DEFAULT_OPENAI_TEXT)
         return _cached("openai", model, kind, lambda: _mk_openai(model, openai_key)), "openai"
@@ -148,6 +156,37 @@ def _mk_groq(model: str, api_key: str) -> Any:
     from browser_use.llm.groq.chat import ChatGroq
 
     return ChatGroq(model=model, api_key=api_key)
+
+
+def _mk_google(model: str, api_key: str) -> Any:
+    from browser_use.llm.google.chat import ChatGoogle
+
+    return ChatGoogle(model=model, api_key=api_key)
+
+
+# --------------------------------------------------------------------------- #
+# PRIMARY-provider switch. OA_PRIMARY=openai flips the fleet's primary to OpenAI (prepaid credits)
+# with ONE env var; every construction site stays `openai_primary_llm(kind) or ChatGoogle(...)`, so
+# with the env unset behavior is byte-identical to before. Gemini auto-demotes to the FALLBACK slot
+# (see _build_fallback) — cross-vendor two-reader diversity preserved, roles swapped.
+# kind -> model: 'text'/'vlm' = value reads & option picks (nano-grade OCR work);
+#                'agent'      = L3 escalation + page-level label->value mapping (needs the mini tier).
+# --------------------------------------------------------------------------- #
+_OPENAI_PRIMARY_DEFAULTS = {"text": "gpt-5.4-nano", "vlm": "gpt-5.4-nano", "agent": "gpt-5.4-mini"}
+
+
+def _openai_primary_on() -> bool:
+    return os.environ.get("OA_PRIMARY", "").lower() == "openai" and bool(os.environ.get("OPENAI_API_KEY"))
+
+
+def openai_primary_llm(kind: str = "text") -> Any | None:
+    """OpenAI primary client for ``kind`` ('text' | 'vlm' | 'agent'), or None when OA_PRIMARY is not
+    'openai' (callers then keep their existing gemini construction). Models overridable via
+    OA_OPENAI_TEXT_MODEL / OA_OPENAI_VLM_MODEL / OA_OPENAI_AGENT_MODEL. Cached per (model, kind)."""
+    if not _openai_primary_on():
+        return None
+    model = os.environ.get(f"OA_OPENAI_{kind.upper()}_MODEL", _OPENAI_PRIMARY_DEFAULTS.get(kind, "gpt-5.4-nano"))
+    return _cached("openai", model, kind, lambda: _mk_openai(model, os.environ["OPENAI_API_KEY"]))
 
 
 def _build_primary_text(model: str | None) -> Any | None:

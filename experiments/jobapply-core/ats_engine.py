@@ -759,7 +759,11 @@ async def agent_fill_section(
     ok = True
     tools, hook = _wizard_agent_kit()
     try:
-        llm = ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY"))
+        import oa_llm as _oal
+
+        llm = _oal.openai_primary_llm("agent") or ChatGoogle(
+            model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY")
+        )
         agent = Agent(
             task=task,
             llm=llm,
@@ -850,7 +854,9 @@ async def repair_and_advance(
     try:
         agent = Agent(
             task=task,
-            llm=agent_llm or ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY")),
+            llm=agent_llm
+            or __import__("oa_llm").openai_primary_llm("agent")
+            or ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY")),
             browser_session=session,
             tools=tools,
             use_vision=True,
@@ -1115,7 +1121,8 @@ async def run_single_page(
     # thinking_level='minimal': label->value mapping is deterministic reasoning, not a
     # puzzle — minimal thinking cuts thought tokens ~10x, holding the call near ~$0.0015.
     llm = tc.register_llm(
-        ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY"), thinking_level="minimal")
+        __import__("oa_llm").openai_primary_llm("agent")
+        or ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY"), thinking_level="minimal")
     )
 
     map_rows = [f for f in fields if f.needs_map]  # step 2 (generic)
@@ -1238,10 +1245,14 @@ async def run_wizard(
     tc = TokenCost(include_cost=True)
     await tc.initialize()
     llm = tc.register_llm(
-        ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY"), thinking_level="minimal")
+        __import__("oa_llm").openai_primary_llm("agent")
+        or ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY"), thinking_level="minimal")
     )
     # separate tc-registered LLM for the repair agent so its tokens count toward per-step cost.
-    agent_llm = tc.register_llm(ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY")))
+    agent_llm = tc.register_llm(
+        __import__("oa_llm").openai_primary_llm("agent")
+        or ChatGoogle(model="gemini-3-flash-preview", api_key=os.environ.get("GOOGLE_API_KEY"))
+    )
     result: dict = {"adapter": adapter.__class__.__name__, "title": title, "url": url, "steps": []}
 
     session = BrowserSession(browser_profile=BrowserProfile(headless=headless, keep_alive=True))

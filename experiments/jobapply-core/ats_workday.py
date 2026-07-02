@@ -1813,7 +1813,9 @@ class WorkdayAdapter(ATSAdapter):
         from browser_use import ChatGoogle
 
         gkey = os.environ.get("GOOGLE_API_KEY")
-        llm = ChatGoogle(model="gemini-3.1-flash-lite", api_key=gkey) if gkey else None
+        import oa_llm as _oal
+
+        llm = _oal.openai_primary_llm("text") or (ChatGoogle(model="gemini-3.1-flash-lite", api_key=gkey) if gkey else None)
         out: dict = {}
         try:
             out["deterministic"] = await wr.fill_deterministic(self, session, page, profile, llm)
