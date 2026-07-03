@@ -771,9 +771,32 @@ async def _ensure_cdp_live(session: Any) -> None:
         await session.connect()  # genuinely dead -> rebuild the root client + watchdogs
 
 
+# ---------------------------------------------------------------------------
+# Job wall-clock budget: agents are the only open-ended time sink (each step is an LLM
+# call + screenshot, ~20s). The kalepa/ringcentral class = an agent grinding into the
+# runner's kill window. Runners call set_job_deadline(); every agent entry point checks
+# there is enough runway left before spawning, so a job DEGRADES (field FAILs, captured)
+# instead of dying mid-CDP.
+# ---------------------------------------------------------------------------
+_JOB_DEADLINE: float | None = None
+
+
+def set_job_deadline(budget_s: float | None) -> None:
+    global _JOB_DEADLINE
+    _JOB_DEADLINE = (time.monotonic() + budget_s) if budget_s else None
+
+
+def _agent_runway(min_s: float = 90.0) -> bool:
+    """True if no deadline set or enough wall clock remains to be worth spawning an agent."""
+    return _JOB_DEADLINE is None or (_JOB_DEADLINE - time.monotonic()) > min_s
+
+
 async def escalate(
     session: Any, agent_llm: Any, page: Any, field: FormField, value: str, resume: str | None = None
 ) -> bool:
+    if not _agent_runway():
+        print("   [budget] wall clock nearly spent — L3 escalation skipped")
+        return False
     from browser_use import Agent
 
     label = field.label or field.name
@@ -825,6 +848,9 @@ async def agent_fill_section(
     FILL-ONLY is enforced STRUCTURALLY, not by prompt alone: every submit control is DISABLED before
     the agent runs (it physically cannot submit) and restored after. Runs LAST, so the agent's CDP
     teardown can't perturb earlier deterministic fields."""
+    if not _agent_runway(min_s=150.0):  # sections legitimately run long — need real runway
+        print(f"   [budget] wall clock nearly spent — section agent '{section}' skipped")
+        return {}
     from browser_use import Agent, ChatGoogle
 
     disable_js = (
@@ -905,6 +931,9 @@ async def repair_and_advance(
     Only the FINAL submit is disabled (the agent must still be able to Save-and-Continue past the
     step); the agent is told never to navigate and never to finalize. The agent's CDP teardown is
     re-attached in finally. Returns True if the agent ran (advancement is verified by the caller)."""
+    if not _agent_runway(min_s=120.0):
+        print("   [budget] wall clock nearly spent — repair agent skipped")
+        return False
     from browser_use import Agent, ChatGoogle
 
     # STRUCTURAL submit-guard (belt-and-suspenders to install_submit_guard already running on the
@@ -1266,6 +1295,10 @@ async def run(
     creds: Credentials | None = None,
 ) -> dict:
     """Dispatch by adapter shape: single-page (one extract+fill pass) vs wizard (stepped)."""
+    with contextlib.suppress(Exception):  # runners may also call set_job_deadline() directly
+        b = float(os.environ.get("GH_JOB_BUDGET_S", "0"))
+        if b > 0:
+            set_job_deadline(b)
     if adapter.multi_page:
         return await run_wizard(
             adapter,
@@ -1341,6 +1374,25 @@ async def run_single_page(
     if not await form_present(adapter, page, fields) and await _try_apply_click(session, page):
         with contextlib.suppress(Exception):
             page = await session.must_get_current_page()
+
+    # REACH rung 2 — iframe src-hop (toast class): the company careers page renders the SAME
+    # hosted ATS form inside a cross-origin iframe our CDP session can't see into. The iframe
+    # src IS the fillable form — hop the top-level page to it and fill normally. Cheap
+    # alternative to a full OOPIF second-session drill (build that only if data still demands).
+    if not await form_present(adapter, page, fields):
+        hosts = [re.escape(h) for h in (getattr(adapter, "hosts", None) or [])]
+        if hosts:
+            with contextlib.suppress(Exception):
+                src = await page.evaluate(
+                    "() => { const rx = new RegExp(" + json.dumps("|".join(hosts)) + ");"
+                    " const f=[...document.querySelectorAll('iframe')].find(i=>rx.test(i.src||''));"
+                    " return f ? f.src : ''; }"
+                )
+                if src:
+                    print(f"   [reach] hopping into ATS iframe src: {str(src)[:90]}")
+                    await session.navigate_to(str(src))
+                    await asyncio.sleep(2.0)
+                    page = await session.must_get_current_page()
 
     if not await form_present(adapter, page, fields):
         # The form is not on this page — boards-api gave us the schema but the live form
@@ -1497,6 +1549,7 @@ async def run_wizard(
         await install_submit_guard(page)
 
         seen: set[int] = set()
+        resumed = False  # one-shot autosave-resume after a stall (stryker class)
         for _ in range(12):  # MAX_STEPS guardrail
             await install_submit_guard(page)  # re-assert each iteration (cheap; idempotent)
             with contextlib.suppress(Exception):
@@ -1539,6 +1592,19 @@ async def run_wizard(
                 )
                 break
             if step.index in seen:  # progress-monotonicity guard
+                if not resumed:
+                    # stryker class: a transient 'Something went wrong' reload can bounce the wizard
+                    # back to an already-done step. Workday AUTOSAVES the application — re-entering
+                    # from the job URL resumes at the last saved step. Try ONCE before halting.
+                    resumed = True
+                    print("  [wd] stalled — re-entering wizard from the job URL once (autosave resume)")
+                    with contextlib.suppress(Exception):
+                        await session.navigate_to(url)
+                        page = await session.must_get_current_page()
+                        page = await adapter.open_form(session, page)
+                        await install_submit_guard(page)
+                        seen.clear()
+                        continue
                 return await _wizard_halt(result, "STEP_STALLED", f"re-entered step {step.index}", tc, session)
             seen.add(step.index)
 

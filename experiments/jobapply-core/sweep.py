@@ -58,6 +58,7 @@ async def _one(url: str, profile: dict, resume: str | None, escalate: bool, ss: 
         return {"url": url, "status": "NO_ADAPTER"}
     t0 = time.monotonic()
     base = {"url": url, "adapter": adapter.__class__.__name__}
+    eng.set_job_deadline(max(30.0, timeout - 20.0))  # agents degrade gracefully, not die mid-CDP
     try:
         res = await asyncio.wait_for(
             eng.run(
