@@ -525,7 +525,13 @@ async def cdp_type(session: Any, node: Any, text: str, *, keystrokes: bool = Fal
     Returns True on success, False on timeout/error.
     """
     if not keystrokes:
-        return await cdp_set_value(session, node, text)
+        if await cdp_set_value(session, node, text):
+            return True
+        # FALLBACK: some React controlled inputs (Workable) immediately RESET a native-setter
+        # value back to their state, so the fast path reads back empty. Retry with TRUSTED
+        # per-char key events — React's onChange captures each keystroke and keeps it. Generic,
+        # no per-ATS branch; only pays the slower path when the fast one demonstrably failed.
+        keystrokes = True
 
     async def _do() -> bool:
         r = await _resolve(session, node)
