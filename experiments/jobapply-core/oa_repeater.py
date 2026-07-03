@@ -140,10 +140,13 @@ async def _visual_click_add(session: Any, section_name: str, llm: Any) -> bool:
         from vision_verify import _vlm
 
         state = await perc.get_state(session)
+        def _big_enough(n: Any) -> bool:  # a real Add button, not a tiny '*' asterisk text mark
+            r = perc.node_rect(n)
+            return bool(r) and r[2] >= 24 and r[3] >= 14
         cands = {
             int(n.backend_node_id): n
             for n in state.selector_map.values()
-            if getattr(n, "backend_node_id", None) is not None and perc.node_is_visible(n) and perc.node_rect(n) is not None
+            if getattr(n, "backend_node_id", None) is not None and perc.node_is_visible(n) and _big_enough(n)
         }
         if not cands:
             return False
