@@ -254,6 +254,11 @@ async def run_single_page_oa(
         # discovered from the LIVE DOM after the page opens (oa_discover), mapped with the
         # same ONE call, committed by the same observe_act machine (its adapter-delegation
         # lane no-ops when ctx.adapter is None).
+        # Scroll-locate ON here: a foreign form usually sits BELOW a long job description, so
+        # its fields are out of the viewport selector_map — the exact 'no-control' the benchmark
+        # exposed (GH extend 2/10 -> 9/10 with this on). Safe in the generic lane: these are
+        # static/CMS pages, not the heavy Lever/Ashby SPAs the default-off guard protects.
+        os.environ.setdefault("OA_SCROLL_LOCATE", "1")
         title, fields = "(generic form)", []
         print(f"[oa:generic] no adapter — live-DOM discovery lane for {url[:70]}")
     else:

@@ -340,14 +340,22 @@ async def _vlm_apply_text(session: Any) -> str:
         from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
         from vision_verify import _vlm
 
-        png = await _oa.bounded_screenshot(session)
+        # FULL-page: the start-application affordance ('Apply for this Job', SR 'I'm interested')
+        # frequently sits BELOW a long job description, out of the viewport a normal screenshot
+        # sees (the Ashby miss). Capture the whole scrollable page so the VLM can name it.
+        import base64 as _b64d
+
+        png = None
+        with contextlib.suppress(Exception):
+            shot = await asyncio.wait_for(session.take_screenshot(full_page=True), timeout=15.0)
+            png = _b64d.b64decode(shot) if isinstance(shot, str) else shot
+        if png is None:
+            png = await _oa.bounded_screenshot(session)  # viewport fallback
+            if isinstance(png, str):
+                png = _b64d.b64decode(png)
         if png is None:
             print("   [reach] vlm affordance: screenshot unavailable")
             return ""
-        if isinstance(png, str):  # take_screenshot returns b64 str on some paths
-            import base64 as _b64d
-
-            png = _b64d.b64decode(png)
         import base64 as _b64
 
         msg = UserMessage(
