@@ -294,8 +294,12 @@ def creds_for(tenant):
     if tenant in store:
         # REUSE a tracked account -> SIGN IN (existing=True), never re-create (Workday rate-limits creates).
         return Credentials(email=store[tenant]["email"], password=store[tenant]["password"], existing=True)
+    import wd_verify_email as wve
+
+    # gmail plus-alias when the IMAP inbox is configured (tenants blocklist mailinator-style
+    # domains AND the alias makes the verification code auto-readable); mailinator fallback.
     c = {
-        "email": f"jobapply.test.{secrets.randbelow(99999999)}@mailinator.com",
+        "email": wve.alias_email(tenant) or f"jobapply.test.{secrets.randbelow(99999999)}@mailinator.com",
         "password": os.environ.get("WD_PASSWORD") or pw(),
     }
     store[tenant] = c
@@ -317,8 +321,12 @@ def rotate_creds(tenant):
     if _CREDS_FILE.exists():
         with contextlib.suppress(Exception):
             store = json.loads(_CREDS_FILE.read_text())
+    import wd_verify_email as wve
+
+    # gmail plus-alias when the IMAP inbox is configured (tenants blocklist mailinator-style
+    # domains AND the alias makes the verification code auto-readable); mailinator fallback.
     c = {
-        "email": f"jobapply.test.{secrets.randbelow(99999999)}@mailinator.com",
+        "email": wve.alias_email(tenant) or f"jobapply.test.{secrets.randbelow(99999999)}@mailinator.com",
         "password": os.environ.get("WD_PASSWORD") or pw(),
     }
     store[tenant] = c
