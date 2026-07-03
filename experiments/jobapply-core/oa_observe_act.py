@@ -1171,6 +1171,21 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
     if not committed:
         # inspectable widget OR Enter-on-highlight commit path
         committed = await act.select_option(session, ctx.node, chosen)
+    if not committed and nodes is None:
+        # READ-BUT-CANT-SELECT (workable react-select rating: read_options found the hidden
+        # <option> texts so we took the native path, but select_option no-ops on the custom
+        # widget). PHYSICALLY open it and click the VISIBLE option by coordinate — the same
+        # visual-commit path S3_OPEN uses for portal menus. Generic, no per-ATS branch.
+        with contextlib.suppress(Exception):
+            before = await perc.get_state(session)
+            await act.click_node(session, ctx.node)
+            await _settle(session, before, _SETTLE_STATIC_S)
+            cands = await _visual_dropdown_candidates(session, ctx, before)
+            if cands and await _visual_commit(session, ctx, cands):
+                ctx.trace.append("read-native-fail->visual-commit")
+                if ctx.nature == "MULTI":
+                    return await _s_multi_loop(session, ctx)
+                return await _s_cascade(session, ctx)
     if not committed:
         ctx.trace.append("commit-failed")
         return ESCALATE if ctx.required else SKIP
