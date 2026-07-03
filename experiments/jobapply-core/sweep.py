@@ -158,6 +158,15 @@ async def main_async(args: argparse.Namespace) -> None:
         ss = str(Path(ss_dir) / f"{i:03d}.png") if ss_dir else None
         async with sem:  # bound to N concurrent browser sessions; each _one owns its own session
             r = await _one(u, profile, args.resume, args.escalate, ss, args.timeout)
+            if conc == 1 and r.get("status") in ("TIMEOUT", "ERROR"):
+                # One retry after full quarantine. A killed/errored job leaves chromium half-dead
+                # and poisons the NEXT session (kalepa chain: agent overran the wall clock -> dirty
+                # kill -> 'No current target found' x3 on the jobs after it). Reap, breathe, retry.
+                _reap_chromium()
+                await asyncio.sleep(3)
+                r2 = await _one(u, profile, args.resume, args.escalate, ss, args.timeout)
+                r2["retried"] = True
+                r = r2 if r2.get("status") == "FILLED" else {**r, "retry_status": r2.get("status")}
         r["profile"] = pname
         results[i] = r
         done["n"] += 1
