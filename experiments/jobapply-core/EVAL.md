@@ -46,6 +46,11 @@ Verified by: DOM audit (required inputs + selects + radio/checkbox groups) + a f
 - IN SCOPE (must be COMPLETE-able, no account): the no-auth Tier-1 ATSs. Target: complete-rate 90%+.
 - OUT (separate tracks): account-gated (Workday/avature auth) → HITL/credential; anti-bot
   (SmartRecruiters slider) → HITL; dead postings → correct decline.
+- WORKDAY HONEST NUMBER (audited 2026-07-03): 6/22 tenants (27%) genuinely fill the multi-page
+  wizard to Review (5-7 steps each, review screenshots verified). The earlier "11/22" was inflated
+  by an is_review bug — a page with NO progressBar defaulted to index=1,total=1 and any sign-in
+  wall counted as Review (signature: steps=1, cost=$0.0000). Fixed (ats_workday, total>1 required).
+  CLAIM GATE: any REACHED/FILLED claim needs steps>=2 AND cost>0 AND an eyeballed review screenshot.
 - The generic engine has ONE path (planner → discover DOM+VLM → map → observe_act → audit),
   zero per-ATS code. A new ATS's failure lands in observe / action / commit and is fixed with a
   GENERIC mechanism (so it converges across platforms, not per-patch).
@@ -62,3 +67,14 @@ Each form fills MOST fields but misses 1-2 REQUIRED ones. Because COMPLETE needs
 6. **localized required** (teamtailor Nom*) — map/audit must handle non-English labels
 
 Drive COMPLETE-RATE (not coverage) to 90% by closing these 6 recurring misses generically.
+
+## Progress log
+
+2026-07-03 (commit a8b4ca124): workable oracle form missing 7 -> 0, complete:True, screenshot-
+verified (runs/newats/wk18.png). Generic mechanisms landed: TIER-0 dom-ref locate (identity
+before similarity), identity-rescroll (off-viewport ref beats a weak/structure bind),
+cdp_choose_aria_option (ARIA combobox family: self-open + aria-owns listbox + innerText option
+click), cdp_choose_option per-id aria-labelledby matching + identity-scoped group by name,
+ALREADY-CORRECT pre-check on CHOICE/SELECT lanes (a prefilled-correct widget is never touched —
+touching flipped +1 to +44). Misses #4 (ratings) closed; #2 (country/select commit) mechanism
+now exists — re-measure pending.
