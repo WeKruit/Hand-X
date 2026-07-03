@@ -13,6 +13,7 @@ Returns eng.FormField rows ready for the standard pipeline (map_fields -> observ
 # will still flag the page APPLICATION_FORM, so misses surface, not vanish).
 """
 
+import contextlib
 import json
 from typing import Any
 
@@ -118,3 +119,107 @@ async def discover_fields(page: Any) -> list[eng.FormField]:
             )
         )
     return fields
+
+
+# ---------------------------------------------------------------------------
+# VISUAL discovery (user: '难道不能用 visuals+dom 吗' — yes, both): ONE full-page VLM read
+# lists EVERY question the applicant must answer. Diffed against the DOM enum; anything the
+# DOM missed (pure-div Yes/No cards, custom widgets with no input/role) becomes a FormField
+# that observe_act's label-driven tiered locate (question text / spatial / marks) can still
+# bind and commit. DOM = precise & cheap; VISION = complete. Union = the honest field list.
+# ---------------------------------------------------------------------------
+_KIND_MAP = {
+    "text": ("text", "input_text"),
+    "textarea": ("textarea", "open_ended"),
+    "dropdown": ("combobox", "select"),
+    "choice": ("radio", "select"),
+    "rating": ("radio", "select"),
+    "checkbox": ("multi_select", "select"),
+    "date": ("date", "input_text"),
+    "file": ("input_file", "file"),
+}
+
+
+def _lnorm(s: str) -> str:
+    return "".join(ch for ch in str(s).lower() if ch.isalnum())
+
+
+async def discover_fields_visual(session: Any, dom_fields: list[eng.FormField]) -> list[eng.FormField]:
+    """Fields VISION sees that the DOM enum missed. [] on any failure (never blocks the run)."""
+    try:
+        import asyncio
+        import base64
+
+        import oa_llm as _oa
+        from vision_verify import _vlm
+
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+        png = None
+        with contextlib.suppress(Exception):
+            sh = await asyncio.wait_for(session.take_screenshot(full_page=True), timeout=15.0)
+            png = base64.b64decode(sh) if isinstance(sh, str) else sh
+        if png is None:
+            return []
+        msg = UserMessage(
+            content=[
+                ContentPartTextParam(
+                    type="text",
+                    text=(
+                        "List EVERY input the applicant must interact with on this job application "
+                        "form: text boxes, dropdowns, yes/no or multiple-choice button groups, "
+                        "1-5 ratings, checkboxes, date pickers, file uploads. Reply ONLY a STRICT "
+                        'JSON array: [{"label": "<exactly as displayed>", "kind": '
+                        '"text|textarea|dropdown|choice|rating|checkbox|date|file", "options": '
+                        '["..."]}] — options only for choice/rating/checkbox, exactly as displayed. '
+                        "No commentary."
+                    ),
+                ),
+                ContentPartImageParam(
+                    type="image_url",
+                    image_url=ImageURL(
+                        url=f"data:image/png;base64,{base64.b64encode(png).decode()}",
+                        detail="high",
+                        media_type="image/png",
+                    ),
+                ),
+            ]
+        )
+        res = await _oa.resilient_vlm([msg], primary=_vlm())
+        raw = str(getattr(res, "completion", res) or "[]")
+        m = None
+        with contextlib.suppress(Exception):
+            import re
+
+            m = re.search(r"\[.*\]", raw, re.S)
+        rows = json.loads(m.group(0)) if m else []
+        seen = {_lnorm(f.label) for f in dom_fields} | {_lnorm(f.name) for f in dom_fields}
+        extra: list[eng.FormField] = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            label = str(r.get("label") or "").strip()
+            k = _lnorm(label)
+            if not label or len(k) < 3:
+                continue
+            # skip anything the DOM enum already carries (containment both ways — labels get
+            # truncated/decorated differently between the two readers)
+            if any(k in s or s in k for s in seen if len(s) >= 4):
+                continue
+            typ, source = _KIND_MAP.get(str(r.get("kind") or "text").lower(), ("text", "input_text"))
+            opts = [str(o)[:80] for o in (r.get("options") or [])][:30] or None
+            extra.append(
+                eng.FormField(
+                    name=label.lower().replace(" ", "_")[:60],
+                    label=label[:200],
+                    type=typ,
+                    source=source,
+                    required="*" in label,
+                    options=opts,
+                )
+            )
+            seen.add(k)
+        return extra[:25]
+    except Exception as exc:
+        print(f"   [discover] visual pass failed: {exc}")
+        return []

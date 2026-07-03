@@ -392,8 +392,19 @@ async def run_single_page_oa(
                         await asyncio.sleep(3.0)
                         page = await session.must_get_current_page()
                         fields = await discover_fields(page)
+            # VISUAL discovery union (user: visuals+DOM): vision lists EVERY question; anything
+            # the DOM enum missed (pure-div widgets) joins the field list — observe_act's
+            # label-driven locate binds them without needing a native input.
+            with contextlib.suppress(Exception):
+                from oa_discover import discover_fields_visual
+
+                extra = await discover_fields_visual(session, fields)
+                if extra:
+                    print(f"[oa:generic] VISION found {len(extra)} fields the DOM enum missed: "
+                          f"{[f.label[:32] for f in extra[:5]]}")
+                    fields = fields + extra
             result["fields_total"] = len(fields)
-            print(f"[oa:generic] discovered {len(fields)} fields from the live DOM")
+            print(f"[oa:generic] discovered {len(fields)} fields (DOM+vision union)")
             if not fields:
                 with contextlib.suppress(Exception):
                     result["final_url"] = await page.get_url()
