@@ -84,6 +84,9 @@ async def _generic_rescue(res: dict, profile: dict, resume: str | None, ss: str 
                 proc.kill()
         return {**res, "generic_status": f"error: {type(exc).__name__}"}
     finally:
+        if ss and oj.exists():  # keep the per-field traces next to the screenshots (autopsy fuel)
+            with contextlib.suppress(Exception):
+                oj.replace(Path(ss.replace(".png", "_generic.json")))
         for f in (pf, oj):
             with contextlib.suppress(Exception):
                 f.unlink()

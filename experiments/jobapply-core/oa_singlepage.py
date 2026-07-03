@@ -430,6 +430,16 @@ async def _fill_form(
         if f.source == "skip":
             continue
         value, src = eng._resolve(f, mapped, resume)
+        if adapter is None:
+            # GENERIC lane: discovery scanned the whole document, but locate reads the
+            # serialized VIEWPORT map — a below-the-fold form (toast) yields 'no-control'
+            # for every field. Center the control (by the id/name discovery recorded) first.
+            with contextlib.suppress(Exception):
+                await page.evaluate(
+                    "(n) => { const el = document.getElementById(n) || document.getElementsByName(n)[0];"
+                    " if (el) el.scrollIntoView({block: 'center'}); }",
+                    f.name,
+                )
         fd = _field_dict(f, value, resume=resume, llm=llm, adapter=adapter, page=page)
         if os.environ.get("OA_FIELD_TRACE"):
             print(
