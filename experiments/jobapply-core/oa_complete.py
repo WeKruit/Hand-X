@@ -201,3 +201,36 @@ async def complete(
         if verdict["missing_required"] or verdict["sections_skipped"]:
             verdict["complete"] = False
     return verdict
+
+
+# ---------------------------------------------------------------------------
+# Consent-overlay dismissal (a blocker on many sites: cookie/privacy banners intercept
+# focus/pointer events and wipe fills — the workable case). Mechanical dismissal of a known
+# affordance kind, not a semantic form decision.
+# ponytail: curated common-consent handles + generic accept-text; add a VLM read only if
+# failures.jsonl shows a banner this misses.
+# ---------------------------------------------------------------------------
+_DISMISS_JS = r"""() => {
+  const sels = ['#onetrust-accept-btn-handler',
+    '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
+    '#CybotCookiebotDialogBodyButtonAccept',
+    '[aria-label*="accept" i]','[data-testid*="accept" i]','[id*="cookie" i] button'];
+  for (const s of sels) { const el=document.querySelector(s);
+    if (el && el.getBoundingClientRect().width>0) { el.click(); return 'sel:'+s; } }
+  const rx = /^(accept all|accept cookies|accept|agree|i agree|got it|allow all|ok)$/i;
+  const btn = [...document.querySelectorAll('button,[role=button],a')].find(e => {
+    const r=e.getBoundingClientRect(); if(r.width<8||r.height<8) return false;
+    return rx.test((e.innerText||'').trim()); });
+  if (btn) { btn.click(); return 'text:'+(btn.innerText||'').trim().slice(0,24); }
+  return '';
+}"""
+
+
+async def dismiss_consent(session: Any, page: Any) -> bool:
+    """Click a cookie/consent accept button if one is blocking the page. False if none found."""
+    with contextlib.suppress(Exception):
+        r = await page.evaluate(_DISMISS_JS)
+        if r:
+            print(f"   [consent] dismissed overlay ({r})")
+            return True
+    return False

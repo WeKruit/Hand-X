@@ -413,6 +413,10 @@ async def run_single_page_oa(
             map_rows = [f for f in fields if f.needs_map]
             mapped = await eng.map_fields(oa_llm.ResilientLLM(llm), map_rows, profile, title) if map_rows else {}
             result["mapped"] = len(mapped)
+            with contextlib.suppress(Exception):  # cookie/consent banners intercept focus + wipe fills
+                import oa_complete
+
+                await oa_complete.dismiss_consent(session, page)
         else:
             page = await adapter.open_form(session, page)
 
