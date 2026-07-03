@@ -439,6 +439,7 @@ async def run_single_page_oa(
             headless=headless,
             screenshot_path=screenshot_path,
             result=result,
+            profile=profile,
         )
     finally:
         # 1) ALWAYS ask browser-use to stop the browser (guarded — kill() must not mask the result).
@@ -470,6 +471,7 @@ async def _fill_form(
     headless: bool,
     screenshot_path: str | None,
     result: dict[str, Any],
+    profile: dict | None = None,
 ) -> dict:
     """The per-field fill body (extracted so ``run_single_page_oa`` can wrap the whole session
     lifecycle in one try/finally). Returns the populated ``result`` dict. FILL-ONLY: never submits.
@@ -535,6 +537,23 @@ async def _fill_form(
                 trace=fd.get("_trace"),
             )
         )
+
+    # COMPLETENESS PASS (generic lane only): discover_fields sees only flat rendered inputs, so a
+    # repeater section (Work Experience / Education behind 'Add another') is invisible and would be
+    # silently skipped. Audit for unfilled repeater sections + empty required fields and fill each
+    # via the proven agent_fill_section. Makes the completeness verdict honest instead of a blind 1.0.
+    if adapter is None and profile is not None and os.environ.get("OA_NO_COMPLETE") != "1":
+        with contextlib.suppress(Exception):
+            import oa_complete
+
+            # audit always runs (cheap: DOM + 1 VLM); the repeater FILL uses the multi-step agent,
+            # so it is gated to OA_COMPLETE_AGENT=1 (off in the cheap sweep, on for real fills). Even
+            # with the fill off, the verdict honestly flags a section we would otherwise have missed.
+            result["completeness"] = await oa_complete.complete(
+                session, page, profile, resume, allow_agent=os.environ.get("OA_COMPLETE_AGENT") == "1"
+            )
+            with contextlib.suppress(Exception):
+                page = await session.must_get_current_page()
 
     secs = round(time.monotonic() - t0, 1)
     usage = await tc.get_usage_summary()
