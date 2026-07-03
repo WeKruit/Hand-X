@@ -336,51 +336,43 @@ async def _vlm_apply_text(session: Any) -> str:
     """ONE nano-VLM read: the exact visible text of the start-application button. Language-
     agnostic (SmartRecruiters "I'm interested", pt-BR "Estou interessado", ...). '' on miss."""
     try:
-        import oa_llm as _oa
-        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
-        from vision_verify import _vlm
-
-        # FULL-page: the start-application affordance ('Apply for this Job', SR 'I'm interested')
-        # frequently sits BELOW a long job description, out of the viewport a normal screenshot
-        # sees (the Ashby miss). Capture the whole scrollable page so the VLM can name it.
+        # The start-application affordance is usually a header tab/button ('Application' tab,
+        # SR 'I'm interested') OR below a long JD ('Apply for this Job'). A full-page shot of a
+        # long page downscales the button below readability (the hibob miss). So read the TOP
+        # viewport FIRST (crisp, catches header/sticky affordances), then full-page as fallback.
         import base64 as _b64d
 
-        png = None
-        with contextlib.suppress(Exception):
-            shot = await asyncio.wait_for(session.take_screenshot(full_page=True), timeout=15.0)
-            png = _b64d.b64decode(shot) if isinstance(shot, str) else shot
-        if png is None:
-            png = await _oa.bounded_screenshot(session)  # viewport fallback
-            if isinstance(png, str):
-                png = _b64d.b64decode(png)
-        if png is None:
-            print("   [reach] vlm affordance: screenshot unavailable")
-            return ""
-        import base64 as _b64
+        import oa_llm as _oa
+        from vision_verify import _vlm
 
-        msg = UserMessage(
-            content=[
-                ContentPartTextParam(
-                    type="text",
-                    text=(
-                        "This is a job posting page. Reply ONLY the EXACT visible text of the "
-                        "button or link a candidate clicks to START the application (any language, "
-                        "e.g. 'Apply now', \"I'm interested\"). If there is none, reply NONE."
-                    ),
-                ),
-                ContentPartImageParam(
-                    type="image_url",
-                    image_url=ImageURL(
-                        url=f"data:image/png;base64,{_b64.b64encode(png).decode()}",
-                        detail="low",
-                        media_type="image/png",
-                    ),
-                ),
-            ]
-        )
-        res = await _oa.resilient_vlm([msg], primary=_vlm())
-        t = str(getattr(res, "completion", res) or "").strip().strip("\"'")  # unwrap ChatInvokeCompletion
-        return "" if (not t or t.upper() == "NONE" or len(t) > 40) else t
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+        async def _shot(full: bool):
+            with contextlib.suppress(Exception):
+                sh = await asyncio.wait_for(session.take_screenshot(full_page=full), timeout=15.0)
+                return _b64d.b64decode(sh) if isinstance(sh, str) else sh
+            return None
+
+        async def _ask(png_bytes):
+            if png_bytes is None:
+                return ""
+            msg = UserMessage(content=[
+                ContentPartTextParam(type="text", text=(
+                    "This is a job posting page. Reply ONLY the EXACT visible text of the button, "
+                    "tab, or link a candidate clicks to START/OPEN the application (any language, "
+                    "e.g. 'Apply now', 'Application', \"I'm interested\"). If none, reply NONE.")),
+                ContentPartImageParam(type="image_url", image_url=ImageURL(
+                    url=f"data:image/png;base64,{_b64d.b64encode(png_bytes).decode()}",
+                    detail="low", media_type="image/png"))])
+            res = await _oa.resilient_vlm([msg], primary=_vlm())
+            t = str(getattr(res, "completion", res) or "").strip().strip("\"'")
+            return "" if (not t or t.upper() == "NONE" or len(t) > 40) else t
+
+        with contextlib.suppress(Exception):  # scroll to top so the header affordance is in view
+            page0 = await session.must_get_current_page()
+            await page0.evaluate("() => window.scrollTo(0,0)")
+        want = await _ask(await _shot(False)) or await _ask(await _shot(True))
+        return want
     except Exception as exc:
         print(f"   [reach] vlm affordance failed: {type(exc).__name__}: {exc}")
         return ""

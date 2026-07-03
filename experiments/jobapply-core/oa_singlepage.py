@@ -362,7 +362,7 @@ async def run_single_page_oa(
             from oa_discover import discover_fields
 
             fields = await discover_fields(page)
-            if not fields and await eng._try_apply_click(session, page):
+            if len(fields) < 2 and await eng._try_apply_click(session, page):
                 # fresh navigation lands PRE-Apply (wayve class) — click the affordance once
                 with contextlib.suppress(Exception):
                     page = await session.must_get_current_page()
