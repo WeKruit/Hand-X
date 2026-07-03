@@ -126,13 +126,58 @@ def _instructions(profile: dict, section: str) -> str:
     )
 
 
-async def complete(session: Any, page: Any, profile: dict, resume: str | None, *, allow_agent: bool) -> dict:
-    """Audit the form for unfilled repeater sections; fill each via the proven agent_fill_section.
-    Returns {complete, missing_required, sections_filled, sections_skipped}. Never raises."""
-    verdict: dict = {"complete": True, "missing_required": [], "sections_filled": [], "sections_skipped": []}
+def _norm(s: str) -> str:
+    return "".join(ch for ch in str(s).lower() if ch.isalnum())
+
+
+async def retry_missing(session: Any, page: Any, profile: dict, resume: str | None, llm: Any, missing: list[str]) -> int:
+    """RE-FILL fields the audit found still-empty (React re-render wiped a committed value —
+    the workable class). Re-discover the live DOM, match each still-empty REQUIRED field by
+    label, re-map + re-run observe_act on just those. Returns how many got re-filled. Generic."""
+    import oa_observe_act as oa
+    from oa_discover import discover_fields
+    from oa_singlepage import _field_dict
+
+    want = {_norm(m) for m in missing}
+    refilled = 0
+    with contextlib.suppress(Exception):
+        fields = [f for f in await discover_fields(page) if _norm(f.label) in want or _norm(f.name) in want]
+        if not fields:
+            return 0
+        rows = [f for f in fields if f.needs_map]
+        mapped = await eng.map_fields(llm, rows, profile, "") if rows else {}
+        for f in fields:
+            value, _ = eng._resolve(f, mapped, resume)
+            if not (value or "").strip():
+                continue
+            fd = _field_dict(f, value, resume=resume, llm=llm, adapter=None, page=page)
+            with contextlib.suppress(Exception):
+                out = await oa.observe_act(session, fd)
+                if out == oa.DONE:
+                    refilled += 1
+    if refilled:
+        print(f"   [complete] retry re-filled {refilled} wiped/empty required field(s)")
+    return refilled
+
+
+async def complete(
+    session: Any, page: Any, profile: dict, resume: str | None, *, allow_agent: bool, llm: Any = None
+) -> dict:
+    """Audit the form for unfilled repeater sections + empty required fields; fill repeaters via the
+    proven agent_fill_section and RE-FILL wiped required fields (retry). Returns
+    {complete, missing_required, sections_filled, sections_skipped, retried}. Never raises."""
+    verdict: dict = {
+        "complete": True, "missing_required": [], "sections_filled": [], "sections_skipped": [], "retried": 0,
+    }
     with contextlib.suppress(Exception):
         a = await audit(session, page)
         verdict["missing_required"] = a.get("emptyReq", [])
+        # RETRY: re-fill required fields a React re-render wiped after commit (workable class),
+        # BEFORE deciding completeness — one bounded pass, then re-audit below.
+        if verdict["missing_required"] and llm is not None:
+            verdict["retried"] = await retry_missing(
+                session, page, profile, resume, llm, verdict["missing_required"]
+            )
         # only look for repeater sections if the DOM shows an add-row affordance OR the profile
         # has history to place — cheap gate before spending a VLM call.
         sections = []

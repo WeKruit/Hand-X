@@ -550,7 +550,7 @@ async def _fill_form(
             # so it is gated to OA_COMPLETE_AGENT=1 (off in the cheap sweep, on for real fills). Even
             # with the fill off, the verdict honestly flags a section we would otherwise have missed.
             result["completeness"] = await oa_complete.complete(
-                session, page, profile, resume, allow_agent=os.environ.get("OA_COMPLETE_AGENT") == "1"
+                session, page, profile, resume, allow_agent=os.environ.get("OA_COMPLETE_AGENT") == "1", llm=llm
             )
             with contextlib.suppress(Exception):
                 page = await session.must_get_current_page()
