@@ -173,6 +173,10 @@ async def _visual_click_add(session: Any, section_name: str, llm: Any) -> bool:
         m = _re.search(r'"mark"\s*:\s*(-?\d+)', raw)
         mk = int(m.group(1)) if m else -1
         node = cands.get(mk)
+        txt = ""
+        with contextlib.suppress(Exception):
+            txt = (getattr(node, "node_value", "") or getattr(node, "get_all_children_text", lambda **k: "")(max_depth=2) or "")[:30]
+        print(f"   [repeater] visual-add '{section_name}': VLM picked mark={mk} ({txt!r})")
         if node is None:
             return False
         # scroll the picked node into view, then click it (trusted, occlusion-aware)
@@ -232,6 +236,18 @@ async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | N
             if time.monotonic() > deadline:
                 break
             before = {f.name for f in await discover_fields(page)}
+            # scroll the SECTION into view first, so its Add is on-screen -> gets marked -> the VLM
+            # can pick it (after saving a prior row the page scrolls away; the Add was off-screen =
+            # the mark=-1 experience miss).
+            with contextlib.suppress(Exception):
+                await page.evaluate(
+                    "(wants) => { const norm=s=>(s||'').replace(/\\s+/g,' ').trim().toLowerCase();"
+                    " const el=[...document.querySelectorAll('h1,h2,h3,h4,div,span,legend,p,label')]"
+                    "   .find(e=>{const t=norm(e.innerText||''); return t.length<40 && wants.some(w=>t.includes(w));});"
+                    " if(el) el.scrollIntoView({block:'center'}); }",
+                    [k for k, v in _SECTION_KEYS.items() if v == key],
+                )
+                await asyncio.sleep(0.6)
             # VISUAL Add-click first (robust to layout shift), DOM-coord fallback
             clicked = await _visual_click_add(session, names.get(key, key), llm)
             if not clicked:
