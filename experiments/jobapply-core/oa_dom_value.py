@@ -54,6 +54,17 @@ function() {
       return real.join(", ");
     }
 
+    // 2a) checkbox / radio — .value is the SUBMIT payload and exists even when UNCHECKED; the
+    // truth is the checked state. Unchecked -> "" (reads EMPTY, so the engine commits). This
+    // killed a live lie: a consent checkbox's value string LLM-matched the wanted answer and the
+    // pre-check skipped the field while the box sat unchecked (breezy gdpr).
+    const ty2 = (el.type || "").toLowerCase();
+    if (tag === "INPUT" && (ty2 === "checkbox" || ty2 === "radio")) {
+      if (!el.checked) return "";
+      const lab = el.labels && el.labels[0] ? norm(el.labels[0].textContent) : "";
+      return norm(el.value && el.value !== "on" ? el.value : "") || lab || "checked";
+    }
+
     // 2) input / textarea — the live .value (typeahead text counts: the user typed it).
     if (tag === "INPUT" || tag === "TEXTAREA") {
       const v = norm(el.value);
