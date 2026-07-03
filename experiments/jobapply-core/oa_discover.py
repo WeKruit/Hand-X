@@ -48,8 +48,10 @@ _ENUM_JS = r"""
                label: label.slice(0, 200), type, source, options, required: !!required });
   };
   for (const el of document.querySelectorAll('input, textarea, select, [role=combobox]')) {
-    if (!vis(el)) continue;
     const tag = (el.tagName || '').toLowerCase(); const ty = (el.type || '').toLowerCase();
+    // hidden file inputs are the NORM (styled button + display:none input) and CDP
+    // setFileInputFiles fills them regardless of visibility — everything else must be visible.
+    if (ty !== 'file' && !vis(el)) continue;
     if (tag === 'input' && ['hidden', 'submit', 'button', 'image', 'reset', 'search'].includes(ty)) continue;
     if (el.closest('nav, header, footer, [role=search]')) continue;  // page chrome, not the form
     const req = el.required || (el.getAttribute && el.getAttribute('aria-required') === 'true');

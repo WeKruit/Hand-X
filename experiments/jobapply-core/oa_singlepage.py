@@ -289,7 +289,10 @@ async def run_single_page_oa(
     # validator RESOLVES the path (on macOS /var -> /private/var), and THAT resolved string is what
     # ends up in Chromium's ``--user-data-dir`` argv — so read it back off the profile and use the
     # resolved form as both the active-tracking key and the kill key (matching the real child argv).
-    profile = BrowserProfile(
+    # NOTE: named browser_profile ON PURPOSE — this used to be `profile =`, silently
+    # SHADOWING the user-profile dict; the generic lane's map_fields call then json.dumps'd
+    # a BrowserProfile object (the toast crash).
+    browser_profile = BrowserProfile(
         headless=headless,
         keep_alive=True,
         viewport={"width": _vw, "height": _vh},
@@ -297,11 +300,11 @@ async def run_single_page_oa(
         user_data_dir=_new_user_data_dir(),
         args=_hard_args,
     )
-    user_data_dir = str(profile.user_data_dir)
+    user_data_dir = str(browser_profile.user_data_dir)
     # Register active + arm the signal handler BEFORE start(), so a signal during launch can't orphan it.
     _ACTIVE_USER_DATA_DIRS.add(user_data_dir)
     _install_signal_cleanup()
-    session = BrowserSession(browser_profile=profile)
+    session = BrowserSession(browser_profile=browser_profile)
 
     result: dict[str, Any] = {
         "adapter": adapter.__class__.__name__ if adapter else "generic",
