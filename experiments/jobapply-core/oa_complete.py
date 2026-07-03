@@ -242,6 +242,8 @@ async def complete(
         "complete": True, "missing_required": [], "sections_filled": [], "sections_skipped": [], "retried": 0,
     }
     with contextlib.suppress(Exception):
+        if resume:  # button-triggered resume upload (hibob/bamboohr 'Add file' has no <input> yet)
+            await upload_via_button(session, page, resume)
         a = await audit(session, page)
         verdict["missing_required"] = a.get("emptyReq", [])
         # RETRY: re-fill required fields a React re-render wiped after commit (workable class),
@@ -349,4 +351,93 @@ async def dismiss_consent(session: Any, page: Any) -> bool:
         if r:
             print(f"   [consent] dismissed overlay ({r})")
             return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Button-triggered file upload (hibob/bamboohr 'Add file': no <input type=file> in the DOM
+# until the button is clicked / it opens a native picker). Intercept the file chooser so the
+# OS dialog never blocks, then set the file on the node the chooser reports. Generic.
+# ---------------------------------------------------------------------------
+async def upload_via_button(session: Any, page: Any, resume_path: str) -> bool:
+    """Upload resume when there's no file input yet — click an upload affordance and intercept
+    the file chooser. False if no upload button / no resume. NEVER raises."""
+    import os
+
+    if not resume_path or not os.path.exists(resume_path):
+        return False
+    with contextlib.suppress(Exception):
+        # already have a file input? use the direct path
+        has_input = await page.evaluate("() => document.querySelectorAll('input[type=file]').length")
+        find_btn = await page.evaluate(
+            "() => { const rx=/^(add file|upload|choose file|attach|upload your resume|add attachment|upload cv)$/i;"
+            " const el=[...document.querySelectorAll('button,a,[role=button]')].find(e=>{"
+            "   const r=e.getBoundingClientRect(); if(r.width<8||r.height<8) return false;"
+            "   return rx.test((e.innerText||e.getAttribute('aria-label')||'').trim());});"
+            " if(!el) return ''; el.scrollIntoView({block:'center'}); const r=el.getBoundingClientRect();"
+            " return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2}); }"
+        )
+        if not find_btn:
+            return False
+        import asyncio
+        import json as _j
+
+        sid = await page.session_id
+        abspath = os.path.abspath(resume_path)
+
+        async def _pierce_file_backend() -> int | None:
+            """Find a file input's backendNodeId even in SHADOW DOM (pierce), where
+            document.querySelector can't reach it (hibob 'Add file')."""
+            with contextlib.suppress(Exception):
+                doc = await session.cdp_client.send.DOM.getDocument(
+                    params={"depth": -1, "pierce": True}, session_id=sid
+                )
+
+                def walk(node: Any) -> int | None:
+                    if node.get("nodeName", "").upper() == "INPUT":
+                        attrs = node.get("attributes") or []
+                        for i in range(0, len(attrs) - 1, 2):
+                            if attrs[i] == "type" and attrs[i + 1] == "file":
+                                return node.get("backendNodeId")
+                    for kid in (node.get("children") or []) + (
+                        [node["contentDocument"]] if node.get("contentDocument") else []
+                    ):
+                        for sr in node.get("shadowRoots") or []:
+                            r = walk(sr)
+                            if r:
+                                return r
+                        r = walk(kid)
+                        if r:
+                            return r
+                    for sr in node.get("shadowRoots") or []:
+                        r = walk(sr)
+                        if r:
+                            return r
+                    return None
+
+                return walk(doc["root"])
+            return None
+
+        # click the button to MOUNT the input (hibob mounts it on click), then pierce-find it
+        c = _j.loads(find_btn)
+        with contextlib.suppress(Exception):
+            await session.cdp_client.send.Page.setInterceptFileChooserDialog(params={"enabled": True}, session_id=sid)
+        for ev in (
+            {"type": "mousePressed", "x": c["x"], "y": c["y"], "button": "left", "buttons": 1, "clickCount": 1},
+            {"type": "mouseReleased", "x": c["x"], "y": c["y"], "button": "left", "buttons": 0, "clickCount": 1},
+        ):
+            await session.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=sid)
+        await asyncio.sleep(1.2)
+        bn = await _pierce_file_backend()
+        ok = False
+        if bn:
+            with contextlib.suppress(Exception):
+                await session.cdp_client.send.DOM.setFileInputFiles(
+                    params={"files": [abspath], "backendNodeId": int(bn)}, session_id=sid
+                )
+                print(f"   [upload] attached resume (pierced file input) -> {os.path.basename(abspath)}")
+                ok = True
+        with contextlib.suppress(Exception):
+            await session.cdp_client.send.Page.setInterceptFileChooserDialog(params={"enabled": False}, session_id=sid)
+        return ok
     return False
