@@ -303,6 +303,8 @@ async def run_single_page_oa(
     # SHADOWING the user-profile dict; the generic lane's map_fields call then json.dumps'd
     # a BrowserProfile object (the toast crash).
     _extra: dict = {}
+    if os.environ.get("OA_CHROME_PATH"):  # real Chrome binary = real fingerprint (SR device check passes)
+        _extra["executable_path"] = os.environ["OA_CHROME_PATH"]
     if os.environ.get("OA_STEALTH") == "1":  # SR-class device checks key on automation fingerprints
         # this venv's browser_use may not ship stealth (only the vendored root copy does);
         # degrade to a plain profile rather than crash — prod uses the user's REAL browser.
@@ -324,7 +326,16 @@ async def run_single_page_oa(
     # Register active + arm the signal handler BEFORE start(), so a signal during launch can't orphan it.
     _ACTIVE_USER_DATA_DIRS.add(user_data_dir)
     _install_signal_cleanup()
-    session = BrowserSession(browser_profile=browser_profile)
+    # CONNECT-OVER-CDP: attach to an ALREADY-RUNNING Chrome (the user's real browser, launched with
+    # --remote-debugging-port). Real profile + no --enable-automation flag = the fingerprint SR's
+    # device check passes — the definitive real-browser test, and the shape production uses (the
+    # Desktop app owns the browser; Hand-X attaches). When set we do NOT own/kill the browser.
+    _cdp = os.environ.get("OA_CDP_URL")
+    if _cdp:
+        _ACTIVE_USER_DATA_DIRS.discard(user_data_dir)  # not ours to reap
+        session = BrowserSession(cdp_url=_cdp)
+    else:
+        session = BrowserSession(browser_profile=browser_profile)
 
     result: dict[str, Any] = {
         "adapter": adapter.__class__.__name__ if adapter else "generic",
