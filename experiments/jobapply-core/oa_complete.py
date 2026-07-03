@@ -385,6 +385,45 @@ async def upload_via_button(session: Any, page: Any, resume_path: str) -> bool:
         sid = await page.session_id
         abspath = os.path.abspath(resume_path)
 
+        # FILE-CHOOSER EVENT on the PAGE-target CDP session (hibob opens a native picker with NO
+        # DOM input — the event carries the input's backendNodeId; root-client register misses it).
+        with contextlib.suppress(Exception):
+            cdp_sess = await session.get_or_create_cdp_session()
+            captured: dict = {}
+
+            def _on_chooser(evt: Any, _c: dict = captured) -> None:
+                with contextlib.suppress(Exception):
+                    bn = evt.get("backendNodeId") if isinstance(evt, dict) else getattr(evt, "backendNodeId", None)
+                    if bn:
+                        _c["bn"] = int(bn)
+
+            with contextlib.suppress(Exception):
+                await cdp_sess.cdp_client.send.Page.enable(session_id=cdp_sess.session_id)
+            cdp_sess.cdp_client.register.Page.fileChooserOpened(_on_chooser)
+            await cdp_sess.cdp_client.send.Page.setInterceptFileChooserDialog(
+                params={"enabled": True}, session_id=cdp_sess.session_id
+            )
+            c = _j.loads(find_btn)
+            for ev in (
+                {"type": "mousePressed", "x": c["x"], "y": c["y"], "button": "left", "buttons": 1, "clickCount": 1},
+                {"type": "mouseReleased", "x": c["x"], "y": c["y"], "button": "left", "buttons": 0, "clickCount": 1},
+            ):
+                await cdp_sess.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=cdp_sess.session_id)
+            for _ in range(20):
+                if captured.get("bn"):
+                    break
+                await asyncio.sleep(0.2)
+            with contextlib.suppress(Exception):
+                await cdp_sess.cdp_client.send.Page.setInterceptFileChooserDialog(
+                    params={"enabled": False}, session_id=cdp_sess.session_id
+                )
+            if captured.get("bn"):
+                await cdp_sess.cdp_client.send.DOM.setFileInputFiles(
+                    params={"files": [abspath], "backendNodeId": captured["bn"]}, session_id=cdp_sess.session_id
+                )
+                print(f"   [upload] attached resume via file-chooser event -> {os.path.basename(abspath)}")
+                return True
+
         async def _pierce_file_backend() -> int | None:
             """Find a file input's backendNodeId even in SHADOW DOM (pierce), where
             document.querySelector can't reach it (hibob 'Add file')."""
