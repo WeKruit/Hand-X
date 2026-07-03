@@ -625,6 +625,11 @@ attribute (profile keys gender, race_ethnicity, hispanic_or_latino, veteran_stat
 disability_status, sexual_orientation, gender_identity, transgender, pronoun), pick the option \
 matching it; ONLY if the profile does not disclose it, choose a "Prefer not to say" / "I don't wish \
 to answer" / "Decline" option.
+- SKILL SELF-RATING questions ("rate your experience 1 (No experience) to 5 (Expert)" for a \
+named technology): rate from the profile's skills/experience — a skill listed in the profile or \
+central to their roles -> "4" or "5"; an adjacent/related skill -> "3"; something the profile \
+never mentions -> "2". Answer with the OPTION string exactly (e.g. "4"). Never leave a required \
+rating blank.
 - SCREENING / ELIGIBILITY yes-no questions: answer the safe, TRUTHFUL default for an ordinary \
 applicant rather than leaving a required question blank. Work-authorization / visa-sponsorship / \
 citizenship / export-control questions -> answer from the profile (work_authorization, \

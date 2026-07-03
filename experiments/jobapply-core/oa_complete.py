@@ -121,6 +121,54 @@ async def _vlm_unfilled_sections(session: Any) -> list[str]:
         return []
 
 
+async def _vlm_unanswered_required(session: Any) -> list[str]:
+    """VISUAL second opinion (user: rely on visuals; DOM alone over-claims): ONE full-page VLM
+    read naming required-marked fields that LOOK unanswered. [] = vision agrees the form is
+    complete. Best-effort []; disagreement only ever makes the verdict STRICTER, never looser."""
+    try:
+        import asyncio
+
+        import oa_llm as _oa
+        from vision_verify import _parse_str_list, _vlm
+
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+        png = None
+        with contextlib.suppress(Exception):
+            sh = await asyncio.wait_for(session.take_screenshot(full_page=True), timeout=15.0)
+            png = base64.b64decode(sh) if isinstance(sh, str) else sh
+        if png is None:
+            return []
+        msg = UserMessage(
+            content=[
+                ContentPartTextParam(
+                    type="text",
+                    text=(
+                        "This is a job application form AFTER automated filling. Look for REQUIRED "
+                        "fields (marked with *, 'required', or in a required section) that are still "
+                        "visibly UNANSWERED: empty text boxes, dropdowns still showing a placeholder "
+                        "like 'Select an option', yes/no button pairs with NEITHER selected, empty "
+                        "upload areas. Reply ONLY a STRICT JSON array of their labels, [] if every "
+                        "required field visibly has an answer."
+                    ),
+                ),
+                ContentPartImageParam(
+                    type="image_url",
+                    image_url=ImageURL(
+                        url=f"data:image/png;base64,{base64.b64encode(png).decode()}",
+                        detail="low",
+                        media_type="image/png",
+                    ),
+                ),
+            ]
+        )
+        res = await _oa.resilient_vlm([msg], primary=_vlm())
+        raw = str(getattr(res, "completion", res) or "[]")
+        return _parse_str_list(raw)[:15]
+    except Exception:
+        return []
+
+
 def _profile_has(profile: dict, section: str) -> bool:
     s = section.lower()
     if "experience" in s or "employment" in s or "work" in s:
@@ -244,7 +292,15 @@ async def complete(
                 verdict["agent_answered_required"] = True
                 with contextlib.suppress(Exception):
                     verdict["missing_required"] = (await audit(session, page)).get("emptyReq", [])
-        if verdict["missing_required"] or verdict["sections_skipped"]:
+        # VISUAL SECOND OPINION (final gate): the DOM audit alone has over-claimed before —
+        # vision must AGREE the form looks complete. Disagreement only tightens the verdict.
+        if not verdict["missing_required"] and not verdict["sections_skipped"]:
+            with contextlib.suppress(Exception):
+                seen = await _vlm_unanswered_required(session)
+                if seen:
+                    verdict["visually_unanswered"] = seen
+                    print(f"   [complete] VISION disagrees — looks unanswered: {seen[:5]}")
+        if verdict["missing_required"] or verdict["sections_skipped"] or verdict.get("visually_unanswered"):
             verdict["complete"] = False
     return verdict
 

@@ -70,14 +70,27 @@ _ENUM_JS = r"""
     }
     push(el.id || el.name, labFor(el), ty || 'text', 'input_text', null, req);
   }
+  const groupLabel = (el, fallback) => {
+    const fs = el.closest('fieldset'); const leg = fs && fs.querySelector('legend');
+    if (leg && clean(leg.innerText)) return clean(leg.innerText);
+    // walk up: the question text is the container's text MINUS its options (workable Yes/No)
+    let p = el.parentElement, hops = 0;
+    while (p && hops++ < 5) {
+      const full = clean(p.innerText || '');
+      if (full.length > 15 && full.length < 400) {
+        const line = full.split('\n').map(clean).find(t => t.length > 10 && !/^(yes|no)$/i.test(t));
+        if (line) return line.slice(0, 200);
+      }
+      p = p.parentElement;
+    }
+    return fallback;
+  };
   for (const [g, v] of Object.entries(radio)) {
-    const fs = v.el.closest('fieldset'); const leg = fs && fs.querySelector('legend');
-    push(g, (leg && clean(leg.innerText)) || g, 'radio', 'select', v.opts.slice(0, 30), false);
+    push(g, groupLabel(v.el, g), 'radio', 'select', v.opts.slice(0, 30), false);
   }
   for (const [g, v] of Object.entries(check)) {
     if (v.opts.length < 2) continue;  // lone consent boxes: v1 skip (ceiling in module docstring)
-    const fs = v.el.closest('fieldset'); const leg = fs && fs.querySelector('legend');
-    push(g, (leg && clean(leg.innerText)) || g, 'multi_select', 'select', v.opts.slice(0, 40), false);
+    push(g, groupLabel(v.el, g), 'multi_select', 'select', v.opts.slice(0, 40), false);
   }
   return JSON.stringify(out.slice(0, 60));
 }
