@@ -35,13 +35,37 @@ _AUDIT_JS = r"""() => {
     .filter(e => { const r=e.getBoundingClientRect(); if(r.width<8||r.height<8) return false;
       const t=norm(e.innerText||e.getAttribute('aria-label')||''); return t.length<40 && addRx.test(t); })
     .map(e => norm(e.innerText||e.getAttribute('aria-label')||'')).slice(0,8);
-  const emptyReq = [...document.querySelectorAll('input,select,textarea')]
-    .filter(e => { const r=e.getBoundingClientRect(); if(r.width<8||r.height<8) return false;
-      const req = e.required || e.getAttribute('aria-required')==='true';
-      const v = (e.value||'').trim(); return req && !v && e.type!=='hidden' && e.type!=='file'; })
-    .map(e => { const l=document.querySelector('label[for="'+CSS.escape(e.id||'')+'"]');
-      return norm((l&&l.innerText)||e.getAttribute('aria-label')||e.name||'?'); }).slice(0,20);
-  return JSON.stringify({adds: [...new Set(adds)], emptyReq: [...new Set(emptyReq)]});
+  const vis = e => { const r=e.getBoundingClientRect(); return r.width>=8 && r.height>=8; };
+  // required-ness: the `required`/aria-required attr OR a '*' in the field's own label (the common
+  // marker plain-attr checks miss). labelText walks the same nearest-label chain discovery uses.
+  const labelText = e => { const l = e.id && document.querySelector('label[for="'+CSS.escape(e.id)+'"]');
+    let t = (l && l.innerText) || e.getAttribute('aria-label') || '';
+    if (!t) { let p=e.closest('label')||e.parentElement, h=0;
+      while(p && h++<3 && !t){ const c=p.querySelector(':scope > label,:scope > legend,:scope > span'); t=(c&&c.innerText)||''; p=p.parentElement; } }
+    return norm(t); };
+  const isReq = e => e.required || e.getAttribute('aria-required')==='true' || /\*/.test(labelText(e));
+  const empty = [];
+  for (const e of document.querySelectorAll('input,select,textarea')) {
+    if (!vis(e) || e.type==='hidden' || e.type==='file') continue;
+    if (e.tagName==='SELECT') { const o=e.options[e.selectedIndex];
+      const ph = !o || o.value==='' || /^(select|choose|--)/i.test(norm(o.text));
+      if (isReq(e) && ph) empty.push(labelText(e)||e.name||'select'); continue; }
+    if (e.type==='radio' || e.type==='checkbox') continue;  // groups handled below
+    if (isReq(e) && !(e.value||'').trim()) empty.push(labelText(e)||e.name||'?');
+  }
+  // required radio/checkbox GROUPS (custom Yes/No, ratings) with NOTHING checked: group by name,
+  // required if any member is required or the group's question label carries a '*'.
+  const groups = {};
+  for (const e of document.querySelectorAll('input[type=radio],input[type=checkbox]')) {
+    const g = e.name || (e.closest('fieldset,[role=radiogroup]')||{}).id || ''; if(!g) continue;
+    (groups[g] = groups[g] || {req:false,checked:false,label:''});
+    groups[g].req = groups[g].req || isReq(e);
+    groups[g].checked = groups[g].checked || e.checked;
+    const fs = e.closest('fieldset'); const lg = fs && fs.querySelector('legend');
+    if (lg && !groups[g].label) groups[g].label = norm(lg.innerText);
+  }
+  for (const [g,v] of Object.entries(groups)) if (v.req && !v.checked) empty.push(v.label||g);
+  return JSON.stringify({adds: [...new Set(adds)], emptyReq: [...new Set(empty)].slice(0,25)});
 }"""
 
 
