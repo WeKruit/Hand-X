@@ -79,6 +79,34 @@ _AUDIT_JS = r"""() => {
     }
   }
   for (const [g,v] of Object.entries(groups)) if (v.req && !v.checked) empty.push(v.label||g);
+
+  // CUSTOM WIDGETS (no native input/select — rippling is 100% custom; the scans above find
+  // NOTHING and a form of empty required questions read complete). Question-centric: a '*'-marked
+  // question with a control that shows NO committed answer. Generic via ARIA / placeholder text,
+  // never per-ATS.
+  const qlabel = box => { const t = norm(box.innerText||''); return (t.split('\n')[0]||t).slice(0,80); };
+  // (a) custom comboboxes: [role=combobox] / [aria-haspopup=listbox] with no aria-activedescendant
+  //     and a placeholder-looking trigger text (Select…/Choose…/empty).
+  for (const c of document.querySelectorAll('[role=combobox],[aria-haspopup=listbox]')) {
+    if (!vis(c)) continue;
+    const q = c.closest('[class*=field],[class*=question],[class*=form-group],div');
+    const reqd = c.getAttribute('aria-required')==='true' || /\*/.test(norm((q||c).innerText).slice(0,200));
+    if (!reqd) continue;
+    const active = c.getAttribute('aria-activedescendant');
+    const shown = norm(c.innerText || c.value || (c.querySelector('*')||{}).innerText || '');
+    const placeholder = !shown || /^(select|choose|--|pick)/i.test(shown);
+    if (!active && placeholder) empty.push(qlabel(q||c));
+  }
+  // (b) custom radio/checkbox groups via [role=radiogroup]/[role=group] with no aria-checked member,
+  //     or aria-checked elements where none is true.
+  for (const grp of document.querySelectorAll('[role=radiogroup],[role=group]')) {
+    if (!vis(grp)) continue;
+    const opts = [...grp.querySelectorAll('[role=radio],[role=checkbox],[aria-checked]')];
+    if (opts.length < 2) continue;
+    const reqd = grp.getAttribute('aria-required')==='true' || /\*/.test(norm(grp.innerText).slice(0,200));
+    if (!reqd) continue;
+    if (!opts.some(o => o.getAttribute('aria-checked')==='true')) empty.push(qlabel(grp));
+  }
   return JSON.stringify({adds: [...new Set(adds)], emptyReq: [...new Set(empty)].slice(0,25)});
 }"""
 
