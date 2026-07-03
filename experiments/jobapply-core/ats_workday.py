@@ -506,23 +506,23 @@ class WorkdayAdapter(ATSAdapter):
 
         # 4. Classify the post-submit screen
         if await eng.first(page, '[data-automation-id="verificationCode"], [data-automation-id="emailVerification"]'):
-            # inline completion when the IMAP inbox is configured: the account email is a gmail
-            # plus-alias, so the code lands in OUR inbox — poll it, type it, advance. Falls back
-            # to the needs_verification halt (HITL) on any miss.
-            import wd_verify_email as wve
+            # inline completion via the pluggable CodeSource chain (code_source.py): IMAP burner
+            # inbox in the test lane, human relay (VALET/desktop/pa-MCP) in production — the
+            # engine only asks "what is the code?". Falls back to the needs_verification halt.
+            import code_source
 
-            if wve.enabled():
-                print("  [wd-auth] verification gate — polling inbox for the emailed code")
-                code = await asyncio.to_thread(wve.fetch_code, creds.email)
-                if code:
-                    await self._fill_aid(page, "verificationCode", code)
-                    with contextlib.suppress(Exception):
-                        await eng.press_enter_trusted(session, page)
-                    await self._settle(page)
-                    page = await session.must_get_current_page()
-                    if not await eng.first(page, '[data-automation-id="verificationCode"]'):
-                        print("  [wd-auth] verification code accepted")
-                        return AuthResult(ok=True)
+            code = await code_source.get_verification_code(
+                {"email": creds.email, "url": await page.get_url()}
+            )
+            if code:
+                await self._fill_aid(page, "verificationCode", code)
+                with contextlib.suppress(Exception):
+                    await eng.press_enter_trusted(session, page)
+                await self._settle(page)
+                page = await session.must_get_current_page()
+                if not await eng.first(page, '[data-automation-id="verificationCode"]'):
+                    print("  [wd-auth] verification code accepted")
+                    return AuthResult(ok=True)
             return AuthResult(
                 ok=True,
                 needs_verification=True,
