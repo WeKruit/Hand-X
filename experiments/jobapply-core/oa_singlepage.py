@@ -240,15 +240,21 @@ async def run_single_page_oa(
     """Fill a single-page ATS form via observe_act, field-by-field. Returns a result dict with the
     per-field outcomes + a fill-rate. FILL-ONLY: never submits."""
     adapter = pick_adapter(url)
-    if adapter is None:
-        return {"url": url, "status": "NO_ADAPTER"}
 
     from browser_use import BrowserProfile, BrowserSession, ChatGoogle
     from browser_use.tokens.service import TokenCost
 
-    # step 1 — schema extract (no browser), reused verbatim.
-    title, fields = await adapter.extract(url, profile)
-    print(f"[oa:{adapter.__class__.__name__}] {title}  ({len(fields)} fields)")
+    if adapter is None:
+        # GENERIC LANE (foreign forms / company sites): no schema, no adapter — fields are
+        # discovered from the LIVE DOM after the page opens (oa_discover), mapped with the
+        # same ONE call, committed by the same observe_act machine (its adapter-delegation
+        # lane no-ops when ctx.adapter is None).
+        title, fields = "(generic form)", []
+        print(f"[oa:generic] no adapter — live-DOM discovery lane for {url[:70]}")
+    else:
+        # step 1 — schema extract (no browser), reused verbatim.
+        title, fields = await adapter.extract(url, profile)
+        print(f"[oa:{adapter.__class__.__name__}] {title}  ({len(fields)} fields)")
 
     tc = TokenCost(include_cost=True)
     await tc.initialize()
@@ -298,7 +304,7 @@ async def run_single_page_oa(
     session = BrowserSession(browser_profile=profile)
 
     result: dict[str, Any] = {
-        "adapter": adapter.__class__.__name__,
+        "adapter": adapter.__class__.__name__ if adapter else "generic",
         "title": title,
         "url": url,
         "fields_total": len(fields),
@@ -318,17 +324,36 @@ async def run_single_page_oa(
             await session.navigate_to(url)
         await asyncio.sleep(2.5)
         page = await session.must_get_current_page()
-        page = await adapter.open_form(session, page)
+        if adapter is None:
+            from oa_discover import discover_fields
 
-        if not await eng.form_present(adapter, page, fields):
-            with contextlib.suppress(Exception):
-                result["final_url"] = await page.get_url()
-            if screenshot_path:
-                result["screenshot"] = await eng._screenshot(session, page, screenshot_path)
-            usage = await tc.get_usage_summary()
-            result.update(status="BLOCKED", cost=usage.total_cost, filled=0, results=[])
-            print(f"  BLOCKED — form not reachable for {adapter.__class__.__name__}")
-            return result
+            fields = await discover_fields(page)
+            result["fields_total"] = len(fields)
+            print(f"[oa:generic] discovered {len(fields)} fields from the live DOM")
+            if not fields:
+                with contextlib.suppress(Exception):
+                    result["final_url"] = await page.get_url()
+                if screenshot_path:
+                    result["screenshot"] = await eng._screenshot(session, page, screenshot_path)
+                usage = await tc.get_usage_summary()
+                result.update(status="BLOCKED", cost=usage.total_cost, filled=0, results=[])
+                print("  BLOCKED — generic lane found no fillable fields")
+                return result
+            map_rows = [f for f in fields if f.needs_map]
+            mapped = await eng.map_fields(oa_llm.ResilientLLM(llm), map_rows, profile, title) if map_rows else {}
+            result["mapped"] = len(mapped)
+        else:
+            page = await adapter.open_form(session, page)
+
+            if not await eng.form_present(adapter, page, fields):
+                with contextlib.suppress(Exception):
+                    result["final_url"] = await page.get_url()
+                if screenshot_path:
+                    result["screenshot"] = await eng._screenshot(session, page, screenshot_path)
+                usage = await tc.get_usage_summary()
+                result.update(status="BLOCKED", cost=usage.total_cost, filled=0, results=[])
+                print(f"  BLOCKED — form not reachable for {adapter.__class__.__name__}")
+                return result
 
         return await _fill_form(
             session=session,

@@ -314,6 +314,18 @@ def _match(controls: list[Control], sec: str, row: str, label: str) -> Control |
     return None
 
 
+_FLAGGED: set[str] = set()
+
+
+def set_flagged(errors: list[str]) -> None:
+    """Validation-error text from the CURRENT blocked advance. reconcile must never SKIP a cell
+    whose label appears in one of these (the chewy School bug: the autofill-owned-row heuristic
+    silently skipped a REQUIRED empty cell the tenant had just flagged). Set by the engine's
+    fix loop right before the repeater fixpoint re-run; consumed (cleared) by reconcile."""
+    global _FLAGGED
+    _FLAGGED = {nkey(e) for e in errors if e}
+
+
 def reconcile(plan: dict, controls: list[Control], readback: dict | None = None) -> Diff:
     """plan = {section: {"count": N, "rows": [ {label: value} ]}} (skills/langs are rows of one value).
     readback = {fkit_id: committed_value} from the live DOM ('' if empty). ROW-AWARE: aligns plan row j
@@ -359,7 +371,11 @@ def reconcile(plan: dict, controls: list[Control], readback: dict | None = None)
                     status = "DONE" if all(it in nkey(got) for it in items) else "MISSING"
                 elif got:
                     status = "DONE"  # filled (any value) = leave it (respect autofill)
-                elif dom_row and row_fill.get((sec, dom_row), 0) >= 2:
+                elif (
+                    dom_row
+                    and row_fill.get((sec, dom_row), 0) >= 2
+                    and not any(nkey(label) and nkey(label) in f for f in _FLAGGED)
+                ):
                     status = "SKIP"  # autofill-owned row — its gaps are the résumé's, not the plan's
                 else:
                     status = "MISSING"

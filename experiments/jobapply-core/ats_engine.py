@@ -1514,6 +1514,10 @@ async def run_wizard(
     from browser_use import BrowserProfile, BrowserSession, ChatGoogle
     from browser_use.tokens.service import TokenCost
 
+    with contextlib.suppress(Exception):  # wd_one calls run_wizard directly, bypassing run()
+        b = float(os.environ.get("GH_JOB_BUDGET_S", "0"))
+        if b > 0:
+            set_job_deadline(b)
     title, _ = await adapter.extract(url, profile)  # title only; fields come per-step
     print(f"[wizard:{adapter.__class__.__name__}] {title}")
     tc = TokenCost(include_cost=True)
@@ -1718,7 +1722,13 @@ async def run_wizard(
                                 # idempotent fixpoint re-run reads everything back and fills only
                                 # what is genuinely MISSING (respect-autofill + SKIP rules apply).
                                 print("  [validation-fix] no step-level owner — re-running repeaters fixpoint")
+                                with contextlib.suppress(Exception):  # flagged cells must not be SKIPped
+                                    import wd_repeaters as _wdr
+
+                                    _wdr.set_flagged(errs)
                                 await adapter.fill_repeaters(session, page, profile)
+                                with contextlib.suppress(Exception):
+                                    _wdr.set_flagged([])
                                 redo = step.fields[:1]  # mark work done so we re-advance below
                             if redo:
                                 await adapter.next_step(session, page)
