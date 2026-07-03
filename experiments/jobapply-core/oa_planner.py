@@ -72,12 +72,12 @@ async def plan_page(session: Any, profile: dict, llm: Any = None) -> dict:
     """ONE marked-screenshot VLM read -> the fill plan. {} on any failure (caller falls back to
     the unplanned path). Never raises."""
     try:
-        import oa_llm as _oa
-        from vision_verify import _vlm
-
         # FULL-page: repeater sections sit BELOW the fold; a viewport shot sees only the top flat
         # fields and under-counts (expected_fields=6, sections=[] — the exact under-estimate bug).
         import asyncio
+
+        import oa_llm as _oa
+        from vision_verify import _vlm
 
         png = None
         with contextlib.suppress(Exception):
