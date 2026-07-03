@@ -66,9 +66,11 @@ async def _generic_rescue(res: dict, profile: dict, resume: str | None, ss: str 
         cmd += ["--screenshot", ss.replace(".png", "_generic.png")]
     print(f"   [generic] foreign form — observe_act rescue on {target[:70]}")
     proc = None
+    glog = Path(ss.replace(".png", "_generic.log")) if ss else Path(f"runs/.gen_{os.getpid()}.log")
     try:
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
+        with glog.open("w") as lf:
+            proc = await asyncio.create_subprocess_exec(*cmd, stdout=lf, stderr=asyncio.subprocess.STDOUT)
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
         g = json.loads(oj.read_text())
         if g.get("status") == "FILLED" and (g.get("fill_rate") or 0) > 0:
             return {**res, "status": "FILLED", "generic": True, "fill_rate": g["fill_rate"],

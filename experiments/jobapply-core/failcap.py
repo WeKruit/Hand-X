@@ -108,7 +108,14 @@ async def _classify(png_bytes: bytes) -> dict:
         )
         raw = str(await _oa.resilient_vlm([msg], primary=_vlm()) or "")
         m = re.search(r"\{.*\}", raw, re.S)
-        d = json.loads(m.group(0)) if m else {}
+        d = {}
+        if m:
+            try:
+                d = json.loads(m.group(0))
+            except Exception:  # VLM emits invalid \escapes (toast case) — salvage by regex
+                k = re.search(r'"kind"\s*:\s*"([A-Za-z_]+)"', raw)
+                e = re.search(r'"evidence"\s*:\s*"([^"\\]*)', raw)
+                d = {"kind": k.group(1) if k else "?", "evidence": e.group(1) if e else ""}
         kind = str(d.get("kind", "?")).upper()
         return {"kind": kind if kind in _BUCKETS else "?", "evidence": str(d.get("evidence", ""))[:120]}
     except Exception as exc:
