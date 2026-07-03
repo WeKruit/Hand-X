@@ -64,6 +64,22 @@ _FIND_SECTIONS_JS = r"""() => {
 }"""
 
 
+def _norm_date(v: str) -> str:
+    """Profile dates are 'YYYY-MM' / 'YYYY-MM-DD' / 'Present'. Most repeater date inputs want a
+    day-month-year mask (dd-mm-yyyy). Emit that; the field's own picker reshapes separators.
+    'YYYY-MM' -> '01-MM-YYYY'; 'YYYY-MM-DD' -> 'DD-MM-YYYY'; pass 'Present'/blank through."""
+    import re as _r
+
+    v = str(v or "").strip()
+    if not v or v.lower() in ("present", "current"):
+        return v
+    m = _r.match(r"^(\d{4})-(\d{1,2})(?:-(\d{1,2}))?$", v)
+    if m:
+        y, mo, d = m.group(1), m.group(2).zfill(2), (m.group(3) or "01").zfill(2)
+        return f"{d}-{mo}-{y}"
+    return v
+
+
 def _entry_profile(profile: dict, key: str, entry: dict) -> dict:
     """A ONE-entry mini-profile the flat map_fields can map (labels School/Company/Degree/... ->
     this entry's values)."""
@@ -73,8 +89,8 @@ def _entry_profile(profile: dict, key: str, entry: dict) -> dict:
             "school": entry.get("school", ""), "university": entry.get("school", ""),
             "degree": entry.get("degree", ""), "field_of_study": entry.get("field_of_study", ""),
             "major": entry.get("field_of_study", ""),
-            "start_date": entry.get("start_date", ""),
-            "end_date": entry.get("graduation_date", entry.get("end_date", "")),
+            "start_date": _norm_date(entry.get("start_date", "")),
+            "end_date": _norm_date(entry.get("graduation_date", entry.get("end_date", ""))),
             "graduation_date": entry.get("graduation_date", ""), "gpa": entry.get("gpa", ""),
         })
     else:
@@ -82,8 +98,8 @@ def _entry_profile(profile: dict, key: str, entry: dict) -> dict:
             "company": entry.get("company", ""), "employer": entry.get("company", ""),
             "title": entry.get("title", ""), "job_title": entry.get("title", ""),
             "location": entry.get("location", ""),
-            "start_date": entry.get("start_date", ""),
-            "end_date": "Present" if entry.get("current") else entry.get("end_date", ""),
+            "start_date": _norm_date(entry.get("start_date", "")),
+            "end_date": "Present" if entry.get("current") else _norm_date(entry.get("end_date", "")),
             "description": "; ".join(entry.get("highlights", []))[:400],
         })
     return base
