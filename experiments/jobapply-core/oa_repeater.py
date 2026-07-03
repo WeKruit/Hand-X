@@ -19,10 +19,13 @@ Reuses discover_fields + map_fields + observe_act — no new fill primitives.
 
 import asyncio
 import contextlib
+import re as _re_mod
 import time
 from typing import Any
 
 import ats_engine as eng
+
+_PERSONAL_RX = _re_mod.compile(r'first name|last name|full name|\bemail\b|\bphone\b|country|linkedin|preferred name|middle name')
 
 _SECTION_KEYS = {
     "experience": "experience",
@@ -258,6 +261,10 @@ async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | N
             with contextlib.suppress(Exception):
                 await asyncio.sleep(1.8)
                 new_fields = [f for f in await discover_fields(page) if f.name not in before]
+                # SAFETY: a re-render can give a flat PERSONAL-INFO field a new id so it looks 'new';
+                # the row map would then overwrite First Name with a row value (the 'United States'
+                # in First Name bug). A repeater row is NEVER a personal-info field — drop those.
+                new_fields = [f for f in new_fields if not _PERSONAL_RX.search((f.label or "").lower())]
                 print(f"   [repeater] {key} row {rows_filled + 1}: Add clicked -> {len(new_fields)} new fields")
                 if not new_fields:
                     break
