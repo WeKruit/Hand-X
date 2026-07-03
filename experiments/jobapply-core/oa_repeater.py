@@ -86,9 +86,105 @@ def _entry_profile(profile: dict, key: str, entry: dict) -> dict:
     return base
 
 
+_SAVE_JS = r"""() => {
+  const norm = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const rx = /^(save|done|confirm|save entry|save and close|save & close)$/;
+  // a row-commit verb ONLY — NEVER apply/submit/finish/next (those finalize the application).
+  const forbidden = /(apply|submit|finish|next|continue)/;
+  const btns = [...document.querySelectorAll('button,[role=button],input[type=submit]')].filter(e => {
+    const r=e.getBoundingClientRect(); if(r.width<8||r.height<8) return false;
+    const t=norm(e.innerText||e.value||e.getAttribute('aria-label')||'');
+    return t && t.length<16 && rx.test(t) && !forbidden.test(t) && t!=='cancel'; });
+  const el = btns[btns.length-1];  // the open form's Save is usually the LAST such button
+  if(!el) return '';
+  el.scrollIntoView({block:'center'}); const r=el.getBoundingClientRect();
+  return JSON.stringify({x:r.left+r.width/2, y:r.top+r.height/2, t:norm(el.innerText||el.value||'')});
+}"""
+
+
+async def _click_save(page: Any, session: Any) -> bool:
+    """Click the open Add-form's Save/Done/Confirm button (never Cancel). False if none."""
+    import json as _j
+
+    with contextlib.suppress(Exception):
+        raw = await page.evaluate(_SAVE_JS)
+        if not raw:
+            return False
+        c = _j.loads(raw)
+        sid = await page.session_id
+        for ev in (
+            {"type": "mouseMoved", "x": c["x"], "y": c["y"], "buttons": 0},
+            {"type": "mousePressed", "x": c["x"], "y": c["y"], "button": "left", "buttons": 1, "clickCount": 1},
+            {"type": "mouseReleased", "x": c["x"], "y": c["y"], "button": "left", "buttons": 0, "clickCount": 1},
+        ):
+            await session.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=sid)
+        print(f"   [repeater] saved row (clicked '{c.get('t')}')")
+        return True
+    return False
+
+
+async def _visual_click_add(session: Any, section_name: str, llm: Any) -> bool:
+    """VISUAL locate + click the Add control for a section (user: use visuals, not DOM coords).
+    Mark every clickable control, ask the VLM which numbered box ADDS an entry to `section_name`,
+    scroll that node into view, click it. Robust to layout shifts (DOM coords go stale). False on
+    miss. This is the primary Add-locate; the DOM-coord path is the fallback."""
+    with contextlib.suppress(Exception):
+        import base64
+
+        import oa_action as act
+        import oa_llm as _oa
+        import oa_perception as perc
+        from vision_verify import _vlm
+
+        state = await perc.get_state(session)
+        cands = {
+            int(n.backend_node_id): n
+            for n in state.selector_map.values()
+            if getattr(n, "backend_node_id", None) is not None and perc.node_is_visible(n) and perc.node_rect(n) is not None
+        }
+        if not cands:
+            return False
+        png = await _oa.bounded_screenshot(session)
+        if png is None:
+            return False
+        raw_b64 = base64.b64encode(png).decode() if isinstance(png, bytes) else str(png)
+        from browser_use.browser.python_highlights import create_highlighted_screenshot
+
+        marked = await create_highlighted_screenshot(raw_b64, cands, filter_highlight_ids=False)
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+        legend = ", ".join(str(i) for i in cands)
+        prompt = (
+            f"This job-application form screenshot has controls outlined by dashed numbered boxes "
+            f"({legend}). Reply STRICT JSON {{\"mark\": <the NUMBER of the control that ADDS a new "
+            f"entry/row to the '{section_name}' section — a button, link, or '+' icon next to that "
+            f'section heading>}}. If none, {{"mark": -1}}.'
+        )
+        msg = UserMessage(content=[
+            ContentPartTextParam(type="text", text=prompt),
+            ContentPartImageParam(type="image_url", image_url=ImageURL(
+                url=f"data:image/png;base64,{marked}", detail="high", media_type="image/png")),
+        ])
+
+        res = await _oa.resilient_vlm([msg], primary=_vlm())
+        raw = str(getattr(res, "completion", res) or "")
+        import re as _re
+
+        m = _re.search(r'"mark"\s*:\s*(-?\d+)', raw)
+        mk = int(m.group(1)) if m else -1
+        node = cands.get(mk)
+        if node is None:
+            return False
+        # scroll the picked node into view, then click it (trusted, occlusion-aware)
+        with contextlib.suppress(Exception):
+            await session.cdp_client.send.DOM.scrollIntoViewIfNeeded(params={"backendNodeId": int(node.backend_node_id)})
+        return await act.click_node(session, node)
+    return False
+
+
 async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | None, llm: Any, *, budget_s: float = 150.0) -> dict:
-    """Fill Experience/Education repeater sections deterministically. Returns
-    {sections: {name: rows_filled}}. Never raises; bounded by budget_s."""
+    """Fill Experience/Education repeater sections. Add control located VISUALLY (VLM marks —
+    robust to layout shift), DOM-coord as fallback. Returns {sections: {name: rows_filled}}."""
     import json as _json
 
     import oa_observe_act as oa
@@ -98,14 +194,21 @@ async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | N
     result: dict = {"sections": {}}
     deadline = time.monotonic() + budget_s
 
-    async def _find_add(section_key: str) -> dict | None:
-        """Re-locate a section's Add control FRESH (coords go stale after each fill shifts layout)."""
+    async def _click_add_dom(section_key: str) -> bool:
+        """Fallback: DOM-coord click (fresh-located)."""
         with contextlib.suppress(Exception):
             for add in _json.loads(await page.evaluate(_FIND_SECTIONS_JS) or "[]"):
                 sec = str(add.get("section", "")).lower()
                 if any(k in sec for k, v in _SECTION_KEYS.items() if v == section_key):
-                    return add
-        return None
+                    sid = await page.session_id
+                    for ev in (
+                        {"type": "mouseMoved", "x": add["x"], "y": add["y"], "buttons": 0},
+                        {"type": "mousePressed", "x": add["x"], "y": add["y"], "button": "left", "buttons": 1, "clickCount": 1},
+                        {"type": "mouseReleased", "x": add["x"], "y": add["y"], "button": "left", "buttons": 0, "clickCount": 1},
+                    ):
+                        await session.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=sid)
+                    return True
+        return False
 
     # which section keys are present + have profile data
     present: list[str] = []
@@ -116,6 +219,8 @@ async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | N
             if key and key not in present:
                 present.append(key)
 
+    # section display names (for the visual prompt) keyed by canonical key
+    names = {"experience": "Work Experience", "education": "Education"}
     for key in present:
         if time.monotonic() > deadline:
             break
@@ -126,20 +231,18 @@ async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | N
         for entry in entries[:4]:
             if time.monotonic() > deadline:
                 break
-            add = await _find_add(key)  # FRESH coords every row — the stale-coord bug that left
-            if add is None:            # Experience unfilled after Education shifted the layout
+            before = {f.name for f in await discover_fields(page)}
+            # VISUAL Add-click first (robust to layout shift), DOM-coord fallback
+            clicked = await _visual_click_add(session, names.get(key, key), llm)
+            if not clicked:
+                clicked = await _click_add_dom(key)
+            if not clicked:
+                print(f"   [repeater] {key}: no Add control found -> stop")
                 break
             with contextlib.suppress(Exception):
-                before = {f.name for f in await discover_fields(page)}
-                sid = await page.session_id
-                for ev in (
-                    {"type": "mouseMoved", "x": add["x"], "y": add["y"], "buttons": 0},
-                    {"type": "mousePressed", "x": add["x"], "y": add["y"], "button": "left", "buttons": 1, "clickCount": 1},
-                    {"type": "mouseReleased", "x": add["x"], "y": add["y"], "button": "left", "buttons": 0, "clickCount": 1},
-                ):
-                    await session.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=sid)
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1.8)
                 new_fields = [f for f in await discover_fields(page) if f.name not in before]
+                print(f"   [repeater] {key} row {rows_filled + 1}: Add clicked -> {len(new_fields)} new fields")
                 if not new_fields:
                     break
                 mini = _entry_profile(profile, key, entry)
@@ -152,6 +255,11 @@ async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | N
                     fd = _field_dict(f, value, resume=resume, llm=llm, adapter=None, page=page)
                     with contextlib.suppress(Exception):
                         await oa.observe_act(session, fd)
+                # COMMIT the row: many repeaters open an inline Add-form with a Save/Done button and
+                # will NOT open the next Add (even for a different section) until this row is saved
+                # (the hibob Education-form-open blocks Experience Add). Click Save/Done/Confirm.
+                await _click_save(page, session)
+                await asyncio.sleep(1.0)
                 rows_filled += 1
         if rows_filled:
             result["sections"][key] = rows_filled

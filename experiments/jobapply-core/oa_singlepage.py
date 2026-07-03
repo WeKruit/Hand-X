@@ -447,6 +447,8 @@ async def run_single_page_oa(
                 import oa_complete
 
                 await oa_complete.dismiss_consent(session, page)
+            with contextlib.suppress(Exception):  # SAFETY: disable every Submit/Apply/Finish so no
+                await eng.install_submit_guard(page)  # repeater Save/Add click can ever finalize
             with contextlib.suppress(Exception):  # FIRST-LOOK PLAN (decides sections/denominator)
                 import oa_planner
 
