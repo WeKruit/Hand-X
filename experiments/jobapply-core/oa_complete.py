@@ -260,6 +260,7 @@ async def complete(
                 rep = await oa_repeater.fill_repeaters(session, page, profile, resume, llm)
                 if rep.get("sections"):
                     verdict["sections_filled"] = list(rep["sections"].keys())
+                    verdict["repeater_fields_filled"] = rep.get("fields_filled", 0)
         # any repeater the deterministic pass could NOT fill (unusual layout) -> agent fallback,
         # only when allowed; else flag it incomplete (never a silent pass).
         sections = []

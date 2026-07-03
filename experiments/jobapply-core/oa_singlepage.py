@@ -613,6 +613,8 @@ async def _fill_form(
     # counts flat fields + every repeater row a COMPLETE application needs. fill_rate over
     # discovered-only systematically over-states (5/5 on a 20-field form). Report BOTH: fill_rate
     # (of what we touched) and coverage (of what the page actually needs).
+    rep_filled = int((result.get("completeness") or {}).get("repeater_fields_filled") or 0)
+    total_filled = len(filled) + rep_filled  # flat + repeater rows = the honest fill count
     expected = 0
     with contextlib.suppress(Exception):
         expected = int((result.get("plan") or {}).get("expected_total_fields") or 0)
@@ -630,8 +632,10 @@ async def _fill_form(
         outcomes={t: sum(1 for r in per_field if r.outcome == t) for t in (oa.DONE, oa.OTHER, oa.SKIP, oa.ESCALATE)},
         fill_rate=round(len(filled) / len(fillable), 3) if fillable else 0.0,
         expected_total_fields=expected or None,
-        coverage=round(len(filled) / expected, 3) if expected else None,
-        filled=len(filled),
+        coverage=round(min(1.0, total_filled / expected), 3) if expected else None,
+        filled=total_filled,
+        flat_filled=len(filled),
+        repeater_filled=rep_filled,
         results=[
             {
                 "name": r.name,

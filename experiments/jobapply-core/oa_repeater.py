@@ -198,7 +198,7 @@ async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | N
     from oa_discover import discover_fields
     from oa_singlepage import _field_dict
 
-    result: dict = {"sections": {}}
+    result: dict = {"sections": {}, "fields_filled": 0}
     deadline = time.monotonic() + budget_s
 
     async def _click_add_dom(section_key: str) -> bool:
@@ -277,7 +277,9 @@ async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | N
                         continue
                     fd = _field_dict(f, value, resume=resume, llm=llm, adapter=None, page=page)
                     with contextlib.suppress(Exception):
-                        await oa.observe_act(session, fd)
+                        out = await oa.observe_act(session, fd)
+                        if out == oa.DONE:
+                            result["fields_filled"] += 1
                 # COMMIT the row: many repeaters open an inline Add-form with a Save/Done button and
                 # will NOT open the next Add (even for a different section) until this row is saved
                 # (the hibob Education-form-open blocks Experience Add). Click Save/Done/Confirm.
