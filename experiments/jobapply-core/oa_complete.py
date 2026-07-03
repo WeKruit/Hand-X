@@ -250,23 +250,36 @@ async def complete(
             verdict["retried"] = await retry_missing(
                 session, page, profile, resume, llm, verdict["missing_required"]
             )
-        # only look for repeater sections if the DOM shows an add-row affordance OR the profile
-        # has history to place — cheap gate before spending a VLM call.
+        # REPEATER SECTIONS (Experience / Education): fill DETERMINISTICALLY (click Add per profile
+        # entry, fill the new row) — fast + reliable, unlike the slow crash-prone agent. Runs whenever
+        # the DOM shows an add-row affordance and the profile has history; no agent gate needed.
+        if (a.get("adds")) and (profile.get("experience") or profile.get("education")) and llm is not None:
+            with contextlib.suppress(Exception):
+                import oa_repeater
+
+                rep = await oa_repeater.fill_repeaters(session, page, profile, resume, llm)
+                if rep.get("sections"):
+                    verdict["sections_filled"] = list(rep["sections"].keys())
+        # any repeater the deterministic pass could NOT fill (unusual layout) -> agent fallback,
+        # only when allowed; else flag it incomplete (never a silent pass).
         sections = []
-        if a.get("adds") or profile.get("experience") or profile.get("education"):
-            sections = [s for s in await _vlm_unfilled_sections(session) if _profile_has(profile, s)]
+        with contextlib.suppress(Exception):
+            sections = [
+                s for s in await _vlm_unfilled_sections(session)
+                if _profile_has(profile, s) and s.lower() not in " ".join(verdict["sections_filled"]).lower()
+            ]
         for sec in sections:
             if not allow_agent:
                 verdict["sections_skipped"].append(sec)
                 verdict["complete"] = False
-                print(f"   [complete] '{sec}' section unfilled — repeater fill needs agent (escalation off)")
+                print(f"   [complete] '{sec}' section still unfilled after deterministic pass (agent off)")
                 continue
             with contextlib.suppress(Exception):
                 await eng.agent_fill_section(
-                    session, page, section=sec, instructions=_instructions(profile, sec), resume=resume, max_steps=16
+                    session, page, section=sec, instructions=_instructions(profile, sec), resume=resume, max_steps=14
                 )
                 verdict["sections_filled"].append(sec)
-                print(f"   [complete] filled repeater section '{sec}'")
+                print(f"   [complete] agent-filled repeater section '{sec}'")
         # re-audit after retry + section fill
         with contextlib.suppress(Exception):
             verdict["missing_required"] = (await audit(session, page)).get("emptyReq", [])

@@ -447,6 +447,10 @@ async def run_single_page_oa(
                 import oa_complete
 
                 await oa_complete.dismiss_consent(session, page)
+            with contextlib.suppress(Exception):  # FIRST-LOOK PLAN (decides sections/denominator)
+                import oa_planner
+
+                result["plan"] = await oa_planner.plan_page(session, profile, llm=llm)
         else:
             page = await adapter.open_form(session, page)
 
@@ -603,12 +607,21 @@ async def _fill_form(
 
     fillable = [r for r in per_field if r.outcome != oa.SKIP]
     filled = [r for r in fillable if r.filled]
+    # HONEST DENOMINATOR (user: 'eval underestimate了任务'): the planner's expected_total_fields
+    # counts flat fields + every repeater row a COMPLETE application needs. fill_rate over
+    # discovered-only systematically over-states (5/5 on a 20-field form). Report BOTH: fill_rate
+    # (of what we touched) and coverage (of what the page actually needs).
+    expected = 0
+    with contextlib.suppress(Exception):
+        expected = int((result.get("plan") or {}).get("expected_total_fields") or 0)
     result.update(
         status="FILLED",
         cost=usage.total_cost,
         secs=secs,
         outcomes={t: sum(1 for r in per_field if r.outcome == t) for t in (oa.DONE, oa.OTHER, oa.SKIP, oa.ESCALATE)},
         fill_rate=round(len(filled) / len(fillable), 3) if fillable else 0.0,
+        expected_total_fields=expected or None,
+        coverage=round(len(filled) / expected, 3) if expected else None,
         filled=len(filled),
         results=[
             {
