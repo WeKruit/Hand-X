@@ -189,7 +189,7 @@ async def _visual_click_add(session: Any, section_name: str, llm: Any) -> bool:
     return False
 
 
-async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | None, llm: Any, *, budget_s: float = 150.0) -> dict:
+async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | None, llm: Any, *, budget_s: float = 150.0, planner_keys: list | None = None) -> dict:
     """Fill Experience/Education repeater sections. Add control located VISUALLY (VLM marks —
     robust to layout shift), DOM-coord as fallback. Returns {sections: {name: rows_filled}}."""
     import json as _json
@@ -217,14 +217,19 @@ async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | N
                     return True
         return False
 
-    # which section keys are present + have profile data
+    # which section keys are present + have profile data. PLANNER (VLM) list wins — it sees an
+    # icon-'+' or a localized Add the DOM regex misses (breezy/rippling); DOM detection is fallback.
     present: list[str] = []
-    with contextlib.suppress(Exception):
-        for add in _json.loads(await page.evaluate(_FIND_SECTIONS_JS) or "[]"):
-            sec = str(add.get("section", "")).lower()
-            key = next((v for k, v in _SECTION_KEYS.items() if k in sec), None)
-            if key and key not in present:
-                present.append(key)
+    for k in (planner_keys or []):
+        if k in ("experience", "education") and k not in present:
+            present.append(k)
+    if not present:
+        with contextlib.suppress(Exception):
+            for add in _json.loads(await page.evaluate(_FIND_SECTIONS_JS) or "[]"):
+                sec = str(add.get("section", "")).lower()
+                key = next((v for k, v in _SECTION_KEYS.items() if k in sec), None)
+                if key and key not in present:
+                    present.append(key)
 
     # section display names (for the visual prompt) keyed by canonical key
     names = {"experience": "Work Experience", "education": "Education"}

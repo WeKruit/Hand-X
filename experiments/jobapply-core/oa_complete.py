@@ -233,7 +233,7 @@ async def retry_missing(session: Any, page: Any, profile: dict, resume: str | No
 
 
 async def complete(
-    session: Any, page: Any, profile: dict, resume: str | None, *, allow_agent: bool, llm: Any = None
+    session: Any, page: Any, profile: dict, resume: str | None, *, allow_agent: bool, llm: Any = None, planner_keys: list | None = None
 ) -> dict:
     """Audit the form for unfilled repeater sections + empty required fields; fill repeaters via the
     proven agent_fill_section and RE-FILL wiped required fields (retry). Returns
@@ -253,11 +253,11 @@ async def complete(
         # REPEATER SECTIONS (Experience / Education): fill DETERMINISTICALLY (click Add per profile
         # entry, fill the new row) — fast + reliable, unlike the slow crash-prone agent. Runs whenever
         # the DOM shows an add-row affordance and the profile has history; no agent gate needed.
-        if (a.get("adds")) and (profile.get("experience") or profile.get("education")) and llm is not None:
+        if (a.get("adds") or planner_keys) and (profile.get("experience") or profile.get("education")) and llm is not None:
             with contextlib.suppress(Exception):
                 import oa_repeater
 
-                rep = await oa_repeater.fill_repeaters(session, page, profile, resume, llm)
+                rep = await oa_repeater.fill_repeaters(session, page, profile, resume, llm, planner_keys=planner_keys)
                 if rep.get("sections"):
                     verdict["sections_filled"] = list(rep["sections"].keys())
                     verdict["repeater_fields_filled"] = rep.get("fields_filled", 0)

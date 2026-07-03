@@ -589,8 +589,11 @@ async def _fill_form(
             # audit always runs (cheap: DOM + 1 VLM); the repeater FILL uses the multi-step agent,
             # so it is gated to OA_COMPLETE_AGENT=1 (off in the cheap sweep, on for real fills). Even
             # with the fill off, the verdict honestly flags a section we would otherwise have missed.
+            _pk = [s.get("profile_key") for s in (result.get("plan") or {}).get("repeater_sections") or []
+                   if s.get("has_add_control") and s.get("profile_key") in ("experience", "education")]
             result["completeness"] = await oa_complete.complete(
-                session, page, profile, resume, allow_agent=os.environ.get("OA_COMPLETE_AGENT") == "1", llm=llm
+                session, page, profile, resume, allow_agent=os.environ.get("OA_COMPLETE_AGENT") == "1",
+                llm=llm, planner_keys=_pk,
             )
             with contextlib.suppress(Exception):
                 page = await session.must_get_current_page()
