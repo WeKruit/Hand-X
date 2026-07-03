@@ -236,10 +236,15 @@ async def run_single_page_oa(
     resume: str | None,
     headless: bool = True,
     screenshot_path: str | None = None,
+    force_generic: bool = False,
 ) -> dict:
     """Fill a single-page ATS form via observe_act, field-by-field. Returns a result dict with the
-    per-field outcomes + a fill-rate. FILL-ONLY: never submits."""
-    adapter = pick_adapter(url)
+    per-field outcomes + a fill-rate. FILL-ONLY: never submits.
+
+    force_generic=True ignores the adapter ON PURPOSE (benchmark mode): run the no-adapter
+    lane on a KNOWN ATS whose adapter result is the ground truth — the diff measures the
+    generic lane's true capability on pages where we can score it exactly."""
+    adapter = None if force_generic else pick_adapter(url)
 
     from browser_use import BrowserProfile, BrowserSession, ChatGoogle
     from browser_use.tokens.service import TokenCost
@@ -292,7 +297,17 @@ async def run_single_page_oa(
     # NOTE: named browser_profile ON PURPOSE — this used to be `profile =`, silently
     # SHADOWING the user-profile dict; the generic lane's map_fields call then json.dumps'd
     # a BrowserProfile object (the toast crash).
+    _extra: dict = {}
+    if os.environ.get("OA_STEALTH") == "1":  # SR-class device checks key on automation fingerprints
+        # this venv's browser_use may not ship stealth (only the vendored root copy does);
+        # degrade to a plain profile rather than crash — prod uses the user's REAL browser.
+        with contextlib.suppress(Exception):
+            from browser_use.browser.profile import StealthConfig
+
+            if "stealth" in BrowserProfile.model_fields:
+                _extra["stealth"] = StealthConfig(enabled=True)
     browser_profile = BrowserProfile(
+        **_extra,
         headless=headless,
         keep_alive=True,
         viewport={"width": _vw, "height": _vh},
@@ -336,6 +351,14 @@ async def run_single_page_oa(
                 with contextlib.suppress(Exception):
                     page = await session.must_get_current_page()
                 fields = await discover_fields(page)
+            if not fields:
+                # interstitial (SmartRecruiters 'Verifying the device...' / slow SPA mount) —
+                # ONE bounded wait, then re-look. A hard anti-bot wall stays empty and falls
+                # through to the classified BLOCKED below.
+                await asyncio.sleep(8.0)
+                with contextlib.suppress(Exception):
+                    page = await session.must_get_current_page()
+                fields = await discover_fields(page)
             result["fields_total"] = len(fields)
             print(f"[oa:generic] discovered {len(fields)} fields from the live DOM")
             if not fields:
@@ -343,9 +366,16 @@ async def run_single_page_oa(
                     result["final_url"] = await page.get_url()
                 if screenshot_path:
                     result["screenshot"] = await eng._screenshot(session, page, screenshot_path)
+                with contextlib.suppress(Exception):  # classify the wall (anti-bot? landing? blank?)
+                    import failcap
+
+                    rec = await failcap.capture(
+                        session, page, "generic_no_fields", "BLOCKED", "generic lane found no fillable fields"
+                    )
+                    result["page_kind"] = (rec or {}).get("triage", {}).get("kind", "?")
                 usage = await tc.get_usage_summary()
                 result.update(status="BLOCKED", cost=usage.total_cost, filled=0, results=[])
-                print("  BLOCKED — generic lane found no fillable fields")
+                print(f"  BLOCKED — generic lane found no fillable fields (kind: {result.get('page_kind', '?')})")
                 return result
             map_rows = [f for f in fields if f.needs_map]
             mapped = await eng.map_fields(oa_llm.ResilientLLM(llm), map_rows, profile, title) if map_rows else {}
@@ -766,6 +796,7 @@ def main() -> None:
     p.add_argument("--screenshot", default=None, help="write an end-of-fill PNG here")
     p.add_argument("--headed", action="store_true", help="run headed (default headless)")
     p.add_argument("--json", default=None, help="write the full per-field result JSON here")
+    p.add_argument("--generic", action="store_true", help="benchmark mode: force the no-adapter lane")
     args = p.parse_args()
 
     profile = _load_profile(args.profile)
@@ -776,6 +807,7 @@ def main() -> None:
             resume=args.resume,
             headless=not args.headed,
             screenshot_path=args.screenshot,
+            force_generic=args.generic,
         )
     )
     if args.json:

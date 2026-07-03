@@ -106,7 +106,8 @@ async def _classify(png_bytes: bytes) -> dict:
                 ),
             ]
         )
-        raw = str(await _oa.resilient_vlm([msg], primary=_vlm()) or "")
+        _res = await _oa.resilient_vlm([msg], primary=_vlm())
+        raw = str(getattr(_res, "completion", _res) or "")  # unwrap ChatInvokeCompletion (repr broke json.loads)
         m = re.search(r"\{.*\}", raw, re.S)
         d = {}
         if m:

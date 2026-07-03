@@ -332,30 +332,78 @@ async def click_trusted(session: Any, page: Any, element: Any) -> bool:
         return False
 
 
+async def _vlm_apply_text(session: Any) -> str:
+    """ONE nano-VLM read: the exact visible text of the start-application button. Language-
+    agnostic (SmartRecruiters "I'm interested", pt-BR "Estou interessado", ...). '' on miss."""
+    try:
+        import oa_llm as _oa
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+        from vision_verify import _vlm
+
+        png = await _oa.bounded_screenshot(session)
+        if png is None:
+            print("   [reach] vlm affordance: screenshot unavailable")
+            return ""
+        if isinstance(png, str):  # take_screenshot returns b64 str on some paths
+            import base64 as _b64d
+
+            png = _b64d.b64decode(png)
+        import base64 as _b64
+
+        msg = UserMessage(
+            content=[
+                ContentPartTextParam(
+                    type="text",
+                    text=(
+                        "This is a job posting page. Reply ONLY the EXACT visible text of the "
+                        "button or link a candidate clicks to START the application (any language, "
+                        "e.g. 'Apply now', \"I'm interested\"). If there is none, reply NONE."
+                    ),
+                ),
+                ContentPartImageParam(
+                    type="image_url",
+                    image_url=ImageURL(
+                        url=f"data:image/png;base64,{_b64.b64encode(png).decode()}",
+                        detail="low",
+                        media_type="image/png",
+                    ),
+                ),
+            ]
+        )
+        res = await _oa.resilient_vlm([msg], primary=_vlm())
+        t = str(getattr(res, "completion", res) or "").strip().strip("\"'")  # unwrap ChatInvokeCompletion
+        return "" if (not t or t.upper() == "NONE" or len(t) > 40) else t
+    except Exception as exc:
+        print(f"   [reach] vlm affordance failed: {type(exc).__name__}: {exc}")
+        return ""
+
+
 async def _try_apply_click(session: Any, page: Any) -> bool:
     """REACH rung: redirect tenants often land on the job DESCRIPTION page with a visible
-    'Apply' affordance (toasttab 'APPLY NOW', n26 'Apply for this position') — click it ONCE,
-    trusted, and let the caller re-check form_present. Text-anchored on purpose: this is the
-    page-level start-application button, not a form field; a localized tenant simply falls
-    through to NEEDS_HUMAN with its capture bundle.
-    # ponytail: regex list covers observed cases; add a VLM read for non-English tenants when
-    # the failures.jsonl data shows the need."""
-    js = (
-        "() => { const rx = /^(apply( now)?|apply for this( job| position| role)?|"
-        "start( your)? application|apply manually)$/i;"
-        " const els=[...document.querySelectorAll('a,button,[role=button],[role=link]')];"
-        " const el=els.find(e=>{const r=e.getBoundingClientRect();"
-        " if(r.width<10||r.height<10) return false;"
-        " const t=(e.innerText||e.getAttribute('aria-label')||'').trim().replace(/\\s+/g,' ');"
-        " return t.length<40 && rx.test(t)});"
-        " if(!el) return '';"
+    start-application affordance. NO regex (standing rule): ONE nano-VLM read of the rendered
+    page NAMES the button (any language/wording — 'Apply now', "I'm interested", 'Estou
+    interessado'); the DOM lookup below only LOCATES that exact named text and clicks it
+    trusted. Meaning lives in the VLM, never in a pattern list."""
+    by_text_js = (
+        "(w) => { const want=w.trim().toLowerCase().replace(/\\s+/g,' ');"
+        " const els=[...document.querySelectorAll('a,button,[role=button],[role=link]')]"
+        " .filter(e=>{const r=e.getBoundingClientRect(); if(r.width<10||r.height<10) return false;"
+        " const t=(e.innerText||'').trim().toLowerCase().replace(/\\s+/g,' ');"
+        " return t && (t===want || (t.length<60 && t.includes(want)));})"
+        " .sort((a,b)=>a.innerText.length-b.innerText.length);"
+        " const el=els[0]; if(!el) return '';"
         " el.scrollIntoView({block:'center'}); const r=el.getBoundingClientRect();"
         " return JSON.stringify({x:r.left+r.width/2, y:r.top+r.height/2,"
         " t:(el.innerText||'').trim().slice(0,40)}); }"
     )
     try:
-        raw = await page.evaluate(js)
+        want = await _vlm_apply_text(session)
+        if not want:
+            return False
+        print(f"   [reach] VLM names the affordance: '{want}'")
+        raw = await page.evaluate(by_text_js, want)
         if not raw:
+            print(f"   [reach] named affordance '{want}' not found in DOM")
             return False
         c = json.loads(raw)
         print(f"   [reach] clicking apply affordance: '{c['t']}'")
