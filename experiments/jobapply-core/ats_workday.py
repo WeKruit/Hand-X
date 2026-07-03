@@ -576,7 +576,9 @@ class WorkdayAdapter(ATSAdapter):
 
         d = json.loads(meta)
         fields = [self._to_field(f) for f in d["fields"]]
-        is_review = d["name"].lower() == "review" or (d["total"] and d["index"] == d["total"])
+        # total>1 REQUIRED: with no progressBar the JS defaults to index=1,total=1, which made any
+        # non-wizard page (sign-in wall, error page) claim is_review -> false FILLED_TO_REVIEW.
+        is_review = d["name"].lower() == "review" or (d["total"] > 1 and d["index"] == d["total"])
         return Step(
             index=d["index"],
             total=d["total"],
