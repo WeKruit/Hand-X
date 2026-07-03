@@ -89,24 +89,36 @@ def _entry_profile(profile: dict, key: str, entry: dict) -> dict:
 async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | None, llm: Any, *, budget_s: float = 150.0) -> dict:
     """Fill Experience/Education repeater sections deterministically. Returns
     {sections: {name: rows_filled}}. Never raises; bounded by budget_s."""
+    import json as _json
+
     import oa_observe_act as oa
     from oa_discover import discover_fields
     from oa_singlepage import _field_dict
 
     result: dict = {"sections": {}}
     deadline = time.monotonic() + budget_s
-    with contextlib.suppress(Exception):
-        raw = await page.evaluate(_FIND_SECTIONS_JS)
-        import json as _json
 
-        adds = _json.loads(raw) if raw else []
-    for add in adds:
+    async def _find_add(section_key: str) -> dict | None:
+        """Re-locate a section's Add control FRESH (coords go stale after each fill shifts layout)."""
+        with contextlib.suppress(Exception):
+            for add in _json.loads(await page.evaluate(_FIND_SECTIONS_JS) or "[]"):
+                sec = str(add.get("section", "")).lower()
+                if any(k in sec for k, v in _SECTION_KEYS.items() if v == section_key):
+                    return add
+        return None
+
+    # which section keys are present + have profile data
+    present: list[str] = []
+    with contextlib.suppress(Exception):
+        for add in _json.loads(await page.evaluate(_FIND_SECTIONS_JS) or "[]"):
+            sec = str(add.get("section", "")).lower()
+            key = next((v for k, v in _SECTION_KEYS.items() if k in sec), None)
+            if key and key not in present:
+                present.append(key)
+
+    for key in present:
         if time.monotonic() > deadline:
             break
-        sec_text = str(add.get("section", "")).lower()
-        key = next((v for k, v in _SECTION_KEYS.items() if k in sec_text), None)
-        if not key:
-            continue
         entries = profile.get(key) or (profile.get("work_experience") if key == "experience" else None) or []
         if not entries:
             continue
@@ -114,8 +126,10 @@ async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | N
         for entry in entries[:4]:
             if time.monotonic() > deadline:
                 break
+            add = await _find_add(key)  # FRESH coords every row — the stale-coord bug that left
+            if add is None:            # Experience unfilled after Education shifted the layout
+                break
             with contextlib.suppress(Exception):
-                # snapshot field ids BEFORE Add, click Add, re-discover -> the NEW fields are the row
                 before = {f.name for f in await discover_fields(page)}
                 sid = await page.session_id
                 for ev in (
@@ -127,7 +141,7 @@ async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | N
                 await asyncio.sleep(1.5)
                 new_fields = [f for f in await discover_fields(page) if f.name not in before]
                 if not new_fields:
-                    break  # Add didn't add a row (section full / not a repeater) — stop this section
+                    break
                 mini = _entry_profile(profile, key, entry)
                 rows = [f for f in new_fields if f.needs_map]
                 mapped = await eng.map_fields(llm, rows, mini, "") if rows else {}
@@ -140,6 +154,6 @@ async def fill_repeaters(session: Any, page: Any, profile: dict, resume: str | N
                         await oa.observe_act(session, fd)
                 rows_filled += 1
         if rows_filled:
-            result["sections"][sec_text[:30] or key] = rows_filled
+            result["sections"][key] = rows_filled
             print(f"   [repeater] filled {rows_filled} row(s) in '{key}' section")
     return result
