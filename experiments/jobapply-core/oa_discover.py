@@ -93,7 +93,14 @@ _ENUM_JS = r"""
     push(g, groupLabel(v.el, g), 'radio', 'select', v.opts.slice(0, 30), false);
   }
   for (const [g, v] of Object.entries(check)) {
-    if (v.opts.length < 2) continue;  // lone consent boxes: v1 skip (ceiling in module docstring)
+    if (v.opts.length < 2) {
+      // LONE checkbox (consent / acknowledge): its own boolean field. The v1 skip made required
+      // consent boxes invisible to discovery while the audit flagged them (teamtailor
+      // candidate[consent_given]). Label: group label, else the box's own text, else the name
+      // attr (the consent sentence often exceeds labFor's length cap).
+      push(g, groupLabel(v.el, g) || v.opts[0] || g, 'checkbox', 'select', ['Yes', 'No'], v.el.required);
+      continue;
+    }
     push(g, groupLabel(v.el, g), 'multi_select', 'select', v.opts.slice(0, 40), false);
   }
   return JSON.stringify(out.slice(0, 60));

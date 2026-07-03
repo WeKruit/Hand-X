@@ -22,6 +22,7 @@ Returns a completeness verdict so the runner reports honestly instead of a blind
 
 import base64
 import contextlib
+import json
 from typing import Any
 
 import ats_engine as eng
@@ -63,9 +64,49 @@ _AUDIT_JS = r"""() => {
     groups[g].checked = groups[g].checked || e.checked;
     const fs = e.closest('fieldset'); const lg = fs && fs.querySelector('legend');
     if (lg && !groups[g].label) groups[g].label = norm(lg.innerText);
+    // the '*' marker usually sits on the QUESTION text above the pills, not any pill's own label
+    // (teamtailor: required séjour radios carried no required attr and each pill read 'Oui'/'Non'
+    // — the group slipped the audit and complete:True lied). Read the smallest ancestor holding
+    // the WHOLE group (+1 parent for a question label rendered as a sibling above it).
+    if (!groups[g].req && e.name) {
+      let p = e.parentElement, h = 0, box = null;
+      while (p && h++ < 6) { if (p.querySelectorAll('input[name="'+CSS.escape(e.name)+'"]').length >= 2) { box = p; break; } p = p.parentElement; }
+      if (box) {
+        const t = norm(box.innerText).slice(0,250) + ' ' + norm((box.parentElement||{}).innerText||'').slice(0,250);
+        if (/\*/.test(t)) groups[g].req = true;
+        if (!groups[g].label) { const q = norm((box.parentElement||box).innerText).split('\n')[0]; if (q) groups[g].label = q.slice(0,80); }
+      }
+    }
   }
   for (const [g,v] of Object.entries(groups)) if (v.req && !v.checked) empty.push(v.label||g);
   return JSON.stringify({adds: [...new Set(adds)], emptyReq: [...new Set(empty)].slice(0,25)});
+}"""
+
+
+# %s = a JSON array of VLM-flagged labels; keep only those whose on-page text has a fillable
+# control within a few ancestor hops (page furniture — footer banners, login prompts — has none).
+_NEAR_FIELD_FILTER_JS = r"""() => {
+  const labels = %s;
+  const nrm = s => (s||'').toLowerCase().replace(/\s+/g,' ').trim();
+  return JSON.stringify(labels.filter(lab => {
+    // token-overlap match: the VLM paraphrases ('travaillez' vs 'travailliez' across runs), so
+    // exact containment misses the on-page text and the furniture flag survives forever.
+    const toks = nrm(lab).split(' ').filter(w => w.length > 3);
+    if (!toks.length) return false;
+    const els = [...document.querySelectorAll('*')].filter(e => {
+      if (e.children.length >= 6) return false;
+      const T = nrm(e.innerText); if (!T) return false;
+      let hit = 0; for (const w of toks) if (T.includes(w)) hit++;
+      return hit >= Math.ceil(toks.length * 0.6);
+    });
+    if (!els.length) return true;  // VLM fully paraphrased — keep (tighter verdict, never looser)
+    return els.some(e => { let p = e;
+      for (let i = 0; i < 5 && p; i++) {
+        if (p.querySelector('input,select,textarea,[role=combobox],[role=radiogroup],[role=listbox]')) return true;
+        p = p.parentElement;
+      }
+      return false; });
+  }));
 }"""
 
 
@@ -108,7 +149,10 @@ async def _vlm_unfilled_sections(session: Any) -> list[str]:
                     type="image_url",
                     image_url=ImageURL(
                         url=f"data:image/png;base64,{base64.b64encode(png).decode()}",
-                        detail="low",
+                        # high: at low detail a dark-themed form's placeholders and unselected
+                        # pills are unreadable — the visual gate PASSED a form with a required
+                        # radio pair unselected (teamtailor tt7 false-complete).
+                        detail="high",
                         media_type="image/png",
                     ),
                 ),
@@ -148,15 +192,21 @@ async def _vlm_unanswered_required(session: Any) -> list[str]:
                         "fields (marked with *, 'required', or in a required section) that are still "
                         "visibly UNANSWERED: empty text boxes, dropdowns still showing a placeholder "
                         "like 'Select an option', yes/no button pairs with NEITHER selected, empty "
-                        "upload areas. Reply ONLY a STRICT JSON array of their labels, [] if every "
-                        "required field visibly has an answer."
+                        "upload areas. ONLY count questions inside the APPLICATION FORM itself — "
+                        "ignore page furniture: headers, footers, cookie banners, employee-referral "
+                        "('already work here?') banners, login prompts, newsletter signups. Reply "
+                        "ONLY a STRICT JSON array of their labels, [] if every required field "
+                        "visibly has an answer."
                     ),
                 ),
                 ContentPartImageParam(
                     type="image_url",
                     image_url=ImageURL(
                         url=f"data:image/png;base64,{base64.b64encode(png).decode()}",
-                        detail="low",
+                        # high: at low detail a dark-themed form's placeholders and unselected
+                        # pills are unreadable — the visual gate PASSED a form with a required
+                        # radio pair unselected (teamtailor tt7 false-complete).
+                        detail="high",
                         media_type="image/png",
                     ),
                 ),
@@ -313,6 +363,14 @@ async def complete(
         if not verdict["missing_required"] and not verdict["sections_skipped"]:
             with contextlib.suppress(Exception):
                 seen = await _vlm_unanswered_required(session)
+                if seen:
+                    # PAGE-FURNITURE filter: keep a flag only when its on-page text sits near a
+                    # FILLABLE control. The VLM kept flagging the footer employee-referral banner
+                    # ('Vous travaillez déjà chez … ?' — a heading + login button, no field)
+                    # despite the prompt exclusion. Text match = normalized containment
+                    # (deterministic identity, not a semantic pattern).
+                    with contextlib.suppress(Exception):
+                        seen = json.loads(await page.evaluate(_NEAR_FIELD_FILTER_JS % json.dumps(seen)))
                 if seen:
                     verdict["visually_unanswered"] = seen
                     print(f"   [complete] VISION disagrees — looks unanswered: {seen[:5]}")

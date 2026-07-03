@@ -294,8 +294,18 @@ function(want, groupName){
     if(this !== root && this.name) inputs = inputs.filter(el => el.name === this.name);
   }
   if(!inputs.length) return "";
+  // LONE checkbox + an affirmative want -> check it (a consent box has no per-option labels to
+  // match; the mapper already decided this field gets a value). Explicit negatives leave it be.
+  if(inputs.length===1 && inputs[0].type==='checkbox' && !['no','false','none','0'].includes(w)){
+    const t=inputs[0];
+    if(!t.checked){ t.click(); t.dispatchEvent(new Event('input',{bubbles:true})); t.dispatchEvent(new Event('change',{bubbles:true})); }
+    return t.checked ? (t.getAttribute('value')||t.value||'checked') : "";
+  }
   const valOf = el => norm(el.getAttribute('value')||el.value||'');
-  const labOf = el => { const L = el.closest('label'); let t = L?vis(L):''; if(!t) t = norm(el.getAttribute('aria-label')||''); return t; };
+  // el.labels covers BOTH a wrapping <label> and a sibling <label for=id> (teamtailor pills use
+  // the sibling shape — closest('label') missed them and the commit fell through to visual).
+  const labOf = el => { const L = (el.labels && el.labels[0]) || el.closest('label');
+    let t = L?vis(L):''; if(!t) t = norm(el.getAttribute('aria-label')||''); return t; };
   // the option text often lives OUTSIDE the <label> and is wired via aria-labelledby on the
   // styled [role=radio|checkbox|option] wrapper (workable) — resolve each referenced id's text
   // as an INDIVIDUAL candidate (joined they'd include the question text and match nothing).
@@ -309,9 +319,17 @@ function(want, groupName){
   if(!t) t = inputs.find(el => { const v=valOf(el); return v && (v.includes(w)||w.includes(v)); });
   if(!t) t = inputs.find(el => { const l=labOf(el); return l && (l.includes(w)||w.includes(l)); });
   if(!t) return "";
-  t.click();
+  // a VISUALLY-HIDDEN input's widget updates its rendered state from the LABEL's native click
+  // forwarding (teamtailor dropdown-as-radios: clicking the hidden input checked it but left the
+  // trigger text on its placeholder). Prefer the label when the input has no box.
+  const box = t.getBoundingClientRect();
+  const L = (t.labels && t.labels[0]) || null;
+  if (L && (box.width < 2 || box.height < 2)) { L.click(); } else { t.click(); }
   t.dispatchEvent(new Event('input',{bubbles:true}));
   t.dispatchEvent(new Event('change',{bubbles:true}));
+  // the click is only a COMMIT if the control actually took it — a controlled widget can swallow
+  // .click() and leave checked=false (then the caller must fall through, not report success).
+  if(!t.checked) return "";
   return el_val(t);
   function el_val(el){ return (el.getAttribute('value')||el.value||labOf(el)||want); }
 }
