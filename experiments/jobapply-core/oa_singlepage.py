@@ -375,6 +375,23 @@ async def run_single_page_oa(
                 with contextlib.suppress(Exception):
                     page = await session.must_get_current_page()
                 fields = await discover_fields(page)
+            if not fields:
+                # GENERIC IFRAME-HOP: the real form is often a CROSS-ORIGIN iframe the main frame
+                # can't see into (comeet.co embed, GH job_app embed). Hop the top-level page to the
+                # LARGEST iframe's src and re-discover. Host-agnostic — any embed.
+                with contextlib.suppress(Exception):
+                    src = await page.evaluate(
+                        "() => { const fs=[...document.querySelectorAll('iframe')]"
+                        " .map(f=>({src:f.src||'',a:f.getBoundingClientRect().width*f.getBoundingClientRect().height}))"
+                        " .filter(f=>/^https?:/.test(f.src) && f.a>60000).sort((x,y)=>y.a-x.a);"
+                        " return fs.length ? fs[0].src : ''; }"
+                    )
+                    if src:
+                        print(f"   [generic] hopping into embedded form iframe: {str(src)[:80]}")
+                        await session.navigate_to(str(src))
+                        await asyncio.sleep(3.0)
+                        page = await session.must_get_current_page()
+                        fields = await discover_fields(page)
             result["fields_total"] = len(fields)
             print(f"[oa:generic] discovered {len(fields)} fields from the live DOM")
             if not fields:

@@ -402,8 +402,9 @@ async def _try_apply_click(session: Any, page: Any) -> bool:
         " .sort((a,b)=>tx(a).length-tx(b).length);"
         " const el=els[0]; if(!el) return '';"
         " el.scrollIntoView({block:'center'}); const r=el.getBoundingClientRect();"
+        " let href=''; const a=el.closest('a'); try{ href=a&&a.href?a.href:''; }catch(e){}"
         " return JSON.stringify({x:r.left+r.width/2, y:r.top+r.height/2,"
-        " t:(el.innerText||'').trim().slice(0,40)}); }"
+        " t:(el.innerText||'').trim().slice(0,40), href}); }"
     )
     try:
         want = await _vlm_apply_text(session)
@@ -424,6 +425,17 @@ async def _try_apply_click(session: Any, page: Any) -> bool:
         ):
             await session.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=sid)
         await asyncio.sleep(2.5)  # navigation / SPA form mount
+        # FOLLOW-HREF: a synthetic click on an SPA anchor (workable's <a href=.../apply/>) may not
+        # fire its client-route. If the affordance carried an href and the page didn't move there,
+        # navigate to it directly — the affordance's OWN destination, still no per-ATS URL pattern.
+        href = c.get("href") or ""
+        if href:
+            with contextlib.suppress(Exception):
+                cur = await page.get_url()
+                if href.rstrip("/") not in (cur or "").rstrip("/"):
+                    print(f"   [reach] following affordance href: {href[:80]}")
+                    await session.navigate_to(href)
+                    await asyncio.sleep(2.5)
         return True
     except Exception as exc:
         print(f"   [reach] apply click failed: {exc}")
