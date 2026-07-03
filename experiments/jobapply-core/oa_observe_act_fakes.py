@@ -645,19 +645,24 @@ class _FakeCdpActionSession:
     def _run_js(self, fn: str, args: list[Any]) -> Any:
         if "input[type=radio]" in fn or "querySelectorAll('select')" in fn:  # _CHOOSE_OPTION_JS /
             return ""  # _SELECT_IN_CONTAINER_JS — fake cards don't model real inputs/selects -> no match
+        if "aria-owns" in fn:  # _ARIA_OPEN_JS / _ARIA_PICK_JS — fake cards have no ARIA listbox wiring
+            return ""
         if "selectedIndex" in fn:  # _SELECT_JS — record the committed select text
             want = str(args[0]) if args else ""
             self._owner.last_select_text = want
+            self._owner._any_write = True
             return want  # non-empty -> cdp_select True
         if "nativeSetter" in fn:  # _SET_VALUE_JS (unique marker) — echo the arg
             text = str(args[0]) if args else ""
             if text != "":  # a clear ('') must NOT overwrite last_type_text
                 self._owner.last_type_text = text
+                self._owner._any_write = True
                 if self._bnid in self._owner._on_type:  # a value-set on a search box mounts its delta
                     self._owner._mount(self._owner._on_type[self._bnid])
             return text  # cdp_set_value success = echo == text
         if "this.click()" in fn:  # _JS_CLICK_JS — option-cell click commit (box-less fallback)
             self._record_click()
+            self._owner._any_write = True
             return True
         if "getBoundingClientRect" in fn:  # _RECT_JS / _RECT_CENTER_JS — node box / viewport center
             rect = getattr(self._node, "absolute_position", None)
@@ -678,6 +683,7 @@ class _FakeCdpActionSession:
     def _on_mouse(self, params: dict) -> None:
         # cdp_click sends move/press/release; record a click on press (one logical click).
         if params.get("type") == "mousePressed":
+            self._owner._any_write = True
             # cdp_click_xy (coordinate-only click, root session, _node=None) records the (x,y) so the
             # VISUAL-COMMIT fallback test can assert the engine clicked the option BY COORDINATE.
             if self._node is None and ("x" in params and "y" in params):
@@ -687,6 +693,7 @@ class _FakeCdpActionSession:
     def _on_key(self, params: dict) -> None:
         # cdp_type keystroke path sends keyDown/char/keyUp; accumulate the chars then mount delta.
         if params.get("type") == "char":
+            self._owner._any_write = True
             self._typed += str(params.get("text", ""))
             self._owner.last_type_text = self._typed
             if self._bnid in self._owner._on_type and self._typed:
@@ -725,6 +732,10 @@ class FakeSession:
         # control. Default {} -> read_dom_value returns "" (visual-only) and verify falls to the VLM
         # aid (the scripted verdict), preserving every pre-existing test's behaviour.
         self._dom_values = dom_values or {}
+        # dom_values model the POST-COMMIT read (fake writes don't mutate state, so tests preset
+        # the outcome). The engine's ALREADY-CORRECT pre-check reads BEFORE any interaction — reads
+        # return "" until the first write so a preset outcome doesn't look like a prefilled form.
+        self._any_write = False
         self._verdict = verdict
         self._vseq = list(verdict_sequence or [])
         self._url = url
@@ -765,6 +776,10 @@ class FakeSession:
     async def cdp_client_for_node(self, node: Any) -> Any:
         bnid = getattr(node, "backend_node_id", None)
         val = self._dom_values.get(bnid, "")
+        # pre-first-write reads are blank (see _any_write above); FILE: sentinels ARE genuinely
+        # prefilled state (is_already_uploaded probes before any write).
+        if not self._any_write and not str(val).startswith("FILE:"):
+            val = ""
         return _FakeCdpActionSession(self, node, read_value=val)
 
     async def get_or_create_cdp_session(self, target_id: Any = None, focus: bool = True) -> Any:

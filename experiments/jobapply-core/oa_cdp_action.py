@@ -270,15 +270,42 @@ async def cdp_select(session: Any, node: Any, text: str) -> bool:
 # a styled label) carrying value="<option label>" — invisible to a visible-only scan but reachable in the
 # full DOM. Returns the matched value string, or "" when nothing matched. Generic standard-DOM.
 _CHOOSE_OPTION_JS = r"""
-function(want){
+function(want, groupName){
   const norm = s => (s||'').replace(/\s+/g,'').toLowerCase();
+  const vis = e => norm((e.innerText!=null && e.innerText.trim()) ? e.innerText : (e.textContent||''));
   const w = norm(want);
   if(!w) return "";
-  const inputs = [...this.querySelectorAll('input[type=radio],input[type=checkbox]')];
+  // IDENTITY-SCOPED: discovery captured the radio group's `name` attr — that names the exact
+  // input set document-wide, immune to a mis-located container (live: a spatially-bound wrong
+  // card made the container scan miss and the visual path answered a NEIGHBOUR question).
+  let inputs = [];
+  if(groupName){
+    const esc = (window.CSS && CSS.escape) ? CSS.escape(groupName) : groupName;
+    inputs = [...document.querySelectorAll('input[type=radio][name="'+esc+'"],input[type=checkbox][name="'+esc+'"]')];
+  }
+  if(!inputs.length){
+    // bound to a LONE radio/checkbox input (dom-ref locate)? widen to its GROUP: the enclosing
+    // fieldset/radiogroup, else all same-name inputs in the form/document.
+    let root = this;
+    if(root.matches && root.matches('input[type=radio],input[type=checkbox]')){
+      root = root.closest('fieldset,[role=radiogroup],[role=group]') || root.form || document;
+    }
+    inputs = [...root.querySelectorAll('input[type=radio],input[type=checkbox]')];
+    if(this !== root && this.name) inputs = inputs.filter(el => el.name === this.name);
+  }
   if(!inputs.length) return "";
   const valOf = el => norm(el.getAttribute('value')||el.value||'');
-  const labOf = el => { const L = el.closest('label'); let t = norm(L?L.textContent:''); if(!t) t = norm(el.getAttribute('aria-label')||''); return t; };
-  let t = inputs.find(el => valOf(el)===w) || inputs.find(el => labOf(el)===w);
+  const labOf = el => { const L = el.closest('label'); let t = L?vis(L):''; if(!t) t = norm(el.getAttribute('aria-label')||''); return t; };
+  // the option text often lives OUTSIDE the <label> and is wired via aria-labelledby on the
+  // styled [role=radio|checkbox|option] wrapper (workable) — resolve each referenced id's text
+  // as an INDIVIDUAL candidate (joined they'd include the question text and match nothing).
+  const ariaTexts = el => {
+    const host = el.closest('[role=radio],[role=checkbox],[role=option],[data-ui=option]');
+    const ids = ((host&&host.getAttribute('aria-labelledby'))||'').split(/\s+/).filter(Boolean);
+    return ids.map(i => { const e=document.getElementById(i); return e?vis(e):''; }).filter(Boolean);
+  };
+  let t = inputs.find(el => valOf(el)===w) || inputs.find(el => labOf(el)===w)
+       || inputs.find(el => ariaTexts(el).some(x => x===w));
   if(!t) t = inputs.find(el => { const v=valOf(el); return v && (v.includes(w)||w.includes(v)); });
   if(!t) t = inputs.find(el => { const l=labOf(el); return l && (l.includes(w)||w.includes(l)); });
   if(!t) return "";
@@ -291,19 +318,20 @@ function(want){
 """
 
 
-async def cdp_choose_option(session: Any, container_node: Any, value: str) -> str:
+async def cdp_choose_option(session: Any, container_node: Any, value: str, group_name: str = "") -> str:
     """Commit a radio/checkbox GROUP the proven Lever way: scan the container's REAL inputs (incl.
     visually-hidden ones a visible-only selector_map misses), match the one whose VALUE attr / wrapping
-    <label> means ``value``, ``.click()`` it + fire input/change. Returns the matched option string, or
-    "" when no input matched (caller falls back to the visual path). Generic — any real radio/checkbox
-    group, no per-ATS hook."""
+    <label> / aria-labelledby text means ``value``, ``.click()`` it + fire input/change. When
+    ``group_name`` (discovery's name attr for the group) is given, the input set is resolved by that
+    IDENTITY document-wide first — immune to a mis-located container. Returns the matched option
+    string, or "" when no input matched (caller falls back to the visual path). Generic."""
 
     async def _do() -> str:
         r = await _resolve(session, container_node)
         if r is None:
             return ""
         cdp_session, session_id, object_id = r
-        got = await _call_on(cdp_session, session_id, object_id, _CHOOSE_OPTION_JS, args=[str(value)])
+        got = await _call_on(cdp_session, session_id, object_id, _CHOOSE_OPTION_JS, args=[str(value), str(group_name or "")])
         return str(got).strip() if got else ""
 
     try:
@@ -351,6 +379,110 @@ async def cdp_select_in_container(session: Any, container_node: Any, value: str)
             return ""
         cdp_session, session_id, object_id = r
         got = await _call_on(cdp_session, session_id, object_id, _SELECT_IN_CONTAINER_JS, args=[str(value)])
+        return str(got).strip() if got else ""
+
+    try:
+        return await asyncio.wait_for(_do(), timeout=CDP_ACTION_TIMEOUT)
+    except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041
+        return ""
+    except Exception:
+        return ""
+
+
+# JS pair for ARIA comboboxes (react-select/downshift/MUI family). The listbox they point at via
+# aria-owns/aria-controls UNMOUNTS when closed (verified live on workable), and any state read
+# between the open-click and the option-click can blur-close it — so the helper is SELF-SUFFICIENT:
+# one call finds the combobox (this, descendants, then up to 4 ancestors' subtrees) and opens it if
+# collapsed; after a short mount wait a second call clicks the [role=option] matching `want`.
+_ARIA_COMBO_FIND = r"""
+  const findCombo = (root) => {
+    const sel = '[role=combobox][aria-owns],[role=combobox][aria-controls],[aria-haspopup=listbox][aria-owns],[aria-haspopup=listbox][aria-controls]';
+    if(root.matches && root.matches(sel)) return root;
+    let c = root.querySelector(sel);
+    if(c) return c;
+    // ancestor walk: accept ONLY an unambiguous match — a broad ancestor holds OTHER fields'
+    // comboboxes (live failure: a rating field matched the phone country-code list and
+    // committed 'United Kingdom+44').
+    let up = root;
+    for(let i=0;i<4 && up;i++){
+      up = up.parentElement;
+      if(!up) break;
+      const cs = up.querySelectorAll(sel);
+      if(cs.length === 1) return cs[0];
+      if(cs.length > 1) return null;
+    }
+    return null;
+  };
+"""
+
+_ARIA_OPEN_JS = (
+    r"""
+function(){
+"""
+    + _ARIA_COMBO_FIND
+    + r"""
+  const c = findCombo(this);
+  if(!c) return "";
+  if(c.getAttribute('aria-expanded') !== 'true'){
+    c.scrollIntoView({block:'center'});
+    for(const ev of ['mousedown','mouseup','click'])
+      c.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true}));
+  }
+  return "found";
+}
+"""
+)
+
+_ARIA_PICK_JS = (
+    r"""
+function(want){
+  const norm = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const w = norm(want);
+  if(!w) return "";
+"""
+    + _ARIA_COMBO_FIND
+    + r"""
+  const c = findCombo(this);
+  if(!c) return "";
+  const id = c.getAttribute('aria-owns') || c.getAttribute('aria-controls');
+  const lb = id && document.getElementById(id);
+  if(!lb) return "";
+  const opts = [...lb.querySelectorAll('[role=option]')];
+  if(!opts.length) opts.push(...lb.querySelectorAll('li'));
+  // innerText = RENDERED text (excludes svg <desc> junk textContent carries — live: option '3'
+  // read back as 'SVGs not supported by this browser.3').
+  const vis = o => norm((o.innerText!=null && o.innerText.trim()) ? o.innerText : (o.textContent||''));
+  let t = opts.find(o => vis(o) === w);
+  // substring fallback only for real words — a 1-char want ('4') matches half a country list
+  if(!t && w.length >= 3) t = opts.find(o => { const x = vis(o); return x && (x.includes(w) || w.includes(x)); });
+  if(!t) return "";
+  t.scrollIntoView({block:'nearest'});
+  for(const ev of ['mousedown','mouseup','click'])
+    t.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true}));
+  const got = (t.innerText!=null && t.innerText.trim()) ? t.innerText.trim() : (t.textContent||'').trim();
+  return got || want;
+}
+"""
+)
+
+
+async def cdp_choose_aria_option(session: Any, node: Any, value: str) -> str:
+    """Commit an ARIA combobox DETERMINISTICALLY: open it if collapsed, follow aria-owns/
+    aria-controls to its listbox, click the [role=option] matching ``value`` by text. No delta,
+    no VLM — the a11y wiring IS the structure. Both phases run on the SAME resolved node with
+    no state read in between (a state read blur-closes the menu and the listbox unmounts).
+    Returns committed text or "" (caller falls back to the visual path). Generic."""
+
+    async def _do() -> str:
+        r = await _resolve(session, node)
+        if r is None:
+            return ""
+        cdp_session, session_id, object_id = r
+        opened = await _call_on(cdp_session, session_id, object_id, _ARIA_OPEN_JS)
+        if not opened:
+            return ""
+        await asyncio.sleep(0.4)  # listbox mounts on the next React commit, not synchronously
+        got = await _call_on(cdp_session, session_id, object_id, _ARIA_PICK_JS, args=[str(value)])
         return str(got).strip() if got else ""
 
     try:

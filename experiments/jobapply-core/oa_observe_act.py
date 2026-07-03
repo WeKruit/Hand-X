@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -527,8 +528,33 @@ async def _s1_locate(session: Any, ctx: Ctx) -> Outcome:
     # VLM disambiguate. Binds an unlabeled card input (Lever) the way a human does — by the question
     # text sitting near it; a non-text card (radio/checkbox/select/textarea) binds via its card heading.
     node, how, card = await perc.locate_field_tiered(
-        state, ctx.label, vlm_pick=_make_vlm_pick(session, ctx), marks_pick=_make_marks_pick(session, ctx)
+        state,
+        ctx.label,
+        vlm_pick=_make_vlm_pick(session, ctx),
+        marks_pick=_make_marks_pick(session, ctx),
+        dom_ref=getattr(ctx.field_obj, "name", "") or "",
     )
+    # IDENTITY-RESCROLL: the dom-ref exists in the full DOM but not the viewport serialize (below
+    # fold), and the ranked tiers produced only a WEAK bind — which is how a rating field bound the
+    # phone country list (spatial hits a NEIGHBOUR). Scroll the identified element itself into view
+    # and rebind by identity. One targeted scroll + one serialize, only when discovery gave a ref.
+    # (includes how=='structure': had the ref'd element been in the viewport map, TIER 0 would
+    # have bound it — so a similarity bind while the identity is off-viewport is suspect; live:
+    # tail-differing rating labels made structure bind the NEIGHBOUR and verify read ITS value.)
+    ref = getattr(ctx.field_obj, "name", "") or ""
+    if ref and ctx.page is not None and how != "dom-ref":
+        with contextlib.suppress(Exception):
+            found = await ctx.page.evaluate(
+                "() => { const el = document.getElementById(%s) || document.getElementsByName(%s)[0];"
+                " if(!el) return false; el.scrollIntoView({block:'center'}); return true; }"
+                % (json.dumps(ref), json.dumps(ref))
+            )
+            if str(found).lower() == "true":
+                await asyncio.sleep(0.4)
+                state = await perc.get_state(session)
+                hit = perc._locate_by_dom_ref(state, ref)
+                if hit is not None:
+                    node, how, card = hit, "dom-ref-scrolled", None
     # FIX (below-the-fold): a question lower on the page may have its card marked not-visible, so the
     # locate sees no control. Scroll the page down one viewport and re-locate, BOUNDED — a question
     # must not be missed just for sitting below the fold, but we never loop forever chasing one.
@@ -574,7 +600,11 @@ async def _scroll_locate(session: Any, ctx: Ctx, state: perc.OAState) -> tuple[A
         await act.scroll(session, None, _SCROLL_PX)
         state = await perc.get_state(session)
         node, how, card = await perc.locate_field_tiered(
-            state, ctx.label, vlm_pick=_make_vlm_pick(session, ctx), marks_pick=_make_marks_pick(session, ctx)
+            state,
+            ctx.label,
+            vlm_pick=_make_vlm_pick(session, ctx),
+            marks_pick=_make_marks_pick(session, ctx),
+            dom_ref=getattr(ctx.field_obj, "name", "") or "",
         )
         ctx.trace.append(f"scroll-locate#{ctx.scroll_reads}:{'hit' if node is not None else 'miss'}")
         if node is not None:
@@ -642,6 +672,30 @@ async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S2_CLASSIFY")
+    # ALREADY-CORRECT no-op (idempotence): read the bound control's CURRENT value through the SAME
+    # DOM-first oracle verify uses (VLM off — free) BEFORE any interaction. A prefilled-correct
+    # widget must never be touched: opening/clicking the phone country list to "set" the +1 it
+    # already had flipped it to +44 and invalidated the phone (live wk16). ONLY for the open/click
+    # lanes (CHOICE/SELECT) — that is where touching breaks state; a text control is idempotent to
+    # re-type, and its pre-check false-positived live (LLM matched the iti '+1' residue against the
+    # phone number -> phone left empty, wk17). EMPTY/UNKNOWN/WRONG falls through unchanged; no
+    # verify budget is spent on the pre-check.
+    if ctx.value and not ctx.resume and normalize_kind(ctx.kind) in ("CHOICE", "SELECT"):
+        with contextlib.suppress(Exception):
+            pre = await brain.verify(
+                session,
+                ctx.label,
+                ctx.value,
+                node=ctx.node,
+                llm=ctx.llm,
+                key=f"pre:{ctx.label}",
+                use_cache=True,
+                allow_vlm=False,
+            )
+            if pre == "CORRECT":
+                ctx.committed_text = ctx.value
+                ctx.trace.append("already-correct")
+                return DONE
     intrinsic = classify_intrinsic(ctx.node)
     if intrinsic:
         ctx.nature = intrinsic
@@ -891,7 +945,9 @@ async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -
     # visual fallback. A successful match IS the commit (the old filler trusted target.click() likewise).
     container = ctx.card if ctx.card is not None else ctx.node
     if container is not None:
-        matched = await cdpa.cdp_choose_option(session, container, ctx.value)
+        matched = await cdpa.cdp_choose_option(
+            session, container, ctx.value, group_name=getattr(ctx.field_obj, "name", "") or ""
+        )
         if matched:
             # The JS found a real input whose value/label matches, clicked it, and fired input/change —
             # a reliable commit (the proven ats_lever path returned True on this click). Trust it as DONE
@@ -1174,18 +1230,38 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
     if not committed and nodes is None:
         # READ-BUT-CANT-SELECT (workable react-select rating: read_options found the hidden
         # <option> texts so we took the native path, but select_option no-ops on the custom
-        # widget). PHYSICALLY open it and click the VISIBLE option by coordinate — the same
-        # visual-commit path S3_OPEN uses for portal menus. Generic, no per-ATS branch.
+        # widget). PHYSICALLY open it and click the rendered option DETERMINISTICALLY: the
+        # delta node whose text IS the chosen option (_node_for_option, the same matcher the
+        # delta path uses). The VLM mark-pick is LAST resort only — opening the menu shifts
+        # everything below it, the shifted question blocks enter the candidate set, and the
+        # VLM mis-picked a neighbouring question label (wk9: committed_text = the Java
+        # question). Generic, no per-ATS branch.
         with contextlib.suppress(Exception):
-            before = await perc.get_state(session)
-            await act.click_node(session, ctx.node)
-            await _settle(session, before, _SETTLE_STATIC_S)
-            cands = await _visual_dropdown_candidates(session, ctx, before)
-            if cands and await _visual_commit(session, ctx, cands):
-                ctx.trace.append("read-native-fail->visual-commit")
-                if ctx.nature == "MULTI":
-                    return await _s_multi_loop(session, ctx)
-                return await _s_cascade(session, ctx)
+            # ARIA-DIRECT first, BEFORE any state read: the combobox's aria-owns/aria-controls
+            # names its listbox; the helper self-opens and clicks the [role=option] by text.
+            # Verified live (workable): the listbox UNMOUNTS when closed and a state read between
+            # open and pick blur-closes it — which is also why the delta is blind here and the
+            # VLM mark-pick saw only shifted question blocks (wk9 committed a neighbour's label).
+            got = await cdpa.cdp_choose_aria_option(session, ctx.node, chosen)
+            if got:
+                ctx.committed_text = got
+                ctx.trace.append(f"aria-option-click:{got[:20]}")
+                committed = True
+            if not committed:
+                before = await perc.get_state(session)
+                await act.click_node(session, ctx.node)
+                cluster = await _settle(session, before, _SETTLE_STATIC_S)
+                onode = _node_for_option(cluster, chosen)
+                if onode is not None and await act.click_node(session, onode):
+                    ctx.trace.append("read-native-fail->delta-option-click")
+                    committed = True
+            if not committed:
+                cands = await _visual_dropdown_candidates(session, ctx, before)
+                if cands and await _visual_commit(session, ctx, cands):
+                    ctx.trace.append("read-native-fail->visual-commit")
+                    if ctx.nature == "MULTI":
+                        return await _s_multi_loop(session, ctx)
+                    return await _s_cascade(session, ctx)
     if not committed:
         ctx.trace.append("commit-failed")
         return ESCALATE if ctx.required else SKIP

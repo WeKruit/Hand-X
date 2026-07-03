@@ -646,16 +646,42 @@ def _group_container(node: Any, *, max_up: int = _CARD_MAX_UP) -> Any | None:
     return None
 
 
+_DOM_REF_ATTRS = ("id", "name", "data-ui", "data-testid", "data-automation-id", "data-fkit-id")
+
+
+def _locate_by_dom_ref(state: OAState, ref: str) -> Any | None:
+    """Re-find the element discovery enumerated, by identity-attribute EQUALITY (no semantics,
+    no similarity). Multiple elements can share a ref (id vs a hidden combined input's name —
+    the live workable phone case): prefer an id match, then a visible fillable control, so we
+    bind the element the USER fills, not a shadow value-carrier. Returns None when the ref isn't
+    in the current selector_map (below fold, re-render) — the caller falls through to the ranked
+    tiers unchanged."""
+    if not ref:
+        return None
+    matches: list[tuple[int, Any]] = []
+    for n in state.selector_map.values():
+        a = getattr(n, "attributes", None) or {}
+        if not any(a.get(k) == ref for k in _DOM_REF_ATTRS):
+            continue
+        score = (2 if a.get("id") == ref else 0) + (1 if node_is_visible(n) and _is_fillable_control(n) else 0)
+        matches.append((score, n))
+    if not matches:
+        return None
+    return max(matches, key=lambda t: t[0])[1]
+
+
 async def locate_field_tiered(
     state: OAState,
     label_text: str,
     *,
     vlm_pick: Any = None,
     marks_pick: Any = None,
+    dom_ref: str = "",
 ) -> tuple[Any, str, Any]:
     """Locate the control for `label_text` by STRUCTURE first, VISUAL PROXIMITY aid, then VLM.
 
-    Returns ``(node, how, card)`` with ``how`` in {"structure", "spatial", "grouped", "vlm", "marks"},
+    Returns ``(node, how, card)`` with ``how`` in {"dom-ref", "structure", "spatial", "grouped",
+    "vlm", "marks"},
     or ``(None, "", None)`` when nothing plausible exists. ``card`` is the enclosing question-card node
     when the bind came from the grouped-widget OR the visual set-of-marks tier (so the choice-group
     reader can scope a radio group to THIS question), else None. GENERIC — no per-ATS code.
@@ -682,6 +708,15 @@ async def locate_field_tiered(
     target = _tokens(label_text)
     if not target:
         return (None, "", None)
+
+    # ---- TIER 0: DOM-REF — discovery read this control's own id/name off the live DOM; re-find
+    # THAT element. Identity beats similarity: rating questions differing only at the label tail
+    # tie in the token ranker and fell to spatial, which bound a NEIGHBOUR's widget (live: one
+    # rating committed into the phone country list; another typed '4' into an essay). ----
+    if dom_ref:
+        hit = _locate_by_dom_ref(state, dom_ref)
+        if hit is not None:
+            return (hit, "dom-ref", None)
 
     # ---- TIER 1: structure (accessible name) ----
     ranked = locate_field_ranked(state, label_text)
