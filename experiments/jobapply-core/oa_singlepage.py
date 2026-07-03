@@ -399,17 +399,36 @@ async def run_single_page_oa(
                     result["final_url"] = await page.get_url()
                 if screenshot_path:
                     result["screenshot"] = await eng._screenshot(session, page, screenshot_path)
+                page_kind = "?"
                 with contextlib.suppress(Exception):  # classify the wall (anti-bot? landing? blank?)
                     import failcap
 
                     rec = await failcap.capture(
                         session, page, "generic_no_fields", "BLOCKED", "generic lane found no fillable fields"
                     )
-                    result["page_kind"] = (rec or {}).get("triage", {}).get("kind", "?")
-                usage = await tc.get_usage_summary()
-                result.update(status="BLOCKED", cost=usage.total_cost, filled=0, results=[])
-                print(f"  BLOCKED — generic lane found no fillable fields (kind: {result.get('page_kind', '?')})")
-                return result
+                    page_kind = (rec or {}).get("triage", {}).get("kind", "?")
+                result["page_kind"] = page_kind
+                # HITL BLOCKER-CONTINUE: a human-clearable wall (CAPTCHA/login/verify) -> pause for
+                # the human to clear it in the (CDP-attached) browser, then RE-DISCOVER + continue.
+                if page_kind in ("CAPTCHA_OR_ANTIBOT", "LOGIN_OR_VERIFY"):
+                    import oa_hitl
+
+                    async def _still(pg: Any) -> bool:
+                        return not await discover_fields(pg)
+
+                    if await oa_hitl.wait_for_unblock(
+                        session, page, kind=page_kind, reason="form behind a human-only wall", still_blocked=_still
+                    ):
+                        with contextlib.suppress(Exception):
+                            page = await session.must_get_current_page()
+                        fields = await discover_fields(page)
+                        result["fields_total"] = len(fields)
+                if not fields:
+                    usage = await tc.get_usage_summary()
+                    status = "NEEDS_HUMAN" if page_kind in ("CAPTCHA_OR_ANTIBOT", "LOGIN_OR_VERIFY") else "BLOCKED"
+                    result.update(status=status, cost=usage.total_cost, filled=0, results=[])
+                    print(f"  {status} — generic lane found no fillable fields (kind: {page_kind})")
+                    return result
             map_rows = [f for f in fields if f.needs_map]
             mapped = await eng.map_fields(oa_llm.ResilientLLM(llm), map_rows, profile, title) if map_rows else {}
             result["mapped"] = len(mapped)
