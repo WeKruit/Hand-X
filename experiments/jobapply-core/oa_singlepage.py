@@ -614,6 +614,13 @@ async def _fill_form(
     expected = 0
     with contextlib.suppress(Exception):
         expected = int((result.get("plan") or {}).get("expected_total_fields") or 0)
+    if not expected:  # planner miss -> estimate: discovered flat + ~5 fields/row for history sections
+        with contextlib.suppress(Exception):
+            exp_rows = len(profile.get("experience") or []) if profile else 0
+            edu_rows = len(profile.get("education") or []) if profile else 0
+            secs = result.get("completeness", {}).get("sections_filled", []) + result.get("completeness", {}).get("sections_skipped", [])
+            has_hist = any("exp" in str(x).lower() or "edu" in str(x).lower() for x in secs)
+            expected = len(fillable) + (5 * (exp_rows + edu_rows) if has_hist else 0)
     result.update(
         status="FILLED",
         cost=usage.total_cost,

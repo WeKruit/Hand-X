@@ -99,11 +99,17 @@ async def plan_page(session: Any, profile: dict, llm: Any = None) -> dict:
                 ),
             ]
         )
-        res = await _oa.resilient_vlm([msg], primary=_vlm())
-        raw = str(getattr(res, "completion", res) or "")
-        m = re.search(r"\{.*\}", raw, re.S)
-        plan = json.loads(m.group(0)) if m else {}
-        if not isinstance(plan, dict):
+        plan = {}
+        for _ in range(2):  # ONE retry — the plan is load-bearing for the coverage denominator
+            res = await _oa.resilient_vlm([msg], primary=_vlm())
+            raw = str(getattr(res, "completion", res) or "")
+            m = re.search(r"\{.*\}", raw, re.S)
+            with contextlib.suppress(Exception):
+                cand = json.loads(m.group(0)) if m else {}
+                if isinstance(cand, dict) and cand.get("expected_total_fields"):
+                    plan = cand
+                    break
+        if not isinstance(plan, dict) or not plan:
             return {}
         secs = [
             f"{s.get('name')}({s.get('profile_key')},add={s.get('has_add_control')})"
