@@ -98,7 +98,7 @@ def _summary(results: list[dict]) -> None:
         filled = [r for r in rows if r.get("status") == "FILLED"]
         # full coverage = the form was filled AND no field FAILed (all fields entered incl selects)
         fullcov = [r for r in filled if (r.get("tiers") or {}).get("FAIL", 1) == 0]
-        blocked = [r for r in rows if r.get("status") == "BLOCKED"]
+        blocked = [r for r in rows if r.get("status") in ("BLOCKED", "NEEDS_HUMAN")]
         errto = [r for r in rows if r.get("status") in ("ERROR", "TIMEOUT", "NO_ADAPTER")]
         avg_fail = (sum((r.get("tiers") or {}).get("FAIL", 0) for r in filled) / len(filled)) if filled else 0.0
         cost = sum(r.get("cost", 0.0) or 0.0 for r in rows)

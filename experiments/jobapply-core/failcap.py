@@ -51,14 +51,16 @@ _PROMPT = (
 # ---------------------------------------------------------------------------
 # Half 1: capture at failure time (wired into engine failure paths)
 # ---------------------------------------------------------------------------
-async def capture(session, page, tag: str, status: str, reason: str, extra: dict | None = None) -> None:
-    """Dump PNG + HTML + one failures.jsonl line. NEVER raises."""
+async def capture(session, page, tag: str, status: str, reason: str, extra: dict | None = None) -> dict | None:
+    """Dump PNG + HTML + one failures.jsonl line. Returns the record (callers may read
+    rec['triage']['kind'] to route, e.g. NEEDS_HUMAN vs BLOCKED). NEVER raises."""
+    rec = None
     with contextlib.suppress(Exception):
         out = Path(os.environ.get("GH_FAIL_DIR", "runs/failures"))
         out.mkdir(parents=True, exist_ok=True)
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", tag)[:100]
         ts = time.strftime("%m%d_%H%M%S")
-        rec: dict = {"ts": ts, "tag": safe, "status": status, "reason": str(reason)[:300], "extra": extra or {}}
+        rec = {"ts": ts, "tag": safe, "status": status, "reason": str(reason)[:300], "extra": extra or {}}
         with contextlib.suppress(Exception):
             rec["url"] = await page.get_url()
         with contextlib.suppress(Exception):  # full-page PNG straight over CDP — no form-clip dependency
@@ -80,6 +82,7 @@ async def capture(session, page, tag: str, status: str, reason: str, extra: dict
         with (out / "failures.jsonl").open("a") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         print(f"   [fail-capture] {safe} status={status} triage={rec.get('triage', {}).get('kind', '?')} -> {out}/")
+    return rec
 
 
 # ---------------------------------------------------------------------------
@@ -89,8 +92,9 @@ async def _classify(png_bytes: bytes) -> dict:
     """One low-detail VLM call -> {kind, evidence}. {'kind':'?'} on any failure."""
     try:
         import oa_llm as _oa
-        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
         from vision_verify import _vlm
+
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
 
         b64 = base64.b64encode(png_bytes).decode()
         msg = UserMessage(

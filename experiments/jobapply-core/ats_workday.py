@@ -2076,7 +2076,7 @@ class WorkdayAdapter(ATSAdapter):
         ("certifications", ("certif", "licen"), True),
     )
 
-    async def fill_repeaters(self, session: Any, page: Any, profile: dict) -> dict:
+    async def fill_repeaters(self, session: Any, page: Any, profile: dict, allow_escalation: bool = True) -> dict:
         # HARD GATE: only run on a page that actually HAS a repeater affordance — an "Add"/"Add
         # Another" control. Without this, a keyword in some unrelated QUESTION text (e.g. "employ"
         # in an export-control question on Application Questions) would falsely fire the experience

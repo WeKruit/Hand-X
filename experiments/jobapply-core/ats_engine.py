@@ -34,6 +34,7 @@ from dataclasses import field as dc_field
 from pathlib import Path
 from typing import Any
 
+import failcap  # failure capture + triage (leaf module; heavy deps lazy-imported inside)
 from pydantic import BaseModel, Field
 
 # Field sources whose value is produced by the ONE structured LLM mapping call.
@@ -157,11 +158,15 @@ class ATSAdapter(abc.ABC):
         ladder, so this default is a no-op for them (Greenhouse/Lever/Ashby/jobapply untouched)."""
         return False
 
-    async def fill_repeaters(self, session: Any, page: Any, profile: dict) -> dict:
+    async def fill_repeaters(self, session: Any, page: Any, profile: dict, allow_escalation: bool = True) -> dict:
         """Optional: fill 'Add another' repeater sections (education / work experience) that
         are NOT in the flat field schema — they exist only in the live DOM and need an
         add-row loop, not the per-field map. Default: none. Kept structurally separate from
-        the flat FormField fill so it never perturbs form_present / read_back."""
+        the flat FormField fill so it never perturbs form_present / read_back.
+
+        allow_escalation MUST be honored by any override that spawns an agent — the kalepa
+        leak (GH education agent running under escalate=False, overrunning the wall clock,
+        poisoning the next session) is exactly this gate being skipped."""
         return {}
 
 
@@ -324,6 +329,47 @@ async def click_trusted(session: Any, page: Any, element: Any) -> bool:
         return True
     except Exception as exc:
         print(f"   [trusted-click] {exc}")
+        return False
+
+
+async def _try_apply_click(session: Any, page: Any) -> bool:
+    """REACH rung: redirect tenants often land on the job DESCRIPTION page with a visible
+    'Apply' affordance (toasttab 'APPLY NOW', n26 'Apply for this position') — click it ONCE,
+    trusted, and let the caller re-check form_present. Text-anchored on purpose: this is the
+    page-level start-application button, not a form field; a localized tenant simply falls
+    through to NEEDS_HUMAN with its capture bundle.
+    # ponytail: regex list covers observed cases; add a VLM read for non-English tenants when
+    # the failures.jsonl data shows the need."""
+    js = (
+        "() => { const rx = /^(apply( now)?|apply for this( job| position| role)?|"
+        "start( your)? application|apply manually)$/i;"
+        " const els=[...document.querySelectorAll('a,button,[role=button],[role=link]')];"
+        " const el=els.find(e=>{const r=e.getBoundingClientRect();"
+        " if(r.width<10||r.height<10) return false;"
+        " const t=(e.innerText||e.getAttribute('aria-label')||'').trim().replace(/\\s+/g,' ');"
+        " return t.length<40 && rx.test(t)});"
+        " if(!el) return '';"
+        " el.scrollIntoView({block:'center'}); const r=el.getBoundingClientRect();"
+        " return JSON.stringify({x:r.left+r.width/2, y:r.top+r.height/2,"
+        " t:(el.innerText||'').trim().slice(0,40)}); }"
+    )
+    try:
+        raw = await page.evaluate(js)
+        if not raw:
+            return False
+        c = json.loads(raw)
+        print(f"   [reach] clicking apply affordance: '{c['t']}'")
+        sid = await page.session_id
+        for ev in (
+            {"type": "mouseMoved", "x": c["x"], "y": c["y"], "buttons": 0},
+            {"type": "mousePressed", "x": c["x"], "y": c["y"], "button": "left", "buttons": 1, "clickCount": 1},
+            {"type": "mouseReleased", "x": c["x"], "y": c["y"], "button": "left", "buttons": 0, "clickCount": 1},
+        ):
+            await session.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=sid)
+        await asyncio.sleep(2.5)  # navigation / SPA form mount
+        return True
+    except Exception as exc:
+        print(f"   [reach] apply click failed: {exc}")
         return False
 
 
@@ -1085,9 +1131,16 @@ async def fill_with_ladder(
         return "blank"
     value = _norm_url_value(field, value)
 
+    # ladder_trace: record WHICH rung died so a FAIL self-reports its class (commit vs
+    # read-back vs escalation) into failures.jsonl — the loop's attribution signal; nobody
+    # greps logs to answer "observe, match or commit?" anymore.
+    trace: list[str] = []
     filled = await adapter.fill(session, page, field, value, resume)
+    trace.append(f"L1.fill={'ok' if filled else 'MISS'}")
     if filled and await adapter.read_back(session, page, field, value):
         return "L1"
+    if filled:
+        trace.append("L1.read_back=MISS")
     # READ-BACK RESCUE (handoff R1): a custom widget (Workday listbox/checkbox) is often visibly
     # filled while the serialized DOM reads it blank -> a FALSE read-back failure. A cheap, cached
     # VLM glance confirms it without RE-FILLING (re-picking a listbox can mis-select) or paying for
@@ -1098,8 +1151,10 @@ async def fill_with_ladder(
     await asyncio.sleep(0.4)
     if await adapter.fill(session, page, field, value, resume) and await adapter.read_back(session, page, field, value):
         return "L2"
+    trace.append("L2=MISS")
     if await _vlm_filled(session, field, value):
         return "vlm"
+    trace.append("vlm=MISS")
 
     if allow_escalation and await escalate(session, agent_llm, page, field, value, resume=resume):
         with contextlib.suppress(Exception):
@@ -1107,6 +1162,13 @@ async def fill_with_ladder(
         await _unfreeze(session)  # belt-and-suspenders: ensure nothing stays locked for later fields
         if await adapter.read_back(session, page, field, value):
             return "L3"
+        trace.append("L3.read_back=MISS")
+    else:
+        trace.append("L3=" + ("MISS" if allow_escalation else "off"))
+    await failcap.capture(
+        session, page, f"field_{field.name}", "FIELD_FAIL", " > ".join(trace),
+        extra={"field": field.name, "ftype": str(getattr(field, "type", "")), "value_len": len(value)},
+    )
     return "FAIL"
 
 
@@ -1274,6 +1336,12 @@ async def run_single_page(
         "screenshot": None,
     }
 
+    # REACH rung: a redirect tenant often lands on the job DESCRIPTION with a visible
+    # Apply affordance — click it ONCE and re-check before giving up (toasttab / n26 class).
+    if not await form_present(adapter, page, fields) and await _try_apply_click(session, page):
+        with contextlib.suppress(Exception):
+            page = await session.must_get_current_page()
+
     if not await form_present(adapter, page, fields):
         # The form is not on this page — boards-api gave us the schema but the live form
         # is behind a redirect to the company site, an anti-bot wall (Cloudflare), a login,
@@ -1286,17 +1354,26 @@ async def run_single_page(
         usage = await tc.get_usage_summary()
         if screenshot_path:
             result["screenshot"] = await _screenshot(session, page, screenshot_path)
+        # capture + classify NOW (dead posting? redirect? wall?) so the record self-explains;
+        # anything a human could act on (login / challenge / landing) is NEEDS_HUMAN, not BLOCKED.
+        kind = "?"
+        with contextlib.suppress(Exception):
+            rec = await failcap.capture(
+                session, page, f"blocked_{adapter.__class__.__name__}", "BLOCKED",
+                "form not reachable", extra={"fields": len(fields), "mapped": len(mapped)},
+            )
+            kind = (rec or {}).get("triage", {}).get("kind", "?")
+        status = "NEEDS_HUMAN" if kind in ("CAREERS_LANDING", "JOB_DESCRIPTION", "LOGIN_OR_VERIFY", "CAPTCHA_OR_ANTIBOT") else "BLOCKED"
         print("\n" + "=" * 78)
-        print(f"  BLOCKED — form not reachable for {adapter.__class__.__name__}")
+        print(f"  {status} — form not reachable for {adapter.__class__.__name__} (page kind: {kind})")
         print(f"  landed on: {final_url}")
-        print("  cause: redirect to company site / anti-bot wall / login / iframe not drilled.")
         print(
             f"  fields in schema: {len(fields)}   mapped (paid): {len(mapped)}   cost so far: ${usage.total_cost:.5f}"
         )
         print("  (ladder skipped — no $ wasted escalating absent fields)")
         print("=" * 78)
         await session.kill()
-        result.update(status="BLOCKED", final_url=final_url, cost=usage.total_cost, tiers={}, filled=0)
+        result.update(status=status, page_kind=kind, final_url=final_url, cost=usage.total_cost, tiers={}, filled=0)
         return result
 
     report: list[_Row] = []
@@ -1306,7 +1383,22 @@ async def run_single_page(
             continue
         value, src = _resolve(f, mapped, resume)
         allow = allow_escalation and esc_used < _STEP_ESC_BUDGET
-        tier = await fill_with_ladder(adapter, session, page, f, value, llm, resume, allow)  # steps 3-4
+        try:
+            tier = await fill_with_ladder(adapter, session, page, f, value, llm, resume, allow)  # steps 3-4
+        except asyncio.CancelledError:
+            # runner wall clock hit MID-FILL (99% of wall time is inside this await) — grab the
+            # artifact bundle before the cancellation propagates, else TIMEOUT rows have nothing
+            # to autopsy (the kalepa gap: 240s, no screenshot, no reason).
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    asyncio.shield(failcap.capture(
+                        session, page, "timeout_mid_fill", "TIMEOUT",
+                        f"wall clock hit while filling '{f.name}'",
+                        extra={"filled_so_far": len(report), "fields_total": len(fields)},
+                    )),
+                    timeout=8,
+                )
+            raise
         # ONLY refresh the page handle when an L3 escalation actually ran (it re-attaches the
         # CDP client). Doing it on every FAIL is harmful: must_get_current_page() can latch a
         # stray about:blank target, after which all remaining fields fill on a blank page.
@@ -1318,7 +1410,7 @@ async def run_single_page(
 
     # repeater sections (education / experience) — separate add-row pass, not the flat loop
     with contextlib.suppress(Exception):
-        rep = await adapter.fill_repeaters(session, page, profile)
+        rep = await adapter.fill_repeaters(session, page, profile, allow_escalation=allow_escalation)
         if rep:
             result["repeaters"] = rep
             print(f"  repeaters: {rep}")
@@ -1622,6 +1714,11 @@ async def _wizard_halt(result: dict, status: str, reason: str, tc: Any, session:
     usage = await tc.get_usage_summary()
     result.update(status=status, reason=reason, cost=usage.total_cost)
     print(f"  WIZARD HALT: {status} — {reason}   (cost ${usage.total_cost:.5f})")
+    # single choke point for EVERY wizard failure -> one capture wires the whole wizard
+    # into the failures.jsonl loop (stryker/chewy would each have a PNG+HTML bundle here).
+    with contextlib.suppress(Exception):
+        page = await session.must_get_current_page()
+        await failcap.capture(session, page, f"wizard_{status}", status, reason)
     with contextlib.suppress(Exception):
         await session.kill()
     return result
