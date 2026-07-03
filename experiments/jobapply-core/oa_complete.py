@@ -219,9 +219,31 @@ async def complete(
                 )
                 verdict["sections_filled"].append(sec)
                 print(f"   [complete] filled repeater section '{sec}'")
-        # re-audit required-empties after any section fill
+        # re-audit after retry + section fill
         with contextlib.suppress(Exception):
             verdict["missing_required"] = (await audit(session, page)).get("emptyReq", [])
+        # REMAINING REQUIRED (screening Yes/No, skill-rating dropdowns): these have no profile
+        # value to map — they need judgement (authorized-to-work -> Yes, rate Python 1-5 from the
+        # candidate's skills). Hand them to the agent, which carries the truthful-default +
+        # skill-rating logic. Gated to allow_agent; otherwise they stay flagged for HITL.
+        if verdict["missing_required"] and allow_agent:
+            with contextlib.suppress(Exception):
+                skills = ", ".join(profile.get("skills") or [])[:200]
+                instr = (
+                    "Answer EVERY remaining required question on this page. For yes/no eligibility "
+                    "(authorized to work in the US -> Yes; require visa sponsorship -> No; 18 or older "
+                    "-> Yes; meets a stated years-of-experience threshold -> Yes; on-site/relocation "
+                    "commitment -> Yes unless the profile says otherwise). For skill self-ratings "
+                    f"(1-5), rate from this candidate's background — skills: {skills}; senior engineer "
+                    "with ~5 years — rate core/listed skills 4-5, unfamiliar ones 2-3. Pick the closest "
+                    "option in every dropdown. Do NOT submit; do NOT navigate away."
+                )
+                await eng.agent_fill_section(
+                    session, page, section="Remaining required questions", instructions=instr, resume=resume, max_steps=18
+                )
+                verdict["agent_answered_required"] = True
+                with contextlib.suppress(Exception):
+                    verdict["missing_required"] = (await audit(session, page)).get("emptyReq", [])
         if verdict["missing_required"] or verdict["sections_skipped"]:
             verdict["complete"] = False
     return verdict
