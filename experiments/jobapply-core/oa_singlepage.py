@@ -683,6 +683,14 @@ async def _fill_form(
         cost=usage.total_cost,
         secs=secs,
         outcomes={t: sum(1 for r in per_field if r.outcome == t) for t in (oa.DONE, oa.OTHER, oa.SKIP, oa.ESCALATE)},
+        # RUN RECORD (user: '要加一个记录'): which answers were ASSUMED via sanctioned defaults
+        # (veteran/disability/government/worked-for -> No) rather than known from the profile —
+        # the audit trail for a human reviewing before submit.
+        defaults_used=[
+            {"name": n, "label": next((r.label for r in per_field if r.name == n), n), "value": m.value, "why": m.why}
+            for n, m in (mapped or {}).items()
+            if str(getattr(m, "why", "")).upper().startswith("DEFAULT")
+        ],
         fill_rate=round(len(filled) / len(fillable), 3) if fillable else 0.0,
         expected_total_fields=expected or None,
         coverage=round(min(1.0, total_filled / expected), 3) if expected else None,

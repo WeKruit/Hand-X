@@ -1616,9 +1616,13 @@ async def _s_other_guard(session: Any, ctx: Ctx) -> Outcome:
     ctx.trace.append("S_OTHER_GUARD")
     if not ctx.required:
         return SKIP
-    # NEVER a silent Other on demographic / screening / legal labels.
-    if _is_sensitive(ctx.label):
-        ctx.trace.append("sensitive->ESCALATE")
+    # Demographic / screening / legal labels: escalate ONLY when we have no answer to give.
+    # When the mapper supplied a value — a disclosed profile fact or a user-sanctioned default
+    # (veteran/disability -> No; government-official / worked-for-X -> No) — filling it is the
+    # POINT (user judged the screenshots: 'veteran/disability by default 都是没有… gender 没有写'
+    # was a MISS, not caution). No value -> honest ESCALATE (HITL).
+    if _is_sensitive(ctx.label) and not (ctx.value or "").strip():
+        ctx.trace.append("sensitive-no-value->ESCALATE")
         return ESCALATE
     return await _s_other(session, ctx)
 

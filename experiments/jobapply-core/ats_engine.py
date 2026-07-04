@@ -619,6 +619,14 @@ For EVERY field, return an object {name, value, why}. Rules:
 - PHONE fields: keep the FULL international form with its leading + (e.g. "+1 415 555 0142") — \
 phone widgets parse the country from it; a stripped national number under the widget's default \
 country flag is invalid and gets wiped.
+- OPEN-ENDED prose questions ("Why do you want to join us?", "Tell us about…"): write 2-4 \
+tailored sentences from the profile's experience. NEVER a bare "Yes"/"No" — a yes/no in a \
+prose box is always wrong.
+- SANCTIONED DEFAULTS when the profile does not disclose (prefix `why` with "DEFAULT: "): \
+veteran status -> the "not a protected veteran" option; disability -> the "no, I don't have a \
+disability" option; government-official / worked-for-THIS-company / conflict-of-interest \
+history -> "No". These are answered, not skipped — but the DEFAULT marker must be set so the \
+run record shows which answers were assumed rather than known.
 - If the field has OPTIONS, `value` MUST be EXACTLY one of those option strings, copied \
 verbatim. Pick the option the profile best supports. For a yes/no question, reason from the \
 profile (e.g. "authorized to work in Japan?" -> the profile is US-authorized only -> "No"). \
