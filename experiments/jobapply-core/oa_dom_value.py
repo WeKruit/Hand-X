@@ -112,6 +112,12 @@ function() {
           const cls = (n.className && n.className.baseVal != null) ? n.className.baseVal : (n.className || "");
           if (typeof cls === "string" && /placeholder/i.test(cls)) continue;
           if (n === el) continue;
+          // never read LABEL text as a committed value: the wrapper scan grabbed the QUESTION
+          // ('What is your preferred office location?') and verify blessed junk as CORRECT
+          // (robinhood). Structural exclusion — the node is/inside a <label> or IS the
+          // control's own label.
+          if (n.tagName === 'LABEL' || (n.closest && n.closest('label'))) continue;
+          if (el.labels && Array.from(el.labels).some(L => L === n || L.contains(n))) continue;
           const t = norm(n.textContent);
           if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out.push(t); }
         }

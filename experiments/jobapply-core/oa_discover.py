@@ -50,12 +50,13 @@ _ENUM_JS = r"""
   };
   for (const el of document.querySelectorAll('input, textarea, select, [role=combobox]')) {
     const tag = (el.tagName || '').toLowerCase(); const ty = (el.type || '').toLowerCase();
-    // hidden file/checkbox/radio inputs are the NORM (styled widget wrapping a visually-hidden
-    // real input): setFileInputFiles / cdp_choose_option operate on them regardless of
-    // visibility. Dropping them made a required consent checkbox invisible to discovery while
-    // the audit (which scans required inputs) still flagged it (breezy gdprAgreement).
-    // Everything else must be visible.
-    if (!['file', 'checkbox', 'radio'].includes(ty) && !vis(el)) continue;
+    // hidden file/checkbox/radio inputs AND hidden <select>s are the NORM (styled widget wrapping
+    // a visually-hidden real control): setFileInputFiles / cdp_choose_option / selectedIndex
+    // operate on them regardless of visibility. Dropping them made a required consent checkbox
+    // (breezy gdprAgreement) and a required screening dropdown (robinhood 'worked here before?',
+    // an old-boards hidden <select> under a custom UI) invisible to discovery while the audit
+    // still flagged them. Everything else must be visible.
+    if (tag !== 'select' && !['file', 'checkbox', 'radio'].includes(ty) && !vis(el)) continue;
     if (tag === 'input' && ['hidden', 'submit', 'button', 'image', 'reset', 'search'].includes(ty)) continue;
     if (el.closest('nav, header, footer, [role=search]')) continue;  // page chrome, not the form
     const req = el.required || (el.getAttribute && el.getAttribute('aria-required') === 'true');
