@@ -80,6 +80,26 @@ _ENUM_JS = r"""
     // got label='Select' -> no value -> required select left empty). Identity comparison only,
     // then climb for the first line that is not the widget's own. 'own' = innerText for
     // button-style, PLACEHOLDER for input-style widgets.
+    // GEOMETRIC label: the nearest text sitting DIRECTLY ABOVE the widget, horizontally
+    // overlapping it. This is how a human associates a label with a field — and the ONLY way
+    // for widgets (rippling) whose question text is a CSS-positioned sibling, NOT a DOM ancestor
+    // (7 ancestor levels measured empty). Bounded scan, cheap, no VLM.
+    const geomLabel = (e) => {
+      const r = e.getBoundingClientRect(); if (!r.width) return '';
+      let best = '', bestGap = 140;
+      for (const q of document.querySelectorAll('label,legend,p,span,div,h1,h2,h3,h4,h5,h6')) {
+        if (q.contains(e) || e.contains(q)) continue;
+        // own text only (no descendant-heavy containers) and a real sentence/word
+        const direct = [...q.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join(' ');
+        const t = clean(direct); if (t.length < 2 || t.length > 400) continue;
+        if (/^(select|search|choose|\-\-|\+?\d)/i.test(t)) continue;  // placeholders/values, not questions
+        const qr = q.getBoundingClientRect(); if (!qr.width) continue;
+        const gap = r.top - qr.bottom;                       // q sits ABOVE e
+        const overlap = Math.min(r.right, qr.right) - Math.max(r.left, qr.left);
+        if (gap >= -4 && gap < bestGap && overlap > Math.min(r.width, qr.width) * 0.3) { best = t; bestGap = gap; }
+      }
+      return best;
+    };
     const questionLabel = (e, lab) => {
       const own = clean(e.innerText) || clean(e.placeholder) || clean(e.value) || '';
       if (lab && lab !== own && !(own && (own.startsWith(lab) || lab.startsWith(own)))) return lab;
@@ -91,7 +111,7 @@ _ENUM_JS = r"""
         }
         p = p.parentElement;
       }
-      return lab;
+      return geomLabel(e) || lab;  // DOM-climb failed -> geometry (rippling's positioned labels)
     };
     if (el.getAttribute && el.getAttribute('role') === 'combobox') {
       push(el.id || el.getAttribute('name'), questionLabel(el, labFor(el)), 'combobox', 'select', [], req); continue;
