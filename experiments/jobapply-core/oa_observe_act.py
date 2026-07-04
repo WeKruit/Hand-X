@@ -2366,8 +2366,12 @@ async def _selftest() -> int:
         restore_vlm(orig_vlm33)
     tr33 = fd33.get("_trace") or []
     chk(
-        "VISUAL radio no-match -> falls through to sensitive guard -> ESCALATE (additive)",
-        out33 == ESCALATE and "visual-choice:none" in tr33 and "sensitive->ESCALATE" in tr33,
+        # policy change (user-sanctioned): a sensitive field WITH a mapped value now TRIES to
+        # answer (S_OTHER) instead of short-circuiting at the sensitive guard; the guard only
+        # fires when no value exists. Outcome here is still ESCALATE (S_OTHER found no escape).
+        "VISUAL radio no-match -> S_OTHER attempted -> ESCALATE (additive)",
+        out33 == ESCALATE and "visual-choice:none" in tr33
+        and ("sensitive-no-value->ESCALATE" in tr33 or "no-escape->ESCALATE" in tr33),
         (out33, tr33),
     )
 
