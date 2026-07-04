@@ -645,6 +645,17 @@ async def _fill_form(
                 # per_field is the LOCAL fill ledger — result['results'] is only assembled later
                 filled_names={str(r.name) for r in per_field},
             )
+            # REQUIRED-ESCALATE VETO (zero-cost, deterministic): a REQUIRED field whose own
+            # outcome is ESCALATE is by definition not complete — yet the audit can't see a
+            # hidden file input and the banded VLM samples. The engine's own ledger already
+            # KNOWS (hibob #19: resume ESCALATE'd honestly, verdict still said complete:True).
+            with contextlib.suppress(Exception):
+                _req = {f.name for f in fields if getattr(f, "required", False)}
+                _esc = [r.label or r.name for r in per_field if r.name in _req and r.outcome == oa.ESCALATE]
+                if _esc and isinstance(result.get("completeness"), dict):
+                    result["completeness"]["complete"] = False
+                    result["completeness"]["required_escalated"] = _esc
+                    print(f"   [complete] VETO — required field(s) escalated: {_esc[:3]}")
             with contextlib.suppress(Exception):
                 page = await session.must_get_current_page()
 
