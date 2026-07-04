@@ -234,43 +234,66 @@ async def _vlm_unanswered_required(session: Any) -> list[str]:
             png = base64.b64decode(sh) if isinstance(sh, str) else sh
         if png is None:
             return []
-        msg = UserMessage(
-            content=[
-                ContentPartTextParam(
-                    type="text",
-                    text=(
-                        # principle + one example each, NOT a rule taxonomy (user: keep prompts
-                        # generic and let the model decide; enumerated ignore-lists are the same
-                        # anti-pattern as regex and break on the next tenant/language).
-                        "This is a job application form AFTER automated filling. List the REQUIRED "
-                        "questions a candidate would still have to answer before submitting: empty "
-                        "text boxes, dropdowns still on a placeholder, choice pairs with neither "
-                        "option selected, empty upload areas. Judge by what the form itself "
-                        "communicates, in whatever language/convention it uses: only count a field "
-                        "the form VISIBLY marks as required (for example an asterisk by its label); "
-                        "an empty but unmarked field is not a finding. Only count questions that are "
-                        "part of the application form a candidate fills in — for example, a footer "
-                        "banner asking 'Do you already work here?' with a login button is page "
-                        "furniture, not a form question. Reply ONLY a STRICT JSON array of their "
-                        "labels, [] if nothing required remains."
-                    ),
-                ),
-                ContentPartImageParam(
-                    type="image_url",
-                    image_url=ImageURL(
-                        url=f"data:image/png;base64,{base64.b64encode(png).decode()}",
-                        # high: at low detail a dark-themed form's placeholders and unselected
-                        # pills are unreadable — the visual gate PASSED a form with a required
-                        # radio pair unselected (teamtailor tt7 false-complete).
-                        detail="high",
-                        media_type="image/png",
-                    ),
-                ),
-            ]
+        _PROMPT = (
+            # principle + one example each, NOT a rule taxonomy (user: keep prompts
+            # generic and let the model decide; enumerated ignore-lists are the same
+            # anti-pattern as regex and break on the next tenant/language).
+            "This is a section of a job application form AFTER automated filling. List the "
+            "REQUIRED questions a candidate would still have to answer before submitting: empty "
+            "text boxes, dropdowns still on a placeholder, choice pairs with neither "
+            "option selected, empty upload areas. Judge by what the form itself "
+            "communicates, in whatever language/convention it uses: only count a field "
+            "the form VISIBLY marks as required (for example an asterisk by its label); "
+            "an empty but unmarked field is not a finding. Only count questions that are "
+            "part of the application form a candidate fills in — for example, a footer "
+            "banner asking 'Do you already work here?' with a login button is page "
+            "furniture, not a form question. Reply ONLY a STRICT JSON array of their "
+            "labels, [] if nothing required remains."
         )
-        res = await _oa.resilient_vlm([msg], primary=_vlm())
-        raw = str(getattr(res, "completion", res) or "[]")
-        return _parse_str_list(raw)[:15]
+        # BAND-TILED verification (the resolution fix): a 5000px-tall page squeezed into one
+        # image budget leaves each form row a few pixels tall — the model physically cannot see
+        # an unticked box (hibob resume false-green: the same VLM caught it instantly on a CROP).
+        # Slice into <=1100px bands (120px overlap so a field on a seam appears whole in one
+        # band), ask the SAME verification question per band, union the answers.
+        bands: list[bytes] = [png]
+        with contextlib.suppress(Exception):
+            import io
+
+            from PIL import Image
+
+            im = Image.open(io.BytesIO(png))
+            if im.height > 1400:
+                bands = []
+                step, ov = 1100, 120
+                y = 0
+                while y < im.height and len(bands) < 8:
+                    buf = io.BytesIO()
+                    im.crop((0, y, im.width, min(y + step + ov, im.height))).save(buf, format="PNG")
+                    bands.append(buf.getvalue())
+                    y += step
+        out: list[str] = []
+        for band in bands:
+            msg = UserMessage(
+                content=[
+                    ContentPartTextParam(type="text", text=_PROMPT),
+                    ContentPartImageParam(
+                        type="image_url",
+                        image_url=ImageURL(
+                            url=f"data:image/png;base64,{base64.b64encode(band).decode()}",
+                            # high + banded: full per-widget resolution (teamtailor tt7 missed an
+                            # unselected required radio pair at full-page scale even on high).
+                            detail="high",
+                            media_type="image/png",
+                        ),
+                    ),
+                ]
+            )
+            with contextlib.suppress(Exception):
+                res = await _oa.resilient_vlm([msg], primary=_vlm())
+                for lab in _parse_str_list(str(getattr(res, "completion", res) or "[]")):
+                    if lab not in out:
+                        out.append(lab)
+        return out[:15]
     except Exception:
         return []
 

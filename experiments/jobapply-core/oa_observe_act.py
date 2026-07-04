@@ -522,7 +522,17 @@ async def _s1_locate(session: Any, ctx: Ctx) -> Outcome:
         fout = await _s_file_global(session, ctx, state)
         if fout is not None:
             return fout
-        # else: no file input on the page -> fall through to generic locate (mis-tagged field).
+        # NO file input found. A field the discovery TYPED as a file field must NEVER fall through
+        # to the text lane — that types the file PATH into some text box and dom-verifies its own
+        # garbage as CORRECT (hibob: 'Resume*' -> S_TEXT -> verdict CORRECT while 'Add file' sat
+        # empty; the false-complete the user caught). Native-picker-only uploaders are the HITL
+        # class: report honestly.
+        if str(getattr(ctx, "kind", "") or "").lower() in ("input_file", "file") or "file" in str(
+            getattr(ctx, "source", "") or ""
+        ).lower():
+            ctx.trace.append("file-field-no-input->escalate")
+            return ESCALATE if ctx.required else SKIP
+        # else: fall through to generic locate (a resume path attached to a mis-tagged TEXT field).
 
     # FIX 1: tiered locate — STRUCTURE first, VISUAL PROXIMITY aid, GROUPED-WIDGET card-heading bind,
     # VLM disambiguate. Binds an unlabeled card input (Lever) the way a human does — by the question
