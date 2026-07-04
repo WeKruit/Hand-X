@@ -312,10 +312,25 @@ async def retry_missing(session: Any, page: Any, profile: dict, resume: str | No
     from oa_discover import discover_fields
     from oa_singlepage import _field_dict
 
+    # token-overlap match: the audit carries the FULL question text while discovery truncates its
+    # label — exact equality never matched long screening questions (robinhood 'Have you ever
+    # worked…' stayed empty through 4 retries). >=50% of the audit label's tokens appearing in
+    # the field's label+name counts as the same field.
+    def _tok(s: str) -> set:
+        return {w for w in _norm(s).split() if len(w) > 3}
+
     want = {_norm(m) for m in missing}
+    want_toks = [t for t in (_tok(m) for m in missing) if t]
     refilled = 0
     with contextlib.suppress(Exception):
-        fields = [f for f in await discover_fields(page) if _norm(f.label) in want or _norm(f.name) in want]
+        fields = []
+        for f in await discover_fields(page):
+            if _norm(f.label) in want or _norm(f.name) in want:
+                fields.append(f)
+                continue
+            ft = _tok(str(f.label or "") + " " + str(f.name or ""))
+            if any(len(wt & ft) >= max(2, len(wt) // 2) for wt in want_toks):
+                fields.append(f)
         if not fields:
             return 0
         rows = [f for f in fields if f.needs_map]

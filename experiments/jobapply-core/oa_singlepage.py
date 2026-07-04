@@ -237,6 +237,7 @@ async def run_single_page_oa(
     headless: bool = True,
     screenshot_path: str | None = None,
     force_generic: bool = False,
+    json_path: str | None = None,
 ) -> dict:
     """Fill a single-page ATS form via observe_act, field-by-field. Returns a result dict with the
     per-field outcomes + a fill-rate. FILL-ONLY: never submits.
@@ -466,7 +467,7 @@ async def run_single_page_oa(
                 print(f"  BLOCKED — form not reachable for {adapter.__class__.__name__}")
                 return result
 
-        return await _fill_form(
+        res = await _fill_form(
             session=session,
             adapter=adapter,
             page=page,
@@ -481,6 +482,16 @@ async def run_single_page_oa(
             result=result,
             profile=profile,
         )
+        # PRE-TEARDOWN dump: a wedged executor thread (LLM HTTP call with no timeout) can hang
+        # asyncio.run's shutdown AFTER the fill finished — main()'s post-run dump then never
+        # executes and the proc-cap hard-exit loses a SUCCESSFUL result (mega #19/#20). Persist
+        # the result the moment it exists; main()'s dump becomes an idempotent rewrite.
+        if json_path:
+            with contextlib.suppress(Exception):
+                with open(json_path, "w", encoding="utf-8") as fh:
+                    json.dump(res, fh, indent=2)
+                print(f"  wrote {json_path} (pre-teardown)")
+        return res
     finally:
         # 1) ALWAYS ask browser-use to stop the browser (guarded — kill() must not mask the result).
         #    BOUNDED: after a forced browser reset (a single_select typeahead can desync CDP ->
@@ -589,7 +600,14 @@ async def _fill_form(
     # and still reported complete:True). input type=email / type=file are structural, not label
     # semantics.
     _has_anchor = any(
-        r.outcome == oa.DONE and ("email" in str(r.type or "").lower() or "file" in str(r.type or "").lower())
+        r.outcome == oa.DONE
+        and (
+            "email" in str(r.type or "").lower()
+            or "file" in str(r.type or "").lower()
+            # rippling renders its email input as type=text — the committed VALUE carrying an
+            # '@' is the same evidence (identity on the value, not label semantics)
+            or "@" in str(r.committed or "")
+        )
         for r in per_field
     )
     _kind = str(((result.get("plan") or {}).get("page_kind")) or "")
@@ -598,6 +616,10 @@ async def _fill_form(
             "complete": False, "missing_required": [], "sections_filled": [], "sections_skipped": [],
             "retried": 0, "not_reached": True, "page_kind": _kind or None, "filled_done": _done_n,
         }
+        # POLICY (user): an auth wall is the HITL lane, not a fill failure — report NEEDS_HUMAN
+        # so scoring counts it as HITL-pass (wait_for_unblock resumes it when a human signs in).
+        if _kind == "login_or_captcha":
+            result["status"] = "NEEDS_HUMAN"
         print(f"   [complete] NOT_REACHED — form evidence too thin (done={_done_n}, kind={_kind or '?'})")
     # COMPLETENESS PASS (generic lane only): discover_fields sees only flat rendered inputs, so a
     # repeater section (Work Experience / Education behind 'Add another') is invisible and would be
@@ -929,6 +951,18 @@ async def _async_noop_str(*_a: Any, **_k: Any) -> str:
 def main() -> None:
     if "--selftest" in sys.argv:
         raise SystemExit(asyncio.run(_selftest()))
+    # PROCESS HARD-CAP: a blocked sync call in the default executor (an LLM HTTP call with no
+    # timeout) keeps asyncio.run's shutdown waiting forever AFTER the fill finished — mega #19
+    # hung 2.5h post-completion. A daemon thread cannot block exit; it just guarantees one.
+    import threading as _th
+    import time as _time
+
+    def _proc_cap() -> None:
+        _time.sleep(float(os.environ.get("OA_PROC_CAP_S", "1500")))
+        print("  [proc-cap] hard exit — executor/teardown hang", flush=True)
+        os._exit(3)
+
+    _th.Thread(target=_proc_cap, daemon=True).start()
     p = argparse.ArgumentParser(description="Fill ONE single-page ATS form via observe_act (FILL-ONLY, never submits)")
     p.add_argument(
         "--selftest", action="store_true", help="run the offline browser-lifecycle self-test ($0, no browser)"
@@ -951,6 +985,7 @@ def main() -> None:
             headless=not args.headed,
             screenshot_path=args.screenshot,
             force_generic=args.generic,
+            json_path=args.json,
         )
     )
     if args.json:
