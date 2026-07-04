@@ -578,11 +578,32 @@ async def _fill_form(
             )
         )
 
+    # FORM-EVIDENCE GATE: complete:True is only meaningful when an APPLICATION FORM was actually
+    # reached and substantively filled. A search box / JD page / login wall has no required-empty
+    # fields, so the audit passes VACUOUSLY (atsx: oracle filled 0/4, phenom 1/6, bain 1/2 all
+    # reported complete:True — the over-positive class). Floor: a real application always has at
+    # least name+email+one more (>=3 fills); a login/captcha page-kind can never be complete.
+    _done_n = sum(1 for r in per_field if r.outcome == oa.DONE)
+    # STRUCTURAL application evidence: every real application takes an email and/or a resume; a
+    # careers-landing SEARCH widget takes neither (SAP: 5 search-box fills passed the count floor
+    # and still reported complete:True). input type=email / type=file are structural, not label
+    # semantics.
+    _has_anchor = any(
+        r.outcome == oa.DONE and ("email" in str(r.type or "").lower() or "file" in str(r.type or "").lower())
+        for r in per_field
+    )
+    _kind = str(((result.get("plan") or {}).get("page_kind")) or "")
+    if adapter is None and (_done_n < 3 or not _has_anchor or _kind == "login_or_captcha"):
+        result["completeness"] = {
+            "complete": False, "missing_required": [], "sections_filled": [], "sections_skipped": [],
+            "retried": 0, "not_reached": True, "page_kind": _kind or None, "filled_done": _done_n,
+        }
+        print(f"   [complete] NOT_REACHED — form evidence too thin (done={_done_n}, kind={_kind or '?'})")
     # COMPLETENESS PASS (generic lane only): discover_fields sees only flat rendered inputs, so a
     # repeater section (Work Experience / Education behind 'Add another') is invisible and would be
     # silently skipped. Audit for unfilled repeater sections + empty required fields and fill each
     # via the proven agent_fill_section. Makes the completeness verdict honest instead of a blind 1.0.
-    if adapter is None and profile is not None and os.environ.get("OA_NO_COMPLETE") != "1":
+    elif adapter is None and profile is not None and os.environ.get("OA_NO_COMPLETE") != "1":
         with contextlib.suppress(Exception):
             import oa_complete
 
@@ -591,6 +612,11 @@ async def _fill_form(
             # with the fill off, the verdict honestly flags a section we would otherwise have missed.
             _pk = [s.get("profile_key") for s in (result.get("plan") or {}).get("repeater_sections") or []
                    if s.get("has_add_control") and s.get("profile_key") in ("experience", "education")]
+            # PLANNER-FLAKE fallback: the first-look VLM plan sometimes returns no sections for a
+            # form that HAS them (hibob run-to-run). When the profile carries entries, hand the
+            # keys over anyway — fill_repeaters no-ops cleanly when it finds no Add affordance.
+            if not _pk and profile:
+                _pk = [k for k in ("experience", "education") if profile.get(k)]
             result["completeness"] = await oa_complete.complete(
                 session, page, profile, resume, allow_agent=os.environ.get("OA_COMPLETE_AGENT") == "1",
                 llm=llm, planner_keys=_pk,
