@@ -616,6 +616,9 @@ For EVERY field, return an object {name, value, why}. Rules:
 - Decide a field's meaning from its LABEL, never from its machine name.
 - Use ONLY facts present in the profile. Never invent or assume facts not in the profile.
 - If the profile gives no basis for the field, return value "" (empty string).
+- PHONE fields: keep the FULL international form with its leading + (e.g. "+1 415 555 0142") — \
+phone widgets parse the country from it; a stripped national number under the widget's default \
+country flag is invalid and gets wiped.
 - If the field has OPTIONS, `value` MUST be EXACTLY one of those option strings, copied \
 verbatim. Pick the option the profile best supports. For a yes/no question, reason from the \
 profile (e.g. "authorized to work in Japan?" -> the profile is US-authorized only -> "No"). \
@@ -688,7 +691,18 @@ async def map_fields(llm: Any, fields: list[FormField], profile: dict, title: st
         [SystemMessage(content=_MAP_SYSTEM), UserMessage(content=json.dumps(ctx, ensure_ascii=False))],
         output_format=FillMap,
     )
-    return {f.name: f for f in res.completion.fields}
+    out = {f.name: f for f in res.completion.fields}
+    # IDENTITY GUARD (not semantics): the mapper keeps returning the phone with its +CC stripped
+    # even when instructed otherwise; a national number under a widget's default country flag is
+    # invalid and gets wiped (rippling '+44 GB' + red 'required'). If a mapped value is a strict
+    # SUFFIX of the profile phone, restore the full international form verbatim.
+    ph = str((profile or {}).get("phone") or "").strip()
+    if ph.startswith("+"):
+        for f in out.values():
+            v = (f.value or "").strip()
+            if v and v != ph and ph.replace(" ", "").endswith(v.replace(" ", "")):
+                f.value = ph
+    return out
 
 
 # ---------------------------------------------------------------------------

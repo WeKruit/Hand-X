@@ -43,6 +43,13 @@ _AUDIT_JS = r"""() => {
     let t = (l && l.innerText) || e.getAttribute('aria-label') || '';
     if (!t) { let p=e.closest('label')||e.parentElement, h=0;
       while(p && h++<3 && !t){ const c=p.querySelector(':scope > label,:scope > legend,:scope > span'); t=(c&&c.innerText)||''; p=p.parentElement; } }
+    // POSITIONAL fallback: take the container's FIRST line — the question renders ABOVE the
+    // control, validation errors BELOW. The child-element pick used to grab the error span, so
+    // the audit reported 'This field is required' as the LABEL and the retry mapper had nothing
+    // to map (rippling phone). Position, not text semantics.
+    if (!t || /required/i.test(t)) { let p=e.parentElement, h=0;
+      while(p && h++<4){ const line=(p.innerText||'').split('\n').map(norm).find(x=>x.length>1 && x.length<120);
+        if(line && !/required/i.test(line)){ t=line; break; } p=p.parentElement; } }
     return norm(t); };
   const isReq = e => e.required || e.getAttribute('aria-required')==='true' || /\*/.test(labelText(e));
   const empty = [];
