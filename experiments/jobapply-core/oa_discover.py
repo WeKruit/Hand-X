@@ -37,7 +37,7 @@ _ENUM_JS = r"""
     while (p && hops++ < 4) {
       const c = p.querySelector(':scope > label, :scope > legend, :scope > span, :scope > div, :scope > p');
       const own = c ? clean(c.innerText) : '';
-      if (own && own.length > 1 && own.length < 160) return own.split('\n')[0].trim();
+      if (own && own.length > 1 && own.length < 400) return own.split('\n')[0].trim();
       p = p.parentElement;
     }
     return '';
@@ -46,7 +46,7 @@ _ENUM_JS = r"""
     label = clean(label); if (!label || label.length < 2) return;
     const key = (name || '') + '|' + label; if (seen.has(key)) return; seen.add(key);
     out.push({ name: name || label.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 60),
-               label: label.slice(0, 200), type, source, options, required: !!required });
+               label: label.slice(0, 400), type, source, options, required: !!required });
   };
   for (const el of document.querySelectorAll('input, textarea, select, [role=combobox]')) {
     const tag = (el.tagName || '').toLowerCase(); const ty = (el.type || '').toLowerCase();
@@ -56,7 +56,12 @@ _ENUM_JS = r"""
     // (breezy gdprAgreement) and a required screening dropdown (robinhood 'worked here before?',
     // an old-boards hidden <select> under a custom UI) invisible to discovery while the audit
     // still flagged them. Everything else must be visible.
-    if (tag !== 'select' && !['file', 'checkbox', 'radio'].includes(ty) && !vis(el)) continue;
+    // react-select's REAL <input> is ~1-3px wide (it grows as you type; the visible control is
+    // the wrapper div) — a role=combobox / aria-autocomplete input is structurally a dropdown and
+    // must bypass the width gate, same as hidden select/checkbox/radio (robinhood's required
+    // 'worked here before?' screening combobox was 3.48px -> dropped -> never fillable).
+    const isCombo = el.getAttribute && (el.getAttribute('role') === 'combobox' || el.getAttribute('aria-autocomplete'));
+    if (tag !== 'select' && !isCombo && !['file', 'checkbox', 'radio'].includes(ty) && !vis(el)) continue;
     if (tag === 'input' && ['hidden', 'submit', 'button', 'image', 'reset', 'search'].includes(ty)) continue;
     if (el.closest('nav, header, footer, [role=search]')) continue;  // page chrome, not the form
     const req = el.required || (el.getAttribute && el.getAttribute('aria-required') === 'true');
@@ -82,7 +87,7 @@ _ENUM_JS = r"""
       while (p && h++ < 5) {
         for (const line of (p.innerText || '').split('\n')) {
           const t = clean(line);
-          if (t && t.length > 1 && t.length < 160 && t !== own && t !== lab && !own.includes(t)) return t;
+          if (t && t.length > 1 && t.length < 400 && t !== own && t !== lab && !own.includes(t)) return t;
         }
         p = p.parentElement;
       }
@@ -110,7 +115,7 @@ _ENUM_JS = r"""
       const full = clean(p.innerText || '');
       if (full.length > 15 && full.length < 400) {
         const line = full.split('\n').map(clean).find(t => t.length > 10 && !/^(yes|no)$/i.test(t));
-        if (line) return line.slice(0, 200);
+        if (line) return line.slice(0, 400);
       }
       p = p.parentElement;
     }
