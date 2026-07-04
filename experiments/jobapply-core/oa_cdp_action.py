@@ -717,7 +717,10 @@ async def cdp_type(session: Any, node: Any, text: str, *, keystrokes: bool = Fal
                     print(f"   [cdp_type] after-fixup value={str(got2)[:60]!r}")
         return True
 
-    return await _guarded(_do())
+    # LENGTH-SCALED guard: the keystroke fallback types per-char (~15-30ms each) — a 700-char
+    # essay needs 10-30s, and the flat 4s guard killed it mid-flight ('text-type-refused' on
+    # every long answer). Budget follows the work, still hard-bounded.
+    return await _guarded(_do(), timeout=max(CDP_ACTION_TIMEOUT, 2.0 + 0.05 * len(str(text))))
 
 
 # --------------------------------------------------------------------------- #
@@ -798,10 +801,10 @@ async def _session_for(session: Any, node_for_session: Any) -> Any | None:
     return None
 
 
-async def _guarded(coro: Any) -> bool:
+async def _guarded(coro: Any, timeout: float | None = None) -> bool:
     """Run a write coroutine under the per-action timeout; any timeout/error -> False (never hang)."""
     try:
-        return bool(await asyncio.wait_for(coro, timeout=CDP_ACTION_TIMEOUT))
+        return bool(await asyncio.wait_for(coro, timeout=timeout or CDP_ACTION_TIMEOUT))
     except TimeoutError:
         return False
     except Exception:

@@ -680,7 +680,12 @@ async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None
     # re-type, and its pre-check false-positived live (LLM matched the iti '+1' residue against the
     # phone number -> phone left empty, wk17). EMPTY/UNKNOWN/WRONG falls through unchanged; no
     # verify budget is spent on the pre-check.
-    if ctx.value and not ctx.resume and normalize_kind(ctx.kind) in ("CHOICE", "SELECT"):
+    # TRUST GATE: the pre-check may only short-circuit when the LOCATE was structural (dom-ref /
+    # accessible-name). A spatial locate can drift to a NEIGHBOR control — on workable the
+    # anti-AI trick question ('did you start your answer with…') was skipped as already-correct
+    # because the pre-check read the neighboring YES it had drifted onto.
+    _loc_trusted = any(t in ctx.trace for t in ("located:dom-ref", "located:structure", "located:grouped"))
+    if ctx.value and not ctx.resume and _loc_trusted and normalize_kind(ctx.kind) in ("CHOICE", "SELECT"):
         with contextlib.suppress(Exception):
             pre = await brain.verify(
                 session,
