@@ -810,9 +810,39 @@ async def _s_file_global(session: Any, ctx: Ctx, state: perc.OAState) -> Outcome
     if not ok:
         ctx.trace.append("upload-failed")
         return ESCALATE if ctx.required else SKIP
+    # UI-VERIFY: a CDP set can land on a DECOY hidden input while the visible uploader (hibob's
+    # custom 'Add file') never reflects it — that was a FALSE-DONE (json 'uploaded' but the page
+    # showed 'Add file' empty). Confirm the filename actually renders before claiming success.
+    if not await _file_visible_in_ui(session, str(path)):
+        ctx.trace.append("uploaded-but-not-in-ui->escalate")
+        return ESCALATE if ctx.required else SKIP
     ctx.committed_text = str(path)
-    ctx.trace.append("uploaded")
+    ctx.trace.append("uploaded+ui-verified")
     return DONE
+
+
+async def _file_visible_in_ui(session: Any, path: str) -> bool:
+    """True when the uploaded file's basename renders as visible text (deep/shadow-pierced) OR a
+    connected file input actually holds it. Distinguishes a REAL upload from a CDP set that landed
+    on a decoy input the visible widget ignores. Best-effort True on read failure (don't regress a
+    working upload on a transient read error)."""
+    import os as _os
+
+    base = _os.path.basename(str(path))
+    needle = base[:8].lower()  # 'test_res' — matches full + truncated 'test_res…pdf' renders
+    with contextlib.suppress(Exception):
+        page = await session.must_get_current_page()
+        # VISIBLE filename text only — NOT input.files, which the decoy hidden input also holds
+        # (that is the exact false-positive: a real uploader RENDERS the name, a decoy does not).
+        found = await page.evaluate(
+            "(n) => { const all=[]; const walk=(r)=>{ for(const e of r.querySelectorAll('*')){ all.push(e);"
+            "   if(e.shadowRoot) walk(e.shadowRoot); } }; walk(document);"
+            " for(const e of all){ if(e.childNodes.length && (e.innerText||'').toLowerCase().includes(n)){"
+            "   const r=e.getBoundingClientRect(); if(r.width>0 && r.height>0) return true; } } return false; }",
+            needle,
+        )
+        return bool(found)
+    return True  # read failed -> don't punish a likely-good upload
 
 
 # ---- S_FILE (intrinsic-located file input — falls back to the global locator if hidden) ----
@@ -832,7 +862,11 @@ async def _s_file(session: Any, ctx: Ctx) -> Outcome:
     if not ok:
         ctx.trace.append("upload-failed")
         return ESCALATE if ctx.required else SKIP
-    # presence-only verify (the file input value is opaque to the VLM; CDP set is reliable)
+    # UI-VERIFY the filename actually renders (a CDP set can land on a decoy input the visible
+    # widget ignores — the hibob false-DONE); presence-only trust was the bug.
+    if not await _file_visible_in_ui(session, str(path)):
+        ctx.trace.append("uploaded-but-not-in-ui->escalate")
+        return ESCALATE if ctx.required else SKIP
     ctx.committed_text = str(path)
     return DONE
 
