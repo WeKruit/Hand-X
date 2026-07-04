@@ -656,6 +656,23 @@ async def _fill_form(
                     result["completeness"]["complete"] = False
                     result["completeness"]["required_escalated"] = _esc
                     print(f"   [complete] VETO — required field(s) escalated: {_esc[:3]}")
+            # RESUME VETO (deterministic): the page HAS a file field and we HAVE a resume, yet no
+            # file field committed — an application without its resume is never complete. Does not
+            # rely on the flaky star flag (hibob #20: 'Resume*' star didn't survive discovery ->
+            # SKIP not ESCALATE -> the required-veto missed it while 'Add file' sat empty), nor on
+            # the sampling VLM. A form with no file field at all is unaffected.
+            with contextlib.suppress(Exception):
+                _file_rows = [r for r in per_field if "file" in str(r.type or "").lower()]
+                if (
+                    resume
+                    and _file_rows
+                    and not any(r.outcome == oa.DONE for r in _file_rows)
+                    and isinstance(result.get("completeness"), dict)
+                    and result["completeness"].get("complete")
+                ):
+                    result["completeness"]["complete"] = False
+                    result["completeness"]["resume_not_attached"] = True
+                    print("   [complete] VETO — resume provided but no file field committed")
             with contextlib.suppress(Exception):
                 page = await session.must_get_current_page()
 
