@@ -338,7 +338,20 @@ async def _orphan_pass(session: Any, page: Any, profile: dict, llm: Any, filled_
         from oa_discover import discover_fields
         from oa_singlepage import _field_dict
 
-        orphans = [f for f in await discover_fields(page) if str(f.name) not in filled_names]
+        # SETTLE-UNION: the late row is created ASYNCHRONOUSLY (breezy parses the uploaded resume
+        # server-side, then renders a Work History row) — a single discover races it. Poll a few
+        # times and union what appears.
+        import asyncio as _aio
+
+        seen: dict = {}
+        for wait_s in (0.0, 2.0, 4.0):
+            if wait_s:
+                await _aio.sleep(wait_s)
+            with contextlib.suppress(Exception):
+                for f in await discover_fields(page):
+                    if str(f.name) not in filled_names:
+                        seen.setdefault(str(f.name), f)
+        orphans = list(seen.values())
         print(f"   [complete] orphan candidates: {[str(f.name)[:24] for f in orphans][:8]}")
         if not orphans:
             return 0
@@ -395,9 +408,14 @@ async def complete(
         # only when allowed; else flag it incomplete (never a silent pass).
         sections = []
         with contextlib.suppress(Exception):
+            # token-overlap dedup: the VLM says 'Work Experience' while the fill ledger says
+            # 'experience' — the old contiguous-substring check never matched, so a JUST-FILLED
+            # section got re-flagged skipped and complete stayed False forever (breezy).
+            filled_tokens = {w for k in verdict["sections_filled"] for w in str(k).lower().split() if len(w) > 3}
             sections = [
                 s for s in await _vlm_unfilled_sections(session)
-                if _profile_has(profile, s) and s.lower() not in " ".join(verdict["sections_filled"]).lower()
+                if _profile_has(profile, s)
+                and not ({w for w in s.lower().split() if len(w) > 3} & filled_tokens)
             ]
         for sec in sections:
             if not allow_agent:
