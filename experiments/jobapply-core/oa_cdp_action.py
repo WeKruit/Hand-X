@@ -699,6 +699,22 @@ async def cdp_type(session: Any, node: Any, text: str, *, keystrokes: bool = Fal
             )
         for ch in str(text):
             await _dispatch_char(cdp_session, session_id, ch)
+        # HEAD-LOSS fixup: typeahead widgets steal focus/wipe while their dropdown opens on the
+        # first keystrokes — the head chars deterministically vanish ('University…' -> 'ersity of
+        # California', breezy/hibob/bamboohr) and RETYPING loses them again (the dropdown re-
+        # opens). But after a keystroke session the widget is INITIALIZED, so a native-setter
+        # re-set of the full value (+input/change) now sticks — even on React fields that refused
+        # it cold (that refusal is the same init wipe). Read back; fix up on mismatch.
+        with contextlib.suppress(Exception):
+            got = await _call_on(cdp_session, session_id, object_id, "function(){ return this.value || ''; }")
+            if os.environ.get("OA_TYPE_DEBUG"):
+                print(f"   [cdp_type] after-keys value={str(got)[:60]!r} want={str(text)[:60]!r}")
+            if str(got or "") != str(text):
+                await asyncio.sleep(0.4)  # let the dropdown/init settle
+                await _call_on(cdp_session, session_id, object_id, _SET_VALUE_JS, args=[str(text)])
+                if os.environ.get("OA_TYPE_DEBUG"):
+                    got2 = await _call_on(cdp_session, session_id, object_id, "function(){ return this.value || ''; }")
+                    print(f"   [cdp_type] after-fixup value={str(got2)[:60]!r}")
         return True
 
     return await _guarded(_do())

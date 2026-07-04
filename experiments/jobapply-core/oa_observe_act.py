@@ -1295,13 +1295,15 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
         ctx.queries_tried.append(q)
         ctx.search_tries += 1
         before = await perc.get_state(session)
-        probe = q[: min(len(q), 4)] if len(q) > 4 else q
-        typed = await act.type_text(session, ctx.node, probe, clear=True)
+        # ONE call with the FULL query. The old probe-then-rest split (4 chars clear=True, then
+        # the tail clear=False) corrupted every SEARCH field on the fast path: type_text's
+        # cdp_set_value REPLACES the value, so the tail overwrote the probe and the field kept
+        # 'ersity of California, Berkeley' — the deterministic head-loss on
+        # breezy/hibob/bamboohr. One set fires one input event with the full string; debounced
+        # suggestion lists filter on it the same.
+        typed = await act.type_text(session, ctx.node, q, clear=True)
         if not typed:
             continue
-        # type the rest so a server-side filter sees the full distinctive query
-        if len(q) > len(probe):
-            await act.type_text(session, ctx.node, q[len(probe) :], clear=False)
         # a geocomplete (the city-prefix variant) resolves its suggestions async over the network —
         # give it the longer settle so the option cluster mounts before we read the delta.
         settle_s = _SETTLE_GEO_S if q == city_prefix else _SETTLE_SEARCH_S

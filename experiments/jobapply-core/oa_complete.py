@@ -217,13 +217,15 @@ async def _vlm_unanswered_required(session: Any) -> list[str]:
                     type="text",
                     text=(
                         "This is a job application form AFTER automated filling. Look for REQUIRED "
-                        "fields (marked with *, 'required', or in a required section) that are still "
-                        "visibly UNANSWERED: empty text boxes, dropdowns still showing a placeholder "
-                        "like 'Select an option', yes/no button pairs with NEITHER selected, empty "
-                        "upload areas. ONLY count questions inside the APPLICATION FORM itself — "
+                        "fields that are still visibly UNANSWERED: empty text boxes, dropdowns still "
+                        "showing a placeholder like 'Select an option', yes/no button pairs with "
+                        "NEITHER selected, empty upload areas. A field counts as REQUIRED only if "
+                        "you can SEE its required marker: an asterisk (*) or the word "
+                        "'required'/'Requis' attached to ITS OWN label — an empty but unmarked field "
+                        "is NOT a finding. ONLY count questions inside the APPLICATION FORM itself — "
                         "ignore page furniture: headers, footers, cookie banners, employee-referral "
                         "('already work here?') banners, login prompts, newsletter signups. Reply "
-                        "ONLY a STRICT JSON array of their labels, [] if every required field "
+                        "ONLY a STRICT JSON array of their labels, [] if every required-marked field "
                         "visibly has an answer."
                     ),
                 ),
@@ -455,9 +457,13 @@ async def upload_via_button(session: Any, page: Any, resume_path: str) -> bool:
     with contextlib.suppress(Exception):
         # already have a file input? use the direct path
         has_input = await page.evaluate("() => document.querySelectorAll('input[type=file]').length")
+        # DEEP query: hibob renders the whole form in shadow DOM — document.querySelectorAll
+        # never sees the 'Add file' button, so the chooser stage was unreachable there.
         find_btn = await page.evaluate(
             "() => { const rx=/^(add file|upload|choose file|attach|upload your resume|add attachment|upload cv)$/i;"
-            " const el=[...document.querySelectorAll('button,a,[role=button]')].find(e=>{"
+            " const all=[]; const walk=(root)=>{ for(const e of root.querySelectorAll('*')){ all.push(e);"
+            "   if(e.shadowRoot) walk(e.shadowRoot); } }; walk(document);"
+            " const el=all.find(e=>{ if(!e.matches('button,a,[role=button]')) return false;"
             "   const r=e.getBoundingClientRect(); if(r.width<8||r.height<8) return false;"
             "   return rx.test((e.innerText||e.getAttribute('aria-label')||'').trim());});"
             " if(!el) return ''; el.scrollIntoView({block:'center'}); const r=el.getBoundingClientRect();"
@@ -477,11 +483,15 @@ async def upload_via_button(session: Any, page: Any, resume_path: str) -> bool:
             cdp_sess = await session.get_or_create_cdp_session()
             captured: dict = {}
 
-            def _on_chooser(evt: Any, _c: dict = captured) -> None:
+            # EventRegistry invokes callback(event_data, session_id) with TWO positionals — the
+            # old `(evt, _c=captured)` signature bound _c to the session-id STRING, `_c["bn"]`
+            # threw, the suppress ate it, and captured stayed empty every time (the whole reason
+            # hibob's native picker 'could not be captured'). Proven fixed by scratch_chooser_toy.
+            def _on_chooser(evt: Any, _session_id: Any = None) -> None:
                 with contextlib.suppress(Exception):
                     bn = evt.get("backendNodeId") if isinstance(evt, dict) else getattr(evt, "backendNodeId", None)
                     if bn:
-                        _c["bn"] = int(bn)
+                        captured["bn"] = int(bn)
 
             with contextlib.suppress(Exception):
                 await cdp_sess.cdp_client.send.Page.enable(session_id=cdp_sess.session_id)
