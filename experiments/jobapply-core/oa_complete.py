@@ -128,9 +128,21 @@ _NEAR_FIELD_FILTER_JS = r"""() => {
       return hit >= Math.ceil(toks.length * 0.6);
     });
     if (!els.length) return true;  // VLM fully paraphrased — keep (tighter verdict, never looser)
+    // keep the flag only when the nearby control is genuinely EMPTY in the DOM — the VLM reads
+    // gray-rendered values as placeholders and re-flags filled fields (teamtailor Prénom/E-mail).
+    const controlEmpty = (c) => {
+      if (c.tagName === 'SELECT') { const o = c.options[c.selectedIndex]; return !o || o.value === ''; }
+      if (c.type === 'radio' || c.type === 'checkbox') {
+        const g = c.name ? [...document.querySelectorAll('input[name="'+CSS.escape(c.name)+'"]')] : [c];
+        return !g.some(x => x.checked);
+      }
+      return !nrm(c.value);
+    };
     return els.some(e => { let p = e;
       for (let i = 0; i < 5 && p; i++) {
-        if (p.querySelector('input,select,textarea,[role=combobox],[role=radiogroup],[role=listbox]')) return true;
+        const cs = p.querySelectorAll('input:not([type=hidden]),select,textarea');
+        if (cs.length) return [...cs].every(controlEmpty);
+        if (p.querySelector('[role=combobox],[role=radiogroup],[role=listbox]')) return true;
         p = p.parentElement;
       }
       return false; });
@@ -216,17 +228,20 @@ async def _vlm_unanswered_required(session: Any) -> list[str]:
                 ContentPartTextParam(
                     type="text",
                     text=(
-                        "This is a job application form AFTER automated filling. Look for REQUIRED "
-                        "fields that are still visibly UNANSWERED: empty text boxes, dropdowns still "
-                        "showing a placeholder like 'Select an option', yes/no button pairs with "
-                        "NEITHER selected, empty upload areas. A field counts as REQUIRED only if "
-                        "you can SEE its required marker: an asterisk (*) or the word "
-                        "'required'/'Requis' attached to ITS OWN label — an empty but unmarked field "
-                        "is NOT a finding. ONLY count questions inside the APPLICATION FORM itself — "
-                        "ignore page furniture: headers, footers, cookie banners, employee-referral "
-                        "('already work here?') banners, login prompts, newsletter signups. Reply "
-                        "ONLY a STRICT JSON array of their labels, [] if every required-marked field "
-                        "visibly has an answer."
+                        # principle + one example each, NOT a rule taxonomy (user: keep prompts
+                        # generic and let the model decide; enumerated ignore-lists are the same
+                        # anti-pattern as regex and break on the next tenant/language).
+                        "This is a job application form AFTER automated filling. List the REQUIRED "
+                        "questions a candidate would still have to answer before submitting: empty "
+                        "text boxes, dropdowns still on a placeholder, choice pairs with neither "
+                        "option selected, empty upload areas. Judge by what the form itself "
+                        "communicates, in whatever language/convention it uses: only count a field "
+                        "the form VISIBLY marks as required (for example an asterisk by its label); "
+                        "an empty but unmarked field is not a finding. Only count questions that are "
+                        "part of the application form a candidate fills in — for example, a footer "
+                        "banner asking 'Do you already work here?' with a login button is page "
+                        "furniture, not a form question. Reply ONLY a STRICT JSON array of their "
+                        "labels, [] if nothing required remains."
                     ),
                 ),
                 ContentPartImageParam(
@@ -490,17 +505,54 @@ async def upload_via_button(session: Any, page: Any, resume_path: str) -> bool:
     with contextlib.suppress(Exception):
         # already have a file input? use the direct path
         has_input = await page.evaluate("() => document.querySelectorAll('input[type=file]').length")
-        # DEEP query: hibob renders the whole form in shadow DOM — document.querySelectorAll
-        # never sees the 'Add file' button, so the chooser stage was unreachable there.
-        find_btn = await page.evaluate(
-            "() => { const rx=/^(add file|upload|choose file|attach|upload your resume|add attachment|upload cv)$/i;"
-            " const all=[]; const walk=(root)=>{ for(const e of root.querySelectorAll('*')){ all.push(e);"
+        # DEEP walk (hibob renders the form in shadow DOM) collecting EVERY clickable's text —
+        # then the LLM decides which one uploads a resume (principle + example, no regex list of
+        # button labels: the next tenant says 'Attach CV' in another language and a list breaks).
+        cands_json = await page.evaluate(
+            "() => { const all=[]; const walk=(root)=>{ for(const e of root.querySelectorAll('*')){ all.push(e);"
             "   if(e.shadowRoot) walk(e.shadowRoot); } }; walk(document);"
-            " const el=all.find(e=>{ if(!e.matches('button,a,[role=button]')) return false;"
+            " const out=[]; for(const e of all){ if(!e.matches||!e.matches('button,a,[role=button],label')) continue;"
+            "   const r=e.getBoundingClientRect(); if(r.width<8||r.height<8) continue;"
+            "   const t=(e.innerText||e.getAttribute('aria-label')||'').trim().replace(/\\s+/g,' ').slice(0,48);"
+            "   if(t) out.push(t); }"
+            " return JSON.stringify([...new Set(out)].slice(0,40)); }"
+        )
+        import json as _jj
+
+        texts = _jj.loads(cands_json or "[]")
+        chosen = ""
+        if texts:
+            with contextlib.suppress(Exception):
+                import oa_llm as _oa
+                from browser_use.llm.messages import UserMessage as _UM
+                from vision_verify import _vlm as _v
+
+                menu = "\n".join(f"{i}: {t}" for i, t in enumerate(texts))
+                q = (
+                    "A job application form needs the candidate's resume/CV uploaded. Which control "
+                    "label below opens the file picker for that? (for example 'Add file' under an "
+                    "'Upload your resume' heading — but judge by meaning, any language).\n"
+                    f"{menu}\n"
+                    'Reply STRICT JSON {"idx": <list number, or -1 if none>}.'
+                )
+                r = await _oa.resilient_vlm([_UM(content=q)], primary=_v())
+                import re as _re3
+
+                m3 = _re3.search(r'"idx"\s*:\s*(-?\d+)', str(getattr(r, "completion", r) or ""))
+                i3 = int(m3.group(1)) if m3 else -1
+                if 0 <= i3 < len(texts):
+                    chosen = texts[i3]
+        if not chosen:
+            return False
+        find_btn = await page.evaluate(
+            "(want) => { const all=[]; const walk=(root)=>{ for(const e of root.querySelectorAll('*')){ all.push(e);"
+            "   if(e.shadowRoot) walk(e.shadowRoot); } }; walk(document);"
+            " const el=all.find(e=>{ if(!e.matches||!e.matches('button,a,[role=button],label')) return false;"
             "   const r=e.getBoundingClientRect(); if(r.width<8||r.height<8) return false;"
-            "   return rx.test((e.innerText||e.getAttribute('aria-label')||'').trim());});"
+            "   return (e.innerText||e.getAttribute('aria-label')||'').trim().replace(/\\s+/g,' ').slice(0,48)===want;});"
             " if(!el) return ''; el.scrollIntoView({block:'center'}); const r=el.getBoundingClientRect();"
-            " return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2}); }"
+            " return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2}); }",
+            chosen,
         )
         if not find_btn:
             return False
