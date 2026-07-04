@@ -69,27 +69,34 @@ _ENUM_JS = r"""
       (check[g] = check[g] || { opts: [], el }).opts.push(labFor(el) || el.value); continue; }
     if (ty === 'file') { push(el.id || el.name, labFor(el) || 'Resume', 'input_file', 'file', null, req); continue; }
     if (tag === 'textarea') { push(el.id || el.name, labFor(el), 'textarea', 'open_ended', null, req); continue; }
-    if (el.getAttribute && el.getAttribute('role') === 'combobox') {
-      let lab = labFor(el);
-      // SELF-LABEL guard: a custom select often exposes its own display text ('Select',
-      // 'Search', an error hint) as its nearest label — the QUESTION lives on an ancestor
-      // (rippling: mapper got label='Select' -> no value -> required select left empty).
-      // Identity comparison only, then climb for the first line that is not the widget's own.
-      // 'own' = the widget's self-text: innerText for button-style, PLACEHOLDER for input-style
-      // (rippling's combobox is an <input placeholder='Select...'> — innerText is empty and the
-      // placeholder is exactly what labFor resolved to, so the guard never fired on it).
-      const own = clean(el.innerText) || clean(el.placeholder) || clean(el.value) || '';
-      if (!lab || lab === own || (own && (own.startsWith(lab) || lab.startsWith(own)))) {
-        let p = el.parentElement, h = 0;
-        outer: while (p && h++ < 5) {
-          for (const line of (p.innerText || '').split('\n')) {
-            const t = clean(line);
-            if (t && t.length > 1 && t.length < 160 && t !== own && t !== lab && !own.includes(t)) { lab = t; break outer; }
-          }
-          p = p.parentElement;
+    // SELF-LABEL guard: a custom select often exposes its own display text ('Select', 'Search',
+    // an error hint) as its nearest label — the QUESTION lives on an ancestor (rippling: mapper
+    // got label='Select' -> no value -> required select left empty). Identity comparison only,
+    // then climb for the first line that is not the widget's own. 'own' = innerText for
+    // button-style, PLACEHOLDER for input-style widgets.
+    const questionLabel = (e, lab) => {
+      const own = clean(e.innerText) || clean(e.placeholder) || clean(e.value) || '';
+      if (lab && lab !== own && !(own && (own.startsWith(lab) || lab.startsWith(own)))) return lab;
+      let p = e.parentElement, h = 0;
+      while (p && h++ < 5) {
+        for (const line of (p.innerText || '').split('\n')) {
+          const t = clean(line);
+          if (t && t.length > 1 && t.length < 160 && t !== own && t !== lab && !own.includes(t)) return t;
         }
+        p = p.parentElement;
       }
-      push(el.id || el.getAttribute('name'), lab, 'combobox', 'select', [], req); continue;
+      return lab;
+    };
+    if (el.getAttribute && el.getAttribute('role') === 'combobox') {
+      push(el.id || el.getAttribute('name'), questionLabel(el, labFor(el)), 'combobox', 'select', [], req); continue;
+    }
+    // combo-ISH inputs (rippling's hub-location: an <input placeholder='Select'> with dropdown
+    // ARIA but no role=combobox) — STRUCTURAL signals only, so a plain text input whose
+    // placeholder IS its true label (breezy 'Full Name') is never touched.
+    const comboish = tag === 'input' && (el.getAttribute('aria-haspopup') || el.getAttribute('aria-expanded') !== null
+      || el.getAttribute('aria-autocomplete') || el.readOnly || el.closest('[role=combobox],[aria-haspopup=listbox]'));
+    if (comboish) {
+      push(el.id || el.name, questionLabel(el, labFor(el)), 'combobox', 'select', [], req); continue;
     }
     push(el.id || el.name, labFor(el), ty || 'text', 'input_text', null, req);
   }
