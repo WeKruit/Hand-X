@@ -496,6 +496,22 @@ async def complete(
                 if seen:
                     verdict["visually_unanswered"] = seen
                     print(f"   [complete] VISION disagrees — looks unanswered: {seen[:5]}")
+                    # CLOSE THE LOOP: the VLM is our 'really filled?' judge — when it flags a field
+                    # the DOM audit thought was fine, that is a WRONG-VALUE signal (rippling's
+                    # CV-parse clobbered a correct email with a garbage partial AFTER we filled and
+                    # verified). Re-fill exactly those labels, then re-ask vision ONCE. The audit
+                    # alone is blind to wrong-but-non-empty; this is the fix for the wrong-value class.
+                    if llm is not None:
+                        with contextlib.suppress(Exception):
+                            fixed = await retry_missing(session, page, profile, resume, llm, seen)
+                            if fixed:
+                                verdict["revalued"] = fixed
+                                seen2 = await _vlm_unanswered_required(session)
+                                with contextlib.suppress(Exception):
+                                    if seen2:
+                                        seen2 = json.loads(await page.evaluate(_NEAR_FIELD_FILTER_JS % json.dumps(seen2)))
+                                verdict["visually_unanswered"] = seen2 or []
+                                print(f"   [complete] revalued {fixed} field(s); vision now: {(seen2 or [])[:5]}")
         if verdict["missing_required"] or verdict["sections_skipped"] or verdict.get("visually_unanswered"):
             verdict["complete"] = False
     return verdict
