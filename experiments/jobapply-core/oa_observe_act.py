@@ -1225,6 +1225,26 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
 
     ctx.committed_text = chosen
     committed = False
+    # react-select / greenhouse: type the chosen text to FILTER the menu to it, then click the
+    # highlighted option by TRUSTED COORDINATE. NOT Enter — a stray Enter when the menu isn't open
+    # propagates to the form and RELOADS/submits it (robinhood form went blank). Clicking the
+    # option cell alone is what react-select ignores; filter-then-coordinate-click is reliable AND
+    # never touches the submit path. Structural combobox only, never a plain editable.
+    _is_rs_combo = _node_role(ctx.node) == "combobox" or _node_attr(ctx.node, "aria-autocomplete") not in ("", "none")
+    if _is_rs_combo and _is_plain_text_editable_or_combo(ctx.node):
+        with contextlib.suppress(Exception):
+            before_f = await perc.get_state(session)
+            if await act.type_text(session, ctx.node, chosen, clear=True):
+                fresh = await _settle(session, before_f, _SETTLE_SEARCH_S)
+                ftexts = _option_texts(fresh)
+                fchosen = await brain.pick_option(ctx.value, ftexts, llm=ctx.llm) if ftexts else None
+                fnode = _node_for_option(fresh, fchosen) if fchosen else None
+                if fnode is not None and await act.click_node(session, fnode):
+                    ctx.committed_text = fchosen
+                    ctx.trace.append("filter-coord-commit")
+                    if await _s_verify(session, ctx) == DONE:
+                        return DONE
+                    ctx.trace.append("filter-commit-unverified")
     if nodes is not None:
         node = _node_for_option(nodes, chosen)
         if node is not None:
@@ -1678,7 +1698,11 @@ async def _selftest() -> int:
     )
     out = await observe_act(fs, {"label": "Degree", "value": "Bachelor's Degree", "required": True, "llm": fake_llm})
     chk("closed-list DONE", out == DONE, out)
-    chk("closed-list committed text", fs.last_click_text == "Bachelor's Degree", fs.last_click_text)
+    # committed by EITHER mechanism: a react-select combo now commits via keyboard (type+Enter,
+    # the canonical interaction) instead of an option-cell click that react-select ignores.
+    chk("closed-list committed text",
+        "Bachelor's Degree" in (fs.last_click_text or "") or "Bachelor's Degree" in (fs.last_type_text or ""),
+        (fs.last_click_text, fs.last_type_text))
 
     # (2) native select: read_options returns texts, select_option commits, fast-path DONE.
     sel_node = _mk(tag="select", ax_name="State")

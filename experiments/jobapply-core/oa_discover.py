@@ -206,6 +206,11 @@ def _lnorm(s: str) -> str:
     return "".join(ch for ch in str(s).lower() if ch.isalnum())
 
 
+def _lnorm2(s: str) -> str:
+    """lowercase, punctuation -> spaces (preserves word boundaries for token-overlap dedup)."""
+    return "".join(ch if ch.isalnum() else " " for ch in str(s).lower())
+
+
 async def discover_fields_visual(session: Any, dom_fields: list[eng.FormField]) -> list[eng.FormField]:
     """Fields VISION sees that the DOM enum missed. [] on any failure (never blocks the run)."""
     try:
@@ -256,6 +261,11 @@ async def discover_fields_visual(session: Any, dom_fields: list[eng.FormField]) 
             m = re.search(r"\[.*\]", raw, re.S)
         rows = json.loads(m.group(0)) if m else []
         seen = {_lnorm(f.label) for f in dom_fields} | {_lnorm(f.name) for f in dom_fields}
+        # token sets of DOM labels for overlap dedup — the DOM combobox (now discoverable via the
+        # width-gate fix) and the VLM twin describe the SAME question in different words; a stale
+        # twin false-DONEs committing the label as its value (robinhood). Exact/containment missed
+        # them because the two readers phrase long questions differently.
+        dom_toks = [t for t in ({w for w in _lnorm2(f.label).split() if len(w) > 3} for f in dom_fields) if len(t) >= 2]
         extra: list[eng.FormField] = []
         for r in rows:
             if not isinstance(r, dict):
@@ -267,6 +277,11 @@ async def discover_fields_visual(session: Any, dom_fields: list[eng.FormField]) 
             # skip anything the DOM enum already carries (containment both ways — labels get
             # truncated/decorated differently between the two readers)
             if any(k in s or s in k for s in seen if len(s) >= 4):
+                continue
+            # token-overlap dedup: a VLM label sharing >=60% of its words with a DOM field's label
+            # is the SAME question (drop the twin, keep the DOM field the engine can actually fill)
+            vtok = {w for w in _lnorm2(label).split() if len(w) > 3}
+            if vtok and any(len(vtok & dt) >= max(2, int(len(vtok) * 0.6)) for dt in dom_toks):
                 continue
             typ, source = _KIND_MAP.get(str(r.get("kind") or "text").lower(), ("text", "input_text"))
             opts = [str(o)[:80] for o in (r.get("options") or [])][:30] or None
