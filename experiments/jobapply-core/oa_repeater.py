@@ -166,6 +166,43 @@ async def _visual_click_add(session: Any, section_name: str, llm: Any) -> bool:
         }
         if not cands:
             return False
+        # TEXT-FIRST: most Add affordances carry text ('Add Position', '+ Add Education') — an
+        # LLM pick over candidate TEXTS is far more reliable than a VLM mark-pick, which chose
+        # 'Use My Indeed Resume' as the Work Experience Add on breezy. The visual mark-pick
+        # below stays as the fallback for icon-only affordances.
+        texted: list[tuple[int, str]] = []
+        for bid, n in cands.items():
+            t = ""
+            with contextlib.suppress(Exception):
+                t = (n.get_all_children_text(max_depth=2) or "").strip()
+            t = " ".join(t.split())[:48]
+            if t:
+                texted.append((bid, t))
+        if texted:
+            with contextlib.suppress(Exception):
+                from browser_use.llm.messages import UserMessage as _UM
+
+                menu = "\n".join(f"{i}: {t}" for i, (_bid, t) in enumerate(texted))
+                q = (
+                    f"A job application form has a '{section_name}' section. Which control label "
+                    f"below ADDS a new entry/row to THAT section?\n{menu}\n"
+                    'Reply STRICT JSON {"idx": <list number, or -1 if none clearly does>}.'
+                )
+                r = await _oa.resilient_vlm([_UM(content=q)], primary=_vlm())
+                raw_t = str(getattr(r, "completion", r) or "")
+                import re as _re2
+
+                mt = _re2.search(r'"idx"\s*:\s*(-?\d+)', raw_t)
+                ti = int(mt.group(1)) if mt else -1
+                if 0 <= ti < len(texted):
+                    node = cands.get(texted[ti][0])
+                    if node is not None:
+                        print(f"   [repeater] text-add '{section_name}': picked {texted[ti][1]!r}")
+                        with contextlib.suppress(Exception):
+                            await session.cdp_client.send.DOM.scrollIntoViewIfNeeded(
+                                params={"backendNodeId": int(node.backend_node_id)}
+                            )
+                        return await act.click_node(session, node)
         png = await _oa.bounded_screenshot(session)
         if png is None:
             return False

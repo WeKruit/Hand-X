@@ -312,8 +312,39 @@ async def retry_missing(session: Any, page: Any, profile: dict, resume: str | No
     return refilled
 
 
+async def _orphan_pass(session: Any, page: Any, profile: dict, llm: Any, filled_names: set) -> int:
+    """Fill fields that APPEARED AFTER the flat pass ran (e.g. breezy's resume-parse creates a
+    Work History row whose Company input the parser left empty — flat discovery never saw it).
+    Re-discover, map the never-seen fields against the profile, run the normal engine on each.
+    Returns how many were filled. Never raises."""
+    n = 0
+    with contextlib.suppress(Exception):
+        import oa_observe_act as oa
+        from oa_discover import discover_fields
+        from oa_singlepage import _field_dict
+
+        orphans = [f for f in await discover_fields(page) if str(f.name) not in filled_names]
+        print(f"   [complete] orphan candidates: {[str(f.name)[:24] for f in orphans][:8]}")
+        if not orphans:
+            return 0
+        mapping = await eng.map_fields(orphans, profile, llm=llm) if llm is not None else {}
+        for f in orphans:
+            val = (mapping or {}).get(f.name) or ""
+            if not val:
+                continue
+            with contextlib.suppress(Exception):
+                fd = _field_dict(f, val, resume=None, llm=llm, adapter=None, page=page)
+                out = await oa.observe_act(session, fd)
+                if str(getattr(out, "outcome", out)).upper().find("DONE") >= 0:
+                    n += 1
+        if n:
+            print(f"   [complete] orphan pass filled {n} late-appearing field(s)")
+    return n
+
+
 async def complete(
-    session: Any, page: Any, profile: dict, resume: str | None, *, allow_agent: bool, llm: Any = None, planner_keys: list | None = None
+    session: Any, page: Any, profile: dict, resume: str | None, *, allow_agent: bool, llm: Any = None, planner_keys: list | None = None,
+    filled_names: set | None = None,
 ) -> dict:
     """Audit the form for unfilled repeater sections + empty required fields; fill repeaters via the
     proven agent_fill_section and RE-FILL wiped required fields (retry). Returns
@@ -324,6 +355,8 @@ async def complete(
     with contextlib.suppress(Exception):
         if resume:  # button-triggered resume upload (hibob/bamboohr 'Add file' has no <input> yet)
             await upload_via_button(session, page, resume)
+        if filled_names:  # fields that appeared AFTER the flat pass (resume-parse rows etc.)
+            await _orphan_pass(session, page, profile, llm, filled_names)
         a = await audit(session, page)
         verdict["missing_required"] = a.get("emptyReq", [])
         # RETRY: re-fill required fields a React re-render wiped after commit (workable class),

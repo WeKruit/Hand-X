@@ -594,6 +594,8 @@ async def _fill_form(
             result["completeness"] = await oa_complete.complete(
                 session, page, profile, resume, allow_agent=os.environ.get("OA_COMPLETE_AGENT") == "1",
                 llm=llm, planner_keys=_pk,
+                # per_field is the LOCAL fill ledger — result['results'] is only assembled later
+                filled_names={str(r.name) for r in per_field},
             )
             with contextlib.suppress(Exception):
                 page = await session.must_get_current_page()
