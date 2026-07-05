@@ -983,8 +983,11 @@ async def _visual_commit(session: Any, ctx: Ctx, candidates: list[Any]) -> bool:
     # Reject BEFORE clicking (the click would just leave a menu hanging open). A CHOICE group is
     # exempt: a lone radio/checkbox legitimately carries the question as its accessible label and
     # self-click IS the commit (offline radio cases).
-    _nlab = " ".join((ctx.label or "").split()).lower()
-    _nch = " ".join(_chosen_text.split()).lower()
+    # strip the trailing required-marker: the on-page label renders 'What is your notice
+    # period?*' while discovery's label has no star — the one-char tail let the reject slip
+    # (airwallex mega/38 committed the question WITH the star as its 'value').
+    _nlab = " ".join((ctx.label or "").split()).lower().rstrip("*: ")
+    _nch = " ".join(_chosen_text.split()).lower().rstrip("*: ")
     if _nlab and _nch == _nlab and classify_intrinsic(target) not in ("INTRINSIC_RADIO", "INTRINSIC_CHECKBOX"):
         ctx.trace.append("visual-choice:self-label-reject")
         return False
@@ -1513,6 +1516,13 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
     # exhausted, no overlay anywhere.
     if _is_plain_text_editable(ctx.node) and ctx.nature == "FREE_TEXT":
         ctx.trace.append("no-overlay->text(free_text_ok)")
+        return await _s_text(session, ctx)
+    # MISCLASSIFIED-SELECT RECOVERY (airwallex mega/38 notice-period / hear-about): a PLAIN
+    # non-combo text input the VLM called a dropdown mounted ZERO options across the S3 filter
+    # AND every S4 variant — it is a text field. Type the value and verify like one; the verify
+    # oracle still guards a real-but-blind widget (wrong read-back -> revalue/escalate as usual).
+    if _is_plain_text_editable(ctx.node):
+        ctx.trace.append("misclassified-select->text")
         return await _s_text(session, ctx)
     # GEOCOMPLETE fill-only (the proven ats_lever._location trick): a React location autocomplete returns
     # no usable suggestion for a synthetic search, but fill-only only needs the value VISIBLY present +
