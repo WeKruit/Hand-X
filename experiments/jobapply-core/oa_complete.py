@@ -130,8 +130,20 @@ _AUDIT_JS = r"""() => {
     if (!reqd) continue;
     const active = c.getAttribute('aria-activedescendant');
     const shown = norm(c.innerText || c.value || (c.querySelector('*')||{}).innerText || '');
-    const placeholder = !shown || /^(select|choose|--|pick|choisir|elegir|wahlen)/i.test((shown||'').normalize('NFD').replace(/[\u0300-\u036f]/g,''));
-    if (!active && placeholder) empty.push(qlabel(q||c));
+    const placeholder = !shown || /^(select|choose|--|pick|choisir|elegir|wahlen|start typing|search)/i.test((shown||'').normalize('NFD').replace(/[\u0300-\u036f]/g,''));
+    // sibling rendered-display (duolingo mega3/22-25: the geocomplete keeps the committed text
+    // beside a role=combobox input whose own value stays empty — same false flag the plain-input
+    // branch already guards against)
+    let sib = false, sp = c.parentElement;
+    for (let h = 0; h < 2 && sp && !sib; h++, sp = sp.parentElement) {
+      for (const el of sp.querySelectorAll('[class*="single-value"],[class*="singleValue"],span,div')) {
+        if (el === c || el.contains(c) || (el.querySelector && el.querySelector('input,select,textarea,[role=combobox]'))) continue;
+        const t2 = norm(el.innerText||'');
+        if (t2 && t2.length <= 80 && !/[*\u2731]$/.test(t2)
+            && !/^(select|choose|--|pick|start typing|search)/i.test(t2.normalize('NFD').replace(/[\u0300-\u036f]/g,''))) { sib = true; break; }
+      }
+    }
+    if (!active && placeholder && !sib) empty.push(qlabel(q||c));
   }
   // (c) BUTTON-PILL questions (ashby 'Yes'/'No' <button>s — no input, no ARIA group): a
   //     '*'-marked question block holding 2-12 SHORT-text buttons none of which reads
@@ -151,6 +163,7 @@ _AUDIT_JS = r"""() => {
     }
     if (!box || seenPill.has(box)) continue;
     seenPill.add(box);
+    if (box.querySelector('input[type=file]')) continue;  // upload widget (duolingo: Dropbox/Drive/Enter-manually buttons)
     const qtxt = norm(box.innerText).slice(0,250) + ' ' + norm((box.parentElement||{}).innerText||'').slice(0,250);
     if (!/[*✱](?!\s*indicates)/i.test(qtxt)) continue;
     const pills = [...box.querySelectorAll(btnSel)].filter(x => vis(x) && norm(x.innerText||'').length && norm(x.innerText||'').length <= 30);
