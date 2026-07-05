@@ -1498,8 +1498,14 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
     # no usable suggestion for a synthetic search, but fill-only only needs the value VISIBLY present +
     # read-back to pass — we do NOT need a geocode pick. Find the text input inside the location card and
     # SET its value via the native setter + input/change (cdp_set_text_in_container) so React keeps it.
+    # ONLY for a genuine SEARCH typeahead on a plain input: a BOOLEAN/SELECT that exhausted its
+    # search rungs has OPTIONS that must be SELECTED — writing the text into its input is a fake
+    # commit the dom read-back then blesses (anthropic 'AI Policy' got .value='I acknowledge',
+    # vision+crop both saw the dropdown still unanswered; robinhood office location same class
+    # on the react-select filter box). Those now fall to search-exhausted -> escalate (HITL).
     container = ctx.card if ctx.card is not None else ctx.node
-    if container is not None:
+    _comboish = _node_role(ctx.node) == "combobox" or _node_attr(ctx.node, "aria-autocomplete") not in ("", "none")
+    if container is not None and ctx.nature == "SEARCH" and not _comboish:
         set_val = await cdpa.cdp_set_text_in_container(session, container, ctx.value)
         if set_val:
             ctx.committed_text = ctx.value
