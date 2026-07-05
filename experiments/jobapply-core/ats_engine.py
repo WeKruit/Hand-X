@@ -781,6 +781,25 @@ async def map_fields(
         "linkedin url": profile.get("linkedin"),
         "linkedin profile": profile.get("linkedin"),
     }
+    # CANONICAL-PROJECTION extension (doordash mega3/21: bare 'School' label mapped BLANK by
+    # the batch prompt, education fields carry no required attr so the focused backfill never
+    # ran, and the section held every doordash run at incomplete). Same projection philosophy:
+    # these labels ARE profile facts with renamed headers.
+    _edu = (profile.get("education") or [{}])[0]
+    _exp = (profile.get("experience") or [{}])[0]
+    _ident.update({
+        "school": _edu.get("school"),
+        "university": _edu.get("school"),
+        "degree": _edu.get("degree"),
+        "field of study": _edu.get("field_of_study"),
+        "discipline": _edu.get("field_of_study"),
+        "company": _exp.get("company"),
+        "employer": _exp.get("company"),
+        "current employer": _exp.get("company"),
+        "current company": _exp.get("company"),
+        "job title": _exp.get("title"),
+        "current title": _exp.get("title"),
+    })
     for name, f in out.items():
         lab = _lab_by_name.get(name, "")
         # strip locale/required suffixes: 'last name * requis', 'e-mail*'
