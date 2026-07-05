@@ -581,9 +581,48 @@ def locate_grouped_widget(state: OAState, label_text: str) -> tuple[Any, Any] | 
             continue
         if best is None or score > best[0]:
             best = (score, rep, card)
-    if best is None:
-        return None
-    return (best[1], best[2])
+    if best is not None:
+        return (best[1], best[2])
+    # BUTTON-PILL pass (notion/ashby mega/45-46): the question's options are literal <button>s —
+    # not fillable controls — so the scan above sees NOTHING and locate reported no-control; the
+    # pills stayed empty on every notion/airwallex form. Find the card whose text names the
+    # question and which holds 2-6 SHORT-text buttons (the Yes/No pills); return (pill, card) so
+    # the choice lane's cdp_choose_option (button-aware) commits scoped to that card.
+    for node in state.selector_map.values():
+        if not node_is_visible(node):
+            continue
+        attrs = getattr(node, "attributes", None) or {}
+        if _tag(node) != "button" and (attrs.get("role") or "").lower() != "button":
+            continue
+        txt = _all_children_text(node).strip()
+        if not txt or len(txt) > 30:
+            continue
+        card = _card_wrapper(node, target)
+        if card is None:
+            continue
+        pills = [
+            n for n in state.selector_map.values()
+            if node_is_visible(n)
+            and (_tag(n) == "button" or ((getattr(n, "attributes", None) or {}).get("role") or "").lower() == "button")
+            and _is_descendant(n, card)
+            and 0 < len(_all_children_text(n).strip()) <= 30
+        ]
+        if 2 <= len(pills) <= 6:
+            return (node, card)
+    return None
+
+
+def _is_descendant(node: Any, ancestor: Any) -> bool:
+    """Structural containment via parent walk (bounded)."""
+    aid = getattr(ancestor, "backend_node_id", None)
+    p = node
+    for _ in range(12):
+        if p is None:
+            return False
+        if getattr(p, "backend_node_id", None) == aid:
+            return True
+        p = getattr(p, "parent_node", None) or getattr(p, "parent", None)
+    return False
 
 
 def _representative_control(card: Any) -> Any | None:

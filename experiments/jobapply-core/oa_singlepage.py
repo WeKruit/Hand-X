@@ -767,6 +767,7 @@ async def _fill_form(
                 "outcome": r.outcome,
                 "nature": r.nature,
                 "committed": r.committed,
+                "value": r.value,
                 "trace": r.trace,
             }
             for r in per_field
