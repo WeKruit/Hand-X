@@ -1531,6 +1531,13 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
                             ctx.committed_text = fchosen
                             ctx.trace.append("filter-retry-commit")
                             return await _s_verify(session, ctx)
+        # MISCLASSIFIED-SELECT recovery on THIS abandon path too (reddit mega3/61-62,
+        # greenhouse API: 'How did you hear' is input_text — the VLM called it a dropdown,
+        # the filter typed into a menu-less box, and this branch escalated without ever
+        # trying the S4-exhaustion text recovery).
+        if _is_plain_text_editable(ctx.node):
+            ctx.trace.append("misclassified-select->text")
+            return await _s_text(session, ctx)
         return await _s_other_guard(session, ctx)
 
     ctx.committed_text = chosen
