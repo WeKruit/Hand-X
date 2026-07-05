@@ -465,9 +465,18 @@ async def _vlm_unanswered_required(session: Any) -> list[str]:
             with contextlib.suppress(Exception):
                 res = await _oa.resilient_vlm([msg], primary=_vlm())
                 for lab in _parse_str_list(str(getattr(res, "completion", res) or "[]")):
-                    if lab not in out:
-                        out.append(lab)
-        return out[:15]
+                    out.append(lab)
+        # NORMALIZED dedup: bands overlap 120px so the same question surfaces twice with
+        # whitespace/invisible-char drift ('Can you legally work in Europe?*' flagged twice,
+        # mega/28) — exact-string `in` missed it. Key on collapsed lowercase.
+        seen_keys: set = set()
+        deduped: list[str] = []
+        for lab in out:
+            k = " ".join(str(lab).split()).lower()
+            if k and k not in seen_keys:
+                seen_keys.add(k)
+                deduped.append(lab)
+        return deduped[:15]
     except Exception:
         return []
 
