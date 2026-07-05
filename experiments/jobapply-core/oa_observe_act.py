@@ -1302,7 +1302,13 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
     # pre-open — react-select exposes aria-owns/aria-controls only once the menu is OPEN, and
     # cdp_choose_aria_option SELF-OPENS then follows them. Gating on the closed-state attribute is
     # why the first cut never fired (aria-direct hits = 0). Any combobox-kind input tries it.
-    if normalize_kind(ctx.kind) == "SELECT" and _is_plain_text_editable_or_combo(ctx.node):
+    # BOOLEAN/CLOSED_LIST widening (watershed mega/59): an ashby Yes/No dropdown classifies as
+    # nature BOOLEAN with a text input — the SELECT-only gate skipped every direct rung and the
+    # field died in blind click+delta (visual clicked self x3 -> commit-cap). A combo-shaped
+    # node with an options-bearing NATURE is a dropdown regardless of the kind label.
+    if (
+        normalize_kind(ctx.kind) == "SELECT" or ctx.nature in ("BOOLEAN", "CLOSED_LIST")
+    ) and _is_plain_text_editable_or_combo(ctx.node):
         with contextlib.suppress(Exception):
             got = await cdpa.cdp_choose_aria_option(session, ctx.node, ctx.value)
             if got:
@@ -1330,7 +1336,10 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
         # a keystroke filters it — the bare click mounts no delta. When the adapter told us this is a
         # SELECT (ctx.kind), TYPE the value to filter, settle, and re-read the delta BEFORE falling to
         # the typeahead search. The control must be text-editable to accept a filter keystroke.
-        if normalize_kind(ctx.kind) == "SELECT" and _is_plain_text_editable_or_combo(ctx.node):
+        # (same BOOLEAN/CLOSED_LIST widening as the aria rung — watershed mega/59)
+        if (
+            normalize_kind(ctx.kind) == "SELECT" or ctx.nature in ("BOOLEAN", "CLOSED_LIST")
+        ) and _is_plain_text_editable_or_combo(ctx.node):
             if await _probe_would_clobber(session, ctx):
                 alt = await _rebind_empty_in_card(session, ctx)
                 if alt is None:
