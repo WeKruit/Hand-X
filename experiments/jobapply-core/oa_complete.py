@@ -751,8 +751,16 @@ async def complete(
                     f"notice period: {profile.get('notice_period','2 weeks')}; "
                     f"earliest start: {profile.get('available_start_date','')}."
                 )
+                # EXACT SCOPE: 'answer EVERY remaining required question' let the agent freelance
+                # into OPTIONAL demographics it should never touch (scaleai mega/35: optional
+                # Disability Status — engine honestly SKIPped it — agent picked 'Yes, I have a
+                # disability', the first option). The audit's own missing_required list IS the
+                # scope; everything else is off-limits.
+                _scope = json.dumps([str(x)[:90] for x in verdict["missing_required"][:12]])
                 instr = (
-                    f"Answer EVERY remaining required question on this page. {_facts} "
+                    f"Answer ONLY these required questions, exactly this list and NOTHING else: "
+                    f"{_scope}. Every other field on the page is off-limits — especially optional "
+                    f"demographic questions and fields that already show a value. {_facts} "
                     "For yes/no eligibility thresholds (18 or older -> Yes; meets a stated "
                     "years-of-experience threshold -> Yes). POLICY ACKNOWLEDGEMENTS (a question asking "
                     "you to confirm you read/understood/agree to a policy or guideline) -> the "
