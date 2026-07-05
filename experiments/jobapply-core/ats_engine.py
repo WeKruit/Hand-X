@@ -630,7 +630,10 @@ run record shows which answers were assumed rather than known.
 - A REQUIRED work-authorization or visa-sponsorship question is NEVER left blank: resolve the \
 role's location from the job context (when the context names none, assume the candidate's own \
 country) and answer from work_authorization / requires_sponsorship ("authorized to work in the \
-location where this role is based?" + US role + US-authorized candidate -> "Yes").
+location where this role is based?" + US role + US-authorized candidate -> "Yes"). The SAME \
+resolution applies to residence/work-permit questions, in any language: a Paris role asking \
+"besoin d'un titre de séjour pour travailler ?" + a US-only-authorized candidate -> "Oui" \
+(needs the permit); a US role + US-authorized -> "No".
 - ADJACENT-SKILL INFERENCE (user-sanctioned): a years-of-experience question about a skill \
 implied by the candidate's stack is answered from the implying skill's tenure, never 0 \
 (e.g. React on the profile implies TypeScript — answer with the React years). A skill with \

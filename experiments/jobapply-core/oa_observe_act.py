@@ -1610,6 +1610,17 @@ async def _s_text_guard(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S_TEXT_GUARD")
+    # RANGE SLIDER (lydia mega/72: years-of-experience slider sat at its default 1 vs the
+    # profile's 7 — type_text no-ops on a range input and every audit is value-blind here).
+    # Deterministic: numeric part of the value, clamped to min/max, native setter + events.
+    if _node_tag(ctx.node) == "input" and (_node_attr(ctx.node, "type") or "").lower() == "range":
+        got = await cdpa.cdp_set_range(session, ctx.node, ctx.value)
+        if got:
+            ctx.committed_text = got
+            ctx.trace.append(f"range-set:{got}")
+            return await _s_verify(session, ctx)
+        ctx.trace.append("range-set-failed")
+        return ESCALATE if ctx.required else SKIP
     # Defend a map mis-tag: if the element is actually a combobox, route to search, never type.
     if not _is_plain_text_editable(ctx.node):
         ctx.trace.append("not-plain-text->search")

@@ -60,7 +60,8 @@ _AUDIT_JS = r"""() => {
   for (const e of document.querySelectorAll('input,select,textarea')) {
     if (!vis(e) || e.type==='hidden' || e.type==='file') continue;
     if (e.tagName==='SELECT') { const o=e.options[e.selectedIndex];
-      const ph = !o || o.value==='' || /^(select|choose|--)/i.test(norm(o.text));
+      const fold = x => (x||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+      const ph = !o || o.value==='' || /^(select|choose|--|pick|choisir|elegir|wahlen)/i.test(fold(norm(o.text)));
       if (isReq(e) && ph) empty.push(labelText(e)||e.name||'select'); continue; }
     if (e.type==='radio' || e.type==='checkbox') continue;  // groups handled below
     if (isReq(e) && !(e.value||'').trim()) empty.push(labelText(e)||e.name||'?');
@@ -109,7 +110,7 @@ _AUDIT_JS = r"""() => {
     if (!reqd) continue;
     const active = c.getAttribute('aria-activedescendant');
     const shown = norm(c.innerText || c.value || (c.querySelector('*')||{}).innerText || '');
-    const placeholder = !shown || /^(select|choose|--|pick)/i.test(shown);
+    const placeholder = !shown || /^(select|choose|--|pick|choisir|elegir|wahlen)/i.test((shown||'').normalize('NFD').replace(/[\u0300-\u036f]/g,''));
     if (!active && placeholder) empty.push(qlabel(q||c));
   }
   // (b) custom radio/checkbox groups via [role=radiogroup]/[role=group] with no aria-checked member,

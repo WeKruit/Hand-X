@@ -700,6 +700,45 @@ async def cdp_set_text_in_container(session: Any, container_node: Any, value: st
         return ""
 
 
+_SET_RANGE_JS = r"""
+function(want){
+  const el = this;
+  if(!(el.tagName==='INPUT' && (el.type||'').toLowerCase()==='range')) return "";
+  const n = parseFloat(String(want).replace(/[^0-9.\-]/g,''));
+  if(!isFinite(n)) return "";
+  const min = parseFloat(el.min||'0'), max = parseFloat(el.max||'100');
+  const v = Math.min(isFinite(max)?max:n, Math.max(isFinite(min)?min:n, n));
+  const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');
+  d.set.call(el, String(v));
+  el.dispatchEvent(new Event('input',{bubbles:true}));
+  el.dispatchEvent(new Event('change',{bubbles:true}));
+  return String(el.value);
+}
+"""
+
+
+async def cdp_set_range(session: Any, node: Any, value: str) -> str:
+    """Commit an <input type=range> slider: parse the numeric part of ``value``, clamp to
+    min/max, set via the native setter + input/change (React keeps it). Returns the committed
+    number as a string, or "" (not a range input / no numeric). teamtailor/lydia years-of-
+    experience sliders sat at their default (1 vs the profile's 7) — audit-blind wrong-value."""
+
+    async def _do() -> str:
+        r = await _resolve(session, node)
+        if r is None:
+            return ""
+        cdp_session, session_id, object_id = r
+        got = await _call_on(cdp_session, session_id, object_id, _SET_RANGE_JS, args=[str(value)])
+        return str(got).strip() if got else ""
+
+    try:
+        return await asyncio.wait_for(_do(), timeout=CDP_ACTION_TIMEOUT)
+    except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041
+        return ""
+    except Exception:
+        return ""
+
+
 # --------------------------------------------------------------------------- #
 # PUBLIC: cdp_click — trusted Input.dispatchMouseEvent at the node center, JS-click fallback.
 # --------------------------------------------------------------------------- #
