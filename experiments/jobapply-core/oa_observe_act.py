@@ -1036,7 +1036,7 @@ async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -
             return await _s_verify(session, ctx)
         return await _s_other_guard(session, ctx)
     texts = [t for t, _ in group]
-    chosen = await brain.pick_option(ctx.value, texts, llm=ctx.llm)
+    chosen = await brain.pick_option(ctx.value, texts, llm=ctx.llm, label=ctx.label)
     node = dict(group).get(chosen) if chosen else None
     if not chosen or node is None:
         # The DOM group was found but the text-pick produced no usable option (Lever's styled-div
@@ -1150,7 +1150,7 @@ async def _s_native(session: Any, ctx: Ctx) -> Outcome:
     if not options:
         ctx.trace.append("native-no-options")
         return ESCALATE if ctx.required else SKIP
-    chosen = await brain.pick_option(ctx.value, options, llm=ctx.llm)
+    chosen = await brain.pick_option(ctx.value, options, llm=ctx.llm, label=ctx.label)
     if not chosen:
         return await _s_other_guard(session, ctx)
     ok = await act.select_option(session, ctx.node, chosen)
@@ -1253,7 +1253,7 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
     Long list -> bounded scroll-reread on no-match. Records committed_text."""
     if len(texts) >= _LIST_LONG:
         ctx.trace.append("long-list")
-    chosen = await brain.pick_option(ctx.value, texts, llm=ctx.llm)
+    chosen = await brain.pick_option(ctx.value, texts, llm=ctx.llm, label=ctx.label)
     if not chosen and nodes is not None and ctx.scroll_reads < SCROLL_CAP:
         # scroll the overlay one page and re-read (off-screen / virtualized, §3.5 / gap E)
         ctx.scroll_reads += 1
@@ -1281,7 +1281,7 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
             if await act.type_text(session, ctx.node, chosen, clear=True):
                 fresh = await _settle(session, before_f, _SETTLE_SEARCH_S)
                 ftexts = _option_texts(fresh)
-                fchosen = await brain.pick_option(ctx.value, ftexts, llm=ctx.llm) if ftexts else None
+                fchosen = await brain.pick_option(ctx.value, ftexts, llm=ctx.llm, label=ctx.label) if ftexts else None
                 fnode = _node_for_option(fresh, fchosen) if fchosen else None
                 if fnode is not None and await act.click_node(session, fnode):
                     ctx.committed_text = fchosen
@@ -1391,7 +1391,7 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
                     return await _s_multi_loop(session, ctx)
                 return await _s_cascade(session, ctx)
             continue  # this variant produced nothing — advance
-        chosen = await brain.pick_option(ctx.value, texts, llm=ctx.llm)
+        chosen = await brain.pick_option(ctx.value, texts, llm=ctx.llm, label=ctx.label)
         if not chosen:
             continue
         ctx.committed_text = chosen
@@ -1480,7 +1480,7 @@ async def _s_multi_loop(session: Any, ctx: Ctx) -> Outcome:
             continue
         cluster = await _settle(session, before, _SETTLE_SEARCH_S)
         texts = _option_texts(cluster)
-        chosen = await brain.pick_option(part, texts, llm=ctx.llm) if texts else None
+        chosen = await brain.pick_option(part, texts, llm=ctx.llm, label=ctx.label) if texts else None
         node = _node_for_option(cluster, chosen) if chosen else None
         if node is not None:
             await act.click_node(session, node)

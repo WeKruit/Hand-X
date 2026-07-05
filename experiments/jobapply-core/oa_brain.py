@@ -290,15 +290,16 @@ async def _variant_llm(value: str, *, llm: Any) -> list[str]:
 # --------------------------------------------------------------------------- #
 # 3. pick_option — reuse the memoised cheap text picker (§5 MATCH).
 # --------------------------------------------------------------------------- #
-async def pick_option(value: str, option_texts: list[str], *, llm: Any = None) -> str | None:
+async def pick_option(value: str, option_texts: list[str], *, llm: Any = None, label: str = "") -> str | None:
     """Best-matching option text for ``value`` from the READ option list, or ``None`` if none fit.
 
-    Thin pass-through to ``wd_repeaters._llm_pick`` — the proven, memoised-on-(value,options)
-    cheap structured picker (LLM-only, no substring/regex, no vision). Returns the EXACT option
-    string (so the caller can cross-check ``committed_text`` membership at verify, §6.1)."""
+    Thin pass-through to ``wd_repeaters._llm_pick`` — the proven, memoised-on-(value,options,label)
+    cheap structured picker (LLM-only, no substring/regex, no vision). ``label`` is the field's
+    QUESTION: without it identical option sets under different questions pick blindly (audit #1).
+    Returns the EXACT option string (so the caller can cross-check ``committed_text`` at verify, §6.1)."""
     if not option_texts:
         return None
-    return await _wr._llm_pick(llm, value, option_texts)
+    return await _wr._llm_pick(llm, value, option_texts, label)
 
 
 # --------------------------------------------------------------------------- #
@@ -348,7 +349,7 @@ async def verify(
             dom_val = await read_dom_value(session, node)
 
     if dom_val:
-        matched = await _dom_value_matches(value, dom_val, llm=llm)
+        matched = await _dom_value_matches(value, dom_val, llm=llm, label=label_text)
         if matched:
             return "CORRECT"  # free truth — no VLM spent (the whole point)
         return "WRONG"  # a definite, different non-blank value is in the control
@@ -361,20 +362,28 @@ async def verify(
     return route_verdict(verdict)
 
 
-async def _dom_value_matches(value: str, dom_value: str, *, llm: Any) -> bool:
+async def _dom_value_matches(value: str, dom_value: str, *, llm: Any, label: str = "") -> bool:
     """Does the read-back DOM ``dom_value`` mean the same as the wanted ``value``? LLM-only match
     (reuse the memoised ``_llm_pick`` over a 2-option set), with a deterministic exact-normal-equality
     short-circuit (NOT substring/regex — full normalized-string identity, which IS deterministic and
-    cheap). The picker is asked to choose between the read-back value and a sentinel; choosing the
-    read-back == "means the same"."""
+    cheap). ``label`` = the field's own question — used to REJECT a read-back that is actually the
+    field's LABEL/placeholder text leaked by the DOM reader (audit incident: verify blessed a label
+    as a committed value)."""
     nv, nd = _norm_lower(value), _norm_lower(dom_value)
+    # LABEL-LEAK GUARD (deterministic): the DOM reader sometimes returns the field's own question
+    # text as its 'value' (a container scan grabbing the label). That is never a real answer — a
+    # value equal to (or a leading chunk of) the label is WRONG, even if the LLM would call it a
+    # match. Only fires when the value we WANTED is not itself that text.
+    nl = _norm_lower(label)
+    if nl and nd and nv != nl and (nd == nl or (len(nl) > 12 and nl.startswith(nd)) or (len(nd) > 12 and nd.startswith(nl))):
+        return False
     if nv and nv == nd:
         return True  # exact normalized identity — deterministic, no LLM
     if llm is None:
         return False  # no matcher -> cannot affirm equivalence -> treat as WRONG (route to revalue)
     # LLM picker: which of {dom_value, "<no match>"} best matches the wanted value?
     sentinel = "— none of these —"
-    picked = await _wr._llm_pick(llm, value, [dom_value, sentinel])
+    picked = await _wr._llm_pick(llm, value, [dom_value, sentinel], label)
     return picked is not None and _norm_lower(picked) == nd
 
 

@@ -546,17 +546,20 @@ _PICK_CACHE: dict = {}  # (value, options) -> chosen text. The 5 language-profic
 # own ~3s LLM call (the 15s/field the user hit). Identical (value,options) -> ONE call, reused.
 
 
-async def _llm_pick(llm, value: str, options: list[str]) -> str | None:
+async def _llm_pick(llm, value: str, options: list[str], label: str = "") -> str | None:
     """The agent's 'which option' decision, made CHEAPLY by a text LLM over the READ options (no vision):
     pick the closest by meaning/abbreviation ('BS'->Bachelor's, 'Python'->nearest skill). Memoised on
-    (value, options) so repeated identical picks (language proficiencies) cost ONE LLM call, not N."""
+    (value, options, label) so repeated identical picks (language proficiencies) cost ONE LLM call, not N.
+    ``label`` = the field's QUESTION — without it '4' vs a satisfaction scale vs years-of-experience,
+    or 'United States' vs a dial-code list vs a residence-country list, are indistinguishable (the
+    audit's #1 gap: the picker chose blind among identical option sets)."""
     import contextlib
 
     if llm is None or not options:
         print(f"  [llm_pick] want={value!r} -> no llm ({llm is None}) / no options ({not options})", flush=True)
         return None
     options = options[:_MAX_PICK_OPTS]  # bound the prompt payload (see _MAX_PICK_OPTS)
-    ckey = (norm(value).lower(), tuple(options))
+    ckey = (norm(value).lower(), tuple(options), norm(label).lower())
     if ckey in _PICK_CACHE:
         return _PICK_CACHE[ckey]
     from pydantic import BaseModel
@@ -584,7 +587,7 @@ async def _llm_pick(llm, value: str, options: list[str]) -> str | None:
                     "EXACT option text from the list. Reply 'NONE' ONLY when every option is clearly "
                     "unrelated to the wanted value (a placeholder like 'Select One' never counts as a match)."
                 ),
-                UserMessage(content=f"wanted: {value!r}\noptions: {options}"),
+                UserMessage(content=(f"question: {label!r}\n" if label else "") + f"wanted: {value!r}\noptions: {options}"),
             ],
             output_format=_Pick,
             primary=llm,
