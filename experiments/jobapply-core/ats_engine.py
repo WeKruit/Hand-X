@@ -789,6 +789,37 @@ async def map_fields(
         if want and (f.value or "").strip() != str(want).strip():
             f.why = f"IDENTITY-DIRECT (mapper said {f.value!r})"
             f.value = str(want)
+    # FOCUSED BACKFILL: the batch prompt keeps ignoring policy rules for judgement questions —
+    # the office-commitment rule survived three iterations and replit mega3/3 still mapped
+    # BLANK. A REQUIRED field the batch left empty gets ONE tight per-field ask with the
+    # candidate facts (the pick_option lesson: narrow prompts comply, batch prompts dilute).
+    _blank_req = [
+        f for f in fields
+        if getattr(f, "required", False) and not ((out.get(f.name) and (out[f.name].value or "").strip()))
+    ]
+    if _blank_req and llm is not None:
+        _facts = (
+            f"city: {profile.get('city','')}, {profile.get('state','')}, {profile.get('country','')}; "
+            f"authorized to work in US: {profile.get('authorized_to_work_us')}; "
+            f"needs visa sponsorship: {profile.get('requires_sponsorship')}; "
+            f"willing to relocate: {profile.get('willing_to_relocate')}; "
+            f"desired salary USD/yr: {profile.get('desired_salary','')}; notice: {profile.get('notice_period','')}; "
+            f"earliest start: {profile.get('available_start_date','')}; skills: {', '.join(profile.get('skills') or [])[:120]}"
+        )
+        for f in _blank_req[:5]:
+            with contextlib.suppress(Exception):
+                q = (getattr(f, "label", "") or f.name)[:300]
+                opts = f"\nOptions: {list(getattr(f, 'options', None) or [])[:12]}" if getattr(f, "options", None) else ""
+                msg = (
+                    f"Candidate facts: {_facts}\nRequired application question: {q}{opts}\n"
+                    "Answer with the EXACT value to fill (option text verbatim when options are "
+                    "given; same-metro office attendance -> Yes; policy acknowledgements -> the "
+                    "affirmative option). Reply ONLY the value, or SKIP if genuinely unanswerable."
+                )
+                r = await llm.ainvoke([UserMessage(content=msg)])
+                v = str(getattr(r, "completion", r) or "").strip().strip('"').strip()
+                if v and v.upper() != "SKIP" and len(v) <= 120 and "\n" not in v:
+                    out[f.name] = FieldFill(name=f.name, value=v, why="FOCUSED backfill")
     return out
 
 
