@@ -1005,6 +1005,11 @@ async def complete(
             if not verdict["missing_required"] and not verdict["sections_skipped"] and not verdict.get("visually_unanswered"):
                 for lab in (required_labels or [])[:6]:
                     if await _crop_check(session, page, lab, (committed_by_label or {}).get(lab, "")) == "no":
+                        # same DOM corroboration as the vision flags (flexport mega3/46: the
+                        # anchor spot-check re-flagged a dom-verified 'No' the whole chain had
+                        # just cleared — the crop anchor keeps landing on the vision-union twin)
+                        if _committed_for(lab):
+                            continue
                         verdict.setdefault("crop_flagged", []).append(lab)
                 if verdict.get("crop_flagged"):
                     verdict["visually_unanswered"] = list(verdict["crop_flagged"])
