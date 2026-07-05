@@ -763,6 +763,32 @@ async def map_fields(
         if v and len(v) >= 15 and (v == lab or lab.startswith(v)):
             f.why = "LABEL-ECHO dropped (value == question)"
             f.value = ""
+    # IDENTITY-DIRECT (deterministic): first/last name, email, phone, linkedin never pass
+    # through the LLM's hands — bamboohr mega/76 mapped Last Name -> 'Jordan' (the FIRST name)
+    # and the value-match verify can never catch a wrong-but-plausible identity. Label-keyed
+    # direct projection from the profile; only overrides when the profile has the value.
+    _ident = {
+        "first name": profile.get("first_name"),
+        "last name": profile.get("last_name"),
+        "surname": profile.get("last_name"),
+        "full name": profile.get("full_name") or f"{profile.get('first_name','')} {profile.get('last_name','')}".strip(),
+        "name": profile.get("full_name") or f"{profile.get('first_name','')} {profile.get('last_name','')}".strip(),
+        "email": profile.get("email"),
+        "e-mail": profile.get("email"),
+        "phone": profile.get("phone"),
+        "phone number": profile.get("phone"),
+        "linkedin": profile.get("linkedin"),
+        "linkedin url": profile.get("linkedin"),
+        "linkedin profile": profile.get("linkedin"),
+    }
+    for name, f in out.items():
+        lab = _lab_by_name.get(name, "")
+        # strip locale/required suffixes: 'last name * requis', 'e-mail*'
+        key = lab.replace("requis", "").strip(" *:✱")
+        want = _ident.get(key)
+        if want and (f.value or "").strip() != str(want).strip():
+            f.why = f"IDENTITY-DIRECT (mapper said {f.value!r})"
+            f.value = str(want)
     return out
 
 
