@@ -938,9 +938,31 @@ async def complete(
                 for lab in flags[:6]:
                     if await _crop_check(session, page, lab, (committed_by_label or {}).get(lab, "")) != "yes":
                         kept.append(lab)
-                verdict["visually_unanswered"] = kept
-                if len(kept) != len(flags):
-                    print(f"   [complete] crop-confirm dropped {len(flags) - len(kept)} banded false-positive(s)")
+                # DOM CORROBORATION (doordash mega3/16-19: filled + dom-verified fields held
+                # hostage by a lone vision flag — the crop anchor lands on the vision-union
+                # TWIN block, which renders nothing). A flag survives only if the DOM side
+                # agrees something is wrong: either the audit still lists it as missing, or
+                # there is NO committed value for that label. Vision alone tightens the
+                # verdict only when the DOM cannot see the field at all.
+                _missing_now = " ".join(str(x).lower() for x in verdict.get("missing_required") or [])
+                def _committed_for(lab: str) -> str:
+                    lt = {w for w in str(lab).lower().replace("*", " ").split() if len(w) > 2}
+                    for k, v in (committed_by_label or {}).items():
+                        kt = {w for w in str(k).lower().replace("*", " ").split() if len(w) > 2}
+                        if kt and lt and len(kt & lt) >= max(1, len(kt) // 2):
+                            return v
+                    return ""
+                kept2 = []
+                for lab in kept:
+                    lt = {w for w in str(lab).lower().replace("*", " ").split() if len(w) > 2}
+                    in_missing = lt and len(lt & set(_missing_now.split())) >= max(1, len(lt) // 2)
+                    if in_missing or not _committed_for(lab):
+                        kept2.append(lab)
+                if len(kept2) != len(kept):
+                    print(f"   [complete] dom-corroboration dropped {len(kept) - len(kept2)} vision-only flag(s)")
+                verdict["visually_unanswered"] = kept2
+                if len(kept2) != len(flags):
+                    print(f"   [complete] crop-confirm dropped {len(flags) - len(kept2)} banded false-positive(s)")
             if not verdict["missing_required"] and not verdict["sections_skipped"] and not verdict.get("visually_unanswered"):
                 for lab in (required_labels or [])[:6]:
                     if await _crop_check(session, page, lab, (committed_by_label or {}).get(lab, "")) == "no":
