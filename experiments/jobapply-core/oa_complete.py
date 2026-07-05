@@ -729,7 +729,12 @@ async def complete(
                     "commitment -> Yes unless the profile says otherwise). For skill self-ratings "
                     f"(1-5), rate from this candidate's background — skills: {skills}; senior engineer "
                     "with ~5 years — rate core/listed skills 4-5, unfamiliar ones 2-3. Pick the closest "
-                    "option in every dropdown. Do NOT submit; do NOT navigate away."
+                    "option in every dropdown. SANCTIONED DEFAULTS (never invent a disqualifying or "
+                    "protected status): veteran status -> 'I am not a protected veteran'; disability -> "
+                    "'No, I don't have a disability'; government official / previously worked for this "
+                    "company / conflicts of interest -> No; voluntary demographics (gender, race, LGBTQ) "
+                    "-> 'I don't wish to answer' / 'Decline to self identify'. NEVER type into a field "
+                    "that already shows a value. Do NOT submit; do NOT navigate away."
                 )
                 await eng.agent_fill_section(
                     session, page, section="Remaining required questions", instructions=instr, resume=resume, max_steps=18
