@@ -331,6 +331,25 @@ async def _probe_would_clobber(session: Any, ctx: "Ctx") -> bool:
     return cur.lower() != (ctx.value or "").strip().lower()
 
 
+def _identity_pick(value: str, options: list[str]) -> str | None:
+    """Deterministic option match BEFORE any LLM pick: normalized equality, else a >=4-char
+    word-boundary prefix either way; shortest hit wins. The LLM pick has refused EXACT matches
+    (palantir 'Other' in a thousands-long list; airbnb NDA: the single filtered option was the
+    wanted legal text verbatim and the pick still returned nothing)."""
+    nv = " ".join((value or "").split()).lower()
+    if not nv:
+        return None
+    hits = [o for o in options if " ".join(o.split()).lower() == nv]
+    if not hits and len(nv) >= 4:
+        for o in options:
+            no = " ".join(o.split()).lower()
+            if no.startswith(nv) and (len(no) == len(nv) or not no[len(nv)].isalnum()):
+                hits.append(o)
+            elif nv.startswith(no) and len(no) >= 4 and (len(nv) == len(no) or not nv[len(no)].isalnum()):
+                hits.append(o)
+    return min(hits, key=len) if hits else None
+
+
 async def _chosen_plausible(ctx: "Ctx", chosen: str) -> bool:
     """ZERO-OVERLAP VETO (mega2/7 'Enter manually' committed for 'United States'; mega2/23
     'Toggle flyout' for 'LinkedIn'): a picked option sharing NO token with the wanted value is
@@ -1156,7 +1175,9 @@ async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -
             return await _s_verify(session, ctx)
         return await _s_other_guard(session, ctx)
     texts = [t for t, _ in group]
-    chosen = await brain.pick_option(ctx.value, texts, llm=ctx.llm, label=ctx.label)
+    chosen = _identity_pick(ctx.value, texts)
+    if not chosen:
+        chosen = await brain.pick_option(ctx.value, texts, llm=ctx.llm, label=ctx.label)
     node = dict(group).get(chosen) if chosen else None
     if not chosen or node is None:
         # The DOM group was found but the text-pick produced no usable option (Lever's styled-div
@@ -1454,7 +1475,11 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
     Long list -> bounded scroll-reread on no-match. Records committed_text."""
     if len(texts) >= _LIST_LONG:
         ctx.trace.append("long-list")
-    chosen = await brain.pick_option(ctx.value, texts, llm=ctx.llm, label=ctx.label)
+    chosen = _identity_pick(ctx.value, texts)
+    if chosen:
+        ctx.trace.append("identity-pick")
+    else:
+        chosen = await brain.pick_option(ctx.value, texts, llm=ctx.llm, label=ctx.label)
     if not chosen and nodes is not None and ctx.scroll_reads < SCROLL_CAP:
         # scroll the overlay one page and re-read (off-screen / virtualized, §3.5 / gap E)
         ctx.scroll_reads += 1
@@ -1484,13 +1509,7 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
                 if ftexts:
                     # deterministic identity first (stripe mega3/6 'country where you reside':
                     # the filter narrowed to ONE option and the LLM pick still returned nothing)
-                    _nv2 = " ".join(ctx.value.split()).lower()
-                    fchosen = next(
-                        (o for o in ftexts if " ".join(o.split()).lower() == _nv2
-                         or " ".join(o.split()).lower().startswith(_nv2 + " ")
-                         or _nv2.startswith(" ".join(o.split()).lower() + " ")),
-                        None,
-                    )
+                    fchosen = _identity_pick(ctx.value, ftexts)
                     if not fchosen:
                         fchosen = await brain.pick_option(ctx.value, ftexts, llm=ctx.llm, label=ctx.label)
                     if fchosen and await _chosen_plausible(ctx, fchosen):
