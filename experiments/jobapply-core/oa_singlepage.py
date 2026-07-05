@@ -563,7 +563,11 @@ async def _fill_form(
         # that already verified DONE this run -> SKIP. If two DISTINCT real fields ever share a
         # label, the completeness audit flags the empty one and retry fills it — safe direction.
         _lkey = " ".join(str(f.label or f.name).split()).lower()
-        if _lkey in _done_labels:
+        # FILE fields are exempt: Resume and Cover Letter both render as 'Attach' on
+        # greenhouse — the second slot is a DIFFERENT real field, and retry cannot heal a
+        # skipped file (airbnb mega3/10-11: Cover Letter slot skipped as a twin, flagged by
+        # vision, unfixable downstream).
+        if _lkey in _done_labels and "file" not in str(f.type or "").lower():
             per_field.append(
                 FieldResult(
                     name=f.name, label=f.label or f.name, type=f.type, value_src="twin",
