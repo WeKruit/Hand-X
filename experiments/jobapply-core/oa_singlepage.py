@@ -644,6 +644,7 @@ async def _fill_form(
                 llm=llm, planner_keys=_pk,
                 # per_field is the LOCAL fill ledger — result['results'] is only assembled later
                 filled_names={str(r.name) for r in per_field},
+                required_labels=[f.label or f.name for f in fields if getattr(f, "required", False)],
             )
             # REQUIRED-ESCALATE VETO (zero-cost, deterministic): a REQUIRED field whose own
             # outcome is ESCALATE is by definition not complete — yet the audit can't see a

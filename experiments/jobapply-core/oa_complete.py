@@ -122,6 +122,104 @@ _AUDIT_JS = r"""() => {
 }"""
 
 
+# label -> DOCUMENT-coordinate rect of {question text + its control} for doubt-crop verification.
+# Token-overlap match to the tightest text element, then the nearest control at/below it — the
+# same geometry a human uses. Returns '' when nothing matches.
+_RECT_FOR_LABEL_JS = r"""(lab) => {
+  const norm=s=>(s||'').toLowerCase().replace(/[^a-z0-9 ]+/g,' ').replace(/\s+/g,' ').trim();
+  const toks=norm(lab).split(' ').filter(w=>w.length>3);
+  if(!toks.length) return '';
+  const all=[]; const walk=r=>{for(const e of r.querySelectorAll('*')){all.push(e); if(e.shadowRoot) walk(e.shadowRoot);}}; walk(document);
+  let best=null,bestScore=0;
+  for(const e of all){
+    if(e.children.length>5) continue;
+    const t=norm(e.innerText); if(!t||t.length>500) continue;
+    let hit=0; for(const w of toks) if(t.includes(w)) hit++;
+    if(hit < Math.max(1,Math.ceil(toks.length*0.5))) continue;
+    const r=e.getBoundingClientRect(); if(!r.width||!r.height) continue;
+    const score=hit/toks.length - t.length/3000;
+    if(score>bestScore){ best=e; bestScore=score; }
+  }
+  if(!best) return '';
+  const lr=best.getBoundingClientRect();
+  let ctl=null,gap=1e9;
+  for(const c of all){
+    if(!c.matches||!c.matches('input,select,textarea,button,[role=combobox],[role=radiogroup],[role=checkbox],[role=radio],[aria-haspopup]')) continue;
+    const cr=c.getBoundingClientRect(); if(!cr.width&&!cr.height) continue;
+    const dv=cr.top-lr.top; if(dv<-10||dv>320) continue;
+    const d=Math.max(0,dv)+Math.abs(cr.left-lr.left)*0.3;
+    if(d<gap){gap=d;ctl=c;}
+  }
+  const cr=ctl?ctl.getBoundingClientRect():lr;
+  const x1=Math.min(lr.left,cr.left), y1=Math.min(lr.top,cr.top);
+  const x2=Math.max(lr.right,cr.right), y2=Math.max(lr.bottom,cr.bottom);
+  return JSON.stringify({x:x1+window.scrollX, y:y1+window.scrollY, w:x2-x1, h:y2-y1});
+}"""
+
+
+async def _crop_check(session: Any, page: Any, label: str) -> str:
+    """Verify ONE field by its own full-resolution CLIP screenshot: 'yes' (answered) / 'no' /
+    'unsure'. Uses browser-use's native take_screenshot(clip=...) (CDP captureScreenshot with a
+    document-coordinate clip) — Chrome renders exactly that region at native resolution, immune
+    to the full-page capture pitfalls (16384px height cap, lazy-rendered blanks below the fold,
+    DPR coordinate drift). Machine version of the manual crop judgment that ran 5/5 where
+    full-page/banded sampling flickered. 'unsure' on ANY failure — never flips a verdict alone."""
+    try:
+        import asyncio
+
+        import oa_llm as _oa
+        from vision_verify import _vlm
+
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+        raw = await asyncio.wait_for(page.evaluate(_RECT_FOR_LABEL_JS, str(label)[:200]), timeout=6.0)
+        if not raw:
+            return "unsure"
+        r = json.loads(raw)
+        pad = 30
+        clip = {
+            "x": max(0, int(r["x"]) - pad),
+            "y": max(0, int(r["y"]) - pad),
+            "width": max(60, int(r["w"]) + pad * 2),
+            "height": max(40, int(r["h"]) + pad * 3),
+        }
+        shot = await asyncio.wait_for(session.take_screenshot(full_page=True, clip=clip), timeout=12.0)
+        crop_png = base64.b64decode(shot) if isinstance(shot, str) else shot
+        if not crop_png:
+            return "unsure"
+        msg = UserMessage(
+            content=[
+                ContentPartTextParam(
+                    type="text",
+                    text=(
+                        "This is a cropped region of a job application form showing ONE field "
+                        "(its label and its control). Is this field ANSWERED — a value typed, an "
+                        "option selected, or a file attached? An empty box, a choice pair with "
+                        "neither picked, a bare placeholder like 'Select', or an empty upload "
+                        'area means NOT answered. Reply STRICT JSON {"answer": "yes"|"no"|"unsure"}.'
+                    ),
+                ),
+                ContentPartImageParam(
+                    type="image_url",
+                    image_url=ImageURL(
+                        url=f"data:image/png;base64,{base64.b64encode(crop_png).decode()}",
+                        detail="high",
+                        media_type="image/png",
+                    ),
+                ),
+            ]
+        )
+        res = await _oa.resilient_vlm([msg], primary=_vlm())
+        raw2 = str(getattr(res, "completion", res) or "").lower()
+        if '"answer": "yes"' in raw2 or '"answer":"yes"' in raw2:
+            return "yes"
+        if '"answer": "no"' in raw2 or '"answer":"no"' in raw2:
+            return "no"
+        return "unsure"
+    except Exception:
+        return "unsure"
+
+
 # %s = a JSON array of VLM-flagged labels; keep only those whose on-page text has a fillable
 # control within a few ancestor hops (page furniture — footer banners, login prompts — has none).
 _NEAR_FIELD_FILTER_JS = r"""() => {
@@ -421,7 +519,7 @@ async def _orphan_pass(session: Any, page: Any, profile: dict, llm: Any, filled_
 
 async def complete(
     session: Any, page: Any, profile: dict, resume: str | None, *, allow_agent: bool, llm: Any = None, planner_keys: list | None = None,
-    filled_names: set | None = None,
+    filled_names: set | None = None, required_labels: list | None = None,
 ) -> dict:
     """Audit the form for unfilled repeater sections + empty required fields; fill repeaters via the
     proven agent_fill_section and RE-FILL wiped required fields (retry). Returns
@@ -535,6 +633,29 @@ async def complete(
                                         seen2 = json.loads(await page.evaluate(_NEAR_FIELD_FILTER_JS % json.dumps(seen2)))
                                 verdict["visually_unanswered"] = seen2 or []
                                 print(f"   [complete] revalued {fixed} field(s); vision now: {(seen2 or [])[:5]}")
+        # DOUBT-CROP verification (the reliable-visual rung): a per-field crop at full resolution
+        # judged 5/5 manually where full-page/banded sampling flickered (~50%). (a) every banded
+        # flag is CONFIRMED by its own crop — a flag the crop sees as answered is a sampling
+        # false-positive and drops; (b) a would-be GREEN gets its REQUIRED anchors spot-checked —
+        # a crop that sees an anchor unanswered kills the false-green. 'unsure' never flips a
+        # verdict on its own (flags stay, greens stay).
+        with contextlib.suppress(Exception):
+            flags = list(verdict.get("visually_unanswered") or [])
+            if flags:
+                kept = []
+                for lab in flags[:6]:
+                    if await _crop_check(session, page, lab) != "yes":
+                        kept.append(lab)
+                verdict["visually_unanswered"] = kept
+                if len(kept) != len(flags):
+                    print(f"   [complete] crop-confirm dropped {len(flags) - len(kept)} banded false-positive(s)")
+            if not verdict["missing_required"] and not verdict["sections_skipped"] and not verdict.get("visually_unanswered"):
+                for lab in (required_labels or [])[:6]:
+                    if await _crop_check(session, page, lab) == "no":
+                        verdict.setdefault("crop_flagged", []).append(lab)
+                if verdict.get("crop_flagged"):
+                    verdict["visually_unanswered"] = list(verdict["crop_flagged"])
+                    print(f"   [complete] crop-anchor CAUGHT unanswered required: {verdict['crop_flagged'][:3]}")
         if verdict["missing_required"] or verdict["sections_skipped"] or verdict.get("visually_unanswered"):
             verdict["complete"] = False
     return verdict
