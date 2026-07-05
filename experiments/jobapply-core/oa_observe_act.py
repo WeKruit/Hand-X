@@ -471,7 +471,13 @@ def _option_texts(nodes: list[perc.DeltaNode]) -> list[str]:
     selects each burning ~28s). Keep genuine option labels: role=option when present; else a short
     leaf label that is NOT a question (ends '?' / very long = a neighbor question) and NOT the
     trigger/button itself. Structural, not an exhaustive word list."""
+    _EMPTY_MENU = re.compile(r"^no (options|results|matches)\b|^nothing found\b", re.IGNORECASE)
+
     def _is_option(d: perc.DeltaNode) -> bool:
+        if _EMPTY_MENU.match((d.text or "").strip()):
+            # the widget's empty-menu placeholder (react-select renders a literal 'No options'
+            # row — samsara mega3/33 captured it as the single 'option' after a failed filter)
+            return False
         role = ""
         with contextlib.suppress(Exception):
             ax = getattr(d.node, "ax_node", None)
