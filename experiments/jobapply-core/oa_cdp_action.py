@@ -293,11 +293,11 @@ function(want, groupName){
     inputs = [...root.querySelectorAll('input[type=radio],input[type=checkbox]')];
     if(this !== root && this.name) inputs = inputs.filter(el => el.name === this.name);
   }
-  if(!inputs.length){
-    // BUTTON-PILL GROUP (ashby mega/38-39 'Yes'/'No' pills): the options are literal <button>s /
-    // role=button, no radio/checkbox input exists anywhere — the choice lane found nothing and
-    // the visual fallback clicked the group container. Match by exact SHORT visible text (an
-    // option pill is a word or two; never submit/apply chrome), click, return the text.
+  // BUTTON-PILL GROUP (ashby mega/38-39/54 'Yes'/'No' pills): the options are literal <button>s /
+  // role=button. Tried when NO radio/checkbox input exists — and ALSO when the inputs exist but
+  // none matched (replo mega/54: the pills hide value='on' checkboxes with NO resolvable label,
+  // so the input matcher came up empty and the button branch was unreachable).
+  const tryButtons = () => {
     let root = this;
     if(root.matches && root.matches('input,button')) root = root.closest('fieldset,[role=group],[role=radiogroup]') || root.parentElement || root;
     const btns = [...root.querySelectorAll('button,[role=button]')].filter(b => {
@@ -311,7 +311,8 @@ function(want, groupName){
       hit.dispatchEvent(new Event('change',{bubbles:true}));
       return (hit.innerText||'').trim() || want; }
     return "";
-  }
+  };
+  if(!inputs.length) return tryButtons();
   // LONE checkbox + an affirmative want -> check it (a consent box has no per-option labels to
   // match; the mapper already decided this field gets a value). Explicit negatives leave it be.
   if(inputs.length===1 && inputs[0].type==='checkbox' && !['no','false','none','0'].includes(w)){
@@ -342,7 +343,7 @@ function(want, groupName){
        || inputs.find(el => ariaTexts(el).some(x => x===w));
   if(!t) t = inputs.find(el => { const v=valOf(el); return v && !generic(v) && (v.includes(w)||w.includes(v)); });
   if(!t) t = inputs.find(el => { const l=labOf(el); return l && (l.includes(w)||w.includes(l)); });
-  if(!t) return "";
+  if(!t) return tryButtons();
   // a VISUALLY-HIDDEN input's widget updates its rendered state from the LABEL's native click
   // forwarding (teamtailor dropdown-as-radios: clicking the hidden input checked it but left the
   // trigger text on its placeholder). Prefer the label when the input has no box.
