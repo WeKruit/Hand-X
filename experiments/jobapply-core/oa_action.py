@@ -278,8 +278,15 @@ async def type_text(session: BrowserSession, node: EnhancedDOMTreeNode, text: st
       * plain text / textarea / date  -> one React-aware value set (native setter + input/change),
         fast and reliable.
     Falls back to the event-bus `TypeTextEvent` (char-by-char) when OA_ACTION_BACKEND=eventbus."""
+    # PHONE / intl-tel widgets parse the country from the leading '+' on each keystroke's INPUT
+    # event; a single native-setter value set bypasses that parse, so the flag stays on its
+    # default (rippling showed '+376 AD' Andorra + raw digits). An E.164-shaped value ('+<digits>')
+    # is typed per-char so the widget detects the country. Structural (the value shape), not a
+    # per-ATS label rule.
+    _t = str(text).strip()
+    _phoneish = _t.startswith("+") and sum(c.isdigit() for c in _t) >= 7 and len(_t) <= 22
     if _use_cdp():
-        return await cdp.cdp_type(session, node, text, keystrokes=_is_typeahead(node), clear=clear)
+        return await cdp.cdp_type(session, node, text, keystrokes=_is_typeahead(node) or _phoneish, clear=clear)
     return await _type_text_eventbus(session, node, text, clear)
 
 
