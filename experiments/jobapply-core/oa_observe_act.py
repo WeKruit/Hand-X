@@ -1927,10 +1927,31 @@ async def _s_revalue(session: Any, ctx: Ctx) -> Outcome:
 
 
 # ---- S_OTHER_GUARD / S_OTHER ----
+async def _clear_probe_residue(session: Any, ctx: Ctx) -> None:
+    """On abandonment, erase OUR OWN probe text left in the box (affirm mega3/44: the
+    previously-employed probe 'I have' stayed behind in the mislocated empty Name
+    Pronunciation input; samsara/32 'Acknow' same). Deterministic: only clears when the
+    current value EXACTLY matches something we typed this field (probe prefix or query)."""
+    with contextlib.suppress(Exception):
+        from oa_dom_value import read_dom_value
+
+        cur = ((await read_dom_value(session, ctx.node)) or "").strip()
+        if not cur:
+            return
+        probes = {q.strip() for q in (ctx.queries_tried or [])}
+        v = (ctx.value or "").strip()
+        if v:
+            probes.add(v[: min(len(v), 6)])
+        if cur in probes and cur.lower() != v.lower():
+            await act.type_text(session, ctx.node, "", clear=True)
+            ctx.trace.append("probe-residue-cleared")
+
+
 async def _s_other_guard(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S_OTHER_GUARD")
+    await _clear_probe_residue(session, ctx)
     if not ctx.required:
         return SKIP
     # Demographic / screening / legal labels: escalate ONLY when we have no answer to give.
