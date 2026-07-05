@@ -1222,6 +1222,20 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
     if inspect:
         ctx.trace.append(f"read_options:{len(inspect)}")
         return await _commit_from_options(session, ctx, inspect, nodes=None)
+    # ARIA-DIRECT for a react-select / listbox combobox BEFORE the delta read: the input's
+    # aria-owns/aria-controls names its portal listbox, so we read ONLY that listbox's [role=option]
+    # and click the match — SCOPED exactly like the proven ats_lever handler scopes by field name,
+    # instead of the page-wide delta that swept in 'Toggle flyout' / neighbor questions and cycled
+    # robinhood's demographic selects to their 28s deadline. Deterministic, no garbage, fast.
+    _role = (_node_role(ctx.node) or "").lower()
+    _has_listbox = _node_attr(ctx.node, "aria-owns") or _node_attr(ctx.node, "aria-controls")
+    if _role == "combobox" or _has_listbox:
+        with contextlib.suppress(Exception):
+            got = await cdpa.cdp_choose_aria_option(session, ctx.node, ctx.value)
+            if got:
+                ctx.committed_text = got
+                ctx.trace.append(f"aria-direct:{got[:20]}")
+                return await _s_verify(session, ctx)
     # Else physically open and watch the delta.
     before = await perc.get_state(session)
     await act.click_node(session, ctx.node)
