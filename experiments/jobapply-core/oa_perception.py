@@ -575,12 +575,24 @@ def locate_grouped_widget(state: OAState, label_text: str) -> tuple[Any, Any] | 
         if cid in seen_cards:
             continue
         seen_cards.add(cid)
+        # EXACT-CONTAINMENT beats token overlap (lever mega/62: 'years of professional
+        # experience' vs 'years of experience working with React Native' share almost every
+        # token — overlap TIED and each question bound the OTHER's radio card, swapping the
+        # answers on screen while ledger values and clicks were both 'correct'). A card whose
+        # text contains the full normalized question IS that question's card; among such
+        # cards the SMALLEST wins (a section wrapper contains every question).
+        card_txt = " ".join(_all_children_text(card).split()).lower()
+        lab_norm = " ".join(label_text.split()).lower().rstrip("*: ")
+        contains = 1 if (lab_norm and lab_norm in card_txt) else 0
         score = _overlap_score(_tokens(_all_children_text(card)), target)
+        rect = node_rect(card)
+        area = (rect[2] * rect[3]) if rect else float("inf")
+        key = (contains, score, -area)
         rep = _representative_control(card)
         if rep is None:
             continue
-        if best is None or score > best[0]:
-            best = (score, rep, card)
+        if best is None or key > best[0]:
+            best = (key, rep, card)
     if best is not None:
         return (best[1], best[2])
     # BUTTON-PILL pass (notion/ashby mega/45-46): the question's options are literal <button>s —
