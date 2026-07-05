@@ -81,13 +81,24 @@ _ENUM_JS = r"""
       // ONE question = ONE field: the nearest ancestor holding >=2 checkboxes IS the option
       // list; a genuine lone consent box finds no such container and keeps the lone branch.)
       let g = el.name || 'check';
-      let p = el.parentElement, depth = 0;
-      while (p && depth < 6) {
-        if (p.tagName !== 'FORM' && p.querySelectorAll) {
-          const n = p.querySelectorAll('input[type=checkbox]').length;
-          if (n >= 2 && n <= 40) { g = p.__oaGid || (p.__oaGid = 'ckgrp' + (++ckgid)); break; }
+      // a checkbox whose own label is a SENTENCE (a consent/acknowledgement clause) is its own
+      // question — twilio mega3/34: two adjacent lone-consent boxes shared a section ancestor
+      // and the container grouping merged them into one field, so only one got checked.
+      const ownLab = labFor(el) || '';
+      if (ownLab.length <= 60) {
+        let p = el.parentElement, depth = 0;
+        while (p && depth < 6) {
+          if (p.tagName !== 'FORM' && p.querySelectorAll) {
+            const boxes = [...p.querySelectorAll('input[type=checkbox]')];
+            // group only when the co-located boxes look like OPTIONS (short labels), not
+            // sibling consent sentences
+            if (boxes.length >= 2 && boxes.length <= 40 && boxes.every(b => (labFor(b)||'').length <= 60)) {
+              g = p.__oaGid || (p.__oaGid = 'ckgrp' + (++ckgid)); break;
+            }
+            if (boxes.length >= 2) break;  // mixed container: stop climbing, stay lone
+          }
+          p = p.parentElement; depth++;
         }
-        p = p.parentElement; depth++;
       }
       (check[g] = check[g] || { opts: [], el }).opts.push(labFor(el) || el.value); continue; }
     if (ty === 'file') { push(el.id || el.name, labFor(el) || 'Resume', 'input_file', 'file', null, req); continue; }
