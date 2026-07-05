@@ -915,6 +915,16 @@ async def complete(
                                         seen2 = json.loads(await page.evaluate(_NEAR_FIELD_FILTER_JS % json.dumps(seen2)))
                                 verdict["visually_unanswered"] = seen2 or []
                                 print(f"   [complete] revalued {fixed} field(s); vision now: {(seen2 or [])[:5]}")
+                                # POST-REVALUE REPAIR (doordash mega3/17: the revalue pass wrote
+                                # the location string into the PHONE box — repair ran before
+                                # revalue and the corruption escaped every judge). Re-assert the
+                                # ledger once more after any revalue write.
+                                if committed_by_label:
+                                    with contextlib.suppress(Exception):
+                                        fixed2 = await repair_overwritten(session, page, committed_by_label)
+                                        if fixed2:
+                                            verdict.setdefault("repaired_overwritten", []).extend(fixed2)
+                                            print(f"   [complete] post-revalue repair: {fixed2}")
         # DOUBT-CROP verification (the reliable-visual rung): a per-field crop at full resolution
         # judged 5/5 manually where full-page/banded sampling flickered (~50%). (a) every banded
         # flag is CONFIRMED by its own crop — a flag the crop sees as answered is a sampling

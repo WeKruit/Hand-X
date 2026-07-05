@@ -340,14 +340,21 @@ def _identity_pick(value: str, options: list[str]) -> str | None:
     if not nv:
         return None
     hits = [o for o in options if " ".join(o.split()).lower() == nv]
-    if not hits and len(nv) >= 4:
-        for o in options:
-            no = " ".join(o.split()).lower()
-            if no.startswith(nv) and (len(no) == len(nv) or not no[len(nv)].isalnum()):
-                hits.append(o)
-            elif nv.startswith(no) and len(no) >= 4 and (len(nv) == len(no) or not nv[len(no)].isalnum()):
-                hits.append(o)
-    return min(hits, key=len) if hits else None
+    if hits:
+        return min(hits, key=len)
+    if len(nv) < 4:
+        return None
+    pref: list[str] = []
+    for o in options:
+        no = " ".join(o.split()).lower()
+        if no.startswith(nv) and (len(no) == len(nv) or not no[len(nv)].isalnum()):
+            pref.append(o)
+        elif nv.startswith(no) and len(no) >= 4 and (len(nv) == len(no) or not nv[len(no)].isalnum()):
+            pref.append(o)
+    # AMBIGUITY -> None (doordash mega3/17: bare 'San Francisco' prefix-matched SIX geocomplete
+    # rows and shortest-wins picked 'San Francisco, Cebu, Philippines' over California. A prefix
+    # is identity evidence only when it is UNIQUE; multiple hits go to the LLM with the label.)
+    return pref[0] if len(pref) == 1 else None
 
 
 async def _chosen_plausible(ctx: "Ctx", chosen: str) -> bool:
