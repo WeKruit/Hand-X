@@ -611,7 +611,9 @@ def locate_grouped_widget(state: OAState, label_text: str) -> tuple[Any, Any] | 
             and _is_descendant(n, card)
             and 0 < len(_all_children_text(n).strip()) <= 30
         ]
-        if 2 <= len(pills) <= 6:
+        # up to 12: a demographic options row renders 7+ pills (replit mega/52 'Hispanic or
+        # Latino' carded all 7 buttons and the old <=6 cap rejected by ONE).
+        if 2 <= len(pills) <= 12:
             return (node, card)
     # DIAGNOSTIC (openai mega/48: pill pass live but still no-control — which stage starved?):
     print(f"   [locate] pill-pass miss '{label_text[:40]}': btns={_dbg_btns} short={_dbg_short} carded={_dbg_cards}")

@@ -627,6 +627,12 @@ veteran status -> the "not a protected veteran" option; disability -> the "no, I
 disability" option; government-official / worked-for-THIS-company / conflict-of-interest \
 history -> "No". These are answered, not skipped — but the DEFAULT marker must be set so the \
 run record shows which answers were assumed rather than known.
+- OFFICE-ATTENDANCE / COMMUTE commitment questions ("able to work from our X office N days a \
+week?", "willing to work in-person from Y?"): reason from the candidate's location vs the \
+office location — same metro area -> "Yes"; different metro -> use willing_to_relocate. A \
+conditional follow-up premised on NOT being local ("If not currently in the area, …") is \
+answered only when the premise holds; otherwise leave it blank. Never leave the PRIMARY \
+commitment question blank.
 - If the field has OPTIONS, `value` MUST be EXACTLY one of those option strings, copied \
 verbatim. Pick the option the profile best supports. For a yes/no question, reason from the \
 profile (e.g. "authorized to work in Japan?" -> the profile is US-authorized only -> "No"). \
