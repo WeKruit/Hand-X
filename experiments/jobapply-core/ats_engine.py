@@ -634,6 +634,10 @@ location where this role is based?" + US role + US-authorized candidate -> "Yes"
 resolution applies to residence/work-permit questions, in any language: a Paris role asking \
 "besoin d'un titre de séjour pour travailler ?" + a US-only-authorized candidate -> "Oui" \
 (needs the permit); a US role + US-authorized -> "No".
+- LANGUAGE-PROFICIENCY scales: a language the profile does not list gets the LOWEST tier \
+offered ('A0-A2', 'Beginner', 'Basic') — never a bare 'None'/'N/A' unless the question \
+visibly offers a none-option (flexport: the Dutch scale is A0-A2..Native with no none row, \
+so 'None' can never match and the required field dies).
 - ADJACENT-SKILL INFERENCE (user-sanctioned): a years-of-experience question about a skill \
 implied by the candidate's stack is answered from the implying skill's tenure, never 0 \
 (e.g. React on the profile implies TypeScript — answer with the React years). A skill with \
