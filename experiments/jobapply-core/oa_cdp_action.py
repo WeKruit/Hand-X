@@ -314,9 +314,15 @@ function(want, groupName){
     const ids = ((host&&host.getAttribute('aria-labelledby'))||'').split(/\s+/).filter(Boolean);
     return ids.map(i => { const e=document.getElementById(i); return e?vis(e):''; }).filter(Boolean);
   };
-  let t = inputs.find(el => valOf(el)===w) || inputs.find(el => labOf(el)===w)
+  // GENERIC value attrs ('on' — the browser default when markup sets none — 'true', '1')
+  // discriminate NOTHING: every input in the group carries the same one (ashby mega/37
+  // committed literal 'on'). They never participate in matching, and el_val prefers the
+  // option's LABEL so the ledger records what a human reads, not the submit payload.
+  const generic = v => ['on','true','1'].includes(v);
+  let t = inputs.find(el => { const v=valOf(el); return v && !generic(v) && v===w; })
+       || inputs.find(el => labOf(el)===w)
        || inputs.find(el => ariaTexts(el).some(x => x===w));
-  if(!t) t = inputs.find(el => { const v=valOf(el); return v && (v.includes(w)||w.includes(v)); });
+  if(!t) t = inputs.find(el => { const v=valOf(el); return v && !generic(v) && (v.includes(w)||w.includes(v)); });
   if(!t) t = inputs.find(el => { const l=labOf(el); return l && (l.includes(w)||w.includes(l)); });
   if(!t) return "";
   // a VISUALLY-HIDDEN input's widget updates its rendered state from the LABEL's native click
@@ -331,7 +337,8 @@ function(want, groupName){
   // .click() and leave checked=false (then the caller must fall through, not report success).
   if(!t.checked) return "";
   return el_val(t);
-  function el_val(el){ return (el.getAttribute('value')||el.value||labOf(el)||want); }
+  function el_val(el){ const v=el.getAttribute('value')||el.value||'';
+    return labOf(el) || (generic(v) ? '' : v) || want; }
 }
 """
 

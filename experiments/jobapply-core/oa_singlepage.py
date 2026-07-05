@@ -179,6 +179,10 @@ class FieldResult:
     nature: str = ""
     committed: str = ""
     trace: list[str] | None = None
+    # the MAPPED value the engine was asked to fill — forensics for wrong-value autopsies
+    # (ashby mega/37 transgender showed 'Yes' on screen; without the wanted value stored the
+    # ledger cannot distinguish a mapper hallucination from a wrong click).
+    value: str = ""
 
     @property
     def filled(self) -> bool:
@@ -608,6 +612,7 @@ async def _fill_form(
                 nature=fd.get("_nature", ""),
                 committed=fd.get("_committed", ""),
                 trace=fd.get("_trace"),
+                value=str(value)[:120],
             )
         )
         if outcome == oa.DONE:

@@ -21,7 +21,7 @@ import ats_engine as eng
 
 _ENUM_JS = r"""
 () => {
-  const seen = new Set(); const out = []; const radio = {}; const check = {};
+  const seen = new Set(); const out = []; const radio = {}; const check = {}; let ckgid = 0;
   const vis = el => { const r = el.getBoundingClientRect(); return r.width > 4 && r.height > 4; };
   const clean = t => (t || '').replace(/\s+/g, ' ').trim();
   const labFor = el => {
@@ -71,7 +71,21 @@ _ENUM_JS = r"""
     }
     if (ty === 'radio') { const g = el.name || 'radio';
       (radio[g] = radio[g] || { opts: [], el }).opts.push(labFor(el) || el.value); continue; }
-    if (ty === 'checkbox') { const g = el.name || 'check';
+    if (ty === 'checkbox') {
+      // GROUP BY SHARED CONTAINER first, name attr second (ashby mega/37: a 'select all that
+      // apply' race list gives every checkbox a UNIQUE name -> 9 singleton groups -> 9 lone
+      // boolean fields -> the mapper hallucinated Yes per option label and 6 boxes got checked.
+      // ONE question = ONE field: the nearest ancestor holding >=2 checkboxes IS the option
+      // list; a genuine lone consent box finds no such container and keeps the lone branch.)
+      let g = el.name || 'check';
+      let p = el.parentElement, depth = 0;
+      while (p && depth < 6) {
+        if (p.tagName !== 'FORM' && p.querySelectorAll) {
+          const n = p.querySelectorAll('input[type=checkbox]').length;
+          if (n >= 2 && n <= 40) { g = p.__oaGid || (p.__oaGid = 'ckgrp' + (++ckgid)); break; }
+        }
+        p = p.parentElement; depth++;
+      }
       (check[g] = check[g] || { opts: [], el }).opts.push(labFor(el) || el.value); continue; }
     if (ty === 'file') { push(el.id || el.name, labFor(el) || 'Resume', 'input_file', 'file', null, req); continue; }
     if (tag === 'textarea') { push(el.id || el.name, labFor(el), 'textarea', 'open_ended', null, req); continue; }
