@@ -739,14 +739,28 @@ async def complete(
         if verdict["missing_required"] and allow_agent:
             with contextlib.suppress(Exception):
                 skills = ", ".join(profile.get("skills") or [])[:200]
+                # CORE PROFILE FACTS: the agent answered location/eligibility questions BLIND —
+                # gitlab mega/33 'Where are you currently based?' -> 'Canada' (candidate is in SF),
+                # agility mega/24 'authorized to work in the US?' -> 'No'. Facts, not guesses.
+                _facts = (
+                    f"CANDIDATE FACTS (answer FROM these, never guess): "
+                    f"location: {profile.get('city','')}, {profile.get('state','')}, {profile.get('country','')}; "
+                    f"authorized to work in the US: {'Yes' if profile.get('authorized_to_work_us') else 'No'}; "
+                    f"requires visa sponsorship: {'Yes' if profile.get('requires_sponsorship') else 'No'}; "
+                    f"willing to relocate: {'Yes' if profile.get('willing_to_relocate') else 'No'}; "
+                    f"notice period: {profile.get('notice_period','2 weeks')}; "
+                    f"earliest start: {profile.get('available_start_date','')}."
+                )
                 instr = (
-                    "Answer EVERY remaining required question on this page. For yes/no eligibility "
-                    "(authorized to work in the US -> Yes; require visa sponsorship -> No; 18 or older "
-                    "-> Yes; meets a stated years-of-experience threshold -> Yes; on-site/relocation "
-                    "commitment -> Yes unless the profile says otherwise). For skill self-ratings "
+                    f"Answer EVERY remaining required question on this page. {_facts} "
+                    "For yes/no eligibility thresholds (18 or older -> Yes; meets a stated "
+                    "years-of-experience threshold -> Yes). POLICY ACKNOWLEDGEMENTS (a question asking "
+                    "you to confirm you read/understood/agree to a policy or guideline) -> the "
+                    "affirmative option ('Yes' / 'I acknowledge' / 'I agree'). For skill self-ratings "
                     f"(1-5), rate from this candidate's background — skills: {skills}; senior engineer "
                     "with ~5 years — rate core/listed skills 4-5, unfamiliar ones 2-3. Pick the closest "
-                    "option in every dropdown. SANCTIONED DEFAULTS (never invent a disqualifying or "
+                    "option in every dropdown and select the option by its TEXT, never type its list "
+                    "number. SANCTIONED DEFAULTS (never invent a disqualifying or "
                     "protected status): veteran status -> 'I am not a protected veteran'; disability -> "
                     "'No, I don't have a disability'; government official / previously worked for this "
                     "company / conflicts of interest -> No; voluntary demographics (gender, race, LGBTQ) "
