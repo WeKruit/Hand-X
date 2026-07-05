@@ -84,7 +84,7 @@ _AUDIT_JS = r"""() => {
       while (p && h++ < 6) { if (p.querySelectorAll('input[name="'+CSS.escape(e.name)+'"]').length >= 2) { box = p; break; } p = p.parentElement; }
       if (box) {
         const t = norm(box.innerText).slice(0,250) + ' ' + norm((box.parentElement||{}).innerText||'').slice(0,250);
-        if (/\*/.test(t)) groups[g].req = true;
+        if (/[*\u2731]/.test(t)) groups[g].req = true;
         if (!groups[g].label) { const q = norm((box.parentElement||box).innerText).split('\n')[0]; if (q) groups[g].label = q.slice(0,80); }
       }
     }
@@ -95,13 +95,17 @@ _AUDIT_JS = r"""() => {
   // NOTHING and a form of empty required questions read complete). Question-centric: a '*'-marked
   // question with a control that shows NO committed answer. Generic via ARIA / placeholder text,
   // never per-ATS.
-  const qlabel = box => { const t = norm(box.innerText||''); return (t.split('\n')[0]||t).slice(0,80); };
+  const qlabel = box => { const lines = norm(box.innerText||'').split('\n').map(x=>x.trim()).filter(Boolean);
+    // prefer the line carrying the required star / question mark — the first line can be a
+    // help banner ('Click Here (If you encounter an issue…)' labeled palantir's university
+    // dropdown, mega/63)
+    return ((lines.find(l=>/[*\u2731?]/.test(l)) || lines[0] || '').slice(0,80)); };
   // (a) custom comboboxes: [role=combobox] / [aria-haspopup=listbox] with no aria-activedescendant
   //     and a placeholder-looking trigger text (Select…/Choose…/empty).
   for (const c of document.querySelectorAll('[role=combobox],[aria-haspopup=listbox]')) {
     if (!vis(c)) continue;
     const q = c.closest('[class*=field],[class*=question],[class*=form-group],div');
-    const reqd = c.getAttribute('aria-required')==='true' || /\*/.test(norm((q||c).innerText).slice(0,200));
+    const reqd = c.getAttribute('aria-required')==='true' || /[*\u2731]/.test(norm((q||c).innerText).slice(0,200));
     if (!reqd) continue;
     const active = c.getAttribute('aria-activedescendant');
     const shown = norm(c.innerText || c.value || (c.querySelector('*')||{}).innerText || '');
@@ -114,7 +118,7 @@ _AUDIT_JS = r"""() => {
     if (!vis(grp)) continue;
     const opts = [...grp.querySelectorAll('[role=radio],[role=checkbox],[aria-checked]')];
     if (opts.length < 2) continue;
-    const reqd = grp.getAttribute('aria-required')==='true' || /\*/.test(norm(grp.innerText).slice(0,200));
+    const reqd = grp.getAttribute('aria-required')==='true' || /[*\u2731]/.test(norm(grp.innerText).slice(0,200));
     if (!reqd) continue;
     if (!opts.some(o => o.getAttribute('aria-checked')==='true')) empty.push(qlabel(grp));
   }
