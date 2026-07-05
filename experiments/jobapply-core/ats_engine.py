@@ -680,7 +680,9 @@ number as the profile has it.
 Return one entry per field, no extras."""
 
 
-async def map_fields(llm: Any, fields: list[FormField], profile: dict, title: str) -> dict[str, FieldFill]:
+async def map_fields(
+    llm: Any, fields: list[FormField], profile: dict, title: str, job_context: str = ""
+) -> dict[str, FieldFill]:
     """The single paid step. Returns {field_name: FieldFill}."""
     from browser_use.llm.messages import SystemMessage, UserMessage
 
@@ -695,6 +697,11 @@ async def map_fields(llm: Any, fields: list[FormField], profile: dict, title: st
         for f in fields
     ]
     ctx = {"job_title": title, "applicant_profile": profile, "fields": descriptors}
+    # JOB CONTEXT (audit pattern 3): prose answers ('Why do you want to join us?') written from
+    # profile + job TITLE alone come out generic — give the mapper the page's own JD text so the
+    # answer can reference the actual role/company.
+    if job_context:
+        ctx["job_description_excerpt"] = str(job_context)[:3500]
     res = await llm.ainvoke(
         [SystemMessage(content=_MAP_SYSTEM), UserMessage(content=json.dumps(ctx, ensure_ascii=False))],
         output_format=FillMap,

@@ -442,7 +442,12 @@ async def run_single_page_oa(
                     print(f"  {status} — generic lane found no fillable fields (kind: {page_kind})")
                     return result
             map_rows = [f for f in fields if f.needs_map]
-            mapped = await eng.map_fields(oa_llm.ResilientLLM(llm), map_rows, profile, title) if map_rows else {}
+            # JD text for the mapper (audit pattern 3): prose answers need the actual role/company,
+            # not just the title. One free DOM read.
+            _jd = ""
+            with contextlib.suppress(Exception):
+                _jd = str(await page.evaluate("() => (document.body && document.body.innerText || '').slice(0, 4000)"))
+            mapped = await eng.map_fields(oa_llm.ResilientLLM(llm), map_rows, profile, title, job_context=_jd) if map_rows else {}
             result["mapped"] = len(mapped)
             with contextlib.suppress(Exception):  # cookie/consent banners intercept focus + wipe fills
                 import oa_complete
@@ -645,6 +650,9 @@ async def _fill_form(
                 # per_field is the LOCAL fill ledger — result['results'] is only assembled later
                 filled_names={str(r.name) for r in per_field},
                 required_labels=[f.label or f.name for f in fields if getattr(f, "required", False)],
+                # the fill ledger's committed values, keyed by label — makes the crop check
+                # VALUE-AWARE (audit pattern 2: presence-only verify blesses label/junk text)
+                committed_by_label={str(r.label): str(r.committed) for r in per_field if r.committed},
             )
             # REQUIRED-ESCALATE VETO (zero-cost, deterministic): a REQUIRED field whose own
             # outcome is ESCALATE is by definition not complete — yet the audit can't see a

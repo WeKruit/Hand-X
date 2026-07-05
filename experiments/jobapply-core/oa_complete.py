@@ -157,7 +157,7 @@ _RECT_FOR_LABEL_JS = r"""(lab) => {
 }"""
 
 
-async def _crop_check(session: Any, page: Any, label: str) -> str:
+async def _crop_check(session: Any, page: Any, label: str, expected: str = "") -> str:
     """Verify ONE field by its own full-resolution CLIP screenshot: 'yes' (answered) / 'no' /
     'unsure'. Uses browser-use's native take_screenshot(clip=...) (CDP captureScreenshot with a
     document-coordinate clip) — Chrome renders exactly that region at native resolution, immune
@@ -196,7 +196,15 @@ async def _crop_check(session: Any, page: Any, label: str) -> str:
                         "(its label and its control). Is this field ANSWERED — a value typed, an "
                         "option selected, or a file attached? An empty box, a choice pair with "
                         "neither picked, a bare placeholder like 'Select', or an empty upload "
-                        'area means NOT answered. Reply STRICT JSON {"answer": "yes"|"no"|"unsure"}.'
+                        "area means NOT answered. The field's own label or placeholder text "
+                        "re-printed inside the control does NOT count as an answer."
+                        + (
+                            f" The value we intended is roughly: {expected[:120]!r} — if the "
+                            "control clearly shows a DIFFERENT unrelated value, answer 'no'."
+                            if expected
+                            else ""
+                        )
+                        + ' Reply STRICT JSON {"answer": "yes"|"no"|"unsure"}.'
                     ),
                 ),
                 ContentPartImageParam(
@@ -543,7 +551,7 @@ async def _orphan_pass(session: Any, page: Any, profile: dict, llm: Any, filled_
 
 async def complete(
     session: Any, page: Any, profile: dict, resume: str | None, *, allow_agent: bool, llm: Any = None, planner_keys: list | None = None,
-    filled_names: set | None = None, required_labels: list | None = None,
+    filled_names: set | None = None, required_labels: list | None = None, committed_by_label: dict | None = None,
 ) -> dict:
     """Audit the form for unfilled repeater sections + empty required fields; fill repeaters via the
     proven agent_fill_section and RE-FILL wiped required fields (retry). Returns
@@ -677,14 +685,14 @@ async def complete(
             if flags:
                 kept = []
                 for lab in flags[:6]:
-                    if await _crop_check(session, page, lab) != "yes":
+                    if await _crop_check(session, page, lab, (committed_by_label or {}).get(lab, "")) != "yes":
                         kept.append(lab)
                 verdict["visually_unanswered"] = kept
                 if len(kept) != len(flags):
                     print(f"   [complete] crop-confirm dropped {len(flags) - len(kept)} banded false-positive(s)")
             if not verdict["missing_required"] and not verdict["sections_skipped"] and not verdict.get("visually_unanswered"):
                 for lab in (required_labels or [])[:6]:
-                    if await _crop_check(session, page, lab) == "no":
+                    if await _crop_check(session, page, lab, (committed_by_label or {}).get(lab, "")) == "no":
                         verdict.setdefault("crop_flagged", []).append(lab)
                 if verdict.get("crop_flagged"):
                     verdict["visually_unanswered"] = list(verdict["crop_flagged"])
