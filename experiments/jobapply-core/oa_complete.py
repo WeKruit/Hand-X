@@ -972,6 +972,13 @@ async def complete(
         # verdict on its own (flags stay, greens stay).
         with contextlib.suppress(Exception):
             flags = list(verdict.get("visually_unanswered") or [])
+            def _committed_for(lab: str) -> str:
+                lt = {w for w in str(lab).lower().replace("*", " ").split() if len(w) > 2}
+                for k, v in (committed_by_label or {}).items():
+                    kt = {w for w in str(k).lower().replace("*", " ").split() if len(w) > 2}
+                    if kt and lt and len(kt & lt) >= max(1, len(kt) // 2):
+                        return v
+                return ""
             if flags:
                 kept = []
                 for lab in flags[:6]:
@@ -984,13 +991,6 @@ async def complete(
                 # there is NO committed value for that label. Vision alone tightens the
                 # verdict only when the DOM cannot see the field at all.
                 _missing_now = " ".join(str(x).lower() for x in verdict.get("missing_required") or [])
-                def _committed_for(lab: str) -> str:
-                    lt = {w for w in str(lab).lower().replace("*", " ").split() if len(w) > 2}
-                    for k, v in (committed_by_label or {}).items():
-                        kt = {w for w in str(k).lower().replace("*", " ").split() if len(w) > 2}
-                        if kt and lt and len(kt & lt) >= max(1, len(kt) // 2):
-                            return v
-                    return ""
                 kept2 = []
                 for lab in kept:
                     lt = {w for w in str(lab).lower().replace("*", " ").split() if len(w) > 2}
