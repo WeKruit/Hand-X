@@ -361,10 +361,35 @@ async def _settle(session: Any, before: perc.OAState, settle_s: float) -> list[p
 def _option_texts(nodes: list[perc.DeltaNode]) -> list[str]:
     """The human option labels from a delta cluster, committed-pill rows excluded.
     Pills carry a 'press delete to clear value' / selectedItem state which node_option_text
-    already strips; here we drop empties and de-dupe, preserving order (top-to-bottom)."""
+    already strips; here we drop empties and de-dupe, preserving order (top-to-bottom).
+
+    OPTION-SCOPE filter: a react-select re-render dumps CHROME (a 'Toggle flyout' / 'Clear
+    selections' control) and NEIGHBOR question labels into the delta — those polluted the option
+    set, so pick_option returned None and the field cycled to its deadline (robinhood: demographic
+    selects each burning ~28s). Keep genuine option labels: role=option when present; else a short
+    leaf label that is NOT a question (ends '?' / very long = a neighbor question) and NOT the
+    trigger/button itself. Structural, not an exhaustive word list."""
+    def _is_option(d: perc.DeltaNode) -> bool:
+        role = ""
+        with contextlib.suppress(Exception):
+            ax = getattr(d.node, "ax_node", None)
+            role = ((getattr(ax, "role", None) or "") if ax else "").lower()
+            if not role:
+                role = ((getattr(d.node, "attributes", None) or {}).get("role") or "").lower()
+        if role == "option":
+            return True
+        if role in ("button", "link", "combobox", "textbox"):
+            return False  # chrome / the trigger itself, never an option
+        t = (d.text or "").strip()
+        if t.endswith("?") or len(t) > 80:
+            return False  # a neighbor QUESTION swept into the delta, not an option
+        return True
+
     seen: set[str] = set()
     out: list[str] = []
-    for d in nodes:
+    scoped = [d for d in nodes if _is_option(d)]
+    # if scoping removed everything, fall back to raw so an unusual menu is not silently emptied.
+    for d in scoped or nodes:
         t = (d.text or "").strip()
         if not t:
             continue
