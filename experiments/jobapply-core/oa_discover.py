@@ -85,9 +85,14 @@ _ENUM_JS = r"""
       // question — twilio mega3/34: two adjacent lone-consent boxes shared a section ancestor
       // and the container grouping merged them into one field, so only one got checked.
       const ownLab = labFor(el) || '';
+      // FIELDSET is a hard question boundary: twilio renders TWO adjacent acknowledgements,
+      // each its own <fieldset><legend>question</legend><input labeled 'Acknowledge'> — both
+      // labels short, so only the structural boundary separates them (mega3/34-37).
+      const fsBound = el.closest('fieldset,[role=group]');
       if (ownLab.length <= 60) {
         let p = el.parentElement, depth = 0;
         while (p && depth < 6) {
+          if (fsBound && p !== fsBound && !fsBound.contains(p) && p.contains(fsBound)) break;
           if (p.tagName !== 'FORM' && p.querySelectorAll) {
             const boxes = [...p.querySelectorAll('input[type=checkbox]')];
             // group only when the co-located boxes look like OPTIONS (short labels), not
