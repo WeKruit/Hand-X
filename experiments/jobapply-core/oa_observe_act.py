@@ -1231,6 +1231,13 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S3_OPEN")
+    # DIAGNOSTIC (gitlab mega/33: aria/react-select rungs never fired, straight to click+delta ->
+    # escalate; cannot tell gate-miss from hidden-<select> node without the node identity):
+    with contextlib.suppress(Exception):
+        ctx.trace.append(
+            f"s3-node:{_node_tag(ctx.node)}/{_node_role(ctx.node) or '-'}"
+            f"/combo={_is_plain_text_editable_or_combo(ctx.node)}"
+        )
     # PROVEN native-<select> commit FIRST (ats_lever._select_native, generalised): browser-use's
     # select_option no-ops on Lever's React selects; setting selectedIndex by option text + firing change
     # is the deterministic path. Scan the card container for a <select> and commit it directly.
