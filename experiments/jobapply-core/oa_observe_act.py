@@ -1227,14 +1227,27 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
     # and click the match — SCOPED exactly like the proven ats_lever handler scopes by field name,
     # instead of the page-wide delta that swept in 'Toggle flyout' / neighbor questions and cycled
     # robinhood's demographic selects to their 28s deadline. Deterministic, no garbage, fast.
-    _role = (_node_role(ctx.node) or "").lower()
-    _has_listbox = _node_attr(ctx.node, "aria-owns") or _node_attr(ctx.node, "aria-controls")
-    if _role == "combobox" or _has_listbox:
+    # Gate on the CLASSIFIED kind (SELECT) + a text-editable input, NOT on aria-owns being present
+    # pre-open — react-select exposes aria-owns/aria-controls only once the menu is OPEN, and
+    # cdp_choose_aria_option SELF-OPENS then follows them. Gating on the closed-state attribute is
+    # why the first cut never fired (aria-direct hits = 0). Any combobox-kind input tries it.
+    if normalize_kind(ctx.kind) == "SELECT" and _is_plain_text_editable_or_combo(ctx.node):
         with contextlib.suppress(Exception):
             got = await cdpa.cdp_choose_aria_option(session, ctx.node, ctx.value)
             if got:
                 ctx.committed_text = got
                 ctx.trace.append(f"aria-direct:{got[:20]}")
+                return await _s_verify(session, ctx)
+        # react-select (no aria-owns): mousedown-open + read class-based options + click match.
+        # This is the robinhood/greenhouse root — a plain click never opens the menu.
+        with contextlib.suppress(Exception):
+            async def _pick(v: str, opts: list[str]) -> str | None:
+                return await brain.pick_option(v, opts, llm=ctx.llm, label=ctx.label)
+
+            got = await cdpa.cdp_choose_react_select(session, ctx.node, ctx.value, pick=_pick)
+            if got:
+                ctx.committed_text = got
+                ctx.trace.append(f"react-select-direct:{got[:20]}")
                 return await _s_verify(session, ctx)
     # Else physically open and watch the delta.
     before = await perc.get_state(session)

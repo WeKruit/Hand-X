@@ -511,6 +511,101 @@ async def cdp_choose_aria_option(session: Any, node: Any, value: str) -> str:
         return ""
 
 
+# react-select (greenhouse/robinhood) exposes NO aria-owns — its options render in a
+# `[class*=option]` menu that only mounts on MOUSEDOWN (a plain .click() never opens it, the live
+# root cause of robinhood's demographic-select escalations). This mirrors ats_greenhouse._combobox:
+# find the control wrapper, mousedown-open, read the class-based options, click the match by text.
+_RS_OPEN_READ_JS = r"""
+function(){
+  const norm = s => (s||'').replace(/\s+/g,' ').trim();
+  // the control wrapper is an ancestor of the input carrying a react-select 'control' class
+  let ctrl = this;
+  for(let i=0;i<5 && ctrl;i++){ if(ctrl.className && /(^|[^a-z])control([^a-z]|$)|select__control|Control/i.test(ctrl.className.toString())) break; ctrl = ctrl.parentElement; }
+  const target = ctrl || this;
+  target.scrollIntoView({block:'center'});
+  for(const ev of ['mousedown','mouseup','click'])
+    target.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));
+  // SCOPE to THIS control's menu. react-select ids every option 'react-select-N-option-M' sharing
+  // the input's 'react-select-N-input' instance — scope by that N so a page-wide read can't grab a
+  // DIFFERENT open menu's options (live: gender read the phone country list). Fall back to the menu
+  // element owning the control, then page-wide, only if the instance scope finds nothing.
+  const idm = (this.id||'').match(/react-select-([^-]+)-/);
+  let opts = [];
+  if(idm){
+    opts = [...document.querySelectorAll('[id^="react-select-'+idm[1]+'-option"]')];
+  }
+  if(!opts.length){
+    // the menu is a descendant of the control wrapper or its next sibling
+    const menu = target.querySelector('[class*=menu],[class*=Menu]') || (target.nextElementSibling && target.nextElementSibling.matches('[class*=menu],[class*=Menu]') ? target.nextElementSibling : null);
+    if(menu) opts = [...menu.querySelectorAll('[class*=option],[class*=Option],[role=option]')];
+  }
+  if(!opts.length){
+    opts = [...document.querySelectorAll('[class*=option],[class*=Option],[role=option]')];
+  }
+  opts = opts.filter(e => e.offsetParent && !/menu-notice|no-options|placeholder/i.test((e.className||'').toString()));
+  return JSON.stringify([...new Set(opts.map(o => norm(o.innerText||o.textContent)).filter(Boolean))].slice(0,60));
+}
+"""
+
+_RS_CLICK_JS = r"""
+function(want){
+  const norm = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const w = norm(want); if(!w) return "";
+  const idm = (this.id||'').match(/react-select-([^-]+)-/);
+  let opts = idm ? [...document.querySelectorAll('[id^="react-select-'+idm[1]+'-option"]')].filter(e=>e.offsetParent) : [];
+  if(!opts.length) opts = [...document.querySelectorAll('[class*=option],[class*=Option],[role=option]')].filter(e=>e.offsetParent);
+  let t = opts.find(o => norm(o.innerText||o.textContent) === w);
+  if(!t && w.length>=3) t = opts.find(o => { const x=norm(o.innerText||o.textContent); return x && (x===w); });
+  if(!t) return "";
+  t.scrollIntoView({block:'nearest'});
+  for(const ev of ['mousedown','mouseup','click']) t.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));
+  return norm(t.innerText||t.textContent);
+}
+"""
+
+
+async def cdp_choose_react_select(session: Any, node: Any, value: str, pick=None) -> str:
+    """Commit a react-select (no aria-owns) DETERMINISTICALLY: mousedown-open the control, read
+    the class-based `[class*=option]` menu, pick (exact, or via ``pick(value, options)`` for
+    semantic match), click the chosen option by text. Returns committed text or "". Generic —
+    the react-select DOM shape (control wrapper + option class) is a library convention, not a
+    per-ATS string."""
+
+    async def _do() -> str:
+        r = await _resolve(session, node)
+        if r is None:
+            return ""
+        cdp_session, session_id, object_id = r
+        raw = await _call_on(cdp_session, session_id, object_id, _RS_OPEN_READ_JS)
+        try:
+            options = json.loads(raw) if raw else []
+        except Exception:
+            options = []
+        if not options:
+            return ""
+        chosen = ""
+        # exact/normalized match first (free), else the caller's semantic picker
+        nv = str(value).strip().lower()
+        for o in options:
+            if o.strip().lower() == nv:
+                chosen = o
+                break
+        if not chosen and pick is not None:
+            with contextlib.suppress(Exception):
+                chosen = await pick(value, options) or ""
+        if not chosen:
+            return ""
+        got = await _call_on(cdp_session, session_id, object_id, _RS_CLICK_JS, args=[str(chosen)])
+        return str(got).strip() if got else ""
+
+    try:
+        return await asyncio.wait_for(_do(), timeout=CDP_ACTION_TIMEOUT + 2.0)
+    except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041
+        return ""
+    except Exception:
+        return ""
+
+
 # JS: find the text input within `this` (the location card / control) and SET its value via the native
 # setter + input/change so a React-controlled autocomplete keeps it (el.fill reverts). Mirrors the proven
 # ats_lever._location. Returns the set value, or "".
