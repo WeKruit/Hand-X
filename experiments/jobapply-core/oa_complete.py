@@ -626,6 +626,14 @@ async def retry_missing(
             value = _prior(f) or eng._resolve(f, mapped, resume)[0]
             if not (value or "").strip():
                 continue
+            # PHONE FORMAT VARIANT (doordash mega3/16: '+1 415 555 0142' committed and
+            # dom-verified, but the tenant mask underlines it red and vision flags it on all
+            # five doordash forms). Being IN this retry means the judge already rejected the
+            # international form once — try the national digits instead.
+            if "phone" in _norm(f.label or "") and value.replace(" ", "").startswith("+1"):
+                _digits = "".join(ch for ch in value if ch.isdigit())
+                if len(_digits) == 11 and _digits.startswith("1"):
+                    value = _digits[1:]
             fd = _field_dict(f, value, resume=resume, llm=llm, adapter=None, page=page)
             with contextlib.suppress(Exception):
                 out = await oa.observe_act(session, fd)
