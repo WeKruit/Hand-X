@@ -733,6 +733,15 @@ async def map_fields(
         if name in _prose and (f.value or "").strip().lower() in ("yes", "no", "n/a", "-", "true", "false"):
             f.why = f"PROSE-GUARD dropped bare '{f.value}'"
             f.value = ""
+    # LABEL-ECHO GUARD (deterministic): a mapped value equal to the field's own question is a
+    # mapper echo, never an answer — downstream it gets TYPED as a search query / committed as
+    # the 'value' (ambral mega/39: search 'Are you currently authorized to work in the US?').
+    _lab_by_name = {f.name: " ".join((getattr(f, "label", "") or "").split()).lower().rstrip("*: ") for f in fields}
+    for name, f in out.items():
+        v = " ".join((f.value or "").split()).lower().rstrip("*: ")
+        if v and v == _lab_by_name.get(name, ""):
+            f.why = "LABEL-ECHO dropped (value == question)"
+            f.value = ""
     return out
 
 

@@ -293,7 +293,25 @@ function(want, groupName){
     inputs = [...root.querySelectorAll('input[type=radio],input[type=checkbox]')];
     if(this !== root && this.name) inputs = inputs.filter(el => el.name === this.name);
   }
-  if(!inputs.length) return "";
+  if(!inputs.length){
+    // BUTTON-PILL GROUP (ashby mega/38-39 'Yes'/'No' pills): the options are literal <button>s /
+    // role=button, no radio/checkbox input exists anywhere — the choice lane found nothing and
+    // the visual fallback clicked the group container. Match by exact SHORT visible text (an
+    // option pill is a word or two; never submit/apply chrome), click, return the text.
+    let root = this;
+    if(root.matches && root.matches('input,button')) root = root.closest('fieldset,[role=group],[role=radiogroup]') || root.parentElement || root;
+    const btns = [...root.querySelectorAll('button,[role=button]')].filter(b => {
+      const ty=(b.getAttribute('type')||'').toLowerCase();
+      if(ty==='submit') return false;
+      const t=vis(b); return t && t.length<=30 && !/submit|apply|upload|replace|next|continue/.test(t);
+    });
+    const hit = btns.find(b => vis(b)===w);
+    if(hit){ hit.click();
+      hit.dispatchEvent(new Event('input',{bubbles:true}));
+      hit.dispatchEvent(new Event('change',{bubbles:true}));
+      return (hit.innerText||'').trim() || want; }
+    return "";
+  }
   // LONE checkbox + an affirmative want -> check it (a consent box has no per-option labels to
   // match; the mapper already decided this field gets a value). Explicit negatives leave it be.
   if(inputs.length===1 && inputs[0].type==='checkbox' && !['no','false','none','0'].includes(w)){
