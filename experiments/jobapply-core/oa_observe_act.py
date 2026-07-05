@@ -1648,8 +1648,17 @@ async def _s_text_guard(session: Any, ctx: Ctx) -> Outcome:
     # a yes/no question spatially bound to the Phone input, Phone became 'Yes'). dom-ref located
     # fields are exempt (retype/revalue of one's own field is legitimate).
     if "located:dom-ref" not in " ".join(ctx.trace) and await _probe_would_clobber(session, ctx):
-        ctx.trace.append("occupied-foreign-input->escalate")
-        return ESCALATE if ctx.required else SKIP
+        # same triple chain as S3/S4 (mega2/31: grouped bound LinkedIn Profile* to an occupied
+        # box and the text lane could ONLY escalate — override/rebind were wired elsewhere).
+        if _occupied_is_own_field(ctx):
+            ctx.trace.append("occupied-own-field->override")
+        else:
+            alt = await _rebind_empty_in_card(session, ctx)
+            if alt is None:
+                ctx.trace.append("occupied-foreign-input->escalate")
+                return ESCALATE if ctx.required else SKIP
+            ctx.node = alt
+            ctx.trace.append("occupied->rebound-empty-in-card")
     return await _s_text(session, ctx)
 
 

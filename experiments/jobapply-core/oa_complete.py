@@ -113,6 +113,30 @@ _AUDIT_JS = r"""() => {
     const placeholder = !shown || /^(select|choose|--|pick|choisir|elegir|wahlen)/i.test((shown||'').normalize('NFD').replace(/[\u0300-\u036f]/g,''));
     if (!active && placeholder) empty.push(qlabel(q||c));
   }
+  // (c) BUTTON-PILL questions (ashby 'Yes'/'No' <button>s — no input, no ARIA group): a
+  //     '*'-marked question block holding 2-12 SHORT-text buttons none of which reads
+  //     selected (aria-pressed/aria-selected/checked-ish class). Invisible to every scan
+  //     above, so the required flag never reached retry/agent (replit mega2/3-4: the Foster
+  //     City commitment stayed blank through the whole pipeline).
+  const btnSel = 'button,[role=button]';
+  const seenPill = new Set();
+  for (const b of document.querySelectorAll(btnSel)) {
+    if (!vis(b)) continue;
+    const t = norm(b.innerText||''); if (!t || t.length > 30) continue;
+    let p = b.parentElement, d = 0, box = null;
+    while (p && d++ < 5) {
+      const n = [...p.querySelectorAll(btnSel)].filter(x => vis(x) && norm(x.innerText||'').length && norm(x.innerText||'').length <= 30).length;
+      if (n >= 2 && n <= 12) { box = p; break; }
+      p = p.parentElement;
+    }
+    if (!box || seenPill.has(box)) continue;
+    seenPill.add(box);
+    const qtxt = norm(box.innerText).slice(0,250) + ' ' + norm((box.parentElement||{}).innerText||'').slice(0,250);
+    if (!/[*✱]/.test(qtxt)) continue;
+    const pills = [...box.querySelectorAll(btnSel)].filter(x => vis(x) && norm(x.innerText||'').length && norm(x.innerText||'').length <= 30);
+    const picked = pills.some(x => x.getAttribute('aria-pressed')==='true' || x.getAttribute('aria-selected')==='true' || /selected|active|checked/.test(x.className||''));
+    if (!picked) empty.push(qlabel(box.parentElement||box));
+  }
   // (b) custom radio/checkbox groups via [role=radiogroup]/[role=group] with no aria-checked member,
   //     or aria-checked elements where none is true.
   for (const grp of document.querySelectorAll('[role=radiogroup],[role=group]')) {
