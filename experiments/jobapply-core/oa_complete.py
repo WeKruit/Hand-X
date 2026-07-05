@@ -914,6 +914,29 @@ async def complete(
 
                 await _aio.sleep(2.0)
                 page = await session.must_get_current_page()
+        # GLOBAL PROBE-RESIDUE SWEEP (instacart mega3/56: the state value's 6-char probe
+        # '(US) C' sat in the AUTH box with a hanging 'No options' menu — the writer's flow
+        # 'succeeded' elsewhere so the abandonment cleaner never fired). Any text/combobox
+        # input whose value EXACTLY equals a known probe prefix (and is not that field's own
+        # committed value) is our residue; clear it before judging.
+        if committed_by_label:
+            with contextlib.suppress(Exception):
+                _vals = [str(v).strip() for v in committed_by_label.values() if v and len(str(v).strip()) > 6]
+                _probes = sorted({v[:6] for v in _vals})
+                _full = sorted({v for v in _vals})
+                _js = (
+                    "((probes, fulls) => { let n = 0; const F = new Set(fulls);"
+                    " for (const el of document.querySelectorAll('input[type=text],input:not([type]),input[type=search],input[role=combobox],input[aria-autocomplete]')) {"
+                    "   const v = (el.value || '').trim();"
+                    "   if (v && probes.includes(v) && !F.has(v)) {"
+                    "     const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');"
+                    "     d.set.call(el, ''); el.dispatchEvent(new Event('input', {bubbles: true}));"
+                    "     el.dispatchEvent(new Event('change', {bubbles: true})); n++; } }"
+                    " return n; })(" + json.dumps(_probes) + ", " + json.dumps(_full) + ")"
+                )
+                _n = await page.evaluate(_js)
+                if _n:
+                    print(f"   [complete] probe-residue sweep cleared {_n} box(es)")
         # SETTLE BEFORE JUDGING: close any dropdown menu a fill/retry left open — an open
         # overlay at judge-time hides committed values from the vision gate and the crops
         # (mega/28 final screenshot still had a menu hanging open). Escape closes menus;
