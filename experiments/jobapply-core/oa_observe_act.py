@@ -975,13 +975,26 @@ async def _visual_commit(session: Any, ctx: Ctx, candidates: list[Any]) -> bool:
     # chosen option to that element, then issue a TRUSTED direct-CDP click on it (real mouse event +
     # elementFromPoint reroute + JS .click() fallback fires the React handler regardless of coordinate).
     target = _resolve_choice_target(chosen, candidates)
+    _chosen_text = perc.node_label_text(chosen) or perc.node_option_text(chosen) or ctx.value
+    # SELF-LABEL REJECT (discord mega/30): when the VLM's pick IS the field's own question/control
+    # (chosen text == our label), clicking it OPENS the widget — it commits nothing. Recording it
+    # as committed let verify read the transient typed text as CORRECT while blur reverted the
+    # widget to its placeholder ('How did you hear about this job?' became the committed 'value').
+    # Reject BEFORE clicking (the click would just leave a menu hanging open). A CHOICE group is
+    # exempt: a lone radio/checkbox legitimately carries the question as its accessible label and
+    # self-click IS the commit (offline radio cases).
+    _nlab = " ".join((ctx.label or "").split()).lower()
+    _nch = " ".join(_chosen_text.split()).lower()
+    if _nlab and _nch == _nlab and classify_intrinsic(target) not in ("INTRINSIC_RADIO", "INTRINSIC_CHECKBOX"):
+        ctx.trace.append("visual-choice:self-label-reject")
+        return False
     ok = await act.click_node(session, target)
     if not ok:
         ok = await act.click_node_center(session, target)  # coordinate fallback
     if not ok:
         ctx.trace.append("visual-choice:click-failed")
         return False
-    ctx.committed_text = perc.node_label_text(chosen) or perc.node_option_text(chosen) or ctx.value
+    ctx.committed_text = _chosen_text
     ctx.node = target  # the verify oracle reads back the option control we actually clicked
     how = "self" if target is chosen else "resolved"
     ctx.trace.append(f"visual-choice+cdp_click:{how}")
@@ -1531,6 +1544,14 @@ async def _s_text_guard(session: Any, ctx: Ctx) -> Outcome:
     if not _is_plain_text_editable(ctx.node):
         ctx.trace.append("not-plain-text->search")
         return await _s4_search(session, ctx)
+    # OCCUPIED-FOREIGN-INPUT (text lane): an UNTRUSTED locate (spatial/grouped/structure — not the
+    # discovery's own dom-ref) bound to a plain input that already holds a DIFFERENT value is
+    # almost certainly a NEIGHBOUR's control — typing clear=True destroys it (agility mega/24:
+    # a yes/no question spatially bound to the Phone input, Phone became 'Yes'). dom-ref located
+    # fields are exempt (retype/revalue of one's own field is legitimate).
+    if "located:dom-ref" not in " ".join(ctx.trace) and await _probe_would_clobber(session, ctx):
+        ctx.trace.append("occupied-foreign-input->escalate")
+        return ESCALATE if ctx.required else SKIP
     return await _s_text(session, ctx)
 
 
