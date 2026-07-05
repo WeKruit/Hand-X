@@ -62,7 +62,10 @@ _ENUM_JS = r"""
     // 'worked here before?' screening combobox was 3.48px -> dropped -> never fillable).
     const isCombo = el.getAttribute && (el.getAttribute('role') === 'combobox' || el.getAttribute('aria-autocomplete'));
     if (tag !== 'select' && !isCombo && !['file', 'checkbox', 'radio'].includes(ty) && !vis(el)) continue;
-    if (tag === 'input' && ['hidden', 'submit', 'button', 'image', 'reset', 'search'].includes(ty)) continue;
+    // type=search stays: duolingo's Location geocomplete is <input type=search> (mega3/22-27,
+    // six runs) — the chrome-search case is already killed by the nav/header/[role=search]
+    // ancestor check below.
+    if (tag === 'input' && ['hidden', 'submit', 'button', 'image', 'reset'].includes(ty)) continue;
     if (el.closest('nav, header, footer, [role=search]')) continue;  // page chrome, not the form
     const req = el.required || (el.getAttribute && el.getAttribute('aria-required') === 'true');
     if (tag === 'select') {
