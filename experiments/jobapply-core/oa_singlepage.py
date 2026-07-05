@@ -618,6 +618,22 @@ async def _fill_form(
         if outcome == oa.DONE:
             _done_labels.add(_lkey)
 
+    # CAPTCHA-AT-END: interaction-triggered challenges (lever hCaptcha) mount AFTER the
+    # start-of-run page-kind check and sit over the form at judge time — mega/61/66 the vision
+    # gate flagged 'Full name' while staring at the puzzle overlay, and the run reported FILLED
+    # instead of the HITL lane. Provider identity (finite vendor iframes), not tenant text.
+    with contextlib.suppress(Exception):
+        _captcha = bool(
+            await page.evaluate(
+                "(() => [...document.querySelectorAll("
+                "'iframe[src*=\"hcaptcha\"],iframe[src*=\"recaptcha\"],iframe[src*=\"turnstile\"],iframe[title*=\"challenge\"]'"
+                ")].some(e => { const r = e.getBoundingClientRect(); return r.width > 50 && r.height > 50; }))()"
+            )
+        )
+        if _captcha:
+            result["status"] = "NEEDS_HUMAN"
+            result["blocker"] = "captcha"
+            print("   [gate] CAPTCHA overlay present at end of run -> NEEDS_HUMAN")
     # FORM-EVIDENCE GATE: complete:True is only meaningful when an APPLICATION FORM was actually
     # reached and substantively filled. A search box / JD page / login wall has no required-empty
     # fields, so the audit passes VACUOUSLY (atsx: oracle filled 0/4, phenom 1/6, bain 1/2 all

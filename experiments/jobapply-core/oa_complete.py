@@ -753,7 +753,9 @@ async def complete(
                     f"requires visa sponsorship: {'Yes' if profile.get('requires_sponsorship') else 'No'}; "
                     f"willing to relocate: {'Yes' if profile.get('willing_to_relocate') else 'No'}; "
                     f"notice period: {profile.get('notice_period','2 weeks')}; "
-                    f"earliest start: {profile.get('available_start_date','')}."
+                    f"earliest start: {profile.get('available_start_date','')}; "
+                    f"desired salary: {profile.get('desired_salary','')} USD/year (a salary question "
+                    f"in another currency gets the approximate converted NUMBER, never prose)."
                 )
                 # EXACT SCOPE: 'answer EVERY remaining required question' let the agent freelance
                 # into OPTIONAL demographics it should never touch (scaleai mega/35: optional
