@@ -627,6 +627,10 @@ veteran status -> the "not a protected veteran" option; disability -> the "no, I
 disability" option; government-official / worked-for-THIS-company / conflict-of-interest \
 history -> "No". These are answered, not skipped — but the DEFAULT marker must be set so the \
 run record shows which answers were assumed rather than known.
+- ADJACENT-SKILL INFERENCE (user-sanctioned): a years-of-experience question about a skill \
+implied by the candidate's stack is answered from the implying skill's tenure, never 0 \
+(e.g. React on the profile implies TypeScript — answer with the React years). A skill with \
+no such neighbour keeps the honest low answer.
 - OFFICE-ATTENDANCE / COMMUTE commitment questions ("able to work from our X office N days a \
 week?", "willing to work in-person from Y?"): reason from the candidate's location vs the \
 office location — same metro area -> "Yes"; different metro -> use willing_to_relocate. A \
