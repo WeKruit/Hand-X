@@ -833,7 +833,9 @@ async def map_fields(
                     f"Candidate facts: {_facts}\nRequired application question: {q}{opts}\n"
                     "Answer with the EXACT value to fill (option text verbatim when options are "
                     "given; same-metro office attendance -> Yes; policy acknowledgements -> the "
-                    "affirmative option). Reply ONLY the value, or SKIP if genuinely unanswerable."
+                    "affirmative option). A follow-up premised on a prior answer ('If you selected "
+                    "Other…', 'If yes, …') whose premise does not hold -> SKIP. Reply ONLY the "
+                    "value, or SKIP if genuinely unanswerable."
                 )
                 r = await llm.ainvoke([UserMessage(content=msg)])
                 v = str(getattr(r, "completion", r) or "").strip().strip('"').strip()
