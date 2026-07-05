@@ -184,7 +184,15 @@ _AUDIT_JS = r"""() => {
     if (!reqd) continue;
     if (!opts.some(o => o.getAttribute('aria-checked')==='true')) empty.push(qlabel(grp));
   }
-  const keep = [...new Set(empty)].filter(t => !/^(create a job alert|apply for this job)/i.test((t||'').trim()));
+  const h1t = norm(((document.querySelector('h1')||{}).innerText)||'').toLowerCase();
+  const keep = [...new Set(empty)].filter(t => {
+    const nt = norm(t||'').toLowerCase();
+    if (/^(create a job alert|apply for this job)/i.test(nt)) return false;
+    // ANY branch that anchored on the page header names the job title — universal exit filter
+    // (affirm mega3/40-42: three header variants from three different branches)
+    if (h1t.length >= 8 && nt.includes(h1t.slice(0, 40))) return false;
+    return true;
+  });
   return JSON.stringify({adds: [...new Set(adds)], emptyReq: keep.slice(0,25)});
 }"""
 
