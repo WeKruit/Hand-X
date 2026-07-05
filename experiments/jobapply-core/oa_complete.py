@@ -197,7 +197,11 @@ async def _crop_check(session: Any, page: Any, label: str, expected: str = "") -
                         "option selected, or a file attached? An empty box, a choice pair with "
                         "neither picked, a bare placeholder like 'Select', or an empty upload "
                         "area means NOT answered. The field's own label or placeholder text "
-                        "re-printed inside the control does NOT count as an answer."
+                        "re-printed inside the control does NOT count as an answer. "
+                        "EXCEPTION — a CONDITIONAL field: if the label says it only applies when a "
+                        "previous answer was a certain way (for example it begins 'If yes,…' or 'If "
+                        "applicable,…') and there is no sign that condition was met, its being empty "
+                        "is CORRECT — answer 'yes'."
                         + (
                             f" The value we intended is roughly: {expected[:120]!r} — if the "
                             "control clearly shows a DIFFERENT unrelated value, answer 'no'."
