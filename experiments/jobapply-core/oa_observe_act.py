@@ -329,6 +329,17 @@ async def _probe_would_clobber(session: Any, ctx: "Ctx") -> bool:
     return cur.lower() != (ctx.value or "").strip().lower()
 
 
+def _occupied_is_own_field(ctx: "Ctx") -> bool:
+    """RIGHT box, WRONG prefill (bamboohr mega/76-77: the Country combo ships with the tenant's
+    'United Kingdom' default): the occupied control's OWN question-group text names THIS field —
+    containment proves ownership, so overwriting the tenant default is the correct move, not a
+    clobber. Same 0.5 bar as the locate containment gate."""
+    with contextlib.suppress(Exception):
+        gt = perc._group_text(ctx.node)
+        return perc._overlap_score(perc._tokens(gt), perc._tokens(ctx.label or "")) >= 0.5
+    return False
+
+
 async def _rebind_empty_in_card(session: Any, ctx: "Ctx") -> Any | None:
     """The grouped/spatial tier bound an OCCUPIED foreign input while the question's REAL control
     sits EMPTY in the SAME card (ramp mega/49-50 payroll location: the card held both the occupied
@@ -1360,12 +1371,15 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
             normalize_kind(ctx.kind) == "SELECT" or ctx.nature in ("BOOLEAN", "CLOSED_LIST")
         ) and _is_plain_text_editable_or_combo(ctx.node):
             if await _probe_would_clobber(session, ctx):
-                alt = await _rebind_empty_in_card(session, ctx)
-                if alt is None:
-                    ctx.trace.append("occupied-foreign-input->escalate")
-                    return await _s_other_guard(session, ctx)
-                ctx.node = alt
-                ctx.trace.append("occupied->rebound-empty-in-card")
+                if _occupied_is_own_field(ctx):
+                    ctx.trace.append("occupied-own-field->override")
+                else:
+                    alt = await _rebind_empty_in_card(session, ctx)
+                    if alt is None:
+                        ctx.trace.append("occupied-foreign-input->escalate")
+                        return await _s_other_guard(session, ctx)
+                    ctx.node = alt
+                    ctx.trace.append("occupied->rebound-empty-in-card")
             ctx.trace.append("select-type-to-filter")
             before2 = await perc.get_state(session)
             probe = ctx.value[: min(len(ctx.value), 6)] if len(ctx.value) > 6 else ctx.value
@@ -1506,12 +1520,15 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
     # Precondition: the located element must be text-editable (a native <select> would have
     # been caught by intrinsic and routed to S_NATIVE).
     if await _probe_would_clobber(session, ctx):
-        alt = await _rebind_empty_in_card(session, ctx)
-        if alt is None:
-            ctx.trace.append("occupied-foreign-input->escalate")
-            return ESCALATE if ctx.required else SKIP
-        ctx.node = alt
-        ctx.trace.append("occupied->rebound-empty-in-card")
+        if _occupied_is_own_field(ctx):
+            ctx.trace.append("occupied-own-field->override")
+        else:
+            alt = await _rebind_empty_in_card(session, ctx)
+            if alt is None:
+                ctx.trace.append("occupied-foreign-input->escalate")
+                return ESCALATE if ctx.required else SKIP
+            ctx.node = alt
+            ctx.trace.append("occupied->rebound-empty-in-card")
     variants = await brain.query_variants(ctx.value, ctx.nature or "SEARCH", llm=ctx.llm)
     # CARD-COMMIT FIX (geocomplete): a react-select location typeahead returns NOTHING for the full
     # 'City, ST, USA' string — it matches on a short CITY prefix and resolves the rest async. Prepend
