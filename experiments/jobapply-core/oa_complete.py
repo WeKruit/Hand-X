@@ -725,6 +725,9 @@ async def complete(
     verdict: dict = {
         "complete": True, "missing_required": [], "sections_filled": [], "sections_skipped": [], "retried": 0,
     }
+    _form_url = ""
+    with contextlib.suppress(Exception):
+        _form_url = await page.get_url()
     with contextlib.suppress(Exception):
         if resume:  # button-triggered resume upload (hibob/bamboohr 'Add file' has no <input> yet)
             await upload_via_button(session, page, resume)
@@ -849,6 +852,19 @@ async def complete(
                 if fixed:
                     verdict["repaired_overwritten"] = fixed
                     print(f"   [complete] repaired agent-overwritten fields: {fixed}")
+        # DRIFT GUARD (samsara mega2/49-51: 18-19 fields filled, then something clicked a nav
+        # link and every judge — audit, vision, screenshot — ran on /company/belonging instead
+        # of the form): if the URL changed since complete() started, navigate BACK before
+        # judging.
+        with contextlib.suppress(Exception):
+            _now_url = await page.get_url()
+            if _form_url and _now_url and _now_url.split("#")[0] != _form_url.split("#")[0]:
+                print(f"   [complete] page drifted to {_now_url[:60]} -> navigating back to the form")
+                await session.navigate_to(_form_url)
+                import asyncio as _aio
+
+                await _aio.sleep(2.0)
+                page = await session.must_get_current_page()
         # SETTLE BEFORE JUDGING: close any dropdown menu a fill/retry left open — an open
         # overlay at judge-time hides committed values from the vision gate and the crops
         # (mega/28 final screenshot still had a menu hanging open). Escape closes menus;
