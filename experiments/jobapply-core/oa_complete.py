@@ -104,7 +104,7 @@ _AUDIT_JS = r"""() => {
       while (p && h++ < 6) { if (p.querySelectorAll('input[name="'+CSS.escape(e.name)+'"]').length >= 2) { box = p; break; } p = p.parentElement; }
       if (box) {
         const t = norm(box.innerText).slice(0,250) + ' ' + norm((box.parentElement||{}).innerText||'').slice(0,250);
-        if (/[*\u2731]/.test(t)) groups[g].req = true;
+        if (/[*\u2731](?!\s*indicates)/i.test(t)) groups[g].req = true;
         if (!groups[g].label) { const q = norm((box.parentElement||box).innerText).split('\n')[0]; if (q) groups[g].label = q.slice(0,80); }
       }
     }
@@ -125,7 +125,7 @@ _AUDIT_JS = r"""() => {
   for (const c of document.querySelectorAll('[role=combobox],[aria-haspopup=listbox]')) {
     if (!vis(c)) continue;
     const q = c.closest('[class*=field],[class*=question],[class*=form-group],div');
-    const reqd = c.getAttribute('aria-required')==='true' || /[*\u2731]/.test(norm((q||c).innerText).slice(0,200));
+    const reqd = c.getAttribute('aria-required')==='true' || /[*\u2731](?!\s*indicates)/i.test(norm((q||c).innerText).slice(0,200));
     if (!reqd) continue;
     const active = c.getAttribute('aria-activedescendant');
     const shown = norm(c.innerText || c.value || (c.querySelector('*')||{}).innerText || '');
@@ -151,7 +151,7 @@ _AUDIT_JS = r"""() => {
     if (!box || seenPill.has(box)) continue;
     seenPill.add(box);
     const qtxt = norm(box.innerText).slice(0,250) + ' ' + norm((box.parentElement||{}).innerText||'').slice(0,250);
-    if (!/[*✱]/.test(qtxt)) continue;
+    if (!/[*✱](?!\s*indicates)/i.test(qtxt)) continue;
     const pills = [...box.querySelectorAll(btnSel)].filter(x => vis(x) && norm(x.innerText||'').length && norm(x.innerText||'').length <= 30);
     const picked = pills.some(x => x.getAttribute('aria-pressed')==='true' || x.getAttribute('aria-selected')==='true' || /selected|active|checked/.test(x.className||''));
     if (!picked) empty.push(qlabel(box.parentElement||box));
@@ -162,7 +162,7 @@ _AUDIT_JS = r"""() => {
     if (!vis(grp)) continue;
     const opts = [...grp.querySelectorAll('[role=radio],[role=checkbox],[aria-checked]')];
     if (opts.length < 2) continue;
-    const reqd = grp.getAttribute('aria-required')==='true' || /[*\u2731]/.test(norm(grp.innerText).slice(0,200));
+    const reqd = grp.getAttribute('aria-required')==='true' || /[*\u2731](?!\s*indicates)/i.test(norm(grp.innerText).slice(0,200));
     if (!reqd) continue;
     if (!opts.some(o => o.getAttribute('aria-checked')==='true')) empty.push(qlabel(grp));
   }

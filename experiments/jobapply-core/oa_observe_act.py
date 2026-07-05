@@ -1480,9 +1480,19 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
             if await act.type_text(session, ctx.node, probe, clear=True):
                 fresh = await _settle(session, before_f, _SETTLE_SEARCH_S)
                 ftexts = _option_texts(fresh)
-                ctx.trace.append(f"pick-fail->filter '{probe}' -> {len(ftexts)} opts")
+                ctx.trace.append(f"pick-fail->filter '{probe}' -> {len(ftexts)} opts:{[t[:14] for t in ftexts[:3]]}")
                 if ftexts:
-                    fchosen = await brain.pick_option(ctx.value, ftexts, llm=ctx.llm, label=ctx.label)
+                    # deterministic identity first (stripe mega3/6 'country where you reside':
+                    # the filter narrowed to ONE option and the LLM pick still returned nothing)
+                    _nv2 = " ".join(ctx.value.split()).lower()
+                    fchosen = next(
+                        (o for o in ftexts if " ".join(o.split()).lower() == _nv2
+                         or " ".join(o.split()).lower().startswith(_nv2 + " ")
+                         or _nv2.startswith(" ".join(o.split()).lower() + " ")),
+                        None,
+                    )
+                    if not fchosen:
+                        fchosen = await brain.pick_option(ctx.value, ftexts, llm=ctx.llm, label=ctx.label)
                     if fchosen and await _chosen_plausible(ctx, fchosen):
                         fnode = _node_for_option(fresh, fchosen)
                         if fnode is not None and await act.click_node(session, fnode):
