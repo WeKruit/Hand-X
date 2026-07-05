@@ -626,6 +626,14 @@ async def _orphan_pass(session: Any, page: Any, profile: dict, llm: Any, filled_
                     if str(f.name) not in filled_names:
                         seen.setdefault(str(f.name), f)
         orphans = list(seen.values())
+        # DIAGNOSTIC (anthropic mega/25: audit saw empty References/Logistics, orphan saw []):
+        # raw control count vs what discovery kept — separates "not in DOM yet" (raw small)
+        # from "discovery gate filtered it" (raw big, orphans 0) without a live probe.
+        with contextlib.suppress(Exception):
+            raw = await page.evaluate(
+                "document.querySelectorAll('input,textarea,select,[role=combobox],[role=checkbox],[role=radio]').length"
+            )
+            print(f"   [complete] orphan: raw controls in DOM={raw}, already-filled={len(filled_names)}, new={len(orphans)}")
         print(f"   [complete] orphan candidates: {[str(f.name)[:24] for f in orphans][:8]}")
         if not orphans:
             return 0
