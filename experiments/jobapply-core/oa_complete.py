@@ -55,7 +55,7 @@ _AUDIT_JS = r"""() => {
       while(p && h++<4){ const line=(p.innerText||'').split('\n').map(norm).find(x=>x.length>1 && x.length<120 && x!==own);
         if(line && !/required/i.test(line)){ t=line; break; } p=p.parentElement; } }
     return norm(t); };
-  const isReq = e => e.required || e.getAttribute('aria-required')==='true' || /\*/.test(labelText(e));
+  const isReq = e => e.required || e.getAttribute('aria-required')==='true' || /[*\u2731](?!\s*indicates)/i.test(labelText(e));
   const empty = [];
   for (const e of document.querySelectorAll('input,select,textarea')) {
     if (!vis(e) || e.type==='hidden' || e.type==='file') continue;
