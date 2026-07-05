@@ -33,6 +33,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from dataclasses import field as dc_field
@@ -327,6 +328,21 @@ async def _probe_would_clobber(session: Any, ctx: "Ctx") -> bool:
     if not cur:
         return False
     return cur.lower() != (ctx.value or "").strip().lower()
+
+
+async def _chosen_plausible(ctx: "Ctx", chosen: str) -> bool:
+    """ZERO-OVERLAP VETO (mega2/7 'Enter manually' committed for 'United States'; mega2/23
+    'Toggle flyout' for 'LinkedIn'): a picked option sharing NO token with the wanted value is
+    page chrome / a neighbour until proven otherwise. One memoized LLM confirm (the same
+    pick_option) decides paraphrases ('Acknowledge' vs 'I understand that…' stays legal)."""
+    a = set(re.findall(r"[a-z0-9]+", (ctx.value or "").lower()))
+    b = set(re.findall(r"[a-z0-9]+", (chosen or "").lower()))
+    if a & b:
+        return True
+    with contextlib.suppress(Exception):
+        got = await brain.pick_option(ctx.value, [chosen], llm=ctx.llm, label=ctx.label)
+        return bool(got)
+    return False
 
 
 def _occupied_is_own_field(ctx: "Ctx") -> bool:
@@ -1026,6 +1042,9 @@ async def _visual_commit(session: Any, ctx: Ctx, candidates: list[Any]) -> bool:
     if _nlab and _nch == _nlab and classify_intrinsic(target) not in ("INTRINSIC_RADIO", "INTRINSIC_CHECKBOX"):
         ctx.trace.append("visual-choice:self-label-reject")
         return False
+    if not await _chosen_plausible(ctx, _chosen_text):
+        ctx.trace.append("visual-choice:implausible-reject")
+        return False
     ok = await act.click_node(session, target)
     if not ok:
         ok = await act.click_node_center(session, target)  # coordinate fallback
@@ -1437,6 +1456,9 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
         ctx.trace.append(f"scroll-reread:{len(texts2)}")
         return await _commit_from_options(session, ctx, texts2, nodes + more)
     if not chosen:
+        return await _s_other_guard(session, ctx)
+    if not await _chosen_plausible(ctx, chosen):
+        ctx.trace.append(f"pick-implausible-reject:{chosen[:20]}")
         return await _s_other_guard(session, ctx)
 
     ctx.committed_text = chosen
