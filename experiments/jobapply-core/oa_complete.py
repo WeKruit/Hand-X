@@ -771,6 +771,14 @@ async def complete(
                 if fixed:
                     verdict["repaired_overwritten"] = fixed
                     print(f"   [complete] repaired agent-overwritten fields: {fixed}")
+        # SETTLE BEFORE JUDGING: close any dropdown menu a fill/retry left open — an open
+        # overlay at judge-time hides committed values from the vision gate and the crops
+        # (mega/28 final screenshot still had a menu hanging open). Escape closes menus;
+        # committed values survive it.
+        with contextlib.suppress(Exception):
+            import oa_action as _act
+
+            await _act.press_key(session, "Escape")
         # VISUAL SECOND OPINION (final gate): the DOM audit alone has over-claimed before —
         # vision must AGREE the form looks complete. Disagreement only tightens the verdict.
         if not verdict["missing_required"] and not verdict["sections_skipped"]:
