@@ -205,6 +205,20 @@ _FILLABLE_ROLES = {
 }
 
 
+def _locatable_control(node: Any) -> bool:
+    """Fillable AND either visible or a combo-role input. Discovery bypasses the width gate for
+    role=combobox / aria-autocomplete (a react-select's REAL input is ~1px), but locate filtered
+    them back out via node_is_visible — stripe mega3/6+9: the multi_value_multi_select question
+    ended no-control on every tier because its only control is that 1px input."""
+    if not _is_fillable_control(node):
+        return False
+    if node_is_visible(node):
+        return True
+    attrs = getattr(node, "attributes", None) or {}
+    role = (attrs.get("role") or "").lower()
+    return role == "combobox" or (attrs.get("aria-autocomplete") or "none") != "none"
+
+
 def _is_fillable_control(node: Any) -> bool:
     attrs = getattr(node, "attributes", None) or {}
     # A file input is NEVER a generic locate candidate. It is reached ONLY via the dedicated
@@ -537,7 +551,7 @@ def _controls_in(card: Any) -> list[Any]:
     def walk(n: Any) -> None:
         kids = getattr(n, "children_nodes", None) or []
         for k in kids:
-            if _is_fillable_control(k):
+            if _locatable_control(k):
                 out.append(k)
             walk(k)
 
@@ -566,7 +580,7 @@ def locate_grouped_widget(state: OAState, label_text: str) -> tuple[Any, Any] | 
     best: tuple[float, Any, Any] | None = None  # (card_text_score, control, card)
     seen_cards: set[int] = set()
     for ctrl in state.selector_map.values():
-        if not node_is_visible(ctrl) or not _is_fillable_control(ctrl):
+        if not _locatable_control(ctrl):
             continue
         card = _card_wrapper(ctrl, target)
         if card is None:
@@ -786,7 +800,7 @@ async def locate_field_tiered(
             return (top_node, "structure", None)
 
     # ---- TIER 2: visual proximity (shallow question text near a single control) ----
-    controls = [n for n in state.selector_map.values() if node_is_visible(n) and _is_fillable_control(n)]
+    controls = [n for n in state.selector_map.values() if _locatable_control(n)]
     text_scored: list[tuple[Any, float, str]] = []
     for n in controls:
         gt = _group_text(n)
