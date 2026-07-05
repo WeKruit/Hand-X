@@ -178,7 +178,14 @@ async def _visual_click_add(session: Any, section_name: str, llm: Any) -> bool:
             t = " ".join(t.split())[:48]
             if t:
                 texted.append((bid, t))
-        if texted:
+        # AMBIGUITY ABSTAIN: when several candidates share the SAME text (hibob's Languages /
+        # Education / Experience Add buttons are all literally 'Add'), the label can't identify the
+        # right one — text-first picked a generic 'Add' and opened the wrong section's row (0 new
+        # fields). Skip the text stage and let the section-aware VISUAL mark-pick below decide by
+        # POSITION relative to the section heading.
+        _texts_norm = [t.lower() for _b, t in texted]
+        _ambiguous = any(_texts_norm.count(t) > 1 for t in _texts_norm)
+        if texted and not _ambiguous:
             with contextlib.suppress(Exception):
                 from browser_use.llm.messages import UserMessage as _UM
 

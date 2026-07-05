@@ -474,6 +474,30 @@ async def retry_missing(session: Any, page: Any, profile: dict, resume: str | No
     return refilled
 
 
+async def _section_has_entry(session: Any, page: Any, section: str) -> bool:
+    """True when a COMMITTED entry (a saved card / row with actual content) renders under the
+    named repeater section — as opposed to just its heading + empty 'Add' button. Generic: find
+    the section heading, then look below it (before the next section heading) for a block carrying
+    real profile-shaped text (a company/school/title line), NOT only the 'Add' affordance. Best-
+    effort False on read failure — an unverifiable section must not be recorded as filled."""
+    with contextlib.suppress(Exception):
+        got = await page.evaluate(
+            "(sec) => { const norm=s=>(s||'').replace(/\\s+/g,' ').trim();"
+            " const secl=sec.toLowerCase();"
+            " const heads=[...document.querySelectorAll('h1,h2,h3,h4,legend,label,div,span,p')]"
+            "   .filter(e=>{const t=norm(e.innerText).toLowerCase(); return t.length<40 && t.includes(secl.split(' ')[0]);});"
+            " for(const h of heads){ const hr=h.getBoundingClientRect(); if(!hr.width) continue;"
+            "   const near=[...document.querySelectorAll('*')].filter(e=>{const r=e.getBoundingClientRect();"
+            "     return r.top>hr.top && r.top<hr.top+380 && r.width>120 && e.children.length<12;});"
+            "   for(const e of near){ const t=norm(e.innerText);"
+            "     if(t.length>12 && !/^\\+?\\s*add\\b/i.test(t) && !/^(add|cancel|save|delete|edit)$/i.test(t)) return true; } }"
+            " return false; }",
+            str(section)[:60],
+        )
+        return bool(got)
+    return False
+
+
 async def _orphan_pass(session: Any, page: Any, profile: dict, llm: Any, filled_names: set) -> int:
     """Fill fields that APPEARED AFTER the flat pass ran (e.g. breezy's resume-parse creates a
     Work History row whose Company input the parser left empty — flat discovery never saw it).
@@ -574,8 +598,17 @@ async def complete(
                 await eng.agent_fill_section(
                     session, page, section=sec, instructions=_instructions(profile, sec), resume=resume, max_steps=14
                 )
-                verdict["sections_filled"].append(sec)
-                print(f"   [complete] agent-filled repeater section '{sec}'")
+                # VERIFY the agent actually SAVED an entry — never trust its self-report. A repeater
+                # section is 'filled' only if a committed entry card now renders (hibob 'Add' clicked
+                # -> 0 rows, the agent then CLAIMED success while the section stayed empty — the
+                # 'Experience 没加' the human judge caught). No visible entry -> skipped, honest.
+                if await _section_has_entry(session, page, sec):
+                    verdict["sections_filled"].append(sec)
+                    print(f"   [complete] agent-filled repeater section '{sec}' (entry verified)")
+                else:
+                    verdict["sections_skipped"].append(sec)
+                    verdict["complete"] = False
+                    print(f"   [complete] agent claimed '{sec}' but NO entry card rendered -> skipped")
         # re-audit after retry + section fill
         with contextlib.suppress(Exception):
             verdict["missing_required"] = (await audit(session, page)).get("emptyReq", [])
