@@ -280,6 +280,70 @@ async def audit(session: Any, page: Any) -> dict:
     return {"adds": [], "emptyReq": []}
 
 
+# AGENT-CORRUPTION REPAIR: restore main-loop-committed values the escalation agent overwrote.
+# STRICT label identity only (label[for] / label-wrapped / aria-labelledby) — repairing a
+# token-guessed box could itself clobber a sibling, which is the exact disease being cured.
+# Plain text inputs/textareas only: a combobox filter box or select needs the ladder, not a set.
+_REPAIR_JS_TMPL = r"""(() => {
+  const pairs = __PAIRS__;
+  const nrm = s => (s||'').replace(/\s+/g,' ').trim();
+  const toks = s => nrm(s).toLowerCase().replace(/[*:]/g,'').split(' ').filter(w=>w.length>1);
+  const isPlainText = c => {
+    if (!c) return false;
+    if (c.tagName === 'TEXTAREA') return true;
+    if (c.tagName !== 'INPUT') return false;
+    const ty = (c.type||'text').toLowerCase();
+    if (!['text','email','url','tel','search',''].includes(ty)) return false;
+    if ((c.getAttribute('role')||'') === 'combobox') return false;
+    const aa = c.getAttribute('aria-autocomplete');
+    if (aa && aa !== 'none') return false;
+    return true;
+  };
+  const controlFor = want => {
+    for (const L of document.querySelectorAll('label')) {
+      const T = toks(L.innerText);
+      if (!T.length || T.length > want.length + 3) continue;
+      const hit = want.filter(t => T.includes(t)).length;
+      if (hit < Math.max(1, Math.ceil(want.length * 0.8))) continue;
+      let c = L.htmlFor ? document.getElementById(L.htmlFor) : null;
+      if (!c) c = L.querySelector('input,textarea');
+      if (!c && L.id) c = document.querySelector('input[aria-labelledby~="'+L.id+'"],textarea[aria-labelledby~="'+L.id+'"]');
+      if (c) return c;
+    }
+    return null;
+  };
+  const setVal = (c, v) => {
+    const proto = c.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(c, v);
+    c.dispatchEvent(new Event('input', {bubbles: true}));
+    c.dispatchEvent(new Event('change', {bubbles: true}));
+  };
+  const repaired = [];
+  for (const [lab, val] of pairs) {
+    if (!nrm(val)) continue;
+    const c = controlFor(toks(lab));
+    if (!isPlainText(c)) continue;
+    if (nrm(c.value).toLowerCase() === nrm(val).toLowerCase()) continue;
+    setVal(c, val);
+    repaired.push(lab);
+  }
+  return JSON.stringify(repaired);
+})()"""
+
+
+async def repair_overwritten(session: Any, page: Any, committed_by_label: dict) -> list[str]:
+    """Re-assert every ledger-committed value on its STRICTLY label-bound plain-text control;
+    returns the labels whose live value had been changed (robinhood mega/16: the escalation
+    agent typed 'Cisgender man' over First Name and an office city over LinkedIn AFTER both
+    were committed+verified — post-verify corruption the ledger cannot see). [] on failure."""
+    import json
+
+    with contextlib.suppress(Exception):
+        js = _REPAIR_JS_TMPL.replace("__PAIRS__", json.dumps([[k, v] for k, v in committed_by_label.items()]))
+        return json.loads(await page.evaluate(js))
+    return []
+
+
 async def _vlm_unfilled_sections(session: Any) -> list[str]:
     """ONE VLM read: which repeatable sections are present but UNFILLED (Work Experience,
     Education, Employment History, ...). [] on miss. Vision, not heading-text matching."""
@@ -673,6 +737,18 @@ async def complete(
                 verdict["agent_answered_required"] = True
                 with contextlib.suppress(Exception):
                     verdict["missing_required"] = (await audit(session, page)).get("emptyReq", [])
+        # AGENT-CORRUPTION REPAIR: retry_missing / agent_fill_section act AFTER the main loop's
+        # verify, so they can silently overwrite committed fields (mega/16: the remaining-required
+        # agent typed 'Cisgender man' over the committed 'Jordan' in First Name and an office city
+        # over LinkedIn — post-verify corruption the ledger cannot see). Re-assert the ledger's
+        # committed values on strictly label-bound text controls BEFORE the visual gate judges the
+        # page; record what changed (audit trail for the human reviewer).
+        if committed_by_label:
+            with contextlib.suppress(Exception):
+                fixed = await repair_overwritten(session, page, committed_by_label)
+                if fixed:
+                    verdict["repaired_overwritten"] = fixed
+                    print(f"   [complete] repaired agent-overwritten fields: {fixed}")
         # VISUAL SECOND OPINION (final gate): the DOM audit alone has over-claimed before —
         # vision must AGREE the form looks complete. Disagreement only tightens the verdict.
         if not verdict["missing_required"] and not verdict["sections_skipped"]:
