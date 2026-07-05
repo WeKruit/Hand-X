@@ -1239,7 +1239,26 @@ async def _s_native(session: Any, ctx: Ctx) -> Outcome:
     if not options:
         ctx.trace.append("native-no-options")
         return ESCALATE if ctx.required else SKIP
-    chosen = await brain.pick_option(ctx.value, options, llm=ctx.llm, label=ctx.label)
+    # DETERMINISTIC identity first (palantir mega/64: a thousands-long school list overwhelmed
+    # the LLM pick, which returned nothing for value 'Other' although 'Other (School Not
+    # Listed)' sat in the list). Normalized equality, else a WORD-BOUNDARY prefix (>=4 chars,
+    # next char non-alphanumeric — 'no' must never match 'North Dakota'); shortest match wins.
+    _nv = " ".join(ctx.value.split()).lower()
+
+    def _no(s: str) -> str:
+        return " ".join(str(s).split()).lower()
+
+    _hits = [o for o in options if _no(o) == _nv]
+    if not _hits and len(_nv) >= 4:
+        _hits = [
+            o for o in options
+            if _no(o).startswith(_nv) and (len(_no(o)) == len(_nv) or not _no(o)[len(_nv)].isalnum())
+        ]
+    if _hits:
+        chosen = min(_hits, key=len)
+        ctx.trace.append("native-identity-match")
+    else:
+        chosen = await brain.pick_option(ctx.value, options, llm=ctx.llm, label=ctx.label)
     if not chosen:
         return await _s_other_guard(session, ctx)
     ok = await act.select_option(session, ctx.node, chosen)
