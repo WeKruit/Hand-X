@@ -701,6 +701,18 @@ async def _fill_form(
             with contextlib.suppress(Exception):
                 _req = {f.name for f in fields if getattr(f, "required", False)}
                 _esc = [r.label or r.name for r in per_field if r.name in _req and r.outcome == oa.ESCALATE]
+                # STALENESS FIX (doordash mega3/16: LinkedIn ESCALATE'd in the ledger, then
+                # retry/agent healed it — the screen shows the URL — yet this veto kept
+                # complete=False forever). The ledger outcome is a snapshot from BEFORE the
+                # completeness repairs; only veto fields the FINAL audit still sees as
+                # missing/unanswered (token match, both sides normalized).
+                _c = result.get("completeness") or {}
+                _still = " ".join(
+                    str(x).lower() for x in (_c.get("missing_required") or []) + (_c.get("visually_unanswered") or [])
+                )
+                def _tok(s: str) -> set:
+                    return {w for w in str(s).lower().replace("*", " ").split() if len(w) > 2}
+                _esc = [l for l in _esc if _tok(l) and len(_tok(l) & set(_still.split())) >= max(1, len(_tok(l)) // 2)]
                 if _esc and isinstance(result.get("completeness"), dict):
                     result["completeness"]["complete"] = False
                     result["completeness"]["required_escalated"] = _esc

@@ -173,6 +173,7 @@ class Ctx:
     revalue_tries: int = 0
     cascade_depth: int = 0
     scroll_reads: int = 0
+    filter_tried: bool = False
     multi_done: int = 0
 
     # per-FIELD verify budget (§6.1 oracle fix): DOM read-back is primary + free; the VLM is a
@@ -1455,10 +1456,30 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
         texts2 = _option_texts(nodes + more)
         ctx.trace.append(f"scroll-reread:{len(texts2)}")
         return await _commit_from_options(session, ctx, texts2, nodes + more)
-    if not chosen:
-        return await _s_other_guard(session, ctx)
-    if not await _chosen_plausible(ctx, chosen):
+    if chosen and not await _chosen_plausible(ctx, chosen):
         ctx.trace.append(f"pick-implausible-reject:{chosen[:20]}")
+        chosen = None
+    if not chosen:
+        # FILTER RETRY (stripe mega3/6 Country: the delta's 5 'options' were chrome and the
+        # veto rightly killed the pick — but the node IS an editable combobox and a keystroke
+        # filter surfaces the REAL options; airbnb Gender same with a 1-junk delta. The old
+        # flow went straight to OTHER_GUARD and the field died unfilled.)
+        if not ctx.filter_tried and _is_plain_text_editable_or_combo(ctx.node):
+            ctx.filter_tried = True
+            probe = ctx.value[: min(len(ctx.value), 6)] if len(ctx.value) > 6 else ctx.value
+            before_f = await perc.get_state(session)
+            if await act.type_text(session, ctx.node, probe, clear=True):
+                fresh = await _settle(session, before_f, _SETTLE_SEARCH_S)
+                ftexts = _option_texts(fresh)
+                ctx.trace.append(f"pick-fail->filter '{probe}' -> {len(ftexts)} opts")
+                if ftexts:
+                    fchosen = await brain.pick_option(ctx.value, ftexts, llm=ctx.llm, label=ctx.label)
+                    if fchosen and await _chosen_plausible(ctx, fchosen):
+                        fnode = _node_for_option(fresh, fchosen)
+                        if fnode is not None and await act.click_node(session, fnode):
+                            ctx.committed_text = fchosen
+                            ctx.trace.append("filter-retry-commit")
+                            return await _s_verify(session, ctx)
         return await _s_other_guard(session, ctx)
 
     ctx.committed_text = chosen
