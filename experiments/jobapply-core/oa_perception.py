@@ -732,7 +732,14 @@ async def locate_field_tiered(
     for n in controls:
         gt = _group_text(n)
         s = _overlap_score(_tokens(gt), target)
-        if s > 0:
+        # CONTAINMENT GATE (mega census: spatial JUNK rate 26% vs dom-ref 1.7%): a candidate
+        # qualifies only when its OWN question-group text carries at least half the wanted
+        # question's tokens — the same bar as _STRUCT_STRONG. `s > 0` let a single shared
+        # token ('you', 'work') nominate a NEIGHBOUR's control, and the always-an-answer
+        # fallback then bound it (agility mega/24: a yes/no question bound the Phone input,
+        # Phone became 'Yes'; hibob mega/19-21: Country bound First name). No strong
+        # candidate -> fall through to grouped / honest NOT-FOUND — escalate beats wrong-fill.
+        if s >= _STRUCT_STRONG:
             text_scored.append((n, s, gt))
     if text_scored:
         text_scored.sort(key=lambda t: t[1], reverse=True)
