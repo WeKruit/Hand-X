@@ -547,8 +547,25 @@ async def _fill_form(
     # processing on upload that can freeze the headless renderer; doing it AFTER the text fields
     # means a wedge can't cost us the rest of the form. Stable sort keeps every other field's order.
     fields_file_last = sorted(fields, key=lambda f: 1 if getattr(f, "source", "") == "file" else 0)
+    _done_labels: set[str] = set()
     for f in fields_file_last:
         if f.source == "skip":
+            continue
+        # TWIN GUARD: discovery unions DOM + vision and a widget's input vs its hidden-select/
+        # wrapper surface as TWO fields with the SAME question label. The real row commits+verifies,
+        # then the twin re-touches the SAME widget and its visual fallback clicks chrome — discord
+        # mega/29: twin committed 'Clear selections' (wiped the verified Gender) and 'Toggle flyout'
+        # (left 'Toggle' in the Disability filter, menu open 'No options'). An identical-label field
+        # that already verified DONE this run -> SKIP. If two DISTINCT real fields ever share a
+        # label, the completeness audit flags the empty one and retry fills it — safe direction.
+        _lkey = " ".join(str(f.label or f.name).split()).lower()
+        if _lkey in _done_labels:
+            per_field.append(
+                FieldResult(
+                    name=f.name, label=f.label or f.name, type=f.type, value_src="twin",
+                    outcome=oa.SKIP, nature="", committed="", trace=["twin-label-already-done->skip"],
+                )
+            )
             continue
         value, src = eng._resolve(f, mapped, resume)
         if adapter is None:
@@ -593,6 +610,8 @@ async def _fill_form(
                 trace=fd.get("_trace"),
             )
         )
+        if outcome == oa.DONE:
+            _done_labels.add(_lkey)
 
     # FORM-EVIDENCE GATE: complete:True is only meaningful when an APPLICATION FORM was actually
     # reached and substantively filled. A search box / JD page / login wall has no required-empty
