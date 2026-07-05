@@ -126,6 +126,8 @@ _AUDIT_JS = r"""() => {
   for (const c of document.querySelectorAll('[role=combobox],[aria-haspopup=listbox]')) {
     if (!vis(c)) continue;
     const q = c.closest('[class*=field],[class*=question],[class*=form-group],div');
+    const h1a = document.querySelector('h1');
+    if (q && h1a && q.contains(h1a)) continue;  // container swallowed the page header
     const reqd = c.getAttribute('aria-required')==='true' || /[*\u2731](?!\s*indicates)/i.test(norm((q||c).innerText).slice(0,200));
     if (!reqd) continue;
     const active = c.getAttribute('aria-activedescendant');
@@ -164,6 +166,8 @@ _AUDIT_JS = r"""() => {
     if (!box || seenPill.has(box)) continue;
     seenPill.add(box);
     if (box.querySelector('input[type=file]')) continue;  // upload widget (duolingo: Dropbox/Drive/Enter-manually buttons)
+    const h1 = document.querySelector('h1');
+    if (h1 && box.contains(h1)) continue;  // page header block (affirm mega3/40: job title became the flag label)
     const qtxt = norm(box.innerText).slice(0,250) + ' ' + norm((box.parentElement||{}).innerText||'').slice(0,250);
     if (!/[*✱](?!\s*indicates)/i.test(qtxt)) continue;
     const pills = [...box.querySelectorAll(btnSel)].filter(x => vis(x) && norm(x.innerText||'').length && norm(x.innerText||'').length <= 30);
