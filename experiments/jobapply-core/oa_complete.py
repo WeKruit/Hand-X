@@ -119,7 +119,8 @@ _AUDIT_JS = r"""() => {
     // prefer the line carrying the required star / question mark — the first line can be a
     // help banner ('Click Here (If you encounter an issue…)' labeled palantir's university
     // dropdown, mega/63)
-    return ((lines.find(l=>/[*\u2731?]/.test(l)) || lines[0] || '').slice(0,80)); };
+    return ((lines.find(l=>/[*\u2731?]/.test(l) && !/[*\u2731]\s*indicates/i.test(l) && !/^create a job alert/i.test(l))
+      || lines.find(l=>!/^create a job alert/i.test(l)) || lines[0] || '').slice(0,80)); };
   // (a) custom comboboxes: [role=combobox] / [aria-haspopup=listbox] with no aria-activedescendant
   //     and a placeholder-looking trigger text (Select…/Choose…/empty).
   for (const c of document.querySelectorAll('[role=combobox],[aria-haspopup=listbox]')) {
@@ -166,7 +167,8 @@ _AUDIT_JS = r"""() => {
     if (!reqd) continue;
     if (!opts.some(o => o.getAttribute('aria-checked')==='true')) empty.push(qlabel(grp));
   }
-  return JSON.stringify({adds: [...new Set(adds)], emptyReq: [...new Set(empty)].slice(0,25)});
+  const keep = [...new Set(empty)].filter(t => !/^(create a job alert|apply for this job)/i.test((t||'').trim()));
+  return JSON.stringify({adds: [...new Set(adds)], emptyReq: keep.slice(0,25)});
 }"""
 
 
