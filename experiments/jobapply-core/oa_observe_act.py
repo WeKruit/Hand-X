@@ -329,6 +329,30 @@ async def _probe_would_clobber(session: Any, ctx: "Ctx") -> bool:
     return cur.lower() != (ctx.value or "").strip().lower()
 
 
+async def _rebind_empty_in_card(session: Any, ctx: "Ctx") -> Any | None:
+    """The grouped/spatial tier bound an OCCUPIED foreign input while the question's REAL control
+    sits EMPTY in the SAME card (ramp mega/49-50 payroll location: the card held both the occupied
+    box it bound and the empty location combobox). Containment already proved the card — emptiness
+    picks the virgin control: return the first OTHER empty keystroke-capable control in the card.
+    None -> caller escalates as before."""
+    if ctx.card is None:
+        return None
+    from oa_dom_value import read_dom_value
+
+    own = getattr(ctx.node, "backend_node_id", None)
+    for n in perc._controls_in(ctx.card):
+        if getattr(n, "backend_node_id", None) == own:
+            continue
+        if not _is_plain_text_editable_or_combo(n):
+            continue
+        cur = ""
+        with contextlib.suppress(Exception):
+            cur = ((await read_dom_value(session, n)) or "").strip()
+        if not cur:
+            return n
+    return None
+
+
 def _is_plain_text_editable(node: Any) -> bool:
     """POSITIVE free-text signal (§4.4): a plain text input/textarea/contenteditable that is
     NOT a combobox / autocomplete. The deterministic veto on a blind type."""
@@ -1308,8 +1332,12 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
         # the typeahead search. The control must be text-editable to accept a filter keystroke.
         if normalize_kind(ctx.kind) == "SELECT" and _is_plain_text_editable_or_combo(ctx.node):
             if await _probe_would_clobber(session, ctx):
-                ctx.trace.append("occupied-foreign-input->escalate")
-                return await _s_other_guard(session, ctx)
+                alt = await _rebind_empty_in_card(session, ctx)
+                if alt is None:
+                    ctx.trace.append("occupied-foreign-input->escalate")
+                    return await _s_other_guard(session, ctx)
+                ctx.node = alt
+                ctx.trace.append("occupied->rebound-empty-in-card")
             ctx.trace.append("select-type-to-filter")
             before2 = await perc.get_state(session)
             probe = ctx.value[: min(len(ctx.value), 6)] if len(ctx.value) > 6 else ctx.value
@@ -1450,8 +1478,12 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
     # Precondition: the located element must be text-editable (a native <select> would have
     # been caught by intrinsic and routed to S_NATIVE).
     if await _probe_would_clobber(session, ctx):
-        ctx.trace.append("occupied-foreign-input->escalate")
-        return ESCALATE if ctx.required else SKIP
+        alt = await _rebind_empty_in_card(session, ctx)
+        if alt is None:
+            ctx.trace.append("occupied-foreign-input->escalate")
+            return ESCALATE if ctx.required else SKIP
+        ctx.node = alt
+        ctx.trace.append("occupied->rebound-empty-in-card")
     variants = await brain.query_variants(ctx.value, ctx.nature or "SEARCH", llm=ctx.llm)
     # CARD-COMMIT FIX (geocomplete): a react-select location typeahead returns NOTHING for the full
     # 'City, ST, USA' string — it matches on a short CITY prefix and resolves the rest async. Prepend
