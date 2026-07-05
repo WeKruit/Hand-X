@@ -717,13 +717,20 @@ async def map_fields(
             v = (f.value or "").strip()
             if v and v != ph and ph.replace(" ", "").endswith(v.replace(" ", "")):
                 f.value = ph
-    # PROSE GUARD (deterministic — the prompt rule alone did NOT stop the model): a bare Yes/No
-    # in an open-ended prose box is always wrong ('Why do you want to join Figma?*' -> 'No',
-    # caught twice by the human judge). Blank it so the field goes to the retry/agent path
-    # (which generates real prose) instead of committing garbage.
-    _prose = {f.name for f in fields if str(getattr(f, "source", "")) == "open_ended" or str(getattr(f, "type", "")) == "textarea"}
+    # PROSE GUARD (deterministic — the prompt rule alone did NOT stop the model): a bare Yes/No in
+    # a PROSE question is always wrong ('Why do you want to join Figma?*' -> 'Yes'). Detect prose by
+    # CONTROL (textarea/open_ended) OR by the QUESTION asking for an explanation — figma renders it
+    # as <input type=text>, escaping a control-only check (the audit's exact gap). Blank it so the
+    # field routes to retry/agent (which writes real prose) instead of committing garbage.
+    def _is_prose(f: Any) -> bool:
+        if str(getattr(f, "source", "")) == "open_ended" or str(getattr(f, "type", "")) == "textarea":
+            return True
+        q = (getattr(f, "label", "") or "").lower()
+        # a question inviting free-form text — principle+example, not an exhaustive verb list
+        return any(k in q for k in ("why do you", "why are you", "tell us", "describe", "explain", "in your own words", "1-2 sentence", "2-3 sentence", "cover letter")) and len(q) > 15
+    _prose = {f.name for f in fields if _is_prose(f)}
     for name, f in out.items():
-        if name in _prose and (f.value or "").strip().lower() in ("yes", "no", "n/a", "-"):
+        if name in _prose and (f.value or "").strip().lower() in ("yes", "no", "n/a", "-", "true", "false"):
             f.why = f"PROSE-GUARD dropped bare '{f.value}'"
             f.value = ""
     return out

@@ -441,13 +441,23 @@ def _norm(s: str) -> str:
     return "".join(ch for ch in str(s).lower() if ch.isalnum())
 
 
-async def retry_missing(session: Any, page: Any, profile: dict, resume: str | None, llm: Any, missing: list[str]) -> int:
+async def retry_missing(
+    session: Any, page: Any, profile: dict, resume: str | None, llm: Any, missing: list[str],
+    committed_by_label: dict | None = None,
+) -> int:
     """RE-FILL fields the audit found still-empty (React re-render wiped a committed value —
     the workable class). Re-discover the live DOM, match each still-empty REQUIRED field by
-    label, re-map + re-run observe_act on just those. Returns how many got re-filled. Generic."""
+    label, and re-commit. Returns how many got re-filled. Generic.
+
+    CORRUPTION GUARD: prefer the value we ALREADY committed to this field (keyed by label) over a
+    fresh out-of-context re-map — re-mapping an isolated 'First Name' next to a location mismapped
+    it to 'San Francisco' and OVERWROTE the good 'Jordan' (figma). Also skip a field whose LIVE
+    value already matches what we committed (the VLM false-flagged a correctly-filled field)."""
     import oa_observe_act as oa
     from oa_discover import discover_fields
     from oa_singlepage import _field_dict
+
+    committed_by_label = committed_by_label or {}
 
     # token-overlap match: the audit carries the FULL question text while discovery truncates its
     # label — exact equality never matched long screening questions (robinhood 'Have you ever
@@ -470,10 +480,27 @@ async def retry_missing(session: Any, page: Any, profile: dict, resume: str | No
                 fields.append(f)
         if not fields:
             return 0
-        rows = [f for f in fields if f.needs_map]
-        mapped = await eng.map_fields(llm, rows, profile, "") if rows else {}
+
+        def _prior(f: Any) -> str:
+            # the value we already committed to this field, matched by label (exact then token)
+            lab = _norm(f.label or "")
+            if lab in {_norm(k): v for k, v in committed_by_label.items()}:
+                return {_norm(k): v for k, v in committed_by_label.items()}[lab]
+            ftok = _tok(str(f.label or ""))
+            for k, v in committed_by_label.items():
+                kt = _tok(k)
+                if kt and len(kt & ftok) >= max(2, len(kt) // 2):
+                    return v
+            return ""
+
+        # only re-map fields we have NO prior committed value for (avoids the out-of-context mismap)
+        no_prior = [f for f in fields if f.needs_map and not _prior(f)]
+        mapped = await eng.map_fields(llm, no_prior, profile, "") if no_prior else {}
         for f in fields:
-            value, _ = eng._resolve(f, mapped, resume)
+            # PRIOR committed value wins over a fresh re-map (idempotent re-type of the KNOWN-good
+            # value; even if the field was already correct, re-typing 'Jordan' can't corrupt it —
+            # whereas re-mapping produced 'San Francisco').
+            value = _prior(f) or eng._resolve(f, mapped, resume)[0]
             if not (value or "").strip():
                 continue
             fd = _field_dict(f, value, resume=resume, llm=llm, adapter=None, page=page)
@@ -574,7 +601,7 @@ async def complete(
         # BEFORE deciding completeness — one bounded pass, then re-audit below.
         if verdict["missing_required"] and llm is not None:
             verdict["retried"] = await retry_missing(
-                session, page, profile, resume, llm, verdict["missing_required"]
+                session, page, profile, resume, llm, verdict["missing_required"], committed_by_label
             )
         # REPEATER SECTIONS (Experience / Education): fill DETERMINISTICALLY (click Add per profile
         # entry, fill the new row) — fast + reliable, unlike the slow crash-prone agent. Runs whenever
@@ -669,7 +696,7 @@ async def complete(
                     # alone is blind to wrong-but-non-empty; this is the fix for the wrong-value class.
                     if llm is not None:
                         with contextlib.suppress(Exception):
-                            fixed = await retry_missing(session, page, profile, resume, llm, seen)
+                            fixed = await retry_missing(session, page, profile, resume, llm, seen, committed_by_label)
                             if fixed:
                                 verdict["revalued"] = fixed
                                 seen2 = await _vlm_unanswered_required(session)
