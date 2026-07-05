@@ -64,7 +64,26 @@ _AUDIT_JS = r"""() => {
       const ph = !o || o.value==='' || /^(select|choose|--|pick|choisir|elegir|wahlen)/i.test(fold(norm(o.text)));
       if (isReq(e) && ph) empty.push(labelText(e)||e.name||'select'); continue; }
     if (e.type==='radio' || e.type==='checkbox') continue;  // groups handled below
-    if (isReq(e) && !(e.value||'').trim()) empty.push(labelText(e)||e.name||'?');
+    if (isReq(e) && !(e.value||'').trim()) {
+      // RENDERED-DISPLAY CHECK (duolingo mega2/43-46 false flags): a geocomplete/react-select
+      // keeps the committed text in a SIBLING display element while the input's own .value is
+      // empty — the screen shows 'San Francisco, CA, USA' and this scan called it missing,
+      // killing the COMPLETE verdict. Before flagging, scan two wrapper levels for a short
+      // rendered text that is neither the label nor a placeholder.
+      const lab = norm(labelText(e)); const ph = norm(e.placeholder||'');
+      let filledVisually = false, p = e.parentElement;
+      for (let h = 0; h < 2 && p && !filledVisually; h++, p = p.parentElement) {
+        for (const s of p.querySelectorAll('[class*="single-value"],[class*="singleValue"],[class*="chip"],[class*="tag"],span,div')) {
+          if (s === e || s.contains(e) || (s.querySelector && s.querySelector('input,select,textarea'))) continue;
+          const t = norm(s.innerText||'');
+          if (t && t.length <= 80 && t !== lab && t !== ph && !/[*✱]$/.test(t)
+              && !/^(select|choose|--|pick|start typing|search)/i.test(t.normalize('NFD').replace(/[̀-ͯ]/g,''))) {
+            filledVisually = true; break;
+          }
+        }
+      }
+      if (!filledVisually) empty.push(labelText(e)||e.name||'?');
+    }
   }
   // required radio/checkbox GROUPS (custom Yes/No, ratings) with NOTHING checked: group by name,
   // required if any member is required or the group's question label carries a '*'.
