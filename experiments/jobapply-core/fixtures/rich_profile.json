@@ -5,18 +5,15 @@
   "full_name": "Jordan Avery",
   "email": "jordan.avery.demo2026@gmail.com",
   "phone": "+1 415 555 0142",
-
   "location": "San Francisco, CA, USA",
   "city": "San Francisco",
   "state": "California",
   "country": "United States",
   "zip": "94105",
   "address_line1": "500 Market Street",
-
   "linkedin": "https://www.linkedin.com/in/jordan-avery-test",
   "github": "https://github.com/jordan-avery-test",
   "website": "https://jordanavery.example.com",
-
   "work_authorization": "Authorized to work in the US (US Citizen)",
   "authorized_to_work_us": true,
   "requires_sponsorship": false,
@@ -28,7 +25,6 @@
   "available_start_date": "2026-08-01",
   "preferred_work_arrangement": "Remote or Hybrid (SF Bay Area)",
   "how_did_you_hear": "LinkedIn",
-
   "gender": "Male",
   "pronouns": "He/Him",
   "race_ethnicity": "Asian",
@@ -37,9 +33,7 @@
   "disability_status": "No, I do not have a disability and have not had one in the past",
   "sexual_orientation": "I don't wish to answer",
   "transgender": "No",
-
   "summary": "Senior software engineer with 7 years building reliable backend services and developer tooling in Python and Go. Led a 4-person team delivering a job-matching API serving 2M requests/day. Comfortable owning a feature from design through on-call.",
-
   "experience": [
     {
       "company": "Northwind Labs",
@@ -67,7 +61,6 @@
       ]
     }
   ],
-
   "education": [
     {
       "school": "University of California, Berkeley",
@@ -78,10 +71,61 @@
       "gpa": "3.8"
     }
   ],
-
-  "skills": ["Python", "Go", "PostgreSQL", "FastAPI", "React", "Playwright", "AWS", "Docker", "Kubernetes"],
-  "certifications": ["AWS Certified Solutions Architect – Associate (2023)"],
-  "languages": [{"language": "English", "proficiency": "Native"}, {"language": "Spanish", "proficiency": "Professional"}],
-
-  "cover_letter": "I'm excited to apply because this role centers on backend reliability and developer experience, which is exactly where I've spent the last several years. I'd bring hands-on ownership of high-throughput Python/Go services and a track record of mentoring teams."
+  "skills": [
+    "Python",
+    "Go",
+    "PostgreSQL",
+    "FastAPI",
+    "React",
+    "Playwright",
+    "AWS",
+    "Docker",
+    "Kubernetes"
+  ],
+  "certifications": [
+    "AWS Certified Solutions Architect – Associate (2023)"
+  ],
+  "languages": [
+    {
+      "language": "English",
+      "proficiency": "Native"
+    },
+    {
+      "language": "Spanish",
+      "proficiency": "Professional"
+    }
+  ],
+  "cover_letter": "I'm excited to apply because this role centers on backend reliability and developer experience, which is exactly where I've spent the last several years. I'd bring hands-on ownership of high-throughput Python/Go services and a track record of mentoring teams.",
+  "references": [
+    {
+      "name": "Maya Chen",
+      "title": "Engineering Manager",
+      "company": "Northwind Labs",
+      "email": "maya.chen.demo2026@gmail.com",
+      "phone": "+1 415 555 0188",
+      "relationship": "Direct manager (2022-2025)"
+    },
+    {
+      "name": "Daniel Okafor",
+      "title": "Staff Software Engineer",
+      "company": "Northwind Labs",
+      "email": "daniel.okafor.demo2026@gmail.com",
+      "phone": "+1 415 555 0164",
+      "relationship": "Senior peer / tech lead"
+    },
+    {
+      "name": "Priya Raman",
+      "title": "Director of Engineering",
+      "company": "Contoso",
+      "email": "priya.raman.demo2026@gmail.com",
+      "phone": "+1 415 555 0117",
+      "relationship": "Skip-level manager (2019-2022)"
+    }
+  ],
+  "notice_period": "2 weeks",
+  "referral": "No referral",
+  "referred_by": "",
+  "additional_information": "",
+  "current_company": "Northwind Labs",
+  "current_title": "Senior Software Engineer"
 }
