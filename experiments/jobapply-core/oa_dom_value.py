@@ -68,7 +68,18 @@ function() {
     // 2) input / textarea — the live .value (typeahead text counts: the user typed it).
     if (tag === "INPUT" || tag === "TEXTAREA") {
       const v = norm(el.value);
-      if (v) return v;
+      // COMBO TRANSIENT GUARD: while a combobox's menu is still OPEN, .value is the FILTER TEXT
+      // the engine typed, NOT a committed value — react-select wipes it on blur. Returning it
+      // blessed a never-stuck selection as CORRECT (robinhood race: typed 'Southeast Asian',
+      // option click missed, verify read the transient, blur left 'Select…'). Menu open ->
+      // skip .value and fall to the chip/single-value scan (committed truth); menu closed ->
+      // .value IS the committed text for real typeaheads (geocomplete keeps it after close).
+      const comboish = el.getAttribute && (
+        el.getAttribute("role") === "combobox" ||
+        ((el.getAttribute("aria-autocomplete") || "") !== "" && el.getAttribute("aria-autocomplete") !== "none")
+      );
+      const menuOpen = el.getAttribute && el.getAttribute("aria-expanded") === "true";
+      if (v && !(comboish && menuOpen)) return v;
       // a react-select INPUT is usually empty after commit; the committed value renders as a
       // sibling single-value / chip — fall through to the container scan below.
     }
