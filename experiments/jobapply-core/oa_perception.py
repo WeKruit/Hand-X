@@ -588,18 +588,22 @@ def locate_grouped_widget(state: OAState, label_text: str) -> tuple[Any, Any] | 
     # pills stayed empty on every notion/airwallex form. Find the card whose text names the
     # question and which holds 2-6 SHORT-text buttons (the Yes/No pills); return (pill, card) so
     # the choice lane's cdp_choose_option (button-aware) commits scoped to that card.
+    _dbg_btns = _dbg_short = _dbg_cards = 0
     for node in state.selector_map.values():
         if not node_is_visible(node):
             continue
         attrs = getattr(node, "attributes", None) or {}
         if _tag(node) != "button" and (attrs.get("role") or "").lower() != "button":
             continue
+        _dbg_btns += 1
         txt = _all_children_text(node).strip()
         if not txt or len(txt) > 30:
             continue
+        _dbg_short += 1
         card = _card_wrapper(node, target)
         if card is None:
             continue
+        _dbg_cards += 1
         pills = [
             n for n in state.selector_map.values()
             if node_is_visible(n)
@@ -609,6 +613,8 @@ def locate_grouped_widget(state: OAState, label_text: str) -> tuple[Any, Any] | 
         ]
         if 2 <= len(pills) <= 6:
             return (node, card)
+    # DIAGNOSTIC (openai mega/48: pill pass live but still no-control — which stage starved?):
+    print(f"   [locate] pill-pass miss '{label_text[:40]}': btns={_dbg_btns} short={_dbg_short} carded={_dbg_cards}")
     return None
 
 

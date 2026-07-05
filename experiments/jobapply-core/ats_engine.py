@@ -739,7 +739,11 @@ async def map_fields(
     _lab_by_name = {f.name: " ".join((getattr(f, "label", "") or "").split()).lower().rstrip("*: ") for f in fields}
     for name, f in out.items():
         v = " ".join((f.value or "").split()).lower().rstrip("*: ")
-        if v and v == _lab_by_name.get(name, ""):
+        lab = _lab_by_name.get(name, "")
+        # exact OR prefix: a vision-union label carries the options tail ('… located? Yes No')
+        # while the mapper echoes just the question — prefix relation, not equality (openai
+        # mega/48: value == the question, exact-match guard slipped).
+        if v and len(v) >= 15 and (v == lab or lab.startswith(v)):
             f.why = "LABEL-ECHO dropped (value == question)"
             f.value = ""
     return out
