@@ -651,9 +651,15 @@ async def _orphan_pass(session: Any, page: Any, profile: dict, llm: Any, filled_
         print(f"   [complete] orphan candidates: {[str(f.name)[:24] for f in orphans][:8]}")
         if not orphans:
             return 0
-        mapping = await eng.map_fields(orphans, profile, llm=llm) if llm is not None else {}
+        # SIGNATURE BUG (found mega/84: orphan candidates ['company','summary',…] yet the row
+        # stayed empty): map_fields is (llm, fields, profile, title, …) — the old call passed
+        # (orphans, profile, llm=llm), raised TypeError, and the pass-wide suppress swallowed it,
+        # so the WHOLE orphan mapping had been silently dead since it shipped. Also unwrap the
+        # FieldFill — the loop compared/typed the OBJECT, not its .value.
+        mapping = await eng.map_fields(llm, orphans, profile, "") if llm is not None else {}
         for f in orphans:
-            val = (mapping or {}).get(f.name) or ""
+            _fill = (mapping or {}).get(f.name)
+            val = (getattr(_fill, "value", None) or "").strip()
             if not val:
                 continue
             with contextlib.suppress(Exception):
