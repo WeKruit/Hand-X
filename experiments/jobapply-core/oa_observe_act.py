@@ -1361,6 +1361,12 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
     ) and _is_plain_text_editable_or_combo(ctx.node):
         with contextlib.suppress(Exception):
             got = await cdpa.cdp_choose_aria_option(session, ctx.node, ctx.value)
+            # PLAUSIBILITY at the direct rungs too (1password mega3/2: the react-select
+            # page-wide option fallback read a FOREIGN menu and committed 'not listed' for
+            # 'San Francisco…' — the veto was wired into the list/visual paths only).
+            if got and not await _chosen_plausible(ctx, got):
+                ctx.trace.append(f"aria-implausible-reject:{got[:18]}")
+                got = ""
             if got:
                 ctx.committed_text = got
                 ctx.trace.append(f"aria-direct:{got[:20]}")
@@ -1372,6 +1378,9 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
                 return await brain.pick_option(v, opts, llm=ctx.llm, label=ctx.label)
 
             got = await cdpa.cdp_choose_react_select(session, ctx.node, ctx.value, pick=_pick)
+            if got and not await _chosen_plausible(ctx, got):
+                ctx.trace.append(f"rs-implausible-reject:{got[:18]}")
+                got = ""
             if got:
                 ctx.committed_text = got
                 ctx.trace.append(f"react-select-direct:{got[:20]}")

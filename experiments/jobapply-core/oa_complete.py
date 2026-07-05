@@ -520,7 +520,7 @@ async def _vlm_unanswered_required(session: Any) -> list[str]:
         seen_keys: set = set()
         deduped: list[str] = []
         for lab in out:
-            k = " ".join(str(lab).split()).lower()
+            k = " ".join(str(lab).split()).lower().strip(" *\u2731")
             if k and k not in seen_keys:
                 seen_keys.add(k)
                 deduped.append(lab)
