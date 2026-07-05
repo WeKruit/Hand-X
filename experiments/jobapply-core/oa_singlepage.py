@@ -627,6 +627,17 @@ async def _fill_form(
         )
         if outcome == oa.DONE:
             _done_labels.add(_lkey)
+        # MID-FILL DRIFT (samsara mega3/30: a fill click navigated to /company/belonging and
+        # every later field died no-control — the judge-time guard saved the verdict but not
+        # the fields). On a no-control locate miss, check the url and pull the run back.
+        if outcome != oa.DONE and "no-control" in " ".join(fd.get("_trace") or []):
+            with contextlib.suppress(Exception):
+                _now = await page.get_url()
+                if _form_url and _now and _now.split("#")[0] != _form_url.split("#")[0]:
+                    print(f"   [fill] mid-fill drift {_now[:60]} -> back to form")
+                    await session.navigate_to(_form_url)
+                    await asyncio.sleep(1.5)
+                    page = await session.must_get_current_page()
 
     # CAPTCHA-AT-END: interaction-triggered challenges (lever hCaptcha) mount AFTER the
     # start-of-run page-kind check and sit over the form at judge time — mega/61/66 the vision
