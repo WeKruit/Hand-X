@@ -551,6 +551,12 @@ async def _fill_form(
     # processing on upload that can freeze the headless renderer; doing it AFTER the text fields
     # means a wedge can't cost us the rest of the form. Stable sort keeps every other field's order.
     fields_file_last = sorted(fields, key=lambda f: 1 if getattr(f, "source", "") == "file" else 0)
+    # the FORM's url, captured BEFORE any fill click can navigate away (samsara mega3/28: a
+    # mid-fill click drifted to /company/belonging, so complete()'s entry snapshot already held
+    # the wrong page and its drift guard saw no difference).
+    _form_url = ""
+    with contextlib.suppress(Exception):
+        _form_url = await page.get_url()
     _done_labels: set[str] = set()
     for f in fields_file_last:
         if f.source == "skip":
@@ -697,6 +703,7 @@ async def _fill_form(
                 # the fill ledger's committed values, keyed by label — makes the crop check
                 # VALUE-AWARE (audit pattern 2: presence-only verify blesses label/junk text)
                 committed_by_label={str(r.label): str(r.committed) for r in per_field if r.committed},
+                form_url=_form_url,
             )
             # REQUIRED-ESCALATE VETO (zero-cost, deterministic): a REQUIRED field whose own
             # outcome is ESCALATE is by definition not complete — yet the audit can't see a

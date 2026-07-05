@@ -741,6 +741,7 @@ async def _orphan_pass(session: Any, page: Any, profile: dict, llm: Any, filled_
 async def complete(
     session: Any, page: Any, profile: dict, resume: str | None, *, allow_agent: bool, llm: Any = None, planner_keys: list | None = None,
     filled_names: set | None = None, required_labels: list | None = None, committed_by_label: dict | None = None,
+    form_url: str = "",
 ) -> dict:
     """Audit the form for unfilled repeater sections + empty required fields; fill repeaters via the
     proven agent_fill_section and RE-FILL wiped required fields (retry). Returns
@@ -748,9 +749,22 @@ async def complete(
     verdict: dict = {
         "complete": True, "missing_required": [], "sections_filled": [], "sections_skipped": [], "retried": 0,
     }
-    _form_url = ""
+    # prefer the runner's PRE-FILL capture: a mid-fill click can navigate away before
+    # complete() even starts (samsara mega3/28) and the entry snapshot would already be wrong.
+    _form_url = form_url or ""
+    if not _form_url:
+        with contextlib.suppress(Exception):
+            _form_url = await page.get_url()
+    # immediate drift check at ENTRY too — the audit/retry/repeater phases all judge the page.
     with contextlib.suppress(Exception):
-        _form_url = await page.get_url()
+        _now0 = await page.get_url()
+        if _form_url and _now0 and _now0.split("#")[0] != _form_url.split("#")[0]:
+            print(f"   [complete] entry drift {_now0[:60]} -> back to form")
+            await session.navigate_to(_form_url)
+            import asyncio as _aio
+
+            await _aio.sleep(2.0)
+            page = await session.must_get_current_page()
     with contextlib.suppress(Exception):
         if resume:  # button-triggered resume upload (hibob/bamboohr 'Add file' has no <input> yet)
             await upload_via_button(session, page, resume)
