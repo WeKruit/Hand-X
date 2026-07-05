@@ -305,6 +305,30 @@ def _is_plain_text_editable_or_combo(node: Any) -> bool:
     return False
 
 
+async def _probe_would_clobber(session: Any, ctx: "Ctx") -> bool:
+    """True when typing a filter/search PROBE into ctx.node would DESTROY a sibling field's data.
+
+    A probe types with clear=True. On a combobox the input IS the widget's filter box — always
+    safe. On a PLAIN text input that already holds a non-empty value that is NOT this field's
+    value, the located node is almost certainly the WRONG control (grouped/structure locate bound
+    the question to a neighbour): hibob 'Country' landed on the First name input and typed
+    'United States' over the committed 'Jordan'; verify then blessed the value-match — right
+    value, wrong box (runs/newats/mega/20). Don't type; escalate."""
+    node = ctx.node
+    if _node_role(node) in ("combobox", "searchbox") or _node_attr(node, "aria-autocomplete") not in ("", "none"):
+        return False
+    if not _is_plain_text_editable(node):
+        return False
+    cur = ""
+    with contextlib.suppress(Exception):
+        from oa_dom_value import read_dom_value
+
+        cur = ((await read_dom_value(session, node)) or "").strip()
+    if not cur:
+        return False
+    return cur.lower() != (ctx.value or "").strip().lower()
+
+
 def _is_plain_text_editable(node: Any) -> bool:
     """POSITIVE free-text signal (§4.4): a plain text input/textarea/contenteditable that is
     NOT a combobox / autocomplete. The deterministic veto on a blind type."""
@@ -1260,6 +1284,9 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
         # SELECT (ctx.kind), TYPE the value to filter, settle, and re-read the delta BEFORE falling to
         # the typeahead search. The control must be text-editable to accept a filter keystroke.
         if normalize_kind(ctx.kind) == "SELECT" and _is_plain_text_editable_or_combo(ctx.node):
+            if await _probe_would_clobber(session, ctx):
+                ctx.trace.append("occupied-foreign-input->escalate")
+                return await _s_other_guard(session, ctx)
             ctx.trace.append("select-type-to-filter")
             before2 = await perc.get_state(session)
             probe = ctx.value[: min(len(ctx.value), 6)] if len(ctx.value) > 6 else ctx.value
@@ -1399,6 +1426,9 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
     ctx.trace.append("S4_SEARCH")
     # Precondition: the located element must be text-editable (a native <select> would have
     # been caught by intrinsic and routed to S_NATIVE).
+    if await _probe_would_clobber(session, ctx):
+        ctx.trace.append("occupied-foreign-input->escalate")
+        return ESCALATE if ctx.required else SKIP
     variants = await brain.query_variants(ctx.value, ctx.nature or "SEARCH", llm=ctx.llm)
     # CARD-COMMIT FIX (geocomplete): a react-select location typeahead returns NOTHING for the full
     # 'City, ST, USA' string — it matches on a short CITY prefix and resolves the rest async. Prepend
