@@ -710,6 +710,15 @@ async def map_fields(llm: Any, fields: list[FormField], profile: dict, title: st
             v = (f.value or "").strip()
             if v and v != ph and ph.replace(" ", "").endswith(v.replace(" ", "")):
                 f.value = ph
+    # PROSE GUARD (deterministic — the prompt rule alone did NOT stop the model): a bare Yes/No
+    # in an open-ended prose box is always wrong ('Why do you want to join Figma?*' -> 'No',
+    # caught twice by the human judge). Blank it so the field goes to the retry/agent path
+    # (which generates real prose) instead of committing garbage.
+    _prose = {f.name for f in fields if str(getattr(f, "source", "")) == "open_ended" or str(getattr(f, "type", "")) == "textarea"}
+    for name, f in out.items():
+        if name in _prose and (f.value or "").strip().lower() in ("yes", "no", "n/a", "-"):
+            f.why = f"PROSE-GUARD dropped bare '{f.value}'"
+            f.value = ""
     return out
 
 
