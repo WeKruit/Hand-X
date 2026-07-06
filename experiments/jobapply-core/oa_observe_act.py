@@ -1793,8 +1793,11 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
         # MISCLASSIFIED-SELECT recovery on THIS abandon path too (reddit mega3/61-62,
         # greenhouse API: 'How did you hear' is input_text — the VLM called it a dropdown,
         # the filter typed into a menu-less box, and this branch escalated without ever
-        # trying the S4-exhaustion text recovery).
-        if _is_plain_text_editable(ctx.node):
+        # trying the S4-exhaustion text recovery). NOT when the field has real discovered
+        # options — an unmatchable value on a genuine closed list is a hallucination that must
+        # escalate, not get typed as free text (airwallex mega4/49 relatives multi_select).
+        _has_real_options = bool(getattr(getattr(ctx, "field_obj", None), "options", None)) or ctx.nature in ("MULTI", "BOOLEAN")
+        if _is_plain_text_editable(ctx.node) and not _has_real_options:
             ctx.trace.append("misclassified-select->text")
             return await _s_text(session, ctx)
         return await _s_other_guard(session, ctx)
@@ -1967,7 +1970,14 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
     # non-combo text input the VLM called a dropdown mounted ZERO options across the S3 filter
     # AND every S4 variant — it is a text field. Type the value and verify like one; the verify
     # oracle still guards a real-but-blind widget (wrong read-back -> revalue/escalate as usual).
-    if _is_plain_text_editable(ctx.node):
+    # BUT NOT when the field was DISCOVERED with real options (a genuine closed list): 0 options
+    # then means the search TERM matched nothing = the mapped VALUE is a hallucination, not that
+    # the widget is a text box. Typing the hallucination as free text and verifying its own .value
+    # is a wrong-value false-green (airwallex mega4/49: relatives Yes/No multi_select got the mapper
+    # value 'AI Policy for the Application process', matched 0 options, was typed as text and
+    # verify-CORRECT'd). A real closed list with an unmatchable value must ESCALATE (fall through).
+    _has_real_options = bool(getattr(getattr(ctx, "field_obj", None), "options", None)) or ctx.nature in ("MULTI", "BOOLEAN")
+    if _is_plain_text_editable(ctx.node) and not _has_real_options:
         ctx.trace.append("misclassified-select->text")
         return await _s_text(session, ctx)
     # GEOCOMPLETE fill-only (the proven ats_lever._location trick): a React location autocomplete returns
