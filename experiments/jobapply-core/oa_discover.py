@@ -48,6 +48,41 @@ _ENUM_JS = r"""
     out.push({ name: name || label.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 60),
                label: label.slice(0, 400), type, source, options, required: !!required });
   };
+  // required-marker element = a bare '*'/'✱', class~=required, or aria-label=required, NOT inside
+  // an option control. Shared by group- and field-level required detection.
+  const isStarMk = s => {
+    const t = clean(s.innerText || '');
+    return (t === '*' || t === '✱' || /(^|[^a-z])required([^a-z]|$)/i.test(s.className || '')
+            || s.getAttribute('aria-label') === 'required');
+  };
+  // FIELD required: the html flag, OR a star embedded in the label, OR a required-marker element
+  // in the field's own question card. react-select comboboxes (twilio 'source of your right to
+  // work…*') carry NO el.required/aria-required and their star is a SEPARATE span the label
+  // capture grabs only INTERMITTENTLY — the sole label-string star test made required detection
+  // (and the hard gate that trusts it) NON-DETERMINISTIC (mega4/29 missed it, mega4/30 caught the
+  // same field). The card-scoped element search is stable regardless of label capture.
+  const starReq = (el, lab) => {
+    if (el.required || (el.getAttribute && el.getAttribute('aria-required') === 'true')) return true;
+    if (/[*✱]/.test(lab || '')) return true;
+    const q = clean(lab || '').slice(0, 40).toLowerCase();
+    let p = el.parentElement;
+    for (let i = 0; i < 5 && p; i++) {
+      if (p.getAttribute && p.getAttribute('aria-required') === 'true') return true;
+      const ctrlN = p.querySelectorAll ? p.querySelectorAll('input:not([type=hidden]),select,textarea,button[aria-haspopup],[role=combobox]').length : 0;
+      // a container holding 2+ fields' controls is a SHARED ancestor — its star could be a
+      // neighbour's, so this field's own card is whatever we already passed. Stop climbing.
+      if (ctrlN > 1) break;
+      const txt = clean(p.innerText || '').toLowerCase();
+      if (q && txt.includes(q)) {
+        // THIS is the field's own card (contains the question, holds only this control). Decide
+        // required here and STOP — never climb into a shared ancestor to borrow a star.
+        const mk = [...p.querySelectorAll('span,i,em,abbr,sup,label')].find(s => isStarMk(s) && !s.closest('button,[role=option],[role=radio],[role=checkbox]'));
+        return !!mk;
+      }
+      p = p.parentElement;
+    }
+    return false;
+  };
   for (const el of document.querySelectorAll('input, textarea, select, [role=combobox]')) {
     const tag = (el.tagName || '').toLowerCase(); const ty = (el.type || '').toLowerCase();
     // hidden file/checkbox/radio inputs AND hidden <select>s are the NORM (styled widget wrapping
@@ -67,7 +102,7 @@ _ENUM_JS = r"""
     // ancestor check below.
     if (tag === 'input' && ['hidden', 'submit', 'button', 'image', 'reset'].includes(ty)) continue;
     if (el.closest('nav, header, footer, [role=search]')) continue;  // page chrome, not the form
-    const req = el.required || (el.getAttribute && el.getAttribute('aria-required') === 'true');
+    const req = starReq(el, labFor(el));
     if (tag === 'select') {
       const opts = [...el.options].map(o => clean(o.text)).filter(t => t && !/^(select|choose|--)/i.test(t)).slice(0, 80);
       push(el.id || el.name, labFor(el), 'single_select', 'select', opts, req); continue;
