@@ -795,8 +795,23 @@ async def retry_missing(
             # PRIOR committed value wins over a fresh re-map (idempotent re-type of the KNOWN-good
             # value; even if the field was already correct, re-typing 'Jordan' can't corrupt it —
             # whereas re-mapping produced 'San Francisco').
-            value = _prior(f) or eng._resolve(f, mapped, resume)[0]
+            prior = _prior(f)
+            value = prior or eng._resolve(f, mapped, resume)[0]
             if not (value or "").strip():
+                continue
+            # CORRUPTION GUARD (implements this function's docstring promise, previously unwired): a
+            # CHOICE widget we ALREADY committed a value to must NOT be re-committed on a NOISY
+            # vision flag. The retry re-commits a combobox/select by TYPING, which strands the text
+            # (stripe mega4/7: a correct react-select 'No' was re-typed -> the menu showed 'No
+            # options' -> the value stranded -> got='No options' was recorded DONE — a
+            # vision-false-flag -> retry-corruption false-green). Re-typing FREE TEXT ('Jordan') is
+            # idempotent and safe, so only committed CHOICE widgets are skipped; a genuinely-wiped
+            # choice then stays empty and the final vision pass keeps the verdict honest rather than
+            # re-corrupted. Structural (has options / choice kind), not a per-ATS label rule.
+            _kind = str(getattr(f, "type", "") or "").lower()
+            if prior and (getattr(f, "options", None) or _kind in (
+                "combobox", "select", "radio", "checkbox", "single_select", "multi_select", "boolean"
+            )):
                 continue
             # PHONE FORMAT VARIANT (doordash mega3/16: '+1 415 555 0142' committed and
             # dom-verified, but the tenant mask underlines it red and vision flags it on all
