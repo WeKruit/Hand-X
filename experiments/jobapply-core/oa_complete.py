@@ -394,6 +394,25 @@ _FILE_REQ_JS = r"""((needle) => {
 })"""
 
 
+# ARIA disclosure selects (duolingo mega4/18-23 false-greens): a required role=group whose
+# ONLY control is a <button aria-haspopup=listbox> and whose rendered text is still the
+# placeholder is an EMPTY required select the input/select-based audit cannot see.
+_ARIA_SEL_REQ_JS = r"""(() => {
+  const out = []; const nrm = s => (s||'').replace(/\s+/g,' ').trim();
+  for (const b of document.querySelectorAll('button[aria-haspopup="listbox"],[role=button][aria-haspopup="listbox"]')) {
+    const grp = b.closest('[role=group],[aria-required]'); if (!grp) continue;
+    if (grp.querySelector('input:not([type=hidden]),select,textarea,[role=combobox]')) continue;
+    if (grp.getAttribute('aria-required') !== 'true') continue;
+    const t = nrm(grp.innerText).toLowerCase();
+    if (!/^(select|choose|start typing|pick)/.test(t)) continue;
+    let lab = '';
+    if (grp.id) { const l = document.querySelector('label[for="' + CSS.escape(grp.id) + '"]'); if (l) lab = nrm(l.innerText); }
+    out.push(lab || 'required select');
+  }
+  return JSON.stringify([...new Set(out)]);
+})()"""
+
+
 async def audit(session: Any, page: Any, file_needle: str = "") -> dict:
     """DOM scan: add-row affordances + still-empty required fields. {} on failure."""
     import json
@@ -401,6 +420,10 @@ async def audit(session: Any, page: Any, file_needle: str = "") -> dict:
     out = {"adds": [], "emptyReq": []}
     with contextlib.suppress(Exception):
         out = json.loads(await page.evaluate(_AUDIT_JS))
+    with contextlib.suppress(Exception):
+        for m in json.loads(await page.evaluate(_ARIA_SEL_REQ_JS)):
+            if m not in out.get("emptyReq", []):
+                out.setdefault("emptyReq", []).append(m)
     if file_needle:
         with contextlib.suppress(Exception):
             for m in json.loads(await page.evaluate(_FILE_REQ_JS, file_needle)):
