@@ -802,6 +802,53 @@ async def _fill_form(
             with contextlib.suppress(Exception):
                 page = await session.must_get_current_page()
 
+        # ============================================================================
+        # HARD LEDGER GATE — the un-suppressed, ledger-first veto (mega4 green audit:
+        # 30 of 31 confirmed false-greens had the failure ALREADY RECORDED in the ledger
+        # — ESCALATE or blank->SKIP on a required field — while the verdict said green,
+        # because the veto above lived INSIDE contextlib.suppress and behind a fragile
+        # token-staleness filter). This gate runs OUTSIDE every suppress block: the
+        # deterministic layer's own bookkeeping is the source of truth, and a form whose
+        # ledger records ANY required field as unfilled can NEVER be green.
+        # ============================================================================
+        if adapter is None and profile is not None and os.environ.get("OA_NO_COMPLETE") != "1":
+            def _norm(s: Any) -> str:
+                return " ".join(str(s or "").split()).lower().strip(" *:✱")
+            comp = result.get("completeness")
+            if not isinstance(comp, dict):
+                # complete() raised inside its suppress and left no verdict — UNKNOWN is not green.
+                comp = {"complete": False, "verdict_missing": True, "missing_required": [], "visually_unanswered": []}
+                result["completeness"] = comp
+            _req_names = {str(f.name) for f in fields if getattr(f, "required", False)}
+            _req_labels = {_norm(f.label) for f in fields if getattr(f, "required", False) and f.label}
+            # a label is HEALED iff some row committed a non-empty value for it, OR a later
+            # pass (retry) recorded one in committed_by_label. NAME-or-label keyed.
+            _committed_labels = {_norm(r.label) for r in per_field if r.committed and str(r.committed).strip()}
+            _committed_labels |= {_norm(k) for k, v in _cbl.items() if v and str(v).strip()}
+            _fails = []
+            for r in per_field:
+                is_req = str(r.name) in _req_names or _norm(r.label) in _req_labels
+                if not is_req:
+                    continue
+                tr = str(r.trace or "")
+                blank_skip = r.outcome == oa.SKIP and "blank->SKIP" in tr
+                escalated = r.outcome == oa.ESCALATE
+                if not (blank_skip or escalated):
+                    continue
+                if _norm(r.label) in _committed_labels:
+                    continue  # a sibling/retry committed it — genuinely filled
+                _fails.append(f"{str(r.label)[:55]} [{r.outcome}]")
+            if _fails:
+                _seen_f: set = set()
+                _fails = [x for x in _fails if not (x in _seen_f or _seen_f.add(x))]
+                comp["complete"] = False
+                comp.setdefault("missing_required", [])
+                for x in _fails:
+                    if x not in comp["missing_required"]:
+                        comp["missing_required"].append(x)
+                comp["ledger_gate_failed"] = _fails
+                print(f"   [HARD GATE] {len(_fails)} required field(s) unfilled in ledger -> NOT complete: {_fails[:4]}")
+
     secs = round(time.monotonic() - t0, 1)
     usage = await tc.get_usage_summary()
     if screenshot_path:
