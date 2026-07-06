@@ -793,6 +793,33 @@ async def _scroll_locate(session: Any, ctx: Ctx, state: perc.OAState) -> tuple[A
     how = ""
     card = None
     node = None
+    # LABEL-ANCHORED JUMP first: the page can be many viewports tall (1password mega4/1: two
+    # viewport steps never reached the bottom questions and browser-use's selector_map only
+    # carries the viewport's surroundings). The field's OWN label text is a known anchor —
+    # scrollIntoView it in one jump, then re-locate. Viewport stepping stays as the fallback.
+    with contextlib.suppress(Exception):
+        page = await session.must_get_current_page()
+        hit = await page.evaluate(
+            "(lab) => { const norm=s=>(s||'').replace(/\\s+/g,' ').trim().toLowerCase();"
+            " const want=norm(lab).slice(0,80); if(!want || want.length<6) return false;"
+            " for(const e of document.querySelectorAll('label,legend,div,span,p,h1,h2,h3,h4')){"
+            "   if(e.children.length>8) continue; const t=norm(e.innerText); if(!t) continue;"
+            "   if(t.startsWith(want) || (t.length>15 && want.startsWith(t.slice(0,60)))){"
+            "     e.scrollIntoView({block:'center'}); return true; } } return false; }",
+            str(ctx.label)[:200],
+        )
+        if hit:
+            state = await perc.get_state(session)
+            node, how, card = await perc.locate_field_tiered(
+                state,
+                ctx.label,
+                vlm_pick=_make_vlm_pick(session, ctx),
+                marks_pick=_make_marks_pick(session, ctx),
+                dom_ref=getattr(ctx.field_obj, "name", "") or "",
+            )
+            ctx.trace.append(f"label-jump:{'hit' if node is not None else 'miss'}")
+            if node is not None:
+                return (node, how, card, state)
     while ctx.scroll_reads < SCROLL_CAP:
         ctx.scroll_reads += 1
         await act.scroll(session, None, _SCROLL_PX)
