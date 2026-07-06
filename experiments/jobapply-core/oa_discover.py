@@ -98,7 +98,17 @@ _ENUM_JS = r"""
             // group only when the co-located boxes look like OPTIONS (short labels), not
             // sibling consent sentences
             if (boxes.length >= 2 && boxes.length <= 40 && boxes.every(b => (labFor(b)||'').length <= 60)) {
-              g = p.__oaGid || (p.__oaGid = 'ckgrp' + (++ckgid)); break;
+              // prefer a SHARED name attr as the group id — it is DOM-REF RESOLVABLE, so locate
+              // binds the real checkbox (classify_intrinsic -> INTRINSIC_CHECKBOX -> _s_choice,
+              // check the box by label). A synthetic ckgrpN is unresolvable, forcing the
+              // VLM-marks path which mis-bound a neighbouring combobox and routed the whole
+              // 29-checkbox group to a dropdown that never opened (stripe mega4 anticipate-
+              // countries escalate — live-CDP-confirmed: name='question_67165646[]', label.click
+              // checks 'US' cleanly). Live-proven fill primitive; the miss was pure identity.
+              const nm = boxes[0].name;
+              const shared = nm && boxes.every(b => b.name === nm);
+              g = shared ? nm : (p.__oaGid || (p.__oaGid = 'ckgrp' + (++ckgid)));
+              break;
             }
             if (boxes.length >= 2) break;  // mixed container: stop climbing, stay lone
           }
