@@ -324,6 +324,19 @@ _NEAR_FIELD_FILTER_JS = r"""() => {
       return hit >= Math.ceil(toks.length * 0.6);
     });
     if (!els.length) return true;  // VLM fully paraphrased — keep (tighter verdict, never looser)
+    // REQUIRED-ONLY: a vlm flag on an unstarred question can never block completeness
+    // (replit mega4/3: 'If not currently in the Bay Area…' is an optional follow-up whose
+    // premise doesn't hold — legitimately blank forever). Narrow climb (small containers
+    // only) so a NEIGHBOR question's star cannot vouch for this one.
+    const isReq = els.some(e => { let p = e;
+      for (let i = 0; i < 4 && p; i++) {
+        if (p.children && p.children.length > 12) break;
+        if (/[*✱](?!\s*indicates)/.test(p.innerText||'')) return true;
+        if (p.querySelector && p.querySelector('[aria-required="true"],[required]')) return true;
+        p = p.parentElement;
+      }
+      return false; });
+    if (!isReq) return false;
     // keep the flag only when the nearby control is genuinely EMPTY in the DOM — the VLM reads
     // gray-rendered values as placeholders and re-flags filled fields (teamtailor Prénom/E-mail).
     const controlEmpty = (c) => {
