@@ -981,6 +981,29 @@ async def _fill_form(
                         comp["missing_required"].append(_tag)
                 comp["wiped_on_screen"] = _wiped
                 print(f"   [WIPE GATE] committed text field(s) EMPTY on final DOM -> NOT complete: {_wiped[:4]}")
+
+            # CHOICE RENDER-VERIFY: a react-select-style committed field (combobox/single_select/
+            # select/boolean) whose control now renders ONLY its placeholder was REVERTED after a
+            # DONE read-back — a false-green the text gate can't see (duolingo sponsorship: ledger
+            # DONE='No', screen 'Select…'). Scope to react-select shapes only (multi_select chips /
+            # checkbox / radio / file render differently and are excluded).
+            _RS_CHOICE = {"combobox", "single_select", "select", "boolean"}
+            _cc = {
+                str(r.label): [str(r.name or ""), str(r.committed)]
+                for r in per_field
+                if r.outcome == oa.DONE and r.committed and str(r.committed).strip() and str(r.type or "").lower() in _RS_CHOICE and r.name
+            }
+            _reverted = await _oc.still_empty_choice(page, _cc) if _cc else []
+            if _reverted:
+                comp = result["completeness"]
+                comp["complete"] = False
+                comp.setdefault("missing_required", [])
+                for _w in _reverted:
+                    _tag = f"{str(_w)[:55]} [CHOICE-REVERTED-EMPTY]"
+                    if _tag not in comp["missing_required"]:
+                        comp["missing_required"].append(_tag)
+                comp["choice_reverted"] = _reverted
+                print(f"   [CHOICE GATE] committed react-select(s) show placeholder on final DOM -> NOT complete: {_reverted[:4]}")
     with contextlib.suppress(Exception):
         result["final_url"] = await page.get_url()
 

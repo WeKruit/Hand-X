@@ -575,6 +575,73 @@ async def still_empty_committed(page: Any, committed_by_label: dict) -> list[str
     return []
 
 
+# CHOICE-WIDGET RENDER-VERIFY (react-select revert gate): the text wipe-gate above reads an
+# <input>.value, but a react-select/single-select renders its committed value as a
+# `.select__single-value` span INSIDE `.select__control` (the input stays empty by design). A commit
+# whose choose_option read-back said DONE can still REVERT on a late re-render, leaving the control
+# showing its `.select__placeholder` ("Select…") — a false-green the text gate can't see (duolingo
+# sponsorship: ledger DONE='No', screen empty). Read the control's rendered value; a committed choice
+# whose control shows ONLY a placeholder (or nothing) was reverted -> not complete. CONSERVATIVE:
+# only flags when a react-select control is confidently bound AND visibly shows a placeholder.
+# CLASS-INDEPENDENT: duolingo/greenhouse/ashby each use a DIFFERENT dropdown widget (react-select
+# .select__control, hashed-class custom 'NuJad/_jDNQ', aria-disclosure button) — binding by class
+# can't cover them. Resolve the committed field's control node by its DOM id/name (the engine already
+# knows it), climb to the visible control BOX, read what it renders. A commit whose value is NOT
+# visible in the box AND whose box shows a placeholder = reverted-to-empty (false-green). Pairs are
+# [label, [name, value]].
+_STILL_EMPTY_CHOICE_JS = r"""() => {
+  const pairs = __PAIRS__;
+  const DIAG = __DIAG__; const dbg = [];
+  const nrm = s => (s||'').replace(/\s+/g,' ').trim();
+  const low = s => nrm(s).toLowerCase();
+  const isPh = t => { const s = nrm(t); return !s || /^(select|choose|start typing|pick|--)\b/i.test(s) || /select\.\.\./i.test(s); };
+  const empty = [];
+  for (const [lab, nv] of pairs) {
+    const name = (nv && nv[0]) || '', val = (nv && nv[1]) || '';
+    if (!nrm(val) || !name) continue;
+    // resolve the committed field's control node by id or name
+    let node = null;
+    try { node = document.getElementById(name) || document.querySelector('[name="'+CSS.escape(name)+'"]') || document.querySelector('[id="'+CSS.escape(name)+'"]'); } catch(e){}
+    if (!node) { if(DIAG) dbg.push({lab:lab.slice(0,22), node:false}); continue; }
+    // climb to the visible control BOX (first bounded ancestor carrying rendered text)
+    let box = node, disp = '';
+    for (let i=0;i<5 && box; i++) {
+      const r = box.getBoundingClientRect(); const t = nrm(box.innerText);
+      if (r.width>40 && r.height>0 && t) { disp = t; break; }
+      box = box.parentElement;
+    }
+    // isolate the VALUE region: strip the leading question/label text so 'No' isn't matched inside the label
+    const labLow = low(lab).replace(/[*:]/g,'').trim();
+    let valRegion = disp;
+    const li = low(disp).indexOf(labLow);
+    if (labLow.length > 4 && li >= 0) valRegion = nrm(disp.slice(li + labLow.length));
+    const hasVal = valRegion && low(valRegion).includes(low(val).slice(0, 18));
+    const reverted = !hasVal && (isPh(valRegion) || !nrm(valRegion));
+    if(DIAG) dbg.push({lab:lab.slice(0,20), val:String(val).slice(0,14), disp:disp.slice(0,44), valReg:valRegion.slice(0,22), hasVal, reverted});
+    if (reverted) empty.push(lab);
+  }
+  if(DIAG) return JSON.stringify({__diag: dbg, empty});
+  return JSON.stringify(empty);
+}"""
+
+
+async def still_empty_choice(page: Any, committed_choice_by_label: dict) -> list[str]:
+    """Committed CHOICE (react-select) labels whose control now renders only its placeholder — the
+    commit reverted on a late re-render (false-green the text gate can't see). [] on failure."""
+    import json
+
+    import os as _os
+    _diag = "true" if _os.environ.get("OA_CHOICE_DIAG") == "1" else "false"
+    with contextlib.suppress(Exception):
+        js = _STILL_EMPTY_CHOICE_JS.replace("__PAIRS__", json.dumps([[k, v] for k, v in committed_choice_by_label.items()])).replace("__DIAG__", _diag)
+        res = json.loads(await page.evaluate(js))
+        if isinstance(res, dict) and "__diag" in res:
+            print(f"   [CHOICE-DIAG] {res['__diag']}")
+            return res.get("empty") or []
+        return res
+    return []
+
+
 # DIAGNOSTIC (env-gated): for each committed label, dump every input/textarea whose name-attr OR
 # near-text mentions the label, with the signals the gate filters on (plain/vis/value). Shows WHY
 # still_empty picked (or skipped) a node — used to pin the samsara First Name gate-miss.
