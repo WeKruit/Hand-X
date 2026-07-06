@@ -705,15 +705,18 @@ async def _fill_form(
             # keys over anyway — fill_repeaters no-ops cleanly when it finds no Add affordance.
             if not _pk and profile:
                 _pk = [k for k in ("experience", "education") if profile.get(k)]
+            # the fill ledger's committed values, keyed by label — makes the crop check
+            # VALUE-AWARE (audit pattern 2: presence-only verify blesses label/junk text).
+            # Kept as a NAMED ref: complete() mutates it in place with retry commits, and the
+            # escalate-veto below reads it back as "who actually got healed".
+            _cbl = {str(r.label): str(r.committed) for r in per_field if r.committed}
             result["completeness"] = await oa_complete.complete(
                 session, page, profile, resume, allow_agent=os.environ.get("OA_COMPLETE_AGENT") == "1",
                 llm=llm, planner_keys=_pk,
                 # per_field is the LOCAL fill ledger — result['results'] is only assembled later
                 filled_names={str(r.name) for r in per_field},
                 required_labels=[f.label or f.name for f in fields if getattr(f, "required", False)],
-                # the fill ledger's committed values, keyed by label — makes the crop check
-                # VALUE-AWARE (audit pattern 2: presence-only verify blesses label/junk text)
-                committed_by_label={str(r.label): str(r.committed) for r in per_field if r.committed},
+                committed_by_label=_cbl,
                 form_url=_form_url,
             )
             # REQUIRED-ESCALATE VETO (zero-cost, deterministic): a REQUIRED field whose own
@@ -734,7 +737,16 @@ async def _fill_form(
                 )
                 def _tok(s: str) -> set:
                     return {w for w in str(s).lower().replace("*", " ").split() if len(w) > 2}
-                _esc = [l for l in _esc if _tok(l) and len(_tok(l) & set(_still.split())) >= max(1, len(_tok(l)) // 2)]
+                def _matches(hay: str, l: str) -> bool:
+                    t = _tok(l)
+                    return bool(t) and len(t & set(hay.split())) >= max(1, len(t) // 2)
+                # a stale escalate is only FORGIVEN when a later pass actually committed the
+                # field (retry commits join committed_by_label) — an audit that merely sees
+                # "non-empty" can be looking at a FOREIGN value we never chose (stripe mega4/5
+                # rerun: 'Belgium' stood on reside-country while our fill escalated; the old
+                # audit-based staleness filter blessed it as healed).
+                _healed = " ".join(str(k).lower().replace("*", " ") for k in _cbl)
+                _esc = [l for l in _esc if _matches(_still, l) or not _matches(_healed, l)]
                 if _esc and isinstance(result.get("completeness"), dict):
                     result["completeness"]["complete"] = False
                     result["completeness"]["required_escalated"] = _esc

@@ -374,7 +374,20 @@ def _identity_pick(value: str, options: list[str]) -> str | None:
     # AMBIGUITY -> None (doordash mega3/17: bare 'San Francisco' prefix-matched SIX geocomplete
     # rows and shortest-wins picked 'San Francisco, Cebu, Philippines' over California. A prefix
     # is identity evidence only when it is UNIQUE; multiple hits go to the LLM with the label.)
-    return pref[0] if len(pref) == 1 else None
+    if len(pref) == 1:
+        return pref[0]
+    if pref:
+        return None
+    # INITIALISM (stripe mega4/5 rerun: the country list offers 'US'/'UK' while the value is
+    # 'United States' — the LLM pick refused and the required select died while a foreign
+    # default stood). An option that IS the first-letters acronym of the value's words is the
+    # value; unique hit only, same discipline as the prefix rule.
+    initials = "".join(w[0] for w in re.findall(r"[a-z0-9]+", nv))
+    if len(initials) >= 2:
+        acr = [o for o in options if " ".join(o.split()).lower() == initials]
+        if len(acr) == 1:
+            return acr[0]
+    return None
 
 
 async def _chosen_plausible(ctx: "Ctx", chosen: str) -> bool:
