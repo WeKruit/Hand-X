@@ -97,6 +97,15 @@ function(text) {
     const desc = Object.getOwnPropertyDescriptor(proto, "value");
     const nativeSetter = desc && desc.set;
     if (nativeSetter) { nativeSetter.call(el, text); } else { el.value = text; }
+    // REACT _valueTracker RESET: the native setter updates el.value AND React's internal value
+    // tracker in lockstep, so React's onChange change-detection (el.value === tracker.getValue())
+    // sees NO change and never commits the value to component STATE — el.value reads back correct
+    // but a later re-render repaints the input from its empty state and WIPES it (samsara greenhouse
+    // embed: First/Preferred name filled + read-back CORRECT, then cleared by a downstream field's
+    // re-render, a verify-passes-but-empty false-green). Forcing the tracker to a DIFFERENT value
+    // before the input event makes React detect the change and setState the real value, so it
+    // survives re-renders. Canonical controlled-input fix; a no-op on plain/uncontrolled inputs.
+    try { const tk = el._valueTracker; if (tk) { tk.setValue(""); } } catch (e) {}
     el.dispatchEvent(new FocusEvent("focus", { bubbles: true }));
     el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
     el.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
