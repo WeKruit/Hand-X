@@ -326,16 +326,23 @@ _NEAR_FIELD_FILTER_JS = r"""() => {
     if (!els.length) return true;  // VLM fully paraphrased — keep (tighter verdict, never looser)
     // REQUIRED-ONLY: a vlm flag on an unstarred question can never block completeness
     // (replit mega4/3: 'If not currently in the Bay Area…' is an optional follow-up whose
-    // premise doesn't hold — legitimately blank forever). Narrow climb (small containers
-    // only) so a NEIGHBOR question's star cannot vouch for this one.
-    const isReq = els.some(e => { let p = e;
-      for (let i = 0; i < 4 && p; i++) {
-        if (p.children && p.children.length > 12) break;
-        if (/[*✱](?!\s*indicates)/.test(p.innerText||'')) return true;
-        if (p.querySelector && p.querySelector('[aria-required="true"],[required]')) return true;
-        p = p.parentElement;
-      }
-      return false; });
+    // premise doesn't hold — legitimately blank forever). The star must sit IMMEDIATELY
+    // after this question's own text (its rendered line or its card) — adjacency, not
+    // co-residence, so a container holding a NEIGHBOR's star cannot vouch.
+    const nlab = nrm(lab);
+    const starNear = (raw) => {
+      const T = nrm(raw||''); if (!T) return false;
+      let idx = T.indexOf(nlab.slice(0, 60));
+      if (idx < 0) { idx = T.indexOf(toks[0]); if (idx < 0) return false; }
+      return /[*✱](?!\s*indicates)/.test(T.slice(idx, idx + nlab.length + 15));
+    };
+    const isReq = els.some(e => {
+      if (starNear(e.innerText)) return true;
+      const card = e.parentElement;
+      if (card && starNear(card.innerText)) return true;
+      return !!(card && nrm(card.innerText||'').length <= nlab.length * 2 + 160
+                && card.querySelector && card.querySelector('[aria-required="true"],[required]'));
+    });
     if (!isReq) return false;
     // keep the flag only when the nearby control is genuinely EMPTY in the DOM — the VLM reads
     // gray-rendered values as placeholders and re-flags filled fields (teamtailor Prénom/E-mail).
