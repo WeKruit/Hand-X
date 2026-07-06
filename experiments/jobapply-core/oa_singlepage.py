@@ -705,11 +705,14 @@ async def _fill_form(
             # keys over anyway — fill_repeaters no-ops cleanly when it finds no Add affordance.
             if not _pk and profile:
                 _pk = [k for k in ("experience", "education") if profile.get(k)]
-            # the fill ledger's committed values, keyed by label — makes the crop check
+            # the fill ledger's VERIFIED committed values, keyed by label — makes the crop check
             # VALUE-AWARE (audit pattern 2: presence-only verify blesses label/junk text).
-            # Kept as a NAMED ref: complete() mutates it in place with retry commits, and the
-            # escalate-veto below reads it back as "who actually got healed".
-            _cbl = {str(r.label): str(r.committed) for r in per_field if r.committed}
+            # DONE-only: `committed` on a SKIP/ESCALATE row is the intended value of a FAILED
+            # attempt (the box is empty on screen), which would falsely bless both the crop
+            # corroboration and the hard gate. Kept as a NAMED ref: complete() mutates it in
+            # place with retry commits (retry only writes on DONE), and the hard gate reads it
+            # back as "who actually got a verified commit".
+            _cbl = {str(r.label): str(r.committed) for r in per_field if r.outcome == oa.DONE and r.committed}
             result["completeness"] = await oa_complete.complete(
                 session, page, profile, resume, allow_agent=os.environ.get("OA_COMPLETE_AGENT") == "1",
                 llm=llm, planner_keys=_pk,
@@ -821,9 +824,14 @@ async def _fill_form(
                 result["completeness"] = comp
             _req_names = {str(f.name) for f in fields if getattr(f, "required", False)}
             _req_labels = {_norm(f.label) for f in fields if getattr(f, "required", False) and f.label}
-            # a label is HEALED iff some row committed a non-empty value for it, OR a later
-            # pass (retry) recorded one in committed_by_label. NAME-or-label keyed.
-            _committed_labels = {_norm(r.label) for r in per_field if r.committed and str(r.committed).strip()}
+            # a label is HEALED iff a row with a VERIFIED terminal (outcome DONE) committed a
+            # non-empty value, OR a later pass (retry) recorded one in committed_by_label
+            # (retry only writes on out==DONE). `committed` on a SKIP/ESCALATE row is the
+            # INTENDED value from a FAILED attempt, NOT a real commit (1password mega4/1:
+            # 'people managers' recommit EMPTY x2 + commit-cap yet committed='No' — the box is
+            # empty on screen). Only DONE rows count.
+            _committed_labels = {_norm(r.label) for r in per_field
+                                 if r.outcome == oa.DONE and r.committed and str(r.committed).strip()}
             _committed_labels |= {_norm(k) for k, v in _cbl.items() if v and str(v).strip()}
             _fails = []
             for r in per_field:
@@ -831,9 +839,19 @@ async def _fill_form(
                 if not is_req:
                     continue
                 tr = str(r.trace or "")
-                blank_skip = r.outcome == oa.SKIP and "blank->SKIP" in tr
+                # a required field is UNFILLED if its row escalated OR skipped for any reason
+                # other than a twin-dedup (the primary handled it) or a conditional premise that
+                # legitimately does not apply. Covers blank->SKIP AND the commit-cap/recommit-
+                # EMPTY class (1password mega4/1 'people managers': tried, box stayed empty,
+                # SKIP with committed='No' intended — NOT blank->SKIP, previously slipped).
                 escalated = r.outcome == oa.ESCALATE
-                if not (blank_skip or escalated):
+                real_skip = (
+                    r.outcome == oa.SKIP
+                    and "twin-label-already-done" not in tr
+                    and "premise" not in tr.lower()
+                    and "conditional" not in tr.lower()
+                )
+                if not (escalated or real_skip):
                     continue
                 if _norm(r.label) in _committed_labels:
                     continue  # a sibling/retry committed it — genuinely filled
