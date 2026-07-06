@@ -930,7 +930,13 @@ async def _s_file_global(session: Any, ctx: Ctx, state: perc.OAState) -> Outcome
       1. ``find_file_input`` scans ALL input[type=file] (incl. hidden) and picks the best by tokens.
       2. ``is_already_uploaded`` reads whether a file is already attached -> idempotent DONE.
       3. else ``act.upload_file`` (CDP setFileInputFiles — NO OS picker)."""
-    node = await filoc.find_file_input(state, ctx.label, llm=ctx.llm)
+    # the visible label on multi-upload forms is a generic verb ('Attach' twice on airbnb —
+    # resume AND cover letter); the discovery NAME is the only distinguishing identity, so
+    # hand the picker both (mega4/9: want='Attach' picked the resume row, the cover-letter
+    # required upload silently landed on the already-filled resume input).
+    _fname = str(getattr(ctx.field_obj, "name", "") or "")
+    _want = f"{ctx.label} ({_fname})" if _fname and _fname.lower() not in ctx.label.lower() else ctx.label
+    node = await filoc.find_file_input(state, _want, llm=ctx.llm)
     if node is None:
         return None  # no file input on the page -> not actually a file field here
     ctx.node = node
@@ -964,15 +970,42 @@ async def _s_file_global(session: Any, ctx: Ctx, state: perc.OAState) -> Outcome
     return DONE
 
 
-async def _file_visible_in_ui(session: Any, path: str) -> bool:
+async def _file_visible_in_ui(session: Any, path: str, node: Any = None) -> bool:
     """True when the uploaded file's basename renders as visible text (deep/shadow-pierced) OR a
     connected file input actually holds it. Distinguishes a REAL upload from a CDP set that landed
     on a decoy input the visible widget ignores. Best-effort True on read failure (don't regress a
-    working upload on a transient read error)."""
+    working upload on a transient read error).
+
+    When ``node`` (the target file input) is given, the search is scoped to ITS card first: on a
+    multi-upload form every field gets the SAME file, so a page-global filename search is vacuously
+    true once the resume chip renders anywhere (airbnb mega4/9: cover-letter upload landed on the
+    resume input, global verify saw the resume chip, ledger claimed 'uploaded+ui-verified')."""
     import os as _os
 
     base = _os.path.basename(str(path))
     needle = base[:8].lower()  # 'test_res' — matches full + truncated 'test_res…pdf' renders
+    if node is not None:
+        _CARD_CHIP_JS = r"""
+function(n){
+  try{
+    let p = this.parentElement;
+    for(let i=0;i<8&&p;i++){
+      // crossing into a container with a SECOND file input = past our own card
+      if(p.querySelectorAll('input[type=file]').length>1) break;
+      if(((p.innerText||'').toLowerCase()).includes(n)) return true;
+      p = p.parentElement;
+    }
+    return false;
+  }catch(e){ return false }
+}
+"""
+        with contextlib.suppress(Exception):
+            r = await cdpa._resolve(session, node)
+            if r is not None:
+                cdp_session, session_id, object_id = r
+                got = await cdpa._call_on(cdp_session, session_id, object_id, _CARD_CHIP_JS, args=[needle])
+                if isinstance(got, bool):
+                    return got  # card-scoped verdict is authoritative; inconclusive falls through
     with contextlib.suppress(Exception):
         page = await session.must_get_current_page()
         # VISIBLE filename text only — NOT input.files, which the decoy hidden input also holds
@@ -1007,7 +1040,7 @@ async def _s_file(session: Any, ctx: Ctx) -> Outcome:
         return ESCALATE if ctx.required else SKIP
     # UI-VERIFY the filename actually renders (a CDP set can land on a decoy input the visible
     # widget ignores — the hibob false-DONE); presence-only trust was the bug.
-    if not await _file_visible_in_ui(session, str(path)):
+    if not await _file_visible_in_ui(session, str(path), node=ctx.node):
         ctx.trace.append("uploaded-but-not-in-ui->escalate")
         return ESCALATE if ctx.required else SKIP
     ctx.committed_text = str(path)
