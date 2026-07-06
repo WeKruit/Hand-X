@@ -1031,6 +1031,12 @@ async def _s_file_global(session: Any, ctx: Ctx, state: perc.OAState) -> Outcome
     # required upload silently landed on the already-filled resume input).
     _fname = str(getattr(ctx.field_obj, "name", "") or "")
     _want = f"{ctx.label} ({_fname})" if _fname and _fname.lower() not in ctx.label.lower() else ctx.label
+    # FRESH state: attaching the SIBLING uploader re-renders the section and consumes its
+    # <input> (live CDP on the greenhouse embed: #resume disappears from the DOM once set)
+    # — a snapshot from before that render binds a STALE node and the set lands nowhere
+    # while the global verify sees the sibling's chip (airbnb mega4/11 false-DONE pair).
+    with contextlib.suppress(Exception):
+        state = await perc.get_state(session)
     node = await filoc.find_file_input(state, _want, llm=ctx.llm)
     if node is None:
         return None  # no file input on the page -> not actually a file field here
@@ -1096,11 +1102,15 @@ function(n){
 """
         with contextlib.suppress(Exception):
             r = await cdpa._resolve(session, node)
-            if r is not None:
-                cdp_session, session_id, object_id = r
-                got = await cdpa._call_on(cdp_session, session_id, object_id, _CARD_CHIP_JS, args=[needle])
-                if isinstance(got, bool):
-                    return got  # card-scoped verdict is authoritative; inconclusive falls through
+            if r is None:
+                # an unresolvable node is a STALE bind (the widget consumed its <input> on the
+                # sibling's attach) — falling to the page-global scan here is what blessed the
+                # airbnb false-DONE pair (the sibling's chip carries the same filename).
+                return False
+            cdp_session, session_id, object_id = r
+            got = await cdpa._call_on(cdp_session, session_id, object_id, _CARD_CHIP_JS, args=[needle])
+            if isinstance(got, bool):
+                return got  # card-scoped verdict is authoritative; inconclusive falls through
     with contextlib.suppress(Exception):
         page = await session.must_get_current_page()
         # VISIBLE filename text only — NOT input.files, which the decoy hidden input also holds
