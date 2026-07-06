@@ -80,6 +80,15 @@ STEP_CAP = 40  # GLOBAL per-field state entries
 FIELD_DEADLINE = float(os.environ.get("OA_FIELD_DEADLINE", "28.0"))
 FIELD_VERIFY_CAP = 3  # per-FIELD verify attempts total (DOM read-back + VLM aids combined)
 FIELD_VLM_CAP = 2  # per-FIELD VLM-aid sub-budget (DOM-first means the VLM is rarely needed)
+# Generic catch-all wants the mapper emits when blind to a combobox's options at map-time. Not a
+# per-ATS label list — this is the closed universal set of residual OPTION labels a form offers;
+# a want in this set means 'the residual/none-of-the-standard-cases option', which pick_option
+# resolves against the real read list (see _chosen_plausible catch-all bypass).
+_CATCH_ALL_WANTS = frozenset({
+    "other", "none", "none of the above", "none of these", "not applicable", "na", "n a",
+    "no preference", "prefer not to answer", "prefer not to say", "decline to answer",
+    "i prefer not to answer", "i decline to answer",
+})
 # Proven-path delegation bounds: the adapter's fill()/read_back() are CDP round-trips on a
 # possibly-busy SPA. Cap each so a wedged proven commit can't eat the whole FIELD_DEADLINE —
 # on timeout we fall through to the generic engine, never hang.
@@ -401,6 +410,15 @@ async def _chosen_plausible(ctx: "Ctx", chosen: str) -> bool:
     want='Other' resolved correctly to 'I do not currently have… will require sponsorship' but the
     old SAME-answer confirm compared it to the literal 'Other', vetoed it, and a context-blind
     retry then committed the WRONG 'Citizen or permanent resident')."""
+    # CATCH-ALL WANT bypass (deterministic): the mapper emits a generic residual ('Other'/'None of
+    # the above'/'N/A') when it is blind to the combobox OPTIONS at map-time; pick_option then
+    # resolves it against the real read list. A residual carries no positive tokens to overlap a
+    # SPECIFIC option, so this token+SAME-answer veto is structurally inapplicable — asking the LLM
+    # 'is option-4 the same as \"None of the above\"?' reliably returns no and kills a correct pick.
+    # Trust the pick_option resolution (twilio non-US source-of-right: 'None of the above'/'Other'
+    # -> option 4 'I do not currently have… will require sponsorship', the truthful residual).
+    if " ".join(re.findall(r"[a-z]+", (ctx.value or "").lower())) in _CATCH_ALL_WANTS:
+        return True
     a = set(re.findall(r"[a-z0-9]+", (ctx.value or "").lower()))
     b = set(re.findall(r"[a-z0-9]+", (chosen or "").lower()))
     if a & b:
@@ -1115,7 +1133,11 @@ async def _s_file_global(session: Any, ctx: Ctx, state: perc.OAState) -> Outcome
     # UI-VERIFY: a CDP set can land on a DECOY hidden input while the visible uploader (hibob's
     # custom 'Add file') never reflects it — that was a FALSE-DONE (json 'uploaded' but the page
     # showed 'Add file' empty). Confirm the filename actually renders before claiming success.
-    if not await _file_visible_in_ui(session, str(path)):
+    # Pass `node` so the verify is CARD-SCOPED: on a multi-upload form (airbnb resume + cover, both
+    # 'Attach') a page-global filename scan is vacuously true once ANY chip renders, so the
+    # cover-letter upload that landed on the resume input was blessed as DONE while Resume/CV stayed
+    # empty (mega4/9,11). The node-scoped check looks only inside THIS field's own card.
+    if not await _file_visible_in_ui(session, str(path), node):
         ctx.trace.append("uploaded-but-not-in-ui->escalate")
         return ESCALATE if ctx.required else SKIP
     ctx.committed_text = str(path)
