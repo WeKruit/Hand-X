@@ -831,6 +831,7 @@ async def _fill_form(
         # ledger records ANY required field as unfilled can NEVER be green.
         # ============================================================================
         if adapter is None and profile is not None and os.environ.get("OA_NO_COMPLETE") != "1":
+            import re
             def _norm(s: Any) -> str:
                 return " ".join(str(s or "").split()).lower().strip(" *:✱")
             comp = result.get("completeness")
