@@ -867,12 +867,25 @@ async def _fill_form(
                 # legitimately does not apply. Covers blank->SKIP AND the commit-cap/recommit-
                 # EMPTY class (1password mega4/1 'people managers': tried, box stayed empty,
                 # SKIP with committed='No' intended — NOT blank->SKIP, previously slipped).
+                # a CONDITIONAL follow-up ('If so…', 'If yes…', 'If you selected…') is required
+                # only when its premise holds; a blank->SKIP on one means the mapper judged the
+                # premise false (duolingo mega4/19: 'If so, are you eligible for OPT?' correctly
+                # skipped because the candidate needs no sponsorship). Not a real miss.
+                _ll = _norm(r.label)
+                # conditional = starts with a premise reference, OR back-references a prior
+                # answer ('after the OPT…' is premised on being in OPT, itself premised on
+                # needing sponsorship — a chain that is inapplicable when sponsorship=No).
+                _conditional = bool(
+                    re.match(r"^(if so|if yes|if no\b|if not|if you|if applicable|if the|if selected|si oui|si vous|after the|based on|given your|as indicated)\b", _ll)
+                    or re.search(r"\b(if you (selected|answered|chose|indicated))\b", _ll)
+                )
                 escalated = r.outcome == oa.ESCALATE
                 real_skip = (
                     r.outcome == oa.SKIP
                     and "twin-label-already-done" not in tr
                     and "premise" not in tr.lower()
                     and "conditional" not in tr.lower()
+                    and not _conditional
                 )
                 if not (escalated or real_skip):
                     continue
