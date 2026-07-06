@@ -394,7 +394,13 @@ async def _chosen_plausible(ctx: "Ctx", chosen: str) -> bool:
     """ZERO-OVERLAP VETO (mega2/7 'Enter manually' committed for 'United States'; mega2/23
     'Toggle flyout' for 'LinkedIn'): a picked option sharing NO token with the wanted value is
     page chrome / a neighbour until proven otherwise. One memoized LLM confirm (the same
-    pick_option) decides paraphrases ('Acknowledge' vs 'I understand that…' stays legal)."""
+    pick_option) decides paraphrases ('Acknowledge' vs 'I understand that…' stays legal).
+    The confirm also licenses a RESIDUAL want: when the mapper wants a generic catch-all
+    ('Other'/'None of the above') it has no positive tokens to overlap a specific option, so the
+    LLM permits the matching residual choice (twilio mega4/29,31 non-US role: source-of-right
+    want='Other' resolved correctly to 'I do not currently have… will require sponsorship' but the
+    old SAME-answer confirm compared it to the literal 'Other', vetoed it, and a context-blind
+    retry then committed the WRONG 'Citizen or permanent resident')."""
     a = set(re.findall(r"[a-z0-9]+", (ctx.value or "").lower()))
     b = set(re.findall(r"[a-z0-9]+", (chosen or "").lower()))
     if a & b:
@@ -408,8 +414,11 @@ async def _chosen_plausible(ctx: "Ctx", chosen: str) -> bool:
         r = await ctx.llm.ainvoke([UserMessage(content=(
             f"A form answer should be: {ctx.value!r}\nThe option about to be committed reads: {chosen!r}\n"
             f"Field label: {(ctx.label or '')[:120]!r}\n"
-            "Do they express the SAME answer (abbreviation, paraphrase, or format variant)? "
-            "A different choice from the same category is NOT the same answer. Reply exactly yes or no."
+            "Is committing this option a correct way to record that intended answer — i.e. EITHER they "
+            "express the same answer (abbreviation, paraphrase, or format variant), OR the intended "
+            "answer is a generic catch-all ('Other' / 'None of the above' / 'Not applicable' / 'Prefer "
+            "not to answer') and this option is the matching residual choice for this field? "
+            "A DIFFERENT specific choice from the same category is NOT acceptable. Reply exactly yes or no."
         ))])
         return str(getattr(r, "completion", r) or "").strip().lower().startswith("y")
     return False
