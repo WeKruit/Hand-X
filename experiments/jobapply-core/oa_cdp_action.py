@@ -632,6 +632,41 @@ function(skipOpen){
 }
 """
 
+# the chosen option's viewport rect, scoped exactly like the read (aria-controls first) —
+# the caller issues a TRUSTED Input.dispatchMouseEvent click there (live-proven on the
+# greenhouse embed: control text flipped to the option and the menu closed).
+_RS_OPTION_RECT_JS = r"""
+function(want){
+  const norm = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const w = norm(want); if(!w) return null;
+  const lid = this.getAttribute('aria-controls') || this.getAttribute('aria-owns');
+  let root = lid && document.getElementById(lid);
+  if(!root){
+    const idm = (this.id||'').match(/react-select-([^-]+)-/);
+    if(idm){ const o0 = document.querySelector('[id^="react-select-'+idm[1]+'-option"]'); root = o0 && o0.parentElement; }
+  }
+  if(!root) return null;
+  const o = [...root.querySelectorAll('[class*=option],[class*=Option],[role=option]')]
+    .find(x => norm(x.innerText||x.textContent) === w);
+  if(!o) return null;
+  o.scrollIntoView({block:'nearest'});
+  const r = o.getBoundingClientRect();
+  if(!r.width || !r.height) return null;
+  return {x: r.x + r.width/2, y: r.y + r.height/2};
+}
+"""
+
+# the control wrapper's rendered text after a commit attempt — the read-back that decides
+# whether the trusted option click actually landed ('Select...' placeholders read as empty).
+_RS_CTRL_TEXT_JS = r"""
+function(){
+  let ctrl = this;
+  for(let i=0;i<6 && ctrl;i++){ if(/(^|[^a-z])control([^a-z]|$)|select__control|Control/i.test(String(ctrl.className))) break; ctrl = ctrl.parentElement; }
+  const t = ((ctrl||this).innerText||'').replace(/\s+/g,' ').trim();
+  return /^(select|choose|start typing)/i.test(t) ? "" : t;
+}
+"""
+
 _RS_CLICK_JS = r"""
 function(want){
   const norm = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
@@ -672,21 +707,27 @@ async def cdp_choose_react_select(session: Any, node: Any, value: str, pick=None
         if r is None:
             return ""
         cdp_session, session_id, object_id = r
-        # TRUSTED open first (affirm mega4/38: the JS synthetic mousedown never opened the
-        # menu — aria/wrapper/idm all absent on every read); the JS re-dispatch is the
-        # fallback for widgets where the trusted center-click lands outside the control.
-        opened_trusted = False
+        # KEYBOARD open: focus + ArrowDown. PROVEN in a live CDP session on the greenhouse
+        # embed (stripe question_67542071): a trusted mousePressed/Released at the control
+        # center left aria-expanded=false, while focus+ArrowDown flipped it true with
+        # aria-controls resolving to react-select-<id>-listbox and 29 scoped options.
+        opened = False
         with contextlib.suppress(Exception):
-            opened_trusted = await cdp_click(session, node)
-        if opened_trusted:
-            await asyncio.sleep(0.4)
-        raw = await _call_on(cdp_session, session_id, object_id, _RS_OPEN_READ_JS, args=[bool(opened_trusted)])
+            await _call_on(cdp_session, session_id, object_id, "function(){ this.focus(); }")
+            key = cdp_session.cdp_client.send.Input.dispatchKeyEvent
+            for typ in ("keyDown", "keyUp"):
+                await key(params={"type": typ, "key": "ArrowDown", "code": "ArrowDown",
+                                  "windowsVirtualKeyCode": 40, "nativeVirtualKeyCode": 40},
+                          session_id=session_id)
+            await asyncio.sleep(0.5)
+            opened = True
+        raw = await _call_on(cdp_session, session_id, object_id, _RS_OPEN_READ_JS, args=[bool(opened)])
         try:
             options = json.loads(raw) if raw else []
         except Exception:
             options = []
-        if isinstance(options, dict) and opened_trusted:
-            # trusted open read nothing — retry once with the synthetic-dispatch open
+        if isinstance(options, dict) and opened:
+            # keyboard open read nothing — one retry with the synthetic-dispatch open
             raw = await _call_on(cdp_session, session_id, object_id, _RS_OPEN_READ_JS, args=[False])
             with contextlib.suppress(Exception):
                 options = json.loads(raw) if raw else []
@@ -707,6 +748,16 @@ async def cdp_choose_react_select(session: Any, node: Any, value: str, pick=None
                 chosen = await pick(value, options) or ""
         if not chosen:
             return ""
+        # TRUSTED click at the option's rect first (live-proven commit path); the synthetic
+        # option-event dispatch stays as the fallback.
+        with contextlib.suppress(Exception):
+            rect = await _call_on(cdp_session, session_id, object_id, _RS_OPTION_RECT_JS, args=[str(chosen)])
+            if isinstance(rect, dict) and rect.get("x") is not None:
+                await _dispatch_mouse_click(cdp_session, session_id, rect["x"], rect["y"])
+                await asyncio.sleep(0.3)
+                got = await _call_on(cdp_session, session_id, object_id, _RS_CTRL_TEXT_JS)
+                if got and str(got).strip():
+                    return str(got).strip()
         got = await _call_on(cdp_session, session_id, object_id, _RS_CLICK_JS, args=[str(chosen)])
         return str(got).strip() if got else ""
 
