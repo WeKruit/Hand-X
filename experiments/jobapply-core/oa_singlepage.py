@@ -558,6 +558,7 @@ async def _fill_form(
     with contextlib.suppress(Exception):
         _form_url = await page.get_url()
     _done_labels: set[str] = set()
+    _done_sigs: dict[str, list] = {}  # label -> option-signatures already committed under it
     for f in fields_file_last:
         if f.source == "skip":
             continue
@@ -569,11 +570,24 @@ async def _fill_form(
         # that already verified DONE this run -> SKIP. If two DISTINCT real fields ever share a
         # label, the completeness audit flags the empty one and retry fills it — safe direction.
         _lkey = " ".join(str(f.label or f.name).split()).lower()
+        # OPTION SIGNATURE: two same-label fields are twins only if they touch the SAME widget.
+        # stripe mega4/6 renders TWO required "Please indicate what you have experience with. *"
+        # multi-selects with DIFFERENT options ([Hunting,Farming] vs [SMB,Mid-Market,Enterprise]);
+        # keying the twin-skip on label ALONE left the second group empty (skipped as a false
+        # twin, its computed 'Enterprise' never applied). A distinct option set = distinct question.
+        _sig = tuple(sorted(str(o).strip().lower() for o in (getattr(f, "options", None) or []) if str(o).strip()))
         # FILE fields are exempt: Resume and Cover Letter both render as 'Attach' on
         # greenhouse — the second slot is a DIFFERENT real field, and retry cannot heal a
         # skipped file (airbnb mega3/10-11: Cover Letter slot skipped as a twin, flagged by
         # vision, unfixable downstream).
-        if _lkey in _done_labels and "file" not in str(f.type or "").lower():
+        _is_twin = (
+            _lkey in _done_labels
+            and "file" not in str(f.type or "").lower()
+            # a non-empty option signature that DIFFERS from every signature already committed
+            # under this label is a distinct question, not a twin.
+            and (not _sig or _sig in _done_sigs.get(_lkey, []) or not _done_sigs.get(_lkey))
+        )
+        if _is_twin:
             per_field.append(
                 FieldResult(
                     name=f.name, label=f.label or f.name, type=f.type, value_src="twin",
@@ -627,6 +641,8 @@ async def _fill_form(
         )
         if outcome == oa.DONE:
             _done_labels.add(_lkey)
+            if _sig:
+                _done_sigs.setdefault(_lkey, []).append(_sig)
         # MID-FILL DRIFT (samsara mega3/30: a fill click navigated to /company/belonging and
         # every later field died no-control — the judge-time guard saved the verdict but not
         # the fields). On a no-control locate miss, check the url and pull the run back.
