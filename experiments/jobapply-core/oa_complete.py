@@ -542,6 +542,24 @@ async def _vlm_unfilled_sections(session: Any) -> list[str]:
         return []
 
 
+_VISION_PROMPT = (
+    # principle + one example each, NOT a rule taxonomy (user: keep prompts
+    # generic and let the model decide; enumerated ignore-lists are the same
+    # anti-pattern as regex and break on the next tenant/language).
+    "This is a section of a job application form AFTER automated filling. List the "
+    "REQUIRED questions a candidate would still have to answer before submitting: empty "
+    "text boxes, dropdowns still on a placeholder, choice pairs with neither "
+    "option selected, empty upload areas. Judge by what the form itself "
+    "communicates, in whatever language/convention it uses: only count a field "
+    "the form VISIBLY marks as required (for example an asterisk by its label); "
+    "an empty but unmarked field is not a finding. Only count questions that are "
+    "part of the application form a candidate fills in — for example, a footer "
+    "banner asking 'Do you already work here?' with a login button is page "
+    "furniture, not a form question. Reply ONLY a STRICT JSON array of their "
+    "labels, [] if nothing required remains."
+)
+
+
 async def _vlm_unanswered_required(session: Any) -> list[str]:
     """VISUAL second opinion (user: rely on visuals; DOM alone over-claims): ONE full-page VLM
     read naming required-marked fields that LOOK unanswered. [] = vision agrees the form is
@@ -559,23 +577,44 @@ async def _vlm_unanswered_required(session: Any) -> list[str]:
             sh = await asyncio.wait_for(session.take_screenshot(full_page=True), timeout=15.0)
             png = base64.b64decode(sh) if isinstance(sh, str) else sh
         if png is None:
-            return []
-        _PROMPT = (
-            # principle + one example each, NOT a rule taxonomy (user: keep prompts
-            # generic and let the model decide; enumerated ignore-lists are the same
-            # anti-pattern as regex and break on the next tenant/language).
-            "This is a section of a job application form AFTER automated filling. List the "
-            "REQUIRED questions a candidate would still have to answer before submitting: empty "
-            "text boxes, dropdowns still on a placeholder, choice pairs with neither "
-            "option selected, empty upload areas. Judge by what the form itself "
-            "communicates, in whatever language/convention it uses: only count a field "
-            "the form VISIBLY marks as required (for example an asterisk by its label); "
-            "an empty but unmarked field is not a finding. Only count questions that are "
-            "part of the application form a candidate fills in — for example, a footer "
-            "banner asking 'Do you already work here?' with a login button is page "
-            "furniture, not a form question. Reply ONLY a STRICT JSON array of their "
-            "labels, [] if nothing required remains."
-        )
+            # VIEWPORT-SCROLL FALLBACK (duolingo mega4/19: the full-page shot of a 4800px
+            # animated page failed and `return []` PASSED the form — 'screenshot failed'
+            # must never impersonate 'vision approves'; offline replay of the same bands
+            # named every empty SELECT* screener instantly).
+            shots: list[bytes] = []
+            with contextlib.suppress(Exception):
+                page = await session.must_get_current_page()
+                h = int(await page.evaluate("document.documentElement.scrollHeight") or 0)
+                y = 0
+                while y < min(h, 9000) and len(shots) < 8:
+                    await page.evaluate(f"window.scrollTo(0, {y})")
+                    await asyncio.sleep(0.4)
+                    sh = await asyncio.wait_for(session.take_screenshot(), timeout=8.0)
+                    shots.append(base64.b64decode(sh) if isinstance(sh, str) else sh)
+                    y += 900
+            if not shots:
+                print("   [complete] vision second-opinion UNAVAILABLE — screenshot failed twice")
+                return None  # sentinel: vision did NOT look (callers must not treat as approval)
+            out2: list[str] = []
+            for band in shots:
+                msg = UserMessage(content=[
+                    ContentPartTextParam(type="text", text=_VISION_PROMPT),
+                    ContentPartImageParam(type="image_url", image_url=ImageURL(
+                        url=f"data:image/png;base64,{base64.b64encode(band).decode()}",
+                        detail="high", media_type="image/png")),
+                ])
+                with contextlib.suppress(Exception):
+                    res = await _oa.resilient_vlm([msg], primary=_vlm())
+                    out2.extend(_parse_str_list(str(getattr(res, "completion", res) or "[]")))
+            seenk: set = set()
+            ded: list[str] = []
+            for lab in out2:
+                k = " ".join(str(lab).split()).lower()
+                if k and k not in seenk:
+                    seenk.add(k)
+                    ded.append(lab)
+            return ded
+        _PROMPT = _VISION_PROMPT
         # BAND-TILED verification (the resolution fix): a 5000px-tall page squeezed into one
         # image budget leaves each form row a few pixels tall — the model physically cannot see
         # an unticked box (hibob resume false-green: the same VLM caught it instantly on a CROP).
@@ -1076,6 +1115,12 @@ async def complete(
         if not verdict["missing_required"] and not verdict["sections_skipped"]:
             with contextlib.suppress(Exception):
                 seen = await _vlm_unanswered_required(session)
+                if seen is None:
+                    # vision could not look — 'unavailable' must never read as approval
+                    # (duolingo mega4/19: screenshot failure -> [] -> false COMPLETE)
+                    verdict["vision_skipped"] = True
+                    verdict["complete"] = False
+                    seen = []
                 if seen:
                     # PAGE-FURNITURE filter: keep a flag only when its on-page text sits near a
                     # FILLABLE control. The VLM kept flagging the footer employee-referral banner
@@ -1098,6 +1143,10 @@ async def complete(
                             if fixed:
                                 verdict["revalued"] = fixed
                                 seen2 = await _vlm_unanswered_required(session)
+                                if seen2 is None:
+                                    verdict["vision_skipped"] = True
+                                    verdict["complete"] = False
+                                    seen2 = []
                                 with contextlib.suppress(Exception):
                                     if seen2:
                                         seen2 = json.loads(await page.evaluate(_NEAR_FIELD_FILTER_JS % json.dumps(seen2)))
