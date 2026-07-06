@@ -839,6 +839,9 @@ async def _fill_form(
                 # complete() raised inside its suppress and left no verdict — UNKNOWN is not green.
                 comp = {"complete": False, "verdict_missing": True, "missing_required": [], "visually_unanswered": []}
                 result["completeness"] = comp
+            _dbg_staresc = [str(r.label)[:40] for r in per_field
+                            if r.outcome in (oa.ESCALATE, oa.SKIP) and ("*" in str(r.label or "") or "✱" in str(r.label or ""))]
+            print(f"   [gate-dbg] per_field={len(per_field)} star-esc/skip rows={_dbg_staresc[:4]}")
             _req_names = {str(f.name) for f in fields if getattr(f, "required", False)}
             _req_labels = {_norm(f.label) for f in fields if getattr(f, "required", False) and f.label}
             # a label is HEALED iff a row with a VERIFIED terminal (outcome DONE) committed a
@@ -934,6 +937,45 @@ async def _fill_form(
             secs = result.get("completeness", {}).get("sections_filled", []) + result.get("completeness", {}).get("sections_skipped", [])
             has_hist = any("exp" in str(x).lower() or "edu" in str(x).lower() for x in secs)
             expected = len(fillable) + (5 * (exp_rows + edu_rows) if has_hist else 0)
+    # REDUNDANT LEDGER SAFETY NET (unconditional, 4-space — runs on EVERY path, not just the
+    # generic-lane elif where the hard gate lives). twilio mega4/29+34: a star+ESCALATE
+    # required 'source of your right to work…*' shipped complete=True — the in-elif gate did
+    # not fire (branch/scope reason still under diagnosis). This net reads the fill ledger one
+    # more time, right before the result is finalized, and can NEVER be skipped: any required
+    # field (star in label, discovery-required, or name/label match) whose ledger row escalated
+    # or non-twin/non-conditional skipped, with no DONE row committing that label, forces
+    # complete=False. Belt-and-suspenders on the no-false-green invariant.
+    with contextlib.suppress(Exception):
+        import re as _re2
+        _comp = result.get("completeness")
+        if isinstance(_comp, dict) and _comp.get("complete") and profile is not None:
+            def _nrm(s: Any) -> str:
+                return " ".join(str(s or "").split()).lower().strip(" *:✱")
+            _dn = {_nrm(r.label) for r in per_field if r.outcome == oa.DONE and r.committed and str(r.committed).strip()}
+            _rq = {str(f.name) for f in fields if getattr(f, "required", False)} if fields else set()
+            _net = []
+            for r in per_field:
+                _lb = str(r.label or "")
+                _st = ("*" in _lb or "✱" in _lb) and "indicates a required" not in _lb.lower()
+                if not (str(r.name) in _rq or _st):
+                    continue
+                _tr = str(r.trace or "")
+                _cnd = bool(_re2.match(r"^(if so|if yes|if no\b|if not|if you|if applicable|if the|if selected|after the|based on|given your|as indicated)\b", _nrm(r.label)))
+                _bad = r.outcome == oa.ESCALATE or (
+                    r.outcome == oa.SKIP and "twin-label-already-done" not in _tr
+                    and "premise" not in _tr.lower() and not _cnd)
+                if _bad and _nrm(r.label) not in _dn:
+                    _net.append(f"{_lb[:50]} [{r.outcome}]")
+            if _net:
+                _seen: set = set()
+                _net = [x for x in _net if not (x in _seen or _seen.add(x))]
+                _comp["complete"] = False
+                _comp.setdefault("missing_required", [])
+                for x in _net:
+                    if x not in _comp["missing_required"]:
+                        _comp["missing_required"].append(x)
+                _comp["safety_net_failed"] = _net
+                print(f"   [SAFETY NET] {len(_net)} required unfilled -> NOT complete: {_net[:4]}")
     result.update(
         status="FILLED",
         cost=usage.total_cost,
