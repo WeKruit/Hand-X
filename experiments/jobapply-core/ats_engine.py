@@ -762,6 +762,11 @@ async def map_fields(
     # mapper echo, never an answer — downstream it gets TYPED as a search query / committed as
     # the 'value' (ambral mega/39: search 'Are you currently authorized to work in the US?').
     _lab_by_name = {f.name: " ".join((getattr(f, "label", "") or "").split()).lower().rstrip("*: ") for f in fields}
+    # ALL field labels (star-stripped) — a value equal to ANY OTHER field's label is a cross-field
+    # mapper hallucination (airwallex mega4/49: 'Do you have any relatives working here?' mapped to
+    # 'AI Policy for the Application process' — the ADJACENT question's heading; value==committed so
+    # the want-vs-got veto and the read-back verify both saw it as CORRECT, a wrong-value false-green).
+    _all_labels = {" ".join((getattr(f, "label", "") or "").split()).lower().rstrip("*: ") for f in fields if getattr(f, "label", "")}
     for name, f in out.items():
         v = " ".join((f.value or "").split()).lower().rstrip("*: ")
         lab = _lab_by_name.get(name, "")
@@ -770,6 +775,10 @@ async def map_fields(
         # mega/48: value == the question, exact-match guard slipped).
         if v and len(v) >= 15 and (v == lab or lab.startswith(v)):
             f.why = "LABEL-ECHO dropped (value == question)"
+            f.value = ""
+        # cross-field: the value IS another field's whole question -> hallucination, drop it
+        elif v and len(v) >= 12 and v in (_all_labels - {lab}):
+            f.why = "CROSS-LABEL-ECHO dropped (value == another field's question)"
             f.value = ""
     # IDENTITY-DIRECT (deterministic): first/last name, email, phone, linkedin never pass
     # through the LLM's hands — bamboohr mega/76 mapped Last Name -> 'Jordan' (the FIRST name)
