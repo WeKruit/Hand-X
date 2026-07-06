@@ -735,6 +735,13 @@ async def retry_missing(
                 print(f"   [retry] '{str(f.label or f.name)[:40]}' want='{str(value)[:25]}' got='{got[:25]}' out={out}")
                 if out == oa.DONE:
                     refilled += 1
+                    # a retry commit must join the ledger the downstream judges read —
+                    # samsara mega4/28: 'Acknowledge/Confirm' committed HERE, but the
+                    # corroboration/crop layers only see committed_by_label (built from the
+                    # pre-retry per_field), so the vision flag on a correctly-filled field
+                    # survived to the verdict.
+                    if got:
+                        committed_by_label[str(f.label or f.name)] = got
     if refilled:
         print(f"   [complete] retry re-filled {refilled} wiped/empty required field(s)")
     return refilled
