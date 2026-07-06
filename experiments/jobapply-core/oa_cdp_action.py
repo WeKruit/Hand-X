@@ -370,16 +370,47 @@ async def cdp_choose_option(session: Any, container_node: Any, value: str, group
     IDENTITY document-wide first — immune to a mis-located container. Returns the matched option
     string, or "" when no input matched (caller falls back to the visual path). Generic."""
 
+    # a controlled widget can accept the click NOW and revert on the next render — sierra
+    # mega4/48 hear-about: t.checked was true at click time, the ledger said DONE, and the
+    # final screenshot showed the whole group unselected. Settle, then re-read the group.
+    _STILL_CHECKED_JS = r"""
+function(groupName){
+  let inputs = [];
+  if(groupName){
+    const esc = (window.CSS && CSS.escape) ? CSS.escape(groupName) : groupName;
+    inputs = [...document.querySelectorAll('input[type=radio][name="'+esc+'"],input[type=checkbox][name="'+esc+'"]')];
+  }
+  if(!inputs.length){
+    let root = this;
+    if(root.matches && root.matches('input[type=radio],input[type=checkbox]')){
+      root = root.closest('fieldset,[role=radiogroup],[role=group]') || root.form || document;
+    }
+    inputs = [...root.querySelectorAll('input[type=radio],input[type=checkbox]')];
+  }
+  if(!inputs.length) return true;  // button-pill commit — nothing to re-read here
+  return inputs.some(el => el.checked);
+}
+"""
+
     async def _do() -> str:
         r = await _resolve(session, container_node)
         if r is None:
             return ""
         cdp_session, session_id, object_id = r
-        got = await _call_on(cdp_session, session_id, object_id, _CHOOSE_OPTION_JS, args=[str(value), str(group_name or "")])
-        return str(got).strip() if got else ""
+        for attempt in (1, 2):
+            got = await _call_on(cdp_session, session_id, object_id, _CHOOSE_OPTION_JS, args=[str(value), str(group_name or "")])
+            if not got:
+                return ""
+            await asyncio.sleep(0.3)
+            still = await _call_on(cdp_session, session_id, object_id, _STILL_CHECKED_JS, args=[str(group_name or "")])
+            if still is not False:
+                return str(got).strip()
+            if attempt == 1:
+                print("   [choice] commit reverted by re-render — one re-click")
+        return ""
 
     try:
-        return await asyncio.wait_for(_do(), timeout=CDP_ACTION_TIMEOUT)
+        return await asyncio.wait_for(_do(), timeout=CDP_ACTION_TIMEOUT + 1.0)
     except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041
         return ""
     except Exception:
