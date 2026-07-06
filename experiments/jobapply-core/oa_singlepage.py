@@ -851,7 +851,14 @@ async def _fill_form(
             _committed_labels |= {_norm(k) for k, v in _cbl.items() if v and str(v).strip()}
             _fails = []
             for r in per_field:
-                is_req = str(r.name) in _req_names or _norm(r.label) in _req_labels
+                # required from THREE independent signals — the gate does not trust discovery's
+                # required flag alone (stripe mega4/7-8: 'anticipate working in... *' escalated
+                # empty yet passed green because grpReq missed the star when it sat on a separate
+                # span/line and no fieldset carried aria-required). The ledger label itself is
+                # the third, self-sufficient signal: a star on the label = required, full stop.
+                _lab = str(r.label or "")
+                star = ("*" in _lab or "✱" in _lab) and "indicates a required" not in _lab.lower()
+                is_req = str(r.name) in _req_names or _norm(r.label) in _req_labels or star
                 if not is_req:
                     continue
                 tr = str(r.trace or "")
