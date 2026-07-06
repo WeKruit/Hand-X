@@ -650,6 +650,14 @@ def locate_grouped_widget(state: OAState, label_text: str) -> tuple[Any, Any] | 
             return (node, card)
     # DIAGNOSTIC (openai mega/48: pill pass live but still no-control — which stage starved?):
     print(f"   [locate] pill-pass miss '{label_text[:40]}': btns={_dbg_btns} short={_dbg_short} carded={_dbg_cards}")
+    # DIAGNOSTIC (stripe mega4/5: combo admitted by _locatable_control yet grouped still None —
+    # is the 1px input even IN selector_map, and where does its card climb die?):
+    for n in state.selector_map.values():
+        a = getattr(n, "attributes", None) or {}
+        if (a.get("role") or "").lower() == "combobox" or (a.get("aria-autocomplete") or "none") != "none":
+            card = _card_wrapper(n, target)
+            print(f"   [locate] combo-cand tag={_tag(n)} vis={node_is_visible(n)} rect={node_rect(n)} "
+                  f"fillable={_is_fillable_control(n)} card={'HIT' if card is not None else 'miss'}")
     return None
 
 
