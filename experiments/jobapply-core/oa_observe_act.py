@@ -1133,11 +1133,13 @@ async def _s_file_global(session: Any, ctx: Ctx, state: perc.OAState) -> Outcome
     # UI-VERIFY: a CDP set can land on a DECOY hidden input while the visible uploader (hibob's
     # custom 'Add file') never reflects it — that was a FALSE-DONE (json 'uploaded' but the page
     # showed 'Add file' empty). Confirm the filename actually renders before claiming success.
-    # Pass `node` so the verify is CARD-SCOPED: on a multi-upload form (airbnb resume + cover, both
-    # 'Attach') a page-global filename scan is vacuously true once ANY chip renders, so the
-    # cover-letter upload that landed on the resume input was blessed as DONE while Resume/CV stayed
-    # empty (mega4/9,11). The node-scoped check looks only inside THIS field's own card.
-    if not await _file_visible_in_ui(session, str(path), node):
+    # NOTE: the node-scoped card verify was too strict — on stripe both file inputs share an
+    # ancestor, so the 'stop at >1 file input' boundary excluded a chip that WAS rendered, turning a
+    # correctly-attached resume into a false-negative escalate (mega4_val/7: both files visibly
+    # attached, ledger said uploaded-but-not-in-ui). The airbnb resume->cover false-green needs a
+    # SPATIAL per-dropzone verify (live-CDP TODO); page-global until then (better a rare false-green
+    # than regressing every multi-upload form to a false-negative).
+    if not await _file_visible_in_ui(session, str(path)):
         ctx.trace.append("uploaded-but-not-in-ui->escalate")
         return ESCALATE if ctx.required else SKIP
     ctx.committed_text = str(path)
