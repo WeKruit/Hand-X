@@ -1628,6 +1628,24 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
                             ctx.committed_text = fchosen
                             ctx.trace.append("filter-retry-commit")
                             return await _s_verify(session, ctx)
+        # REACT-SELECT DIRECT on the pick-fail path (twilio mega4/32: every delta/filter read
+        # returned junk while the tenant's DEFAULT answer sat committed on screen — the RS rung
+        # reads its OWN menu via instance-id/aria-controls and can commit here, but it was only
+        # wired into the native-fail path).
+        if _node_role(ctx.node) == "combobox" or _node_attr(ctx.node, "aria-autocomplete") not in ("", "none"):
+            with contextlib.suppress(Exception):
+
+                async def _rs_pick(v: str, opts: list) -> str | None:
+                    c = _identity_pick(v, opts)
+                    if not c:
+                        c = await brain.pick_option(v, opts, llm=ctx.llm, label=ctx.label)
+                    return c if (c and await _chosen_plausible(ctx, c)) else None
+
+                got = await cdpa.cdp_choose_react_select(session, ctx.node, ctx.value, pick=_rs_pick)
+                if got:
+                    ctx.committed_text = got
+                    ctx.trace.append(f"rs-direct-commit:{got[:20]}")
+                    return await _s_verify(session, ctx)
         # MISCLASSIFIED-SELECT recovery on THIS abandon path too (reddit mega3/61-62,
         # greenhouse API: 'How did you hear' is input_text — the VLM called it a dropdown,
         # the filter typed into a menu-less box, and this branch escalated without ever
