@@ -634,6 +634,10 @@ location where this role is based?" + US role + US-authorized candidate -> "Yes"
 resolution applies to residence/work-permit questions, in any language: a Paris role asking \
 "besoin d'un titre de séjour pour travailler ?" + a US-only-authorized candidate -> "Oui" \
 (needs the permit); a US role + US-authorized -> "No".
+- The answers form ONE consistent story, not independent guesses: a follow-up must agree with \
+its parent answer (twilio, Mexico role: "authorized to work where this role is located?" -> \
+"No" — then "source of your right to work there?" can NOT be "Citizen or permanent resident"; \
+pick the none/other/visa-required option).
 - LANGUAGE-PROFICIENCY scales: a language the profile does not list gets the LOWEST tier \
 offered ('A0-A2', 'Beginner', 'Basic') — never a bare 'None'/'N/A' unless the question \
 visibly offers a none-option (flexport: the Dutch scale is A0-A2..Native with no none row, \
