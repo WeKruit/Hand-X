@@ -1683,6 +1683,26 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
         # reads its OWN menu via instance-id/aria-controls and can commit here, but it was only
         # wired into the native-fail path).
         if _node_role(ctx.node) == "combobox" or _node_attr(ctx.node, "aria-autocomplete") not in ("", "none"):
+            # CDP-CORE FIRST (owner mandate + live-proven on this exact widget): resolve the
+            # field FRESH by discovery identity, keyboard-open, aria-scoped read, trusted rect
+            # click. Replaces the flaky node-based cdp_choose_react_select (stripe mega4/5 rerun
+            # 'rs-direct no options: aria=True pageOpts=244' — the node path couldn't scope the
+            # menu; core.choose_option committed 'NO' on this same widget in a live session).
+            _core_name = str(getattr(ctx.field_obj, "name", "") or "")
+            if _core_name:
+                with contextlib.suppress(Exception):
+                    import oa_cdp_core as core
+
+                    _opts = await core.read_options(session, _core_name)
+                    if _opts:
+                        _chosen = _identity_pick(ctx.value, _opts) or await brain.pick_option(
+                            ctx.value, _opts, llm=ctx.llm, label=ctx.label)
+                        if _chosen and await _chosen_plausible(ctx, _chosen):
+                            _got = await core.choose_option(session, _core_name, _chosen)
+                            if _got:
+                                ctx.committed_text = _got
+                                ctx.trace.append(f"rs-core-commit:{_got[:20]}")
+                                return await _s_verify(session, ctx)
             with contextlib.suppress(Exception):
 
                 async def _rs_pick(v: str, opts: list) -> str | None:
