@@ -991,28 +991,30 @@ async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None
                         return True
                 return False
 
-            # check the node AND its card — duolingo's office question bound a textbox (the
-            # aria-select's filter input) as the representative control, whose subtree has no
-            # haspopup (the button is a SIBLING), so a node-only check missed it and the field
-            # fell to S3 -> filter 0 opts -> commit-cap. core.read_options resolves by the group
-            # NAME and descends to the button regardless of which control locate bound.
-            if _haspopup_at_or_below(ctx.node) or _haspopup_at_or_below(ctx.card):
-                _core_name = str(getattr(ctx.field_obj, "name", "") or "")
-                if _core_name:
-                    with contextlib.suppress(Exception):
-                        import oa_cdp_core as core
+            # CORE-FIRST for every custom SELECT (duolingo mega4/20: the office question's
+            # perception-tree haspopup check was unreliable — locate bound a filter textbox whose
+            # subtree lacked the sibling button, so the gate missed it and it fell to S3 ->
+            # commit-cap). core.read_options resolves by the group NAME and descends to the real
+            # trigger (button OR react-select input) regardless of which control locate bound;
+            # it safely returns [] when it cannot open/read, falling through to S3. So there is no
+            # need to pre-detect the widget kind — try core whenever there is a resolvable name.
+            # (Native <select> already short-circuited via classify_intrinsic before this route.)
+            _core_name = str(getattr(ctx.field_obj, "name", "") or "")
+            if _core_name:
+                with contextlib.suppress(Exception):
+                    import oa_cdp_core as core
 
-                        _opts = await core.read_options(session, _core_name)
-                        if _opts:
-                            _chosen = _identity_pick(ctx.value, _opts) or await brain.pick_option(
-                                ctx.value, _opts, llm=ctx.llm, label=ctx.label)
-                            if _chosen and await _chosen_plausible(ctx, _chosen):
-                                _got = await core.choose_option(session, _core_name, _chosen)
-                                if _got:
-                                    ctx.nature = "CLOSED_LIST"
-                                    ctx.committed_text = _got
-                                    ctx.trace.append(f"aria-core-commit:{_got[:20]}")
-                                    return await _s_verify(session, ctx)
+                    _opts = await core.read_options(session, _core_name)
+                    if _opts:
+                        _chosen = _identity_pick(ctx.value, _opts) or await brain.pick_option(
+                            ctx.value, _opts, llm=ctx.llm, label=ctx.label)
+                        if _chosen and await _chosen_plausible(ctx, _chosen):
+                            _got = await core.choose_option(session, _core_name, _chosen)
+                            if _got:
+                                ctx.nature = "CLOSED_LIST"
+                                ctx.committed_text = _got
+                                ctx.trace.append(f"aria-core-commit:{_got[:20]}")
+                                return await _s_verify(session, ctx)
             # single/multi-select: a (often custom) dropdown — open + read its options + commit the
             # match. Lever's custom select renders options only after a click, so S3_OPEN's click+
             # settle+delta path is exactly right; a native <select> short-circuits via read_options.
