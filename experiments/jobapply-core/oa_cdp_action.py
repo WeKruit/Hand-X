@@ -586,6 +586,11 @@ function(){
   if(!opts.length){
     // close whatever we opened so it cannot bleed into the NEXT field's page-wide read
     this.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    // WHY-EMPTY diagnostic (twilio mega4/34: rs-direct returned '' silently and the tenant
+    // default stood): which scope existed but held nothing vs never resolved at all.
+    const allOpt = document.querySelectorAll('[class*=option],[class*=Option],[role=option]').length;
+    return JSON.stringify({__miss: {idm: !!idm, aria: !!(this.getAttribute('aria-controls')||this.getAttribute('aria-owns')),
+      wrapperMenu: !!target.querySelector('[class*=menu],[class*=Menu]'), pageOpts: allOpt}});
   }
   return JSON.stringify([...new Set(opts.map(o => norm(o.innerText||o.textContent)).filter(Boolean))].slice(0,60));
 }
@@ -636,6 +641,9 @@ async def cdp_choose_react_select(session: Any, node: Any, value: str, pick=None
             options = json.loads(raw) if raw else []
         except Exception:
             options = []
+        if isinstance(options, dict):
+            print(f"   [rs-direct] no options: {options.get('__miss')}")
+            return ""
         if not options:
             return ""
         chosen = ""
