@@ -467,6 +467,8 @@ _REPAIR_JS_TMPL = r"""(() => {
   const setVal = (c, v) => {
     const proto = c.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(proto, 'value').set.call(c, v);
+    // React _valueTracker reset so onChange fires and STATE commits (else a re-render re-wipes it)
+    try { const tk = c._valueTracker; if (tk) { tk.setValue(''); } } catch (e) {}
     c.dispatchEvent(new Event('input', {bubbles: true}));
     c.dispatchEvent(new Event('change', {bubbles: true}));
   };
@@ -492,6 +494,62 @@ async def repair_overwritten(session: Any, page: Any, committed_by_label: dict) 
 
     with contextlib.suppress(Exception):
         js = _REPAIR_JS_TMPL.replace("__PAIRS__", json.dumps([[k, v] for k, v in committed_by_label.items()]))
+        return json.loads(await page.evaluate(js))
+    return []
+
+
+# Same strict label-binding as _REPAIR_JS_TMPL, but READ-ONLY: returns the committed labels whose
+# plain-text control is now EMPTY on the live DOM. This is the deterministic anti-false-green gate:
+# the S_VERIFY read-back fires right after S_TEXT and reads .value='Jordan', but a LATE async
+# re-render (greenhouse resume-parse autofill) wipes the field to '' seconds later — after the
+# audit, retry, and repair all ran. Reading .value one last time AFTER a settle catches the wipe
+# that every earlier check missed (samsara First/Preferred name false-green, vision non-deterministic).
+_STILL_EMPTY_JS_TMPL = r"""(() => {
+  const pairs = __PAIRS__;
+  const nrm = s => (s||'').replace(/\s+/g,' ').trim();
+  const toks = s => nrm(s).toLowerCase().replace(/[*:]/g,'').split(' ').filter(w=>w.length>1);
+  const isPlainText = c => {
+    if (!c) return false;
+    if (c.tagName === 'TEXTAREA') return true;
+    if (c.tagName !== 'INPUT') return false;
+    const ty = (c.type||'text').toLowerCase();
+    if (!['text','email','url','tel','search',''].includes(ty)) return false;
+    if ((c.getAttribute('role')||'') === 'combobox') return false;
+    const aa = c.getAttribute('aria-autocomplete');
+    if (aa && aa !== 'none') return false;
+    return true;
+  };
+  const controlFor = want => {
+    for (const L of document.querySelectorAll('label')) {
+      const T = toks(L.innerText);
+      if (!T.length || T.length > want.length + 3) continue;
+      const hit = want.filter(t => T.includes(t)).length;
+      if (hit < Math.max(1, Math.ceil(want.length * 0.8))) continue;
+      let c = L.htmlFor ? document.getElementById(L.htmlFor) : null;
+      if (!c) c = L.querySelector('input,textarea');
+      if (!c && L.id) c = document.querySelector('input[aria-labelledby~="'+L.id+'"],textarea[aria-labelledby~="'+L.id+'"]');
+      if (c) return c;
+    }
+    return null;
+  };
+  const empty = [];
+  for (const [lab, val] of pairs) {
+    if (!nrm(val)) continue;
+    const c = controlFor(toks(lab));
+    if (!isPlainText(c)) continue;       // only judge STRICTLY label-bound plain-text controls
+    if (!nrm(c.value)) empty.push(lab);  // committed a value but the live control is now EMPTY = WIPED
+  }
+  return JSON.stringify(empty);
+})()"""
+
+
+async def still_empty_committed(page: Any, committed_by_label: dict) -> list[str]:
+    """Committed labels whose strictly-bound plain-text control reads EMPTY on the live DOM right
+    now — a value that was committed+verified but a late re-render wiped. [] on failure."""
+    import json
+
+    with contextlib.suppress(Exception):
+        js = _STILL_EMPTY_JS_TMPL.replace("__PAIRS__", json.dumps([[k, v] for k, v in committed_by_label.items()]))
         return json.loads(await page.evaluate(js))
     return []
 
@@ -1236,6 +1294,30 @@ async def complete(
                 if verdict.get("crop_flagged"):
                     verdict["visually_unanswered"] = list(verdict["crop_flagged"])
                     print(f"   [complete] crop-anchor CAUGHT unanswered required: {verdict['crop_flagged'][:3]}")
+        # DETERMINISTIC WIPE GATE (LAST, after a settle): a committed plain-text field that reads
+        # EMPTY on the live DOM now was WIPED by a LATE async re-render (greenhouse resume-parse
+        # autofill) AFTER the read-back / audit / repair / vision all passed — the samsara
+        # First/Preferred name false-green (complete=True, ledger DONE 'Jordan' CORRECT, but the
+        # field renders empty; vision non-deterministically missed it). Read .value once more after
+        # a settle; re-fill the wiped ones with the tracker-aware setter; re-read; whatever is STILL
+        # empty is an honest miss -> not complete. Deterministic, not vision — cannot false-green.
+        if committed_by_label:
+            with contextlib.suppress(Exception):
+                import asyncio as _aio2
+
+                await _aio2.sleep(2.5)  # let the late async autofill/re-render fire
+                _wiped = await still_empty_committed(page, committed_by_label)
+                if _wiped:
+                    print(f"   [complete] WIPE GATE — committed fields read EMPTY: {_wiped[:4]}")
+                    await repair_overwritten(session, page, committed_by_label)  # tracker-aware re-set
+                    await _aio2.sleep(1.5)
+                    _wiped2 = await still_empty_committed(page, committed_by_label)
+                    if _wiped2:
+                        print(f"   [complete] WIPE GATE — STILL empty after repair: {_wiped2} -> NOT complete")
+                        verdict["wiped_committed"] = _wiped2
+                        for _w in _wiped2:
+                            if _w not in verdict["missing_required"]:
+                                verdict["missing_required"].append(_w)
         if verdict["missing_required"] or verdict["sections_skipped"] or verdict.get("visually_unanswered"):
             verdict["complete"] = False
     return verdict
