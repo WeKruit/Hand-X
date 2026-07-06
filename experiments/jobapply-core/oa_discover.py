@@ -159,15 +159,20 @@ _ENUM_JS = r"""
     }
     push(el.id || el.name, labFor(el), ty || 'text', 'input_text', null, req);
   }
-  const groupLabel = (el, fallback) => {
+  const groupLabel = (el, fallback, optTexts) => {
     const fs = el.closest('fieldset'); const leg = fs && fs.querySelector('legend');
     if (leg && clean(leg.innerText)) return clean(leg.innerText);
-    // walk up: the question text is the container's text MINUS its options (workable Yes/No)
+    // walk up: the question text is the container's text MINUS its options. The 'first long
+    // line' heuristic must skip lines that ARE an option (sierra mega4/46: sentence-length
+    // options — "Yes, I am based in one of Sierra's office locations." became the group's
+    // label, the real question never became a field, and the mapper had nothing to answer).
+    const optSet = new Set((optTexts || []).map(t => clean(t).toLowerCase()));
     let p = el.parentElement, hops = 0;
     while (p && hops++ < 5) {
       const full = clean(p.innerText || '');
       if (full.length > 15 && full.length < 400) {
-        const line = full.split('\n').map(clean).find(t => t.length > 10 && !/^(yes|no)$/i.test(t));
+        const line = full.split('\n').map(clean).find(t =>
+          t.length > 10 && !/^(yes|no)$/i.test(t) && !optSet.has(t.toLowerCase()));
         if (line) return line.slice(0, 400);
       }
       p = p.parentElement;
@@ -180,7 +185,7 @@ _ENUM_JS = r"""
   // and blank->SKIP stood on a required multi_select).
   const grpReq = (el, lab) => !!(el.required || el.getAttribute('aria-required') === 'true' || /[*✱]\s*$/.test(lab || ''));
   for (const [g, v] of Object.entries(radio)) {
-    const rlab = groupLabel(v.el, g);
+    const rlab = groupLabel(v.el, g, v.opts);
     push(g, rlab, 'radio', 'select', v.opts.slice(0, 30), grpReq(v.el, rlab));
   }
   for (const [g, v] of Object.entries(check)) {
@@ -192,7 +197,7 @@ _ENUM_JS = r"""
       push(g, groupLabel(v.el, g) || v.opts[0] || g, 'checkbox', 'select', ['Yes', 'No'], v.el.required);
       continue;
     }
-    const clab = groupLabel(v.el, g);
+    const clab = groupLabel(v.el, g, v.opts);
     push(g, clab, 'multi_select', 'select', v.opts.slice(0, 40), grpReq(v.el, clab));
   }
   return JSON.stringify(out.slice(0, 60));
