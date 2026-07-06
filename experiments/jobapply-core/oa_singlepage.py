@@ -756,6 +756,37 @@ async def _fill_form(
                     result["completeness"]["complete"] = False
                     result["completeness"]["resume_not_attached"] = True
                     print("   [complete] VETO — resume provided but no file field committed")
+            # WANT-vs-GOT VETO (samsara mega4/24: 'Enter manually' committed for want='0',
+            # 'Gender Fluid' for want='Male', verdict still COMPLETE — every audit checks
+            # PRESENCE, nothing checked the VALUE): a DONE row whose committed text shares no
+            # token with the mapped value and prefixes neither way is a wrong-value commit,
+            # unless the picker confirms the mapping semantically ('B.S.' -> "Bachelor's").
+            with contextlib.suppress(Exception):
+                import re as _re
+
+                import oa_brain as brain
+
+                def _wtok(s: str) -> set:
+                    return {w for w in _re.sub(r"[^a-z0-9 ]", " ", str(s).lower()).split() if len(w) > 1}
+
+                _suspects = []
+                for r in per_field:
+                    v, c = str(r.value or "").strip(), str(r.committed or "").strip()
+                    if r.outcome != oa.DONE or not v or not c or "file" in str(r.type or "").lower():
+                        continue
+                    if v.lower() == c.lower() or (_wtok(v) & _wtok(c)):
+                        continue
+                    if c.lower().startswith(v.lower()) or v.lower().startswith(c.lower()):
+                        continue
+                    _ok = None
+                    with contextlib.suppress(Exception):
+                        _ok = await brain.pick_option(v, [c], llm=llm, label=str(r.label))
+                    if not _ok:
+                        _suspects.append(f"{str(r.label)[:60]} (want '{v[:25]}' got '{c[:25]}')")
+                if _suspects and isinstance(result.get("completeness"), dict):
+                    print(f"   [complete] VETO — want-vs-got mismatch: {_suspects[:3]}")
+                    result["completeness"]["complete"] = False
+                    result["completeness"].setdefault("missing_required", []).extend(_suspects)
             with contextlib.suppress(Exception):
                 page = await session.must_get_current_page()
 
