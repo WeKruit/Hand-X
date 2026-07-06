@@ -750,6 +750,25 @@ async def _orphan_pass(session: Any, page: Any, profile: dict, llm: Any, filled_
     return n
 
 
+def _drop_second_instance(missing: list, committed_by_label: dict | None) -> list:
+    """An emptyReq entry whose label EXACTLY matches a committed+filled key is the page's
+    SECOND instance of that field — ashby's bottom 'join our talent community' block carries
+    real Name/Email inputs (sierra mega3/84: main form dom-verified, footer block flagged).
+    Distinct real duplicates (references) use distinguishable labels and are unaffected."""
+    if not committed_by_label:
+        return missing
+    keys = {" ".join(str(k).split()).lower().strip(" *\u2731") for k in committed_by_label}
+    kept, dropped = [], []
+    for m in missing:
+        if " ".join(str(m).split()).lower().strip(" *\u2731") in keys:
+            dropped.append(m)
+        else:
+            kept.append(m)
+    if dropped:
+        print(f"   [complete] second-instance furniture dropped: {[str(x)[:24] for x in dropped]}")
+    return kept
+
+
 async def complete(
     session: Any, page: Any, profile: dict, resume: str | None, *, allow_agent: bool, llm: Any = None, planner_keys: list | None = None,
     filled_names: set | None = None, required_labels: list | None = None, committed_by_label: dict | None = None,
@@ -837,7 +856,7 @@ async def complete(
                     print(f"   [complete] agent claimed '{sec}' but NO entry card rendered -> skipped")
         # re-audit after retry + section fill
         with contextlib.suppress(Exception):
-            verdict["missing_required"] = (await audit(session, page)).get("emptyReq", [])
+            verdict["missing_required"] = _drop_second_instance((await audit(session, page)).get("emptyReq", []), committed_by_label)
         # REMAINING REQUIRED (screening Yes/No, skill-rating dropdowns): these have no profile
         # value to map — they need judgement (authorized-to-work -> Yes, rate Python 1-5 from the
         # candidate's skills). Hand them to the agent, which carries the truthful-default +
@@ -888,7 +907,7 @@ async def complete(
                 )
                 verdict["agent_answered_required"] = True
                 with contextlib.suppress(Exception):
-                    verdict["missing_required"] = (await audit(session, page)).get("emptyReq", [])
+                    verdict["missing_required"] = _drop_second_instance((await audit(session, page)).get("emptyReq", []), committed_by_label)
         # AGENT-CORRUPTION REPAIR: retry_missing / agent_fill_section act AFTER the main loop's
         # verify, so they can silently overwrite committed fields (mega/16: the remaining-required
         # agent typed 'Cisgender man' over the committed 'Jordan' in First Name and an office city
