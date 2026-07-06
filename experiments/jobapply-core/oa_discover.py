@@ -174,8 +174,14 @@ _ENUM_JS = r"""
     }
     return fallback;
   };
+  // required for a GROUP: any member input carries required/aria-required, or the group's
+  // question line ends with the required star (stripe mega4/6: 'Please indicate what you
+  // have experience with. *' shipped required=false, so the FOCUSED backfill never ran
+  // and blank->SKIP stood on a required multi_select).
+  const grpReq = (el, lab) => !!(el.required || el.getAttribute('aria-required') === 'true' || /[*✱]\s*$/.test(lab || ''));
   for (const [g, v] of Object.entries(radio)) {
-    push(g, groupLabel(v.el, g), 'radio', 'select', v.opts.slice(0, 30), false);
+    const rlab = groupLabel(v.el, g);
+    push(g, rlab, 'radio', 'select', v.opts.slice(0, 30), grpReq(v.el, rlab));
   }
   for (const [g, v] of Object.entries(check)) {
     if (v.opts.length < 2) {
@@ -186,7 +192,8 @@ _ENUM_JS = r"""
       push(g, groupLabel(v.el, g) || v.opts[0] || g, 'checkbox', 'select', ['Yes', 'No'], v.el.required);
       continue;
     }
-    push(g, groupLabel(v.el, g), 'multi_select', 'select', v.opts.slice(0, 40), false);
+    const clab = groupLabel(v.el, g);
+    push(g, clab, 'multi_select', 'select', v.opts.slice(0, 40), grpReq(v.el, clab));
   }
   return JSON.stringify(out.slice(0, 60));
 }

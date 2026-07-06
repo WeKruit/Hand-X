@@ -843,6 +843,7 @@ async def map_fields(
                 )
                 r = await llm.ainvoke([UserMessage(content=msg)])
                 v = str(getattr(r, "completion", r) or "").strip().strip('"').strip()
+                print(f"  [focused] '{q[:40]}' opts={bool(getattr(f, 'options', None))} -> {v[:40]!r}")
                 if v and v.upper() != "SKIP" and len(v) <= 120 and "\n" not in v:
                     out[f.name] = FieldFill(name=f.name, value=v, why="FOCUSED backfill")
     return out
