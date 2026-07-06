@@ -493,6 +493,20 @@ def _option_texts(nodes: list[perc.DeltaNode]) -> list[str]:
     trigger/button itself. Structural, not an exhaustive word list."""
     _EMPTY_MENU = re.compile(r"^no (options|results|matches)\b|^nothing found\b", re.IGNORECASE)
 
+    def _in_menu_ancestor(node: Any) -> bool:
+        p = node
+        for _ in range(6):
+            if p is None:
+                return False
+            attrs = getattr(p, "attributes", None) or {}
+            if ((attrs.get("role") or "").lower() in ("listbox", "menu")
+                    or "menu" in (attrs.get("class") or "").lower()):
+                return True
+            p = getattr(p, "parent_node", None)
+        return False
+
+    hard_chrome: set[int] = set()  # button/link chrome — must NEVER re-enter via the raw fallback
+
     def _is_option(d: perc.DeltaNode) -> bool:
         if _EMPTY_MENU.match((d.text or "").strip()):
             # the widget's empty-menu placeholder (react-select renders a literal 'No options'
@@ -506,8 +520,18 @@ def _option_texts(nodes: list[perc.DeltaNode]) -> list[str]:
                 role = ((getattr(d.node, "attributes", None) or {}).get("role") or "").lower()
         if role == "option":
             return True
-        if role in ("button", "link", "combobox", "textbox"):
-            return False  # chrome / the trigger itself, never an option
+        tag = ""
+        with contextlib.suppress(Exception):
+            tag = perc._tag(d.node)
+        if role in ("button", "link", "combobox", "textbox") or tag in ("button", "a"):
+            # a button IS a legit option inside a menu container (pill/menu-item widgets);
+            # outside one it is page chrome — samsara mega4/24 committed the literal
+            # 'Enter manually' upload button as the years-of-experience answer because the
+            # delta held ONLY chrome and the raw fallback let it back in.
+            if _in_menu_ancestor(d.node):
+                return True
+            hard_chrome.add(id(d))
+            return False
         t = (d.text or "").strip()
         if t.endswith("?") or len(t) > 80:
             return False  # a neighbor QUESTION swept into the delta, not an option
@@ -516,8 +540,9 @@ def _option_texts(nodes: list[perc.DeltaNode]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     scoped = [d for d in nodes if _is_option(d)]
-    # if scoping removed everything, fall back to raw so an unusual menu is not silently emptied.
-    for d in scoped or nodes:
+    # if scoping removed everything, fall back to the SOFT-excluded raw nodes so an unusual menu
+    # is not silently emptied — but hard chrome (buttons/links outside any menu) stays out.
+    for d in scoped or [d for d in nodes if id(d) not in hard_chrome]:
         t = (d.text or "").strip()
         if not t:
             continue
