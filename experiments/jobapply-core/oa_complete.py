@@ -623,6 +623,37 @@ def _norm(s: str) -> str:
     return "".join(ch for ch in str(s).lower() if ch.isalnum())
 
 
+async def _probe_sweep(page: Any, committed_by_label: dict | None) -> int:
+    """Clear our own 6-char filter-probe residue from any text/combobox input. A box whose value
+    EXACTLY equals a committed value's probe prefix (and is not itself a committed value) holds
+    typed junk from a filter attempt, not an answer. Idempotent + cheap — runs pre-vision AND
+    again after the retry passes (samsara mega4/27: the retry typed 'East A' into gender AFTER
+    the only sweep had already run)."""
+    if not committed_by_label:
+        return 0
+    n = 0
+    with contextlib.suppress(Exception):
+        _vals = [str(v).strip() for v in committed_by_label.values() if v and len(str(v).strip()) > 6]
+        if not _vals:
+            return 0
+        _probes = sorted({v[:6] for v in _vals})
+        _full = sorted(set(_vals))
+        _js = (
+            "((probes, fulls) => { let n = 0; const F = new Set(fulls);"
+            " for (const el of document.querySelectorAll('input[type=text],input:not([type]),input[type=search],input[role=combobox],input[aria-autocomplete]')) {"
+            "   const v = (el.value || '').trim();"
+            "   if (v && probes.includes(v) && !F.has(v)) {"
+            "     const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');"
+            "     d.set.call(el, ''); el.dispatchEvent(new Event('input', {bubbles: true}));"
+            "     el.dispatchEvent(new Event('change', {bubbles: true})); n++; } }"
+            " return n; })(" + json.dumps(_probes) + ", " + json.dumps(_full) + ")"
+        )
+        n = await page.evaluate(_js)
+        if n:
+            print(f"   [complete] probe-residue sweep cleared {n} box(es)")
+    return n
+
+
 async def retry_missing(
     session: Any, page: Any, profile: dict, resume: str | None, llm: Any, missing: list[str],
     committed_by_label: dict | None = None,
@@ -981,24 +1012,7 @@ async def complete(
         # 'succeeded' elsewhere so the abandonment cleaner never fired). Any text/combobox
         # input whose value EXACTLY equals a known probe prefix (and is not that field's own
         # committed value) is our residue; clear it before judging.
-        if committed_by_label:
-            with contextlib.suppress(Exception):
-                _vals = [str(v).strip() for v in committed_by_label.values() if v and len(str(v).strip()) > 6]
-                _probes = sorted({v[:6] for v in _vals})
-                _full = sorted({v for v in _vals})
-                _js = (
-                    "((probes, fulls) => { let n = 0; const F = new Set(fulls);"
-                    " for (const el of document.querySelectorAll('input[type=text],input:not([type]),input[type=search],input[role=combobox],input[aria-autocomplete]')) {"
-                    "   const v = (el.value || '').trim();"
-                    "   if (v && probes.includes(v) && !F.has(v)) {"
-                    "     const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');"
-                    "     d.set.call(el, ''); el.dispatchEvent(new Event('input', {bubbles: true}));"
-                    "     el.dispatchEvent(new Event('change', {bubbles: true})); n++; } }"
-                    " return n; })(" + json.dumps(_probes) + ", " + json.dumps(_full) + ")"
-                )
-                _n = await page.evaluate(_js)
-                if _n:
-                    print(f"   [complete] probe-residue sweep cleared {_n} box(es)")
+        await _probe_sweep(page, committed_by_label)
         # SETTLE BEFORE JUDGING: close any dropdown menu a fill/retry left open — an open
         # overlay at judge-time hides committed values from the vision gate and the crops
         # (mega/28 final screenshot still had a menu hanging open). Escape closes menus;
@@ -1049,6 +1063,10 @@ async def complete(
                                         if fixed2:
                                             verdict.setdefault("repaired_overwritten", []).extend(fixed2)
                                             print(f"   [complete] post-revalue repair: {fixed2}")
+                                # SECOND SWEEP (samsara mega4/27: the retry above typed a fresh
+                                # probe into the WRONG box — 'East A' sat in gender with a 'No
+                                # options' menu; the only sweep had already run pre-vision).
+                                await _probe_sweep(page, committed_by_label)
         # DOUBT-CROP verification (the reliable-visual rung): a per-field crop at full resolution
         # judged 5/5 manually where full-page/banded sampling flickered (~50%). (a) every banded
         # flag is CONFIRMED by its own crop — a flag the crop sees as answered is a sampling
