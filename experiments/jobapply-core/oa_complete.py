@@ -1001,6 +1001,11 @@ async def complete(
                     kt = {w for w in str(k).lower().replace("*", " ").split() if len(w) > 2}
                     if kt and lt and len(kt & lt) >= max(1, len(kt) // 2):
                         return v
+                    # the flag can carry the committed ANSWER's own first line instead of the
+                    # question (octoenergy mega3/73: the why-us prose was flagged by its content)
+                    vt = {w for w in str(v).lower().split() if len(w) > 2}
+                    if vt and lt and len(vt & lt) >= max(2, len(lt) // 2):
+                        return v
                 return ""
             if flags:
                 kept = []
