@@ -825,6 +825,23 @@ async def map_fields(
         if want and (f.value or "").strip() != str(want).strip():
             f.why = f"IDENTITY-DIRECT (mapper said {f.value!r})"
             f.value = str(want)
+    # NAME-KEYED identity projection (LOCALIZED labels): greenhouse/ashby/lever keep STABLE English
+    # field NAMES (first_name/last_name/email/phone) even when the display LABEL is localized — the
+    # label-keyed pass above only knows English, so flexport's Dutch 'Achternaam' (name=last_name)
+    # was left to the LLM, which mapped it to 'Jordan' (the FIRST name) — a wrong-but-plausible
+    # identity the value-match verify can never catch. Match on the machine NAME too (a DOM-identity
+    # cross-check, not a per-locale label list): the canonical identity names are unambiguous.
+    _ident_by_name = {
+        "first_name": profile.get("first_name"),
+        "last_name": profile.get("last_name"),
+        "email": profile.get("email"),
+        "phone": profile.get("phone"),
+    }
+    for name, f in out.items():
+        want = _ident_by_name.get(str(name).strip().lower())
+        if want and (f.value or "").strip() != str(want).strip():
+            f.why = f"IDENTITY-DIRECT-by-name (mapper said {f.value!r})"
+            f.value = str(want)
     # FOCUSED BACKFILL: the batch prompt keeps ignoring policy rules for judgement questions —
     # the office-commitment rule survived three iterations and replit mega3/3 still mapped
     # BLANK. A REQUIRED field the batch left empty gets ONE tight per-field ask with the
