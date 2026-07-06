@@ -331,6 +331,26 @@ async def _probe_would_clobber(session: Any, ctx: "Ctx") -> bool:
     return cur.lower() != (ctx.value or "").strip().lower()
 
 
+def _filter_probes(value: str) -> list[str]:
+    """Typeahead filter-query ladder, most-specific first: the FULL value (nails the exact row),
+    then the value's last word (the distinguishing token — 'Berkeley'), then the old head-6 slice.
+    The head-6 probe alone was the doordash mega4/15 school fail: 'Univer' matched every
+    university on earth and the wanted row never entered the 58 rows read across two scrolls."""
+    v = " ".join(str(value).split())
+    if not v:
+        return []
+    toks = [t for t in re.split(r"[^\w]+", v) if len(t) >= 3]
+    cand = [v] + ([toks[-1]] if toks else []) + [v[: min(len(v), 6)]]
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in cand:
+        p = p.strip()
+        if p and p.lower() not in seen:
+            seen.add(p.lower())
+            out.append(p)
+    return out
+
+
 def _identity_pick(value: str, options: list[str]) -> str | None:
     """Deterministic option match BEFORE any LLM pick: normalized equality, else a >=4-char
     word-boundary prefix either way; shortest hit wins. The LLM pick has refused EXACT matches
@@ -1477,12 +1497,15 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
                     ctx.node = alt
                     ctx.trace.append("occupied->rebound-empty-in-card")
             ctx.trace.append("select-type-to-filter")
-            before2 = await perc.get_state(session)
-            probe = ctx.value[: min(len(ctx.value), 6)] if len(ctx.value) > 6 else ctx.value
-            if await act.type_text(session, ctx.node, probe, clear=True):
+            for probe in _filter_probes(ctx.value):
+                before2 = await perc.get_state(session)
+                if not await act.type_text(session, ctx.node, probe, clear=True):
+                    break
                 cluster = await _settle(session, before2, _SETTLE_SEARCH_S)
                 texts = _option_texts(cluster)
                 ctx.trace.append(f"select-filter '{probe}' -> {len(texts)} opts")
+                if texts:
+                    break
         if not texts:
             # VISUAL FALLBACK: the custom dropdown is OPEN (we clicked + filtered) but its option list
             # rendered into a portal the DOM delta missed — yet the options are VISIBLE. SEE them: read
@@ -1546,12 +1569,18 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
         # flow went straight to OTHER_GUARD and the field died unfilled.)
         if not ctx.filter_tried and _is_plain_text_editable_or_combo(ctx.node):
             ctx.filter_tried = True
-            probe = ctx.value[: min(len(ctx.value), 6)] if len(ctx.value) > 6 else ctx.value
-            before_f = await perc.get_state(session)
-            if await act.type_text(session, ctx.node, probe, clear=True):
+            fresh: list = []
+            ftexts: list = []
+            for probe in _filter_probes(ctx.value):
+                before_f = await perc.get_state(session)
+                if not await act.type_text(session, ctx.node, probe, clear=True):
+                    break
                 fresh = await _settle(session, before_f, _SETTLE_SEARCH_S)
                 ftexts = _option_texts(fresh)
                 ctx.trace.append(f"pick-fail->filter '{probe}' -> {len(ftexts)} opts:{[t[:14] for t in ftexts[:3]]}")
+                if ftexts:
+                    break
+            if True:
                 if ftexts:
                     # deterministic identity first (stripe mega3/6 'country where you reside':
                     # the filter narrowed to ONE option and the LLM pick still returned nothing)
