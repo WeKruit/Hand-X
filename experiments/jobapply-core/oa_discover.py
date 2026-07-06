@@ -211,19 +211,39 @@ _ENUM_JS = r"""
   // and BEFORE the appended option text, so it is not trailing. Test: a star right after the
   // question (before options), any aria-required member, or a required-role star element in
   // the enclosing fieldset/[role=group] (a <span class=required>* / [aria-hidden] asterisk).
+  const starMark = s => {
+    const t = clean(s.innerText || '');
+    return (t === '*' || t === '✱' || /(^|[^a-z])required([^a-z]|$)/i.test(s.className || '')
+            || s.getAttribute('aria-label') === 'required');
+  };
   const grpReq = (el, lab) => {
     if (el.required || el.getAttribute('aria-required') === 'true') return true;
     const L = lab || '';
     if (/[*✱]\s*$/.test(L)) return true;
     if (/\?\s*[*✱]/.test(L)) return true;              // star right after the question mark
-    const box = el.closest('fieldset,[role=group],[role=radiogroup]');
-    if (box) {
-      if (box.getAttribute('aria-required') === 'true') return true;
-      // a dedicated required-marker element in the group (not option text)
-      const mk = [...box.querySelectorAll('span,i,em,abbr,sup')].find(s => {
-        const t = clean(s.innerText);
-        return (t === '*' || t === '✱' || /required/i.test(s.className || '') || s.getAttribute('aria-label') === 'required');
-      });
+    // CARD-SCOPED STAR (1password mega4/1 ashby pills: the required '*' is a separate <span>
+    // next to the question heading, dropped from the captured label, and the pills are NOT in a
+    // fieldset). Find the nearest ancestor that is THIS question's card — the smallest one whose
+    // text contains the question but does NOT absorb a sibling group (its checkbox/pill count
+    // stays == this group's) — then look for a required-marker there. Scoping to the card is what
+    // stops a neighbour's star being borrowed.
+    const qhead = clean(L).replace(/\s+(yes|no)\b.*$/i, '').slice(0, 40).toLowerCase();
+    const myBoxes = el.name ? [...(el.form||document).querySelectorAll('input[type=checkbox][name="'+CSS.escape(el.name)+'"]')].length : 1;
+    let p = el.parentElement, card = null;
+    for (let i = 0; i < 6 && p; i++) {
+      if (p.getAttribute && p.getAttribute('aria-required') === 'true') return true;
+      const txt = clean(p.innerText || '').toLowerCase();
+      const cbCount = p.querySelectorAll ? p.querySelectorAll('input[type=checkbox],[role=checkbox],button').length : 0;
+      // the card = contains the question heading AND has not yet absorbed a second group's controls
+      if (qhead && txt.includes(qhead)) {
+        if (cbCount > Math.max(myBoxes, 2) + 1) break;   // absorbed a neighbour -> too far
+        card = p;
+      }
+      p = p.parentElement;
+    }
+    if (card) {
+      const mk = [...card.querySelectorAll('span,i,em,abbr,sup,label')].find(
+        s => starMark(s) && !s.closest('button,[role=option],[role=radio],[role=checkbox]'));
       if (mk) return true;
     }
     return false;
