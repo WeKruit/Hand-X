@@ -386,9 +386,19 @@ async def _chosen_plausible(ctx: "Ctx", chosen: str) -> bool:
     b = set(re.findall(r"[a-z0-9]+", (chosen or "").lower()))
     if a & b:
         return True
+    # DIRECT equivalence ask, NOT pick_option([chosen]): a single-candidate pick invites the
+    # closest-match bias — samsara mega4/24+26 blessed 'Gender Fluid' then 'Non-Binary' as the
+    # only offered 'match' for want='Male'. Same-meaning is a yes/no question.
     with contextlib.suppress(Exception):
-        got = await brain.pick_option(ctx.value, [chosen], llm=ctx.llm, label=ctx.label)
-        return bool(got)
+        from browser_use.llm.messages import UserMessage
+
+        r = await ctx.llm.ainvoke([UserMessage(content=(
+            f"A form answer should be: {ctx.value!r}\nThe option about to be committed reads: {chosen!r}\n"
+            f"Field label: {(ctx.label or '')[:120]!r}\n"
+            "Do they express the SAME answer (abbreviation, paraphrase, or format variant)? "
+            "A different choice from the same category is NOT the same answer. Reply exactly yes or no."
+        ))])
+        return str(getattr(r, "completion", r) or "").strip().lower().startswith("y")
     return False
 
 

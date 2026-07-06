@@ -696,6 +696,12 @@ async def retry_missing(
             fd = _field_dict(f, value, resume=resume, llm=llm, adapter=None, page=page)
             with contextlib.suppress(Exception):
                 out = await oa.observe_act(session, fd)
+                # retry commits bypass the fill ledger (the per_field row keeps its pre-retry
+                # outcome), so the want-vs-got veto never sees them — samsara mega4/26
+                # committed 'Non-Binary' for want='Male' HERE while the verdict stayed
+                # COMPLETE. Surface the got-value in the trail for every retry commit.
+                got = str(fd.get("_committed") or "")
+                print(f"   [retry] '{str(f.label or f.name)[:40]}' want='{str(value)[:25]}' got='{got[:25]}' out={out}")
                 if out == oa.DONE:
                     refilled += 1
     if refilled:
