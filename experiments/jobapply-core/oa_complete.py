@@ -451,6 +451,8 @@ _REPAIR_JS_TMPL = r"""(() => {
     if (aa && aa !== 'none') return false;
     return true;
   };
+  const near = (el) => { let p = el; for (let i=0;i<6&&p;i++){ let s=p.previousElementSibling;
+    for (let j=0;j<5&&s;j++){ const t=nrm(s.innerText); if(t && t.length<45) return t; s=s.previousElementSibling; } p=p.parentElement; } return ''; };
   const controlFor = want => {
     for (const L of document.querySelectorAll('label')) {
       const T = toks(L.innerText);
@@ -462,7 +464,18 @@ _REPAIR_JS_TMPL = r"""(() => {
       if (!c && L.id) c = document.querySelector('input[aria-labelledby~="'+L.id+'"],textarea[aria-labelledby~="'+L.id+'"]');
       if (c) return c;
     }
-    return null;
+    // FALLBACK: near-text binding (samsara greenhouse-embed labels are sibling divs, not <label>).
+    let best = null, bestExcess = 99;
+    for (const c of document.querySelectorAll('input,textarea')) {
+      if (!isPlainText(c)) continue;
+      const T = toks(near(c));
+      if (!T.length) continue;
+      const hit = want.filter(t => T.includes(t)).length;
+      if (hit < Math.max(1, Math.ceil(want.length * 0.8))) continue;
+      const excess = T.length - want.length;
+      if (excess < bestExcess) { best = c; bestExcess = excess; }
+    }
+    return best;
   };
   const setVal = (c, v) => {
     const proto = c.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -519,6 +532,10 @@ _STILL_EMPTY_JS_TMPL = r"""(() => {
     if (aa && aa !== 'none') return false;
     return true;
   };
+  // nearest short text ABOVE/left of a control (samsara greenhouse-embed labels are sibling DIVs,
+  // NOT <label for>, so the <label> scan below finds nothing — this near-text finder does).
+  const near = (el) => { let p = el; for (let i=0;i<6&&p;i++){ let s=p.previousElementSibling;
+    for (let j=0;j<5&&s;j++){ const t=nrm(s.innerText); if(t && t.length<45) return t; s=s.previousElementSibling; } p=p.parentElement; } return ''; };
   const controlFor = want => {
     for (const L of document.querySelectorAll('label')) {
       const T = toks(L.innerText);
@@ -530,7 +547,19 @@ _STILL_EMPTY_JS_TMPL = r"""(() => {
       if (!c && L.id) c = document.querySelector('input[aria-labelledby~="'+L.id+'"],textarea[aria-labelledby~="'+L.id+'"]');
       if (c) return c;
     }
-    return null;
+    // FALLBACK: scan plain-text inputs by their nearest preceding text; prefer the CLOSEST match
+    // (fewest excess tokens) so 'first name' binds to 'First Name', not 'Preferred First Name'.
+    let best = null, bestExcess = 99;
+    for (const c of document.querySelectorAll('input,textarea')) {
+      if (!isPlainText(c)) continue;
+      const T = toks(near(c));
+      if (!T.length) continue;
+      const hit = want.filter(t => T.includes(t)).length;
+      if (hit < Math.max(1, Math.ceil(want.length * 0.8))) continue;
+      const excess = T.length - want.length;
+      if (excess < bestExcess) { best = c; bestExcess = excess; }
+    }
+    return best;
   };
   const empty = [];
   for (const [lab, val] of pairs) {
