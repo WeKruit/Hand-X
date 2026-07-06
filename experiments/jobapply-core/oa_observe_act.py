@@ -1503,7 +1503,7 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
                     break
                 cluster = await _settle(session, before2, _SETTLE_SEARCH_S)
                 texts = _option_texts(cluster)
-                ctx.trace.append(f"select-filter '{probe}' -> {len(texts)} opts")
+                ctx.trace.append(f"select-filter '{probe}' -> {len(texts)} opts:{[t[:16] for t in texts[:3]]}")
                 if texts:
                     break
         if not texts:
