@@ -179,6 +179,21 @@ _ENUM_JS = r"""
     }
     return fallback;
   };
+  // ARIA DISCLOSURE SELECT (duolingo mega4/18-23 false-greens: the whole screener column of
+  // 'Select...' widgets has NO input/select/[role=combobox] — just a <button
+  // aria-haspopup=listbox aria-controls=...> inside a role=group that carries the label and
+  // aria-required). Standard ARIA pattern, generic. Skipped when the group already holds a
+  // real control (ashby renders the button NEXT TO its combo input — one question, one field).
+  for (const b of document.querySelectorAll('button[aria-haspopup="listbox"],[role=button][aria-haspopup="listbox"]')) {
+    if (b.closest('nav, header, footer, [role=search]')) continue;
+    const grp = b.closest('[role=group],[aria-required]') || b.parentElement;
+    if (grp && grp.querySelector('input:not([type=hidden]), select, textarea, [role=combobox]')) continue;
+    let lab = '';
+    if (grp && grp.id) { const l = document.querySelector('label[for="' + CSS.escape(grp.id) + '"]'); if (l) lab = clean(l.innerText); }
+    if (!lab) lab = labFor(b);
+    const rq = !!(grp && grp.getAttribute('aria-required') === 'true') || /[*✱]\s*$/.test(lab || '');
+    push((grp && grp.id) || b.getAttribute('aria-controls') || lab, lab, 'single_select', 'select', null, rq);
+  }
   // required for a GROUP: any member input carries required/aria-required, or the group's
   // question line ends with the required star (stripe mega4/6: 'Please indicate what you
   // have experience with. *' shipped required=false, so the FOCUSED backfill never ran

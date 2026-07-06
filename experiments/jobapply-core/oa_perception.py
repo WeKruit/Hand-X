@@ -210,11 +210,15 @@ def _locatable_control(node: Any) -> bool:
     role=combobox / aria-autocomplete (a react-select's REAL input is ~1px), but locate filtered
     them back out via node_is_visible — stripe mega3/6+9: the multi_value_multi_select question
     ended no-control on every tier because its only control is that 1px input."""
+    attrs = getattr(node, "attributes", None) or {}
+    # ARIA disclosure select (duolingo mega4/18-23): the question's ONLY control is a
+    # <button aria-haspopup=listbox> — not fillable by tag, but it IS the select trigger.
+    if (attrs.get("aria-haspopup") or "").lower() in ("listbox", "menu"):
+        return True
     if not _is_fillable_control(node):
         return False
     if node_is_visible(node):
         return True
-    attrs = getattr(node, "attributes", None) or {}
     role = (attrs.get("role") or "").lower()
     return role == "combobox" or (attrs.get("aria-autocomplete") or "none") != "none"
 
