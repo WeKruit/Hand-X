@@ -542,15 +542,20 @@ async def cdp_choose_aria_option(session: Any, node: Any, value: str) -> str:
 # root cause of robinhood's demographic-select escalations). This mirrors ats_greenhouse._combobox:
 # find the control wrapper, mousedown-open, read the class-based options, click the match by text.
 _RS_OPEN_READ_JS = r"""
-function(){
+function(skipOpen){
   const norm = s => (s||'').replace(/\s+/g,' ').trim();
   // the control wrapper is an ancestor of the input carrying a react-select 'control' class
   let ctrl = this;
   for(let i=0;i<5 && ctrl;i++){ if(ctrl.className && /(^|[^a-z])control([^a-z]|$)|select__control|Control/i.test(ctrl.className.toString())) break; ctrl = ctrl.parentElement; }
   const target = ctrl || this;
   target.scrollIntoView({block:'center'});
-  for(const ev of ['mousedown','mouseup','click'])
-    target.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));
+  // affirm mega4/38: the synthetic dispatch NEVER opened the menu (aria/wrapper/idm all
+  // absent, 244 stale option-classed nodes page-wide) — the caller now opens with a TRUSTED
+  // CDP click first and passes skipOpen=true; dispatching again here would TOGGLE it closed.
+  if(!skipOpen){
+    for(const ev of ['mousedown','mouseup','click'])
+      target.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));
+  }
   // SCOPE to THIS control's menu. react-select ids every option 'react-select-N-option-M' sharing
   // the input's 'react-select-N-input' instance — scope by that N so a page-wide read can't grab a
   // DIFFERENT open menu's options (live: gender read the phone country list). Fall back to the menu
@@ -636,11 +641,24 @@ async def cdp_choose_react_select(session: Any, node: Any, value: str, pick=None
         if r is None:
             return ""
         cdp_session, session_id, object_id = r
-        raw = await _call_on(cdp_session, session_id, object_id, _RS_OPEN_READ_JS)
+        # TRUSTED open first (affirm mega4/38: the JS synthetic mousedown never opened the
+        # menu — aria/wrapper/idm all absent on every read); the JS re-dispatch is the
+        # fallback for widgets where the trusted center-click lands outside the control.
+        opened_trusted = False
+        with contextlib.suppress(Exception):
+            opened_trusted = await cdp_click(session, node)
+        if opened_trusted:
+            await asyncio.sleep(0.4)
+        raw = await _call_on(cdp_session, session_id, object_id, _RS_OPEN_READ_JS, args=[bool(opened_trusted)])
         try:
             options = json.loads(raw) if raw else []
         except Exception:
             options = []
+        if isinstance(options, dict) and opened_trusted:
+            # trusted open read nothing — retry once with the synthetic-dispatch open
+            raw = await _call_on(cdp_session, session_id, object_id, _RS_OPEN_READ_JS, args=[False])
+            with contextlib.suppress(Exception):
+                options = json.loads(raw) if raw else []
         if isinstance(options, dict):
             print(f"   [rs-direct] no options: {options.get('__miss')}")
             return ""
