@@ -991,7 +991,12 @@ async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None
                         return True
                 return False
 
-            if _haspopup_at_or_below(ctx.node):
+            # check the node AND its card — duolingo's office question bound a textbox (the
+            # aria-select's filter input) as the representative control, whose subtree has no
+            # haspopup (the button is a SIBLING), so a node-only check missed it and the field
+            # fell to S3 -> filter 0 opts -> commit-cap. core.read_options resolves by the group
+            # NAME and descends to the button regardless of which control locate bound.
+            if _haspopup_at_or_below(ctx.node) or _haspopup_at_or_below(ctx.card):
                 _core_name = str(getattr(ctx.field_obj, "name", "") or "")
                 if _core_name:
                     with contextlib.suppress(Exception):
