@@ -671,7 +671,7 @@ async def _fill_form(
             await page.evaluate(
                 "(() => [...document.querySelectorAll("
                 "'iframe[src*=\"hcaptcha\"],iframe[src*=\"recaptcha\"],iframe[src*=\"turnstile\"],iframe[title*=\"challenge\"]'"
-                ")].some(e => { const r = e.getBoundingClientRect(); return r.width > 50 && r.height > 50; }))()"
+                ")].some(e => { const r = e.getBoundingClientRect(); return r.width > 50 && r.height > 50; }))"
             )
         )
         if _captcha:
@@ -736,6 +736,14 @@ async def _fill_form(
             # place with retry commits (retry only writes on DONE), and the hard gate reads it
             # back as "who actually got a verified commit".
             _cbl = {str(r.label): str(r.committed) for r in per_field if r.outcome == oa.DONE and r.committed}
+            # plain-text-typed committed labels ONLY (name/email/phone/location/linkedin): the wipe
+            # gate reads a live .value and a choice widget's visible input is legitimately empty after
+            # commit — judging it would false-RED a rendered react-select (samsara race/ethnicity).
+            _CHOICE_T = {"combobox", "select", "input_file", "file", "checkbox", "radio", "multi_select", "single_select", "boolean"}
+            _text_labels = {
+                str(r.label) for r in per_field
+                if r.outcome == oa.DONE and r.committed and str(r.type or "").lower() not in _CHOICE_T
+            }
             result["completeness"] = await oa_complete.complete(
                 session, page, profile, resume, allow_agent=os.environ.get("OA_COMPLETE_AGENT") == "1",
                 llm=llm, planner_keys=_pk,
@@ -743,6 +751,7 @@ async def _fill_form(
                 filled_names={str(r.name) for r in per_field},
                 required_labels=[f.label or f.name for f in fields if getattr(f, "required", False)],
                 committed_by_label=_cbl,
+                text_labels=_text_labels,
                 form_url=_form_url,
             )
             # REQUIRED-ESCALATE VETO (zero-cost, deterministic): a REQUIRED field whose own
@@ -921,6 +930,57 @@ async def _fill_form(
         # not respond") AFTER the fill is already done — cap it so it can't push wall-clock past budget.
         with contextlib.suppress(Exception):
             result["screenshot"] = await asyncio.wait_for(eng._screenshot(session, page, screenshot_path), timeout=15.0)
+    # LIVE-DOM WIPE GATE (co-located with the screenshot): read committed plain-text fields' ACTUAL
+    # value from the SAME DOM the screenshot just captured. A committed text field that reads EMPTY
+    # now was wiped by a LATE async re-render AFTER complete()'s own +2.5s gate read .value='Jordan'
+    # — the wipe fires later (or on the screenshot scroll), the screenshot shows empty, and the
+    # verdict stayed green (samsara First/Preferred name false-green). Reading here — right after the
+    # screenshot, same DOM — makes the verdict AGREE with the pixels: empty -> not complete.
+    # Deterministic (near-text-bound live .value read), not vision, so it cannot false-green.
+    if adapter is None and isinstance(result.get("completeness"), dict):
+        with contextlib.suppress(Exception):
+            import oa_complete as _oc
+
+            # only TEXT-type committed rows: a combobox/select/checkbox's visible input is legitimately
+            # empty after a selection (the value lives in a chip/hidden field), so the empty-value gate
+            # must never judge them — only plain text fields (name/email/phone/location) whose empty
+            # input genuinely means WIPED.
+            _CHOICE = {"combobox", "select", "input_file", "file", "checkbox", "radio", "multi_select", "single_select", "boolean"}
+            _ct = {
+                str(r.label): str(r.committed)
+                for r in per_field
+                if r.outcome == oa.DONE and r.committed and str(r.committed).strip() and str(r.type or "").lower() not in _CHOICE
+            }
+            if os.environ.get("OA_FN_DIAG") == "1":
+                with contextlib.suppress(Exception):
+                    _diag = await page.evaluate(r"""() => {
+  const near=(el)=>{let p=el;for(let i=0;i<6&&p;i++){let s=p.previousElementSibling;for(let j=0;j<5&&s;j++){const t=(s.innerText||'').replace(/\s+/g,' ').trim();if(t&&t.length<45)return t;s=s.previousElementSibling;}p=p.parentElement;}return '';};
+  const out=[]; for(const el of document.querySelectorAll('input,textarea')){const n=(near(el)||'').toLowerCase();const nm=(el.getAttribute('name')||'').toLowerCase();
+    if(!(n.includes('first name')||nm.includes('first'))) continue; const r=el.getBoundingClientRect(); const cs=getComputedStyle(el);
+    out.push({name:el.getAttribute('name')||'',id:el.id||'',near:near(el).slice(0,28),value:el.value,vis:r.width>0&&r.height>0&&cs.display!=='none'&&cs.visibility!=='hidden',rect:[Math.round(r.x),Math.round(r.y)]});}
+  return JSON.stringify(out); }""")
+                    print(f"   [FN-DIAG] first-name inputs @ final DOM: {_diag}")
+            if os.environ.get("OA_FN_DIAG") == "1":
+                try:
+                    _dbg_res = await _oc.still_empty_committed(page, _ct) if _ct else "NO_CT"
+                    print(f"   [WIPE-DBG] _ct_keys={list(_ct)[:8]} still_empty={_dbg_res!r}")
+                    if _ct:
+                        _diag2 = await _oc.still_empty_diag(page, {k: v for k, v in _ct.items() if "first name" in k.lower()})
+                        print(f"   [WIPE-DIAG] {_diag2!r}")
+                except Exception as _e:
+                    import traceback as _tb
+                    print(f"   [WIPE-DBG] still_empty RAISED: {_e!r}\n{_tb.format_exc()}")
+            _wiped = await _oc.still_empty_committed(page, _ct) if _ct else []
+            if _wiped:
+                comp = result["completeness"]
+                comp["complete"] = False
+                comp.setdefault("missing_required", [])
+                for _w in _wiped:
+                    _tag = f"{str(_w)[:55]} [WIPED-EMPTY-ON-SCREEN]"
+                    if _tag not in comp["missing_required"]:
+                        comp["missing_required"].append(_tag)
+                comp["wiped_on_screen"] = _wiped
+                print(f"   [WIPE GATE] committed text field(s) EMPTY on final DOM -> NOT complete: {_wiped[:4]}")
     with contextlib.suppress(Exception):
         result["final_url"] = await page.get_url()
 

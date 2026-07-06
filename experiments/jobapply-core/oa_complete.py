@@ -410,7 +410,7 @@ _ARIA_SEL_REQ_JS = r"""(() => {
     out.push(lab || 'required select');
   }
   return JSON.stringify([...new Set(out)]);
-})()"""
+})"""
 
 
 async def audit(session: Any, page: Any, file_needle: str = "") -> dict:
@@ -436,7 +436,7 @@ async def audit(session: Any, page: Any, file_needle: str = "") -> dict:
 # STRICT label identity only (label[for] / label-wrapped / aria-labelledby) — repairing a
 # token-guessed box could itself clobber a sibling, which is the exact disease being cured.
 # Plain text inputs/textareas only: a combobox filter box or select needs the ladder, not a set.
-_REPAIR_JS_TMPL = r"""(() => {
+_REPAIR_JS_TMPL = r"""() => {
   const pairs = __PAIRS__;
   const nrm = s => (s||'').replace(/\s+/g,' ').trim();
   const toks = s => nrm(s).toLowerCase().replace(/[*:]/g,'').split(' ').filter(w=>w.length>1);
@@ -495,7 +495,7 @@ _REPAIR_JS_TMPL = r"""(() => {
     repaired.push(lab);
   }
   return JSON.stringify(repaired);
-})()"""
+}"""
 
 
 async def repair_overwritten(session: Any, page: Any, committed_by_label: dict) -> list[str]:
@@ -517,59 +517,51 @@ async def repair_overwritten(session: Any, page: Any, committed_by_label: dict) 
 # re-render (greenhouse resume-parse autofill) wipes the field to '' seconds later — after the
 # audit, retry, and repair all ran. Reading .value one last time AFTER a settle catches the wipe
 # that every earlier check missed (samsara First/Preferred name false-green, vision non-deterministic).
-_STILL_EMPTY_JS_TMPL = r"""(() => {
+_STILL_EMPTY_JS_TMPL = r"""() => {
   const pairs = __PAIRS__;
   const nrm = s => (s||'').replace(/\s+/g,' ').trim();
   const toks = s => nrm(s).toLowerCase().replace(/[*:]/g,'').split(' ').filter(w=>w.length>1);
+  // LOOSE text-entry check: accept any text-entry input/textarea, EXCLUDING only non-text input
+  // types (checkbox/radio/file/etc). The strict whitelist ('text'/'email'/… + no role=combobox +
+  // no aria-autocomplete) wrongly REJECTED samsara's First Name input (it carries an autocomplete/
+  // role attr), so the wipe gate skipped a visibly-EMPTY committed field -> false-green. The CALLER
+  // already filters _ct to text-TYPE ledger rows (never comboboxes), so this can stay permissive.
   const isPlainText = c => {
     if (!c) return false;
     if (c.tagName === 'TEXTAREA') return true;
     if (c.tagName !== 'INPUT') return false;
-    const ty = (c.type||'text').toLowerCase();
-    if (!['text','email','url','tel','search',''].includes(ty)) return false;
-    if ((c.getAttribute('role')||'') === 'combobox') return false;
-    const aa = c.getAttribute('aria-autocomplete');
-    if (aa && aa !== 'none') return false;
-    return true;
+    const ty = (c.type || 'text').toLowerCase();
+    return !['hidden','file','checkbox','radio','submit','button','image','range','color','date'].includes(ty);
   };
   // nearest short text ABOVE/left of a control (samsara greenhouse-embed labels are sibling DIVs,
   // NOT <label for>, so the <label> scan below finds nothing — this near-text finder does).
   const near = (el) => { let p = el; for (let i=0;i<6&&p;i++){ let s=p.previousElementSibling;
     for (let j=0;j<5&&s;j++){ const t=nrm(s.innerText); if(t && t.length<45) return t; s=s.previousElementSibling; } p=p.parentElement; } return ''; };
-  const controlFor = want => {
-    for (const L of document.querySelectorAll('label')) {
-      const T = toks(L.innerText);
-      if (!T.length || T.length > want.length + 3) continue;
-      const hit = want.filter(t => T.includes(t)).length;
-      if (hit < Math.max(1, Math.ceil(want.length * 0.8))) continue;
-      let c = L.htmlFor ? document.getElementById(L.htmlFor) : null;
-      if (!c) c = L.querySelector('input,textarea');
-      if (!c && L.id) c = document.querySelector('input[aria-labelledby~="'+L.id+'"],textarea[aria-labelledby~="'+L.id+'"]');
-      if (c) return c;
-    }
-    // FALLBACK: scan plain-text inputs by their nearest preceding text; prefer the CLOSEST match
-    // (fewest excess tokens) so 'first name' binds to 'First Name', not 'Preferred First Name'.
-    let best = null, bestExcess = 99;
-    for (const c of document.querySelectorAll('input,textarea')) {
-      if (!isPlainText(c)) continue;
-      const T = toks(near(c));
-      if (!T.length) continue;
-      const hit = want.filter(t => T.includes(t)).length;
-      if (hit < Math.max(1, Math.ceil(want.length * 0.8))) continue;
-      const excess = T.length - want.length;
-      if (excess < bestExcess) { best = c; bestExcess = excess; }
-    }
-    return best;
-  };
+  // VISIBLE-SUBSTRING binding (the FN-DIAG approach that provably found the empty samsara
+  // first_name where the <label>+token controlFor did not): find the VISIBLE plain-text input
+  // whose nearest preceding text CONTAINS the committed label; prefer the closest (shortest
+  // near-text) so 'first name' binds 'First Name', not 'Preferred First Name'. Only a visible
+  // control's value reflects the pixels — a hidden/off-node's .value is not what the user sees.
+  const low = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase().replace(/[*:]/g, '').trim();
   const empty = [];
   for (const [lab, val] of pairs) {
     if (!nrm(val)) continue;
-    const c = controlFor(toks(lab));
-    if (!isPlainText(c)) continue;       // only judge STRICTLY label-bound plain-text controls
-    if (!nrm(c.value)) empty.push(lab);  // committed a value but the live control is now EMPTY = WIPED
+    const want = low(lab);
+    if (want.length < 2) continue;
+    let best = null, bestLen = 1e9;
+    for (const c of document.querySelectorAll('input,textarea')) {
+      if (!isPlainText(c)) continue;
+      const r = c.getBoundingClientRect();
+      const cs = getComputedStyle(c);
+      if (!(r.width > 0 && r.height > 0) || cs.display === 'none' || cs.visibility === 'hidden') continue;
+      const nt = low(near(c));
+      if (!nt || !nt.includes(want)) continue;
+      if (nt.length < bestLen) { best = c; bestLen = nt.length; }
+    }
+    if (best && !nrm(best.value)) empty.push(lab);  // committed a value, visible control now EMPTY = WIPED
   }
   return JSON.stringify(empty);
-})()"""
+}"""
 
 
 async def still_empty_committed(page: Any, committed_by_label: dict) -> list[str]:
@@ -581,6 +573,52 @@ async def still_empty_committed(page: Any, committed_by_label: dict) -> list[str
         js = _STILL_EMPTY_JS_TMPL.replace("__PAIRS__", json.dumps([[k, v] for k, v in committed_by_label.items()]))
         return json.loads(await page.evaluate(js))
     return []
+
+
+# DIAGNOSTIC (env-gated): for each committed label, dump every input/textarea whose name-attr OR
+# near-text mentions the label, with the signals the gate filters on (plain/vis/value). Shows WHY
+# still_empty picked (or skipped) a node — used to pin the samsara First Name gate-miss.
+_STILL_EMPTY_DIAG_JS = r"""() => {
+  const pairs = __PAIRS__;
+  const nrm = s => (s||'').replace(/\s+/g,' ').trim();
+  const low = s => nrm(s).toLowerCase().replace(/[*:]/g,'').trim();
+  const isPlainText = c => {
+    if (!c) return false;
+    if (c.tagName === 'TEXTAREA') return true;
+    if (c.tagName !== 'INPUT') return false;
+    const ty = (c.type || 'text').toLowerCase();
+    return !['hidden','file','checkbox','radio','submit','button','image','range','color','date'].includes(ty);
+  };
+  const near = (el) => { let p = el; for (let i=0;i<6&&p;i++){ let s=p.previousElementSibling;
+    for (let j=0;j<5&&s;j++){ const t=nrm(s.innerText); if(t && t.length<45) return t; s=s.previousElementSibling; } p=p.parentElement; } return ''; };
+  const out = [];
+  for (const [lab, val] of pairs) {
+    const want = low(lab);
+    const cands = [];
+    for (const c of document.querySelectorAll('input,textarea')) {
+      const nt = low(near(c));
+      const nm = (c.getAttribute('name')||'').toLowerCase();
+      const id = (c.id||'').toLowerCase();
+      if (!(nt.includes(want) || (want.split(' ')[0] && (nm.includes(want.split(' ')[0]) || id.includes(want.split(' ')[0]))))) continue;
+      const r = c.getBoundingClientRect(); const cs = getComputedStyle(c);
+      cands.push({id:c.id||'', name:c.getAttribute('name')||'', near:near(c).slice(0,24), nt, val:c.value,
+        plain:isPlainText(c), w:Math.round(r.width), h:Math.round(r.height),
+        disp:cs.display, vis:cs.visibility, matchNear:nt.includes(want)});
+    }
+    out.push({lab, want, cands});
+  }
+  return JSON.stringify(out);
+}"""
+
+
+async def still_empty_diag(page: Any, committed_by_label: dict) -> Any:
+    """Per-label candidate dump for the wipe gate — diagnostic only. None on failure."""
+    import json
+
+    with contextlib.suppress(Exception):
+        js = _STILL_EMPTY_DIAG_JS.replace("__PAIRS__", json.dumps([[k, v] for k, v in committed_by_label.items()]))
+        return json.loads(await page.evaluate(js))
+    return None
 
 
 async def _vlm_unfilled_sections(session: Any) -> list[str]:
@@ -1034,7 +1072,7 @@ def _drop_second_instance(missing: list, committed_by_label: dict | None) -> lis
 async def complete(
     session: Any, page: Any, profile: dict, resume: str | None, *, allow_agent: bool, llm: Any = None, planner_keys: list | None = None,
     filled_names: set | None = None, required_labels: list | None = None, committed_by_label: dict | None = None,
-    form_url: str = "",
+    text_labels: set | None = None, form_url: str = "",
 ) -> dict:
     """Audit the form for unfilled repeater sections + empty required fields; fill repeaters via the
     proven agent_fill_section and RE-FILL wiped required fields (retry). Returns
@@ -1330,17 +1368,26 @@ async def complete(
         # field renders empty; vision non-deterministically missed it). Read .value once more after
         # a settle; re-fill the wiped ones with the tracker-aware setter; re-read; whatever is STILL
         # empty is an honest miss -> not complete. Deterministic, not vision — cannot false-green.
-        if committed_by_label:
+        # judge ONLY plain-text committed fields: a select/combobox/checkbox's visible input is
+        # legitimately EMPTY after commit (value lives in a chip / hidden field / render), so the
+        # empty-value gate must never see it — else a react-select (samsara race/ethnicity, a
+        # rendered 'East Asian…') false-REDs. text_labels is the ledger's plain-text-typed subset.
+        _gate_cbl = (
+            {k: v for k, v in committed_by_label.items() if k in text_labels}
+            if (committed_by_label and text_labels is not None)
+            else (committed_by_label or {})
+        )
+        if _gate_cbl:
             with contextlib.suppress(Exception):
                 import asyncio as _aio2
 
                 await _aio2.sleep(2.5)  # let the late async autofill/re-render fire
-                _wiped = await still_empty_committed(page, committed_by_label)
+                _wiped = await still_empty_committed(page, _gate_cbl)
                 if _wiped:
                     print(f"   [complete] WIPE GATE — committed fields read EMPTY: {_wiped[:4]}")
-                    await repair_overwritten(session, page, committed_by_label)  # tracker-aware re-set
+                    await repair_overwritten(session, page, _gate_cbl)  # tracker-aware re-set
                     await _aio2.sleep(1.5)
-                    _wiped2 = await still_empty_committed(page, committed_by_label)
+                    _wiped2 = await still_empty_committed(page, _gate_cbl)
                     if _wiped2:
                         print(f"   [complete] WIPE GATE — STILL empty after repair: {_wiped2} -> NOT complete")
                         verdict["wiped_committed"] = _wiped2
