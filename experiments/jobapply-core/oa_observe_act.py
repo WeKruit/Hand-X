@@ -1587,7 +1587,14 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
             if await act.type_text(session, ctx.node, chosen, clear=True):
                 fresh = await _settle(session, before_f, _SETTLE_SEARCH_S)
                 ftexts = _option_texts(fresh)
-                fchosen = await brain.pick_option(ctx.value, ftexts, llm=ctx.llm, label=ctx.label) if ftexts else None
+                # the FULL menu already decided `chosen` — the filtered menu can EXCLUDE that
+                # exact row and leave only lookalikes (airbnb mega4/14: full-string filter
+                # showed only 'South San Francisco…' and the LLM re-pick downgraded the correct
+                # 'San Francisco…' into it). Exact/identity match only here; a semantic re-pick
+                # of an already-made decision is never allowed.
+                fchosen = next((t for t in ftexts if t.strip().lower() == chosen.strip().lower()), None)
+                if not fchosen:
+                    fchosen = _identity_pick(ctx.value, ftexts)
                 fnode = _node_for_option(fresh, fchosen) if fchosen else None
                 if fnode is not None and await act.click_node(session, fnode):
                     ctx.committed_text = fchosen
@@ -1595,6 +1602,8 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
                     if await _s_verify(session, ctx) == DONE:
                         return DONE
                     ctx.trace.append("filter-commit-unverified")
+                elif ftexts:
+                    ctx.trace.append(f"filter-lost-chosen '{chosen[:20]}' -> fall through")
     if nodes is not None:
         node = _node_for_option(nodes, chosen)
         if node is not None:
