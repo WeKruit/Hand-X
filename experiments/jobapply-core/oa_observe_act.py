@@ -1607,6 +1607,33 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
     if (
         normalize_kind(ctx.kind) == "SELECT" or ctx.nature in ("BOOLEAN", "CLOSED_LIST")
     ) and _is_plain_text_editable_or_combo(ctx.node):
+        # CDP-CORE FIRST (react-select): the NAME-based open(focus+ArrowDown)+aria-scoped read+
+        # trusted rect click is PROVEN reliable on this widget (twilio question_66968126: a fresh
+        # core.read_options returns the 4 real options and choose_option commits), whereas the
+        # node-based filter rung below (cdp_choose_react_select) THRASHES the menu into a
+        # collapsing state (244 stale page opts -> None -> escalate) and only THEN falls to this
+        # same core path on a corrupted menu. Run it before anything touches the menu. Falls
+        # through untouched when core can't scope (returns []), so no regression on other widgets.
+        # the react-select's ACTIONABLE id is on the combobox INPUT node (greenhouse: id=question_N),
+        # NOT the field's descriptive name (a sibling text/hidden input 'what_is_the_source_of…' whose
+        # 'open' renders no menu -> read_options=0). Prefer the node's raw DOM id, fall back to name.
+        _node_id = (getattr(ctx.node, "attributes", None) or {}).get("id") or ""
+        _cands = [c for c in (_node_id, str(getattr(ctx.field_obj, "name", "") or "")) if c]
+        for _core_name in _cands:
+            with contextlib.suppress(Exception):
+                import oa_cdp_core as _core
+
+                _opts = await _core.read_options(session, _core_name)
+                if _opts:
+                    _chosen = _identity_pick(ctx.value, _opts) or await brain.pick_option(
+                        ctx.value, _opts, llm=ctx.llm, label=ctx.label)
+                    if _chosen and await _chosen_plausible(ctx, _chosen):
+                        _got = await _core.choose_option(session, _core_name, _chosen)
+                        if _got:
+                            ctx.committed_text = _got
+                            ctx.trace.append(f"rs-core-first:{_got[:20]}")
+                            return await _s_verify(session, ctx)
+                    break  # found the menu on this id; don't re-open on the sibling name
         with contextlib.suppress(Exception):
             got = await cdpa.cdp_choose_aria_option(session, ctx.node, ctx.value)
             # PLAUSIBILITY at the direct rungs too (1password mega3/2: the react-select

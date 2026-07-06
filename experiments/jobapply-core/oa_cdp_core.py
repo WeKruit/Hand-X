@@ -129,11 +129,15 @@ async def _open(cdp_session: Any, sid: Any, oid: str) -> None:
 function(){ const ac = this.getAttribute('aria-controls') || this.getAttribute('aria-owns');
   return {tag: this.tagName, exp: this.getAttribute('aria-expanded'),
           open: !!(ac && document.getElementById(ac))}; }""") or {}
-    # already open — a second click would TOGGLE it closed. aria-expanded is unreliable
-    # (duolingo's button never sets it, live-proven); the MOUNTED listbox is the real signal.
-    if state.get("open") is True or str(state.get("exp")) == "true":
-        return
     tag = str(state.get("tag") or "")
+    # already open — for a BUTTON a second click TOGGLES it closed, so skip. For an INPUT-style
+    # react-select, focus+ArrowDown on an open menu only moves the highlight (never closes), and a
+    # STALE aria-expanded=true left by a prior rung (that opened then failed to scope) would make an
+    # early-return read a menu that is actually CLOSED -> read_options=0 (twilio in-engine: fresh
+    # probe reads 4, but after a sibling rung thrashed the control the reader saw stale-true and
+    # skipped the real open). So only trust the early-return for BUTTON triggers.
+    if (state.get("open") is True or str(state.get("exp")) == "true") and tag.upper() == "BUTTON":
+        return
     if tag.upper() == "BUTTON":
         rect = await cdpa._call_on(cdp_session, sid, oid, r"""
 function(){ this.scrollIntoView({block:'center'}); const r=this.getBoundingClientRect();
@@ -141,7 +145,11 @@ function(){ this.scrollIntoView({block:'center'}); const r=this.getBoundingClien
         if isinstance(rect, dict) and rect.get("x") is not None:
             await cdpa._dispatch_mouse_click(cdp_session, sid, rect["x"], rect["y"])
     else:
-        await cdpa._call_on(cdp_session, sid, oid, "function(){ this.focus(); }")
+        # SCROLL INTO VIEW before focus (as the BUTTON path already does): after many prior fields
+        # the react-select is off-screen; focusing an off-screen react-select input does NOT mount
+        # its menu, so the aria-controls listbox never appears and the scoped read misses (twilio
+        # in-engine read_options=0 while a fresh on-screen probe reads 4). Center it, then open.
+        await cdpa._call_on(cdp_session, sid, oid, "function(){ this.scrollIntoView({block:'center'}); this.focus(); }")
         key = cdp_session.cdp_client.send.Input.dispatchKeyEvent
         for typ in ("keyDown", "keyUp"):
             await key(params={"type": typ, "key": "ArrowDown", "code": "ArrowDown",
