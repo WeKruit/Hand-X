@@ -561,14 +561,32 @@ function(){
     opts = [...document.querySelectorAll('[id^="react-select-'+idm[1]+'-option"]')];
   }
   if(!opts.length){
+    // the OPEN menu's listbox id lands on the input's aria-controls/aria-owns — the only
+    // ownership link that survives menuPortalTarget (stripe mega4/8: custom classNamePrefix
+    // + body portal defeated both other scopes and the page-wide fallback read a DIFFERENT
+    // field's lingering menu — 'Belgium' ended up committed into reside-country).
+    const lid = this.getAttribute('aria-controls') || this.getAttribute('aria-owns');
+    const lb = lid && document.getElementById(lid);
+    if(lb) opts = [...lb.querySelectorAll('[class*=option],[class*=Option],[role=option]')];
+  }
+  if(!opts.length){
     // the menu is a descendant of the control wrapper or its next sibling
     const menu = target.querySelector('[class*=menu],[class*=Menu]') || (target.nextElementSibling && target.nextElementSibling.matches('[class*=menu],[class*=Menu]') ? target.nextElementSibling : null);
     if(menu) opts = [...menu.querySelectorAll('[class*=option],[class*=Option],[role=option]')];
   }
   if(!opts.length){
-    opts = [...document.querySelectorAll('[class*=option],[class*=Option],[role=option]')];
+    // page-wide LAST resort: only trustworthy when exactly ONE menu container is open —
+    // options spanning 2+ containers means another field's menu is open too and any
+    // read/click would cross fields.
+    const all = [...document.querySelectorAll('[class*=option],[class*=Option],[role=option]')].filter(e=>e.offsetParent);
+    const menus = new Set(all.map(o => o.closest('[class*=menu],[class*=Menu],[role=listbox]')).filter(Boolean));
+    if(menus.size <= 1) opts = all;
   }
   opts = opts.filter(e => e.offsetParent && !/menu-notice|no-options|placeholder/i.test((e.className||'').toString()));
+  if(!opts.length){
+    // close whatever we opened so it cannot bleed into the NEXT field's page-wide read
+    this.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+  }
   return JSON.stringify([...new Set(opts.map(o => norm(o.innerText||o.textContent)).filter(Boolean))].slice(0,60));
 }
 """
@@ -579,7 +597,18 @@ function(want){
   const w = norm(want); if(!w) return "";
   const idm = (this.id||'').match(/react-select-([^-]+)-/);
   let opts = idm ? [...document.querySelectorAll('[id^="react-select-'+idm[1]+'-option"]')].filter(e=>e.offsetParent) : [];
-  if(!opts.length) opts = [...document.querySelectorAll('[class*=option],[class*=Option],[role=option]')].filter(e=>e.offsetParent);
+  if(!opts.length){
+    const lid = this.getAttribute('aria-controls') || this.getAttribute('aria-owns');
+    const lb = lid && document.getElementById(lid);
+    if(lb) opts = [...lb.querySelectorAll('[class*=option],[class*=Option],[role=option]')].filter(e=>e.offsetParent);
+  }
+  if(!opts.length){
+    // page-wide click ONLY when a single menu is open — a cross-field click commits into
+    // the WRONG question (stripe mega4/8 'Belgium').
+    const all = [...document.querySelectorAll('[class*=option],[class*=Option],[role=option]')].filter(e=>e.offsetParent);
+    const menus = new Set(all.map(o => o.closest('[class*=menu],[class*=Menu],[role=listbox]')).filter(Boolean));
+    if(menus.size <= 1) opts = all;
+  }
   let t = opts.find(o => norm(o.innerText||o.textContent) === w);
   if(!t && w.length>=3) t = opts.find(o => { const x=norm(o.innerText||o.textContent); return x && (x===w); });
   if(!t) return "";
