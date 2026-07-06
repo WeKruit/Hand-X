@@ -583,6 +583,13 @@ async def _fill_form(
         _is_twin = (
             _lkey in _done_labels
             and "file" not in str(f.type or "").lower()
+            # HTML5 DATA inputs (tel/email/url/number) are never a choice-widget's twin: an
+            # intl-tel 'Telefoon*' widget surfaces its country-code COMBOBOX and the phone-NUMBER
+            # <input type=tel> under the SAME label — skipping the tel as a twin of the country
+            # selector left the required phone number EMPTY (flexport mega4/41 false-green). These
+            # carry distinct real data, so exempt them like files; a text/combobox react-select
+            # search box (the real twin case) is NOT one of these types and stays guarded.
+            and str(f.type or "").lower() not in ("tel", "email", "url", "number")
             # a non-empty option signature that DIFFERS from every signature already committed
             # under this label is a distinct question, not a twin.
             and (not _sig or _sig in _done_sigs.get(_lkey, []) or not _done_sigs.get(_lkey))
