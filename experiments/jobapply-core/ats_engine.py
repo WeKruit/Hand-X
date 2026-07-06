@@ -825,13 +825,19 @@ async def map_fields(
         if getattr(f, "required", False) and not ((out.get(f.name) and (out[f.name].value or "").strip()))
     ]
     if _blank_req and llm is not None:
+        _exp0 = (profile.get("experience") or [{}])[0]
         _facts = (
             f"city: {profile.get('city','')}, {profile.get('state','')}, {profile.get('country','')}; "
             f"authorized to work in US: {profile.get('authorized_to_work_us')}; "
             f"needs visa sponsorship: {profile.get('requires_sponsorship')}; "
             f"willing to relocate: {profile.get('willing_to_relocate')}; "
             f"desired salary USD/yr: {profile.get('desired_salary','')}; notice: {profile.get('notice_period','')}; "
-            f"earliest start: {profile.get('available_start_date','')}; skills: {', '.join(profile.get('skills') or [])[:120]}"
+            f"earliest start: {profile.get('available_start_date','')}; "
+            # judgment questions need WHO the candidate is, not just logistics (stripe mega4/6:
+            # 'what do you have experience with' + sales-motion options got SKIP three times
+            # because the facts said nothing about the candidate's work)
+            f"current role: {_exp0.get('title','')} at {_exp0.get('company','')}; "
+            f"skills: {', '.join(profile.get('skills') or [])[:120]}"
         )
         for f in _blank_req[:5]:
             with contextlib.suppress(Exception):
@@ -842,8 +848,10 @@ async def map_fields(
                     "Answer with the EXACT value to fill (option text verbatim when options are "
                     "given; same-metro office attendance -> Yes; policy acknowledgements -> the "
                     "affirmative option). A follow-up premised on a prior answer ('If you selected "
-                    "Other…', 'If yes, …') whose premise does not hold -> SKIP. Reply ONLY the "
-                    "value, or SKIP if genuinely unanswerable."
+                    "Other…', 'If yes, …') whose premise does not hold -> SKIP. This field is "
+                    "REQUIRED: when options are given and none is a none/other row, pick the "
+                    "closest defensible option for this candidate rather than SKIP. Reply ONLY "
+                    "the value, or SKIP if genuinely unanswerable."
                 )
                 r = await llm.ainvoke([UserMessage(content=msg)])
                 v = str(getattr(r, "completion", r) or "").strip().strip('"').strip()
