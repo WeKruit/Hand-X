@@ -215,6 +215,34 @@ _ENUM_JS = r"""
     const clab = groupLabel(v.el, g, v.opts);
     push(g, clab, 'multi_select', 'select', v.opts.slice(0, 40), grpReq(v.el, clab));
   }
+  // DISCOVERY-BLIND GENERA (mega4 green-audit: 9 widget kinds neither the input/select scan
+  // nor the audit sees, so a required one passes as green). Each is a real ATS control with
+  // no <input>/<select>/[role=combobox]; detect by ARIA/structural signal, route to the closest
+  // existing lane. Generic — ARIA roles, not per-ATS classes.
+  const ident = el => el.id || (el.getAttribute && el.getAttribute('name')) ||
+    (labFor(el) || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 60);
+  for (const el of document.querySelectorAll(
+    '[contenteditable="true"],[role=textbox],[role=switch],[role=slider],input[type=range],[role=listbox]:not(select)'
+  )) {
+    if (el.closest('nav, header, footer, [role=search]')) continue;
+    if (!vis(el)) continue;
+    // skip if already emitted (a role=textbox that is really a captured input, etc.)
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    const ce = el.getAttribute('contenteditable') === 'true';
+    const lab = labFor(el);
+    if (!lab || lab.length < 2) continue;
+    const rq2 = el.getAttribute('aria-required') === 'true' || /[*✱]\s*$/.test(lab);
+    if (ce || role === 'textbox') {
+      push(ident(el), lab, 'textarea', 'open_ended', null, rq2);
+    } else if (role === 'switch') {
+      push(ident(el), lab, 'checkbox', 'select', ['Yes', 'No'], rq2);
+    } else if (role === 'slider' || (el.tagName === 'INPUT')) {
+      push(ident(el), lab, 'range', 'select', null, rq2);
+    } else if (role === 'listbox') {
+      const opts = [...el.querySelectorAll('[role=option]')].map(o => clean(o.innerText)).filter(Boolean).slice(0, 40);
+      push(ident(el), lab, 'single_select', 'select', opts, rq2);
+    }
+  }
   return JSON.stringify(out.slice(0, 60));
 }
 """
