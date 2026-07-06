@@ -346,13 +346,47 @@ _NEAR_FIELD_FILTER_JS = r"""() => {
 }"""
 
 
-async def audit(session: Any, page: Any) -> dict:
+# REQUIRED-FILE blindness (airbnb mega4/11 FALSE COMPLETE: Resume/CV* rendered EMPTY while the
+# verdict said complete — the pill/file exclusions keep upload-button rows out of the generic
+# emptyReq scan, so nothing audited file fields at all). Structural: a star-marked uploader card
+# whose input holds no file AND whose text lacks the uploaded filename is missing. The needle is
+# the basename we uploaded everywhere this run — its absence in the card is the empty signal.
+_FILE_REQ_JS = r"""((needle) => {
+  const nrm = s => (s||'').replace(/\s+/g,' ').trim();
+  const out = [];
+  for (const fi of document.querySelectorAll('input[type=file]')) {
+    if (fi.files && fi.files.length) continue;
+    let p = fi.parentElement, card = null;
+    for (let i = 0; i < 8 && p; i++) {
+      if (p.querySelectorAll('input[type=file]').length > 1) break; // absorbed a sibling uploader -> too far
+      card = p;
+      if (/[*✱]/.test(p.innerText||'')) break;                 // reached the heading card
+      p = p.parentElement;
+    }
+    if (!card) continue;
+    const txt = nrm(card.innerText||'').toLowerCase();
+    if (needle && txt.includes(needle)) continue;                    // filename chip rendered -> filled
+    if (!/[*✱](?!\s*indicates)/.test(card.innerText||'')) continue; // not visibly required
+    const line = (card.innerText||'').split('\n').map(nrm).find(t => /[*✱]/.test(t) && t.length < 120);
+    out.push(line || 'required file upload');
+  }
+  return JSON.stringify([...new Set(out)]);
+})"""
+
+
+async def audit(session: Any, page: Any, file_needle: str = "") -> dict:
     """DOM scan: add-row affordances + still-empty required fields. {} on failure."""
     import json
 
+    out = {"adds": [], "emptyReq": []}
     with contextlib.suppress(Exception):
-        return json.loads(await page.evaluate(_AUDIT_JS))
-    return {"adds": [], "emptyReq": []}
+        out = json.loads(await page.evaluate(_AUDIT_JS))
+    if file_needle:
+        with contextlib.suppress(Exception):
+            for m in json.loads(await page.evaluate(_FILE_REQ_JS, file_needle)):
+                if m not in out.get("emptyReq", []):
+                    out.setdefault("emptyReq", []).append(m)
+    return out
 
 
 # AGENT-CORRUPTION REPAIR: restore main-loop-committed values the escalation agent overwrote.
@@ -796,12 +830,15 @@ async def complete(
 
             await _aio.sleep(2.0)
             page = await session.must_get_current_page()
+    import os as _os
+
+    _fneedle = _os.path.basename(str(resume))[:8].lower() if resume else ""
     with contextlib.suppress(Exception):
         if resume:  # button-triggered resume upload (hibob/bamboohr 'Add file' has no <input> yet)
             await upload_via_button(session, page, resume)
         if filled_names:  # fields that appeared AFTER the flat pass (resume-parse rows etc.)
             await _orphan_pass(session, page, profile, llm, filled_names)
-        a = await audit(session, page)
+        a = await audit(session, page, file_needle=_fneedle)
         verdict["missing_required"] = a.get("emptyReq", [])
         # RETRY: re-fill required fields a React re-render wiped after commit (workable class),
         # BEFORE deciding completeness — one bounded pass, then re-audit below.
@@ -856,7 +893,7 @@ async def complete(
                     print(f"   [complete] agent claimed '{sec}' but NO entry card rendered -> skipped")
         # re-audit after retry + section fill
         with contextlib.suppress(Exception):
-            verdict["missing_required"] = _drop_second_instance((await audit(session, page)).get("emptyReq", []), committed_by_label)
+            verdict["missing_required"] = _drop_second_instance((await audit(session, page, file_needle=_fneedle)).get("emptyReq", []), committed_by_label)
         # REMAINING REQUIRED (screening Yes/No, skill-rating dropdowns): these have no profile
         # value to map — they need judgement (authorized-to-work -> Yes, rate Python 1-5 from the
         # candidate's skills). Hand them to the agent, which carries the truthful-default +
@@ -907,7 +944,7 @@ async def complete(
                 )
                 verdict["agent_answered_required"] = True
                 with contextlib.suppress(Exception):
-                    verdict["missing_required"] = _drop_second_instance((await audit(session, page)).get("emptyReq", []), committed_by_label)
+                    verdict["missing_required"] = _drop_second_instance((await audit(session, page, file_needle=_fneedle)).get("emptyReq", []), committed_by_label)
         # AGENT-CORRUPTION REPAIR: retry_missing / agent_fill_section act AFTER the main loop's
         # verify, so they can silently overwrite committed fields (mega/16: the remaining-required
         # agent typed 'Cisgender man' over the committed 'Jordan' in First Name and an office city
