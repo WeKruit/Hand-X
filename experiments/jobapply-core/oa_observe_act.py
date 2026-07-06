@@ -972,6 +972,28 @@ async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None
             ctx.nature = _kind_to_intrinsic(ctx.kind) or "INTRINSIC_RADIO"
             return await _s_choice(session, ctx, state)
         if routed == "SELECT":
+            # ARIA-DISCLOSURE SELECT via CDP-CORE (duolingo: <button aria-haspopup=listbox>).
+            # S3's delta-open path is built for react-select inputs; the disclosure BUTTON opens
+            # only on a trusted click and reads via aria-controls — exactly what core._open +
+            # core.choose_option do (live-proven on duolingo: readback 'NO'). Try it FIRST for
+            # aria-haspopup nodes; fall through to S3 if it can't resolve/commit.
+            if (_node_attr(ctx.node, "aria-haspopup") or "").lower() in ("listbox", "menu"):
+                _core_name = str(getattr(ctx.field_obj, "name", "") or "")
+                if _core_name:
+                    with contextlib.suppress(Exception):
+                        import oa_cdp_core as core
+
+                        _opts = await core.read_options(session, _core_name)
+                        if _opts:
+                            _chosen = _identity_pick(ctx.value, _opts) or await brain.pick_option(
+                                ctx.value, _opts, llm=ctx.llm, label=ctx.label)
+                            if _chosen and await _chosen_plausible(ctx, _chosen):
+                                _got = await core.choose_option(session, _core_name, _chosen)
+                                if _got:
+                                    ctx.nature = "CLOSED_LIST"
+                                    ctx.committed_text = _got
+                                    ctx.trace.append(f"aria-core-commit:{_got[:20]}")
+                                    return await _s_verify(session, ctx)
             # single/multi-select: a (often custom) dropdown — open + read its options + commit the
             # match. Lever's custom select renders options only after a click, so S3_OPEN's click+
             # settle+delta path is exactly right; a native <select> short-circuits via read_options.
