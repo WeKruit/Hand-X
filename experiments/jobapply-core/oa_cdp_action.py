@@ -362,6 +362,29 @@ function(want, groupName){
 """
 
 
+    # a controlled widget can accept the click NOW and revert on the next render — sierra
+# mega4/48 hear-about: t.checked was true at click time, the ledger said DONE, and the
+# final screenshot showed the whole group unselected. Settle, then re-read the group.
+_STILL_CHECKED_JS = r"""
+function(groupName){
+  let inputs = [];
+  if(groupName){
+const esc = (window.CSS && CSS.escape) ? CSS.escape(groupName) : groupName;
+inputs = [...document.querySelectorAll('input[type=radio][name="'+esc+'"],input[type=checkbox][name="'+esc+'"]')];
+  }
+  if(!inputs.length){
+let root = this;
+if(root.matches && root.matches('input[type=radio],input[type=checkbox]')){
+  root = root.closest('fieldset,[role=radiogroup],[role=group]') || root.form || document;
+}
+inputs = [...root.querySelectorAll('input[type=radio],input[type=checkbox]')];
+  }
+  if(!inputs.length) return true;  // button-pill commit — nothing to re-read here
+  return inputs.some(el => el.checked);
+}
+"""
+
+
 async def cdp_choose_option(session: Any, container_node: Any, value: str, group_name: str = "") -> str:
     """Commit a radio/checkbox GROUP the proven Lever way: scan the container's REAL inputs (incl.
     visually-hidden ones a visible-only selector_map misses), match the one whose VALUE attr / wrapping
@@ -370,27 +393,6 @@ async def cdp_choose_option(session: Any, container_node: Any, value: str, group
     IDENTITY document-wide first — immune to a mis-located container. Returns the matched option
     string, or "" when no input matched (caller falls back to the visual path). Generic."""
 
-    # a controlled widget can accept the click NOW and revert on the next render — sierra
-    # mega4/48 hear-about: t.checked was true at click time, the ledger said DONE, and the
-    # final screenshot showed the whole group unselected. Settle, then re-read the group.
-    _STILL_CHECKED_JS = r"""
-function(groupName){
-  let inputs = [];
-  if(groupName){
-    const esc = (window.CSS && CSS.escape) ? CSS.escape(groupName) : groupName;
-    inputs = [...document.querySelectorAll('input[type=radio][name="'+esc+'"],input[type=checkbox][name="'+esc+'"]')];
-  }
-  if(!inputs.length){
-    let root = this;
-    if(root.matches && root.matches('input[type=radio],input[type=checkbox]')){
-      root = root.closest('fieldset,[role=radiogroup],[role=group]') || root.form || document;
-    }
-    inputs = [...root.querySelectorAll('input[type=radio],input[type=checkbox]')];
-  }
-  if(!inputs.length) return true;  // button-pill commit — nothing to re-read here
-  return inputs.some(el => el.checked);
-}
-"""
 
     async def _do() -> str:
         r = await _resolve(session, container_node)
