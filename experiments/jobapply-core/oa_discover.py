@@ -194,11 +194,30 @@ _ENUM_JS = r"""
     const rq = !!(grp && grp.getAttribute('aria-required') === 'true') || /[*✱]\s*$/.test(lab || '');
     push((grp && grp.id) || b.getAttribute('aria-controls') || lab, lab, 'single_select', 'select', null, rq);
   }
-  // required for a GROUP: any member input carries required/aria-required, or the group's
-  // question line ends with the required star (stripe mega4/6: 'Please indicate what you
-  // have experience with. *' shipped required=false, so the FOCUSED backfill never ran
-  // and blank->SKIP stood on a required multi_select).
-  const grpReq = (el, lab) => !!(el.required || el.getAttribute('aria-required') === 'true' || /[*✱]\s*$/.test(lab || ''));
+  // required for a GROUP: any member input carries required/aria-required, the group's
+  // question line carries a required star, OR a required-indicator sits in the group's own
+  // DOM subtree. The trailing-star-only test (stripe mega4/6) missed 1password mega4/1
+  // 'Do you have experience leading people managers?* Yes No' — the star sits AFTER the '?'
+  // and BEFORE the appended option text, so it is not trailing. Test: a star right after the
+  // question (before options), any aria-required member, or a required-role star element in
+  // the enclosing fieldset/[role=group] (a <span class=required>* / [aria-hidden] asterisk).
+  const grpReq = (el, lab) => {
+    if (el.required || el.getAttribute('aria-required') === 'true') return true;
+    const L = lab || '';
+    if (/[*✱]\s*$/.test(L)) return true;
+    if (/\?\s*[*✱]/.test(L)) return true;              // star right after the question mark
+    const box = el.closest('fieldset,[role=group],[role=radiogroup]');
+    if (box) {
+      if (box.getAttribute('aria-required') === 'true') return true;
+      // a dedicated required-marker element in the group (not option text)
+      const mk = [...box.querySelectorAll('span,i,em,abbr,sup')].find(s => {
+        const t = clean(s.innerText);
+        return (t === '*' || t === '✱' || /required/i.test(s.className || '') || s.getAttribute('aria-label') === 'required');
+      });
+      if (mk) return true;
+    }
+    return false;
+  };
   for (const [g, v] of Object.entries(radio)) {
     const rlab = groupLabel(v.el, g, v.opts);
     push(g, rlab, 'radio', 'select', v.opts.slice(0, 30), grpReq(v.el, rlab));
