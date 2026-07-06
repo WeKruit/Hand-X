@@ -379,8 +379,25 @@ if(root.matches && root.matches('input[type=radio],input[type=checkbox]')){
 }
 inputs = [...root.querySelectorAll('input[type=radio],input[type=checkbox]')];
   }
-  if(!inputs.length) return true;  // button-pill commit — nothing to re-read here
-  return inputs.some(el => el.checked);
+  if(inputs.some(el => el.checked)) return true;
+  // ASHBY PILL (live-CDP-confirmed on 1password): the option is a <button> whose hidden
+  // checkbox lags on React re-render — but the button itself carries an ACTIVE/SELECTED class
+  // the instant it commits ('_active_', 'selected', 'checked', aria-pressed/checked=true). Read
+  // that visual state too, so a lagging checkbox no longer makes the commit look reverted (which
+  // sent the field to the visual path -> recommit-toggle-thrash -> commit-cap, 1password 'people
+  // managers'). Scope to the SAME group container as the checkbox.
+  let root = this;
+  if(root.matches && root.matches('input')) root = root.closest('fieldset,[role=group],[role=radiogroup]') || (inputs[0] && inputs[0].closest('div')) || root.form || document;
+  else if(inputs.length) root = inputs[0].closest('fieldset,[role=group],[role=radiogroup],div') || document;
+  const activeBtn = [...root.querySelectorAll('button,[role=radio],[role=checkbox],[role=option]')].some(b => {
+    const c = String(b.className||'');
+    return /(^|[^a-z])(active|selected|checked|_active_)([^a-z]|$)/i.test(c)
+      || b.getAttribute('aria-pressed') === 'true' || b.getAttribute('aria-checked') === 'true'
+      || b.getAttribute('data-state') === 'checked' || b.getAttribute('data-selected') === 'true';
+  });
+  if(activeBtn) return true;
+  if(!inputs.length) return true;  // no readable input AND no active button — trust the commit
+  return false;
 }
 """
 
