@@ -977,7 +977,21 @@ async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None
             # only on a trusted click and reads via aria-controls — exactly what core._open +
             # core.choose_option do (live-proven on duolingo: readback 'NO'). Try it FIRST for
             # aria-haspopup nodes; fall through to S3 if it can't resolve/commit.
-            if (_node_attr(ctx.node, "aria-haspopup") or "").lower() in ("listbox", "menu"):
+            # aria-haspopup can be on ctx.node OR a descendant button — duolingo binds the
+            # role=group WRAPPER (discovery name=group.id) whose disclosure button carries the
+            # attribute, so a node-only check misses it. core._trigger descends to the button;
+            # here we just gate on the attribute appearing at or below the node.
+            def _haspopup_at_or_below(n: Any, depth: int = 0) -> bool:
+                if n is None or depth > 4:
+                    return False
+                if (_node_attr(n, "aria-haspopup") or "").lower() in ("listbox", "menu"):
+                    return True
+                for k in (getattr(n, "children_nodes", None) or [])[:20]:
+                    if _haspopup_at_or_below(k, depth + 1):
+                        return True
+                return False
+
+            if _haspopup_at_or_below(ctx.node):
                 _core_name = str(getattr(ctx.field_obj, "name", "") or "")
                 if _core_name:
                     with contextlib.suppress(Exception):
