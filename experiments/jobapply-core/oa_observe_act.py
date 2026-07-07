@@ -2224,6 +2224,27 @@ async def _s_recommit(session: Any, ctx: Ctx) -> Outcome:
         return ESCALATE if ctx.required else SKIP
     if ctx.commit_tries >= COMMIT_CAP:
         ctx.trace.append("commit-cap")
+        # RENDER-TRUTH before escalating: verify read the DOM .value EMPTY, but react-select / custom
+        # combobox / styled radio render the committed value WITHOUT a readable .value — so the recommit
+        # thrashed to the cap on a field that is actually filled (freshmatrix2: 26 commit-caps, the
+        # 'recommit-verdict:EMPTY' pattern; the ledger later reconciled several as value-on-screen).
+        # If the intended value is POSITIVELY painted in the field's own region (same proven check the
+        # reconciliation uses — matches the INTENDED value, so it can't green an empty/wrong field),
+        # the commit landed: accept DONE instead of escalating a filled field.
+        with contextlib.suppress(Exception):
+            import oa_complete as _oc
+
+            _nm = str(
+                getattr(ctx.field_obj, "name", "") or (getattr(ctx.node, "attributes", None) or {}).get("id", "") or ""
+            )
+            _val = str(ctx.committed_text or ctx.value or "")
+            if _nm and _val:
+                _pg = await session.must_get_current_page()
+                _shown = await _oc.rendered_present(_pg, {str(ctx.label): [_nm, _val]})
+                if str(ctx.label) in _shown:
+                    ctx.trace.append("commit-cap-render-accept")
+                    ctx.committed_text = _val
+                    return DONE
         return ESCALATE if ctx.required else SKIP
     ctx.commit_tries += 1
     ctx.trace.append(f"S_RECOMMIT#{ctx.commit_tries}")
