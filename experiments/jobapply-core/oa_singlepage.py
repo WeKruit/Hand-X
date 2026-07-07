@@ -946,10 +946,15 @@ async def _fill_form(
             # must never judge them — only plain text fields (name/email/phone/location) whose empty
             # input genuinely means WIPED.
             _CHOICE = {"combobox", "select", "input_file", "file", "checkbox", "radio", "multi_select", "single_select", "boolean"}
+            # ONLY required fields fail completeness: an OPTIONAL field that reverts/wipes to empty is
+            # legitimately blank (airbnb 'Location (City)' + a Milan-office question, no asterisk) —
+            # flagging it would false-RED a row whose required fields are all filled.
+            _req_names = {str(f.name) for f in fields if getattr(f, "required", False)}
             _ct = {
                 str(r.label): str(r.committed)
                 for r in per_field
                 if r.outcome == oa.DONE and r.committed and str(r.committed).strip() and str(r.type or "").lower() not in _CHOICE
+                and str(r.name) in _req_names
             }
             if os.environ.get("OA_FN_DIAG") == "1":
                 with contextlib.suppress(Exception):
@@ -991,7 +996,8 @@ async def _fill_form(
             _cc = {
                 str(r.label): [str(r.name or ""), str(r.committed)]
                 for r in per_field
-                if r.outcome == oa.DONE and r.committed and str(r.committed).strip() and str(r.type or "").lower() in _RS_CHOICE and r.name
+                if r.outcome == oa.DONE and r.committed and str(r.committed).strip() and str(r.type or "").lower() in _RS_CHOICE
+                and r.name and str(r.name) in _req_names
             }
             _reverted = await _oc.still_empty_choice(page, _cc) if _cc else []
             if _reverted:
