@@ -951,11 +951,14 @@ async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None
     # re-type, and its pre-check false-positived live (LLM matched the iti '+1' residue against the
     # phone number -> phone left empty, wk17). EMPTY/UNKNOWN/WRONG falls through unchanged; no
     # verify budget is spent on the pre-check.
-    # TRUST GATE: the pre-check may only short-circuit when the LOCATE was structural (dom-ref /
-    # accessible-name). A spatial locate can drift to a NEIGHBOR control — on workable the
-    # anti-AI trick question ('did you start your answer with…') was skipped as already-correct
-    # because the pre-check read the neighboring YES it had drifted onto.
-    _loc_trusted = any(t in ctx.trace for t in ("located:dom-ref", "located:structure", "located:grouped"))
+    # TRUST GATE: the pre-check may only short-circuit when the LOCATE bound the field's OWN single
+    # control (dom-ref / structure / accessible-name). A spatial locate can drift to a NEIGHBOR; a
+    # GROUPED locate binds a REPRESENTATIVE node whose DOM value desyncs from the painted control —
+    # duolingo sponsorship: verify read a stale 'No' off the representative while the react-select
+    # painted 'SELECT…', short-circuited, committed nothing, reverted (rv3, live-confirmed the veto
+    # below can't even resolve a grouped representative). Grouped choice widgets are idempotent to
+    # re-commit, so excluding them only costs a re-click on the rare genuinely-prefilled grouped field.
+    _loc_trusted = any(t in ctx.trace for t in ("located:dom-ref", "located:structure"))
     if ctx.value and not ctx.resume and _loc_trusted and normalize_kind(ctx.kind) in ("CHOICE", "SELECT"):
         with contextlib.suppress(Exception):
             pre = await brain.verify(
@@ -969,9 +972,21 @@ async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None
                 allow_vlm=False,
             )
             if pre == "CORRECT":
-                ctx.committed_text = ctx.value
-                ctx.trace.append("already-correct")
-                return DONE
+                # RENDER VETO (rv3 sponsorship): DOM/verify said CORRECT off a react-select's stale
+                # .value while the CONTROL paints only 'SELECT…' — so the field is skipped as prefilled,
+                # committed nothing, and reverts (a false-green the render gate later flags). Confirm the
+                # value is actually PAINTED before trusting the short-circuit. Runs for CHOICE and SELECT
+                # alike (sponsorship classifies BOOLEAN, not SELECT — a SELECT-only gate never saw it):
+                # the reader is the discriminator — it fires ONLY on a real placeholder, which a true
+                # radio/checkbox never paints, so their idempotence protection (phone +1->+44) is intact.
+                _ph = False
+                with contextlib.suppress(Exception):
+                    _ph = await cdpa.rendered_is_placeholder(session, ctx.node, ctx.label, ctx.value)
+                if not _ph:
+                    ctx.committed_text = ctx.value
+                    ctx.trace.append("already-correct")
+                    return DONE
+                ctx.trace.append("already-correct-veto:placeholder-rendered")
     intrinsic = classify_intrinsic(ctx.node)
     if intrinsic:
         ctx.nature = intrinsic
@@ -2300,6 +2315,28 @@ async def _s_other(session: Any, ctx: Ctx) -> Outcome:
                     ctx.committed_text = match
                     ctx.trace.append(f"other->{match}")
                     return OTHER
+    # CDP-CORE react-select recovery (last chance before HITL): a BOOLEAN/combobox that fell through
+    # the filter/search/visual rungs (airtable 'require visa sponsorship?' Yes/No react-select:
+    # select-filter 'No' -> 0 opts, visual self-label-reject, search 0 opts) can still be filled by
+    # the PROVEN name-based open(scroll+ArrowDown)+aria-scoped read+trusted click that fixed twilio
+    # source-of-right — this S3/S4 path never wired it in. Resolve by the react-select input's DOM id
+    # (fall back to the field name). The S_VERIFY + render-verify/wipe gates re-check, so no false-green.
+    if ctx.nature in ("BOOLEAN", "CLOSED_LIST") or _node_role(ctx.node) == "combobox" or _node_attr(ctx.node, "aria-autocomplete") not in ("", "none"):
+        _cn = (getattr(ctx.node, "attributes", None) or {}).get("id") or str(getattr(ctx.field_obj, "name", "") or "")
+        if _cn:
+            with contextlib.suppress(Exception):
+                import oa_cdp_core as _core
+
+                _opts = await _core.read_options(session, _cn)
+                if _opts:
+                    _ch = _identity_pick(ctx.value, _opts) or await brain.pick_option(
+                        ctx.value, _opts, llm=ctx.llm, label=ctx.label)
+                    if _ch and await _chosen_plausible(ctx, _ch):
+                        _got = await _core.choose_option(session, _cn, _ch)
+                        if _got:
+                            ctx.committed_text = _got
+                            ctx.trace.append(f"s-other-rs-core:{_got[:18]}")
+                            return await _s_verify(session, ctx)
     ctx.trace.append("no-escape->ESCALATE")
     return ESCALATE
 

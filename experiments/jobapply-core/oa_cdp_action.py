@@ -204,6 +204,54 @@ async def _call_on(cdp_session: Any, session_id: Any, object_id: str, fn: str, a
     return ((result or {}).get("result") or {}).get("value")
 
 
+# JS: `this` = the located node. STRUCTURAL (class-independent — duolingo & co. hash their class names
+# so `.select__control` never matches): climb ≤6 ancestors to the first bounded box carrying rendered
+# text, strip the leading label, and report whether the VALUE region is a placeholder (Select…/Choose…)
+# or empty. Same proven body as oa_complete._STILL_EMPTY_CHOICE_JS (which flags duolingo's revert at the
+# END), keyed off the live node so the ALREADY-CORRECT pre-check can tell a genuinely-painted 'No' from
+# a control still showing 'SELECT…'. Diag fields returned for OA_PRECHK_DIAG instrumentation.
+_RENDERED_PLACEHOLDER_JS = r"""
+function(label, val){
+  const nrm = s => (s||'').replace(/\s+/g,' ').trim();
+  const low = s => nrm(s).toLowerCase();
+  const isPh = t => { const s = nrm(t); return !s || /^(select|choose|start typing|pick|--)\b/i.test(s) || /select\.\.\./i.test(s); };
+  let box = this, disp = '';
+  for (let i=0;i<6 && box;i++){ const r=box.getBoundingClientRect(); const t=nrm(box.innerText); if(r.width>40 && r.height>0 && t){ disp=t; break; } box=box.parentElement; }
+  const labLow = low(label).replace(/[*:]/g,'').trim();
+  let valRegion = disp; const li = low(disp).indexOf(labLow);
+  if (labLow.length > 4 && li >= 0) valRegion = nrm(disp.slice(li + labLow.length));
+  // VALUE-INDEPENDENT (a value-substring false-matched 'No' inside the question 'Will you *no*w…').
+  // ph = the value region is a placeholder/empty. Fallback token-scan of the whole box catches the
+  // case where label-strip failed (rendered label != ctx.label) and left the question text in front.
+  const phByRegion = isPh(valRegion);
+  const phByToken = /(select|choose|start typing)\s*(\.\.\.|…)/i.test(disp);
+  const ph = phByRegion || phByToken;
+  return JSON.stringify({disp: disp.slice(0,60), valRegion: valRegion.slice(0,32), phByRegion, phByToken, ph});
+}
+"""
+
+
+async def rendered_is_placeholder(session: Any, node: Any, label: str = "", value: str = "") -> bool:
+    """True iff the node's rendered control box shows a placeholder / is empty (value NOT painted).
+    Class-independent structural read. Conservative: False on any read failure, so it can only VETO an
+    already-correct short-circuit when it DEFINITIVELY sees a placeholder — never turns a genuinely-
+    prefilled field into a re-commit. OA_PRECHK_DIAG=1 prints what the box actually showed."""
+    import json as _json
+    import os as _os
+
+    r = await _resolve(session, node)
+    if r is None:
+        return False
+    cdp_session, session_id, object_id = r
+    with contextlib.suppress(Exception):
+        got = await _call_on(cdp_session, session_id, object_id, _RENDERED_PLACEHOLDER_JS, args=[str(label or ""), str(value or "")])
+        d = _json.loads(got) if got else {}
+        if _os.environ.get("OA_PRECHK_DIAG") == "1":
+            print(f"   [PRECHK] ph={d.get('ph')} region={d.get('phByRegion')} token={d.get('phByToken')} disp={d.get('disp')!r} valRegion={d.get('valRegion')!r}")
+        return bool(d.get("ph"))
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # PUBLIC: cdp_set_value — React-aware value set + input/change. No readiness wait.
 # --------------------------------------------------------------------------- #
@@ -639,12 +687,19 @@ function(skipOpen){
     if(menu) opts = [...menu.querySelectorAll('[class*=option],[class*=Option],[role=option]')];
   }
   if(!opts.length){
-    // page-wide LAST resort: only trustworthy when exactly ONE menu container is open —
-    // options spanning 2+ containers means another field's menu is open too and any
-    // read/click would cross fields.
+    // page-wide LAST resort: trustworthy ONLY when exactly ONE menu is open AND it BELONGS to this
+    // control. A lone-but-STALE neighbor menu (this field's own menu never opened) is the #1 bleed —
+    // audit: 2,517 llm_pick->None, e.g. a COUNTRY field read the PRONOUNS menu (cov/35), stripe
+    // 'Belgium' into reside-country. Ownership = react-select renders its menu hugging the control
+    // edge (horizontal overlap + vertical adjacency). A menu elsewhere on the page is foreign -> miss.
     const all = [...document.querySelectorAll('[class*=option],[class*=Option],[role=option]')].filter(e=>e.offsetParent);
-    const menus = new Set(all.map(o => o.closest('[class*=menu],[class*=Menu],[role=listbox]')).filter(Boolean));
-    if(menus.size <= 1) opts = all;
+    const menus = [...new Set(all.map(o => o.closest('[class*=menu],[class*=Menu],[role=listbox]')).filter(Boolean))];
+    if(menus.length === 1){
+      const tr = target.getBoundingClientRect(), mr = menus[0].getBoundingClientRect();
+      const hOverlap = mr.left < tr.right && mr.right > tr.left && mr.width > 0;
+      const vAdjacent = Math.abs(mr.top - tr.bottom) <= 14 || Math.abs(mr.bottom - tr.top) <= 14;
+      if(hOverlap && vAdjacent) opts = all;
+    }
   }
   opts = opts.filter(e => e.offsetParent && !/menu-notice|no-options|placeholder/i.test((e.className||'').toString()));
   if(!opts.length){
@@ -707,11 +762,19 @@ function(want){
     if(lb) opts = [...lb.querySelectorAll('[class*=option],[class*=Option],[role=option]')].filter(e=>e.offsetParent);
   }
   if(!opts.length){
-    // page-wide click ONLY when a single menu is open — a cross-field click commits into
-    // the WRONG question (stripe mega4/8 'Belgium').
+    // page-wide click ONLY when the single open menu BELONGS to this control (renders adjacent) —
+    // a lone STALE neighbor menu would commit into the WRONG question (stripe mega4/8 'Belgium').
+    let ctrl = this;
+    for(let i=0;i<5 && ctrl;i++){ if(/(^|[^a-z])control([^a-z]|$)|select__control|Control/i.test(String(ctrl.className||''))) break; ctrl = ctrl.parentElement; }
+    const anchor = ctrl || this;
     const all = [...document.querySelectorAll('[class*=option],[class*=Option],[role=option]')].filter(e=>e.offsetParent);
-    const menus = new Set(all.map(o => o.closest('[class*=menu],[class*=Menu],[role=listbox]')).filter(Boolean));
-    if(menus.size <= 1) opts = all;
+    const menus = [...new Set(all.map(o => o.closest('[class*=menu],[class*=Menu],[role=listbox]')).filter(Boolean))];
+    if(menus.length === 1){
+      const tr = anchor.getBoundingClientRect(), mr = menus[0].getBoundingClientRect();
+      const hOverlap = mr.left < tr.right && mr.right > tr.left && mr.width > 0;
+      const vAdjacent = Math.abs(mr.top - tr.bottom) <= 14 || Math.abs(mr.bottom - tr.top) <= 14;
+      if(hOverlap && vAdjacent) opts = all;
+    }
   }
   let t = opts.find(o => norm(o.innerText||o.textContent) === w);
   if(!t && w.length>=3) t = opts.find(o => { const x=norm(o.innerText||o.textContent); return x && (x===w); });
