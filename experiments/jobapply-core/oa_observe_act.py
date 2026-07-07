@@ -65,7 +65,7 @@ Outcome = str
 # Per-field caps (§6.2). Per-axis + GLOBAL backstop.
 # --------------------------------------------------------------------------- #
 VARIANT_CAP = 3  # query variants (shared front + revalue, deduped) — comes from oa_brain too
-SCROLL_CAP = 2  # off-screen / virtualized overlay reread
+SCROLL_CAP = 5  # off-screen / virtualized overlay reread (long EEO forms sit many viewports down)
 COMMIT_CAP = 2  # EMPTY re-commit, fresh verify key each time
 REVALUE_CAP = 2  # WRONG_VALUE re-search, clear-first
 CASCADE_CAP = 2  # sub-option recursion depth
@@ -107,7 +107,7 @@ _SETTLE_STATIC_S = 0.6  # a click-open menu settles fast
 _SETTLE_SEARCH_S = 0.9  # an async typeahead needs longer
 _SETTLE_GEO_S = 1.6  # a geocomplete (react-select location) resolves suggestions over the network
 _LIST_LONG = 12  # cluster >= this -> type-to-filter first (S_CLOSED_LIST long path)
-_SCROLL_PX = 320  # one overlay page for the off-screen reread
+_SCROLL_PX = 720  # ~one viewport for the off-screen reread (320 barely moved on tall forms)
 
 # Labels that FORBID a silent "Other"/skip substitution (§S_OTHER_GUARD).
 _SENSITIVE_TOKENS = frozenset(
@@ -850,7 +850,7 @@ async def _scroll_locate(session: Any, ctx: Ctx, state: perc.OAState) -> tuple[A
             " const want=norm(lab).slice(0,80); if(!want || want.length<6) return false;"
             " for(const e of document.querySelectorAll('label,legend,div,span,p,h1,h2,h3,h4')){"
             "   if(e.children.length>8) continue; const t=norm(e.innerText); if(!t) continue;"
-            "   if(t.startsWith(want) || (t.length>15 && want.startsWith(t.slice(0,60)))){"
+            "   if(t.startsWith(want) || (t.length>10 && want.startsWith(t.slice(0,60)))){"
             "     e.scrollIntoView({block:'center'}); return true; } } return false; }",
             str(ctx.label)[:200],
         )
