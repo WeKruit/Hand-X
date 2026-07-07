@@ -779,6 +779,34 @@ async def _fill_form(
                         _recon += 1
                 if _recon:
                     print(f"   [reconcile] {_recon} escalate/skip row(s) flipped to DONE (retry pass committed them)")
+            # DOM-VALUE reconciliation: an escalate/skip REQUIRED field whose INTENDED value is
+            # actually rendered on screen was filled by a path that never updated the outcome
+            # (airtable 'require sponsorship?' shows 'No' but logged ESCALATE; twin country combobox;
+            # etc.). Read the live DOM and flip those to DONE so the ledger matches the pixels. SAFE:
+            # matches the INTENDED value in the field's own region — a WRONG rendered value won't
+            # match, and the render-verify/wipe gates below re-check, so no false-green.
+            with contextlib.suppress(Exception):
+                def _rnorm2(s: Any) -> str:
+                    return " ".join(str(s or "").lower().replace("*", " ").replace(":", " ").split())
+                _reqn = {str(f.name) for f in fields if getattr(f, "required", False)}
+                _stale = {
+                    str(r.label): [str(r.name), str(r.value)]
+                    for r in per_field
+                    if r.outcome in (oa.ESCALATE, oa.SKIP) and r.name and str(r.name) in _reqn and str(r.value or "").strip()
+                }
+                if _stale:
+                    _shown = await oa_complete.rendered_present(page, _stale)
+                    _rn = 0
+                    for r in per_field:
+                        if r.outcome in (oa.ESCALATE, oa.SKIP) and str(r.label) in _shown:
+                            r.outcome = oa.DONE
+                            if not (r.committed and str(r.committed).strip()):
+                                r.committed = str(r.value)
+                            if isinstance(r.trace, list):
+                                r.trace.append("ledger-reconciled:value-on-screen")
+                            _rn += 1
+                    if _rn:
+                        print(f"   [reconcile] {_rn} escalate/skip row(s) flipped to DONE (intended value rendered on screen)")
             # REQUIRED-ESCALATE VETO (zero-cost, deterministic): a REQUIRED field whose own
             # outcome is ESCALATE is by definition not complete — yet the audit can't see a
             # hidden file input and the banded VLM samples. The engine's own ledger already

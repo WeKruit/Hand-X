@@ -625,6 +625,46 @@ _STILL_EMPTY_CHOICE_JS = r"""() => {
 }"""
 
 
+# LEDGER-HONESTY reconciliation: an escalate/skip field whose INTENDED value renders on screen was
+# actually filled (via a twin / a path that didn't update the outcome) — airtable sponsorship shows
+# 'No' but logged ESCALATE. Resolve the field by DOM id/name, read its container/value, and report
+# the labels whose intended value is visible. SAFE: matches the INTENDED value (a WRONG rendered
+# value won't match, so it can't turn a wrong field green), scoped to the field's own region.
+_RENDERED_PRESENT_JS = r"""() => {
+  const pairs = __PAIRS__;
+  const nrm = s => (s||'').replace(/\s+/g,' ').trim();
+  const low = s => nrm(s).toLowerCase();
+  const present = [];
+  for (const [lab, nv] of pairs) {
+    const name = (nv && nv[0]) || '', val = (nv && nv[1]) || '';
+    if (!nrm(val) || !name) continue;
+    let node = null;
+    try { node = document.getElementById(name) || document.querySelector('[name="'+CSS.escape(name)+'"]') || document.querySelector('[id="'+CSS.escape(name)+'"]'); } catch(e){}
+    if (!node) continue;
+    let box = node, disp = '';
+    for (let i=0;i<6 && box; i++){ const r=box.getBoundingClientRect(); const t=nrm(box.innerText); if(r.width>40 && r.height>0 && t){ disp=t; break; } box=box.parentElement; }
+    const labLow = low(lab).replace(/[*:]/g,'').trim();
+    let valReg = disp; const li = low(disp).indexOf(labLow);
+    if (labLow.length > 4 && li >= 0) valReg = nrm(disp.slice(li + labLow.length));
+    const iv = (node.value !== undefined) ? String(node.value) : '';
+    const v = low(val).slice(0, 24);
+    if (v.length >= 2 && (low(valReg).includes(v) || low(iv).includes(v))) present.push(lab);
+  }
+  return JSON.stringify(present);
+}"""
+
+
+async def rendered_present(page: Any, pairs_by_label: dict) -> list[str]:
+    """Labels (of escalate/skip fields) whose INTENDED value is actually rendered on screen — i.e.
+    the field IS filled and the ledger is stale. pairs_by_label: {label: [name, intended_value]}."""
+    import json
+
+    with contextlib.suppress(Exception):
+        js = _RENDERED_PRESENT_JS.replace("__PAIRS__", json.dumps([[k, v] for k, v in pairs_by_label.items()]))
+        return json.loads(await page.evaluate(js))
+    return []
+
+
 async def still_empty_choice(page: Any, committed_choice_by_label: dict) -> list[str]:
     """Committed CHOICE (react-select) labels whose control now renders only its placeholder — the
     commit reverted on a late re-render (false-green the text gate can't see). [] on failure."""
