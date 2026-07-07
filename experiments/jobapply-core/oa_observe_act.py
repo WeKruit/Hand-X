@@ -349,7 +349,13 @@ def _filter_probes(value: str) -> list[str]:
     if not v:
         return []
     toks = [t for t in re.split(r"[^\w]+", v) if len(t) >= 3]
-    cand = [v] + ([toks[-1]] if toks else []) + [v[: min(len(v), 6)]]
+    # HEAD comma-token: a geocomplete typeahead matches a CITY PREFIX, not the full "City, State,
+    # Country" — typing 'San Francisco, CA, USA' yields 0 rows and the last-word fallback 'USA' pulls
+    # garbage ('Uşak Turkey'). The leading comma part ('San Francisco') is the real query and surfaces
+    # the right rows (mega6/16: 'San Francisco' -> 6 opts CORRECT vs the full string -> ESCALATE). Try
+    # it right after the full value so location exits on it before the useless last-word probe.
+    head_comma = v.split(",")[0].strip() if "," in v else ""
+    cand = [v] + ([head_comma] if len(head_comma) >= 3 else []) + ([toks[-1]] if toks else []) + [v[: min(len(v), 6)]]
     seen: set[str] = set()
     out: list[str] = []
     for p in cand:
