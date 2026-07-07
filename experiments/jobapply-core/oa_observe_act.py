@@ -1385,10 +1385,23 @@ async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -
             session, container, ctx.value, group_name=getattr(ctx.field_obj, "name", "") or ""
         )
         if matched:
-            # The JS found a real input whose value/label matches, clicked it, and fired input/change —
-            # a reliable commit (the proven ats_lever path returned True on this click). Trust it as DONE
-            # rather than a DOM read-back of the trigger node (which can't see a hidden radio's checked
-            # state and would false-negative -> recommit loop).
+            # ASHBY PILL FALSE-GREEN REPAIR (live: clipboard 'authorized to work' — ledger DONE, pill
+            # blank on screen): cdp_choose_option may have checked a HIDDEN <input type=radio> while the
+            # VISIBLE pill button — React-controlled from its OWN onClick, not the input's change event —
+            # stayed unselected. Re-issue the commit by clicking the VISIBLE BUTTON via btn-by-label,
+            # which drives React (updates button + input together). It self-verifies against the real
+            # active class and NO-OPs when the button is already active (choice-dom-direct genuinely
+            # worked) or absent (lever styled-label radios) — so zero regression, repairs only the
+            # decoupled-pill false-green. Falls through to trusting `matched` if it can't find a button.
+            with contextlib.suppress(Exception):
+                _pg = await session.must_get_current_page()
+                _btn = await cdpa.cdp_choose_button_by_label(_pg, ctx.label, ctx.value)
+                if _btn:
+                    ctx.committed_text = _btn
+                    ctx.trace.append(f"choice-btn-repair:{_btn[:16]}")
+                    return DONE
+            # No pill button (real hidden radio whose styled label DOES reflect it — the proven Lever
+            # path): trust the matched click as DONE rather than a read-back that can't see the input.
             ctx.committed_text = matched
             ctx.trace.append(f"choice-dom-direct:{matched[:20]}")
             return DONE
