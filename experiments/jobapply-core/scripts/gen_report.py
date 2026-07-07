@@ -59,15 +59,20 @@ def main():
         w.writeheader()
         w.writerows(rows)
 
-    # Markdown
-    reached = [r for r in rows if r["verdict"] not in ("BLOCKED", "NONE", "NOT_REACHED")]
+    # Markdown — "reached" = actually got a fillable form (DONE>0); a 0-field/instant status is a
+    # failed-to-load custom-domain wrapper, NOT reached (counting it inflates reached/fill).
+    reached = [r for r in rows if r["filled"] > 0]
     passed = [r for r in rows if r["verdict"] == "PASS"]
     tot_cost = sum(r["cost"] for r in rows)
     avg_lat = sum(r["latency_s"] for r in rows) / max(len(rows), 1)
     slots = sum(r["filled"] + r["esc"] for r in reached)
+    tot_esc = sum(r["esc"] for r in reached)
     fill_pct = 100 * sum(r["filled"] for r in reached) // max(slots, 1)
+    esc_pct = 100 * tot_esc // max(slots, 1)
+    forms_esc = sum(1 for r in reached if r["esc"] > 0)
+    false_green = sum(1 for r in rows if r["reverted"])
     lines = [f"# {name} — sweep report", ""]
-    lines.append(f"**{len(passed)}/{len(reached)} PASS (finish {100*len(passed)//max(len(reached),1)}%)** | field-fill {fill_pct}% | total cost ${tot_cost:.3f} | avg latency {avg_lat:.0f}s | {len(rows)} rows")
+    lines.append(f"**{len(passed)}/{len(reached)} PASS (finish {100*len(passed)//max(len(reached),1)}%)** | reached {len(reached)}/{len(rows)} | field-fill {fill_pct}% | **escalation {esc_pct}%** ({tot_esc} fields, {forms_esc} forms) | **false-green {false_green}** | cost ${tot_cost:.3f} | avg latency {avg_lat:.0f}s | {len(rows)} rows")
     lines.append("")
     lines.append("| row | platform | verdict | filled | esc | cost | latency | missing/reverted | url |")
     lines.append("|----|----|----|----|----|----|----|----|----|")

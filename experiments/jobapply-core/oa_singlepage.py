@@ -754,6 +754,31 @@ async def _fill_form(
                 text_labels=_text_labels,
                 form_url=_form_url,
             )
+            # LEDGER RECONCILIATION: complete()'s retry/agent pass commits fields into
+            # committed_by_label (it mutates _cbl in place, adding retry commits) but the per_field
+            # row keeps its pre-retry ESCALATE/SKIP — so the ledger, every downstream stat, and the
+            # results JSON UNDER-report fills that ARE on screen (reddit veteran, lyft signature,
+            # webflow consent were all filled by the retry pass, screenshot-verified, yet logged
+            # ESCALATE). Flip any ESCALATE/SKIP row the completion pass actually committed to DONE,
+            # so the ledger matches the pixels. Uses complete()'s OWN verified commit record (a retry
+            # only writes committed_by_label on outcome==DONE) — no DOM re-read/guess — and the
+            # render-verify + wipe gates below still re-check every DONE against the live screen, so
+            # this cannot manufacture a false-green.
+            with contextlib.suppress(Exception):
+                def _rnorm(s: Any) -> str:  # inline: the module _norm is defined LATER in this fn
+                    return " ".join(str(s or "").lower().replace("*", " ").replace(":", " ").split())
+                _healed = {_rnorm(k): str(v) for k, v in _cbl.items() if v and str(v).strip()}
+                _recon = 0
+                for r in per_field:
+                    if r.outcome in (oa.ESCALATE, oa.SKIP) and _rnorm(r.label) in _healed:
+                        r.outcome = oa.DONE
+                        if not (r.committed and str(r.committed).strip()):
+                            r.committed = _healed[_norm(r.label)]
+                        if isinstance(r.trace, list):
+                            r.trace.append("ledger-reconciled:retry-commit")
+                        _recon += 1
+                if _recon:
+                    print(f"   [reconcile] {_recon} escalate/skip row(s) flipped to DONE (retry pass committed them)")
             # REQUIRED-ESCALATE VETO (zero-cost, deterministic): a REQUIRED field whose own
             # outcome is ESCALATE is by definition not complete — yet the audit can't see a
             # hidden file input and the banded VLM samples. The engine's own ledger already
