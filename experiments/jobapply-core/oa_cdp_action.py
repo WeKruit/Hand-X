@@ -459,6 +459,32 @@ inputs = [...root.querySelectorAll('input[type=radio],input[type=checkbox]')];
 """
 
 
+# JS: mirror _CHOOSE_OPTION_JS's match (button-pill, then hidden-input's label) but RETURN the target's
+# viewport-center coords instead of clicking — so the caller can issue a TRUSTED CDP mouse click when the
+# synthetic .click() didn't stick (ashby pills listen on pointerdown, not click). `this` = the container.
+_OPTION_COORDS_JS = r"""
+function(want, groupName){
+  const norm = s => (s||'').replace(/\s+/g,'').toLowerCase();
+  const vis = e => norm((e.innerText!=null && e.innerText.trim()) ? e.innerText : (e.textContent||''));
+  const w = norm(want); if(!w) return null;
+  const rectOf = e => { try{ e.scrollIntoView({block:'center'}); }catch(_){} const r=e.getBoundingClientRect();
+    return (r.width>1 && r.height>1) ? {x:r.left+r.width/2, y:r.top+r.height/2} : null; };
+  let root = this;
+  if(root.matches && root.matches('input,button')) root = root.closest('fieldset,[role=group],[role=radiogroup]') || root.parentElement || root;
+  const btns = [...root.querySelectorAll('button,[role=button],[role=radio],[role=option]')].filter(b => {
+    const ty=(b.getAttribute('type')||'').toLowerCase(); if(ty==='submit') return false;
+    const t=vis(b); return t && t.length<=30 && !/submit|apply|upload|replace|next|continue/.test(t); });
+  let hit = btns.find(b => vis(b)===w);
+  if(hit) return rectOf(hit);
+  let inputs = [];
+  if(groupName){ const esc=(window.CSS&&CSS.escape)?CSS.escape(groupName):groupName;
+    inputs=[...document.querySelectorAll('input[type=radio][name="'+esc+'"],input[type=checkbox][name="'+esc+'"]')]; }
+  for(const el of inputs){ const L=(el.labels&&el.labels[0])||el.closest('label'); if(L && vis(L)===w) return rectOf(L); }
+  return null;
+}
+"""
+
+
 async def cdp_choose_option(session: Any, container_node: Any, value: str, group_name: str = "") -> str:
     """Commit a radio/checkbox GROUP the proven Lever way: scan the container's REAL inputs (incl.
     visually-hidden ones a visible-only selector_map misses), match the one whose VALUE attr / wrapping
@@ -483,6 +509,27 @@ async def cdp_choose_option(session: Any, container_node: Any, value: str, group
                 return str(got).strip()
             if attempt == 1:
                 print("   [choice] commit reverted by re-render — one re-click")
+        # TRUSTED-CLICK FALLBACK: the synthetic .click() found the option ('got') but it never stuck
+        # (React ashby pills fire on pointerdown, not the synthetic click — apolink 'satellite missions'
+        # committed EMPTY twice -> commit-cap). Get the matched option's coords and issue a REAL CDP mouse
+        # click there, then RE-VERIFY via _STILL_CHECKED_JS (reads the true .checked/active-class state,
+        # NOT label text — so this can never false-green an unselected field). Only reached after the
+        # synthetic path failed, so working pills are untouched.
+        with contextlib.suppress(Exception):
+            coords = await _call_on(cdp_session, session_id, object_id, _OPTION_COORDS_JS, args=[str(value), str(group_name or "")])
+            if isinstance(coords, dict) and coords.get("x") is not None and coords.get("y") is not None:
+                cx, cy = float(coords["x"]), float(coords["y"])
+                for ev in (
+                    {"type": "mouseMoved", "x": cx, "y": cy, "buttons": 0},
+                    {"type": "mousePressed", "x": cx, "y": cy, "button": "left", "buttons": 1, "clickCount": 1},
+                    {"type": "mouseReleased", "x": cx, "y": cy, "button": "left", "buttons": 0, "clickCount": 1},
+                ):
+                    await cdp_session.cdp_client.send.Input.dispatchMouseEvent(params=ev, session_id=session_id)
+                await asyncio.sleep(0.35)
+                still = await _call_on(cdp_session, session_id, object_id, _STILL_CHECKED_JS, args=[str(group_name or "")])
+                if still is not False:
+                    print("   [choice] trusted CDP click landed the pill (synthetic click was ignored)")
+                    return str(got).strip() or str(value)
         return ""
 
     try:
