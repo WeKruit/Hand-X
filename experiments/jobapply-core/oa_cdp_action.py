@@ -464,42 +464,58 @@ inputs = [...root.querySelectorAll('input[type=radio],input[type=checkbox]')];
 # ANCHOR to the field's own entry container by LABEL text (not page-wide -> no cross-field bleed), click
 # the button whose text == value, and return the value ONLY if the button ends in an active/selected
 # state -> self-verifying, so it cannot false-green an unselected pill.
-_BTN_BY_LABEL_JS = r"""() => {
-  const label = __LABEL__, want = __WANT__;
+# shared prologue: resolve the field-entry container BY LABEL and the target pill button.
+_BTN_FIND = r"""
   const low = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
   const norm2 = s => (s||'').replace(/\s+/g,'').toLowerCase();
-  const w = norm2(want);
-  const labLow = low(label).replace(/[*:]/g,'').trim();
+  const w = norm2(want); const labLow = low(label).replace(/[*:]/g,'').trim();
   if(!w || labLow.length < 4) return "";
   const cands = [...document.querySelectorAll('div,fieldset,section')].filter(e => {
     const t = low(e.innerText); return e.children.length < 40 && t && t.startsWith(labLow.slice(0,40));
   }).sort((a,b) => (a.innerText||'').length - (b.innerText||'').length);
-  const cont = cands[0];
-  if(!cont) return "";
+  const cont = cands[0]; if(!cont) return "";
   const btns = [...cont.querySelectorAll('button,[role=button],[role=radio],[role=option]')].filter(b => {
     const ty=(b.getAttribute('type')||'').toLowerCase(); if(ty==='submit') return false;
     const t=norm2(b.innerText); return t && t.length<=30 && !/submit|apply|upload|replace|next|continue/.test(t); });
-  const hit = btns.find(b => norm2(b.innerText)===w);
-  if(!hit) return "";
+  const hit = btns.find(b => norm2(b.innerText)===w); if(!hit) return "";
+"""
+# STEP 1 — click the pill (pointer sequence). Returns its text (the click landed).
+_BTN_CLICK_JS = "() => { const label = __LABEL__, want = __WANT__;" + _BTN_FIND + r"""
+  const cls0 = String(hit.className||'');
+  const already = /(^|[^a-z])(active|selected|checked|_active_)([^a-z]|$)/i.test(cls0)
+    || hit.getAttribute('aria-checked')==='true' || hit.getAttribute('aria-pressed')==='true' || hit.getAttribute('data-state')==='checked';
+  if(already) return (hit.innerText||'').trim() || want;   // already selected -> don't re-click (would TOGGLE it off)
   try{ hit.scrollIntoView({block:'center'}); }catch(_){}
   for(const ev of ['pointerdown','mousedown','mouseup','click']) hit.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));
+  return (hit.innerText||'').trim() || want; }"""
+# STEP 2 — AFTER a tick, is that same pill now active/selected? (React applies the class next tick,
+# so this MUST run in a separate evaluate after an await — checking in step 1 always read stale.)
+_BTN_VERIFY_JS = "() => { const label = __LABEL__, want = __WANT__;" + _BTN_FIND + r"""
   const cls = String(hit.className||'');
-  const active = /(^|[^a-z])(active|selected|checked|_active_)([^a-z]|$)/i.test(cls)
-    || hit.getAttribute('aria-checked')==='true' || hit.getAttribute('aria-pressed')==='true' || hit.getAttribute('data-state')==='checked';
-  return active ? ((hit.innerText||'').trim() || want) : "";
-}"""
+  return (/(^|[^a-z])(active|selected|checked|_active_)([^a-z]|$)/i.test(cls)
+    || hit.getAttribute('aria-checked')==='true' || hit.getAttribute('aria-pressed')==='true'
+    || hit.getAttribute('data-state')==='checked') ? ((hit.innerText||'').trim() || want) : ""; }"""
 
 
 async def cdp_choose_button_by_label(page: Any, label: str, value: str) -> str:
     """Commit an ashby-style pill button group anchored by the field's LABEL (field-scoped, no bleed).
-    Returns the committed option text ONLY if the button ended in an active/selected state — self-
-    verifying, so it can never false-green an unselected pill. "" on any miss/failure."""
+    Clicks the pill, then AFTER a tick re-checks it ended active/selected — returns the option text ONLY
+    if so. Self-verifying (real active state, not label text) -> cannot false-green an unselected pill.
+    Split click/verify because React applies the active class on the next tick (a same-evaluate check
+    read stale and returned "" every time -> the fix silently never fired). "" on any miss/failure."""
+    import asyncio as _a
     import json as _json
 
     with contextlib.suppress(Exception):
-        js = _BTN_BY_LABEL_JS.replace("__LABEL__", _json.dumps(str(label or ""))).replace("__WANT__", _json.dumps(str(value or "")))
-        got = await page.evaluate(js)
-        return str(got or "").strip()
+        def _b(t):
+            return t.replace("__LABEL__", _json.dumps(str(label or ""))).replace("__WANT__", _json.dumps(str(value or "")))
+
+        clicked = await page.evaluate(_b(_BTN_CLICK_JS))
+        if not str(clicked or "").strip():
+            return ""
+        await _a.sleep(0.3)
+        active = await page.evaluate(_b(_BTN_VERIFY_JS))
+        return str(active or "").strip()
     return ""
 
 
