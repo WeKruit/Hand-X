@@ -16,7 +16,9 @@ create table if not exists job_fill_runs (
   cost_usd         numeric(10,5),
   latency_s        int,
   false_green      boolean     not null default false,
-  committed_data   jsonb,                                 -- [{label, type, outcome, committed}] — the actual data filled
+  committed_data   jsonb,                                 -- [{label,type,outcome,committed,value,trace}]
+  escalations      jsonb,                                 -- denormalized escalate/skip fields for aggregation
+  log_text         text,                                  -- run log tail for debugging reported issues                                 -- [{label, type, outcome, committed}] — the actual data filled
   screenshot_path  text,                                  -- local path or Supabase Storage URL
   created_at       timestamptz not null default now(),
   unique (run_batch, row_num)

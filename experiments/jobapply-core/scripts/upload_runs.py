@@ -44,16 +44,28 @@ def _row(path: str, batch: str) -> dict | None:
     verdict = "PASS" if c.get("complete") else ("NO_LOAD" if dn == 0 else (d.get("status") or "FILLED"))
     committed = [
         {"label": (e.get("label") or e.get("name") or "")[:120], "type": e.get("type"),
-         "outcome": e.get("outcome"), "committed": str(e.get("committed") or "")[:200]}
-        for e in res if e.get("committed")
+         "outcome": e.get("outcome"), "committed": str(e.get("committed") or "")[:200],
+         "value": str(e.get("value") or "")[:120], "trace": (e.get("trace") or [])[-8:]}
+        for e in res
     ]
+    # denormalized escalation list for cheap aggregation ("top escalation causes") — reason = last trace step
+    escal = [
+        {"label": (e.get("label") or e.get("name") or "")[:120], "type": e.get("type"),
+         "outcome": e.get("outcome"), "reason": ((e.get("trace") or ["?"])[-1])[:80]}
+        for e in res if e.get("outcome") in ("ESCALATE", "SKIP")
+    ]
+    # run log tail (escalation traces live at the end) — so a reported issue is debuggable in-DB
+    log = ""
+    with __import__("contextlib").suppress(Exception):
+        log = open(path[:-5] + ".log", errors="ignore").read()[-20000:]
     return {
         "run_batch": batch, "row_num": int(n), "url": url, "host": _host(url), "ats_platform": _plat(url),
         "profile_name": "Jordan Avery (rich_profile.json)", "verdict": verdict,
         "fields_filled": dn, "fields_escalated": es, "fields_total": len(res),
         "field_fill_rate": round(100 * dn / max(dn + es, 1), 2), "cost_usd": round(d.get("cost") or 0, 5),
         "latency_s": int(d.get("secs") or 0), "false_green": bool(c.get("choice_reverted")),
-        "committed_data": json.dumps(committed), "screenshot_path": path[:-5] + ".png",
+        "committed_data": json.dumps(committed), "escalations": json.dumps(escal),
+        "log_text": log, "screenshot_path": path[:-5] + ".png",
     }
 
 
@@ -75,7 +87,7 @@ async def main():
         await conn.execute(open(os.path.join(os.path.dirname(__file__), "db_schema.sql")).read())
         cols = ["run_batch", "row_num", "url", "host", "ats_platform", "profile_name", "verdict",
                 "fields_filled", "fields_escalated", "fields_total", "field_fill_rate", "cost_usd",
-                "latency_s", "false_green", "committed_data", "screenshot_path"]
+                "latency_s", "false_green", "committed_data", "escalations", "log_text", "screenshot_path"]
         ph = ", ".join(f"${i+1}" for i in range(len(cols)))
         upd = ", ".join(f"{c}=excluded.{c}" for c in cols if c not in ("run_batch", "row_num"))
         sql = (f"insert into job_fill_runs ({', '.join(cols)}) values ({ph}) "
