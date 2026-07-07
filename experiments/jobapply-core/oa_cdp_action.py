@@ -459,6 +459,50 @@ inputs = [...root.querySelectorAll('input[type=radio],input[type=checkbox]')];
 """
 
 
+# JS (bare arrow, baked args): commit an ashby-style pill BUTTON group the cdp_choose_option container
+# scan missed (live-verified on apolink: the 'No' option is a <button>, clicking it adds `_active_1svni_57`).
+# ANCHOR to the field's own entry container by LABEL text (not page-wide -> no cross-field bleed), click
+# the button whose text == value, and return the value ONLY if the button ends in an active/selected
+# state -> self-verifying, so it cannot false-green an unselected pill.
+_BTN_BY_LABEL_JS = r"""() => {
+  const label = __LABEL__, want = __WANT__;
+  const low = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const norm2 = s => (s||'').replace(/\s+/g,'').toLowerCase();
+  const w = norm2(want);
+  const labLow = low(label).replace(/[*:]/g,'').trim();
+  if(!w || labLow.length < 4) return "";
+  const cands = [...document.querySelectorAll('div,fieldset,section')].filter(e => {
+    const t = low(e.innerText); return e.children.length < 40 && t && t.startsWith(labLow.slice(0,40));
+  }).sort((a,b) => (a.innerText||'').length - (b.innerText||'').length);
+  const cont = cands[0];
+  if(!cont) return "";
+  const btns = [...cont.querySelectorAll('button,[role=button],[role=radio],[role=option]')].filter(b => {
+    const ty=(b.getAttribute('type')||'').toLowerCase(); if(ty==='submit') return false;
+    const t=norm2(b.innerText); return t && t.length<=30 && !/submit|apply|upload|replace|next|continue/.test(t); });
+  const hit = btns.find(b => norm2(b.innerText)===w);
+  if(!hit) return "";
+  try{ hit.scrollIntoView({block:'center'}); }catch(_){}
+  for(const ev of ['pointerdown','mousedown','mouseup','click']) hit.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));
+  const cls = String(hit.className||'');
+  const active = /(^|[^a-z])(active|selected|checked|_active_)([^a-z]|$)/i.test(cls)
+    || hit.getAttribute('aria-checked')==='true' || hit.getAttribute('aria-pressed')==='true' || hit.getAttribute('data-state')==='checked';
+  return active ? ((hit.innerText||'').trim() || want) : "";
+}"""
+
+
+async def cdp_choose_button_by_label(page: Any, label: str, value: str) -> str:
+    """Commit an ashby-style pill button group anchored by the field's LABEL (field-scoped, no bleed).
+    Returns the committed option text ONLY if the button ended in an active/selected state — self-
+    verifying, so it can never false-green an unselected pill. "" on any miss/failure."""
+    import json as _json
+
+    with contextlib.suppress(Exception):
+        js = _BTN_BY_LABEL_JS.replace("__LABEL__", _json.dumps(str(label or ""))).replace("__WANT__", _json.dumps(str(value or "")))
+        got = await page.evaluate(js)
+        return str(got or "").strip()
+    return ""
+
+
 async def cdp_choose_option(session: Any, container_node: Any, value: str, group_name: str = "") -> str:
     """Commit a radio/checkbox GROUP the proven Lever way: scan the container's REAL inputs (incl.
     visually-hidden ones a visible-only selector_map misses), match the one whose VALUE attr / wrapping

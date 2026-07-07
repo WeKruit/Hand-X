@@ -1393,6 +1393,21 @@ async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -
             ctx.trace.append(f"choice-dom-direct:{matched[:20]}")
             return DONE
 
+    # LABEL-ANCHORED PILL BUTTON (ashby _option buttons the container scan missed — the locate bound a
+    # node outside the field-entry, so cdp_choose_option found no button and the field fell to the visual
+    # path -> implausible-reject -> S_OTHER_GUARD, apolink 'satellite missions'). Live-verified: the pill
+    # IS a <button>, clicking adds `_active_`. Find the field-entry container BY LABEL (field-scoped, no
+    # page-wide bleed), click the matching button, accept ONLY if it ends active (self-verifying, cannot
+    # false-green). Between dom-direct and the visual fallback so it never overrides a real input match.
+    if normalize_kind(ctx.kind) in ("CHOICE", "SELECT") or ctx.nature in ("BOOLEAN", "CLOSED_LIST", "INTRINSIC_RADIO", "INTRINSIC_CHECKBOX"):
+        with contextlib.suppress(Exception):
+            _pg = await session.must_get_current_page()
+            _btn = await cdpa.cdp_choose_button_by_label(_pg, ctx.label, ctx.value)
+            if _btn:
+                ctx.committed_text = _btn
+                ctx.trace.append(f"choice-btn-by-label:{_btn[:20]}")
+                return DONE
+
     # The group's options are siblings already rendered. SNAPSHOT REUSE: prefer the locate snapshot
     # handed down from classify (the static radio/checkbox group is already in it) — only serialize
     # afresh if the caller had none (e.g. a re-entry). This removes a full-page get_state per choice
