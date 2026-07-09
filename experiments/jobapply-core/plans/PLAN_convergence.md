@@ -119,7 +119,16 @@ block submit; dismiss before verify/finish; fixture `cookie_banner_blocks_submit
 was DISABLED while engine said COMPLETE — completeness should check the submit control's enabled state
 (free structural signal; fixture `submit_disabled_incomplete`).
 
-Combined streaming tally at ~110/500: 83 audited → 73 real, 7 hard false-greens, 3 captcha-blocked.
+Combined streaming tally at ~160/500 (3 chunks, 123 audited): **108 truly complete (87.8% of
+claimed-COMPLETE)**. Deductions decompose into exactly two levers:
+- **9 captcha/stuck-overlay runs marked COMPLETE (7.3% of audited)** — THE dominant false-green source,
+  bigger than all fill bugs combined; one Phase-1 verdict fix (honor the engine's own `blocker` flag +
+  overlay detection → NEEDS_HUMAN) recovers all 9.
+- **6 true fill false-greens**: Location-geocomplete placeholder ×4 (artie 045/102/157 + 1password 087 —
+  top fill bug; = the verify-timing class), consent-pill both-grey ×1 (airwallex 149 AI-Policy; also
+  Middle Name='+1' country-code bleed painted + submit disabled), cross-field bleed painted ×1 (arq 101).
+Chunk-3 audit prompt refined (cookie banners noted, not auto-failed) — chunk-2's 4 banner rows recounted
+as real. Streaming audits: 3 chunks × ~90s each, zero added wall-clock to the sweep.
 
 **Cluster wake #2 (67/500): `S_OTHER no-escape→ESCALATE` 2→7.** Decomposition:
 anthropic ×2 = FR-2 (known). flexport ×2 + twilio ×2 = **duplicate-discovery pairs** (one control
