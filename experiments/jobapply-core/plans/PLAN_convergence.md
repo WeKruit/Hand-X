@@ -160,6 +160,11 @@ value is not among them, RE-VALUE with the actual options in context (meaning-pi
 before S_OTHER; NEEDS_HUMAN only after that. Fixture: `closed_list_value_not_member`. Also abacum 145 =
 2nd `ledger-reconciled:value-on-screen` specimen (painted but counted ESCALATE — scoring false-red).
 
+**Cluster wake #5 (173/500): no-escape 10→13 — NO new class; per-tenant repetition.** Every twilio
+posting emits the identical N2 right-to-work pair + Location miss; affirm repeats N3 on each posting.
+SCORING IMPLICATION: failures concentrate by tenant — report confidence per-COMPANY alongside per-run,
+else repeated tenants over-weight the metric (both directions). Watcher baselines raised accordingly.
+
 ## Immediate next actions (this week)
 1. Finish current sweep + streaming audit → honest baseline number on the NEW population.
 2. Phase 1 verdict fixes + their 3 fixtures (small diffs, verdict-layer, fixture-gated).
