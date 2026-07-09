@@ -107,6 +107,20 @@ the SETTLED painted state; DOM-echo verify of the committed control is circular.
 caught). Also proves F2 again — these 6 are honest ESCALATEs only BECAUSE vision was alive; under load
 the same rows ship as false-greens.
 
+**Streaming-audit chunk 2 (40 runs, 87s): 30 real / 10 flagged — decomposed honestly:**
+3 TRUE fill false-greens: 1password 087 (Location 'Start typing…' + work-auth pill both-grey — engine
+claimed both), arq 101 (**cross-field bleed PAINTED**: visa-support question contains
+'New York City, New York, United States' — first bleed specimen visible ON SCREEN, upgrades FR-1/N1
+from false-red to false-GREEN producer), artie 102 (Location placeholder — geocomplete-wipe now 3×:
+045/102/087; the highest-frequency fill bug of this sweep). 3 CAPTCHA-blocked runs marked COMPLETE
+(073/074/076 drag-puzzles) — verdict must be NEEDS_HUMAN. 4 cookie-banner rows: auditors verified the
+fills ARE real (over-strict audit rule on my part) — real gap = **banner dismissal** (a banner can
+block submit; dismiss before verify/finish; fixture `cookie_banner_blocks_submit`). Also arq's Submit
+was DISABLED while engine said COMPLETE — completeness should check the submit control's enabled state
+(free structural signal; fixture `submit_disabled_incomplete`).
+
+Combined streaming tally at ~110/500: 83 audited → 73 real, 7 hard false-greens, 3 captcha-blocked.
+
 **Cluster wake #2 (67/500): `S_OTHER no-escape→ESCALATE` 2→7.** Decomposition:
 anthropic ×2 = FR-2 (known). flexport ×2 + twilio ×2 = **duplicate-discovery pairs** (one control
 discovered as combobox AND text row; both escalate — failures double-counted; FR-1's
@@ -117,6 +131,16 @@ dedup-by-backend_node_id also fixes the denominator). Plus TWO NEW bugs for B's 
 and never clicked; fixture `search_single_option_commit`. Also noted: airtable 061 ends
 `ledger-reconciled:value-on-screen` (value IS painted post-escalate) — scoring must count
 reconciled rows as filled, else self-inflicted false-reds.
+
+**Cluster wake #3 (109/500): `scroll-locate×5:miss → no-control` — the BIGGEST lost-field family.**
+~28 rows across ~15 runs; ~18 are **Ashby/Lever EEO-demographic radios** (`systemfield_eeoc_race`,
+Veteran, Disability, gender/ethnicity — openai/replit/aleph/vanta ×2 each, 1password, ro, mashgin):
+the voluntary self-ID section sits behind a collapsed disclosure / lazy region that scrolling never
+reveals — values were correctly MAPPED, locate can't REACH the controls. One structural fix (detect +
+expand disclosure affordances before locate-exhaust; title-ignorant, structure-only) recovers dozens of
+fields. Fixture: `collapsed_selfid_disclosure`. Remainder: agilityrobotics custom-domain GH-embed
+iframe ×5 (reach class, joins coreweave), replit 112 First/Last-name no-control anomaly (probe
+separately). Slots into B-F5 (scoped re-discover) + A's flow/disclosure lane.
 
 ## Immediate next actions (this week)
 1. Finish current sweep + streaming audit → honest baseline number on the NEW population.
