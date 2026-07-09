@@ -151,6 +151,15 @@ fields. Fixture: `collapsed_selfid_disclosure`. Remainder: agilityrobotics custo
 iframe ×5 (reach class, joins coreweave), replit 112 First/Last-name no-control anomaly (probe
 separately). Slots into B-F5 (scoped re-discover) + A's flow/disclosure lane.
 
+**Cluster wake #4 (165/500): no-escape 7→10 — new class (N3) mapper-vs-options mismatch on closed
+lists.** affirm 117: mapper emitted a free-text SENTENCE for a combobox ('How do you feel about…') →
+filters find 0 opts; affirm 172 ×2 (duplicate pair again): mapper said 'Other' but the 61-option state
+list has no literal 'Other' — the ONE mapping call runs BEFORE options are read, so closed-list values
+can be non-members. Fix rung (B-F3 extension): when a closed list's options are read and the mapped
+value is not among them, RE-VALUE with the actual options in context (meaning-pick, no text matching)
+before S_OTHER; NEEDS_HUMAN only after that. Fixture: `closed_list_value_not_member`. Also abacum 145 =
+2nd `ledger-reconciled:value-on-screen` specimen (painted but counted ESCALATE — scoring false-red).
+
 ## Immediate next actions (this week)
 1. Finish current sweep + streaming audit → honest baseline number on the NEW population.
 2. Phase 1 verdict fixes + their 3 fixtures (small diffs, verdict-layer, fixture-gated).
