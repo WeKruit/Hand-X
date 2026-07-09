@@ -46,7 +46,13 @@ from typing import Any
 # --------------------------------------------------------------------------- #
 # Bounds (env-tunable). The whole point: NO per-field await is ever unbounded.
 # --------------------------------------------------------------------------- #
-OA_LLM_TIMEOUT = float(os.environ.get("OA_LLM_TIMEOUT", "5.0"))  # per-attempt bound (text + vlm)
+OA_LLM_TIMEOUT = float(os.environ.get("OA_LLM_TIMEOUT", "5.0"))  # per-attempt bound (text)
+# VLM needs its own, larger bound: a vision call ships a full-page SCREENSHOT, so the model round-trip
+# is 2-8s even on a healthy network (vs a nano text read <1s). The shared 5s bounded-out the vision
+# second-opinion on nearly every live page -> visually_unanswered came back empty -> COMPLETE went
+# DOM-only (false-greens the vision guard exists to catch slipped through). The completeness-audit
+# vision is a page-level call (after the fill loop, NOT under FIELD_DEADLINE) so the larger bound is safe.
+OA_VLM_TIMEOUT = float(os.environ.get("OA_VLM_TIMEOUT", "12.0"))  # per-attempt bound (vlm image call)
 OA_LLM_RETRIES = int(os.environ.get("OA_LLM_RETRIES", "1"))  # ONE retry on the PRIMARY before fallback
 # The page-level field-mapping call (ats_engine.map_fields via ResilientLLM.ainvoke) is ONE large
 # structured prompt (every field row + profile + JD in a single request), not a per-field call. It
@@ -287,7 +293,7 @@ async def resilient_vlm(messages: Any, *, primary: Any = None) -> Any:
     sentinel). NEVER an unbounded await."""
     prim = primary if primary is not None else _build_primary_vlm()
     if prim is not None:
-        res = await _bounded_invoke(prim, messages, None, who="gemini(vlm-primary)")
+        res = await _bounded_invoke(prim, messages, None, who="gemini(vlm-primary)", timeout=OA_VLM_TIMEOUT)
         if res is not None:
             return res
 
@@ -295,7 +301,7 @@ async def resilient_vlm(messages: Any, *, primary: Any = None) -> Any:
     if fb is None:
         _log("vlm: primary bounded-out, NO vision fallback key -> None")
         return None
-    res = await _bounded_invoke(fb, messages, None, who=f"{name}(vlm-fallback)")
+    res = await _bounded_invoke(fb, messages, None, who=f"{name}(vlm-fallback)", timeout=OA_VLM_TIMEOUT)
     if res is None:
         _log(f"vlm: fallback {name} also bounded-out -> None")
     return res

@@ -603,6 +603,45 @@ _STILL_EMPTY_CHOICE_JS = r"""() => {
     let node = null;
     try { node = document.getElementById(name) || document.querySelector('[name="'+CSS.escape(name)+'"]') || document.querySelector('[id="'+CSS.escape(name)+'"]'); } catch(e){}
     if (!node) { if(DIAG) dbg.push({lab:lab.slice(0,22), node:false}); continue; }
+    // NATIVE <select> FAST-TRUTH: a native <select>'s innerText concatenates ALL option labels
+    // (incl. the "Select…" placeholder), so the innerText/isPh path below FALSE-flags a correctly-set
+    // select as reverted (Lever's application-dropdown Yes/No/EEO — value stays 'No' but innerText reads
+    // "Select... Yes No"). Read the SELECTED option instead: a real (non-placeholder) selection == filled;
+    // only a placeholder/nothing selected is genuinely reverted. Reads actual state -> no false-green.
+    { let sEl = node.tagName === 'SELECT' ? node : (node.querySelector ? node.querySelector('select') : null);
+      if (sEl && sEl.options) { const si = sEl.selectedIndex;
+        const st = (si >= 0 && sEl.options[si]) ? sEl.options[si].textContent : '';
+        if (si > 0 && !isPh(st)) { if(DIAG) dbg.push({lab:lab.slice(0,20), nativeSel:st.slice(0,16)}); continue; }
+        if(DIAG) dbg.push({lab:lab.slice(0,20), nativeSel:'PLACEHOLDER'}); empty.push(lab); continue; } }
+    // RADIO-GROUP SELECTED-STATE (native input[type=radio] / [role=radio] ONLY): a radio group renders
+    // EVERY option label ('Yes No', 'Full-time Part-time Contract') regardless of which is selected, so
+    // the text-presence path below FALSE-GREENS a blank group — the committed label is always in the box
+    // (reference_rendered_present_unsafe_radio). Verify the committed option is really CHECKED. Scoped to
+    // TRUE radios only (NOT button/[role=option]) so it can't over-match datepicker day-buttons or a
+    // Workday/react-select listbox (role=option / single-value span -> falls through to the text path
+    // unchanged). Fires only when a >=2 radio group is bound to the committed field.
+    { let grp = node, radios = [];
+      for (let i=0;i<6 && grp; i++) {
+        const rs = [...grp.querySelectorAll('input[type=radio],[role=radio]')];
+        if (rs.length >= 2) { radios = rs; break; }
+        grp = grp.parentElement;
+      }
+      if (radios.length >= 2) {
+        const chk = e => (e.tagName === 'INPUT' ? !!e.checked : e.getAttribute('aria-checked') === 'true');
+        const rlab = e => { let t = '';
+          try { if (e.id) { const l = document.querySelector('label[for="'+CSS.escape(e.id)+'"]'); if (l) t = l.innerText; } } catch(_){}
+          if (!t && e.closest && e.closest('label')) t = e.closest('label').innerText;
+          if (!t) t = e.getAttribute('aria-label') || e.value || '';
+          return low(t); };
+        const wl = low(val);
+        const match = radios.find(r => { const t = rlab(r); return t && (t === wl || t.includes(wl) || wl.includes(t)); });
+        if (match) {
+          if (chk(match)) { if(DIAG) dbg.push({lab:lab.slice(0,18), radio:'checked'}); continue; }
+          if(DIAG) dbg.push({lab:lab.slice(0,18), radio:'MATCH-UNCHECKED'}); empty.push(lab); continue;
+        }
+        if (!radios.some(chk)) { if(DIAG) dbg.push({lab:lab.slice(0,18), radio:'NONE-CHECKED'}); empty.push(lab); continue; }
+      }
+    }
     // climb to the visible control BOX (first bounded ancestor carrying rendered text)
     let box = node, disp = '';
     for (let i=0;i<5 && box; i++) {

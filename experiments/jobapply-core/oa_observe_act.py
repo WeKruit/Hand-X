@@ -139,6 +139,28 @@ def _is_sensitive(label: str) -> bool:
     return bool(toks & _SENSITIVE_TOKENS)
 
 
+# Phantom double-bind disambiguation. A MUI Select is discovered as TWO entries (the real combobox +
+# a native-mirror twin whose accessible name is the placeholder, e.g. "Select an answer"). The twin
+# must be skipped so its stray value can't overwrite the real commit. But grouped-locate desync can
+# also make a DISTINCT field resolve to an unrelated committed node (live Ashby: a 'visa' radio group
+# resolves to the Name input's id) — that must NOT be skipped. The committer's node id is stored WITH
+# its question label; a later same-node hit is a real twin only if its label is a placeholder OR shares
+# a content token with the committer (principle + the DOM same-node cross-check, not a rule list).
+def _phantom_label(label: str) -> str:
+    return " ".join(str(label or "").lower().split())
+
+
+def _phantom_twin(cur_label: str, committer_label: str) -> bool:
+    # TIGHT: the twin is skippable ONLY when its OWN accessible name is a MUI Select placeholder
+    # ("Select an answer/option/…", "Choose …") — the native-mirror artifact of fixtures 09/104/93.
+    # A real question (a distinct radio group that grouped-desyncs onto a committed node — live Ashby
+    # 'visa'/'ethnicity'/'how did you hear') never carries a placeholder name, so it is never skipped.
+    # committer_label is retained for context/trace but is NOT part of the decision (a shared-token gate
+    # over-fired on live neighbours). Principle + the DOM same-node cross-check, not a rule list.
+    c = _phantom_label(cur_label)
+    return c.startswith("select ") or c.startswith("choose ") or c in ("select", "select an answer", "select option")
+
+
 # --------------------------------------------------------------------------- #
 # Single-field context — the anti-spin budget the drafts lacked (§2 Ctx).
 # --------------------------------------------------------------------------- #
@@ -167,6 +189,14 @@ class Ctx:
     adapter: Any = None
     page: Any = None
     field_obj: Any = None
+    # run-scoped set of DOM ids already committed by an EARLIER field this page (PHANTOM double-bind
+    # guard): a widget discovered as TWO fields (MUI Select native-mirror; a placeholder-labelled
+    # phantom of the same control) — the second re-binds the SAME node and its commit overwrites the
+    # first's. When set, S1_LOCATE skips a field that locates an already-committed node. loc_id = the
+    # id this field bound, recorded into the set on DONE.
+    committed_nodes: Any = None   # dict {dom_id: committer_how} — how tags whether the id is reliable
+    loc_id: str = ""
+    loc_how: str = ""             # this field's locate tier ('dom-ref'|'structure'|'grouped'|...)
 
     # resolved during the run
     nature: str = ""
@@ -314,6 +344,22 @@ def _is_plain_text_editable_or_combo(node: Any) -> bool:
         typ = _node_attr(node, "type") or "text"
         return typ in ("text", "email", "url", "tel", "search", "")
     return False
+
+
+def _is_click_only_combobox(node: Any) -> bool:
+    """A combobox/listbox TRIGGER that cannot receive a filter keystroke: role=combobox/listbox or
+    aria-haspopup=listbox, but NOT an <input>/<textarea>/contenteditable (a MUI Select div, a
+    <button> that opens a listbox). Typing into it is a no-op — it must be READ + CLICKED via the
+    aria/react-select reader, never type-to-filtered. STRUCTURAL (standard DOM, no renameable attr)."""
+    if node is None:
+        return False
+    if _node_tag(node) in ("input", "textarea"):
+        return False
+    # only an EXPLICIT contenteditable excludes — _node_attr returns "" for an ABSENT attribute too,
+    # so `in ("", "true")` wrongly excluded a plain MUI Select div (contenteditable absent -> "").
+    if _node_attr(node, "contenteditable") == "true":
+        return False
+    return _node_role(node) in ("combobox", "listbox") or _node_attr(node, "aria-haspopup") == "listbox"
 
 
 async def _probe_would_clobber(session: Any, ctx: "Ctx") -> bool:
@@ -657,9 +703,18 @@ async def observe_act(session: Any, field: dict[str, Any] | Ctx) -> Outcome:
             adapter=field.get("adapter"),
             page=field.get("page"),
             field_obj=field.get("field_obj"),
+            committed_nodes=field.get("_committed_nodes"),
         )
     )
     out = await _s0_guard(session, ctx)
+    # PHANTOM double-bind guard: record the DOM id this field committed so a later phantom field that
+    # re-binds the SAME node is skipped (S1_LOCATE checks the set). Only on a real commit.
+    if out == DONE and ctx.committed_nodes is not None and ctx.loc_id:
+        # record the id WITH the committer's QUESTION label. A later same-node hit is a real phantom twin
+        # only if its label is a MUI placeholder ("Select an answer") or shares a token with THIS label;
+        # a distinct field that merely grouped-desyncs onto this node (Ashby radio group -> the Name input)
+        # shares nothing and must NOT be skipped. See _phantom_twin in _s1_locate.
+        ctx.committed_nodes[ctx.loc_id] = _phantom_label(ctx.label)
     if not isinstance(field, Ctx):
         # surface the trace on the dict so the runner can record per-field detail
         field["_trace"] = ctx.trace
@@ -669,16 +724,93 @@ async def observe_act(session: Any, field: dict[str, Any] | Ctx) -> Outcome:
 
 
 # ---- S0_GUARD ----
+_SELFID_TOKENS = ("gender", "race", "ethnic", "hispanic", "latino", "disab", "veteran",
+                  "self-identif", "sexual orientation", "transgender", "pronoun")
+
+
+def _is_selfid(label: str) -> bool:
+    """A demographic self-identification field (EEO/voluntary self-ID). Deliberately NARROW — excludes
+    visa/sponsorship/consent/citizenship/age, which keep their own blank handling."""
+    low = str(label or "").lower()
+    return any(t in low for t in _SELFID_TOKENS)
+
+
+# A required consent/agreement checkbox (GDPR gate, "I agree to the Terms", ...). STRUCTURAL gate:
+# a checkbox-kind control whose label reads as an agreement/consent clause -- never a plain optional box.
+_CONSENT_TOKENS = ("agree", "consent", "acknowledge", "terms", "privacy", "certify", "gdpr")
+
+
+def _is_consent_checkbox(ctx: Ctx) -> bool:
+    if "checkbox" not in str(getattr(ctx, "kind", "") or "").lower():
+        return False
+    low = str(ctx.label or "").lower()
+    return any(t in low for t in _CONSENT_TOKENS)
+
+
+# Toggle the field's real checkbox ON directly (bare arrow -- actor.page.evaluate calls (fn)() with no
+# args; the name is embedded as a JSON literal). Targets the box by name/id, else the LONE required
+# checkbox on the page; fires input+change so a submit-gate un-blocks. Returns .checked.
+_CONSENT_CHECK_JS = r"""() => {
+  const NAME = __NAME__;
+  const boxes = [...document.querySelectorAll('input[type=checkbox]')];
+  let el = null;
+  if (NAME) el = boxes.find(b => b.name === NAME || b.id === NAME);
+  if (!el) { const req = boxes.filter(b => b.required); if (req.length === 1) el = req[0]; }
+  if (!el) return false;
+  if (!el.checked) {
+    try { el.checked = true; } catch(_) {}
+    el.dispatchEvent(new Event('input', {bubbles:true}));
+    el.dispatchEvent(new Event('change', {bubbles:true}));
+  }
+  return !!el.checked;
+}"""
+
+
+async def _commit_consent_checkbox(session: Any, ctx: Ctx) -> Outcome | None:
+    """Directly check a required consent checkbox whose real <input> is sr-only (generic locate misses
+    it). Self-verifying (returns .checked); None on any miss -> caller falls through to adapter/locate."""
+    import json as _json
+    with contextlib.suppress(Exception):
+        page = await session.must_get_current_page()
+        name = str(getattr(getattr(ctx, "field_obj", None), "name", "") or "")
+        ok = await page.evaluate(_CONSENT_CHECK_JS.replace("__NAME__", _json.dumps(name)))
+        if ok:
+            ctx.committed_text = "Yes"
+            ctx.trace.append("consent-check")
+            return DONE
+    return None
+
+
 async def _s0_guard(session: Any, ctx: Ctx) -> Outcome:
     ctx.trace.append("S0_GUARD")
     # A file field carries its payload in ``resume`` (the value may be blank) — it is NOT a blank
     # field, so the blank->SKIP gate must not swallow it before the global file path runs.
     if not ctx.value.strip() and not ctx.resume:
-        ctx.trace.append("blank->SKIP")
-        return SKIP
+        # REQUIRED self-identification with NO profile value: the correct answer is the explicit
+        # 'Decline to self-identify' option, NOT a blank required field. Narrowly scoped to demographic
+        # self-ID; the downstream select/choice path then matches the rendered decline option + verifies.
+        if ctx.required and _is_selfid(ctx.label):
+            ctx.value = "Decline to self-identify"
+            ctx.trace.append("selfid-blank->decline")
+        elif ctx.required and _is_consent_checkbox(ctx):
+            # REQUIRED consent/agreement checkbox with NO value: the correct answer is AGREE (checked).
+            # A blank required consent gate blocks submit; default to affirmative, committed just below.
+            ctx.value = "Yes"
+            ctx.trace.append("consent-blank->agree")
+        else:
+            ctx.trace.append("blank->SKIP")
+            return SKIP
     # PROVEN-PATH FIRST: if this run has a per-archetype adapter, commit via its battle-tested
     # fill()+read_back() before the generic engine. DONE on a verified proven commit; otherwise
     # fall through to the generic locate/classify/commit as the fallback aid.
+    # REQUIRED consent/agreement checkbox: its real <input> is often sr-only (1px / opacity:0), so the
+    # generic locate returns no-control. Toggle it directly (self-verifying: reads back .checked) on an
+    # affirmative value. Gated to required + checkbox kind + agreement label; never a plain optional box,
+    # never an explicit decline. None -> fall through to adapter/locate unchanged.
+    if ctx.required and _is_consent_checkbox(ctx) and brain._norm_lower(ctx.value) not in {"no", "false", "n", "decline"}:
+        _cc = await _commit_consent_checkbox(session, ctx)
+        if _cc is not None:
+            return _cc
     proven = await _s_adapter(session, ctx)
     if proven is not None:
         return proven
@@ -743,6 +875,38 @@ async def _s1_locate(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S1_LOCATE")
+    # MAKE-REACHABLE (disabled-until-checkbox): a real-DOM-disabled target serializes as
+    # non-interactive and cannot be typed, so locate drifts to a neighbour (82: the salary input
+    # bound the gate checkbox -> INTRINSIC_CHECKBOX -> committed 'on', 145000 never landed). When
+    # discovery gave a ref and that element is disabled with an unchecked, non-disabled checkbox in
+    # its OWN container, tick the checkbox to enable it BEFORE we serialize + locate. Structural only
+    # (disabled flag + sibling checkbox), no label text. Bare-arrow + inlined ref (ctx.page.evaluate
+    # wraps arg as (fn)(); mirrors the scroll-into-view call below).
+    _mrref = getattr(ctx.field_obj, "name", "") or ""
+    if _mrref and ctx.page is not None:
+        with contextlib.suppress(Exception):
+            _mr = await ctx.page.evaluate(
+                "() => { const el = document.getElementById(%s) || document.getElementsByName(%s)[0];"
+                " if (!el || el.disabled !== true) return 'na';"
+                " let p = el.parentElement, hops = 0;"
+                " while (p && hops++ < 6) { const cb = [...p.querySelectorAll('input[type=checkbox]')]"
+                ".find(c => !c.checked && !c.disabled); if (cb) { cb.click(); break; } p = p.parentElement; }"
+                " let acted = false;"
+                " if (el.disabled === true) {"  # DEPENDENT CASCADE: still disabled -> the IMMEDIATE
+                # prerequisite <select> (State) already has a value but never fired its change at load.
+                # Re-fire ONLY the LAST value-bearing select (the closest prerequisite) — firing an
+                # UPSTREAM one (Country) can run a handler that RE-POPULATES + WIPES the downstream
+                # select (keep=false), leaving the target disabled. The enable is often debounced, so
+                # 'fired' proceeds (Python settles ~0.5s before locate).
+                "   let q = el.parentElement, h2 = 0;"
+                "   while (q && h2++ < 6) { const sels = [...q.querySelectorAll('select')].filter(s => s.value);"
+                "     if (sels.length) { sels[sels.length - 1].dispatchEvent(new Event('change', {bubbles: true})); acted = true; break; } q = q.parentElement; } }"
+                " return el.disabled === true ? (acted ? 'fired' : 'still-disabled') : 'enabled'; }"
+                % (json.dumps(_mrref), json.dumps(_mrref))
+            )
+            if str(_mr) in ("enabled", "fired"):
+                ctx.trace.append("make-reachable:enable-gate")
+                await asyncio.sleep(0.55)  # a debounced cascade-enable (~300ms) needs a tick before locate
     # FIX 3 (speed): ONE full-page get_state here; it is forwarded to classify so a normal field
     # never re-serializes just to classify the control it already located.
     state = await perc.get_state(session)
@@ -816,6 +980,41 @@ async def _s1_locate(session: Any, ctx: Ctx) -> Outcome:
     ctx.node = node
     ctx.card = card
     ctx.trace.append(f"located:{how}")
+    # PHANTOM double-bind guard: the resolved node's stable DOM id (else the discovery dom-ref). If an
+    # EARLIER field already committed THIS exact node, this is a phantom re-bind of the same widget (a
+    # MUI Select native-mirror / a placeholder-labelled twin of the same control) — skip so its stray
+    # value can't overwrite the real commit. Same-NODE (not same-label) so distinct fields are untouched.
+    _lid = str((getattr(node, "attributes", None) or {}).get("id")
+               or getattr(getattr(ctx, "field_obj", None), "name", "") or "")
+    ctx.loc_id = _lid
+    ctx.loc_how = how
+    # Skip a phantom re-bind ONLY when the current field is a TRUE twin of the field that committed this
+    # node — its label is a MUI placeholder ("Select an answer/option") or shares a content token with the
+    # committer's question. A distinct radio group that grouped-DESYNCS onto an unrelated node (live Ashby:
+    # 'visa' / 'how did you hear' resolve to the Name input's id) shares no token -> must commit, not skip.
+    if _lid and ctx.committed_nodes is not None:
+        _st = ctx.committed_nodes.get(_lid)
+        if _st is not None and _st != "__widget__" and _phantom_twin(ctx.label, _st):
+            ctx.trace.append("phantom-samenode->skip")
+            return SKIP
+    # WIDGET-BOUNDARY phantom guard: a composite widget (intl-tel) exposes a sub-control (the country
+    # FLAG button) as a separate field whose node has NO id but sits INSIDE the widget container that an
+    # earlier field already committed (its id was recorded by _split's dial path). Skip it so it can't
+    # reset the widget. Only recorded widget-container ids are in the set, so a normal fieldset with two
+    # real fields (different sub-ids, container not recorded) is untouched.
+    if ctx.committed_nodes is not None:
+        _cur = node
+        for _ in range(5):
+            _cur = getattr(_cur, "parent_node", None)
+            if _cur is None:
+                break
+            _aid = str((getattr(_cur, "attributes", None) or {}).get("id") or "")
+            # ONLY a container explicitly tagged "__widget__" by _split (intl-tel dial path) suppresses a
+            # descendant — never an ordinary committed field's own node (that would nuke a sibling field
+            # nested under a shared grouped ancestor).
+            if _aid and ctx.committed_nodes.get(_aid) == "__widget__":
+                ctx.trace.append("phantom-widget->skip")
+                return SKIP
     # label-collision (repeaters with two "Degree"): a structural tie forces a value-verify later
     # (§6 fast-path off). Only the structure tier can produce a true accessible-name collision.
     if how == "structure":
@@ -938,6 +1137,47 @@ def _make_marks_pick(session: Any, ctx: Ctx) -> Any:
     return _pick
 
 
+async def _s_grid_or_scale(session: Any, ctx: Ctx) -> Outcome | None:
+    """NEW COMMIT RUNG — a Likert MATRIX CELL or an ordinal RATING SCALE, the two grouped widgets whose
+    option can only be bound by STRUCTURAL association (aria-labelledby row x column) or ORDINAL position:
+      * Likert: the shared column label ('Strongly agree') repeats in every row, so the text-matching
+        choice path checks the WRONG row's radio and the tested group reads BLANK. Bind the cell by
+        rowHeader-text == this field's label AND colHeader-text == value.
+      * Star rating: N sibling <button>/[role=radio] in a [role=group] labelled by this field's label; the
+        integer value is the ORDINAL, and the options carry the star glyph (never the digit) so text/label
+        matching finds nothing. Click the Nth.
+    Self-verifying (real .checked / aria-pressed state), so it can never false-green. Returns None for every
+    field that is NOT one of these two structures -> classify continues unchanged (radio/checkbox/select hot
+    path untouched). A matched-but-uncommitted structure is reported honestly (escalate/skip) rather than
+    dropped to the text path, which would false-green off the repeated column label."""
+    if not ctx.value or ctx.resume:
+        return None
+    # Cheap gate: only choice-ish controls pay the probe; text/select/date fields return here untouched.
+    _tag = _node_tag(ctx.node)
+    _role = _node_role(ctx.node)
+    if (
+        classify_intrinsic(ctx.node) != "INTRINSIC_RADIO"
+        and normalize_kind(ctx.kind) != "CHOICE"
+        and _tag != "button"
+        and _role not in ("radio", "button", "group", "radiogroup")
+    ):
+        return None
+    with contextlib.suppress(Exception):
+        _pg = await session.must_get_current_page()
+        committed, matched = await cdpa.cdp_commit_grid_or_scale(_pg, ctx.label, ctx.value)
+        if committed:
+            ctx.nature = "INTRINSIC_RADIO"
+            ctx.committed_text = committed
+            ctx.trace.append(f"grid-scale-commit:{committed[:20]}")
+            return DONE
+        if matched:
+            # the exact cell/scale WAS found but the click didn't take — do NOT fall to the text path
+            # (it would check the shared column label in the wrong row / miss the ordinal). Report honestly.
+            ctx.trace.append("grid-scale:matched-uncommitted")
+            return ESCALATE if ctx.required else SKIP
+    return None
+
+
 # ---- S2_CLASSIFY ----
 async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None) -> Outcome:
     if not ctx.guard():
@@ -987,6 +1227,15 @@ async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None
                     ctx.trace.append("already-correct")
                     return DONE
                 ctx.trace.append("already-correct-veto:placeholder-rendered")
+    # MATRIX / SCALE (structural-association commit): a Likert grid cell or an ordinal rating scale can
+    # only be bound by row/col header association (aria-labelledby) or ordinal position — free option-text
+    # matches the SHARED column label in the WRONG row (Likert) or never equals the star glyph (rating).
+    # Runs BEFORE intrinsic/kind routing so the text-matching S_CHOICE never gets a chance to false-green
+    # off the repeated column label. Self-gating: returns None for every non-grid/non-scale field, so the
+    # normal radio/checkbox/select hot path is untouched.
+    _gs = await _s_grid_or_scale(session, ctx)
+    if _gs is not None:
+        return _gs
     intrinsic = classify_intrinsic(ctx.node)
     if intrinsic:
         ctx.nature = intrinsic
@@ -994,11 +1243,25 @@ async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None
         if intrinsic == "INTRINSIC_FILE":
             return await _s_file(session, ctx)
         if intrinsic in ("INTRINSIC_RADIO", "INTRINSIC_CHECKBOX"):
+            # MULTI checkbox group: a multi_select whose value is a LIST (Skills/Languages = 'Python, Go')
+            # must check EVERY matching box. INTRINSIC_CHECKBOX alone routed it to the single-pick _s_choice
+            # which committed only the head token 'Python' and dropped 'Go' (widget-zoo multi FAIL). Route a
+            # genuine multi-value checkbox group to the per-value loop instead.
+            if intrinsic == "INTRINSIC_CHECKBOX" and ("," in ctx.value or ";" in ctx.value) and (
+                str(getattr(ctx.field_obj, "type", "") or "").lower() == "multi_select"
+                or brain.is_multi_label(ctx.label)
+                or ctx.cardinality == "many"
+            ):
+                return await _s_multi_checkbox(session, ctx, state)
             # SNAPSHOT REUSE: the radio/checkbox options are STATIC siblings already present in the
             # locate snapshot (no click reveals them) — pass it through so _s_choice reads the group
             # from the SAME serialize, never a second full-page get_state per choice field.
             return await _s_choice(session, ctx, state)
         if intrinsic == "INTRINSIC_SELECT":
+            # an ARIA role=listbox (not a native <select>) — cdp_select/select_option no-op on it;
+            # click its [role=option] cells by text instead (single + aria-multiselectable).
+            if _node_tag(ctx.node) != "select":
+                return await _s_listbox(session, ctx)
             return await _s_native(session, ctx)
         if intrinsic == "INTRINSIC_DATE":
             return await _s_date(session, ctx)
@@ -1097,6 +1360,10 @@ async def _s2_classify(session: Any, ctx: Ctx, state: perc.OAState | None = None
         return await _s3_open(session, ctx)
     if nature == "CLOSED_LIST":
         return await _s3_open(session, ctx)
+    # TAG/CHIP input: a MULTI on a PLAIN text input (not a combobox typeahead) is a chip box — type each
+    # value + Enter, no option menu to search. Route straight to the multi loop (nothing committed yet).
+    if nature == "MULTI" and _is_plain_text_editable(ctx.node):  # plain text (helper excludes comboboxes)
+        return await _s_multi_loop(session, ctx, first_committed=False)
     if nature in ("SEARCH", "MULTI"):
         return await _s4_search(session, ctx)
     if nature == "FREE_TEXT":
@@ -1373,52 +1640,51 @@ async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S_CHOICE")
-    # PROVEN DOM-DIRECT COMMIT FIRST (the ats_lever._click_option interaction, generalised): scan the
-    # card's REAL radio/checkbox inputs — INCLUDING the visually-hidden ones a visible-only selector_map
-    # misses (Lever hides the real <input value="Yes"> behind a styled <label>) — match the input whose
-    # value attr / wrapping label means ctx.value, and .click() it + fire input/change so React commits.
-    # This is generic (any real radio/checkbox group) and reliable, so it precedes the group-read and the
-    # visual fallback. A successful match IS the commit (the old filler trusted target.click() likewise).
+    # GROUND-TRUTH-FIRST (顶层设计 — the ONE widget-agnostic commit): re-resolve the field by its own
+    # LABEL (immune to a grouped-locate desync that binds the WRONG node) and accept ONLY on the REAL
+    # painted selected-state — a pill's active class, a native radio's .checked — never label text, never
+    # the bound node's identity. Self-verifying, so it cannot false-green. Covers ashby pill <button>s AND
+    # native <input type=radio> alike (AfterQuery 'authorized to work' — ledger DONE, radio blank on screen
+    # — was the desync this closes). Runs BEFORE the structural scan, which trusts the located container and
+    # so inherits the desync; that scan is now only the FALLBACK for controls with no label-anchorable
+    # button/radio (e.g. Lever's styled <div> whose hidden <input> its own <label> reflects).
+    # ALWAYS try the label-anchor first inside _s_choice (this IS the choice handler). It self-verifies
+    # on real selected-state and returns "" on no match, so an unconditional attempt cannot false-green
+    # and cannot regress — while a narrow kind/nature gate silently skipped it for a segmented/toggle
+    # button group (kind-hint radio, no native inputs) -> choice-no-group -> S_OTHER_GUARD -> SKIP.
+    _la_found = False
+    if True:
+        with contextlib.suppress(Exception):
+            _pg = await session.must_get_current_page()
+            _btn, _la_found = await cdpa.cdp_choose_button_by_label(_pg, ctx.label, ctx.value)
+            if _btn:
+                ctx.committed_text = _btn
+                ctx.trace.append(f"choice-label-anchor:{_btn[:20]}")
+                if _reveal_pending_text(ctx.value, _btn):
+                    return await _s_cascade(session, ctx)  # 'Yes' revealed a 'please specify' input, etc.
+                return DONE
+
+    # FALLBACK — structural DOM-direct (the proven Lever ._click_option, generalised): scan the located
+    # container's REAL radio/checkbox inputs, INCLUDING visually-hidden styled ones (Lever hides the real
+    # <input value="Yes"> behind a styled <label>), match the input meaning ctx.value, .click() + fire
+    # input/change. Reached only when the label-anchor found NO button/radio for this field.
     container = ctx.card if ctx.card is not None else ctx.node
     if container is not None:
         matched = await cdpa.cdp_choose_option(
             session, container, ctx.value, group_name=getattr(ctx.field_obj, "name", "") or ""
         )
         if matched:
-            # ASHBY PILL FALSE-GREEN REPAIR (live: clipboard 'authorized to work' — ledger DONE, pill
-            # blank on screen): cdp_choose_option may have checked a HIDDEN <input type=radio> while the
-            # VISIBLE pill button — React-controlled from its OWN onClick, not the input's change event —
-            # stayed unselected. Re-issue the commit by clicking the VISIBLE BUTTON via btn-by-label,
-            # which drives React (updates button + input together). It self-verifies against the real
-            # active class and NO-OPs when the button is already active (choice-dom-direct genuinely
-            # worked) or absent (lever styled-label radios) — so zero regression, repairs only the
-            # decoupled-pill false-green. Falls through to trusting `matched` if it can't find a button.
-            with contextlib.suppress(Exception):
-                _pg = await session.must_get_current_page()
-                _btn = await cdpa.cdp_choose_button_by_label(_pg, ctx.label, ctx.value)
-                if _btn:
-                    ctx.committed_text = _btn
-                    ctx.trace.append(f"choice-btn-repair:{_btn[:16]}")
-                    return DONE
-            # No pill button (real hidden radio whose styled label DOES reflect it — the proven Lever
-            # path): trust the matched click as DONE rather than a read-back that can't see the input.
-            ctx.committed_text = matched
-            ctx.trace.append(f"choice-dom-direct:{matched[:20]}")
-            return DONE
-
-    # LABEL-ANCHORED PILL BUTTON (ashby _option buttons the container scan missed — the locate bound a
-    # node outside the field-entry, so cdp_choose_option found no button and the field fell to the visual
-    # path -> implausible-reject -> S_OTHER_GUARD, apolink 'satellite missions'). Live-verified: the pill
-    # IS a <button>, clicking adds `_active_`. Find the field-entry container BY LABEL (field-scoped, no
-    # page-wide bleed), click the matching button, accept ONLY if it ends active (self-verifying, cannot
-    # false-green). Between dom-direct and the visual fallback so it never overrides a real input match.
-    if normalize_kind(ctx.kind) in ("CHOICE", "SELECT") or ctx.nature in ("BOOLEAN", "CLOSED_LIST", "INTRINSIC_RADIO", "INTRINSIC_CHECKBOX"):
-        with contextlib.suppress(Exception):
-            _pg = await session.must_get_current_page()
-            _btn = await cdpa.cdp_choose_button_by_label(_pg, ctx.label, ctx.value)
-            if _btn:
-                ctx.committed_text = _btn
-                ctx.trace.append(f"choice-btn-by-label:{_btn[:20]}")
+            if _la_found:
+                # The label-anchor DID find a matching control for this field but it was NOT selected, yet
+                # the structural scan now claims a match — that match is the grouped-locate desync
+                # false-green (committed on the wrong node). Do NOT trust it: fall through to the
+                # group-read / visual path, which clicks the correct option and ends in _s_verify (real state).
+                ctx.trace.append("choice-falsegreen-caught")
+            else:
+                # No label-anchorable control existed (Lever styled-DIV whose hidden input its own label
+                # reflects, verified by cdp_choose_option's _STILL_CHECKED): trust the matched click.
+                ctx.committed_text = matched
+                ctx.trace.append(f"choice-dom-direct:{matched[:20]}")
                 return DONE
 
     # The group's options are siblings already rendered. SNAPSHOT REUSE: prefer the locate snapshot
@@ -1430,6 +1696,17 @@ async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -
     group = _read_choice_group(state, ctx)
     if not group:
         ctx.trace.append("choice-no-group")
+        # DUAL-LISTBOX transfer widget (two item panels + a move/add button, no radio/checkbox group):
+        # move each value from the source list to the selected panel. Gated on that structure, so a
+        # normal choice never reaches it. _s_verify re-checks the Selected panel -> cannot false-green.
+        with contextlib.suppress(Exception):
+            _pg = await session.must_get_current_page()
+            _parts = [p.strip() for p in ctx.value.replace(";", ",").split(",") if p.strip()] or [ctx.value]
+            _dn = await cdpa.cdp_dual_listbox_transfer(_pg, ctx.label, _parts[:MULTI_CAP])
+            if _dn and _dn > 0:
+                ctx.committed_text = ", ".join(_parts[:MULTI_CAP])
+                ctx.trace.append(f"dual-listbox:{_dn}")
+                return await _s_verify(session, ctx)
         # VISUAL FALLBACK (preferred over the standalone-checkbox heuristic): the DOM read found NO
         # option controls (Lever radios are styled DIVs, not <input type=radio> — invisible to the
         # structural scan but VISIBLE on screen). When the card holds >=2 visible candidate options,
@@ -1472,7 +1749,45 @@ async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -
     # option — the DOM read-back then checks the real selected radio/checkbox.
     ctx.node = node
     await act.click_node(session, node)  # TRUSTED click on the visible proxy / input
+    _texts_lower = {t.strip().lower() for t in texts}
+    if _reveal_pending_text(ctx.value, chosen) or (
+        ctx.value.strip().lower() not in _texts_lower and any(_is_other_escape(t) for t in texts)
+    ):
+        return await _s_cascade(session, ctx)  # commit revealed a specify input / value needs self-describe
     return await _s_verify(session, ctx)
+
+
+async def _s_multi_checkbox(session: Any, ctx: Ctx, state: perc.OAState | None = None) -> Outcome:
+    """Check EVERY box in a native checkbox GROUP whose label matches a token of a multi-value (a
+    multi_select like Skills/Languages = 'Python, Go'). The single-pick _s_choice commits only the head
+    token; this loops the proven per-value commit (label-anchor first — self-verifies .checked — then the
+    group scan) once per value. Checkboxes are independent, so each check persists. DONE when every token
+    committed (each already self-verified); partial falls to _s_verify; none falls back to single-pick."""
+    if not ctx.guard():
+        return ESCALATE if ctx.required else SKIP
+    ctx.trace.append("S_MULTI_CHECKBOX")
+    parts = [p.strip() for p in ctx.value.replace(";", ",").split(",") if p.strip()]
+    container = ctx.card if ctx.card is not None else ctx.node
+    committed: list[str] = []
+    for part in parts[:MULTI_CAP]:
+        got = ""
+        with contextlib.suppress(Exception):
+            _pg = await session.must_get_current_page()
+            _btn, _ = await cdpa.cdp_choose_button_by_label(_pg, ctx.label, part)
+            got = _btn
+        if not got and container is not None:
+            got = await cdpa.cdp_choose_option(
+                session, container, part, group_name=getattr(ctx.field_obj, "name", "") or ""
+            )
+        if got:
+            committed.append(part)
+            ctx.trace.append(f"multi-cb+{part[:14]}")
+    if committed:
+        ctx.committed_text = ", ".join(committed)
+        if len(committed) == len(parts):
+            return DONE  # every token self-verified (.checked / _STILL_CHECKED) — honest DONE
+        return await _s_verify(session, ctx)
+    return await _s_choice(session, ctx, state)  # mis-detected multi -> single pick
 
 
 def _read_choice_group(state: perc.OAState, ctx: Ctx) -> list[tuple[str, Any]]:
@@ -1576,7 +1891,40 @@ async def _s_native(session: Any, ctx: Ctx) -> Outcome:
     def _no(s: str) -> str:
         return " ".join(str(s).split()).lower()
 
+    # NATIVE <select multiple>: a comma/semicolon value is a LIST — resolve EACH token to its option
+    # (fuzzy per value: 'USA'->'United States') and select them all in one commit. cdp_select_multiple
+    # returns -1 when the element is NOT multiple, so a single-select whose value legitimately holds a
+    # comma ('San Francisco, CA') falls straight through to the single-pick below. Unharmed either way.
+    if "," in ctx.value or ";" in ctx.value:
+        _parts = [p.strip() for p in ctx.value.replace(";", ",").split(",") if p.strip()]
+        _picked: list[str] = []
+        for _part in _parts[:MULTI_CAP]:
+            _mh = [o for o in options if _no(o) == _no(_part)]
+            _ch = min(_mh, key=len) if _mh else await brain.pick_option(_part, options, llm=ctx.llm, label=ctx.label)
+            if _ch and _ch not in _picked:
+                _picked.append(_ch)
+        if _picked:
+            _cnt = await cdpa.cdp_select_multiple(session, ctx.node, _picked)
+            if _cnt and _cnt > 0:
+                ctx.committed_text = ", ".join(_picked)
+                ctx.trace.append(f"native-multi:{_cnt}")
+                return await _s_verify(session, ctx)
+
     _hits = [o for o in options if _no(o) == _nv]
+    # DATE COMPONENT for a Month or Year <select> (a 'Graduation Date' split across two selects): an ISO
+    # value has no whole-string option, so match by its month-NAME or year component instead.
+    if not _hits:
+        _dm = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", ctx.value.strip())
+        if _dm:
+            for _cand in (_MONTHS[int(_dm.group(2)) - 1], _dm.group(1), str(int(_dm.group(2)))):
+                _dh = [o for o in options if _no(o) == _no(_cand)]
+                if _dh:
+                    ctx.committed_text = min(_dh, key=len)
+                    ctx.trace.append(f"date-select:{_cand}")
+                    ok = await act.select_option(session, ctx.node, ctx.committed_text)
+                    if ok:
+                        return await _s_verify(session, ctx)
+                    break
     if not _hits and len(_nv) >= 4:
         _hits = [
             o for o in options
@@ -1597,19 +1945,92 @@ async def _s_native(session: Any, ctx: Ctx) -> Outcome:
     return await _s_verify(session, ctx)
 
 
+_MONTHS = ["January", "February", "March", "April", "May", "June",
+           "July", "August", "September", "October", "November", "December"]
+
+
+def _reformat_date(value: str, label: str) -> str:
+    """Re-serialize an ISO ``yyyy-mm-dd`` value to the FORMAT the field asks for (read from the label —
+    'Start Date (MM/DD/YYYY)', 'DOB (DD/MM/YYYY)', 'Graduation (Month YYYY)'). Typing the raw ISO into a
+    Cleave MM/DD mask fed '2027-03-15' -> '20/27/0315' garbage; a 'Month YYYY' text stayed ISO. Defaults
+    to KEEP the value unchanged when no format hint is present (native input[type=date] wants ISO, and an
+    unhinted field is left alone — zero live regression). Only ISO inputs are touched."""
+    import re as _re
+
+    m = _re.match(r"^(\d{4})-(\d{2})-(\d{2})$", str(value).strip())
+    if not m:
+        return value
+    y, mo, d = m.groups()
+    hint = " ".join(str(label or "").upper().split())
+    if "DD/MM" in hint or "DD-MM" in hint or "DD.MM" in hint:
+        return f"{d}/{mo}/{y}"
+    if "MONTH" in hint and ("YYYY" in hint or "YEAR" in hint):
+        return f"{_MONTHS[int(mo) - 1]} {y}"
+    if "MM/YYYY" in hint or "MM-YYYY" in hint or "MM.YYYY" in hint:
+        return f"{mo}/{y}"  # month + year, no day (license/expiry masks)
+    if "YYYY/MM" in hint or "YYYY-MM" in hint:
+        return f"{y}/{mo}"
+    if "MM/DD" in hint or "MM-DD" in hint or "MM.DD" in hint:
+        return f"{mo}/{d}/{y}"
+    return value  # no hint -> unchanged (native date accepts ISO; don't touch live)
+
+
+def _to_iso_date(value: str) -> str:
+    """Coerce a date string to ISO ``yyyy-mm-dd`` for a native ``input[type=date]`` (its .value is
+    ALWAYS ISO — a US/other string assigned to .value silently BLANKS the field). Accepts ISO and
+    numeric MM/DD/YYYY or DD/MM/YYYY (disambiguated: a first component >12 is the day). Returns '' if
+    unparseable (caller keeps the reformatted value — no worse than today)."""
+    import re as _re
+
+    s = str(value or "").strip()
+    if _re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+        return s
+    m = _re.match(r"^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})$", s)
+    if not m:
+        return ""
+    a, b, y = int(m.group(1)), int(m.group(2)), m.group(3)
+    mo, d = (b, a) if a > 12 else (a, b)  # first>12 -> DD/MM; else MM/DD (US)
+    if not (1 <= mo <= 12 and 1 <= d <= 31):
+        return ""
+    return f"{y}-{mo:02d}-{d:02d}"
+
+
 # ---- S_DATE ----
 async def _s_date(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S_DATE")
+    # PRESENT/CURRENT sentinel: an End Date of 'Present' is expressed by TICKING the sibling
+    # 'I currently work here' checkbox (which disables the date), not by typing a date. Fires ONLY on the
+    # sentinel value, so a real date types normally; no sibling checkbox -> fall through and type.
+    if _is_present_value(ctx.value):
+        cb = await _find_sibling_checkbox(session, ctx)
+        if cb is not None and await act.click_node(session, cb):
+            ctx.node = cb
+            ctx.committed_text = ctx.value
+            ctx.trace.append("present-toggle-check")
+            return DONE  # native checkbox toggle is deterministic; verify would re-click and untick it
+    # REFORMAT an ISO value to the field's requested format (from the label) BEFORE typing — a masked
+    # MM/DD/YYYY / DD/MM/YYYY input mangles raw ISO digits, and a 'Month YYYY' text needs the month name.
+    _v = _reformat_date(ctx.value, ctx.label)
+    if _v != ctx.value:
+        ctx.trace.append(f"date-reformat:{_v}")
+    # NATIVE input[type=date]: .value must be ISO yyyy-mm-dd. Assigning US/other format via the
+    # native setter (act.type_text's date path) blanks the field. Coerce to ISO for this node only;
+    # masked/text 'Month YYYY' inputs keep the reformatted display string above.
+    if _node_tag(ctx.node) == "input" and _node_attr(ctx.node, "type") == "date":
+        _iso = _to_iso_date(ctx.value)
+        if _iso:
+            _v = _iso
+            ctx.trace.append(f"date-iso:{_v}")
     # Never delta-probed. Type the value into the located control; a segmented control accepts
     # digit-by-digit via the same trusted type. (Segment-aware digit building is the engine's
     # _date job for Workday; here the located node is the date control and trusted-type lands it.)
-    ok = await act.type_text(session, ctx.node, ctx.value, clear=True)
+    ok = await act.type_text(session, ctx.node, _v, clear=True)
     if not ok:
         ctx.trace.append("date-type-refused")
         return ESCALATE if ctx.required else SKIP
-    ctx.committed_text = ctx.value
+    ctx.committed_text = _v
     return await _s_verify(session, ctx)
 
 
@@ -1635,10 +2056,58 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
             ctx.committed_text = sel
             ctx.trace.append(f"select-dom-direct:{sel[:20]}")
             return DONE
+    # INLINE CHOICE PILLS / native (styled) radios mis-routed to S3 instead of S_CHOICE (ashby Yes/No:
+    # authorized-to-work / relatives / 18+ / visa — they open no menu, so the react-select rungs below
+    # read 0 owned options and escalate). Commit STRUCTURALLY via cdp_choose_option: it scopes to the
+    # group by its `name` IDENTITY (discovery's structural handle, document-wide, immune to a mis-located
+    # container) or scans the located card, handles button-pills AND native radios, matches the OPTION's
+    # own text (short 'Yes'/'No'), and self-verifies real checked-state. NO question-label string re-scan
+    # (that was the brittle 40-char match). Returns "" when nothing structural matched -> a real dropdown
+    # falls through to react-select untouched.
+    # Includes MULTI: Ashby renders Yes/No as an _option_ pill group with a text input, and the classifier
+    # mislabels it 'multi_select' — so gating on BOOLEAN/CLOSED_LIST alone skipped it (live: nature=MULTI,
+    # kind=multi_select, card present). cdp_choose_option self-verifies structurally: a single value ('Yes')
+    # matches one option and commits; a REAL multi's comma-joined value matches no single option -> returns
+    # "" and falls through to the multi loop. So widening to MULTI cannot break a genuine multi-select.
+    if ctx.nature in ("BOOLEAN", "CLOSED_LIST", "MULTI"):
+        _container = ctx.card if ctx.card is not None else ctx.node
+        _gname = str(getattr(getattr(ctx, "field_obj", None), "name", "") or "")
+        if _container is not None:
+            with contextlib.suppress(Exception):
+                _opt = await cdpa.cdp_choose_option(session, _container, ctx.value, group_name=_gname)
+                if _opt and await _chosen_plausible(ctx, _opt):
+                    ctx.committed_text = _opt
+                    ctx.trace.append(f"s3-choice-struct:{_opt[:20]}")
+                    if _reveal_pending_text(ctx.value, _opt):
+                        return await _s_cascade(session, ctx)
+                    return DONE
     # First try the cheap inspectable read (native/ARIA/custom dropdown_options).
     inspect = await act.read_options(session, ctx.node)
     if inspect:
         ctx.trace.append(f"read_options:{len(inspect)}")
+        # VIRTUALIZED click-only combobox: read_options only sees the MOUNTED window (react-window
+        # ~10 of N rows). If the wanted value isn't in it, scroll-materialize the portaled listbox by
+        # exact value until it mounts. Gated to a click-only combobox whose window LACKS the value, so
+        # a normal in-window option still commits via the fast path below (zero hot-path change).
+        if _is_click_only_combobox(ctx.node):
+            _nv = _norm_opt(ctx.value)
+
+            def _otxt(o: Any) -> str:
+                return o if isinstance(o, str) else (o.get("text") or o.get("label") or o.get("value") or "")
+
+            if not any(_norm_opt(_otxt(o)) == _nv or (_nv and _nv in _norm_opt(_otxt(o))) for o in inspect):
+                # EXACT/identity match ONLY (pick=None) — this fires when the value is missing from the
+                # mounted window, which is EITHER virtualized (value is a real option, scroll finds it)
+                # OR an Other-specify field (value is NOT any option). An LLM pick here would grab the
+                # 'Other (please specify)' escape and commit it, skipping the S_CASCADE reveal. Exact-
+                # only commits only true virtualized hits; Other-specify finds nothing -> falls through
+                # to _commit_from_options, which routes the escape option into the reveal cascade.
+                _g = await cdpa.cdp_pick_aria_option(session, ctx.node, ctx.value, pick=None,
+                                                     node_id=str(getattr(getattr(ctx, "field_obj", None), "name", "") or ""))
+                if _g and await _chosen_plausible(ctx, _g):
+                    ctx.committed_text = _g
+                    ctx.trace.append(f"virtualized-pick:{_g[:20]}")
+                    return await _s_verify(session, ctx)
         return await _commit_from_options(session, ctx, inspect, nodes=None)
     # ARIA-DIRECT for a react-select / listbox combobox BEFORE the delta read: the input's
     # aria-owns/aria-controls names its portal listbox, so we read ONLY that listbox's [role=option]
@@ -1708,6 +2177,12 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
             if got:
                 ctx.committed_text = got
                 ctx.trace.append(f"react-select-direct:{got[:20]}")
+                # MULTI: react-select isMulti commits ONE value here then stops (playground
+                # react_select_multi painted 'React' only). Loop the remaining tokens like the sibling
+                # react-select paths (below + S4) already do — _s_multi_loop types each next value into
+                # the same input to add its pill.
+                if ctx.nature == "MULTI":
+                    return await _s_multi_loop(session, ctx)
                 return await _s_verify(session, ctx)
     # Else physically open and watch the delta.
     before = await perc.get_state(session)
@@ -1715,6 +2190,22 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
     cluster = await _settle(session, before, _SETTLE_STATIC_S)
     texts = _option_texts(cluster)
     if not texts:
+        # NON-EDITABLE COMBOBOX (MUI Select div): the TRUSTED click above opened its React menu (a
+        # synthetic dispatch could not, so the aria-direct rung missed), but the listbox portals to
+        # <body> outside this field's subtree so the field-scoped delta is empty. Pick from the OPEN
+        # portaled listbox by aria-ownership WITHOUT re-opening (a re-open toggles MUI shut). Never
+        # type-to-filter a click-only combobox — a keystroke lands in a div and filters nothing.
+        if _is_click_only_combobox(ctx.node):
+            async def _pick_pl(v: str, opts: list[str]) -> str | None:
+                c = _identity_pick(v, opts)
+                return c or await brain.pick_option(v, opts, llm=ctx.llm, label=ctx.label)
+
+            got = await cdpa.cdp_pick_aria_option(session, ctx.node, ctx.value, pick=_pick_pl,
+                                                  node_id=str(getattr(getattr(ctx, "field_obj", None), "name", "") or ""))
+            if got and await _chosen_plausible(ctx, got):
+                ctx.committed_text = got
+                ctx.trace.append(f"portaled-pick:{got[:20]}")
+                return await _s_verify(session, ctx)
         # CARD-COMMIT FIX: a CUSTOM dropdown (Lever single_select) renders its option list only AFTER
         # a keystroke filters it — the bare click mounts no delta. When the adapter told us this is a
         # SELECT (ctx.kind), TYPE the value to filter, settle, and re-read the delta BEFORE falling to
@@ -1988,6 +2479,21 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
     city_prefix = _city_prefix(ctx.value)
     if city_prefix and city_prefix.lower() not in {v.lower() for v in variants}:
         variants = [city_prefix, *variants]
+    # REACT-SELECT PREFIX PROBES: a react-select filters its options by the typed text. When the real
+    # option label is LONGER-worded than the mapped value ('None of the above' vs 'None of the above —
+    # I do not have work authorization'; 'Other' vs 'Other (please specify)'), typing the full value can
+    # still miss and the widget renders its "No options" message. Lead with the value's SHORT prefixes
+    # (first word, first two words) so a longer option prefix-matches and actually surfaces. Cheap: these
+    # are just extra early queries; pick_option still chooses the closest full option that appears.
+    _w = ctx.value.strip().split()
+    _pfx = []
+    if len(_w) >= 2:
+        _pfx.append(" ".join(_w[:2]))
+    if _w and len(_w[0]) >= 3:
+        _pfx.append(_w[0])
+    for _p in _pfx:
+        if _p.lower() not in {v.lower() for v in variants}:
+            variants = [_p, *variants]
     for q in variants:
         if ctx.search_tries >= VARIANT_CAP:
             break
@@ -2010,6 +2516,9 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
         settle_s = _SETTLE_GEO_S if q == city_prefix else _SETTLE_SEARCH_S
         cluster = await _settle(session, before, settle_s)
         texts = _option_texts(cluster)
+        # react-select renders a "No options" / "No results" placeholder AS an option row when the
+        # filter matches nothing — drop it so a 0-match probe isn't mistaken for 1 real option.
+        texts = [t for t in texts if not re.match(r"^\s*no (options?|results?|matches?)\b", t, re.I)]
         ctx.trace.append(f"search '{q}' -> {len(texts)} opts")
         if not texts:
             # VISUAL FALLBACK (geocomplete): we typed the city prefix and the suggestion list IS
@@ -2119,16 +2628,338 @@ async def _s_text_guard(session: Any, ctx: Ctx) -> Outcome:
     return await _s_text(session, ctx)
 
 
+def _norm_opt(s: str) -> str:
+    return " ".join((s or "").split()).strip().lower()
+
+
+async def _commit_creatable(session: Any, ctx: Ctx, before: perc.OAState) -> str | None:
+    """After typing into a PLAIN input, commit a creatable/typeahead combobox-in-disguise by CLICKING
+    the rendered option row — the EXACT-value row, else the `Create \"<value>\"` row (value embedded
+    verbatim). Returns the committed text, or None when no menu surfaced / no exact-or-Create row
+    (caller keeps the plain-text commit). Deterministic (no LLM fuzzy -> never snaps 'Sr.' to
+    'Senior'); CLICKS the option, never presses Enter -> safe on the hot _s_text path."""
+    cluster = await _settle(session, before, _SETTLE_STATIC_S)
+    texts = _option_texts(cluster)
+    if not texts:
+        return None
+    nv = _norm_opt(ctx.value)
+    if not nv:
+        return None
+    exact = next((t for t in texts if _norm_opt(t) == nv), None)
+    create = next((t for t in texts if _norm_opt(t) != nv and nv in _norm_opt(t)), None)
+    target = exact or create
+    if not target:
+        return None
+    node = _node_for_option(cluster, target)
+    if node is None:
+        return None
+    await act.click_node(session, node)
+    return ctx.value if exact is None else target
+
+
+# ---- COMPOSITE SIBLING SPLIT (one value -> two sibling controls) ----
+# A single profile scalar sometimes carries TWO components that render as TWO inputs inside ONE
+# field group: a phone + its extension ('(415) 555-0199 x1234' -> phone box + 'Ext.' box) or a
+# salary range ('$120,000 - $150,000' -> 'Minimum' + 'Maximum'). ctx.node is the label-matched
+# FIRST input; the SECOND is an empty plain-text sibling in the same container that gets NO injected
+# value of its own. Gate is TIGHT: fire only when the VALUE is a composite (ext token, or a $/number
+# range) AND an empty sibling input exists -- a plain single phone/text field has neither, so the hot
+# path and live pages are untouched. ponytail: US national extraction (drop a leading '1' country
+# code); a non-US '+CC ...' widget is the intl-tel per-char absorb path in act.type_text, not this one.
+_EXT_RE = re.compile(r"\b(?:ext|extension|x)\b\.?\s*(\d{1,6})\s*$", re.I)
+_MONEY_RANGE_RE = re.compile(r"^\s*(\$?\d[\d,]*)\s*[-–—]\s*(\$?\d[\d,]*)\s*$")
+# street address + unit -> line1 | line2. The unit keyword must FOLLOW a space (so a street named
+# 'Unit Ave' at the start doesn't split), and _split_composite_to_sibling only fires when an empty
+# second input actually exists, so a single-line address (no line2) safely falls back to one fill.
+_APT_RE = re.compile(r"^(.+?),?\s+((?:apt|apartment|suite|ste|unit|#|no\.|bldg|building|fl|floor|rm|room)\b.*)$", re.I)
+# compensation amount + rate basis: '$104,000 per year' -> amount input + a 'Per year' <select>. The
+# secondary is a rate PHRASE (normalized to 'Per <period>'); _split_composite_to_sibling routes it to a
+# sibling <select> when there is no text sibling. Only fires on 'amount per|/ period', so a plain salary
+# ('$104,000') has no match and stays a single fill.
+_RATE_WORDS = {"hour": "Per hour", "hr": "Per hour", "week": "Per week", "wk": "Per week",
+               "month": "Per month", "mo": "Per month", "year": "Per year", "yr": "Per year", "annum": "Per year"}
+_RATE_RE = re.compile(r"^\s*(\$?[\d,]+(?:\.\d{1,2})?)\s*(?:/|per)\s*(hour|hr|week|wk|month|mo|year|yr|annum)\b", re.I)
+# intl phone with a leading dial code -> national digits into the number input + the '+CC' into a
+# SEPARATE country/flag selector (intl-tel separateDialCode). national = value minus the '+CC'.
+# Only a '+CC ' prefix followed by phone-ish content; a plain national number has no match.
+_PHONE_DIAL_RE = re.compile(r"^\s*(\+\d{1,3})[\s.\-]+([\d][\d\s().\-]{5,})$")
+
+
+def _composite_parts(value: str) -> tuple[str, str] | None:
+    """(primary -> ctx.node, secondary -> empty sibling) for a composite value, else None."""
+    v = " ".join((value or "").split())
+    m = _EXT_RE.search(v)
+    if m:  # phone + extension: national digits -> phone box, ext digits -> ext box
+        digits = re.sub(r"\D", "", v[: m.start()])
+        if len(digits) >= 10:
+            return (digits[-10:] if len(digits) > 10 else digits), m.group(1)
+        return None
+    m = _MONEY_RANGE_RE.match(v)
+    if m:  # numeric/salary range: low -> min box, high -> max box
+        return m.group(1), m.group(2)
+    m = _APT_RE.match(v)
+    if m:  # street address + unit: line1 -> line1 box, unit -> line2 box
+        return m.group(1).rstrip(", ").strip(), m.group(2).strip()
+    m = _RATE_RE.match(v)
+    if m:  # comp amount + rate: amount -> input, 'Per <period>' -> a sibling <select>
+        return m.group(1).strip(), _RATE_WORDS[m.group(2).lower()]
+    m = _PHONE_DIAL_RE.match(v)
+    if m:  # intl phone: national -> number input, '+CC' -> a sibling flag/country selector
+        return m.group(2).strip(), m.group(1).strip()
+    return None
+
+
+async def _split_composite_to_sibling(session: Any, ctx: Ctx) -> Outcome | None:
+    """Type the primary into ctx.node and the secondary into the empty sibling input; DONE only when
+    BOTH read back non-empty, else None (caller re-types the whole value into the single control)."""
+    parts = _composite_parts(ctx.value)
+    if parts is None or not _is_plain_text_editable(ctx.node):
+        return None
+    primary, secondary = parts
+    if not await act.type_text(session, ctx.node, primary, clear=True):
+        return None
+    from oa_dom_value import read_dom_value
+    # read the primary back NOW — _find_revealed_input calls get_state (re-serialize), which stales
+    # ctx.node's backend id; a read AFTER that returned "" and false-failed the whole split (address_line2
+    # painted BLANK|BLANK intermittently). Capture it against the still-fresh node first.
+    a = ((await read_dom_value(session, ctx.node)) or "").strip()
+    sib = await _find_revealed_input(session, ctx)
+    if sib is not None:
+        await act.type_text(session, sib, secondary, clear=True)
+        b = ((await read_dom_value(session, sib)) or "").strip()
+    else:
+        # no text sibling -> the secondary maps to a sibling SELECTOR. Climb from the primary input
+        # (by stable id, stale-proof) to the field container and commit it there. Two selector kinds:
+        #   * a '+CC' dial code -> a country/flag [role=listbox] with [data-dial] options (intl-tel):
+        #     click the matching option; the widget writes the .iti__selected-dial-code.
+        #   * anything else -> a native <select> (comp RATE basis): match the option by text.
+        # Returns the committed label/dial; "" if there's no such selector (not a split field).
+        _nid = str((getattr(ctx.node, "attributes", None) or {}).get("id") or "")
+        if not _nid:
+            return None
+        _pg = await session.must_get_current_page()
+        if secondary.startswith("+"):
+            _js = ("() => { const el=document.getElementById(%s); const want=%s; if(!el||!want) return '';"
+                   " let c=el; for(let i=0;i<6&&c;i++){"
+                   "   const li=[...c.querySelectorAll('[data-dial]')].find(o=>(o.getAttribute('data-dial')||'').trim()===want);"
+                   "   if(li){ const btn=c.querySelector('[aria-haspopup=listbox],button'); if(btn) btn.click();"
+                   "     for(const e of ['mousedown','mouseup','click']) li.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true,view:window}));"
+                   "     const dc=c.querySelector('.iti__selected-dial-code');"
+                   "     return JSON.stringify({dc:(dc?dc.textContent:want).trim(), cid:c.id||''}); }"
+                   "   c=c.parentElement; } return ''; }") % (json.dumps(_nid), json.dumps(secondary))
+        else:
+            _js = ("() => { const el=document.getElementById(%s); const want=(%s||'').toLowerCase();"
+                   " if(!el||!want) return ''; let c=el;"
+                   " for(let i=0;i<5&&c;i++){ const s=c.querySelector('select');"
+                   "   if(s){ const o=[...s.options].find(o=>o.text.trim().toLowerCase()===want)"
+                   "     || [...s.options].find(o=>{const t=o.text.trim().toLowerCase(); return t&&(t.includes(want)||want.includes(t));});"
+                   "     if(o){ s.value=o.value; s.dispatchEvent(new Event('input',{bubbles:true}));"
+                   "       s.dispatchEvent(new Event('change',{bubbles:true})); return o.text.trim(); } }"
+                   "   c=c.parentElement; } return ''; }") % (json.dumps(_nid), json.dumps(secondary))
+        b = ""
+        with contextlib.suppress(Exception):
+            _raw = await _pg.evaluate(_js)
+            if secondary.startswith("+") and isinstance(_raw, str) and _raw.startswith("{"):
+                _obj = json.loads(_raw)
+                b = str(_obj.get("dc") or "").strip()
+                # PHANTOM guard: the dial code was set on the flag selector inside this widget container.
+                # Record the container id so the flag BUTTON (discovered as a separate phantom field with
+                # a flag-glyph label) is skipped in S1_LOCATE instead of resetting the dial to +1.
+                _cid = str(_obj.get("cid") or "")
+                if _cid and ctx.committed_nodes is not None:
+                    ctx.committed_nodes[_cid] = "__widget__"
+            else:
+                b = (_raw or "").strip()
+    if not a or not b:
+        return None
+    ctx.committed_text = f"{a} | {b}"
+    ctx.trace.append(f"composite-split:{a}|{b}")
+    return DONE
+
+
 async def _s_text(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S_TEXT")
-    ok = await act.type_text(session, ctx.node, ctx.value, clear=True)
+    _cs = await _split_composite_to_sibling(session, ctx)
+    if _cs is not None:
+        return _cs
+    _val = ctx.value
+    _ml = _node_attr(ctx.node, "maxlength")
+    if _ml.isdigit() and int(_ml) > 0 and len(_val) > int(_ml):
+        # A native value-setter (cdp_set_value / page.fill) BYPASSES the HTML maxlength cap, so the DOM
+        # holds the full string while the browser keeps only the first maxLength chars on real keystrokes.
+        # Pre-truncate so the committed value matches what a capped control actually stores.
+        _val = _val[: int(_ml)]
+        ctx.trace.append(f"maxlen-trunc:{_ml}")
+    before = await perc.get_state(session)
+    ok = await act.type_text(session, ctx.node, _val, clear=True)
     if not ok:
         ctx.trace.append("text-type-refused")
         return ESCALATE if ctx.required else SKIP
-    ctx.committed_text = ctx.value
+    # CREATABLE-COMBOBOX-IN-DISGUISE: a bare <input> (no role=combobox) whose typing surfaces a menu is
+    # a react-select Creatable etc. — a native-setter type writes the input's .value but the widget only
+    # paints its committed display when the option ROW is chosen, so painted stays BLANK (false-green on
+    # the input's own .value read-back). If typing opened a menu offering the value EXACTLY or a
+    # `Create \"<value>\"` row, click it verbatim (never fuzzy, never Enter). Plain inputs surface
+    # nothing -> keep the plain-text commit (hot path unchanged; geocomplete stays verbatim).
+    picked = await _commit_creatable(session, ctx, before)
+    if picked is not None:
+        ctx.trace.append("creatable-commit")
+    ctx.committed_text = picked if picked is not None else _val
     return await _s_verify(session, ctx)
+
+
+async def _s_listbox(session: Any, ctx: Ctx) -> Outcome:
+    """ARIA role=listbox (NOT a native <select>): click each matching [role=option] cell by text.
+    Handles single + aria-multiselectable (a comma/semicolon value = multiple picks). Self-verifies via
+    _s_verify (real aria-selected / painted state), so an over-eager click cannot false-green."""
+    if not ctx.guard():
+        return ESCALATE if ctx.required else SKIP
+    ctx.trace.append("S_LISTBOX")
+    parts = [p.strip() for p in ctx.value.replace(";", ",").split(",") if p.strip()] or [ctx.value]
+    n = await cdpa.cdp_click_listbox_options(session, ctx.node, parts[:MULTI_CAP])
+    if n and n > 0:
+        ctx.committed_text = ", ".join(parts[:MULTI_CAP])
+        ctx.trace.append(f"listbox-click:{n}")
+        return await _s_verify(session, ctx)
+    return await _s_native(session, ctx)  # nothing matched -> fall back (also covers a mis-detected select)
+
+
+# ---- Other-specify reveal detection (structural, no fixed label strings) ----
+_OTHER_ESCAPE_RE = re.compile(r"\b(other|specify|self[- ]describe|something else|prefer to (?:self[- ])?describe|not listed)\b", re.I)
+
+
+def _is_other_escape(text: str) -> bool:
+    """STRUCTURAL escape-option signal: the committed option is a generic 'Other / please specify /
+    something else / prefer to self-describe' bucket whose purpose is to REVEAL a dependent free-text
+    input. Matched by the OPTION's own words (word-boundary so 'another'/'mother' don't trip), never
+    by the field label. Principle + example: 'Other (please specify)' qualifies; 'Referral' does not."""
+    return bool(text and _OTHER_ESCAPE_RE.search(text))
+
+
+def _reveal_residual(value: str, committed: str) -> str:
+    """Sub-field text = value minus the committed option when that option is a LEADING prefix
+    ('Yes, H-1B' -> 'H-1B'); otherwise the whole value ('Other (please specify)' -> full value)."""
+    v = (value or "").strip()
+    c = (committed or "").strip()
+    if c and v.lower().startswith(c.lower()):
+        rest = v[len(c):].lstrip(" ,;:-").strip()
+        if rest:
+            return rest
+    return v
+
+
+def _reveal_pending_text(value: str, committed: str) -> bool:
+    """Cheap (no DOM) pre-check for routing a choice commit into S_CASCADE: the committed option is an
+    'other/self-describe' escape bucket, OR it is a leading prefix of a longer value carrying detail.
+    A plain closed-list commit (value == committed, no escape word) returns False -> hot path skips."""
+    v = (value or "").strip()
+    c = (committed or "").strip()
+    if not v or v.lower() == c.lower():
+        return False
+    return _is_other_escape(c) or _reveal_residual(v, c) != v
+
+
+_PRESENT_VALUES = {
+    "present", "current", "currently", "ongoing", "now", "to present", "till date",
+    "current position", "i currently work here",
+}
+
+
+def _is_present_value(value: str) -> bool:
+    """The End-Date value is a 'currently employed' sentinel, not a date -> tick the present toggle."""
+    return (value or "").strip().lower() in _PRESENT_VALUES
+
+
+async def _find_revealed_input(session: Any, ctx: "Ctx") -> Any | None:
+    """After an escape-option commit, find the dependent text input the choice REVEALED.
+
+    Structural, no label strings: the 'please specify' box was display:none during S1_LOCATE so it is
+    NOT in the old state -> re-perceive. Relocate the committed control by discovery identity (dom-ref)
+    or, lacking one, by nearest rect (the select did not move). Then climb to the smallest ancestor
+    that ALSO holds an empty, visible, plain-text input that is NOT inside the committed combobox
+    itself. Containment scopes it to THIS field, so a neighbouring field's empty input is never
+    grabbed; None -> caller falls through to verify unchanged."""
+    from oa_dom_value import read_dom_value
+
+    base_rect = perc.node_rect(ctx.node)
+    state = await perc.get_state(session)
+    ref = str(getattr(getattr(ctx, "field_obj", None), "name", "") or "")
+    node = perc._locate_by_dom_ref(state, ref) if ref else None
+    if node is None and base_rect is not None:
+        # no usable identity: relocate the committed control geometrically (it did not move).
+        bx, by = base_rect[0] + base_rect[2] / 2, base_rect[1] + base_rect[3] / 2
+        best_d = 1e9
+        for n in state.selector_map.values():
+            r = perc.node_rect(n)
+            if not r:
+                continue
+            d = abs((r[0] + r[2] / 2) - bx) + abs((r[1] + r[3] / 2) - by)
+            if d < best_d:
+                best_d, node = d, n
+    if node is None:
+        return None
+    own = getattr(node, "backend_node_id", None)
+    cur = node
+    for _ in range(6):
+        parent = getattr(cur, "parent_node", None)
+        if parent is None:
+            break
+        cur = parent
+        for n in perc._controls_in(cur):
+            if getattr(n, "backend_node_id", None) == own:
+                continue
+            if perc._is_descendant(n, node):  # skip the committed combobox's OWN inner input
+                continue
+            # HARD veto radio/checkbox/button/non-text inputs: _is_plain_text_editable relies on the
+            # perc node's type attr, which reads "" for some radios -> "" || "text" => wrongly editable.
+            # Typing into the sibling RADIO set its .value=residual and fired its change (yesno: flipped
+            # 'No'->'H-1B', whose change else-branch re-hid the reveal + wiped the real input). Read the
+            # type straight from the node's attributes and skip anything not a free-text field.
+            _ty = str((getattr(n, "attributes", None) or {}).get("type") or _node_attr(n, "type") or "").lower()
+            if _ty in ("radio", "checkbox", "button", "submit", "reset", "file", "hidden", "range", "color", "image"):
+                continue
+            if not _is_plain_text_editable(n) or not perc.node_is_visible(n):
+                continue
+            existing = ""
+            with contextlib.suppress(Exception):
+                existing = ((await read_dom_value(session, n)) or "").strip()
+            if not existing:
+                return n
+    return None
+
+
+async def _find_sibling_checkbox(session: Any, ctx: "Ctx") -> Any | None:
+    """The 'I currently work here / present' checkbox sharing a work-history row with the End Date input.
+    Structural (no label words): relocate the located date control (dom-ref, else nearest rect) then climb
+    to the smallest ancestor that ALSO holds a visible checkbox. None -> caller types the date normally."""
+    base_rect = perc.node_rect(ctx.node)
+    state = await perc.get_state(session)
+    ref = str(getattr(getattr(ctx, "field_obj", None), "name", "") or "")
+    node = perc._locate_by_dom_ref(state, ref) if ref else None
+    if node is None and base_rect is not None:
+        bx, by = base_rect[0] + base_rect[2] / 2, base_rect[1] + base_rect[3] / 2
+        best_d = 1e9
+        for n in state.selector_map.values():
+            r = perc.node_rect(n)
+            if not r:
+                continue
+            d = abs((r[0] + r[2] / 2) - bx) + abs((r[1] + r[3] / 2) - by)
+            if d < best_d:
+                best_d, node = d, n
+    if node is None:
+        node = ctx.node
+    cur = node
+    for _ in range(6):
+        parent = getattr(cur, "parent_node", None)
+        if parent is None:
+            break
+        cur = parent
+        for n in perc._controls_in(cur):
+            if classify_intrinsic(n) == "INTRINSIC_CHECKBOX" and perc.node_is_visible(n):
+                return n
+    return None
 
 
 # ---- S_CASCADE (did the commit reveal a sub-field?) ----
@@ -2136,6 +2967,65 @@ async def _s_cascade(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S_CASCADE")
+    # OTHER-SPECIFY REVEAL: the commit chose an escape bucket ('Other (please specify)') because the
+    # wanted value is not a listed option — choosing it unhid a dependent text input that must receive
+    # ctx.value. Gate TIGHT: fire only when the committed option READS as an escape bucket AND differs
+    # from the wanted value. A genuine closed-list commit sets committed_text to a real option (no
+    # escape word) so this whole rung is skipped and the hot path / live pages are untouched.
+    value = ctx.value.strip()
+    committed = (ctx.committed_text or "").strip()
+    residual = _reveal_residual(value, committed)
+    # ARM A — the commit REVEALED a dependent input: an 'Other/self-describe' escape bucket, OR an
+    # affirmative option carrying trailing detail ('Yes, H-1B'). Fill the newly-visible input with the
+    # RESIDUAL (value minus the option) and verify against exactly that residual. Gate = residual/escape
+    # signal AND the input actually being found, so a plain closed-list commit skips this (hot path).
+    if value and value.lower() != committed.lower() and (_is_other_escape(committed) or residual != value):
+        rin = await _find_revealed_input(session, ctx)
+        if rin is not None and await act.type_text(session, rin, residual, clear=True):
+            ctx.node = rin  # verify now reads the input that holds the REAL value, not the combobox
+            ctx.card = None
+            ctx.value = residual  # verify compares the input against exactly what we typed
+            ctx.committed_text = residual
+            ctx.trace.append("other-specify-fill")
+            from oa_dom_value import read_dom_value as _rdv
+            _rb = ((await _rdv(session, ctx.node)) or "").strip()
+            if _rb and (_rb.lower() == residual.strip().lower() or residual.strip().lower() in _rb.lower()):
+                ctx.trace.append("reveal-verified-dom")
+                return DONE  # revealed input holds the value; NEVER vlm/revalue (revalue clobbers it)
+            return await _s_verify(session, ctx)
+    # ARM B — wanted value is NOT an offered option AND the on-screen radio group carries a
+    # 'self-describe / other' escape option: switch the pick to that escape (which reveals its input)
+    # and type the full value in. Radio/checkbox groups only (a native select's Other is Arm A);
+    # gated on value != committed so an exact-match pick never re-picks. Fixes gender self-describe.
+    elif (
+        value
+        and value.lower() != committed.lower()
+        and classify_intrinsic(ctx.node) in ("INTRINSIC_RADIO", "INTRINSIC_CHECKBOX")
+    ):
+        state = await perc.get_state(session)
+        group = _read_choice_group(state, ctx)  # ponytail: whole-page scope when card is None; routing gate already confirmed this field has a self-describe escape
+        if not any(t.strip().lower() == value.lower() for t, _ in group):
+            esc = next(
+                ((t, n) for t, n in group if _is_other_escape(t) and t.strip().lower() != committed.lower()),
+                None,
+            )
+            if esc is not None:
+                await act.click_node(session, esc[1])
+                ctx.node = esc[1]
+                ctx.committed_text = esc[0]
+                ctx.trace.append(f"cascade-escape:{esc[0][:20]}")
+                rin = await _find_revealed_input(session, ctx)
+                if rin is not None and await act.type_text(session, rin, value, clear=True):
+                    ctx.node = rin
+                    ctx.card = None
+                    ctx.committed_text = value
+                    ctx.trace.append("other-specify-fill")
+                    from oa_dom_value import read_dom_value as _rdv
+                    _rb = ((await _rdv(session, ctx.node)) or "").strip()
+                    if _rb and (_rb.lower() == value.strip().lower() or value.strip().lower() in _rb.lower()):
+                        ctx.trace.append("reveal-verified-dom")
+                        return DONE  # revealed input holds value; NEVER vlm/revalue (revalue clobbers it)
+                    return await _s_verify(session, ctx)
     # Bounded; the single-page proof does not derive child values (no profile here), so cascade
     # only guards against runaway recursion and hands off to verify. A real sub-field would be
     # discovered by the runner's next field; here we verify the parent commit.
@@ -2143,17 +3033,48 @@ async def _s_cascade(session: Any, ctx: Ctx) -> Outcome:
 
 
 # ---- S_MULTI_LOOP (multi-value chips: Skills / Languages) ----
-async def _s_multi_loop(session: Any, ctx: Ctx) -> Outcome:
+async def _s_multi_loop(session: Any, ctx: Ctx, first_committed: bool = True) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
     ctx.trace.append("S_MULTI_LOOP")
     parts = [p.strip() for p in ctx.value.replace(";", ",").split(",") if p.strip()]
-    ctx.multi_done += 1  # the first value was committed by the caller
+    if first_committed:
+        ctx.multi_done += 1  # the caller already committed the first value (react-select-direct etc.)
+
+    # BARE CHIP BOX (react-tag-input / Ashby skills): a MULTI on a PLAIN text input (S2 routes only a
+    # non-combobox here) mints a chip per token via type+Enter with NO option menu. Fire every token in
+    # ONE CDP call (single resolve): a per-token get_state re-resolve invalidates the input's backend
+    # node id ('Node does not belong to the document') so only the first chip landed, and the native-
+    # setter type BLURS the field so a SendKeys Enter missed the chip handler / hit the <form> (painted
+    # BLANK, final_url gained '?'). Enter is dispatched UNTRUSTED (JS KeyboardEvent) so it fires the
+    # widget's keydown listener but can NEVER submit the form; gated to a plain input so it never runs
+    # on a typeahead/plain single field.
+    if _is_plain_text_editable(ctx.node):
+        want = parts[ctx.multi_done : MULTI_CAP]
+        n = await cdpa.cdp_type_enter_chips(session, ctx.node, want)
+        ctx.multi_done += n
+        ctx.committed_text = ", ".join(parts[:MULTI_CAP])
+        ctx.trace.append(f"multi-chips:{n}/{len(want)}")
+        return await _s_verify(session, ctx)
+
+    async def _pick(v: str, opts: list[str]) -> str | None:
+        return await brain.pick_option(v, opts, llm=ctx.llm, label=ctx.label)
+
     for part in parts[ctx.multi_done :]:
         if ctx.multi_done >= MULTI_CAP:
             break
         if not ctx.guard():
             break
+        # REACT-SELECT isMulti: reuse the SAME primitive that committed token #1 — it opens the still-open
+        # menu scoped to THIS control and clicks the matching option, adding a pill. The bespoke
+        # type->delta->Enter below never surfaced a fresh delta (closeMenuOnSelect=false) so only the 1st
+        # pill landed. Returns "" for a plain chip input, so those fall through to type+Enter.
+        with contextlib.suppress(Exception):
+            got = await cdpa.cdp_choose_react_select(session, ctx.node, part, pick=_pick)
+            if got:
+                ctx.multi_done += 1
+                ctx.trace.append(f"multi-rs+ {part}")
+                continue
         before = await perc.get_state(session)
         typed = await act.type_text(session, ctx.node, part, clear=True)
         if not typed:
@@ -2164,7 +3085,8 @@ async def _s_multi_loop(session: Any, ctx: Ctx) -> Outcome:
         node = _node_for_option(cluster, chosen) if chosen else None
         if node is not None:
             await act.click_node(session, node)
-        elif chosen:
+        else:
+            # tag/chip input (no option menu appears): Enter commits the typed value as a chip.
             await act.press_key(session, "Enter")
         ctx.multi_done += 1
         ctx.trace.append(f"multi+ {part}")
@@ -2440,6 +3362,13 @@ async def _selftest() -> int:
     chk("intrinsic checkbox(role)", classify_intrinsic(_mk(role="checkbox")) == "INTRINSIC_CHECKBOX")
     chk("intrinsic select", classify_intrinsic(_mk(tag="select")) == "INTRINSIC_SELECT")
     chk("intrinsic date(spinbutton)", classify_intrinsic(_mk(role="spinbutton")) == "INTRINSIC_DATE")
+    chk(
+        "native date -> ISO",
+        _to_iso_date("03/15/2027") == "2027-03-15"
+        and _to_iso_date("2027-03-15") == "2027-03-15"
+        and _to_iso_date("15/03/2027") == "2027-03-15"
+        and _to_iso_date("March 2027") == "",
+    )
     chk("non-intrinsic ''", classify_intrinsic(_mk(tag="input", typ="text", role="combobox")) == "")
     chk(
         "plain-text editable yes",

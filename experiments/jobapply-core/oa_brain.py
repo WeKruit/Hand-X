@@ -466,6 +466,72 @@ async def pick_control_by_vision(
     return candidates[idx]
 
 
+async def vision_audit(png_b64: str, intended: list[tuple[str, str]], *, llm: Any = None) -> list[dict]:
+    """ABSOLUTE-ACCURACY verifier — read the FILLED form from ONE screenshot and report, per field, the
+    value ACTUALLY painted on screen and whether it matches the intended value. This is the VERIFIER that
+    looks at PIXELS, wholly independent of the DOM node the committer used — so a locate/commit desync
+    (ledger DONE, control blank on screen) is exposed, not hidden. Human's final glance, one VLM call for
+    the whole page.
+
+    ``intended`` = [(label, intended_value)] for every field we tried to fill. Returns a list aligned to
+    it: ``[{label, intended, rendered, match}]`` where ``rendered`` is the on-screen value (or "BLANK" /
+    "OFFSCREEN"). Empty list on ANY VLM failure -> the caller keeps the DOM ledger rather than
+    false-failing every field on a flaky screenshot."""
+    if not intended or not png_b64:
+        return []
+    import json as _json
+    import re as _re
+
+    lines = "\n".join(f"[{i}] {lab[:120]!r} -> intended: {val[:80]!r}" for i, (lab, val) in enumerate(intended))
+    prompt = (
+        "You are auditing a FILLED job-application form from its screenshot. Trust ONLY what is visibly "
+        "painted on screen: a selected radio/pill, a checked box, entered text, a chosen dropdown value. "
+        "Do NOT infer from the field label and do NOT assume a field was filled.\n"
+        "For each field below report what is ACTUALLY selected/entered on screen right now:\n"
+        f"{lines}\n\n"
+        'Reply STRICT JSON: {"fields":[{"i":<index>,"rendered":"<the visible value; use \\"BLANK\\" if '
+        'nothing is selected/entered for it; use \\"OFFSCREEN\\" if that field is not visible in the '
+        'image>","match":<true|false>}]}. Set match=true ONLY if the on-screen value means the same as '
+        "the intended value; a BLANK or a different value is match=false."
+    )
+    try:
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+        msg: Any = UserMessage(
+            content=[
+                ContentPartTextParam(type="text", text=prompt),
+                ContentPartImageParam(
+                    type="image_url",
+                    image_url=ImageURL(url=f"data:image/png;base64,{png_b64}", detail="high", media_type="image/png"),
+                ),
+            ]
+        )
+    except Exception:
+        msg = prompt
+    resp = await _oa_llm.resilient_vlm([msg], primary=(llm or _vv._vlm()))
+    if resp is None:
+        return []
+    raw = (getattr(resp, "completion", None) or str(resp)).strip()
+    m = _re.search(r"\{.*\}", raw, _re.S)
+    if not m:
+        return []
+    try:
+        data = _json.loads(m.group(0))
+    except Exception:
+        return []
+    out: list[dict] = [{} for _ in intended]
+    for e in data.get("fields", []) if isinstance(data, dict) else []:
+        i = e.get("i")
+        if isinstance(i, int) and 0 <= i < len(intended):
+            out[i] = {
+                "label": intended[i][0],
+                "intended": intended[i][1],
+                "rendered": str(e.get("rendered", "")),
+                "match": bool(e.get("match")),
+            }
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # 6. pick_control_by_marks — VISUAL SET-OF-MARKS bind for a LABEL-FREE card.
 #    The locate LAST RESORT when STRUCTURE + spatial + grouped-text all miss (a non-text

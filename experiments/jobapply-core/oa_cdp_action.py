@@ -60,6 +60,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 from typing import Any
 
 # Per-action hard timeout (seconds). A single CDP round-trip is sub-second on a healthy session;
@@ -282,6 +283,54 @@ async def cdp_set_value(session: Any, node: Any, text: str) -> bool:
     return await _guarded(_do())
 
 
+_MINT_CHIP_JS = r"""
+function(token){
+  try{
+    const el=this;
+    const set=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+    set.call(el, token);
+    try{ const tk=el._valueTracker; if(tk) tk.setValue(''); }catch(e){}
+    el.dispatchEvent(new Event('input',{bubbles:true}));
+    const opt={key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true};
+    el.dispatchEvent(new KeyboardEvent('keydown',opt));
+    el.dispatchEvent(new KeyboardEvent('keypress',opt));
+    el.dispatchEvent(new KeyboardEvent('keyup',opt));
+    return el.value==null ? '' : String(el.value);
+  }catch(e){ return 'ERR'; }
+}
+"""
+
+
+async def cdp_type_enter_chips(session: Any, node: Any, tokens: list[str]) -> int:
+    """Mint one chip per token in a free-text tag/chip input (react-tag-input / Ashby skills box).
+
+    Resolve the input ONCE, then per token set its .value (native setter) and dispatch the widget's
+    own keydown/keypress/keyup Enter as an UNTRUSTED KeyboardEvent bound to the element. ONE resolve
+    with NO get_state between tokens avoids the stale-backend-node error that dropped every chip after
+    the first; the UNTRUSTED JS Enter fires the page's keydown handler yet can never trigger a native
+    <form> submit. Returns the count of tokens whose .value emptied after Enter (chip box clears on
+    mint)."""
+    toks = [str(t) for t in (tokens or []) if str(t).strip()]
+    if not toks:
+        return 0
+    landed = [0]
+
+    async def _do() -> bool:
+        r = await _resolve(session, node)
+        if r is None:
+            return False
+        cdp_session, session_id, object_id = r
+        for tok in toks:
+            with contextlib.suppress(Exception):
+                got = await _call_on(cdp_session, session_id, object_id, _MINT_CHIP_JS, args=[tok])
+                if str(got or "") == "":
+                    landed[0] += 1
+        return True
+
+    await _guarded(_do(), timeout=max(CDP_ACTION_TIMEOUT, 2.0 + 0.3 * len(toks)))
+    return landed[0]
+
+
 def _alnum_fold(s: str) -> str:
     """Meaningful characters only: alphanumerics, case-folded, separators/whitespace dropped.
     A formatting mask reshapes separators but preserves these — so two strings that fold equal are
@@ -319,6 +368,146 @@ async def cdp_select(session: Any, node: Any, text: str) -> bool:
         return bool(got) and str(got).strip() != ""
 
     return await _guarded(_do())
+
+
+# JS: select MULTIPLE options in a native <select multiple> — each `wants` entry (already resolved to an
+# exact option text by the caller) sets option.selected=true; fires input/change once. Returns -1 when the
+# element is NOT a multiple-select (so the caller falls back to single-pick, immune to a comma inside one
+# option like 'San Francisco, CA'), else the count selected.
+_SELECT_MULTI_JS = r"""
+function(wantsJson){
+  if(!this.multiple) return -1;
+  const wants = JSON.parse(wantsJson);
+  const norm = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const opts = [...this.options];
+  let n = 0;
+  for(const w of wants){
+    const wl = norm(w);
+    let o = opts.find(o => norm(o.textContent)===wl || norm(o.value)===wl);
+    if(!o) o = opts.find(o => { const t=norm(o.textContent); return t && (t.startsWith(wl)||wl.startsWith(t)); });
+    if(!o) o = opts.find(o => { const t=norm(o.textContent); return t && (t.includes(wl)||wl.includes(t)); });
+    if(o && !o.selected){ o.selected = true; n++; }
+  }
+  if(n){ this.dispatchEvent(new Event('input',{bubbles:true})); this.dispatchEvent(new Event('change',{bubbles:true})); }
+  return n;
+}
+"""
+
+
+_LISTBOX_CLICK_JS = r"""
+function(valuesJson){
+  const norm = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const wants = JSON.parse(valuesJson).map(norm).filter(Boolean);
+  // resolve the listbox: the node itself, its ancestor, its aria-controls/owns target, else page.
+  let box = (this.matches && this.matches('[role=listbox]')) ? this
+          : (this.closest ? this.closest('[role=listbox]') : null);
+  if(!box){ const lid = this.getAttribute && (this.getAttribute('aria-controls')||this.getAttribute('aria-owns')); if(lid) box = document.getElementById(lid); }
+  if(!box) box = document.querySelector('[role=listbox]');
+  if(!box) return 0;
+  const opts = [...box.querySelectorAll('[role=option]')];
+  let n = 0;
+  for(const w of wants){
+    let o = opts.find(x => norm(x.innerText||x.textContent) === w);
+    if(!o) o = opts.find(x => { const t = norm(x.innerText||x.textContent); return t && (t.includes(w)||w.includes(t)); });
+    if(o){ o.scrollIntoView({block:'nearest'});
+      for(const ev of ['pointerdown','mousedown','mouseup','click']) o.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));
+      n++; }
+  }
+  return n;
+}
+"""
+
+
+_DUAL_LB_JS = "() => { const label = __LABEL__, wants = __VALUES__;" + r"""
+  const norm = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const labLow = norm(label).replace(/[*:?]/g,'').trim();
+  // the dual-listbox container = >=2 item lists + an add/move-right button. Prefer the one whose text
+  // carries the field label; take the smallest such container.
+  const conts = [...document.querySelectorAll('div,fieldset,section,[role=group]')].filter(c => {
+    const lists = c.querySelectorAll('ul,[role=listbox]');
+    const hasAdd = [...c.querySelectorAll('button,[role=button]')].some(b =>
+      /add|move|select|transfer|→|›|»|>/i.test((b.getAttribute('aria-label')||'')+' '+(b.className||'')+' '+(b.innerText||'')));
+    return lists.length>=2 && hasAdd && c.children.length<40;
+  }).sort((a,b)=>(a.innerText||'').length-(b.innerText||'').length);
+  const cont = (labLow.length>=4 && conts.find(c=>norm(c.innerText).includes(labLow.slice(0,20)))) || conts[0];
+  if(!cont) return 0;
+  const addBtn = [...cont.querySelectorAll('button,[role=button]')].find(b =>
+    /(^|[^a-z])(add|move|select|transfer)([^a-z]|$)|→|›|»/i.test((b.getAttribute('aria-label')||'')+' '+(b.className||'')+' '+(b.innerText||'')));
+  if(!addBtn) return 0;
+  let n = 0;
+  for(const w of wants){
+    if(!w) continue;
+    const li = [...cont.querySelectorAll('li,[role=option]')].find(x => {
+      const t = norm((x.dataset && x.dataset.val) ? x.dataset.val : (x.innerText||x.textContent));
+      return t && (t===w || t.includes(w) || w.includes(t)); });
+    if(!li) continue;
+    li.scrollIntoView({block:'nearest'});
+    for(const ev of ['pointerdown','mousedown','mouseup','click']) li.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));
+    for(const ev of ['pointerdown','mousedown','mouseup','click']) addBtn.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));
+    n++;
+  }
+  return n; }"""
+
+
+async def cdp_dual_listbox_transfer(page: Any, label: str, values: list) -> int:
+    """Two-panel transfer widget (bootstrap-duallistbox / PrimeFaces PickList): for each value, click its
+    item in the source list + click the add/move-right button to move it to the selected panel. Anchored
+    by the field LABEL. Returns the count moved; _s_verify re-checks the Selected panel (no false-green)."""
+    import json as _json
+
+    with contextlib.suppress(Exception):
+        js = _DUAL_LB_JS.replace("__LABEL__", _json.dumps(str(label or ""))).replace(
+            "__VALUES__", _json.dumps([str(v).lower() for v in values]))
+        got = await page.evaluate(js)
+        try:
+            return int(got or 0)
+        except Exception:
+            return 0
+    return 0
+
+
+async def cdp_click_listbox_options(session: Any, node: Any, values: list) -> int:
+    """Click matching [role=option] cells inside an ARIA role=listbox (one per value token). Returns the
+    count clicked; _s_verify then re-checks the real aria-selected state so this cannot false-green."""
+    async def _do() -> int:
+        r = await _resolve(session, node)
+        if r is None:
+            return 0
+        cdp_session, session_id, object_id = r
+        import json as _json
+        got = await _call_on(cdp_session, session_id, object_id, _LISTBOX_CLICK_JS, args=[_json.dumps([str(v) for v in values])])
+        try:
+            return int(got)
+        except Exception:
+            return 0
+
+    try:
+        return int(await asyncio.wait_for(_do(), timeout=CDP_ACTION_TIMEOUT))
+    except Exception:
+        return 0
+
+
+async def cdp_select_multiple(session: Any, node: Any, texts: list) -> int:
+    """Select several options in a native <select multiple> (each an exact option text) + fire change.
+    Returns -1 if the element is not a multiple-select, else the count selected."""
+    async def _do() -> int:
+        r = await _resolve(session, node)
+        if r is None:
+            return 0
+        cdp_session, session_id, object_id = r
+        import json as _json
+        got = await _call_on(cdp_session, session_id, object_id, _SELECT_MULTI_JS, args=[_json.dumps([str(t) for t in texts])])
+        try:
+            return int(got)
+        except Exception:
+            return 0
+
+    # NOT via _guarded — it bool()-coerces the return, which would turn the -1 "not-a-multiple-select"
+    # sentinel into True (bool(-1)) and false-green a non-native listbox. Preserve the raw int.
+    try:
+        return int(await asyncio.wait_for(_do(), timeout=CDP_ACTION_TIMEOUT))
+    except Exception:
+        return 0
 
 
 # JS: within `this` (the card/group container) find the radio/checkbox input whose VALUE attr (or its
@@ -464,45 +653,192 @@ inputs = [...root.querySelectorAll('input[type=radio],input[type=checkbox]')];
 # ANCHOR to the field's own entry container by LABEL text (not page-wide -> no cross-field bleed), click
 # the button whose text == value, and return the value ONLY if the button ends in an active/selected
 # state -> self-verifying, so it cannot false-green an unselected pill.
-# shared prologue: resolve the field-entry container BY LABEL and the target pill button.
+# shared prologue: resolve the field-entry container BY LABEL, then the target OPTION control — either
+# an ashby-style pill <button>/role widget OR a native <input type=radio|checkbox> (matched by its
+# associated <label> / value). Assignment-only (no early return) so CLICK returns text and VERIFY can
+# report found-ness. `hit` is the control to test for selected-state; `clickTarget` the thing to click
+# (a native input's own <label>, which drives React's onChange); `isInput` switches active-detection to
+# the real .checked property (a native radio has no _active_ class — trusting label-text there false-greens).
 _BTN_FIND = r"""
   const low = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
   const norm2 = s => (s||'').replace(/\s+/g,'').toLowerCase();
   const w = norm2(want); const labLow = low(label).replace(/[*:]/g,'').trim();
-  if(!w || labLow.length < 4) return "";
-  const cands = [...document.querySelectorAll('div,fieldset,section')].filter(e => {
-    const t = low(e.innerText); return e.children.length < 40 && t && t.startsWith(labLow.slice(0,40));
-  }).sort((a,b) => (a.innerText||'').length - (b.innerText||'').length);
-  const cont = cands[0]; if(!cont) return "";
-  const btns = [...cont.querySelectorAll('button,[role=button],[role=radio],[role=option]')].filter(b => {
-    const ty=(b.getAttribute('type')||'').toLowerCase(); if(ty==='submit') return false;
-    const t=norm2(b.innerText); return t && t.length<=30 && !/submit|apply|upload|replace|next|continue/.test(t); });
-  const hit = btns.find(b => norm2(b.innerText)===w); if(!hit) return "";
+  let hit=null, clickTarget=null, isInput=false, cont=null;
+  if(w && labLow.length >= 4){
+    // MATCH BY QUESTION STEM, not the whole label: discovery can append option text onto the label
+    // ('Do you require sponsorship? * Yes No'), and a startsWith(full-label) then never finds the
+    // field's own container. Take the stem (text before the first '?', else the first 40 chars) and
+    // accept any small container whose text CONTAINS it (tolerant of leading/trailing junk on either
+    // side); the shortest such container is the field entry.
+    const _pre = labLow.split('?')[0].trim();
+    const stem = (_pre.length >= 6 ? _pre : labLow).slice(0,40);
+    const cands = [...document.querySelectorAll('div,fieldset,section')].filter(e => {
+      const t = low(e.innerText); return e.children.length < 40 && t && (t.includes(stem) || t.startsWith(labLow.slice(0,40)));
+    }).sort((a,b) => (a.innerText||'').length - (b.innerText||'').length);
+    cont = cands[0] || null;
+  }
+  if(cont){
+    const btns = [...cont.querySelectorAll('button,[role=button],[role=radio],[role=option]')].filter(b => {
+      const ty=(b.getAttribute('type')||'').toLowerCase(); if(ty==='submit') return false;
+      const t=norm2(b.innerText); return t && t.length<=30 && !/submit|apply|upload|replace|next|continue/.test(t); });
+    hit = btns.find(b => norm2(b.innerText)===w) || null;
+    clickTarget = hit;
+    if(!hit){
+      // native radio/checkbox — the option a grouped-locate desync mis-committed (ledger DONE, radio
+      // blank on screen). Re-find it here BY LABEL, immune to the bad container.
+      const esc = id => (window.CSS && CSS.escape) ? CSS.escape(id) : id;
+      const _raw = inp => { let t='';
+        if(inp.id){ const l=cont.querySelector('label[for="'+esc(inp.id)+'"]'); if(l) t=l.innerText; }
+        if(!t){ const p=inp.closest('label'); if(p) t=p.innerText; }
+        if(!t) t=inp.getAttribute('aria-label')||inp.value||''; return t; };
+      const lblText = inp => norm2(_raw(inp));
+      const lblSp = inp => low(_raw(inp));   // spaced -> real word boundaries
+      const inps = [...cont.querySelectorAll('input[type=radio],input[type=checkbox]')];
+      let inp = inps.find(i => lblText(i)===w);
+      if(!inp){
+        // WORD-BOUNDARY PREFIX before any substring: 'No' -> the option STARTING with the word 'No'
+        // ('No, I do not have a disability...'), never a substring hit inside 'I do NOt want to answer'
+        // (the CC-305 false-pick). No length cap here — the correct option is often a long clause.
+        const wl = low(want);
+        const re = new RegExp('^' + wl.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '\\b');
+        inp = inps.find(i => re.test(lblSp(i)));
+      }
+      if(!inp) inp = inps.find(i => { const t=lblText(i); return t && t.length<=30 && (t.includes(w)||w.includes(t)); });
+      if(inp){ hit=inp; isInput=true;
+        clickTarget = (inp.id && cont.querySelector('label[for="'+esc(inp.id)+'"]')) || inp.closest('label') || inp; }
+    }
+  }
+  const _active = el => (el.getAttribute('aria-checked')==='true' || el.getAttribute('aria-pressed')==='true'
+    || el.getAttribute('data-state')==='checked'
+    || /(^|[^a-z])(active|selected|checked|_active_)([^a-z]|$)/i.test(String(el.className||'')));
+  // COMMITTED TEXT = the option's VISIBLE LABEL, never input.value. A native radio's value attr is
+  // usually the generic 'on' (Ashby EEO groups), so returning it makes committed='on' -> the want-vs-got
+  // completeness veto false-REDs a correctly-selected radio (want 'Woman' got 'on'). The label[for] /
+  // wrapping <label> / aria-label is the human-meaningful text that the veto compares against ctx.value.
+  const _labelOf = el => {
+    if(!el) return '';
+    if(isInput){
+      let t='';
+      if(el.id){ const _e=(window.CSS&&CSS.escape)?CSS.escape(el.id):el.id;
+        const l=(cont||document).querySelector('label[for="'+_e+'"]'); if(l) t=l.innerText; }
+      if(!t){ const p=el.closest('label'); if(p) t=p.innerText; }
+      if(!t) t=el.getAttribute('aria-label')||'';
+      return (t||'').replace(/\s+/g,' ').trim();
+    }
+    return (el.innerText||'').replace(/\s+/g,' ').trim();
+  };
 """
-# STEP 1 — click the pill (pointer sequence). Returns its text (the click landed).
+# STEP 1 — click the option (pill: pointer sequence; native input: click its label + fire change).
+# Returns the option text (the click landed), "" when nothing matched.
 _BTN_CLICK_JS = "() => { const label = __LABEL__, want = __WANT__;" + _BTN_FIND + r"""
-  const cls0 = String(hit.className||'');
-  const already = /(^|[^a-z])(active|selected|checked|_active_)([^a-z]|$)/i.test(cls0)
-    || hit.getAttribute('aria-checked')==='true' || hit.getAttribute('aria-pressed')==='true' || hit.getAttribute('data-state')==='checked';
-  if(already) return (hit.innerText||'').trim() || want;   // already selected -> don't re-click (would TOGGLE it off)
+  if(!hit) return "";
+  if(isInput){
+    if(hit.checked) return (_labelOf(hit)||want);             // already selected -> don't re-toggle
+    try{ hit.scrollIntoView({block:'center'}); }catch(_){}
+    try{ clickTarget.click(); }catch(_){}
+    if(!hit.checked){ try{ hit.checked = true; }catch(_){} }   // belt: force + fire so React onChange commits
+    hit.dispatchEvent(new Event('input',{bubbles:true}));
+    hit.dispatchEvent(new Event('change',{bubbles:true}));
+    return (_labelOf(hit)||want);
+  }
+  if(_active(hit)) return (hit.innerText||'').trim() || want;  // already selected -> don't re-click (would TOGGLE off)
   try{ hit.scrollIntoView({block:'center'}); }catch(_){}
   for(const ev of ['pointerdown','mousedown','mouseup','click']) hit.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,view:window}));
   return (hit.innerText||'').trim() || want; }"""
-# STEP 2 — AFTER a tick, is that same pill now active/selected? (React applies the class next tick,
-# so this MUST run in a separate evaluate after an await — checking in step 1 always read stale.)
+# STEP 2 — AFTER a tick, is that same option now really selected? React applies state on the next tick,
+# so this MUST run in a separate evaluate after an await (a same-evaluate check read stale every time).
+# Returns JSON {v: committed-text-or-"", found: a matching control existed} so the caller can tell a
+# real Lever styled-DIV (found=false -> trust the prior click) from a false-green native radio the click
+# didn't take (found=true, v="" -> do NOT trust the ledger; re-commit via the visual/group path).
 _BTN_VERIFY_JS = "() => { const label = __LABEL__, want = __WANT__;" + _BTN_FIND + r"""
-  const cls = String(hit.className||'');
-  return (/(^|[^a-z])(active|selected|checked|_active_)([^a-z]|$)/i.test(cls)
-    || hit.getAttribute('aria-checked')==='true' || hit.getAttribute('aria-pressed')==='true'
-    || hit.getAttribute('data-state')==='checked') ? ((hit.innerText||'').trim() || want) : ""; }"""
+  if(!hit) return JSON.stringify({v:"", found:false});
+  const ok = isInput ? !!hit.checked : _active(hit);
+  const v = ok ? (_labelOf(hit)||want) : "";
+  return JSON.stringify({v:v, found:true}); }"""
 
 
-async def cdp_choose_button_by_label(page: Any, label: str, value: str) -> str:
-    """Commit an ashby-style pill button group anchored by the field's LABEL (field-scoped, no bleed).
-    Clicks the pill, then AFTER a tick re-checks it ended active/selected — returns the option text ONLY
-    if so. Self-verifying (real active state, not label text) -> cannot false-green an unselected pill.
-    Split click/verify because React applies the active class on the next tick (a same-evaluate check
-    read stale and returned "" every time -> the fix silently never fired). "" on any miss/failure."""
+# JS (bare arrow, __LABEL__/__WANT__ baked via .replace — same pattern as _BTN_CLICK_JS): commit the two
+# GROUPED widgets whose option is resolvable only by STRUCTURAL ASSOCIATION or ORDINAL position, never by
+# free option-text. (1) MATRIX CELL (Likert): a radio whose aria-labelledby references >=2 headers (row +
+# column) — the shared column label ('Strongly agree') repeats every row, so a text match checks the WRONG
+# row; bind by rowHeader-text==label AND colHeader-text==value. (2) ORDINAL SCALE (star rating): N sibling
+# <button>/[role=radio] in a [role=group] labelled by this field's label; the integer value is the ordinal —
+# click the Nth (options carry the star glyph, not the digit). Self-verifying: returns v only when the
+# control ends really selected (.checked / aria-pressed / aria-checked / on|active|selected|checked class),
+# so it can never false-green; m marks that the exact structure was found (caller must NOT fall to the text
+# path when m && !v — that is the shared-column false-green).
+_GRID_SCALE_JS = "() => { const label = __LABEL__, want = __WANT__;" + r"""
+  const low = s => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const norm = s => (s||'').replace(/\s+/g,'').toLowerCase();
+  const L = low(label).replace(/[*:]/g,'').trim();
+  const W = norm(want);
+  const idText = id => { const e = id && document.getElementById(id); return e ? low(e.innerText||e.textContent) : ''; };
+  const rowMatch = t => !!t && (t===L || (L.length>8 && (t.includes(L)||L.includes(t))));
+  // MATRIX CELL: a radio whose aria-labelledby references BOTH a row header and a column header.
+  const cells = [...document.querySelectorAll('input[type=radio][aria-labelledby],[role=radio][aria-labelledby]')];
+  for(const r of cells){
+    const ids = (r.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean);
+    if(ids.length < 2) continue;
+    const texts = ids.map(idText);
+    if(!(texts.some(rowMatch) && texts.some(t => norm(t)===W))) continue;
+    if(!r.checked){ try{ r.scrollIntoView({block:'center'}); }catch(_){}
+      try{ r.click(); }catch(_){} if(!r.checked){ try{ r.checked = true; }catch(_){} }
+      r.dispatchEvent(new Event('input',{bubbles:true})); r.dispatchEvent(new Event('change',{bubbles:true})); }
+    return JSON.stringify({v: r.checked ? want : '', m: true});
+  }
+  // ORDINAL RATING SCALE: value is a bare integer N -> click the Nth sibling rating control.
+  const s = String(want).trim(); const n = parseInt(s,10);
+  if(String(n)===s && n>=1){
+    for(const g of [...document.querySelectorAll('[role=group],[role=radiogroup]')]){
+      const gl = idText(g.getAttribute('aria-labelledby')) || low(g.getAttribute('aria-label'));
+      if(!rowMatch(gl)) continue;
+      const opts = [...g.querySelectorAll('button,[role=radio]')].filter(b => (b.getAttribute('type')||'').toLowerCase()!=='submit');
+      if(opts.length < 3 || n > opts.length) continue;
+      const ordinal = opts.every((b,i) => { const dv=b.getAttribute('data-v');
+        return (dv && parseInt(dv,10)===i+1) || /^\s*\d+\b/.test(low(b.getAttribute('aria-label'))); });
+      if(!ordinal) continue;
+      const t = opts[n-1];
+      try{ t.scrollIntoView({block:'center'}); }catch(_){}
+      try{ t.click(); }catch(_){}
+      const on = t.getAttribute('aria-pressed')==='true' || t.getAttribute('aria-checked')==='true'
+        || /(^|[^a-z])(on|active|selected|checked)([^a-z]|$)/i.test(String(t.className||''));
+      return JSON.stringify({v: on ? s : '', m: true});
+    }
+  }
+  return JSON.stringify({v:'', m:false}); }"""
+
+
+async def cdp_commit_grid_or_scale(page: Any, label: str, value: str) -> tuple[str, bool]:
+    """Commit a Likert MATRIX CELL or an ordinal RATING SCALE — the two grouped widgets whose option is
+    resolvable only by STRUCTURAL association (aria-labelledby row x column) or ORDINAL position, never by
+    free option-text (the shared column label repeats every row; the star glyph never equals the digit).
+    Self-verifying: returns ``(committed_text, matched)`` where committed non-empty == the control ended
+    really selected (.checked / aria-pressed / aria-checked). ``('', True)`` == the exact cell/scale was
+    found but the click did not take (caller must NOT fall to the text path -> shared-column false-green).
+    ``('', False)`` == not one of these structures (caller continues normal classify). Generic; no per-ATS
+    string, no heading-text heuristic beyond the accessible row/col/group name association."""
+    import json as _json
+
+    with contextlib.suppress(Exception):
+        js = _GRID_SCALE_JS.replace("__LABEL__", _json.dumps(str(label or ""))).replace(
+            "__WANT__", _json.dumps(str(value or "")))
+        raw = await page.evaluate(js)
+        try:
+            res = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except Exception:
+            res = {}
+        return (str(res.get("v") or "").strip(), bool(res.get("m")))
+    return ("", False)
+
+
+async def cdp_choose_button_by_label(page: Any, label: str, value: str) -> tuple[str, bool]:
+    """Commit an ashby pill button OR native radio group anchored by the field's LABEL (field-scoped,
+    no bleed). Clicks the option, then AFTER a tick re-checks it ended really selected (active class for
+    a pill, .checked for a native input) — never label text, so it cannot false-green. Returns
+    ``(committed_text, found)``: ``committed_text`` non-empty == real commit; ``found`` == a matching
+    control existed in the field container. ``("", True)`` is the caught false-green (control present but
+    unselected); ``("", False)`` == no anchorable control (e.g. Lever styled-DIV — caller trusts its own
+    verified click). Split click/verify because React applies state on the next tick."""
     import asyncio as _a
     import json as _json
 
@@ -512,11 +848,15 @@ async def cdp_choose_button_by_label(page: Any, label: str, value: str) -> str:
 
         clicked = await page.evaluate(_b(_BTN_CLICK_JS))
         if not str(clicked or "").strip():
-            return ""
+            return ("", False)  # nothing matched -> no control here
         await _a.sleep(0.3)
-        active = await page.evaluate(_b(_BTN_VERIFY_JS))
-        return str(active or "").strip()
-    return ""
+        raw = await page.evaluate(_b(_BTN_VERIFY_JS))
+        try:
+            res = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except Exception:
+            res = {}
+        return (str(res.get("v") or "").strip(), bool(res.get("found")))
+    return ("", False)
 
 
 async def cdp_choose_option(session: Any, container_node: Any, value: str, group_name: str = "") -> str:
@@ -607,7 +947,7 @@ async def cdp_select_in_container(session: Any, container_node: Any, value: str)
 # collapsed; after a short mount wait a second call clicks the [role=option] matching `want`.
 _ARIA_COMBO_FIND = r"""
   const findCombo = (root) => {
-    const sel = '[role=combobox][aria-owns],[role=combobox][aria-controls],[aria-haspopup=listbox][aria-owns],[aria-haspopup=listbox][aria-controls]';
+    const sel = '[role=combobox][aria-owns],[role=combobox][aria-controls],[aria-haspopup=listbox][aria-owns],[aria-haspopup=listbox][aria-controls],[role=combobox][aria-haspopup=listbox],[aria-haspopup=listbox]';
     if(root.matches && root.matches(sel)) return root;
     let c = root.querySelector(sel);
     if(c) return c;
@@ -636,8 +976,11 @@ function(){
   if(!c) return "";
   if(c.getAttribute('aria-expanded') !== 'true'){
     c.scrollIntoView({block:'center'});
+    // the open handler may live on an inner <button> trigger (Workday selectWidget); a click on the
+    // combobox WRAPPER never fires it. Open the inner button when present, else the combobox itself.
+    const opener = c.querySelector('button') || c;
     for(const ev of ['mousedown','mouseup','click'])
-      c.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true}));
+      opener.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true}));
   }
   return "found";
 }
@@ -656,14 +999,36 @@ function(want){
   const c = findCombo(this);
   if(!c) return "";
   const id = c.getAttribute('aria-owns') || c.getAttribute('aria-controls');
-  const lb = id && document.getElementById(id);
+  let lb = id && document.getElementById(id);
+  if(!lb){
+    // portaled/sibling listbox with NO aria-owns/controls (MUI Select body-portal; Workday sibling
+    // toggled by `hidden`). Scope by ARIA OWNERSHIP: shared aria-labelledby token, OR the listbox's
+    // aria-label == the trigger's accessible name; else the structural [role=listbox] inside the
+    // combobox / its field. A foreign field's listbox carries a different label -> no cross-field bleed.
+    const mine = (c.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean);
+    const nm = mine.map(i=>{const e=document.getElementById(i);return e?(e.innerText||e.textContent||''):'';}).join(' ').toLowerCase().replace(/\s+/g,'');
+    lb = [...document.querySelectorAll('[role=listbox]')].filter(e=>e.offsetParent).find(b=>{
+      const bl=(b.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean);
+      if(bl.some(t=>mine.includes(t))) return true;
+      const al=(b.getAttribute('aria-label')||'').toLowerCase().replace(/\s+/g,'');
+      return !!al && !!nm && (al.includes(nm)||nm.includes(al)); })
+      || c.querySelector('[role=listbox]')
+      || ((c.closest('.field,[class*=field]')||c.parentElement||c).querySelector('[role=listbox]'));
+  }
   if(!lb) return "";
   const opts = [...lb.querySelectorAll('[role=option]')];
   if(!opts.length) opts.push(...lb.querySelectorAll('li'));
+  // custom div dropdown (dependent-cascade city: `.citysel__opt` cells, no role=option/li). The
+  // listbox was resolved by aria-owns/controls or ownership, so its class-based option cells ARE the
+  // options — scoped to this list, so no page-wide bleed. Leaf cells only (skip wrapper containers).
+  if(!opts.length) opts.push(...[...lb.querySelectorAll('[class*=opt],[class*=item],[class*=cell]')].filter(e=>!e.querySelector('[class*=opt],[class*=item]')));
   // innerText = RENDERED text (excludes svg <desc> junk textContent carries — live: option '3'
   // read back as 'SVGs not supported by this browser.3').
   const vis = o => norm((o.innerText!=null && o.innerText.trim()) ? o.innerText : (o.textContent||''));
   let t = opts.find(o => vis(o) === w);
+  // PICK-STABILITY: word-boundary PREFIX before any substring. Value 'No' must prefer the option that
+  // STARTS with the word 'No' over a 'Decline to self-identify' / 'do not consent' substring match.
+  if(!t){ const re = new RegExp('^'+w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\b'); t = opts.find(o => re.test(vis(o))); }
   // substring fallback only for real words — a 1-char want ('4') matches half a country list
   if(!t && w.length >= 3) t = opts.find(o => { const x = vis(o); return x && (x.includes(w) || w.includes(x)); });
   if(!t) return "";
@@ -704,6 +1069,135 @@ async def cdp_choose_aria_option(session: Any, node: Any, value: str) -> str:
         return ""
 
 
+# ID-based (STALE-PROOF) portaled-listbox JS — bind the trigger by its DOM id in PAGE scope, so a
+# get_state re-serialize between open and pick (which stales the backend node id) can't break it.
+# _lbById mirrors _ARIA_LB_FIND's ownership scope with `t` = the id-resolved trigger. Bare arrows
+# (page.evaluate wraps as (fn)()). __ID__ / __W__ baked via .replace(json.dumps(...)).
+_PL_LB_HELPER = r"""
+  const _lbFind = (c) => {
+    const id = c.getAttribute('aria-owns') || c.getAttribute('aria-controls');
+    let lb = id && document.getElementById(id);
+    if(!lb){
+      const mine = (c.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean);
+      const nm = mine.map(i=>{const e=document.getElementById(i);return e?(e.innerText||e.textContent||''):'';}).join(' ').toLowerCase().replace(/\s+/g,'');
+      lb = [...document.querySelectorAll('[role=listbox]')].filter(e=>e.getClientRects().length).find(b=>{
+        const bl=(b.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean);
+        if(bl.some(x=>mine.includes(x))) return true;
+        const al=(b.getAttribute('aria-label')||'').toLowerCase().replace(/\s+/g,'');
+        return !!al && !!nm && (al.includes(nm)||nm.includes(al)); })
+        || c.querySelector('[role=listbox]')
+        || ((c.closest('.field,[class*=field]')||c.parentElement||c).querySelector('[role=listbox]'));
+    }
+    return lb || null;
+  };
+  const _opts = (lb) => { let o=[...lb.querySelectorAll('[role=option]')]; if(!o.length) o.push(...lb.querySelectorAll('li')); if(!o.length) o.push(...[...lb.querySelectorAll('[class*=opt],[class*=item],[class*=cell]')].filter(e=>!e.querySelector('[class*=opt],[class*=item]'))); return o; };
+  const _vis = o => ((o.innerText!=null && o.innerText.trim()) ? o.innerText : (o.textContent||'')).replace(/\s+/g,' ').trim();
+"""
+_PL_OPEN_BY_ID = "() => { const t = document.getElementById(__ID__); if(!t) return 'noel';" + r"""
+  // IDEMPOTENT open: click ONLY when no menu is currently visible. A custom combobox (dependent-cascade
+  // city) doesn't track aria-expanded, and prior rungs toggle it — clicking on aria-expanded alone
+  // TOGGLES an already-open menu shut. Detect open by the owned list OR any visible menu/listbox in the
+  // widget; open only if none. So whatever state prior rungs left, this ENSURES open, never closes.
+  const lid = t.getAttribute('aria-controls') || t.getAttribute('aria-owns');
+  const owned = lid && document.getElementById(lid);
+  const scope = t.closest('.field,[class*=field]') || t.parentElement || document;
+  const isOpen = (t.getAttribute('aria-expanded') === 'true')
+    || (owned && owned.getClientRects().length)
+    || [...scope.querySelectorAll('[role=listbox],[class*=menu],[class*=Menu]')].some(e => e.getClientRects().length);
+  if(!isOpen){ t.scrollIntoView({block:'center'});
+    for(const e of ['mousedown','mouseup','click']) t.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true,view:window})); }
+  return 'ok'; }"""
+_PL_READ_BY_ID = ("() => { const t = document.getElementById(__ID__); if(!t) return '[]';" + _PL_LB_HELPER + r"""
+  const lb = _lbFind(t); if(!lb) return '[]';
+  return JSON.stringify(_opts(lb).map(_vis).filter(Boolean)); }""")
+_PL_CLICK_BY_ID = ("() => { const t = document.getElementById(__ID__); const w = (__W__||'').replace(/\\s+/g,' ').trim().toLowerCase();"
+                   + _PL_LB_HELPER + r"""
+  if(!t || !w) return '';
+  const lb = _lbFind(t); if(!lb) return '';
+  const opts = _opts(lb); const low = o => _vis(o).toLowerCase();
+  let x = opts.find(o => low(o) === w) || opts.find(o => { const y=low(o); return y && (y.includes(w)||w.includes(y)); });
+  if(!x) return '';
+  x.scrollIntoView({block:'nearest'});
+  for(const e of ['mousedown','mouseup','click']) x.dispatchEvent(new MouseEvent(e,{bubbles:true,cancelable:true,view:window}));
+  return _vis(x); }""")
+# SCROLL-MATERIALIZE a VIRTUALIZED listbox (react-window: only ~10 of N rows mounted). Page the
+# listbox's scroll container by ~one viewport (overlapping) and return the freshly-mounted texts +
+# whether it advanced, so the caller loops until the wanted row mounts or scrolling ends.
+_PL_SCROLL_BY_ID = ("() => { const t = document.getElementById(__ID__);" + _PL_LB_HELPER + r"""
+  const lb = _lbFind(t); if(!lb) return null;
+  let sc = lb;
+  if(sc.scrollHeight <= sc.clientHeight + 4){
+    sc = [...lb.querySelectorAll('*')].find(e => e.scrollHeight > e.clientHeight + 4 && /auto|scroll/.test(getComputedStyle(e).overflowY)) || lb;
+  }
+  const before = sc.scrollTop;
+  sc.scrollTop = before + Math.max(40, Math.floor(sc.clientHeight * 0.85));
+  const now = sc.scrollTop;
+  return JSON.stringify({advanced: now > before + 1, texts: _opts(lb).map(_vis).filter(Boolean)}); }""")
+
+
+async def cdp_pick_aria_option(session: Any, node: Any, value: str, pick=None, node_id: str = "") -> str:
+    """Commit a non-editable combobox (MUI Select div) whose body-portaled listbox a synthetic dispatch
+    can open but the field-scoped delta never captures. STALE-PROOF: binds the trigger by its DOM id in
+    PAGE scope (a get_state re-serialize stales the backend node — the reason the node-resolved rungs
+    returned ''), OPENS it, READS the ownership-scoped listbox, resolves via ``pick(value, opts)`` (LLM:
+    a short intent -> a long clause), then clicks the chosen option. Requires a stable id (the node's
+    own id else the caller's discovery ref via ``node_id``); returns '' without one. Returns text or ''."""
+    nid = str((getattr(node, "attributes", None) or {}).get("id") or node_id or "")
+    if not nid:
+        return ""
+
+    async def _do() -> str:
+        page = await session.must_get_current_page()
+        idj = json.dumps(str(nid))
+        await page.evaluate(_PL_OPEN_BY_ID.replace("__ID__", idj))
+        await asyncio.sleep(0.4)  # listbox mounts on the next commit
+        raw = await page.evaluate(_PL_READ_BY_ID.replace("__ID__", idj))
+        try:
+            opts = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except Exception:
+            opts = []
+        if not opts:
+            return ""
+        nv = " ".join(str(value).split()).lower()
+        chosen = (await pick(value, opts)) if pick is not None else ""
+        chosen = chosen or ""
+        if not chosen:
+            chosen = next((o for o in opts if " ".join(str(o).split()).lower() == nv), "") or \
+                next((o for o in opts if nv and (nv in str(o).lower() or str(o).lower() in nv)), "")
+        if not chosen:
+            # VIRTUALIZED (react-window): the wanted row was never in the mounted window. Scroll-
+            # materialize by exact value (the LLM can't see 500 unmounted rows), re-reading until it
+            # mounts or scrolling ends. Exact/substring match — a windowed country list is not fuzzy.
+            for _ in range(150):
+                raw2 = await page.evaluate(_PL_SCROLL_BY_ID.replace("__ID__", idj))
+                try:
+                    info = json.loads(raw2) if raw2 else None
+                except Exception:
+                    info = None
+                if not isinstance(info, dict):
+                    break
+                hit = next((t for t in info.get("texts", [])
+                            if " ".join(str(t).split()).lower() == nv
+                            or (nv and nv in " ".join(str(t).split()).lower())), None)
+                if hit:
+                    chosen = hit
+                    break
+                if not info.get("advanced"):
+                    break
+        if not chosen:
+            return ""
+        got = await page.evaluate(
+            _PL_CLICK_BY_ID.replace("__ID__", idj).replace("__W__", json.dumps(str(chosen))))
+        return str(got).strip() if got else str(chosen)
+
+    try:
+        return await asyncio.wait_for(_do(), timeout=max(CDP_ACTION_TIMEOUT, 4.0))
+    except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041
+        return ""
+    except Exception:
+        return ""
+
+
 # react-select (greenhouse/robinhood) exposes NO aria-owns — its options render in a
 # `[class*=option]` menu that only mounts on MOUSEDOWN (a plain .click() never opens it, the live
 # root cause of robinhood's demographic-select escalations). This mirrors ats_greenhouse._combobox:
@@ -712,9 +1206,13 @@ _RS_OPEN_READ_JS = r"""
 function(skipOpen){
   const norm = s => (s||'').replace(/\s+/g,' ').trim();
   // the control wrapper is an ancestor of the input carrying a react-select 'control' class
-  let ctrl = this;
-  for(let i=0;i<5 && ctrl;i++){ if(ctrl.className && /(^|[^a-z])control([^a-z]|$)|select__control|Control/i.test(ctrl.className.toString())) break; ctrl = ctrl.parentElement; }
-  const target = ctrl || this;
+  let ctrl = this, matched = false;
+  for(let i=0;i<5 && ctrl;i++){ if(ctrl.className && /(^|[^a-z])control([^a-z]|$)|select__control|Control/i.test(ctrl.className.toString())){ matched = true; break; } ctrl = ctrl.parentElement; }
+  // BARE combobox (MUI Select / any role=combobox trigger with no react-select 'control' wrapper):
+  // when the walk matched nothing, ctrl has drifted to a random ancestor whose click never reaches
+  // the trigger's own open handler (MUI painted BLANK: pageOpts=0). Fall back to `this`, the real
+  // trigger. react-select keeps its matched control wrapper unchanged -> no regression.
+  const target = matched ? ctrl : this;
   target.scrollIntoView({block:'center'});
   // affirm mega4/38: the synthetic dispatch NEVER opened the menu (aria/wrapper/idm all
   // absent, 244 stale option-classed nodes page-wide) — the caller now opens with a TRUSTED
@@ -740,6 +1238,19 @@ function(skipOpen){
     const lid = this.getAttribute('aria-controls') || this.getAttribute('aria-owns');
     const lb = lid && document.getElementById(lid);
     if(lb) opts = [...lb.querySelectorAll('[class*=option],[class*=Option],[role=option]')];
+  }
+  if(!opts.length){
+    // ARIA ownership by shared LABEL: MUI Select / Workday / Radix menus portal to <body> with NO
+    // aria-owns/controls; the trigger links its listbox via a shared aria-labelledby token OR the
+    // listbox's aria-label repeats the question. Deterministic ownership, survives body-portaling.
+    const _mine = (this.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean);
+    const _nm = _mine.map(id=>{const e=document.getElementById(id);return e?(e.innerText||e.textContent||''):'';}).join(' ').toLowerCase().replace(/\s+/g,'');
+    const _own = [...document.querySelectorAll('[role=listbox],[class*=Menu-list],[class*=MenuList]')].filter(e=>e.offsetParent).find(b=>{
+      const bl=(b.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean);
+      if(bl.some(t=>_mine.includes(t))) return true;
+      const al=(b.getAttribute('aria-label')||'').toLowerCase().replace(/\s+/g,'');
+      return !!al && !!_nm && (al.includes(_nm)||_nm.includes(al)); });
+    if(_own) opts = [..._own.querySelectorAll('[role=option],[class*=option],[class*=MenuItem],li')];
   }
   if(!opts.length){
     // the menu is a descendant of the control wrapper or its next sibling
@@ -788,7 +1299,21 @@ function(want){
     const idm = (this.id||'').match(/react-select-([^-]+)-/);
     if(idm){ const o0 = document.querySelector('[id^="react-select-'+idm[1]+'-option"]'); root = o0 && o0.parentElement; }
   }
+  if(!root){
+    const _mine = (this.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean);
+    const _nm = _mine.map(id=>{const e=document.getElementById(id);return e?(e.innerText||e.textContent||''):'';}).join(' ').toLowerCase().replace(/\s+/g,'');
+    root = [...document.querySelectorAll('[role=listbox],[class*=Menu-list],[class*=MenuList]')].filter(e=>e.offsetParent).find(b=>{
+      const bl=(b.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean);
+      if(bl.some(t=>_mine.includes(t))) return true;
+      const al=(b.getAttribute('aria-label')||'').toLowerCase().replace(/\s+/g,'');
+      return !!al && !!_nm && (al.includes(_nm)||_nm.includes(al)); }) || null;
+  }
   if(!root) return null;
+  {
+    const o = [...root.querySelectorAll('[role=option],[class*=option],[class*=MenuItem],li')]
+      .find(x => norm(x.innerText||x.textContent) === w);
+    if(o){ o.scrollIntoView({block:'nearest'}); const r=o.getBoundingClientRect(); if(r.width&&r.height) return {x:r.x+r.width/2, y:r.y+r.height/2}; }
+  }
   const o = [...root.querySelectorAll('[class*=option],[class*=Option],[role=option]')]
     .find(x => norm(x.innerText||x.textContent) === w);
   if(!o) return null;
@@ -822,6 +1347,17 @@ function(want){
     if(lb) opts = [...lb.querySelectorAll('[class*=option],[class*=Option],[role=option]')].filter(e=>e.offsetParent);
   }
   if(!opts.length){
+    // ARIA ownership by shared LABEL (MUI Select / Workday / Radix body-portal, no aria-owns/controls).
+    const _mine = (this.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean);
+    const _nm = _mine.map(id=>{const e=document.getElementById(id);return e?(e.innerText||e.textContent||''):'';}).join(' ').toLowerCase().replace(/\s+/g,'');
+    const _own = [...document.querySelectorAll('[role=listbox],[class*=Menu-list],[class*=MenuList]')].filter(e=>e.offsetParent).find(b=>{
+      const bl=(b.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean);
+      if(bl.some(t=>_mine.includes(t))) return true;
+      const al=(b.getAttribute('aria-label')||'').toLowerCase().replace(/\s+/g,'');
+      return !!al && !!_nm && (al.includes(_nm)||_nm.includes(al)); });
+    if(_own) opts = [..._own.querySelectorAll('[role=option],[class*=option],[class*=MenuItem],li')].filter(e=>e.offsetParent);
+  }
+  if(!opts.length){
     // page-wide click ONLY when the single open menu BELONGS to this control (renders adjacent) —
     // a lone STALE neighbor menu would commit into the WRONG question (stripe mega4/8 'Belgium').
     let ctrl = this;
@@ -846,10 +1382,150 @@ function(want){
 """
 
 
+# SCROLL-MATERIALIZE a virtualized/windowed listbox (react-window: only ~10 of N rows mounted). Resolve
+# THIS control's listbox exactly like the read/click scopes, page its scroll container by ~one viewport
+# (overlapping so no row is skipped), and return the freshly-mounted option texts + whether the scroll
+# advanced, so the caller can loop until the wanted row materializes or scrolling hits the end.
+_RS_SCROLL_READ_JS = r"""
+function(){
+  const norm = s => (s||'').replace(/\s+/g,' ').trim();
+  const lid = this.getAttribute('aria-controls') || this.getAttribute('aria-owns');
+  let root = lid && document.getElementById(lid);
+  if(!root){
+    const idm = (this.id||'').match(/react-select-([^-]+)-/);
+    if(idm){ const o0 = document.querySelector('[id^="react-select-'+idm[1]+'-option"]'); root = o0 && o0.parentElement; }
+  }
+  if(!root){
+    const _mine = (this.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean);
+    const _nm = _mine.map(id=>{const e=document.getElementById(id);return e?(e.innerText||e.textContent||''):'';}).join(' ').toLowerCase().replace(/\s+/g,'');
+    root = [...document.querySelectorAll('[role=listbox],[class*=Menu-list],[class*=MenuList]')].filter(e=>e.offsetParent).find(b=>{
+      const bl=(b.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean);
+      if(bl.some(t=>_mine.includes(t))) return true;
+      const al=(b.getAttribute('aria-label')||'').toLowerCase().replace(/\s+/g,'');
+      return !!al && !!_nm && (al.includes(_nm)||_nm.includes(al)); }) || null;
+  }
+  if(!root) return null;
+  let sc = root;
+  if(sc.scrollHeight <= sc.clientHeight + 4){
+    sc = [...root.querySelectorAll('*')].find(e => e.scrollHeight > e.clientHeight + 4 && /auto|scroll/.test(getComputedStyle(e).overflowY)) || root;
+  }
+  const before = sc.scrollTop;
+  const step = Math.max(40, Math.floor(sc.clientHeight * 0.85));
+  sc.scrollTop = before + step;
+  const now = sc.scrollTop;
+  const opts = [...root.querySelectorAll('[role=option],[class*=option],[class*=Option],[class*=MenuItem]')].filter(e=>e.offsetParent);
+  const texts = [...new Set(opts.map(o => norm(o.innerText||o.textContent)).filter(Boolean))];
+  return JSON.stringify({top: now, advanced: now > before + 1, texts: texts});
+}
+"""
+
+
+# Read the option nodes CURRENTLY VISIBLE ON SCREEN (+ their center coords), restricted to a menu
+# HUGGING `this` control (viewport proximity — survives body-portaling AND any classNamePrefix rename).
+# role=option/menuitem/treeitem are ARIA STANDARDS; [class*=option] catches the library shells. The
+# in-viewport + not-hidden filter = exactly what the user SEES. NO aria-controls / id / label / DOM
+# ownership — a tenant renaming those cannot break the commit. `this` is the control node.
+_VISIBLE_OPTIONS_JS = r"""
+function(){
+  const norm = s => (s||'').replace(/\s+/g,' ').trim();
+  // bring the control (and its adjacent option cluster) into view first — an option rendered
+  // below the fold is invisible to the read and the whole commit no-ops (the live flaky-empty).
+  try { this.scrollIntoView({block:'center'}); } catch(e){}
+  const cr = this.getBoundingClientRect();
+  const inView = el => { const r=el.getBoundingClientRect();
+    return r.width>1 && r.height>1 && r.top<innerHeight && r.left<innerWidth && r.bottom>0 && r.right>0; };
+  const shown = el => { const s=getComputedStyle(el);
+    return s.visibility!=='hidden' && s.display!=='none' && s.opacity!=='0' && el.offsetParent!==null; };
+  // ARIA option roles + react-select option classes ONLY. A menu option is what this reader targets;
+  // broadening to button/label grabs the form's field-title labels and mis-clicks them (proven
+  // net-negative) — inline Yes/No pills are handled label-anchored elsewhere, not here.
+  const sel='[role="option"],[role="menuitem"],[role="treeitem"],[role="menuitemradio"],'
+           +'[class*=option],[class*=Option],[class*=MenuItem]';
+  const seen=new Set(), out=[];
+  document.querySelectorAll(sel).forEach(el=>{
+    if(!inView(el)||!shown(el)) return;
+    const t=norm(el.textContent);
+    if(!t || t.length>90 || seen.has(t)) return;
+    if(/menu-notice|no-options|placeholder/i.test((el.className||'').toString())) return;
+    const r=el.getBoundingClientRect();
+    // ANTI-BLEED: the option must belong to a menu hugging THIS control — a dropdown renders directly
+    // below (or above) the control, horizontally overlapping it. A far option is a DIFFERENT field's
+    // open menu (the 'Belgium into reside-country' bleed). Band by VIEWPORT rect (portal-agnostic).
+    const hOverlap = r.left < cr.right+60 && r.right > cr.left-60;
+    const vNear = (r.top >= cr.top-8 && r.top <= cr.bottom + innerHeight*0.75)
+               || (r.bottom <= cr.bottom+8 && r.bottom >= cr.top - innerHeight*0.5);
+    if(!hOverlap || !vNear) return;
+    seen.add(t);
+    out.push({text:t, x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)});
+  });
+  return JSON.stringify(out);
+}
+"""
+
+
+async def cdp_pick_option_visually(session: Any, node: Any, value: str, pick=None) -> str:
+    """VISUAL option commit — what a HUMAN does: SEE the rendered options, click the right one. Reads
+    the option nodes VISIBLE on screen (ARIA roles + [class*=option], in-viewport, hugging THIS
+    control) WITH their center coords, picks the best by meaning (exact -> caller's semantic ``pick``),
+    then a TRUSTED CDP click AT the option's coords. Ownership-BLIND (no aria-controls/id/label) so a
+    tenant renaming those cannot break it. Fires as the fallback when the OWNED read (``_RS_OPEN_READ_JS``)
+    found nothing but options ARE painted (the ``pageOpts>0`` __miss). Returns committed text or ""."""
+
+    async def _do() -> str:
+        r = await _resolve(session, node)
+        if r is None:
+            return ""
+        cdp_session, session_id, object_id = r
+        # RETRY the read: options can paint late (async menu, below-fold scroll settling). An empty
+        # first read was the live flaky-empty that silently no-op'd the whole visual commit.
+        opts: Any = []
+        for _try in range(3):
+            raw = await _call_on(cdp_session, session_id, object_id, _VISIBLE_OPTIONS_JS)
+            try:
+                opts = json.loads(raw) if raw else []
+            except Exception:
+                opts = []
+            if isinstance(opts, list) and opts:
+                break
+            await asyncio.sleep(0.35)
+        if not isinstance(opts, list) or not opts:
+            return ""
+        texts = [o["text"] for o in opts]
+        nv = " ".join(str(value).split()).lower()
+        chosen = next((t for t in texts if " ".join(t.split()).lower() == nv), "")
+        if not chosen and nv and len(nv) <= 5:
+            # WORD-BOUNDARY PREFIX (deterministic, LLM-free): a SHORT BOOLEAN value whose option label is a
+            # long CLAUSE ('Yes' -> 'Yes, I am legally authorized to work…'; 'No' -> 'No, I require
+            # sponsorship'). ^value\b so 'No' never matches 'None of the above'; require the option be
+            # much longer than the value (a clause, not a peer token) so a date value can't grab a
+            # same-length day cell ('15' vs day '15' — react_datepicker false-green). Live greenhouse
+            # authorized/sponsorship commit that escalated when the semantic pick timed out under load.
+            import re as _re
+            _wb = _re.compile(r"^" + _re.escape(nv) + r"\b", _re.I)
+            chosen = next((t for t in texts if _wb.match(" ".join(t.split()).lower())
+                           and len(" ".join(t.split())) >= len(nv) + 6), "")
+        if not chosen and pick is not None:
+            with contextlib.suppress(Exception):
+                chosen = await pick(value, texts) or ""
+        if not chosen:
+            return ""
+        nch = " ".join(chosen.split()).lower()
+        tgt = next((o for o in opts if " ".join(o["text"].split()).lower() == nch), None)
+        if tgt is None:
+            return ""
+        ok = await cdp_click_xy(session, node, int(tgt["x"]), int(tgt["y"]))
+        print(f"   [pick_visual] want={value!r} visible={texts[:6]} -> {chosen!r} click={ok}", flush=True)
+        return chosen if ok else ""
+
+    return await _guarded(_do())
+
+
 async def cdp_choose_react_select(session: Any, node: Any, value: str, pick=None) -> str:
     """Commit a react-select (no aria-owns) DETERMINISTICALLY: mousedown-open the control, read
     the class-based `[class*=option]` menu, pick (exact, or via ``pick(value, options)`` for
-    semantic match), click the chosen option by text. Returns committed text or "". Generic —
+    semantic match), click the chosen option by text. When the OWNED read finds nothing (ownership
+    couldn't bind painted options, or the menu is async), falls to ``cdp_pick_option_visually`` —
+    see the options on screen + click by coords. Returns committed text or "". Generic —
     the react-select DOM shape (control wrapper + option class) is a library convention, not a
     per-ATS string."""
 
@@ -882,11 +1558,20 @@ async def cdp_choose_react_select(session: Any, node: Any, value: str, pick=None
             raw = await _call_on(cdp_session, session_id, object_id, _RS_OPEN_READ_JS, args=[False])
             with contextlib.suppress(Exception):
                 options = json.loads(raw) if raw else []
-        if isinstance(options, dict):
-            print(f"   [rs-direct] no options: {options.get('__miss')}")
-            return ""
-        if not options:
-            return ""
+        if isinstance(options, dict) and not (options.get("__miss") or {}).get("pageOpts"):
+            # ASYNC menu: options fetch on open (typed-search / XHR) — the read beat the paint
+            # (pageOpts==0). Wait one beat and re-read the OWNED scope before giving up.
+            await asyncio.sleep(0.6)
+            with contextlib.suppress(Exception):
+                raw = await _call_on(cdp_session, session_id, object_id, _RS_OPEN_READ_JS, args=[True])
+                options = json.loads(raw) if raw else options
+        if isinstance(options, dict) or not options:
+            # OWNED read found nothing — ownership couldn't bind the painted options (pageOpts>0 but no
+            # id/aria/wrapper/geometry match), or the menu never opened. VISION: read the options
+            # visibly on screen by coords + click the match. Ownership-blind -> survives class renames.
+            miss = options.get("__miss") if isinstance(options, dict) else None
+            print(f"   [rs-direct] no owned options: {miss} -> visual", flush=True)
+            return await cdp_pick_option_visually(session, node, value, pick=pick)
         chosen = ""
         # exact/normalized match first (free), else the caller's semantic picker
         nv = str(value).strip().lower()
@@ -894,9 +1579,41 @@ async def cdp_choose_react_select(session: Any, node: Any, value: str, pick=None
             if o.strip().lower() == nv:
                 chosen = o
                 break
+        if not chosen and nv and len(nv) <= 5:
+            # WORD-BOUNDARY PREFIX (deterministic): a SHORT BOOLEAN value whose option label is a long
+            # CLAUSE ('Yes' -> 'Yes, I am legally authorized…'). ^value\b so 'No' can't match 'None of the
+            # above'; require the option much longer than the value so a date value can't grab a same-length
+            # day cell (react_datepicker false-green).
+            import re as _re
+            _wb = _re.compile(r"^" + _re.escape(nv) + r"\b", _re.I)
+            chosen = next((o for o in options if _wb.match(o.strip().lower())
+                           and len(o.strip()) >= len(nv) + 6), "")
         if not chosen and pick is not None:
             with contextlib.suppress(Exception):
                 chosen = await pick(value, options) or ""
+        if not chosen:
+            # SCROLL-MATERIALIZE: a virtualized/windowed listbox (react-window) mounts only ~10 of N
+            # rows, so the wanted option was never in the first read. Only when THIS trigger is click-
+            # only (a text-input react-select is type-filtered instead) and its listbox actually scrolls:
+            # page the listbox and re-read until an option IDENTITY-matches `value` or scrolling ends.
+            editable = await _call_on(cdp_session, session_id, object_id,
+                "function(){ return this.tagName==='INPUT' || this.tagName==='TEXTAREA' || this.isContentEditable === true; }")
+            if not editable:
+                nv = " ".join(str(value).split()).lower()
+                for _ in range(150):  # ~150 pages caps a 500-row virtualized list; each read is cheap CDP
+                    raw2 = await _call_on(cdp_session, session_id, object_id, _RS_SCROLL_READ_JS)
+                    try:
+                        info = json.loads(raw2) if raw2 else None
+                    except Exception:
+                        info = None
+                    if not isinstance(info, dict):
+                        break
+                    hit = next((t for t in info.get("texts", []) if " ".join(str(t).split()).lower() == nv), None)
+                    if hit:
+                        chosen = hit
+                        break
+                    if not info.get("advanced"):  # scroll no longer moves -> end of list
+                        break
         if not chosen:
             return ""
         # TRUSTED click at the option's rect first (live-proven commit path); the synthetic

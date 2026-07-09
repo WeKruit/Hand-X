@@ -380,6 +380,16 @@ async def run_single_page_oa(
                 with contextlib.suppress(Exception):
                     page = await session.must_get_current_page()
                 fields = await discover_fields(page)
+            if not fields and await eng._try_apply_click(session, page):
+                # POST-SETTLE APPLY REVEAL (cursor / Ashby): the FIRST apply-click at ~2.5s read a
+                # blank, un-mounted SPA, so the VLM named no affordance and it no-oped silently. After
+                # the 8s settle the 'Apply for this Job' button is finally painted — retry the reach
+                # rung NOW; the form mounts and re-discovery finds it. Reuses the existing rung, no
+                # per-ATS string. (These landed 0-fields -> BLOCKED before this retry.)
+                with contextlib.suppress(Exception):
+                    page = await session.must_get_current_page()
+                await asyncio.sleep(2.5)
+                fields = await discover_fields(page)
             if not fields:
                 # GENERIC IFRAME-HOP: the real form is often a CROSS-ORIGIN iframe the main frame
                 # can't see into (comeet.co embed, GH job_app embed). Hop the top-level page to the
@@ -547,6 +557,15 @@ async def _fill_form(
     oa.reset_page_vlm_backstop()
     per_field: list[FieldResult] = []
     t0 = time.monotonic()
+    # OFFLINE PLAYGROUND VALUE INJECTION (OA_FIXTURE_VALUES=path, fixture self-test only): a JSON
+    # {normalized_label: raw_value} that OVERRIDES map_fields per field by label — so the playground is
+    # deterministic AND the RAW value reaches the engine (a fuzzy fixture needs the engine to match
+    # 'USA'->'United States' itself, not have map_fields pre-resolve it). No effect on live runs.
+    _fixv: dict = {}
+    with contextlib.suppress(Exception):
+        _fp = os.environ.get("OA_FIXTURE_VALUES")
+        if _fp:
+            _fixv = {" ".join(str(k).lower().replace("*", " ").replace("?", " ").split()): str(v) for k, v in json.load(open(_fp)).items()}
     # FILE FIELDS LAST: a drag-drop resume dropzone (Lever/Ashby) kicks off heavy client-side
     # processing on upload that can freeze the headless renderer; doing it AFTER the text fields
     # means a wedge can't cost us the rest of the form. Stable sort keeps every other field's order.
@@ -559,6 +578,7 @@ async def _fill_form(
         _form_url = await page.get_url()
     _done_labels: set[str] = set()
     _done_sigs: dict[str, list] = {}  # label -> option-signatures already committed under it
+    _committed_nodes: dict[str, str] = {}  # {dom id: committer locate-how} -> phantom same-node re-bind skip
     for f in fields_file_last:
         if f.source == "skip":
             continue
@@ -603,6 +623,21 @@ async def _fill_form(
             )
             continue
         value, src = eng._resolve(f, mapped, resume)
+        if _fixv:  # playground: override by normalized label (lenient — discovery may append help/option text)
+            _lk = " ".join(str(f.label or f.name).lower().replace("*", " ").replace("?", " ").split())
+            _hit = _fixv.get(_lk)
+            if _hit is None:
+                for _k, _v in _fixv.items():
+                    # lenient (playground only): substring either way, OR a shared specific stem (first
+                    # >=10 chars) — so a group label 'graduation date' injects into its 'graduation month'
+                    # / 'graduation year' sub-selects, and help/option-appended labels still match.
+                    if _k and len(_k) >= 6 and (
+                        _k in _lk or _lk in _k or _lk.startswith(_k[:24]) or (len(_k) >= 10 and _lk[:10] == _k[:10])
+                    ):
+                        _hit = _v
+                        break
+            if _hit is not None:
+                value, src = _hit, "fixture"
         if adapter is None:
             # GENERIC lane: discovery scanned the whole document, but locate reads the
             # serialized VIEWPORT map — a below-the-fold form (toast) yields 'no-control'
@@ -614,6 +649,7 @@ async def _fill_form(
                     f.name,
                 )
         fd = _field_dict(f, value, resume=resume, llm=llm, adapter=adapter, page=page)
+        fd["_committed_nodes"] = _committed_nodes  # phantom double-bind guard (same-node skip)
         if os.environ.get("OA_FIELD_TRACE"):
             print(
                 f"[FIELD-START] name={f.name[:28]} src={f.source} type={f.type} val={str(value)[:30]!r}",
@@ -874,6 +910,13 @@ async def _fill_form(
                     v, c = str(r.value or "").strip(), str(r.committed or "").strip()
                     if r.outcome != oa.DONE or not v or not c or "file" in str(r.type or "").lower():
                         continue
+                    # PLACEHOLDER committed-text: a react-select surfaced+clicked its option (S_VERIFY
+                    # confirmed on screen) but the committed_text stayed the widget's own 'No options' /
+                    # 'Select…' filter string — that's stale metadata, not a real committed value, so a
+                    # want-vs-got compare against it is meaningless and false-REDs a filled field. The
+                    # CHOICE-REVERTED gate + S_VERIFY already guard a genuinely-empty one.
+                    if _re.match(r"^\s*(no (options?|results?|matches?)\b|select\b|choose\b|--|start typing)", c, _re.I):
+                        continue
                     if v.lower() == c.lower() or (_wtok(v) & _wtok(c)):
                         continue
                     if c.lower().startswith(v.lower()) or v.lower().startswith(c.lower()):
@@ -983,6 +1026,85 @@ async def _fill_form(
         # not respond") AFTER the fill is already done — cap it so it can't push wall-clock past budget.
         with contextlib.suppress(Exception):
             result["screenshot"] = await asyncio.wait_for(eng._screenshot(session, page, screenshot_path), timeout=15.0)
+
+    # ABSOLUTE-ACCURACY VISION GATE (choice widgets; default on, OA_VISION_GATE=0 to skip). The text
+    # wipe-gate below reads live .value for plain-text fields — but a radio/select/checkbox commits into
+    # DOM/React state a .value read can't see, and the ashby hidden-radio/grouped-locate desync fools
+    # EVERY DOM check (rendered_present, still_empty), so the whole audit blessed an EMPTY 'authorized to
+    # work' radio (AfterQuery false-green). This is the VERIFIER that looks at PIXELS: one screenshot ->
+    # VLM reports each committed CHOICE field's painted value -> any that is BLANK/wrong is downgraded to
+    # ESCALATE. Independent of every DOM read, so a desync cannot hide; downgrade-only, so it can never
+    # manufacture a green. NOTE: checks painted==committed, NOT committed==correct (a mapping error is a
+    # separate axis). [[reference_rendered_present_unsafe_radio]] [[feedback_no_overclaiming]]
+    if os.environ.get("OA_VISION_GATE", "1") != "0":
+        with contextlib.suppress(Exception):
+            import oa_brain as _brain
+
+            _CHOICEG = {"combobox", "select", "checkbox", "radio", "multi_select", "single_select", "boolean"}
+            _gate_rows = [
+                r
+                for r in per_field
+                if r.outcome == oa.DONE
+                and str(r.committed or r.value or "").strip()
+                and str(r.type or "").lower() in _CHOICEG
+            ]
+            if _gate_rows:
+                _intended = [(str(r.label), str(r.committed or r.value)) for r in _gate_rows]
+                _b64 = await eng._capture_form_b64(session, page)
+                _va = await _brain.vision_audit(_b64, _intended, llm=None) if _b64 else []
+                if _va:
+                    result["vision_gate"] = _va
+                    # DOWNGRADE ON BLANK ONLY. The VLM is reliable at "is this control empty or filled"
+                    # (a pixel question) but NOT at "does this value mean the intended one" (a semantic
+                    # question — live proof: it read a correctly-selected 'No' radio yet judged match=False,
+                    # a false-FAIL). So act ONLY on the unambiguous false-green signal: the VLM says NOTHING
+                    # is selected/entered. A rendered value that merely disagrees on semantics is recorded
+                    # (for eyeballing) but never hard-fails a filled control. [[feedback_no_overclaiming]]
+                    _BLANK = {"", "BLANK", "NONE", "EMPTY", "NOT SELECTED", "UNSELECTED", "UNANSWERED", "NULL", "NOTHING"}
+                    _bad = 0
+                    for _r, _v in zip(_gate_rows, _va):
+                        if not _v:
+                            continue
+                        _rend = str(_v.get("rendered", "")).strip().upper()
+                        if not _v.get("match") and _rend in _BLANK:
+                            _r.outcome = oa.ESCALATE
+                            if isinstance(_r.trace, list):
+                                _r.trace.append("vision-gate:blank-on-screen")
+                            _bad += 1
+                    if _bad:
+                        print(f"   [vision-gate] {_bad}/{len(_gate_rows)} choice field(s) BLANK on screen -> ESCALATE")
+
+    # OFFLINE FIXTURE PAINTED-TRUTH DUMP (OA_PAINTED_DUMP=1, widget-zoo self-test only). Read the REAL
+    # painted state of each `.field[data-kind]` deterministically from the DOM — a pill's .active button,
+    # a radio's :checked, a select's value — so the harness asserts painted==expected WITHOUT the VLM.
+    # This is how the finite widget matrix is tested offline; no effect on live runs (flag off).
+    if os.environ.get("OA_PAINTED_DUMP") == "1":
+        with contextlib.suppress(Exception):
+            painted = await page.evaluate(
+                r"""() => [...document.querySelectorAll('.field[data-kind]')].map(f => {
+                  const k=f.dataset.kind, exp=f.dataset.expected, lab=f.dataset.label; let val='';
+                  try {
+                    // SELF-DESCRIBING: a fixture may carry data-read = a JS expression over `f` that
+                    // returns its painted ground truth. Generic — new widgets need no dump edit.
+                    if(f.dataset.read){ val = (new Function('f', 'return ('+f.dataset.read+')'))(f); }
+                    else if(k==='text') val=(f.querySelector('input')||{}).value||'BLANK';
+                    else if(k==='native_radio'||k==='styled_radio'){ const c=f.querySelector('input:checked'); val=c?c.value:'BLANK'; }
+                    else if(k==='pill'||k==='decoupled'){ const a=f.querySelector('button.active'); val=a?a.dataset.val:'BLANK'; }
+                    else if(k==='select'){ val=(f.querySelector('select')||{}).value||'BLANK'; }
+                    else if(k==='checkbox'){ val=f.querySelector('input:checked')?'checked':'BLANK'; }
+                    else if(k==='date'){ val=(f.querySelector('input')||{}).value||'BLANK'; }
+                    else if(k==='rselect'){ const sv=f.querySelector('.select__single-value'); val=(sv&&(sv.dataset.value||sv.textContent||'').trim())||'BLANK'; }
+                    else if(k==='multi'){ const cs=[...f.querySelectorAll('input:checked')].map(x=>x.value).sort(); val=cs.length?cs.join('|'):'BLANK'; }
+                  } catch(e){ val='ERR:'+e.message; }
+                  if(val==null || String(val).trim()==='') val='BLANK';
+                  return {label:lab, kind:k, expected:exp, painted:String(val)};
+                })"""
+            )
+            if isinstance(painted, str):  # page.evaluate serializes the return -> parse back to a list
+                painted = json.loads(painted)
+            if painted:
+                result["painted"] = painted
+
     # LIVE-DOM WIPE GATE (co-located with the screenshot): read committed plain-text fields' ACTUAL
     # value from the SAME DOM the screenshot just captured. A committed text field that reads EMPTY
     # now was wiped by a LATE async re-render AFTER complete()'s own +2.5s gate read .value='Jordan'

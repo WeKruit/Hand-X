@@ -21,6 +21,47 @@ import ats_engine as eng
 
 _ENUM_JS = r"""
 () => {
+  // MAKE-REACHABLE (structural pre-scan): a field hidden behind a COLLAPSED aria disclosure or an
+  // INACTIVE tabpanel is dropped by the vis() gate below and never becomes fillable. Reveal those
+  // containers by ARIA relationship only (no heading/label text, no value/consent mutation) so their
+  // inputs enter discovery. ponytail: direct unhide, not click - clicking one tab hides its sibling
+  // panel (mutual exclusion, would drop Full Name to reveal Portfolio) and can fire nav handlers;
+  // upgrade to click only if a real site lazy-mounts panel content on activation.
+  try {
+    for (const b of document.querySelectorAll('[aria-expanded="false"][aria-controls]')) {
+      const pan = document.getElementById(b.getAttribute('aria-controls'));
+      if (!pan) continue;
+      // SKIP select/combobox/menu triggers: a downshift useSelect / MUI Select button also carries
+      // aria-expanded=false + aria-controls, but force-expanding it desyncs its controlled listbox
+      // state (React owns open/close) and breaks the later commit. Only true DISCLOSURES (accordion
+      // button -> region/group panel, tabpanel) may be revealed here.
+      const _hp = (b.getAttribute('aria-haspopup')||'').toLowerCase();
+      const _rl = (b.getAttribute('role')||'').toLowerCase();
+      const _pr = (pan.getAttribute('role')||'').toLowerCase();
+      if (_hp==='listbox'||_hp==='menu'||_hp==='dialog'||_hp==='grid'||_rl==='combobox'||_pr==='listbox'||_pr==='menu') continue;
+      b.setAttribute('aria-expanded', 'true');
+      pan.hidden = false; pan.removeAttribute('aria-hidden');
+      if (pan.style && pan.style.display === 'none') pan.style.display = '';
+    }
+    for (const pan of document.querySelectorAll('[role=tabpanel]')) {
+      pan.hidden = false; pan.removeAttribute('aria-hidden');
+      if (pan.style && pan.style.display === 'none') pan.style.display = '';
+    }
+    // DISMISSABLE NOTICE: a role=alert banner with a dismiss button hides a following field container
+    // ([hidden]) that is unreachable until dismissed. Un-hide the field DIRECTLY (do not remove the
+    // banner — that could fire analytics/nav). TIGHT gate: a role=alert WITH a button, whose later
+    // sibling is [hidden] AND holds a form control — so a plain alert or a hidden template never trips.
+    for (const al of document.querySelectorAll('[role=alert]')) {
+      if (!al.querySelector('button,[role=button]')) continue;
+      let sib = al.nextElementSibling;
+      while (sib) {
+        if (sib.hasAttribute && sib.hasAttribute('hidden') && sib.querySelector('input,select,textarea')) {
+          sib.hidden = false; sib.removeAttribute('aria-hidden'); break;
+        }
+        sib = sib.nextElementSibling;
+      }
+    }
+  } catch (e) {}
   const seen = new Set(); const out = []; const radio = {}; const check = {}; let ckgid = 0;
   const vis = el => { const r = el.getBoundingClientRect(); return r.width > 4 && r.height > 4; };
   const clean = t => (t || '').replace(/\s+/g, ' ').trim();

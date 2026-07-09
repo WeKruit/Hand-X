@@ -1,0 +1,130 @@
+{
+  "first_name": "Marcus",
+  "last_name": "Bell-Okonkwo",
+  "preferred_name": "Marcus",
+  "full_name": "Marcus Bell-Okonkwo",
+  "email": "marcus.bellokonkwo.demo2026@gmail.com",
+  "phone": "+1 646 555 0129",
+  "location": "New York, NY, USA",
+  "city": "New York",
+  "state": "New York",
+  "country": "United States",
+  "zip": "10011",
+  "address_line1": "350 5th Avenue",
+  "linkedin": "https://www.linkedin.com/in/marcus-bell-okonkwo-test",
+  "github": "https://github.com/marcus-bo-test",
+  "website": "https://marcusbo.example.com",
+  "work_authorization": "Authorized to work in the US (US Citizen)",
+  "authorized_to_work_us": true,
+  "requires_sponsorship": false,
+  "visa_status": "U.S. Citizen — no sponsorship required",
+  "citizenship": "United States",
+  "currently_located_in_us": true,
+  "willing_to_relocate": true,
+  "desired_salary": "210000",
+  "available_start_date": "2026-10-01",
+  "preferred_work_arrangement": "Onsite or hybrid; willing to relocate anywhere in the US",
+  "how_did_you_hear": "Employee Referral",
+  "gender": "Non-binary",
+  "pronouns": "They/Them",
+  "race_ethnicity": "Black or African American",
+  "hispanic_or_latino": "No",
+  "veteran_status": "I am a protected veteran",
+  "disability_status": "Yes, I have a disability (or previously had one)",
+  "sexual_orientation": "I don't wish to answer",
+  "transgender": "No",
+  "summary": "Staff engineer and US Army veteran with 9 years across infrastructure and platform teams. Led a 6-person platform group and a company-wide Kubernetes migration.",
+  "experience": [
+    {
+      "company": "Datadog",
+      "title": "Staff Software Engineer",
+      "location": "New York, NY",
+      "start_date": "2023-02",
+      "end_date": "Present",
+      "current": true,
+      "highlights": [
+        "Led a company-wide migration to multi-region Kubernetes, cutting deploy times 60%.",
+        "Built an internal platform CLI adopted by 400+ engineers."
+      ]
+    },
+    {
+      "company": "Squarespace",
+      "title": "Senior Software Engineer",
+      "location": "New York, NY",
+      "start_date": "2020-03",
+      "end_date": "2023-01",
+      "current": false,
+      "highlights": [
+        "Owned the CI/CD platform (Jenkins, Argo) for 1,500 daily builds.",
+        "Reduced flaky-test failure rate from 12% to under 2%."
+      ]
+    },
+    {
+      "company": "Etsy",
+      "title": "Software Engineer",
+      "location": "Brooklyn, NY",
+      "start_date": "2017-06",
+      "end_date": "2020-02",
+      "current": false,
+      "highlights": [
+        "Scaled the checkout service to handle 3x holiday peak traffic.",
+        "Introduced feature flags reducing rollback incidents 50%."
+      ]
+    },
+    {
+      "company": "United States Army",
+      "title": "Signals Analyst (Sergeant)",
+      "location": "Fort Gordon, GA",
+      "start_date": "2013-05",
+      "end_date": "2017-04",
+      "current": false,
+      "highlights": [
+        "Managed secure communications systems for a 40-person unit.",
+        "Awarded Army Commendation Medal for technical leadership."
+      ]
+    }
+  ],
+  "education": [
+    {
+      "school": "Georgia Institute of Technology",
+      "degree": "B.S.",
+      "field_of_study": "Computer Engineering",
+      "start_date": "2017-08",
+      "graduation_date": "2021-05",
+      "gpa": "3.6"
+    },
+    {
+      "school": "Community College of the Air Force",
+      "degree": "A.A.S.",
+      "field_of_study": "Electronic Systems Technology",
+      "start_date": "2013-09",
+      "graduation_date": "2016-05",
+      "gpa": "3.9"
+    }
+  ],
+  "skills": ["Kubernetes", "Go", "Python", "Terraform", "AWS", "Argo", "Jenkins", "Prometheus", "Linux"],
+  "certifications": [
+    "Certified Kubernetes Administrator (CKA, 2022)",
+    "AWS Certified DevOps Engineer – Professional (2023)"
+  ],
+  "languages": [
+    {"language": "English", "proficiency": "Native"}
+  ],
+  "cover_letter": "As a veteran and staff engineer, I bring both platform depth and team leadership. I'm willing to relocate and excited about infrastructure roles with real ownership.",
+  "references": [
+    {
+      "name": "Elena Ruiz",
+      "title": "Director of Platform",
+      "company": "Datadog",
+      "email": "elena.ruiz.demo2026@gmail.com",
+      "phone": "+1 646 555 0155",
+      "relationship": "Direct manager"
+    }
+  ],
+  "notice_period": "3 weeks",
+  "referral": "Referred by a current employee",
+  "referred_by": "Elena Ruiz",
+  "additional_information": "Protected veteran; open to relocation nationwide.",
+  "current_company": "Datadog",
+  "current_title": "Staff Software Engineer"
+}

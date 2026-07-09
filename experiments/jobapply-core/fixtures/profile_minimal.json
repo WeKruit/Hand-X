@@ -1,0 +1,81 @@
+{
+  "first_name": "Sam",
+  "last_name": "Rivera",
+  "preferred_name": "Sam",
+  "full_name": "Sam Rivera",
+  "email": "sam.rivera.demo2026@gmail.com",
+  "phone": "+1 512 555 0173",
+  "location": "Austin, TX, USA",
+  "city": "Austin",
+  "state": "Texas",
+  "country": "United States",
+  "zip": "78701",
+  "address_line1": "200 Congress Avenue",
+  "linkedin": "https://www.linkedin.com/in/sam-rivera",
+  "github": "https://github.com/samrivera",
+  "website": "",
+  "work_authorization": "Authorized to work in the US",
+  "authorized_to_work_us": true,
+  "requires_sponsorship": false,
+  "visa_status": "Authorized — no sponsorship required",
+  "citizenship": "United States",
+  "currently_located_in_us": true,
+  "willing_to_relocate": false,
+  "desired_salary": "",
+  "available_start_date": "2026-08-15",
+  "preferred_work_arrangement": "",
+  "how_did_you_hear": "Indeed",
+  "gender": "I don't wish to answer",
+  "pronouns": "",
+  "race_ethnicity": "I don't wish to answer",
+  "hispanic_or_latino": "I don't wish to answer",
+  "veteran_status": "I don't wish to answer",
+  "disability_status": "I don't wish to answer",
+  "sexual_orientation": "I don't wish to answer",
+  "transgender": "I don't wish to answer",
+  "summary": "Recent computer science graduate seeking a first software engineering role.",
+  "experience": [
+    {
+      "company": "University IT Help Desk",
+      "title": "Student Technician",
+      "location": "Austin, TX",
+      "start_date": "2024-01",
+      "end_date": "2025-05",
+      "current": false,
+      "highlights": [
+        "Resolved 1,200+ student support tickets; wrote a Python script that auto-triaged common issues."
+      ]
+    }
+  ],
+  "education": [
+    {
+      "school": "University of Texas at Austin",
+      "degree": "B.S.",
+      "field_of_study": "Computer Science",
+      "start_date": "2021-08",
+      "graduation_date": "2025-05",
+      "gpa": "3.4"
+    }
+  ],
+  "skills": [
+    "Python",
+    "Java",
+    "Git",
+    "SQL"
+  ],
+  "certifications": [],
+  "languages": [
+    {
+      "language": "English",
+      "proficiency": "Native"
+    }
+  ],
+  "cover_letter": "",
+  "references": [],
+  "notice_period": "Available immediately",
+  "referral": "No referral",
+  "referred_by": "",
+  "additional_information": "",
+  "current_company": "",
+  "current_title": ""
+}

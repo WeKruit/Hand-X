@@ -683,8 +683,13 @@ NEVER invent specific data — zip, salary, employee id, address, references): \
 "Preferred name"/"preferred first name" -> the profile's first name; \
 "How did you hear about us/this job?" -> pick the most neutral truthful OPTION present, preferring \
 "LinkedIn" when the profile has a LinkedIn, else "Company Website"/"Other" (free text -> "LinkedIn"); \
-a required acknowledgement/consent option (label starts with "I ", "By ", "Acknowledge", or says \
-agree/confirm/consent) -> return that option's label verbatim to select it; \
+a required CONSENT / AGREEMENT / ACKNOWLEDGEMENT question — one that, by its MEANING (not any keyword), \
+asks you to agree, acknowledge, confirm you have read/understand, or consent to a policy or statement \
+in order to apply, in ANY language (e.g. "Please indicate your agreement … by selecting Yes", "I have \
+read and agree to the terms", "Ich stimme zu", a lone "By clicking Submit you agree …" acknowledgement) \
+-> is ALWAYS answered AFFIRMATIVELY, because submitting the application requires agreeing: return the \
+OPTION that MEANS agreement (Yes / I agree / I accept / Ja / Oui / the acknowledgement label itself when \
+that is the affirmative choice); never leave a required consent blank; \
 a "phone device type"/"phone type" field, when the profile gives a phone but no device type -> \
 "Mobile" (a personal contact number is a mobile/cell — pick the option matching that if OPTIONS \
 are given); \
@@ -1542,6 +1547,31 @@ async def _screenshot(session: Any, page: Any, path: str) -> str | None:
         return path
     except Exception as exc:
         print(f"   [screenshot] failed: {exc}")
+        return None
+
+
+async def _capture_form_b64(session: Any, page: Any) -> str | None:
+    """The same form-clipped, beyond-viewport PNG as ``_screenshot`` but returned as base64 in memory —
+    the pixels the vision audit reads. Bounded so a stalled capture can't hang the gate."""
+    try:
+        sid = await page.session_id
+        params: dict = {"format": "png", "captureBeyondViewport": True}
+        clip_json = await page.evaluate(
+            "() => { const a=document.querySelector('#first_name,[name=first_name],#email,[name=email]');"
+            " if(!a) return ''; const form=a.closest('form')||a.parentElement;"
+            " const r=form.getBoundingClientRect();"
+            " return JSON.stringify({x: Math.max(0, window.scrollX + r.left - 12),"
+            " y: window.scrollY + r.top - 12, w: Math.min(1100, r.width + 24),"
+            " h: Math.min(6500, form.scrollHeight + 24)}); }"
+        )
+        if clip_json:
+            c = json.loads(clip_json)
+            params["clip"] = {"x": c["x"], "y": c["y"], "width": c["w"], "height": c["h"], "scale": 1}
+        res = await asyncio.wait_for(
+            session.cdp_client.send.Page.captureScreenshot(params=params, session_id=sid), timeout=15.0
+        )
+        return res.get("data")
+    except Exception:
         return None
 
 
