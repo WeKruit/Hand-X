@@ -160,6 +160,17 @@ value is not among them, RE-VALUE with the actual options in context (meaning-pi
 before S_OTHER; NEEDS_HUMAN only after that. Fixture: `closed_list_value_not_member`. Also abacum 145 =
 2nd `ledger-reconciled:value-on-screen` specimen (painted but counted ESCALATE — scoring false-red).
 
+**Cluster wake #6 (201/500): `choice-label-anchor:<opt> → vision-gate:blank-on-screen` — 15 rows /
+10 runs, the #2 volume family.** Lever multi-select checkbox groups (pronouns, how-did-you-hear,
+tool checklists — handoff ×4, spotify ×3, twilio, ro) + Ashby demographic radios/checkboxes (1password
+×5, sierra, aleph). The label-anchor's next-tick self-verify PASSED at commit yet paint is blank at
+end-of-run — consistent with `_STILL_CHECKED_JS`'s accept-on-UNKNOWN fallback (`if(!inputs.length)
+return true`) silently passing on no-input pill/checkbox shapes. **F1 scope extension: the label-anchor
+self-verify must FAIL-CLOSED on unknown (route to visual commit), and multi-select groups need
+per-option painted verify.** Fixtures: `lever_multicheck_group`, `ashby_demographic_radio_late_wipe`.
+All 15 were honest ESCALATEs (vision alive) — under load these become false-greens; F2 remains the
+backstop.
+
 **Cluster wake #5 (173/500): no-escape 10→13 — NO new class; per-tenant repetition.** Every twilio
 posting emits the identical N2 right-to-work pair + Location miss; affirm repeats N3 on each posting.
 SCORING IMPLICATION: failures concentrate by tenant — report confidence per-COMPANY alongside per-run,
