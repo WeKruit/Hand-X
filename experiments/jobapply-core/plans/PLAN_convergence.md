@@ -107,6 +107,17 @@ the SETTLED painted state; DOM-echo verify of the committed control is circular.
 caught). Also proves F2 again — these 6 are honest ESCALATEs only BECAUSE vision was alive; under load
 the same rows ship as false-greens.
 
+**Cluster wake #2 (67/500): `S_OTHER no-escape→ESCALATE` 2→7.** Decomposition:
+anthropic ×2 = FR-2 (known). flexport ×2 + twilio ×2 = **duplicate-discovery pairs** (one control
+discovered as combobox AND text row; both escalate — failures double-counted; FR-1's
+dedup-by-backend_node_id also fixes the denominator). Plus TWO NEW bugs for B's fix order:
+**(N1) S4_SEARCH cross-field bleed** — twilio Location value='New York' but the search TYPED
+'New York University' (another field's answer used as filter text); fixture `search_filter_bleed`.
+**(N2) found-but-not-committed** — `search 'Other' → 1 opts > search-exhausted`: the option was found
+and never clicked; fixture `search_single_option_commit`. Also noted: airtable 061 ends
+`ledger-reconciled:value-on-screen` (value IS painted post-escalate) — scoring must count
+reconciled rows as filled, else self-inflicted false-reds.
+
 ## Immediate next actions (this week)
 1. Finish current sweep + streaming audit → honest baseline number on the NEW population.
 2. Phase 1 verdict fixes + their 3 fixtures (small diffs, verdict-layer, fixture-gated).
