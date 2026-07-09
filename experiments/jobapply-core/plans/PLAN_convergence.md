@@ -130,6 +130,13 @@ claimed-COMPLETE)**. Deductions decompose into exactly two levers:
 Chunk-3 audit prompt refined (cookie banners noted, not auto-failed) — chunk-2's 4 banner rows recounted
 as real. Streaming audits: 3 chunks × ~90s each, zero added wall-clock to the sweep.
 
+**Chunk 5 (41 runs): 35 real / 6 fg. Cumulative 205 audited → 179 truly complete (~87%).**
+Captcha-blocked-as-COMPLETE now ~13 runs (Lever image-grid hCaptcha wave on mistral/multiplylabs/veeva —
+the class compounds; Phase-1 verdict gate recovers ALL). **Ashby decoupled-pill misses now span 4
+tenants** (airwallex ×4 postings, aleph required radio group, replit relocation pills, 1password
+work-auth) — the #1 TRUE fill false-green family; every DOM-echo verify defeated; F1 painted-crop
+verify is the designed kill. Fixture set: mine each tenant's real DOM (A-M5).
+
 **Chunk 4 (41 runs): 36 real / 5 fg. Cumulative 164 audited → ~144 truly complete (~88%).**
 Geocomplete/uncommitted-location = 6–7 specimens (#1 fill bug; netomi's dropdown left OPEN on the final
 screenshot — verify must also assert menus CLOSED). airwallex AI-Policy pill both-grey on its 3rd
