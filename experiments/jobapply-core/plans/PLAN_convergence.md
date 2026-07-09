@@ -75,6 +75,26 @@ introduced) lands in Phase 1 — after that, confidence is measured against an h
 - A's flow lane produces `advance()` → unblocks Workday e2e → C's multi-page product lane.
 - Phase 1+2 MUST land before the next scoring sweep; Phase 3/4 proceed in parallel after.
 
+## LIVE VALIDATION — streaming-audit chunk 1 (added mid-sweep, 2026-07-09)
+
+43 COMPLETE runs audited in 101s while the sweep kept running (the new overlapped pipeline):
+**39 real / 4 false-green (9.3%)**. The 4 false-greens land EXACTLY on plan targets and add one new class:
+
+1. **Unsolved CAPTCHA / stuck overlay occluding the form, still marked COMPLETE** (gridware 018, ro 026,
+   mytos 023 — 3 of 4). Validates **Phase-1 F2 (vision fail-closed)**: the end-of-run pixel gate runs
+   `llm=None` and fails open, so nothing SAW the overlay. Fail-closed + canary would have scored all
+   three UNVERIFIED/NEEDS_HUMAN. (The engine even logged `blocker: captcha` — the verdict layer ignored
+   its own blocker flag: additional trivial gate.)
+2. **NEW CLASS — VLM verify at the wrong MOMENT** (artie 045 Location): trace shows
+   `filter-lost-chosen → fall through` (option never committed) yet `verify-src:vlm → verdict:CORRECT` —
+   the VLM verified typed-but-uncommitted text; the widget wiped it on blur; final PNG shows the
+   placeholder. **Verify must observe the SETTLED painted state (after blur + menu close), not the
+   mid-interaction state.** Amends B-F1's crop-verify spec: settle-then-verify + end-of-run gate remains
+   the backstop. Fixture: `geocomplete_wipe_on_blur` (type→menu→lose→blur-wipe).
+
+Streaming doctrine benefit demonstrated: defects known ~4 hours before the sweep finishes; fixes and
+fixtures can be prepared before the retry pass.
+
 ## Immediate next actions (this week)
 1. Finish current sweep + streaming audit → honest baseline number on the NEW population.
 2. Phase 1 verdict fixes + their 3 fixtures (small diffs, verdict-layer, fixture-gated).
