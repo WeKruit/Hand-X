@@ -130,6 +130,14 @@ claimed-COMPLETE)**. Deductions decompose into exactly two levers:
 Chunk-3 audit prompt refined (cookie banners noted, not auto-failed) — chunk-2's 4 banner rows recounted
 as real. Streaming audits: 3 chunks × ~90s each, zero added wall-clock to the sweep.
 
+**Chunk 4 (41 runs): 36 real / 5 fg. Cumulative 164 audited → ~144 truly complete (~88%).**
+Geocomplete/uncommitted-location = 6–7 specimens (#1 fill bug; netomi's dropdown left OPEN on the final
+screenshot — verify must also assert menus CLOSED). airwallex AI-Policy pill both-grey on its 3rd
+consecutive posting — per-tenant systematic label-anchor-family miss. NEW sub-classes: **cascade
+follow-up missed** (airwallex relatives=Yes revealed 'If Yes, name' left placeholder — S_CASCADE gap;
+fixture `cascade_reveal_followup`), and **missing_required blind spot** (aleph: 3 required textareas
+unanswered yet COMPLETE — the required-detector missed them; feeds the completeness layer fix).
+
 **Cluster wake #2 (67/500): `S_OTHER no-escape→ESCALATE` 2→7.** Decomposition:
 anthropic ×2 = FR-2 (known). flexport ×2 + twilio ×2 = **duplicate-discovery pairs** (one control
 discovered as combobox AND text row; both escalate — failures double-counted; FR-1's
