@@ -95,6 +95,18 @@ introduced) lands in Phase 1 — after that, confidence is measured against an h
 Streaming doctrine benefit demonstrated: defects known ~4 hours before the sweep finishes; fixes and
 fixtures can be prepared before the retry pass.
 
+**Cluster wake #1 (62/500 swept): `verify-src:dom → CORRECT → vision-gate:blank-on-screen` ×6.**
+Commits landed on a DOM control that does NOT drive paint (`aria-core-commit`/`native-identity-match`
+set the hidden select; DOM read-back reads the SAME dead control → CORRECT; the vision gate — alive on
+these runs — caught the blank and honestly ESCALATEd). 4 of 6 are ONE family: classic
+`boards.greenhouse.io` education-section comboboxes (School*/Degree*/Discipline*/End-month*, anduril
+062); plus airtable work-auth combobox (061), netomi Lever timezone native-select (024), ro pronouns
+checkbox (026). Direct live proof of **P1/F1's thesis**: commit must be the USER-visible action + verify
+the SETTLED painted state; DOM-echo verify of the committed control is circular. New fixture:
+`gh_classic_education_selects` (hidden `<select>` + custom rendered widget; commit-on-hidden must be
+caught). Also proves F2 again — these 6 are honest ESCALATEs only BECAUSE vision was alive; under load
+the same rows ship as false-greens.
+
 ## Immediate next actions (this week)
 1. Finish current sweep + streaming audit → honest baseline number on the NEW population.
 2. Phase 1 verdict fixes + their 3 fixtures (small diffs, verdict-layer, fixture-gated).
