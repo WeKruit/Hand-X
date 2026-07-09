@@ -179,6 +179,12 @@ per-option painted verify.** Fixtures: `lever_multicheck_group`, `ashby_demograp
 All 15 were honest ESCALATEs (vision alive) — under load these become false-greens; F2 remains the
 backstop.
 
+**Cluster wake #7 (243/500): `choice-dom-direct:Yes → blank` ×3 — all airwallex AI-Policy pill.**
+The SAME field has now failed via BOTH label-anchor and dom-direct paths: the tenant's decoupled pill
+defeats every DOM-echo verify. Our `decoupled_pill_falsegreen` fixture PASSES offline — playground-green
+/ live-red = closure-test failure in miniature; fixture-miner must capture the REAL airwallex DOM
+(`airwallex_ai_policy_pill`). Confirms F1: only painted-crop verify closes all three choice paths.
+
 **Cluster wake #5 (173/500): no-escape 10→13 — NO new class; per-tenant repetition.** Every twilio
 posting emits the identical N2 right-to-work pair + Location miss; affirm repeats N3 on each posting.
 SCORING IMPLICATION: failures concentrate by tenant — report confidence per-COMPANY alongside per-run,
