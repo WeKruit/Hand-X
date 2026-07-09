@@ -52,12 +52,53 @@ def _reap_chromium() -> None:
         subprocess.run(["pkill", "-f", "ms-playwright/chromium"], capture_output=True, timeout=10)
 
 
+async def _generic_rescue(res: dict, profile: dict, resume: str | None, ss: str | None, timeout: float) -> dict:
+    """Foreign-form fall-through (toast/wayve class): the adapter can't see the form but the
+    VLM triage can (page_kind APPLICATION_FORM) — hand the LIVE page to the no-adapter
+    observe_act lane. Subprocess = its proven isolation model; sequential (conc=1) only."""
+    target = res.get("final_url") or res["url"]
+    pf, oj = Path(f"runs/.gen_profile_{os.getpid()}.json"), Path(f"runs/.gen_result_{os.getpid()}.json")
+    pf.write_text(json.dumps(profile))
+    cmd = [sys.executable, "oa_singlepage.py", "--url", target, "--profile", str(pf), "--json", str(oj)]
+    if resume:
+        cmd += ["--resume", resume]
+    if ss:
+        cmd += ["--screenshot", ss.replace(".png", "_generic.png")]
+    print(f"   [generic] foreign form — observe_act rescue on {target[:70]}")
+    proc = None
+    glog = Path(ss.replace(".png", "_generic.log")) if ss else Path(f"runs/.gen_{os.getpid()}.log")
+    try:
+        with glog.open("w") as lf:
+            proc = await asyncio.create_subprocess_exec(*cmd, stdout=lf, stderr=asyncio.subprocess.STDOUT)
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+        g = json.loads(oj.read_text())
+        if g.get("status") == "FILLED" and (g.get("fill_rate") or 0) > 0:
+            return {**res, "status": "FILLED", "generic": True, "fill_rate": g["fill_rate"],
+                    "filled": g.get("filled"), "fields_total": g.get("fields_total"),
+                    "cost": (res.get("cost") or 0) + (g.get("cost") or 0),
+                    "screenshot": g.get("screenshot") or res.get("screenshot")}
+        return {**res, "generic_status": g.get("status"), "generic_fill_rate": g.get("fill_rate")}
+    except Exception as exc:
+        if proc is not None:
+            with contextlib.suppress(Exception):
+                proc.kill()
+        return {**res, "generic_status": f"error: {type(exc).__name__}"}
+    finally:
+        if ss and oj.exists():  # keep the per-field traces next to the screenshots (autopsy fuel)
+            with contextlib.suppress(Exception):
+                oj.replace(Path(ss.replace(".png", "_generic.json")))
+        for f in (pf, oj):
+            with contextlib.suppress(Exception):
+                f.unlink()
+
+
 async def _one(url: str, profile: dict, resume: str | None, escalate: bool, ss: str | None, timeout: float) -> dict:
     adapter = _pick(url)
     if adapter is None:
         return {"url": url, "status": "NO_ADAPTER"}
     t0 = time.monotonic()
     base = {"url": url, "adapter": adapter.__class__.__name__}
+    eng.set_job_deadline(max(30.0, timeout - 20.0))  # agents degrade gracefully, not die mid-CDP
     try:
         res = await asyncio.wait_for(
             eng.run(
@@ -71,6 +112,8 @@ async def _one(url: str, profile: dict, resume: str | None, escalate: bool, ss: 
     except Exception as exc:
         res = {**base, "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
     res.setdefault("url", url)
+    if res.get("status") in ("BLOCKED", "NEEDS_HUMAN") and res.get("page_kind") == "APPLICATION_FORM":
+        res = await _generic_rescue(res, profile, resume, ss, timeout)
     res["secs"] = round(time.monotonic() - t0, 1)
     return res
 
@@ -98,7 +141,7 @@ def _summary(results: list[dict]) -> None:
         filled = [r for r in rows if r.get("status") == "FILLED"]
         # full coverage = the form was filled AND no field FAILed (all fields entered incl selects)
         fullcov = [r for r in filled if (r.get("tiers") or {}).get("FAIL", 1) == 0]
-        blocked = [r for r in rows if r.get("status") == "BLOCKED"]
+        blocked = [r for r in rows if r.get("status") in ("BLOCKED", "NEEDS_HUMAN")]
         errto = [r for r in rows if r.get("status") in ("ERROR", "TIMEOUT", "NO_ADAPTER")]
         avg_fail = (sum((r.get("tiers") or {}).get("FAIL", 0) for r in filled) / len(filled)) if filled else 0.0
         cost = sum(r.get("cost", 0.0) or 0.0 for r in rows)
@@ -158,6 +201,15 @@ async def main_async(args: argparse.Namespace) -> None:
         ss = str(Path(ss_dir) / f"{i:03d}.png") if ss_dir else None
         async with sem:  # bound to N concurrent browser sessions; each _one owns its own session
             r = await _one(u, profile, args.resume, args.escalate, ss, args.timeout)
+            if conc == 1 and r.get("status") in ("TIMEOUT", "ERROR"):
+                # One retry after full quarantine. A killed/errored job leaves chromium half-dead
+                # and poisons the NEXT session (kalepa chain: agent overran the wall clock -> dirty
+                # kill -> 'No current target found' x3 on the jobs after it). Reap, breathe, retry.
+                _reap_chromium()
+                await asyncio.sleep(3)
+                r2 = await _one(u, profile, args.resume, args.escalate, ss, args.timeout)
+                r2["retried"] = True
+                r = r2 if r2.get("status") == "FILLED" else {**r, "retry_status": r2.get("status")}
         r["profile"] = pname
         results[i] = r
         done["n"] += 1

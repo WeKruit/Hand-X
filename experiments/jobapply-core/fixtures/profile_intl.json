@@ -1,0 +1,87 @@
+{
+  "first_name": "Aditi",
+  "last_name": "Sharma",
+  "preferred_name": "Aditi",
+  "full_name": "Aditi Sharma",
+  "email": "aditi.sharma.demo2026@gmail.com",
+  "phone": "+44 20 7946 0958",
+  "location": "London, United Kingdom",
+  "city": "London",
+  "state": "England",
+  "country": "United Kingdom",
+  "zip": "EC2A 4NE",
+  "address_line1": "12 Shoreditch High Street",
+  "linkedin": "https://www.linkedin.com/in/aditi-sharma-test",
+  "github": "https://github.com/aditi-sharma-test",
+  "website": "",
+  "work_authorization": "Require sponsorship (H-1B) to work in the US",
+  "authorized_to_work_us": false,
+  "requires_sponsorship": true,
+  "visa_status": "Not currently authorized; will require H-1B sponsorship now and in the future",
+  "citizenship": "India",
+  "currently_located_in_us": false,
+  "willing_to_relocate": true,
+  "desired_salary": "150000",
+  "available_start_date": "2026-09-15",
+  "preferred_work_arrangement": "Open to relocation to the US; remote considered",
+  "how_did_you_hear": "Company website",
+  "gender": "Female",
+  "pronouns": "She/Her",
+  "race_ethnicity": "Asian",
+  "hispanic_or_latino": "No",
+  "veteran_status": "I am not a protected veteran",
+  "disability_status": "No, I do not have a disability and have not had one in the past",
+  "sexual_orientation": "Heterosexual",
+  "transgender": "No",
+  "summary": "Backend engineer with 4 years building distributed payment systems in Java and Kotlin. Shipped a ledger service processing £4B/yr. Seeking a US-based role and open to relocation.",
+  "experience": [
+    {
+      "company": "Monzo",
+      "title": "Backend Engineer",
+      "location": "London, UK",
+      "start_date": "2023-01",
+      "end_date": "Present",
+      "current": true,
+      "highlights": [
+        "Owned a double-entry ledger service (Kotlin, Cassandra) processing £4B in annual transaction volume.",
+        "Cut settlement reconciliation time from 6 hours to 15 minutes via an event-sourced redesign."
+      ]
+    },
+    {
+      "company": "Revolut",
+      "title": "Software Engineer",
+      "location": "London, UK",
+      "start_date": "2021-06",
+      "end_date": "2022-12",
+      "current": false,
+      "highlights": [
+        "Built fraud-scoring microservices (Java, Kafka) evaluating 20k transactions/sec.",
+        "Reduced false-positive card declines 18% with a feature-store rework."
+      ]
+    }
+  ],
+  "education": [
+    {
+      "school": "Imperial College London",
+      "degree": "M.Eng.",
+      "field_of_study": "Computing",
+      "start_date": "2017-09",
+      "graduation_date": "2021-06",
+      "gpa": "First Class Honours"
+    }
+  ],
+  "skills": ["Java", "Kotlin", "Cassandra", "Kafka", "Spring Boot", "PostgreSQL", "Docker", "Terraform"],
+  "certifications": [],
+  "languages": [
+    {"language": "English", "proficiency": "Native"},
+    {"language": "Hindi", "proficiency": "Native"}
+  ],
+  "cover_letter": "I'm applying because I want to bring my payments-infrastructure experience to a US fintech. I'm open to relocation and will require H-1B sponsorship.",
+  "references": [],
+  "notice_period": "1 month",
+  "referral": "No referral",
+  "referred_by": "",
+  "additional_information": "",
+  "current_company": "Monzo",
+  "current_title": "Backend Engineer"
+}

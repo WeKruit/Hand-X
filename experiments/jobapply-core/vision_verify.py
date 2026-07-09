@@ -31,8 +31,8 @@ VERIFY_MODEL = os.environ.get("GH_VERIFY_MODEL", "gemini-3.1-flash-lite")
 VLM_MAX_CALLS = int(os.environ.get("GH_VERIFY_MAX_CALLS", "6"))
 
 # ---- run-scoped state (one process == one application run) -------------------
-_VCACHE: dict[str, str] = {}     # cache key (url|label) -> raw verdict string
-_VLM_CALLS = {"n": 0}            # unique VLM calls on the CURRENT page
+_VCACHE: dict[str, str] = {}  # cache key (url|label) -> raw verdict string
+_VLM_CALLS = {"n": 0}  # unique VLM calls on the CURRENT page
 
 
 def reset_visual_cache() -> None:
@@ -51,10 +51,20 @@ def _is_filled(verdict: str) -> bool:
     return '"filled":true' in v
 
 
+def _matches(verdict: str) -> bool:
+    """Whitespace/quote-tolerant parse of the value-aware VLM's {"matches": true} reply.
+    Used by callers that asked `want=...`: answers "does the field show the RIGHT value?"
+    (not merely "is it non-blank?"). False for presence-only verdicts (no matches key)."""
+    v = verdict.lower().replace("'", '"').replace(" ", "")
+    return '"matches":true' in v
+
+
 def _vlm() -> Any:
+    import oa_llm
+
     from browser_use import ChatGoogle  # cheap VLM; swap to ChatOpenAI(base_url=…) for local Qwen2.5-VL
 
-    return ChatGoogle(model=VERIFY_MODEL, api_key=os.environ.get("GOOGLE_API_KEY"))
+    return oa_llm.openai_primary_llm("vlm") or ChatGoogle(model=VERIFY_MODEL, api_key=os.environ.get("GOOGLE_API_KEY"))
 
 
 async def _current_url(session: Any) -> str:
@@ -64,31 +74,65 @@ async def _current_url(session: Any) -> str:
         return ""
 
 
-async def visual_check(session: Any, target: str, *, key: str | None = None, use_cache: bool = True) -> str:
+async def visual_check(
+    session: Any, target: str, *, want: str | None = None, key: str | None = None, use_cache: bool = True
+) -> str:
     """Core cheap-VLM check, reused by the action AND the deterministic loop hook.
     `target` is what to look for ("Cover Letter" / "646-678-9391"); `key` overrides the
     cache identity (default: target) so the hook (keyed by field label) and the action
-    (keyed by field_label) hit the SAME cache entry for a field. Returns a short JSON-ish
-    verdict string {filled, value}. Served from cache (no VLM, no $) on a repeat; returns
-    a {"capped"} sentinel once the per-page VLM budget is spent."""
+    (keyed by field_label) hit the SAME cache entry for a field.
+
+    VALUE-AWARE mode (`want` given): asks "does field `target` visibly contain the value
+    `want`?" and returns {"filled": bool, "value": "<visible text>", "matches": bool}. This
+    is what the Workday dropdown/repeater guards need — the frozen-portal bug commits the
+    WRONG option, so a presence-only "filled" rubber-stamps a wrong value as done; `matches`
+    is the question that actually catches it. Parse it with `_matches`.
+
+    PRESENCE-ONLY mode (`want` None, the default): unchanged — "is `target` non-blank?",
+    returns {"filled": bool, "value": ...}. Single-page (jobapply.py) calls it this way.
+
+    Returns a short JSON-ish verdict string. Served from cache (no VLM, no $) on a repeat;
+    returns a {"capped"} sentinel once the per-page VLM budget is spent. The cache key
+    includes `want` so a value-check and a presence-check of the same field never collide."""
     ck = ""
     if use_cache:
         # cache hit / over-budget are the FAST paths: no screenshot, no import, no $.
-        ck = f"{await _current_url(session)}|{_norm(key if key is not None else target)}"
+        # `want` is in the key: a presence-check and a value-check of one field are distinct.
+        ident = _norm(key if key is not None else target)
+        ck = f"{await _current_url(session)}|{ident}|{_norm(want) if want is not None else ''}"
         if ck in _VCACHE:
             return _VCACHE[ck]
         if _VLM_CALLS["n"] >= VLM_MAX_CALLS:
             return '{"filled": null, "capped": true}'  # budget spent — caller stays silent
 
-    try:
-        png = await session.take_screenshot()  # bytes (PNG)
-    except Exception as exc:
-        return f'{{"filled": null, "error": "screenshot: {exc}"}}'
+    import oa_llm as _oa_llm
+
+    png = await _oa_llm.bounded_screenshot(session)  # bytes (PNG), bounded — None on timeout/error
+    if png is None:
+        return '{"filled": null, "error": "screenshot bounded-out"}'
     b64 = base64.b64encode(png).decode()
-    prompt = (
-        f"This is a job-application web form. Is '{target}' currently filled in / visibly present "
-        f'in an input (not blank)? Reply STRICT JSON: {{"filled": true|false, "value": "<visible text>"}}.'
-    )
+    if want is not None:
+        prompt = (
+            f'This is a job-application web form. Look at the field labeled "{target}". Set "matches"=true '
+            f'if it shows the value "{want}" OR a clearly EQUIVALENT / closest-available option that means '
+            f'the same thing — e.g. a fuller official name ("Computer and Information Science" for '
+            f'"Computer Science"; "University of California, Berkeley" for "UC Berkeley"; "United States of '
+            f'America (+1)" for "United States"), or all of several comma-separated items present as pills. '
+            # typed-residue false-positive (verified live): raw text sitting in a tag/typeahead SEARCH BOX
+            # looks 'filled' but is NOT committed — only a pill/tag chip (with its x/remove control) or a
+            # selected option counts. Plain text inputs (name/city) still count by their text.
+            f"IMPORTANT: for a tag/multi-select field, TEXT STILL SITTING IN THE SEARCH BOX does NOT count "
+            f"— it must appear as a COMMITTED pill/tag chip (usually with an x/remove control) or a "
+            f"selected option; if the value is only typed in the search box, set matches=false. "
+            f'Set "matches"=false ONLY if the field is blank, uncommitted as above, or shows a clearly '
+            f'DIFFERENT thing. Reply STRICT JSON: {{"filled": true|false, "value": "<visible text>", '
+            f'"matches": true|false}}.'
+        )
+    else:
+        prompt = (
+            f"This is a job-application web form. Is '{target}' currently filled in / visibly present "
+            f'in an input (not blank)? Reply STRICT JSON: {{"filled": true|false, "value": "<visible text>"}}.'
+        )
     try:  # production always has browser_use; the guard only lets offline tests fake _vlm()
         from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
 
@@ -103,8 +147,14 @@ async def visual_check(session: Any, target: str, *, key: str | None = None, use
         )
     except Exception:
         msg = prompt
+    # BOUNDED + vision-fallback-capable: a stalled gemini-vision fails fast (OA_LLM_TIMEOUT) and a
+    # vision fallback answers when keyed; None -> a bounded error sentinel (never an unbounded ainvoke).
     try:
-        resp = await _vlm().ainvoke([msg])
+        import oa_llm as _oa_llm
+
+        resp = await _oa_llm.resilient_vlm([msg], primary=_vlm())
+        if resp is None:
+            return '{"filled": null, "error": "vlm bounded-out (no fallback)"}'
         verdict = (getattr(resp, "completion", None) or str(resp)).strip()
     except Exception as exc:
         return f'{{"filled": null, "error": "{type(exc).__name__}: {exc}"}}'
@@ -112,6 +162,135 @@ async def visual_check(session: Any, target: str, *, key: str | None = None, use
         _VLM_CALLS["n"] += 1
         _VCACHE[ck] = verdict
     return verdict
+
+
+def _parse_str_list(raw: str) -> list[str]:
+    """Tolerant parse of the VLM's JSON array reply -> [str]. The model sometimes wraps the array
+    in prose or a ```json fence, so slice to the outermost [...] and json.load; fall back to a
+    line-split. Returns de-duped, stripped, non-empty strings in order (the rendered top-to-bottom)."""
+    import json
+    import re as _re
+
+    s = (raw or "").strip()
+    out: list[str] = []
+    m = _re.search(r"\[.*\]", s, _re.DOTALL)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            if isinstance(data, list):
+                out = [str(x).strip() for x in data if str(x).strip()]
+        except Exception:
+            out = []
+    if not out:  # no JSON array — split lines, drop bullets/numbering
+        for ln in s.splitlines():
+            t = _re.sub(r'^[\s\-\*\d\.\)"]+', "", ln).strip().strip('",')
+            if t and not t.startswith("[") and not t.startswith("{"):
+                out.append(t)
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for t in out:
+        k = t.lower()
+        if k not in seen:
+            seen.add(k)
+            uniq.append(t)
+    return uniq
+
+
+async def flagged_fields_visually(session: Any) -> list[str]:
+    """FIX-LOOP vision reader (user directive: 'VLM can help here too'): when the DOM/text readers
+    can't tie an advance-blocking message to concrete fields, ONE low-detail screenshot names the
+    fields VISIBLY flagged as invalid (red border/asterisk banner/error text under the input).
+    Uncached (post-write state), bounded like every VLM call. [] on any failure — never blocks."""
+    import oa_llm as _oa_llm
+
+    png = await _oa_llm.bounded_screenshot(session)
+    if png is None:
+        return []
+    b64 = base64.b64encode(png).decode()
+    prompt = (
+        "This job-application form failed to advance. Some fields are visibly marked as having "
+        "validation errors (red outline, error text beneath them, or listed in an error banner). "
+        "Reply ONLY a STRICT JSON array of the LABELS of those flagged fields, exactly as shown, "
+        'e.g. ["Postal Code", "State"]. If none are visibly flagged, reply [].'
+    )
+    try:
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+        msg = UserMessage(
+            content=[
+                ContentPartTextParam(type="text", text=prompt),
+                ContentPartImageParam(
+                    type="image_url",
+                    image_url=ImageURL(url=f"data:image/png;base64,{b64}", detail="low", media_type="image/png"),
+                ),
+            ]
+        )
+        res = await _oa_llm.resilient_vlm([msg], primary=_vlm())
+        return _parse_str_list(res or "[]")[:8]
+    except Exception:
+        return []
+
+
+async def read_options_visually(session: Any, *, key: str | None = None, use_cache: bool = True) -> list[str]:
+    """Read the ACTUALLY-RENDERED options of the currently-open dropdown/menu from ONE low-detail
+    screenshot — no DOM lag, no stale shared portal. This is the matching fix: the DOM option portal
+    LAGS / freezes (filling 'Kubernetes' re-serves the previous 'Go' options; 'UC Berkeley' reads []),
+    so we ask a cheap VLM to TRANSCRIBE the visible option texts top-to-bottom as a JSON string array.
+
+    Cached + capped exactly like visual_check: keyed by (url | key). The caller passes a `key` that
+    identifies the open widget + the typed filter (e.g. f"{field_label}:{typed}") so a re-read after a
+    new keystroke is a DISTINCT entry (the whole point — the previous read is stale), while a repeat
+    read of the same open state is served free. Over the per-page VLM budget -> returns [] (caller
+    falls back to its DOM read rather than spend). Returns [] on any error (caller degrades, never crashes)."""
+    ck = ""
+    if use_cache:
+        ident = _norm(key) if key is not None else "open-menu"
+        ck = f"{await _current_url(session)}|opts|{ident}"
+        if ck in _VCACHE:
+            return _parse_str_list(_VCACHE[ck])
+        if _VLM_CALLS["n"] >= VLM_MAX_CALLS:
+            return []  # budget spent — caller uses its DOM read
+
+    import oa_llm as _oa_llm
+
+    png = await _oa_llm.bounded_screenshot(session)
+    if png is None:
+        return []
+    b64 = base64.b64encode(png).decode()
+    prompt = (
+        "This is a job-application web form with a dropdown/combobox menu currently OPEN. "
+        "List the option texts CURRENTLY VISIBLE in that open menu, top to bottom, EXACTLY as shown. "
+        'Reply ONLY a STRICT JSON array of strings, e.g. ["Bachelor\'s Degree", "Master\'s Degree"]. '
+        "If no menu is open or no options are visible, reply []."
+    )
+    try:
+        from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+        msg = UserMessage(
+            content=[
+                ContentPartTextParam(type="text", text=prompt),
+                ContentPartImageParam(
+                    type="image_url",
+                    image_url=ImageURL(url=f"data:image/png;base64,{b64}", detail="low", media_type="image/png"),
+                ),
+            ]
+        )
+    except Exception:
+        msg = prompt
+    # BOUNDED + vision-fallback-capable (see visual_check). None -> [] (caller uses its DOM read).
+    try:
+        import oa_llm as _oa_llm
+
+        resp = await _oa_llm.resilient_vlm([msg], primary=_vlm())
+        if resp is None:
+            return []
+        raw = (getattr(resp, "completion", None) or str(resp)).strip()
+    except Exception:
+        return []
+    if use_cache:
+        _VLM_CALLS["n"] += 1
+        _VCACHE[ck] = raw
+    return _parse_str_list(raw)
 
 
 def _action_target(dumped: dict) -> tuple[Any, Any]:

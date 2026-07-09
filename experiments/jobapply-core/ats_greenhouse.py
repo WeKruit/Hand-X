@@ -120,7 +120,7 @@ class GreenhouseAdapter(ATSAdapter):
         except Exception:
             return False
 
-    async def fill_repeaters(self, session: Any, page: Any, profile: dict) -> dict:
+    async def fill_repeaters(self, session: Any, page: Any, profile: dict, allow_escalation: bool = True) -> dict:
         """Education repeater. The boards-api schema can't enumerate rows and the
         school/degree/discipline are searchable closed taxonomies living below the fold (NOT in
         browser-use's selector map) — deterministic string-match gets them wrong. So drive this
@@ -132,6 +132,12 @@ class GreenhouseAdapter(ATSAdapter):
             return {}
         if not await eng.first(page, '[id^="react-select-school--0"], [class*="education--"]'):
             return {}  # new-template boards turn education into flat questions — no repeater here
+        if not allow_escalation:
+            # the kalepa leak: this agent used to run even under escalate=False, overrunning the
+            # runner's wall clock and poisoning the next browser session. Honor the gate; the miss
+            # is reported, not hidden.
+            print("   [education] repeater needs the section agent but escalation is off — skipped")
+            return {"education_rows": 0, "education_skipped": "escalation_off"}
         entries = "; ".join(
             f"entry {i + 1}: School='{e.get('school', '')}', Degree='{e.get('degree', '')}', "
             f"Discipline='{e.get('field_of_study', '')}'"
