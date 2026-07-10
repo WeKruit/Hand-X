@@ -3236,16 +3236,20 @@ async def _observed_already_correct(session: Any, ctx: Ctx, *, stage: str) -> bo
     """One fresh, uncached VLM look at the field BEFORE any destructive repair. The EMPTY/WRONG
     verdict that routed us here can be a stale/desynced DOM read (grouped-locate, next-tick React
     state) — repairing off it re-clicks toggles OFF or wipes a correct value. If the pixels already
-    show the wanted value, the repair is aborted and the field is DONE. Bounded by the per-field
-    VLM budget; False on any failure/budget (repair proceeds exactly as before)."""
+    show the wanted value, the repair is aborted and the field is DONE.
+
+    BUDGET NOTE: this look does NOT consume the per-field VLM AID budget (FIELD_VLM_CAP) — it is
+    a cadence OBSERVATION (铁律 2), and charging it starved the set-of-marks visual COMMIT one
+    rung later (toggle_switch_radix regression: verify-aid 1 + this 1 = cap 2, visual-commit had
+    nothing left). It is naturally bounded by the repair-entry caps (COMMIT_CAP + REVALUE_CAP).
+    False on any failure (repair proceeds exactly as before)."""
     want = (ctx.committed_text or ctx.value or "").strip()
-    if not want or ctx.vlm_used >= FIELD_VLM_CAP:
+    if not want:
         return False
     with contextlib.suppress(Exception):
         # the field was just interacted with, so it is in the viewport the screenshot captures
         import vision_verify as _vv2
 
-        ctx.vlm_used += 1
         verdict = await _vv2.visual_check(
             session, ctx.label, want=want, key=f"{ctx.label}:{stage}", use_cache=False
         )
