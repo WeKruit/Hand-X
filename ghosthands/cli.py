@@ -44,7 +44,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import structlog
 
@@ -58,6 +58,9 @@ from ghosthands.bridge.protocol import (
     wait_for_review_command,
 )
 
+if TYPE_CHECKING:
+    from browser_use import Agent
+
 # Backward-compatible alias retained for older internal imports/tests.
 _camel_to_snake_profile = camel_to_snake_profile
 
@@ -67,7 +70,7 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 # Suppress browser-use's own logging setup so we control stderr exclusively
 os.environ["BROWSER_USE_SETUP_LOGGING"] = "false"
 
-from ghosthands.agent.hooks import (
+from ghosthands.agent.hooks import (  # noqa: E402
     consume_blocked_final_submit,
     install_final_submit_guard,
     install_same_tab_guard,
@@ -300,9 +303,7 @@ async def _inspect_workday_runtime_state(browser_session, page) -> dict[str, Any
     """Inspect lightweight Workday page state for deterministic auth handling."""
     derived_from_browser_text: dict[str, Any] = {}
     with contextlib.suppress(Exception):
-        derived_from_browser_text = _derive_workday_state_from_browser_text(
-            await browser_session.get_state_as_text()
-        )
+        derived_from_browser_text = _derive_workday_state_from_browser_text(await browser_session.get_state_as_text())
     try:
         state = await page.evaluate(
             r"""() => {
@@ -624,6 +625,10 @@ def parse_args() -> argparse.Namespace:
     argv = sys.argv[1:]
     if argv and argv[0] == "apply":
         argv = argv[1:]
+    if argv and argv[0] in {"tui", "terminal"}:
+        argv = ["--output-format", "tui", *argv[1:]]
+    elif not argv and sys.stdin.isatty() and sys.stdout.isatty():
+        argv = ["--output-format", "tui"]
 
     parser = argparse.ArgumentParser(
         prog="hand-x",
@@ -637,7 +642,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Required
-    parser.add_argument("--job-url", required=True, help="Job posting URL to apply to")
+    parser.add_argument("--job-url", default=None, help="Job posting URL to apply to")
 
     # Profile source (one of these is required)
     parser.add_argument("--profile", default=None, help="Applicant profile as JSON string or @filepath")
@@ -665,9 +670,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--headless", action="store_true", help="Run browser headless")
     parser.add_argument(
         "--output-format",
-        choices=["jsonl", "human"],
+        choices=["jsonl", "human", "tui"],
         default="jsonl",
-        help="Output format: jsonl for IPC, human for terminal (default: jsonl)",
+        help="Output format: jsonl for IPC, human for raw terminal logs, tui for interactive terminal UX",
     )
 
     # VALET proxy
@@ -692,8 +697,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Connect to an existing browser via CDP URL instead of launching a new one (Desktop-owned browser mode)",
     )
+    parser.add_argument(
+        "--engine",
+        choices=["auto", "chromium", "firefox"],
+        default="auto",
+        help="Reserved browser engine selector for the terminal app",
+    )
 
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.output_format != "tui" and not args.job_url:
+        parser.error("the following arguments are required: --job-url")
+    return args
 
 
 # ── Logging setup ─────────────────────────────────────────────────────
@@ -702,7 +716,7 @@ def parse_args() -> argparse.Namespace:
 class _CompactFormatter(logging.Formatter):
     """Shorten noisy logger names while keeping everything else intact."""
 
-    _REWRITES = {
+    _REWRITES: ClassVar[dict[str, str]] = {
         "Agent": "Agent",
         "BrowserSession": "Session",
         "tools": "tools",
@@ -863,7 +877,7 @@ def _load_desktop_overlay_fields() -> dict[str, Any] | None:
         "learnedInteractionRecipes",
         "learned_interaction_recipes",
     ):
-        if key in data and data[key]:
+        if data.get(key):
             overlay[key] = data[key]
     return overlay if overlay else None
 
@@ -950,7 +964,7 @@ def _load_runtime_settings():
     """Load settings after CLI-provided environment overrides are applied."""
     from ghosthands.config.settings import Settings
 
-    return Settings()
+    return Settings()  # pyright: ignore[reportCallIssue]
 
 
 def _resolve_sensitive_data(
@@ -1399,7 +1413,7 @@ async def _collect_open_question_issues_from_browser(browser: Any) -> list[_Open
         from ghosthands.actions.domhand_assess_state import domhand_assess_state
         from ghosthands.actions.views import DomHandAssessStateParams
 
-        result = await domhand_assess_state(DomHandAssessStateParams(), browser)
+        result = await domhand_assess_state(DomHandAssessStateParams(target_section=None), browser)
         summary = result.extracted_content or ""
         payload: dict[str, Any] = {}
         meta = getattr(result, "metadata", None) or {}
@@ -1481,9 +1495,9 @@ async def _auto_answer_open_question_issues(
         _default_screening_answer,
         _find_best_profile_answer,
         _known_profile_value,
-        _semantic_profile_value_for_field,
         _normalize_match_label,
         _parse_profile_evidence,
+        _semantic_profile_value_for_field,
     )
     from ghosthands.actions.views import FormField
     from ghosthands.runtime_learning import confirm_learned_question_alias
@@ -1561,8 +1575,8 @@ async def _infer_open_question_answers_with_domhand(
     if not isinstance(profile, dict):
         return [], issues
 
-    from ghosthands.actions.domhand_fill import infer_answers_for_fields
     from ghosthands.actions.views import FormField
+    from ghosthands.dom.fill_llm_answers import infer_answers_for_fields
 
     synthetic_fields: list[FormField] = []
     issue_by_field_id: dict[str, _OpenQuestionIssue] = {}
@@ -1836,11 +1850,7 @@ def _jsonl_done_signals_incomplete_outcome(final_result: str, history: Any) -> b
                 f"{getattr(cs, 'evaluation_previous_goal', '')} "
                 f"{getattr(cs, 'next_goal', '')}"
             ).lower()
-            if (
-                "step limit" in blob
-                or "maximum steps" in blob
-                or "terminated due to step limit" in blob
-            ):
+            if "step limit" in blob or "maximum steps" in blob or "terminated due to step limit" in blob:
                 return True
     except Exception:
         pass
@@ -2046,7 +2056,9 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         # from incorrectly assuming headless mode (get_display_size() returns None in
         # Electron-spawned subprocesses) and setting a 1920x1080 viewport override via CDP,
         # which would cause pages to render wider than the physical Chrome window.
-        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains, headless=False, no_viewport=True)
+        browser_profile = BrowserProfile(
+            keep_alive=True, allowed_domains=allowed_domains, headless=False, no_viewport=True
+        )
         browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url, target_id=cdp_target_id)
         if cdp_target_id:
             emit_status(f"Connecting to Desktop-owned browser via CDP (target: {cdp_target_id[:8]}...)", job_id=job_id)
@@ -2133,7 +2145,17 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 from ghosthands.actions.views import DomHandFillParams
 
                 _emit_phase_if_changed("Auto-filling form fields")
-                result = await _domhand_fill(DomHandFillParams(), ag.browser_session)
+                result = await _domhand_fill(
+                    DomHandFillParams(
+                        target_section=None,
+                        heading_boundary=None,
+                        focus_fields=None,
+                        entry_data=None,
+                        use_auth_credentials=False,
+                        strict_scope=False,
+                    ),
+                    ag.browser_session,
+                )
                 if result and not result.error:
                     ag.state.last_result = [result]
                     logger.warning(
@@ -2258,7 +2280,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                             domain=hostname or None,
                             email=app_settings.email,
                             password=app_settings.password,
-                            credential_status=marker_status,
+                            credential_status=marker_status or "active",
                             note=marker_note,
                             evidence=marker_evidence,
                             url=url,
@@ -2281,7 +2303,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         )
         try:
             await asyncio.wait_for(browser.start(), timeout=60)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("startup.browser_launch_timeout", timeout_seconds=60)
             emit_error("Browser failed to start within 60 seconds", fatal=True, job_id=job_id)
             jt.emit_run_terminal(
@@ -2349,7 +2371,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 browser_session=browser,
                 tools=tools,
                 extend_system_message=system_ext or None,
-                sensitive_data=sensitive_data,
+                sensitive_data=cast("dict[str, str | dict[str, str]] | None", sensitive_data),
                 available_file_paths=available_files or None,
                 use_vision="auto",
                 max_actions_per_step=app_settings.agent_max_actions_per_step,
@@ -2426,9 +2448,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
         filled_count, failed_count = get_field_counts()
         filled_field_records = get_filled_field_records()
-        best_effort_guess_count, best_effort_guess_fields = _extract_best_effort_guess_summary(
-            filled_field_records
-        )
+        best_effort_guess_count, best_effort_guess_fields = _extract_best_effort_guess_summary(filled_field_records)
 
         if cancelled:
             from ghosthands.runtime_learning import export_runtime_learning_payload
@@ -2438,9 +2458,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 logger.info(
                     "cli.runtime_learning_export",
                     extra={
-                        "learned_question_aliases": len(
-                            runtime_learning_payload.get("learned_question_aliases") or []
-                        ),
+                        "learned_question_aliases": len(runtime_learning_payload.get("learned_question_aliases") or []),
                         "learned_interaction_recipes": len(
                             runtime_learning_payload.get("learned_interaction_recipes") or []
                         ),
@@ -2515,9 +2533,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             logger.info(
                 "cli.runtime_learning_export",
                 extra={
-                    "learned_question_aliases": len(
-                        runtime_learning_payload.get("learned_question_aliases") or []
-                    ),
+                    "learned_question_aliases": len(runtime_learning_payload.get("learned_question_aliases") or []),
                     "learned_interaction_recipes": len(
                         runtime_learning_payload.get("learned_interaction_recipes") or []
                     ),
@@ -2814,7 +2830,9 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     if cdp_url:
         # Desktop-owned browser is always headful; bypass faulty display auto-detection
         # (see primary CDP path above for full rationale).
-        browser_profile = BrowserProfile(keep_alive=True, allowed_domains=allowed_domains, headless=False, no_viewport=True)
+        browser_profile = BrowserProfile(
+            keep_alive=True, allowed_domains=allowed_domains, headless=False, no_viewport=True
+        )
         browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
         print(f"Connecting to Desktop-owned browser via CDP: {cdp_url}")
     else:
@@ -2902,7 +2920,7 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         browser_session=browser,
         tools=tools,
         extend_system_message=system_ext or None,
-        sensitive_data=sensitive_data,
+        sensitive_data=cast("dict[str, str | dict[str, str]] | None", sensitive_data),
         available_file_paths=available_files or None,
         use_vision="auto",
         max_actions_per_step=app_settings.agent_max_actions_per_step,
@@ -2958,10 +2976,17 @@ async def run_agent_human(args: argparse.Namespace) -> None:
     except Exception as e:
         print(f"\n  [ERROR] Cost summary failed: {e}", file=sys.stderr)
         sys.stderr.flush()
-        cost_summary = {"total_tracked_cost_usd": 0, "browser_use_cost_usd": 0,
-                        "domhand_cost_usd": 0, "stagehand_calls": 0, "stagehand_used": False,
-                        "total_tracked_prompt_tokens": 0, "total_tracked_completion_tokens": 0,
-                        "untracked_cost_possible": True, "untracked_reasons": [str(e)]}
+        cost_summary = {
+            "total_tracked_cost_usd": 0,
+            "browser_use_cost_usd": 0,
+            "domhand_cost_usd": 0,
+            "stagehand_calls": 0,
+            "stagehand_used": False,
+            "total_tracked_prompt_tokens": 0,
+            "total_tracked_completion_tokens": 0,
+            "untracked_cost_possible": True,
+            "untracked_reasons": [str(e)],
+        }
     try:
         _print_human_result_summary(history, cost_summary)
     except Exception as e:
@@ -2995,8 +3020,9 @@ def main() -> None:
     args = parse_args()
 
     is_jsonl = args.output_format == "jsonl"
+    is_tui = args.output_format == "tui"
 
-    if not is_jsonl:
+    if not is_jsonl and not is_tui:
         signal.signal(signal.SIGTERM, _handle_sigterm)
 
     # Install stdout guard BEFORE any library imports in JSONL mode.
@@ -3010,7 +3036,12 @@ def main() -> None:
 
     _setup_logging()
 
-    runner = run_agent_jsonl if is_jsonl else run_agent_human
+    if is_tui:
+        from ghosthands.tui import run_tui
+
+        runner = run_tui
+    else:
+        runner = run_agent_jsonl if is_jsonl else run_agent_human
 
     try:
         asyncio.run(runner(args))
