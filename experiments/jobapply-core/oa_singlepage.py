@@ -941,13 +941,17 @@ async def _fill_form(
     # gate flagged 'Full name' while staring at the puzzle overlay, and the run reported FILLED
     # instead of the HITL lane. Provider identity (finite vendor iframes), not tenant text.
     with contextlib.suppress(Exception):
-        _captcha = bool(
-            await page.evaluate(
-                "(() => [...document.querySelectorAll("
-                "'iframe[src*=\"hcaptcha\"],iframe[src*=\"recaptcha\"],iframe[src*=\"turnstile\"],iframe[title*=\"challenge\"]'"
-                ")].some(e => { const r = e.getBoundingClientRect(); return r.width > 50 && r.height > 50; }))"
-            )
+        # BARE arrow + STRING SENTINEL (never IIFE, never bool(evaluate)): page.evaluate serializes
+        # the return, so the old bool("False") was ALWAYS True — 461/472 sweep500b runs carried a
+        # false blocker='captcha' (masked until the verdict layer started reading blocker; the
+        # status clobber below used to hide it). 'yes'/'no' sentinel + exact compare, live-verified
+        # both directions (zero-iframe page -> 'no'; injected hcaptcha iframe -> 'yes').
+        _raw = await page.evaluate(
+            "() => [...document.querySelectorAll("
+            "'iframe[src*=\"hcaptcha\"],iframe[src*=\"recaptcha\"],iframe[src*=\"turnstile\"],iframe[title*=\"challenge\"]'"
+            ")].some(f => f.getBoundingClientRect().width > 50) ? 'yes' : 'no'"
         )
+        _captcha = str(_raw).strip().lower() == "yes"
         if _captcha:
             result["status"] = "NEEDS_HUMAN"
             result["blocker"] = "captcha"

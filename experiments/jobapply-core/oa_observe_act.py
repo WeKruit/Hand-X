@@ -1540,14 +1540,16 @@ function(n){
         page = await session.must_get_current_page()
         # VISIBLE filename text only — NOT input.files, which the decoy hidden input also holds
         # (that is the exact false-positive: a real uploader RENDERS the name, a decoy does not).
+        # STRING SENTINEL, never bool(evaluate): the serialized return made bool("false") True,
+        # so this UI-verify was silently fail-open (same trap as the captcha gate).
         found = await page.evaluate(
             "(n) => { const all=[]; const walk=(r)=>{ for(const e of r.querySelectorAll('*')){ all.push(e);"
             "   if(e.shadowRoot) walk(e.shadowRoot); } }; walk(document);"
             " for(const e of all){ if(e.childNodes.length && (e.innerText||'').toLowerCase().includes(n)){"
-            "   const r=e.getBoundingClientRect(); if(r.width>0 && r.height>0) return true; } } return false; }",
+            "   const r=e.getBoundingClientRect(); if(r.width>0 && r.height>0) return 'yes'; } } return 'no'; }",
             needle,
         )
-        return bool(found)
+        return str(found).strip().lower() == "yes"
     return True  # read failed -> don't punish a likely-good upload
 
 
