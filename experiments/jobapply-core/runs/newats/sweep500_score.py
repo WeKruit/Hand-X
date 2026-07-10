@@ -7,7 +7,8 @@ from collections import defaultdict
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-res = json.loads((HERE / "sweep500_results.json").read_text())
+import sys
+res = json.loads((HERE / (sys.argv[1] if len(sys.argv) > 1 else "sweep500b_results.json")).read_text())
 
 
 def verdict(r):

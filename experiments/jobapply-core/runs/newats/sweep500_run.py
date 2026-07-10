@@ -13,7 +13,8 @@ TSV = sys.argv[2] if len(sys.argv) > 2 else "sweep500.tsv"     # smoke: pass a s
 TAG = Path(TSV).stem                                            # out dir + results keyed by tsv stem
 OUT = HERE / TAG
 OUT.mkdir(exist_ok=True)
-TIMEOUT = 170
+import os as _os
+TIMEOUT = int(_os.environ.get("OA_RUN_TIMEOUT", "170"))
 RESUME = "fixtures/resumes/test_resume.pdf"
 
 rows = []
