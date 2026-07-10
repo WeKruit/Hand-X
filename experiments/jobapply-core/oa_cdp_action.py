@@ -573,10 +573,11 @@ function(want, groupName){
     const mirror = bx.width < 2 || bx.height < 2 || t.tabIndex === -1
       || getComputedStyle(t).visibility === 'hidden' || getComputedStyle(t).display === 'none';
     if(mirror){
+      // STRUCTURE, not text: a pill group has sibling option BUTTONS; an sr-only lone consent box
+      // does not. Any non-submit button in the tight group container marks this as a pill group.
       let broot = t.closest('fieldset,[role=group],[role=radiogroup]') || t.parentElement || t;
-      const hasBtns = broot.querySelectorAll && [...broot.querySelectorAll('button,[role=button]')].some(b => {
-        const ty=(b.getAttribute('type')||'').toLowerCase(); if(ty==='submit') return false;
-        const tx=vis(b); return tx && tx.length<=30 && !/submit|apply|upload|replace|next|continue/.test(tx); });
+      const hasBtns = broot.querySelectorAll && [...broot.querySelectorAll('button,[role=button]')]
+        .some(b => (b.getAttribute('type')||'').toLowerCase() !== 'submit');
       if(hasBtns) return tryButtons();
     }
     if(!t.checked){ t.click(); t.dispatchEvent(new Event('input',{bubbles:true})); t.dispatchEvent(new Event('change',{bubbles:true})); }
