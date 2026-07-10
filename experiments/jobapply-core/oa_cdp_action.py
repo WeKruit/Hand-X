@@ -563,6 +563,22 @@ function(want, groupName){
   // match; the mapper already decided this field gets a value). Explicit negatives leave it be.
   if(inputs.length===1 && inputs[0].type==='checkbox' && !['no','false','none','0'].includes(w)){
     const t=inputs[0];
+    // HIDDEN RENDER-MIRROR CHECKBOX (ashby yes-no pill, airwallex AI-Policy): a zero-box /
+    // tabindex=-1 / display:none checkbox is a ONE-WAY mirror — the visible option BUTTONS drive
+    // the paint, and clicking the mirror never repaints them (both pills stay grey while .checked
+    // reads true => the false-green). When such a mirror sits beside matching option buttons,
+    // commit the BUTTON (it paints); on no button match return "" (never bless the dead mirror).
+    // A truly hidden LONE consent box (sr-only, no sibling buttons) still gets clicked below.
+    const bx = t.getBoundingClientRect();
+    const mirror = bx.width < 2 || bx.height < 2 || t.tabIndex === -1
+      || getComputedStyle(t).visibility === 'hidden' || getComputedStyle(t).display === 'none';
+    if(mirror){
+      let broot = t.closest('fieldset,[role=group],[role=radiogroup]') || t.parentElement || t;
+      const hasBtns = broot.querySelectorAll && [...broot.querySelectorAll('button,[role=button]')].some(b => {
+        const ty=(b.getAttribute('type')||'').toLowerCase(); if(ty==='submit') return false;
+        const tx=vis(b); return tx && tx.length<=30 && !/submit|apply|upload|replace|next|continue/.test(tx); });
+      if(hasBtns) return tryButtons();
+    }
     if(!t.checked){ t.click(); t.dispatchEvent(new Event('input',{bubbles:true})); t.dispatchEvent(new Event('change',{bubbles:true})); }
     return t.checked ? (t.getAttribute('value')||t.value||'checked') : "";
   }
@@ -642,7 +658,10 @@ inputs = [...root.querySelectorAll('input[type=radio],input[type=checkbox]')];
       || b.getAttribute('data-state') === 'checked' || b.getAttribute('data-selected') === 'true';
   });
   if(activeBtn) return true;
-  if(!inputs.length) return true;  // no readable input AND no active button — trust the commit
+  // RETIRED accept-on-unknown: "no readable input AND no active button -> trust the commit" blessed
+  // a dead render-mirror checkbox (both pills grey) as committed. Fail CLOSED — an unconfirmed
+  // commit returns "" from cdp_choose_option and falls through to the visual set-of-marks path,
+  // which SEES + clicks the painted option and self-verifies on real selected-state.
   return false;
 }
 """
