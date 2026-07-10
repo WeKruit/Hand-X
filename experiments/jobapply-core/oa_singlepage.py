@@ -551,9 +551,14 @@ async def _fill_form(
     # Lift the per-PAGE VLM cap to a high backstop so the verify oracle's per-FIELD VLM budget
     # (FIELD_VLM_CAP) is the real limiter — a long single page must not starve field 7+ (the
     # capped->UNKNOWN->ESCALATE false-failure this fix removes). DOM read-back stays free + primary.
+    import base64 as _b64mod
+
+    import oa_brain as _brainmod
+    import oa_llm as _oal
     import vision_verify as _vv
 
     _vv.reset_visual_cache()
+    _oal.reset_vlm_heartbeat()  # per-run vision heartbeat -> result JSON (铁律 2 observability)
     oa.reset_page_vlm_backstop()
     per_field: list[FieldResult] = []
     t0 = time.monotonic()
@@ -579,124 +584,357 @@ async def _fill_form(
     _done_labels: set[str] = set()
     _done_sigs: dict[str, list] = {}  # label -> option-signatures already committed under it
     _committed_nodes: dict[str, str] = {}  # {dom id: committer locate-how} -> phantom same-node re-bind skip
-    for f in fields_file_last:
-        if f.source == "skip":
-            continue
-        # TWIN GUARD: discovery unions DOM + vision and a widget's input vs its hidden-select/
-        # wrapper surface as TWO fields with the SAME question label. The real row commits+verifies,
-        # then the twin re-touches the SAME widget and its visual fallback clicks chrome — discord
-        # mega/29: twin committed 'Clear selections' (wiped the verified Gender) and 'Toggle flyout'
-        # (left 'Toggle' in the Disability filter, menu open 'No options'). An identical-label field
-        # that already verified DONE this run -> SKIP. If two DISTINCT real fields ever share a
-        # label, the completeness audit flags the empty one and retry fills it — safe direction.
-        _lkey = " ".join(str(f.label or f.name).split()).lower()
-        # OPTION SIGNATURE: two same-label fields are twins only if they touch the SAME widget.
-        # stripe mega4/6 renders TWO required "Please indicate what you have experience with. *"
-        # multi-selects with DIFFERENT options ([Hunting,Farming] vs [SMB,Mid-Market,Enterprise]);
-        # keying the twin-skip on label ALONE left the second group empty (skipped as a false
-        # twin, its computed 'Enterprise' never applied). A distinct option set = distinct question.
-        _sig = tuple(sorted(str(o).strip().lower() for o in (getattr(f, "options", None) or []) if str(o).strip()))
-        # FILE fields are exempt: Resume and Cover Letter both render as 'Attach' on
-        # greenhouse — the second slot is a DIFFERENT real field, and retry cannot heal a
-        # skipped file (airbnb mega3/10-11: Cover Letter slot skipped as a twin, flagged by
-        # vision, unfixable downstream).
-        _is_twin = (
-            _lkey in _done_labels
-            and "file" not in str(f.type or "").lower()
-            # HTML5 DATA inputs (tel/email/url/number) are never a choice-widget's twin: an
-            # intl-tel 'Telefoon*' widget surfaces its country-code COMBOBOX and the phone-NUMBER
-            # <input type=tel> under the SAME label — skipping the tel as a twin of the country
-            # selector left the required phone number EMPTY (flexport mega4/41 false-green). These
-            # carry distinct real data, so exempt them like files; a text/combobox react-select
-            # search box (the real twin case) is NOT one of these types and stays guarded.
-            and str(f.type or "").lower() not in ("tel", "email", "url", "number")
-            # a non-empty option signature that DIFFERS from every signature already committed
-            # under this label is a distinct question, not a twin.
-            and (not _sig or _sig in _done_sigs.get(_lkey, []) or not _done_sigs.get(_lkey))
-        )
-        if _is_twin:
+
+    # ------------------------------------------------------------------ #
+    # BATCH VISUAL CHECKPOINT (铁律 2 — visual observation is an UNCONDITIONAL CADENCE, never
+    # DOM-triggered): after every K committed fields (OA_VISUAL_EVERY, default 5), on page-fields-
+    # exhausted (residual 1..K-1 flushed), and BEFORE any page-advance click, ONE VLM call reads the
+    # painted state of the batch; any field whose pixels contradict the ledger is routed back through
+    # the commit machinery (observe_act re-run = the visual recommit path) and re-checked. Recorded
+    # in the run ledger as result['checkpoints'].  OA_VISUAL_EVERY=0 disables (offline ISO harness).
+    # ------------------------------------------------------------------ #
+    _ckpt_every = int(os.environ.get("OA_VISUAL_EVERY", "5") or 0)
+    _ckpt_pending: list[FieldResult] = []
+    _checkpoints: list[dict] = []
+    result["checkpoints"] = _checkpoints
+    _vals: dict[str, str] = {}  # name -> resolved value (checkpoint repair re-runs need the raw value)
+    _fobj: dict[str, Any] = {}  # name -> FormField
+    _blankv = {"", "BLANK", "NONE", "EMPTY", "NOT SELECTED", "UNSELECTED", "UNANSWERED", "NULL", "NOTHING"}
+
+    async def _ckpt_repair(row: FieldResult) -> str:
+        """Route a pixels-contradict-ledger field back through the commit machinery: a FRESH
+        observe_act run (new Ctx -> locate/commit/verify incl. the visual set-of-marks rungs). No
+        _committed_nodes handed over — the phantom same-node guard must not skip the re-commit."""
+        f = _fobj.get(str(row.name))
+        if f is None:
+            return "no-field-obj"
+        fd2 = _field_dict(f, _vals.get(str(row.name), row.value), resume=resume, llm=llm, adapter=adapter, page=page)
+        try:
+            out2 = await asyncio.wait_for(oa.observe_act(session, fd2), timeout=oa.FIELD_DEADLINE + 6.0)
+        except Exception:
+            out2 = oa.ESCALATE
+        if isinstance(row.trace, list):
+            row.trace.append(f"checkpoint-repair:{out2}")
+        if out2 == oa.DONE:
+            row.outcome = oa.DONE
+            row.committed = fd2.get("_committed", "") or row.committed
+        else:
+            row.outcome = oa.ESCALATE  # pixels said blank and the recommit failed -> honest
+        return str(out2)
+
+    async def _visual_checkpoint(trigger: str) -> None:
+        """Flush the pending committed batch through ONE vision_audit call; repair contradictions."""
+        batch = list(_ckpt_pending)
+        _ckpt_pending.clear()
+        if not batch or _ckpt_every <= 0:
+            return
+        entry: dict[str, Any] = {"trigger": trigger, "fields": [str(r.label) for r in batch], "verdicts": [], "repairs": []}
+        _checkpoints.append(entry)
+        with contextlib.suppress(Exception):  # bring the batch's first field into view (section shot)
+            await page.evaluate(
+                "(n) => { const el = document.getElementById(n) || document.getElementsByName(n)[0];"
+                " if (el) el.scrollIntoView({block: 'start'}); }",
+                str(batch[0].name),
+            )
+            await asyncio.sleep(0.35)
+        png = await _oal.bounded_screenshot(session)
+        intended = [(str(r.label), str(r.committed or r.value)) for r in batch]
+        meta: dict = {}
+        va = None
+        if png is not None:
+            with contextlib.suppress(Exception):
+                va = await _brainmod.vision_audit(_b64mod.b64encode(png).decode(), intended, llm=None, out_meta=meta)
+        if meta.get("overlay"):
+            entry["overlay"] = str(meta["overlay"])[:120]
+            result["blocker"] = result.get("blocker") or f"overlay: {str(meta['overlay'])[:60]}"
+            print(f"   [checkpoint:{trigger}] BLOCKING OVERLAY on screen: {str(meta['overlay'])[:60]}")
+        if va is None:  # screenshot or the WHOLE vision chain dead -> batch is UNVERIFIED, never skipped
+            entry["unverified"] = True
+            for r in batch:
+                if isinstance(r.trace, list):
+                    r.trace.append("checkpoint:vision-dead")
+            print(f"   [checkpoint:{trigger}] VISION DEAD — batch of {len(batch)} recorded UNVERIFIED")
+            return
+        for r, v in zip(batch, va, strict=False):
+            if not v:
+                continue
+            rend = str(v.get("rendered", "")).strip().upper()
+            entry["verdicts"].append(
+                {"label": str(r.label), "rendered": str(v.get("rendered", ""))[:80], "match": bool(v.get("match"))}
+            )
+            # repair ONLY the unambiguous contradiction: ledger DONE, pixels BLANK (a semantic
+            # disagreement on a rendered value is recorded, not acted on — same rule as the end gate).
+            if not v.get("match") and rend in _blankv:
+                print(
+                    f"   [checkpoint:{trigger}] '{str(r.label)[:44]}' BLANK on screen"
+                    f" (ledger {str(r.committed)[:24]!r}) -> visual recommit"
+                )
+                rec: dict[str, Any] = {"label": str(r.label), "was": rend, "repair": await _ckpt_repair(r)}
+                with contextlib.suppress(Exception):  # painted re-check AFTER the repair (fresh, uncached)
+                    v2 = await _vv.visual_check(
+                        session, str(r.label), want=str(r.committed or r.value), key=f"ckpt:{r.label}", use_cache=False
+                    )
+                    rec["recheck"] = str(v2)[:120]
+                    if r.outcome == oa.DONE and not _vv._is_filled(v2) and not _vv._matches(v2):
+                        r.outcome = oa.ESCALATE
+                        if isinstance(r.trace, list):
+                            r.trace.append("checkpoint-recheck:still-blank->ESCALATE")
+                entry["repairs"].append(rec)
+
+    async def _advance_step() -> bool:
+        """FLOW lane (OA_FLOW=1): advance a multi-step SPA wizard ONE step. HARD CADENCE RULE: the
+        visual checkpoint flushes (repairs included) BEFORE the advance click — once the step swaps,
+        the old DOM is gone and nothing can be repaired. Meaning lives in the VLM (it NAMES the
+        advance control, any language/wording); the DOM lookup only locates that exact named text.
+        NEVER clicks a submit control (VLM instruction + install_submit_guard + type!=submit filter)."""
+        nonlocal page
+        await _visual_checkpoint("pre-advance")  # flush + repair MUST precede any advance click
+        name = ""
+        with contextlib.suppress(Exception):
+            png = await _oal.bounded_screenshot(session)
+            if png is None:
+                return False
+            from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+
+            prompt = (
+                "This is a MULTI-STEP job-application form. Name the visible, enabled button that advances "
+                "to the NEXT step/page of the form WITHOUT submitting the application (a Next / Continue / "
+                "Save-and-continue style control — NEVER a Submit/Apply/Finish control). Reply STRICT JSON "
+                '{"text": "<the exact visible button text>"} or {"text": ""} if there is none.'
+            )
+            msg = UserMessage(
+                content=[
+                    ContentPartTextParam(type="text", text=prompt),
+                    ContentPartImageParam(
+                        type="image_url",
+                        image_url=ImageURL(
+                            url=f"data:image/png;base64,{_b64mod.b64encode(png).decode()}",
+                            detail="low",
+                            media_type="image/png",
+                        ),
+                    ),
+                ]
+            )
+            resp = await _oal.resilient_vlm([msg], primary=_vv._vlm())
+            if resp is not None:
+                import re as _re3
+
+                raw = (getattr(resp, "completion", None) or str(resp)).strip()
+                m = _re3.search(r"\{.*\}", raw, _re3.S)
+                if m:
+                    name = str((json.loads(m.group(0)) or {}).get("text") or "").strip()
+        if not name:
+            return False
+        clicked = ""
+        with contextlib.suppress(Exception):
+            clicked = await page.evaluate(
+                "(w) => { const want=w.trim().toLowerCase().replace(/\\s+/g,' ');"
+                " const tx=e=>((e.innerText||e.textContent||e.getAttribute('aria-label')||e.value||'')"
+                "   .trim().toLowerCase().replace(/\\s+/g,' '));"
+                " const els=[...document.querySelectorAll('button,[role=button]')]"
+                "   .filter(e=>e.type!=='submit' && !e.disabled)"
+                "   .filter(e=>{const r=e.getBoundingClientRect(); if(r.width<8||r.height<8) return false;"
+                "     const t=tx(e); return t && (t===want || (t.length<60 && (t.includes(want)||want.includes(t))));})"
+                "   .sort((x,y)=>tx(x).length-tx(y).length);"
+                " const el=els[0]; if(!el) return '';"
+                " el.scrollIntoView({block:'center'}); el.click();"
+                " return (el.innerText||'').trim().slice(0,40); }",
+                name,
+            )
+        if not clicked:
+            print(f"   [flow] VLM named advance '{name}' but no matching enabled non-submit control")
+            return False
+        print(f"   [flow] advanced via '{clicked}'")
+        await asyncio.sleep(1.2)
+        with contextlib.suppress(Exception):
+            page = await session.must_get_current_page()
+        # AFTER-ADVANCE confirmation: did the previous step reject (error banner / flagged fields)?
+        flagged: list = []
+        with contextlib.suppress(Exception):
+            flagged = await _vv.flagged_fields_visually(session)
+        entry: dict[str, Any] = {
+            "trigger": "post-advance", "clicked": clicked, "error_banner_fields": list(flagged),
+            "fields": [], "verdicts": [], "repairs": [],
+        }
+        _checkpoints.append(entry)
+        if flagged:
+            print(f"   [flow] error banner names {len(flagged)} field(s) after advance: {flagged[:4]}")
+
+            def _tokf(s: Any) -> set:
+                return {w for w in str(s).lower().replace("*", " ").split() if len(w) > 2}
+
+            for lab in flagged:
+                row = next(
+                    (r for r in per_field if _tokf(lab) and len(_tokf(lab) & _tokf(r.label)) >= max(1, len(_tokf(lab)) // 2)),
+                    None,
+                )
+                if row is not None:
+                    entry["repairs"].append({"label": str(row.label), "repair": await _ckpt_repair(row)})
+        return True
+
+    async def _fill_pass(_fs: list) -> None:
+        """ONE pass of the per-field fill over ``_fs`` (extracted so the OA_FLOW wizard lane can
+        re-run it on fields discovered after a step advance). Mutates the enclosing ledger state
+        (per_field/_done_labels/...); the batch visual checkpoint fires INSIDE (every K commits)."""
+        nonlocal page
+        for f in _fs:
+            if f.source == "skip":
+                continue
+            # TWIN GUARD: discovery unions DOM + vision and a widget's input vs its hidden-select/
+            # wrapper surface as TWO fields with the SAME question label. The real row commits+verifies,
+            # then the twin re-touches the SAME widget and its visual fallback clicks chrome — discord
+            # mega/29: twin committed 'Clear selections' (wiped the verified Gender) and 'Toggle flyout'
+            # (left 'Toggle' in the Disability filter, menu open 'No options'). An identical-label field
+            # that already verified DONE this run -> SKIP. If two DISTINCT real fields ever share a
+            # label, the completeness audit flags the empty one and retry fills it — safe direction.
+            _lkey = " ".join(str(f.label or f.name).split()).lower()
+            # OPTION SIGNATURE: two same-label fields are twins only if they touch the SAME widget.
+            # stripe mega4/6 renders TWO required "Please indicate what you have experience with. *"
+            # multi-selects with DIFFERENT options ([Hunting,Farming] vs [SMB,Mid-Market,Enterprise]);
+            # keying the twin-skip on label ALONE left the second group empty (skipped as a false
+            # twin, its computed 'Enterprise' never applied). A distinct option set = distinct question.
+            _sig = tuple(sorted(str(o).strip().lower() for o in (getattr(f, "options", None) or []) if str(o).strip()))
+            # FILE fields are exempt: Resume and Cover Letter both render as 'Attach' on
+            # greenhouse — the second slot is a DIFFERENT real field, and retry cannot heal a
+            # skipped file (airbnb mega3/10-11: Cover Letter slot skipped as a twin, flagged by
+            # vision, unfixable downstream).
+            _is_twin = (
+                _lkey in _done_labels
+                and "file" not in str(f.type or "").lower()
+                # HTML5 DATA inputs (tel/email/url/number) are never a choice-widget's twin: an
+                # intl-tel 'Telefoon*' widget surfaces its country-code COMBOBOX and the phone-NUMBER
+                # <input type=tel> under the SAME label — skipping the tel as a twin of the country
+                # selector left the required phone number EMPTY (flexport mega4/41 false-green). These
+                # carry distinct real data, so exempt them like files; a text/combobox react-select
+                # search box (the real twin case) is NOT one of these types and stays guarded.
+                and str(f.type or "").lower() not in ("tel", "email", "url", "number")
+                # a non-empty option signature that DIFFERS from every signature already committed
+                # under this label is a distinct question, not a twin.
+                and (not _sig or _sig in _done_sigs.get(_lkey, []) or not _done_sigs.get(_lkey))
+            )
+            if _is_twin:
+                per_field.append(
+                    FieldResult(
+                        name=f.name, label=f.label or f.name, type=f.type, value_src="twin",
+                        outcome=oa.SKIP, nature="", committed="", trace=["twin-label-already-done->skip"],
+                    )
+                )
+                continue
+            value, src = eng._resolve(f, mapped, resume)
+            if _fixv:  # playground: override by normalized label (lenient — discovery may append help/option text)
+                _lk = " ".join(str(f.label or f.name).lower().replace("*", " ").replace("?", " ").split())
+                _hit = _fixv.get(_lk)
+                if _hit is None:
+                    for _k, _v in _fixv.items():
+                        # lenient (playground only): substring either way, OR a shared specific stem (first
+                        # >=10 chars) — so a group label 'graduation date' injects into its 'graduation month'
+                        # / 'graduation year' sub-selects, and help/option-appended labels still match.
+                        if _k and len(_k) >= 6 and (
+                            _k in _lk or _lk in _k or _lk.startswith(_k[:24]) or (len(_k) >= 10 and _lk[:10] == _k[:10])
+                        ):
+                            _hit = _v
+                            break
+                if _hit is not None:
+                    value, src = _hit, "fixture"
+            _fobj[str(f.name)] = f  # checkpoint repair re-runs resolve the field by name
+            _vals[str(f.name)] = str(value)
+            if adapter is None:
+                # GENERIC lane: discovery scanned the whole document, but locate reads the
+                # serialized VIEWPORT map — a below-the-fold form (toast) yields 'no-control'
+                # for every field. Center the control (by the id/name discovery recorded) first.
+                with contextlib.suppress(Exception):
+                    await page.evaluate(
+                        "(n) => { const el = document.getElementById(n) || document.getElementsByName(n)[0];"
+                        " if (el) el.scrollIntoView({block: 'center'}); }",
+                        f.name,
+                    )
+            fd = _field_dict(f, value, resume=resume, llm=llm, adapter=adapter, page=page)
+            fd["_committed_nodes"] = _committed_nodes  # phantom double-bind guard (same-node skip)
+            if os.environ.get("OA_FIELD_TRACE"):
+                print(
+                    f"[FIELD-START] name={f.name[:28]} src={f.source} type={f.type} val={str(value)[:30]!r}",
+                    flush=True,
+                )
+            try:
+                # HARD per-field wall-clock ceiling. ``observe_act``'s own ``FIELD_DEADLINE`` guard only
+                # fires BETWEEN states; a single blocking CDP await (a wedged UploadFile/dropdown event on
+                # a never-idle SPA) is not interrupted by it and would otherwise hang the WHOLE form. Wrap
+                # each field in ``asyncio.wait_for`` at FIELD_DEADLINE + a small margin so a wedged field
+                # is forcibly ESCALATED and the rest of the form keeps filling — the documented per-field
+                # ESCALATE production policy, not a process kill.
+                outcome = await asyncio.wait_for(oa.observe_act(session, fd), timeout=oa.FIELD_DEADLINE + 6.0)
+            except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041 — explicit for clarity
+                outcome = oa.ESCALATE
+                fd.setdefault("_trace", []).append("HARD-FIELD-TIMEOUT->ESCALATE")
+            except Exception as exc:  # a single hard field must not abort the page (fill-only proof)
+                outcome = oa.ESCALATE
+                fd["_trace"] = [f"EXC:{type(exc).__name__}:{exc}"]
             per_field.append(
                 FieldResult(
-                    name=f.name, label=f.label or f.name, type=f.type, value_src="twin",
-                    outcome=oa.SKIP, nature="", committed="", trace=["twin-label-already-done->skip"],
+                    name=f.name,
+                    label=f.label or f.name,
+                    type=f.type,
+                    value_src=src,
+                    outcome=outcome,
+                    nature=fd.get("_nature", ""),
+                    committed=fd.get("_committed", ""),
+                    trace=fd.get("_trace"),
+                    value=str(value)[:120],
                 )
             )
-            continue
-        value, src = eng._resolve(f, mapped, resume)
-        if _fixv:  # playground: override by normalized label (lenient — discovery may append help/option text)
-            _lk = " ".join(str(f.label or f.name).lower().replace("*", " ").replace("?", " ").split())
-            _hit = _fixv.get(_lk)
-            if _hit is None:
-                for _k, _v in _fixv.items():
-                    # lenient (playground only): substring either way, OR a shared specific stem (first
-                    # >=10 chars) — so a group label 'graduation date' injects into its 'graduation month'
-                    # / 'graduation year' sub-selects, and help/option-appended labels still match.
-                    if _k and len(_k) >= 6 and (
-                        _k in _lk or _lk in _k or _lk.startswith(_k[:24]) or (len(_k) >= 10 and _lk[:10] == _k[:10])
-                    ):
-                        _hit = _v
-                        break
-            if _hit is not None:
-                value, src = _hit, "fixture"
-        if adapter is None:
-            # GENERIC lane: discovery scanned the whole document, but locate reads the
-            # serialized VIEWPORT map — a below-the-fold form (toast) yields 'no-control'
-            # for every field. Center the control (by the id/name discovery recorded) first.
+            if outcome == oa.DONE:
+                _done_labels.add(_lkey)
+                if _sig:
+                    _done_sigs.setdefault(_lkey, []).append(_sig)
+                # UNCONDITIONAL VISUAL CADENCE: every committed field joins the checkpoint batch;
+                # the K-th commit fires the batch look (page-exhausted/pre-advance flush the rest).
+                if str(per_field[-1].committed or value or "").strip():
+                    _ckpt_pending.append(per_field[-1])
+                    if _ckpt_every > 0 and len(_ckpt_pending) >= _ckpt_every:
+                        await _visual_checkpoint("every-K")
+            # MID-FILL DRIFT (samsara mega3/30: a fill click navigated to /company/belonging and
+            # every later field died no-control — the judge-time guard saved the verdict but not
+            # the fields). On a no-control locate miss, check the url and pull the run back.
+            if outcome != oa.DONE and "no-control" in " ".join(fd.get("_trace") or []):
+                with contextlib.suppress(Exception):
+                    _now = await page.get_url()
+                    if _form_url and _now and _now.split("#")[0] != _form_url.split("#")[0]:
+                        print(f"   [fill] mid-fill drift {_now[:60]} -> back to form")
+                        await session.navigate_to(_form_url)
+                        await asyncio.sleep(1.5)
+                        page = await session.must_get_current_page()
+
+    await _fill_pass(fields_file_last)
+    # PAGE-FIELDS-EXHAUSTED flush: the residual 1..K-1 committed fields get their look too — the
+    # cadence triggers are K-count OR exhausted OR pre-advance, whichever comes first (残余不漏).
+    await _visual_checkpoint("page-exhausted")
+
+    # FLOW LANE (OA_FLOW=1, generic lane only): a multi-step SPA wizard — advance step by step,
+    # discovering + filling the newly-revealed fields each hop. Every advance is preceded by the
+    # checkpoint flush (inside _advance_step) and followed by the error-banner look. Fill-only:
+    # _advance_step structurally refuses submit controls, and install_submit_guard stays armed.
+    if adapter is None and os.environ.get("OA_FLOW") == "1":
+        from oa_discover import discover_fields as _disc_flow
+
+        for _hop in range(int(os.environ.get("OA_FLOW_MAX_PAGES", "3"))):
+            if not await _advance_step():
+                break
+            _known_names = {str(f2.name) for f2 in fields}
+            fresh: list = []
             with contextlib.suppress(Exception):
-                await page.evaluate(
-                    "(n) => { const el = document.getElementById(n) || document.getElementsByName(n)[0];"
-                    " if (el) el.scrollIntoView({block: 'center'}); }",
-                    f.name,
-                )
-        fd = _field_dict(f, value, resume=resume, llm=llm, adapter=adapter, page=page)
-        fd["_committed_nodes"] = _committed_nodes  # phantom double-bind guard (same-node skip)
-        if os.environ.get("OA_FIELD_TRACE"):
-            print(
-                f"[FIELD-START] name={f.name[:28]} src={f.source} type={f.type} val={str(value)[:30]!r}",
-                flush=True,
-            )
-        try:
-            # HARD per-field wall-clock ceiling. ``observe_act``'s own ``FIELD_DEADLINE`` guard only
-            # fires BETWEEN states; a single blocking CDP await (a wedged UploadFile/dropdown event on
-            # a never-idle SPA) is not interrupted by it and would otherwise hang the WHOLE form. Wrap
-            # each field in ``asyncio.wait_for`` at FIELD_DEADLINE + a small margin so a wedged field
-            # is forcibly ESCALATED and the rest of the form keeps filling — the documented per-field
-            # ESCALATE production policy, not a process kill.
-            outcome = await asyncio.wait_for(oa.observe_act(session, fd), timeout=oa.FIELD_DEADLINE + 6.0)
-        except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041 — explicit for clarity
-            outcome = oa.ESCALATE
-            fd.setdefault("_trace", []).append("HARD-FIELD-TIMEOUT->ESCALATE")
-        except Exception as exc:  # a single hard field must not abort the page (fill-only proof)
-            outcome = oa.ESCALATE
-            fd["_trace"] = [f"EXC:{type(exc).__name__}:{exc}"]
-        per_field.append(
-            FieldResult(
-                name=f.name,
-                label=f.label or f.name,
-                type=f.type,
-                value_src=src,
-                outcome=outcome,
-                nature=fd.get("_nature", ""),
-                committed=fd.get("_committed", ""),
-                trace=fd.get("_trace"),
-                value=str(value)[:120],
-            )
-        )
-        if outcome == oa.DONE:
-            _done_labels.add(_lkey)
-            if _sig:
-                _done_sigs.setdefault(_lkey, []).append(_sig)
-        # MID-FILL DRIFT (samsara mega3/30: a fill click navigated to /company/belonging and
-        # every later field died no-control — the judge-time guard saved the verdict but not
-        # the fields). On a no-control locate miss, check the url and pull the run back.
-        if outcome != oa.DONE and "no-control" in " ".join(fd.get("_trace") or []):
-            with contextlib.suppress(Exception):
-                _now = await page.get_url()
-                if _form_url and _now and _now.split("#")[0] != _form_url.split("#")[0]:
-                    print(f"   [fill] mid-fill drift {_now[:60]} -> back to form")
-                    await session.navigate_to(_form_url)
-                    await asyncio.sleep(1.5)
-                    page = await session.must_get_current_page()
+                fresh = [f2 for f2 in await _disc_flow(page) if str(f2.name) not in _known_names]
+            if not fresh:
+                print("   [flow] no new fields after advance -> stop")
+                break
+            print(f"   [flow] {len(fresh)} new field(s) after advance")
+            _mrows = [f2 for f2 in fresh if f2.needs_map]
+            if _mrows:
+                with contextlib.suppress(Exception):
+                    mapped.update(await eng.map_fields(_oal.ResilientLLM(llm), _mrows, profile or {}, title))
+            fields.extend(fresh)  # the required-field gates + denominator must see the new step's fields
+            result["fields_total"] = len(fields)
+            await _fill_pass(sorted(fresh, key=lambda f2: 1 if getattr(f2, "source", "") == "file" else 0))
+            await _visual_checkpoint("page-exhausted")
 
     # CAPTCHA-AT-END: interaction-triggered challenges (lever hCaptcha) mount AFTER the
     # start-of-run page-kind check and sit over the form at judge time — mega/61/66 the vision
@@ -995,6 +1233,8 @@ async def _fill_form(
                     re.match(r"^(if so|if yes|if no\b|if not|if you|if applicable|if the|if selected|si oui|si vous|after the|based on|given your|as indicated)\b", _ll)
                     or re.search(r"\b(if you (selected|answered|chose|indicated))\b", _ll)
                 )
+                if "not-rendered" in tr:
+                    continue  # D-ii: a field that never had a rendered box is not a fill failure
                 escalated = r.outcome == oa.ESCALATE
                 real_skip = (
                     r.outcome == oa.SKIP
@@ -1036,23 +1276,35 @@ async def _fill_form(
     # ESCALATE. Independent of every DOM read, so a desync cannot hide; downgrade-only, so it can never
     # manufacture a green. NOTE: checks painted==committed, NOT committed==correct (a mapping error is a
     # separate axis). [[reference_rendered_present_unsafe_radio]] [[feedback_no_overclaiming]]
+    _CHOICEG = {"combobox", "select", "checkbox", "radio", "multi_select", "single_select", "boolean"}
     if os.environ.get("OA_VISION_GATE", "1") != "0":
-        with contextlib.suppress(Exception):
-            import oa_brain as _brain
+        # FAIL-CLOSED (铁律 2): the gate no longer hides inside a blanket suppress with llm=None
+        # semantics — if it CANNOT run (screenshot dead, whole vision chain dead, crash), every
+        # committed choice field is UNVERIFIED and the run can never be green (reason 'vision-dead').
+        import oa_brain as _brain
 
-            _CHOICEG = {"combobox", "select", "checkbox", "radio", "multi_select", "single_select", "boolean"}
-            _gate_rows = [
-                r
-                for r in per_field
-                if r.outcome == oa.DONE
-                and str(r.committed or r.value or "").strip()
-                and str(r.type or "").lower() in _CHOICEG
-            ]
-            if _gate_rows:
+        _gate_rows = [
+            r
+            for r in per_field
+            if r.outcome == oa.DONE
+            and str(r.committed or r.value or "").strip()
+            and str(r.type or "").lower() in _CHOICEG
+        ]
+        _gate_dead = False
+        _gate_ran_ok = False
+        if _gate_rows:
+            try:
                 _intended = [(str(r.label), str(r.committed or r.value)) for r in _gate_rows]
                 _b64 = await eng._capture_form_b64(session, page)
-                _va = await _brain.vision_audit(_b64, _intended, llm=None) if _b64 else []
-                if _va:
+                _gmeta: dict = {}
+                _va = await _brain.vision_audit(_b64, _intended, llm=None, out_meta=_gmeta) if _b64 else None
+                if _gmeta.get("overlay"):
+                    result["blocker"] = result.get("blocker") or f"overlay: {str(_gmeta['overlay'])[:60]}"
+                    print(f"   [vision-gate] BLOCKING OVERLAY on screen: {str(_gmeta['overlay'])[:60]}")
+                if _va is None:
+                    _gate_dead = True  # no screenshot, chain dead, or unparseable reply -> UNVERIFIED
+                else:
+                    _gate_ran_ok = True
                     result["vision_gate"] = _va
                     # DOWNGRADE ON BLANK ONLY. The VLM is reliable at "is this control empty or filled"
                     # (a pixel question) but NOT at "does this value mean the intended one" (a semantic
@@ -1073,6 +1325,35 @@ async def _fill_form(
                             _bad += 1
                     if _bad:
                         print(f"   [vision-gate] {_bad}/{len(_gate_rows)} choice field(s) BLANK on screen -> ESCALATE")
+            except Exception as _gexc:
+                print(f"   [vision-gate] gate crashed ({type(_gexc).__name__}: {_gexc}) -> fail-closed")
+                _gate_dead = True
+        # mid-run checkpoints ALL vision-dead and the end gate never verified anything either ->
+        # this run had zero visual confirmation: same fail-closed treatment.
+        _ckpt_tried = [e for e in _checkpoints if e.get("fields")]
+        if _ckpt_tried and all(e.get("unverified") for e in _ckpt_tried) and not _gate_ran_ok:
+            _gate_dead = True
+        if _gate_dead:
+            _un = 0
+            for r in per_field:
+                if r.outcome == oa.DONE and str(r.type or "").lower() in _CHOICEG:
+                    r.outcome = oa.UNVERIFIED
+                    if isinstance(r.trace, list):
+                        r.trace.append("vision-dead:unverified")
+                    _un += 1
+            result["vision_dead"] = True
+            comp = result.get("completeness")
+            if not isinstance(comp, dict) and adapter is None:
+                comp = {"complete": False, "missing_required": []}
+                result["completeness"] = comp
+            if isinstance(comp, dict):
+                comp["complete"] = False
+                comp["vision_dead"] = True
+                comp["reason"] = "vision-dead"
+            print(
+                f"   [vision-gate] VISION CHAIN DEAD -> {_un} committed choice field(s) UNVERIFIED,"
+                " complete=False (vision-dead)"
+            )
 
     # OFFLINE FIXTURE PAINTED-TRUTH DUMP (OA_PAINTED_DUMP=1, widget-zoo self-test only). Read the REAL
     # painted state of each `.field[data-kind]` deterministically from the DOM — a pill's .active button,
@@ -1231,6 +1512,8 @@ async def _fill_form(
                 if not (str(r.name) in _rq or _st):
                     continue
                 _tr = str(r.trace or "")
+                if "not-rendered" in _tr:
+                    continue  # D-ii: never on screen -> excluded from missing_required
                 _cnd = bool(_re2.match(r"^(if so|if yes|if no\b|if not|if you|if applicable|if the|if selected|after the|based on|given your|as indicated)\b", _nrm(r.label)))
                 _bad = r.outcome == oa.ESCALATE or (
                     r.outcome == oa.SKIP and "twin-label-already-done" not in _tr
@@ -1251,7 +1534,11 @@ async def _fill_form(
         status="FILLED",
         cost=usage.total_cost,
         secs=secs,
-        outcomes={t: sum(1 for r in per_field if r.outcome == t) for t in (oa.DONE, oa.OTHER, oa.SKIP, oa.ESCALATE)},
+        vision_heartbeat=_oal.get_vlm_heartbeat(),  # every VLM chain stage: provider+latency+outcome
+        outcomes={
+            t: sum(1 for r in per_field if r.outcome == t)
+            for t in (oa.DONE, oa.OTHER, oa.SKIP, oa.ESCALATE, oa.UNVERIFIED, oa.NEEDS_HUMAN)
+        },
         # RUN RECORD (user: '要加一个记录'): which answers were ASSUMED via sanctioned defaults
         # (veteran/disability/government/worked-for -> No) rather than known from the profile —
         # the audit trail for a human reviewing before submit.
@@ -1277,10 +1564,52 @@ async def _fill_form(
                 "committed": r.committed,
                 "value": r.value,
                 "trace": r.trace,
+                # D-ii: the node never had a rendered box — excluded from missing_required
+                "not_rendered": "not-rendered" in str(r.trace or ""),
             }
             for r in per_field
         ],
     )
+
+    # ------------------------------------------------------------------ #
+    # VERDICT LAYER (D-i): NEEDS_HUMAN is a DISTINCT completeness class — a blocker (captcha /
+    # blocking overlay reported by the checkpoint or end gate) or a media-answer field means a
+    # human must act; the run is never COMPLETE and never a plain FAIL. Runs AFTER result.update
+    # so the status cannot be clobbered back to FILLED (the pre-existing captcha clobber).
+    # ------------------------------------------------------------------ #
+    _nh_rows = [str(r.label) for r in per_field if r.outcome == oa.NEEDS_HUMAN]
+    comp = result.get("completeness")
+    if isinstance(comp, dict):
+        # D-ii: strip not_rendered rows' labels out of missing_required (they were never on screen)
+        _nr_labels = {
+            " ".join(str(r.label or "").split()).lower().strip(" *:✱")
+            for r in per_field
+            if "not-rendered" in str(r.trace or "")
+        }
+        if _nr_labels and comp.get("missing_required"):
+            def _mnorm(s: Any) -> str:
+                return " ".join(str(s or "").split()).lower().strip(" *:✱")
+            _kept = [
+                m for m in comp["missing_required"]
+                if not any(nl and (nl in _mnorm(m) or _mnorm(m).startswith(nl[:40])) for nl in _nr_labels)
+            ]
+            if len(_kept) != len(comp["missing_required"]):
+                # NOTE: exclusion only edits the list — it never flips complete back to True.
+                comp["not_rendered_excluded"] = [m for m in comp["missing_required"] if m not in _kept]
+                comp["missing_required"] = _kept
+        if result.get("blocker") or _nh_rows:
+            comp["complete"] = False
+            comp["verdict"] = "NEEDS_HUMAN"
+            if _nh_rows:
+                comp["needs_human_fields"] = _nh_rows
+            result["status"] = "NEEDS_HUMAN"
+            print(f"   [verdict] NEEDS_HUMAN (blocker={result.get('blocker')!r}, media fields={_nh_rows[:3]})")
+        elif comp.get("vision_dead"):
+            comp["verdict"] = "UNVERIFIED"
+        else:
+            comp["verdict"] = "COMPLETE" if comp.get("complete") else "INCOMPLETE"
+    elif result.get("blocker") or _nh_rows:
+        result["status"] = "NEEDS_HUMAN"
 
     # NB: browser teardown is owned by run_single_page_oa's finally (the bulletproof path) — we
     # do NOT kill the session here, so a raise anywhere above still reaches that guaranteed cleanup.
@@ -1304,14 +1633,18 @@ def _print_report(
     for r in rows:
         print(f"  {r.name[:21]:<22}{r.type[:21]:<22}{r.nature[:13]:<14}{r.value_src:<9}{r.outcome:<9}")
     print("  " + "-" * 80)
-    counts = {t: sum(1 for r in rows if r.outcome == t) for t in (oa.DONE, oa.OTHER, oa.SKIP, oa.ESCALATE)}
+    counts = {
+        t: sum(1 for r in rows if r.outcome == t)
+        for t in (oa.DONE, oa.OTHER, oa.SKIP, oa.ESCALATE, oa.UNVERIFIED, oa.NEEDS_HUMAN)
+    }
     fillable = [r for r in rows if r.outcome != oa.SKIP]
     filled = [r for r in fillable if r.filled]
     rate = (len(filled) / len(fillable) * 100) if fillable else 0.0
     print(f"  fields                  : {len(rows)}")
     print(
         f"  outcomes                : DONE={counts[oa.DONE]}  OTHER={counts[oa.OTHER]}  "
-        f"SKIP={counts[oa.SKIP]}  ESCALATE={counts[oa.ESCALATE]}"
+        f"SKIP={counts[oa.SKIP]}  ESCALATE={counts[oa.ESCALATE]}  "
+        f"UNVERIFIED={counts[oa.UNVERIFIED]}  NEEDS_HUMAN={counts[oa.NEEDS_HUMAN]}"
     )
     print(f"  fill-rate (DONE+OTHER / non-skip) : {rate:.0f}%  ({len(filled)}/{len(fillable)})")
     print(f"  mapped by the 1 structured call   : {n_mapped}")

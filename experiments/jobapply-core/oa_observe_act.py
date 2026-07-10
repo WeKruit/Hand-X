@@ -52,6 +52,8 @@ DONE = "DONE"  # field visibly holds the value (or a clearly-equivalent option)
 OTHER = "OTHER"  # required, no exact match -> a genuine "Other"/"Prefer not" escape committed
 SKIP = "SKIP"  # optional & blank / optional & unmatchable -> left blank (agent-repairable)
 ESCALATE = "ESCALATE"  # required & unfillable deterministically -> caller's agent of last resort
+UNVERIFIED = "UNVERIFIED"  # committed but the vision layer could not confirm it (vision-dead) — never green
+NEEDS_HUMAN = "NEEDS_HUMAN"  # a human must answer (voice/audio/media answer field) — never text-filled
 Outcome = str
 
 # PRODUCTION TIMEOUT POLICY (do not "fix" this into a process kill): when a REQUIRED field overruns
@@ -781,8 +783,44 @@ async def _commit_consent_checkbox(session: Any, ctx: Ctx) -> Outcome | None:
     return None
 
 
+# ---- MEDIA-ANSWER PROBE (restraint class, clipboard 363): a question answered by RECORDING
+# audio/video must NEVER be text-filled — filling it plants garbage a human can't easily undo.
+# Detection is STRUCTURAL ONLY (no label text): the field's own card contains an <audio>/<video>
+# element, an HTML media-capture file input (capture attr), or a file input whose accept contract
+# is audio/*|video/* MIME. The card = nearest ancestor that doesn't already span the whole form.
+_MEDIA_PROBE_JS = r"""() => {
+  const el = document.getElementById(__REF__) || document.getElementsByName(__REF__)[0];
+  if (!el) return false;
+  const MEDIA = 'audio,video,input[type=file][capture],input[type=file][accept*="audio/"],input[type=file][accept*="video/"]';
+  let card = el, hops = 0;
+  while (card.parentElement && hops++ < 5) {
+    const p = card.parentElement;
+    if (p.querySelectorAll('input,select,textarea').length > 4) break;  // p spans the form, stop
+    card = p;
+  }
+  return !!card.querySelector(MEDIA);
+}"""
+
+
+async def _media_answer_field(session: Any, ctx: Ctx) -> bool:
+    """True when the field's card structurally carries a recorder/media-answer affordance."""
+    if ctx.page is None:
+        return False
+    ref = str(getattr(ctx.field_obj, "name", "") or "")
+    if not ref:
+        return False
+    with contextlib.suppress(Exception):
+        got = await ctx.page.evaluate(_MEDIA_PROBE_JS.replace("__REF__", json.dumps(ref)))
+        return str(got).lower() == "true"
+    return False
+
+
 async def _s0_guard(session: Any, ctx: Ctx) -> Outcome:
     ctx.trace.append("S0_GUARD")
+    # MEDIA-ANSWER field -> a human records the answer; the engine must not touch it (D-iii).
+    if await _media_answer_field(session, ctx):
+        ctx.trace.append("media-answer-field->NEEDS_HUMAN")
+        return NEEDS_HUMAN
     # A file field carries its payload in ``resume`` (the value may be blank) — it is NOT a blank
     # field, so the blank->SKIP gate must not swallow it before the global file path runs.
     if not ctx.value.strip() and not ctx.resume:
@@ -976,6 +1014,29 @@ async def _s1_locate(session: Any, ctx: Ctx) -> Outcome:
         node, how, card, state = await _scroll_locate(session, ctx, state)
     if node is None:
         ctx.trace.append("no-control")
+        # NOT_RENDERED (D-ii, anthropic-004 class): the discovered element has NO rendered box AND
+        # its card has no visible interactive either (a collapsed/display:none section) — the field
+        # was never on screen, so it must not count as a fill failure. STRICT both-conditions check:
+        # an sr-only input whose VISIBLE widget exists (react-select) keeps a rendered sibling and is
+        # NOT marked (that is a locate failure we must keep honest). Trace-only; the runner excludes
+        # 'not-rendered' rows from missing_required and marks the row.
+        _nrref = str(getattr(ctx.field_obj, "name", "") or "")
+        if _nrref and ctx.page is not None:
+            with contextlib.suppress(Exception):
+                _nr = await ctx.page.evaluate(
+                    "() => { const el = document.getElementById(__REF__) || document.getElementsByName(__REF__)[0];"
+                    " if (!el) return 'gone';"
+                    " if (el.getClientRects().length) return 'rendered';"
+                    " let card = el, hops = 0;"
+                    " while (card.parentElement && hops++ < 5) {"
+                    "   const p = card.parentElement;"
+                    "   if (p.querySelectorAll('input,select,textarea').length > 4) break; card = p; }"
+                    " const vis = [...card.querySelectorAll('input,select,textarea,button,[role=radio],[role=checkbox],[role=combobox]')]"
+                    "   .some(e => e.getClientRects().length);"
+                    " return vis ? 'rendered' : 'unrendered'; }".replace("__REF__", json.dumps(_nrref))
+                )
+                if str(_nr) == "unrendered":
+                    ctx.trace.append("not-rendered")
         return ESCALATE if ctx.required else SKIP
     ctx.node = node
     ctx.card = card
@@ -3168,10 +3229,38 @@ async def _s_verify(session: Any, ctx: Ctx) -> Outcome:
     return ESCALATE if ctx.required else SKIP
 
 
+# ---- OBSERVE-BEFORE-REPAIR (铁律 2: repair decisions come from FRESH PIXELS, never stale DOM) ----
+async def _observed_already_correct(session: Any, ctx: Ctx, *, stage: str) -> bool:
+    """One fresh, uncached VLM look at the field BEFORE any destructive repair. The EMPTY/WRONG
+    verdict that routed us here can be a stale/desynced DOM read (grouped-locate, next-tick React
+    state) — repairing off it re-clicks toggles OFF or wipes a correct value. If the pixels already
+    show the wanted value, the repair is aborted and the field is DONE. Bounded by the per-field
+    VLM budget; False on any failure/budget (repair proceeds exactly as before)."""
+    want = (ctx.committed_text or ctx.value or "").strip()
+    if not want or ctx.vlm_used >= FIELD_VLM_CAP:
+        return False
+    with contextlib.suppress(Exception):
+        # the field was just interacted with, so it is in the viewport the screenshot captures
+        import vision_verify as _vv2
+
+        ctx.vlm_used += 1
+        verdict = await _vv2.visual_check(
+            session, ctx.label, want=want, key=f"{ctx.label}:{stage}", use_cache=False
+        )
+        if _vv2._matches(verdict):
+            ctx.trace.append(f"{stage}:fresh-observe-correct->DONE")
+            return True
+    return False
+
+
 # ---- S_RECOMMIT (EMPTY: click never registered) ----
 async def _s_recommit(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
+    # fresh pixels FIRST: a false-EMPTY (desynced DOM) must not trigger a duplicate commit
+    # (a re-click on an already-selected pill/checkbox TOGGLES IT OFF — destructive).
+    if await _observed_already_correct(session, ctx, stage=f"recommit#{ctx.commit_tries + 1}"):
+        return DONE
     if ctx.commit_tries >= COMMIT_CAP:
         ctx.trace.append("commit-cap")
         # NOTE: a render-truth "accept if painted" here is UNSAFE — rendered_present matched a Yes/No
@@ -3205,6 +3294,9 @@ async def _s_recommit(session: Any, ctx: Ctx) -> Outcome:
 async def _s_revalue(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
+    # fresh pixels FIRST: a stale WRONG verdict must not clear a value that is correct on screen.
+    if await _observed_already_correct(session, ctx, stage=f"revalue#{ctx.revalue_tries + 1}"):
+        return DONE
     if ctx.revalue_tries >= REVALUE_CAP:
         ctx.trace.append("revalue-cap")
         return ESCALATE if ctx.required else SKIP
