@@ -11,6 +11,45 @@ Canonical location: `experiments/jobapply-core/HANDOFF_observe_act.md` on `Hand-
 
 ---
 
+## ⚡ PROGRESS UPDATE — 2026-07-09 evening (read this first, then the rest)
+
+**Everything below in this section happened AFTER the original handoff. State: three team sub-plans +
+one converged plan on main; a FRESH 500-URL sweep completed with STREAMING audit; 15 defect classes
+enumerated with live counts; no engine changes made (population discipline).**
+
+1. **Plans (all in `experiments/jobapply-core/plans/`, committed to main):**
+   `PLAN_convergence.md` (the spine: Phase 0 streaming → P1 trustworthy-verdict → P2 VLM-first commit →
+   P3 playground-100% → P4 product wiring) + `SUBPLAN_A_playground.md` (44 uncovered cells, flow lane,
+   VLM fixture miner, closure test) + `SUBPLAN_B_engine.md` (8,080 rows mined; only 37/6,387 DONE were
+   VLM-verified; `_BTN_FIND` = 61% of escalates; 18 string-match violations tabled; VLM-first design +
+   bench) + `SUBPLAN_C_product.md` (control plane ~80% exists; pause/resume/HITL/usage/cookie plan).
+2. **Fresh sweep500b: 500/500 done** (`runs/newats/sweep500b/`, tsv `sweep500b.tsv`).
+   **RAW: 381/460 scoreable COMPLETE = 82.8%** (DEAD 12, NEAR 66, FAIL 13; ashby 87.9 / lever 83.7 /
+   greenhouse 71.8 — GH dragged by dead-control education selects + captcha wave + state-list N3 +
+   hidden-EEO). ⚠ The packaged `sweep500_score.py` reads the OLD `sweep500_results.json` — score
+   sweep500b with its own dir (a corrected scorer inline in the transcript; port it before reuse).
+3. **Streaming audit (the new testing-efficiency pipeline — audit DURING sweep, zero end-tax):**
+   `live_watch.py` event wake-loop (cluster-growth / 40-chunk / done) + chunked adversarial
+   screenshot-audit workflows (~90s per 40). **248/381 COMPLETEs audited → ~88% real.** Remaining ~133
+   to audit (4 audit agents hit the Claude session limit, resets 8:30pm — resume then, manifests
+   `audit_chunk*.json` + workflow scripts exist).
+4. **15 defect classes enumerated, each with counts + named fixture** (see PLAN_convergence LIVE
+   VALIDATION sections): captcha/overlay-as-COMPLETE (~16 runs, DOMINANT — one verdict gate recovers
+   all), Ashby decoupled-pill family across ≥4 tenants (airwallex AI-Policy ×4 postings — defeats ALL
+   DOM-echo verifies; F1 painted-crop kill), geocomplete wipe/left-open (~7), commit-on-dead-control GH
+   comboboxes (16 traced), label-anchor accept-on-unknown hole (15 rows), collapsed-EEO no-control
+   (~18 rows, biggest lost-field family), alias-duplicate discovery (127 historic + live), non-rendered
+   →NOT_RENDERED, S4 filter bleed, found-not-committed, mapper-vs-options N3, cascade-followup missed,
+   missing_required blind spot, ledger-reconciled false-red, banner-dismissal.
+5. **Taxonomy SATURATED** — the last 3 cluster wakes added zero new classes: the finite-combination
+   thesis holds on this population; the defect space is enumerated.
+6. **NEXT (in order):** (a) resume streaming audit for the ~133 remaining COMPLETEs (after 8:30pm);
+   (b) reconcile false-reds (alias dups, NOT_RENDERED, reconciled-on-screen) → publish the final honest
+   number per-run AND per-company; (c) execute Phase 1 (vision fail-closed + blocker gate + bleed-guard
+   self-check + NOT_RENDERED) fixture-first; (d) Phase 2 F1; (e) C-M1 engine-as-callable in parallel.
+
+---
+
 ## 0. TL;DR + Progress
 
 - **What:** `observe_act` — a generic web-form filler that fills ANY ATS job application (Greenhouse /
