@@ -936,26 +936,33 @@ async def _fill_form(
             await _fill_pass(sorted(fresh, key=lambda f2: 1 if getattr(f2, "source", "") == "file" else 0))
             await _visual_checkpoint("page-exhausted")
 
-    # CAPTCHA-AT-END: interaction-triggered challenges (lever hCaptcha) mount AFTER the
-    # start-of-run page-kind check and sit over the form at judge time — mega/61/66 the vision
-    # gate flagged 'Full name' while staring at the puzzle overlay, and the run reported FILLED
-    # instead of the HITL lane. Provider identity (finite vendor iframes), not tenant text.
+    # CAPTCHA-IFRAME HINT — demoted from verdict-driver (P4 rerun autopsy: 76/117 NEEDS_HUMAN were
+    # pure iframe-sniff hits with ZERO VLM overlay confirmation; GH/Lever/Ashby pages carry AMBIENT
+    # reCAPTCHA/hCaptcha badge/protection iframes — rerun_failed/001 = a clean anthropic
+    # job-boards page). The sniff NEVER sets status/blocker anymore: the NEEDS_HUMAN verdict
+    # requires the checkpoint/end-gate VLM to CONFIRM a blocking overlay (铁律 2 — pixels decide,
+    # the DOM only hints). Recorded as result['blocker_hint'] for diagnostics; geometry keeps the
+    # hint honest: the challenge box must OVERLAP the form region by >50px on BOTH axes — a fixed
+    # corner badge floats outside the form column and never qualifies. Structural rects only;
+    # vendor identity stays the existing finite iframe set (no new src text lists).
+    # BARE arrow + 'yes'/'no' string sentinel (never IIFE, never bool(evaluate) — the serialized
+    # "false" is truthy; that trap masked this whole class for 461/472 sweep500b runs).
     with contextlib.suppress(Exception):
-        # BARE arrow + STRING SENTINEL (never IIFE, never bool(evaluate)): page.evaluate serializes
-        # the return, so the old bool("False") was ALWAYS True — 461/472 sweep500b runs carried a
-        # false blocker='captcha' (masked until the verdict layer started reading blocker; the
-        # status clobber below used to hide it). 'yes'/'no' sentinel + exact compare, live-verified
-        # both directions (zero-iframe page -> 'no'; injected hcaptcha iframe -> 'yes').
         _raw = await page.evaluate(
-            "() => [...document.querySelectorAll("
+            "() => { const form = document.querySelector('form') || document.body;"
+            " const fr = form.getBoundingClientRect();"
+            " const hit = [...document.querySelectorAll("
             "'iframe[src*=\"hcaptcha\"],iframe[src*=\"recaptcha\"],iframe[src*=\"turnstile\"],iframe[title*=\"challenge\"]'"
-            ")].some(f => f.getBoundingClientRect().width > 50) ? 'yes' : 'no'"
+            ")].some(f => { const r = f.getBoundingClientRect();"
+            "   if (r.width <= 50 || r.height <= 50) return false;"
+            "   const ox = Math.min(r.right, fr.right) - Math.max(r.left, fr.left);"
+            "   const oy = Math.min(r.bottom, fr.bottom) - Math.max(r.top, fr.top);"
+            "   return ox > 50 && oy > 50; });"
+            " return hit ? 'yes' : 'no'; }"
         )
-        _captcha = str(_raw).strip().lower() == "yes"
-        if _captcha:
-            result["status"] = "NEEDS_HUMAN"
-            result["blocker"] = "captcha"
-            print("   [gate] CAPTCHA overlay present at end of run -> NEEDS_HUMAN")
+        if str(_raw).strip().lower() == "yes":
+            result["blocker_hint"] = "captcha-iframe-over-form"
+            print("   [hint] challenge iframe overlaps the form (diagnostic only — VLM overlay decides the verdict)")
     # FORM-EVIDENCE GATE: complete:True is only meaningful when an APPLICATION FORM was actually
     # reached and substantively filled. A search box / JD page / login wall has no required-empty
     # fields, so the audit passes VACUOUSLY (atsx: oracle filled 0/4, phenom 1/6, bain 1/2 all
