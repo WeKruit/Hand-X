@@ -338,7 +338,12 @@ async def _resolve_required_human_answer(
     if not field.required or not unresolved:
         return proposed
 
-    from ghosthands.bridge.protocol import get_field_answer, is_hitl_available, wait_for_run_resume
+    from ghosthands.bridge.protocol import (
+        consume_field_answer_save,
+        get_field_answer,
+        is_hitl_available,
+        wait_for_run_resume,
+    )
 
     if not is_hitl_available():
         return None
@@ -359,6 +364,7 @@ async def _resolve_required_human_answer(
         timeout=DEFAULT_HITL_TIMEOUT_SECONDS,
         field_label=label,
     )
+    save_answer = consume_field_answer_save(field.field_id, field_label=label)
     if not await wait_for_run_resume():
         return None
     emit_run_state("running", message="Input received")
@@ -370,7 +376,7 @@ async def _resolve_required_human_answer(
     return _resolved_field_value(
         coerced,
         source="human",
-        answer_mode="human_supplied",
+        answer_mode="human_saved" if save_answer else "human_supplied",
         confidence=1.0,
     )
 

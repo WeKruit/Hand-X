@@ -83,6 +83,41 @@ logger = structlog.get_logger()
 # If remaining budget is less than this, the agent stops before the next step.
 _STEP_COST_ESTIMATE = 0.10
 
+_REVIEW_SUCCESS_CLAIM_RE = re.compile(r"\b(?:submitted|applied)\b", re.IGNORECASE)
+_REVIEW_NEGATED_CLAIM_RE = re.compile(
+    r"(?:\b(?:not|never)\b|\bwithout(?:\s+being)?\b|\b(?:was|were|is|are|has|have|had|did)n't\b)"
+    r"(?:\s+\w+){0,3}\s*$",
+    re.IGNORECASE,
+)
+_REVIEW_CLAIM_REDACTION = "[forbidden final-submit success claim removed]"
+
+
+def _review_output_has_forbidden_success_claim(value: Any) -> bool:
+    """Return whether a review-only output value claims submit success."""
+    if isinstance(value, dict):
+        return any(_review_output_has_forbidden_success_claim(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_review_output_has_forbidden_success_claim(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    for match in _REVIEW_SUCCESS_CLAIM_RE.finditer(value):
+        if not _REVIEW_NEGATED_CLAIM_RE.search(value[max(0, match.start() - 64) : match.start()]):
+            return True
+    return False
+
+
+def _redact_review_success_claims(value: Any) -> Any:
+    """Remove prohibited success claims before a review-only payload is emitted."""
+    if isinstance(value, dict):
+        return {key: _redact_review_success_claims(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_review_success_claims(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_review_success_claims(item) for item in value)
+    if isinstance(value, str) and _review_output_has_forbidden_success_claim(value):
+        return _REVIEW_CLAIM_REDACTION
+    return value
+
 
 def _profile_debug_enabled() -> bool:
     return os.getenv("GH_DEBUG_PROFILE_PASS_THROUGH") == "1"
@@ -537,6 +572,9 @@ async def _run_workday_auth_preface(
 
     page = await browser_session.get_current_page()
     if page is None:
+        locked_target_id = str(getattr(browser_session, "_initial_target_id", "") or "")
+        if locked_target_id:
+            raise RuntimeError(f"Selected Chrome target {locked_target_id} is unavailable; refusing replacement tab")
         page = await browser_session.new_page(job_url)
     else:
         current = ""
@@ -2129,6 +2167,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             cost_summary = summarize_history_cost(ag.history, ag.browser_session)
             last_cost_summary = cost_summary
             hist_payload = build_agent_history_payload(ag.history, sensitive_data)
+            if app_settings.submit_intent != "submit":
+                hist_payload = _redact_review_success_claims(hist_payload)
             jt.update_runtime_snapshot(
                 cost_summary,
                 step_count=max(n_hist, int(step)),
@@ -2137,6 +2177,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         goal = ""
         if ag.state.last_model_output:
             goal = ag.state.last_model_output.next_goal or ""
+        if app_settings.submit_intent != "submit":
+            goal = _redact_review_success_claims(goal)
         phase = infer_phase_from_goal(goal)
         if phase:
             _emit_phase_if_changed(phase, detail=goal or None)
@@ -2206,6 +2248,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         cost_summary = summarize_history_cost(ag.history, ag.browser_session)
         last_cost_summary = cost_summary
         hist_payload = build_agent_history_payload(ag.history, sensitive_data)
+        if app_settings.submit_intent != "submit":
+            hist_payload = _redact_review_success_claims(hist_payload)
         jt.update_runtime_snapshot(
             cost_summary,
             step_count=len(ag.history.history or []),
@@ -2507,6 +2551,9 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 **runtime_learning_payload,
             }
             cancel_rd["agentHistory"] = build_agent_history_payload(history, sensitive_data)
+            if app_settings.submit_intent != "submit" and _review_output_has_forbidden_success_claim(cancel_rd):
+                cancel_rd = _redact_review_success_claims(cancel_rd)
+                cancel_rd["blocker"] = "guard breach: final-submission confirmation detected in review mode"
             jt.emit_run_terminal(
                 termination_status="cancelled",
                 success=False,
@@ -2537,8 +2584,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             if blocker is None:
                 blocker = final_result
         if app_settings.submit_intent != "submit" and final_result:
-            final_lower = final_result.lower()
-            if "application submitted" in final_lower or "submitted successfully" in final_lower:
+            if _review_output_has_forbidden_success_claim(final_result):
                 blocker = "guard breach: final-submission confirmation detected in review mode"
                 success = False
                 final_result = "Final-submission confirmation detected; review-only contract breached"
@@ -2571,6 +2617,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             )
         result_data.update(runtime_learning_payload)
         result_data["agentHistory"] = build_agent_history_payload(history, sensitive_data)
+
+        if app_settings.submit_intent != "submit" and _review_output_has_forbidden_success_claim(result_data):
+            blocker = "guard breach: final-submission confirmation detected in review mode"
+            success = False
+            result_data = _redact_review_success_claims(result_data)
+            result_data["success"] = False
+            result_data["blocker"] = blocker
+            result_data["finalResult"] = "Final-submission confirmation detected; review-only contract breached"
 
         if success:
             # I-02/U-01: emit status (not done) before review so the terminal

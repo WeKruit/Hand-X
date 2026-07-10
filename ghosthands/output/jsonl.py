@@ -378,10 +378,17 @@ def emit_needs_answer(
     job_id: str = "",
 ) -> None:
     """Emit one Go-compatible HITL question."""
+    normalized_type = str(field_type or "text").strip().lower().replace("_", "-")
+    if normalized_type in {"select", "choice", "radio", "radio-group", "button-group"}:
+        normalized_type = "choice"
+    elif normalized_type in {"checkbox", "checkboxes", "checkbox-group", "multi-select"}:
+        normalized_type = "checkbox"
+    else:
+        normalized_type = "text"
     question = {
         "fieldId": field_id,
         "fieldLabel": label,
-        "fieldType": field_type,
+        "fieldType": normalized_type,
         "options": list(options),
         "required": bool(required),
         "section": section,
@@ -397,7 +404,7 @@ def emit_needs_answer(
         field={
             "id": field_id,
             "label": label,
-            "type": field_type,
+            "type": normalized_type,
             "options": list(options),
             "required": bool(required),
             "section": section,

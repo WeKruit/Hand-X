@@ -70,6 +70,68 @@ async def test_missing_requested_chrome_target_fails_without_creating_a_tab() ->
     cdp_client.send.Target.createTarget.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_selected_chrome_target_is_the_only_visible_or_switchable_page() -> None:
+    from browser_use.browser.events import CloseTabEvent, NavigateToUrlEvent, SwitchTabEvent
+    from browser_use.browser.session import BrowserSession
+
+    session = BrowserSession(
+        cdp_url="ws://127.0.0.1:9222/devtools/browser/shared",
+        target_id="target-a",
+    )
+    session.agent_focus_target_id = "target-a"
+    session.session_manager = MagicMock()
+    session.session_manager.get_all_page_targets.return_value = [
+        SimpleNamespace(target_id="target-a"),
+        SimpleNamespace(target_id="target-b"),
+    ]
+    cdp_client = AsyncMock()
+    cdp_client.send = MagicMock()
+    cdp_client.send.Target = MagicMock()
+    cdp_client.send.Target.createTarget = AsyncMock()
+    cdp_client.send.Target.closeTarget = AsyncMock()
+    session._cdp_client_root = cdp_client
+
+    assert [page._target_id for page in await session.get_pages()] == ["target-a"]
+    assert [target.target_id for target in session.get_page_targets()] == ["target-a"]
+    with pytest.raises(RuntimeError, match="locked to Chrome target target-a"):
+        await session.new_page("https://example.com")
+    with pytest.raises(RuntimeError, match="locked to Chrome target target-a"):
+        await session.on_SwitchTabEvent(SwitchTabEvent(target_id="target-b"))
+    with pytest.raises(RuntimeError, match="locked to Chrome target target-a"):
+        await session.close_page("target-a")
+    with pytest.raises(RuntimeError, match="locked to Chrome target target-a"):
+        await session.on_CloseTabEvent(CloseTabEvent(target_id="target-a"))
+    session.agent_focus_target_id = None
+    with pytest.raises(RuntimeError, match="lost locked Chrome target target-a"):
+        await session.on_NavigateToUrlEvent(NavigateToUrlEvent(url="https://example.com/next"))
+
+    cdp_client.send.Target.createTarget.assert_not_awaited()
+    cdp_client.send.Target.closeTarget.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_workday_preface_refuses_to_replace_missing_selected_target() -> None:
+    from ghosthands.cli import _run_workday_auth_preface
+
+    browser = SimpleNamespace(
+        _initial_target_id="target-a",
+        get_current_page=AsyncMock(return_value=None),
+        new_page=AsyncMock(),
+    )
+    settings = SimpleNamespace(email="user@example.com", password="secret")
+
+    with pytest.raises(RuntimeError, match="target-a"):
+        await _run_workday_auth_preface(
+            browser,
+            job_url="https://example.com/job",
+            app_settings=settings,
+            platform="workday",
+        )
+
+    browser.new_page.assert_not_awaited()
+
+
 def test_public_tui_always_forces_review_intent() -> None:
     from ghosthands.tui import build_engine_argv
 
@@ -168,6 +230,33 @@ def test_go_jsonl_contract_is_versioned_and_never_reports_submission() -> None:
     assert '"status":"applied"' not in encoded
 
 
+@pytest.mark.parametrize(
+    ("raw_type", "expected_type"),
+    [
+        ("textarea", "text"),
+        ("select", "choice"),
+        ("radio-group", "choice"),
+        ("checkbox-group", "checkbox"),
+        ("multi_select", "checkbox"),
+    ],
+)
+def test_needs_answer_normalizes_field_types_for_go(raw_type: str, expected_type: str) -> None:
+    from ghosthands.output.jsonl import emit_needs_answer
+
+    events = _capture_events(
+        lambda: emit_needs_answer(
+            field_id="field-1",
+            label="Question",
+            field_type=raw_type,
+            options=["One", "Two"],
+            required=True,
+            section="Screening",
+        )
+    )
+
+    assert events[0]["questions"][0]["fieldType"] == expected_type
+
+
 class _PauseableAgent:
     def __init__(self) -> None:
         self.state = SimpleNamespace(stopped=False, paused=False)
@@ -263,6 +352,74 @@ async def test_pause_resume_commands_gate_actions_without_browser_cleanup() -> N
     review_paused.assert_called_once()
     review_resumed.assert_called_once()
     review_browser.detach_keep_alive.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_save_answer_and_multi_checkbox_answers_are_consumed_from_stdin() -> None:
+    from ghosthands.bridge import protocol
+
+    protocol.reset_hitl_state()
+    agent = _PauseableAgent()
+    commands: asyncio.Queue[str] = asyncio.Queue()
+
+    async def read_command(timeout: float | None = None) -> str:
+        return await asyncio.wait_for(commands.get(), timeout=timeout)
+
+    with patch("ghosthands.bridge.protocol.read_stdin_line", side_effect=read_command):
+        listener = asyncio.create_task(protocol.listen_for_cancel(agent, job_id="job-1"))
+        await commands.put(
+            '{"type":"save_answer","field_id":"skills","field_label":"Skills","answer":["Python","Go"]}\n'
+        )
+        answer = await protocol.get_field_answer("skills", field_label="Skills", timeout=1)
+        await commands.put('{"type":"cancel_job"}\n')
+        await asyncio.wait_for(listener, timeout=1)
+
+    assert answer == "Python, Go"
+    assert protocol.consume_field_answer_save("skills", field_label="Skills") is True
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "Successfully applied",
+        "Submitted",
+        "The application has been submitted",
+        "Applied successfully",
+    ],
+)
+def test_review_mode_rejects_every_submitted_or_applied_success_claim(claim: str) -> None:
+    from ghosthands.cli import _review_output_has_forbidden_success_claim
+
+    assert _review_output_has_forbidden_success_claim(claim) is True
+
+
+@pytest.mark.parametrize(
+    "safe_text",
+    [
+        "Application ready for review",
+        "The application was not submitted",
+        "Final submit was blocked",
+    ],
+)
+def test_review_mode_allows_non_submission_copy(safe_text: str) -> None:
+    from ghosthands.cli import _review_output_has_forbidden_success_claim
+
+    assert _review_output_has_forbidden_success_claim(safe_text) is False
+
+
+def test_multi_checkbox_answer_preserves_every_exact_choice() -> None:
+    from ghosthands.actions.views import FormField
+    from ghosthands.dom.fill_label_match import _coerce_answer_to_field
+
+    field = FormField(
+        field_id="skills",
+        name="Skills",
+        field_type="checkbox-group",
+        choices=["Python", "Go", "Rust"],
+    )
+
+    assert _coerce_answer_to_field(field, "python, GO") == "Python, Go"
+    assert _coerce_answer_to_field(field, "Python, Unknown") is None
 
 
 @pytest.mark.asyncio

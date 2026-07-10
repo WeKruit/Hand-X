@@ -530,11 +530,20 @@ class TestRunAgentJsonlFlow:
         _, kwargs = _m_emit_cost.call_args
         assert kwargs.get("total_usd") == 0.12
 
-    async def test_submit_guard_breach_marks_failure_in_review_mode(self):
+    @pytest.mark.parametrize(
+        "claim",
+        [
+            "Application submitted successfully",
+            "Successfully applied",
+            "Submitted",
+            "The application has been submitted",
+        ],
+    )
+    async def test_submit_guard_breach_marks_failure_in_review_mode(self, claim):
         """A run that reports submission while submit_intent=review must fail."""
         mock_history = _make_mock_history(
             is_done=True,
-            final_result="Application submitted successfully",
+            final_result=claim,
         )
         mock_browser = _make_mock_browser()
 
@@ -551,3 +560,24 @@ class TestRunAgentJsonlFlow:
         kwargs = _m_emit_done.call_args.kwargs
         assert kwargs["success"] is False
         assert "guard breach" in (kwargs.get("message") or "").lower()
+
+    async def test_submit_guard_breach_in_agent_history_is_removed_from_output(self):
+        mock_history = _make_mock_history(is_done=True, final_result="Application ready for review")
+        mock_browser = _make_mock_browser()
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(return_value=mock_history)
+        mock_agent.state = MagicMock(n_steps=9, last_model_output=None, stopped=False)
+
+        with _apply_stubs_and_patches(mock_browser, mock_agent):
+            history_payload = sys.modules["ghosthands.output.agent_history_payload"].build_agent_history_payload
+            history_payload.return_value = [{"result": "Successfully applied"}]
+            with pytest.raises(SystemExit) as exc_info:
+                await run_agent_jsonl(_make_args())
+
+        assert exc_info.value.code == 1
+        _m_emit_awaiting_review.assert_not_called()
+        result_data = _m_emit_done.call_args.kwargs["result_data"]
+        assert "guard breach" in _m_emit_done.call_args.kwargs["message"].lower()
+        encoded = str(result_data).lower()
+        assert "successfully applied" not in encoded
+        assert "application submitted" not in encoded

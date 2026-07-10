@@ -161,13 +161,15 @@ _FINAL_SUBMIT_GUARD_JS = r"""(() => {
 
 	function getText(el) {
 		if (!el) return '';
-		return [
+		return ([
 			el.getAttribute && el.getAttribute('aria-label'),
 			el.getAttribute && el.getAttribute('title'),
 			el.value,
 			el.innerText,
 			el.textContent,
-		].filter(Boolean).join(' ');
+		].filter(Boolean).filter(function(value, index, values) {
+			return values.indexOf(value) === index;
+		}).join(' '));
 	}
 
 	function isVisible(el) {
@@ -186,19 +188,6 @@ _FINAL_SUBMIT_GUARD_JS = r"""(() => {
 		}
 	}
 
-	function looksLikeApplicationForm(form) {
-		if (!form || !form.getAttribute) return false;
-		const identity = normalize([
-			form.id,
-			form.getAttribute('name'),
-			form.getAttribute('class'),
-			form.getAttribute('aria-label'),
-			form.getAttribute('data-automation-id'),
-			form.getAttribute('action'),
-		].filter(Boolean).join(' '));
-		return /(?:job|candidate)?\s*application|application\s*form|jobapplication/.test(identity);
-	}
-
 	function recordBlock(el) {
 		const text = normalize(getText(el));
 		window.__ghFinalSubmitGuardState = {
@@ -209,55 +198,67 @@ _FINAL_SUBMIT_GUARD_JS = r"""(() => {
 		};
 	}
 
+	function controlFor(el) {
+		return el && el.closest ? el.closest('button, input[type="submit"], input[type="button"], [role="button"]') : null;
+	}
+
+	function isAllowedNonFinalControl(el) {
+		const control = controlFor(el);
+		if (!control) return false;
+		const text = normalize(getText(control));
+		const form = control.form || (control.closest ? control.closest('form') : null);
+		if (hasPasswordField(form)) return true;
+		return (
+			text === 'next' ||
+			text === 'continue' ||
+			text === 'save' ||
+			text === 'save and continue' ||
+			text === 'save & continue' ||
+			text === 'continue to review' ||
+			text === 'apply with resume' ||
+			text === 'autofill with resume'
+		);
+	}
+
 	function looksLikeFinalSubmit(el) {
-		const control = el && el.closest ? el.closest('button, input[type="submit"], input[type="button"], [role="button"]') : null;
+		const control = controlFor(el);
 		if (!control || !isVisible(control)) return false;
 		if (control.disabled) return false;
 		if (String(control.getAttribute && control.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return false;
 
 		const form = control.form || (control.closest ? control.closest('form') : null);
 		if (hasPasswordField(form)) return false;
+		if (isAllowedNonFinalControl(control)) return false;
 
 		const text = normalize(getText(control));
-		if (!text) return false;
-		if (
-			text.includes('sign in') ||
-			text.includes('log in') ||
-			text.includes('login') ||
-			text.includes('create account') ||
-			text.includes('register') ||
-			text.includes('save and continue') ||
-			text === 'next' ||
-			text === 'continue' ||
-			text.includes('continue to review') ||
-			text.includes('apply with resume')
-		) {
-			return false;
-		}
-		const applicationFormAction = looksLikeApplicationForm(form) && (
-			text === 'apply' || text === 'apply now' || text === 'finish'
-		);
-
-		return (
+		const explicitFinalLabel = (
 			text === 'submit' ||
+			text === 'apply' ||
+			text === 'apply now' ||
+			text === 'finish' ||
 			text.includes('submit application') ||
 			text.includes('review and submit') ||
 			text.includes('finish and submit') ||
 			text.includes('complete application') ||
 			text.includes('confirm and submit') ||
-			text.includes('send application') ||
-			applicationFormAction
+			text.includes('send application')
 		);
+		if (explicitFinalLabel) return true;
+		if (!form) return false;
+		return control.matches('button:not([type]), button[type="submit"], input[type="submit"]');
 	}
 
 	function shouldBlockFormSubmit(form, candidate) {
 		if (hasPasswordField(form)) return false;
-		if (candidate && looksLikeFinalSubmit(candidate)) return candidate.closest('button, input[type="submit"], input[type="button"], [role="button"]');
+		if (candidate && isAllowedNonFinalControl(candidate)) return false;
+		if (candidate) return controlFor(candidate) || form;
 		try {
 			const controls = Array.from(form.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'));
-			return controls.find(looksLikeFinalSubmit) || (looksLikeApplicationForm(form) ? form : null);
+			const submitControls = controls.filter((control) => control.matches('button:not([type]), button[type="submit"], input[type="submit"]'));
+			if (submitControls.length === 1 && isAllowedNonFinalControl(submitControls[0])) return false;
+			return submitControls.find(looksLikeFinalSubmit) || form;
 		} catch (e) {
-			return looksLikeApplicationForm(form) ? form : null;
+			return form;
 		}
 	}
 

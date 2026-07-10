@@ -5273,9 +5273,12 @@ async def _fill_checkbox_group(page: Any, field: FormField, value: str, tag: str
                     )
                     return True
         try:
-            result_json = await page.evaluate(_CLICK_CHECKBOX_GROUP_JS, field.field_id)
+            result_json = await page.evaluate(_CLICK_CHECKBOX_GROUP_JS, field.field_id, value)
             result = json.loads(result_json)
             if result.get("clicked"):
+                if result.get("matchedCount") and not await _field_has_validation_error(page, field.field_id):
+                    logger.debug(f'check {tag} -> "{value}"')
+                    return True
                 current = await _read_binary_state(page, field.field_id)
                 if result.get("alreadyChecked") and not await _field_has_validation_error(page, field.field_id):
                     logger.debug(f"skip {tag} (already checked)")

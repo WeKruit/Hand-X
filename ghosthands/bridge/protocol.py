@@ -23,6 +23,7 @@ logger = structlog.get_logger()
 _COMMAND_TYPES = frozenset(
     {
         "answer_field",
+        "save_answer",
         "skip_field",
         "pause_job",
         "resume_job",
@@ -41,11 +42,12 @@ def parse_bridge_command(line: str) -> dict[str, Any] | None:
         return None
     if not isinstance(command, dict) or command.get("type") not in _COMMAND_TYPES:
         return None
-    if command["type"] in {"answer_field", "skip_field"} and not (
+    if command["type"] in {"answer_field", "save_answer", "skip_field"} and not (
         str(command.get("field_id") or "").strip() or str(command.get("field_label") or "").strip()
     ):
         return None
     return command
+
 
 stdin_lock = asyncio.Lock()
 stdin_executor = concurrent.futures.ThreadPoolExecutor(
@@ -119,6 +121,7 @@ async def read_stdin_line(timeout: float | None = None) -> str:
 # and "Email" in emergency contact).  Falls back to field_label for
 # backward compatibility with older Desktop versions.
 _pending_answers: dict[str, str] = {}
+_saved_answer_keys: set[str] = set()
 _answer_events: dict[str, asyncio.Event] = {}
 _hitl_lock = asyncio.Lock()
 # M13: Cancel event — set when the run is cancelled so pending
@@ -140,6 +143,7 @@ def reset_hitl_state() -> None:
     """
     global _cancel_event, _hitl_available, _run_resume_event
     _pending_answers.clear()
+    _saved_answer_keys.clear()
     _answer_events.clear()
     _cancel_event = asyncio.Event()
     _run_resume_event = asyncio.Event()
@@ -205,7 +209,21 @@ def is_hitl_available() -> bool:
     return _hitl_available
 
 
-def put_field_answer(field_id: str, answer: str, *, field_label: str = "") -> None:
+def _normalize_field_answer(answer: Any) -> str:
+    if isinstance(answer, (list, tuple)):
+        return ", ".join(str(item).strip() for item in answer if str(item).strip())
+    if isinstance(answer, bool):
+        return "true" if answer else "false"
+    return str(answer or "")
+
+
+def put_field_answer(
+    field_id: str,
+    answer: Any,
+    *,
+    field_label: str = "",
+    save_answer: bool = False,
+) -> None:
     """Store an answer received from the Desktop for a pending HITL field.
 
     Parameters
@@ -222,7 +240,12 @@ def put_field_answer(field_id: str, answer: str, *, field_label: str = "") -> No
     key = field_id or field_label
     if not key:
         return
+    answer = _normalize_field_answer(answer)
     _pending_answers[key] = answer
+    if save_answer:
+        _saved_answer_keys.add(key)
+    else:
+        _saved_answer_keys.discard(key)
     evt = _answer_events.get(key)
     if evt:
         evt.set()
@@ -231,9 +254,21 @@ def put_field_answer(field_id: str, answer: str, *, field_label: str = "") -> No
     # legacy Desktop that only sends field_label.
     if field_label and field_label != key:
         _pending_answers[field_label] = answer
+        if save_answer:
+            _saved_answer_keys.add(field_label)
+        else:
+            _saved_answer_keys.discard(field_label)
         evt2 = _answer_events.get(field_label)
         if evt2:
             evt2.set()
+
+
+def consume_field_answer_save(field_id: str, *, field_label: str = "") -> bool:
+    """Consume whether the most recent answer requested verified-answer persistence."""
+    keys = {key for key in (field_id, field_label) if key}
+    saved = bool(keys & _saved_answer_keys)
+    _saved_answer_keys.difference_update(keys)
+    return saved
 
 
 async def get_field_answer(
@@ -295,7 +330,10 @@ async def get_field_answer(
 
         if answer_task in done:
             async with _hitl_lock:
-                return _pending_answers.pop(key, None)
+                answer = _pending_answers.pop(key, None)
+                if answer is None and field_label and field_label != key:
+                    answer = _pending_answers.pop(field_label, None)
+                return answer
 
         # Neither completed — timeout
         async with _hitl_lock:
@@ -373,14 +411,19 @@ async def listen_for_cancel(
                 target_id = getattr(getattr(agent, "browser_session", None), "agent_focus_target_id", None)
                 emit_resumed(job_id=job_id, target_id=target_id)
                 emit_run_state("running", job_id=job_id, target_id=target_id)
-        elif cmd_type == "answer_field":
+        elif cmd_type in {"answer_field", "save_answer"}:
             field_id = cmd.get("field_id", "")
             field_label = cmd.get("field_label", "")
             answer = cmd.get("answer", "")
             key = field_id or field_label
             if key:
                 logger.info("answer_field_received", field_id=field_id, field_label=field_label)
-                put_field_answer(field_id, answer, field_label=field_label)
+                put_field_answer(
+                    field_id,
+                    answer,
+                    field_label=field_label,
+                    save_answer=cmd_type == "save_answer" or cmd.get("save_answer") is True,
+                )
                 if not bool(getattr(agent.state, "paused", False)):
                     emit_run_state("running", message="Input received", job_id=job_id)
         elif cmd_type == "skip_field":

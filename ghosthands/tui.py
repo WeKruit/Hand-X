@@ -497,9 +497,16 @@ async def _handle_hitl_prompt(
     question = state.pending_question or {}
     field_id = str(question.get("fieldId") or question.get("id") or "")
     field_label = str(question.get("fieldLabel") or question.get("label") or field_id)
+    field_type = str(question.get("fieldType") or question.get("type") or "text").lower()
     options = question.get("options")
     console.print(f"\n[bold]{field_label}[/bold]")
-    if isinstance(options, list) and options:
+    if field_type in {"checkbox", "checkboxes", "checkbox-group", "multi_select", "multi-select"}:
+        choices = [str(option) for option in options] if isinstance(options, list) else []
+        if choices:
+            answer: str | list[str] = [choice for choice in choices if Confirm.ask(choice, default=False)]
+        else:
+            answer = "true" if Confirm.ask("Answer", default=False) else ""
+    elif isinstance(options, list) and options:
         skip_choice = "<skip>"
         choices = [str(option) for option in options]
         selected = Prompt.ask("Answer", choices=[*choices, skip_choice], default=choices[0])
@@ -507,10 +514,11 @@ async def _handle_hitl_prompt(
     else:
         answer = Prompt.ask("Answer (leave blank to skip)", default="").strip()
     if answer:
+        save_answer = Confirm.ask("Save as verified answer?", default=False)
         await _send_command(
             proc,
             {
-                "type": "answer_field",
+                "type": "save_answer" if save_answer else "answer_field",
                 "field_id": field_id,
                 "field_label": field_label,
                 "answer": answer,
