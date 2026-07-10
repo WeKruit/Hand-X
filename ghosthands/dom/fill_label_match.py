@@ -489,6 +489,14 @@ def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
         for candidate in _field_label_candidates(field)
     )
     degree_family_answer = _normalize_degree_family_answer(text) if degree_like_label else None
+    choices = [str(choice).strip() for choice in (field.options or field.choices or []) if str(choice).strip()]
+    if field.field_type == "checkbox-group" and "," in text and choices:
+        requested = [part.strip() for part in text.split(",") if part.strip()]
+        choices_by_name = {normalize_name(choice): choice for choice in choices}
+        matched = [choices_by_name.get(normalize_name(part)) for part in requested]
+        if requested and all(matched):
+            return ", ".join(str(choice) for choice in matched)
+        return None
 
     # Workday skills/selectinput widgets intentionally accept comma-joined
     # multi-value answers and split them later inside ``_fill_multi_select``.
@@ -513,7 +521,6 @@ def _coerce_answer_to_field(field: FormField, answer: str | None) -> str | None:
         for candidate in _field_label_candidates(field)
     )
 
-    choices = [str(choice).strip() for choice in (field.options or field.choices or []) if str(choice).strip()]
     if not choices:
         if field.field_type == "select" and latest_employer_label:
             return None

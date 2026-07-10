@@ -879,9 +879,13 @@ class BrowserSession(BaseModel):
 	async def on_NavigateToUrlEvent(self, event: NavigateToUrlEvent) -> None:
 		"""Handle navigation requests - core browser functionality."""
 		self.logger.debug(f'[on_NavigateToUrlEvent] Received NavigateToUrlEvent: url={event.url}, new_tab={event.new_tab}')
+		if self._initial_target_id and self.agent_focus_target_id != self._initial_target_id:
+			raise RuntimeError(f'Browser session lost locked Chrome target {self._initial_target_id}')
 		if not self.agent_focus_target_id:
 			self.logger.warning('Cannot navigate - browser not connected')
 			return
+		if self._initial_target_id:
+			event.new_tab = False
 
 		target_id = None
 		current_target_id = self.agent_focus_target_id
@@ -1098,6 +1102,10 @@ class BrowserSession(BaseModel):
 		"""Handle tab switching - core browser functionality."""
 		if not self.agent_focus_target_id:
 			raise RuntimeError('Cannot switch tabs - browser not connected')
+		if self._initial_target_id and event.target_id != self._initial_target_id:
+			raise RuntimeError(
+				f'Browser session is locked to Chrome target {self._initial_target_id}; refusing to switch tabs'
+			)
 
 		# Get all page targets
 		page_targets = self.session_manager.get_all_page_targets()
@@ -1140,6 +1148,10 @@ class BrowserSession(BaseModel):
 
 	async def on_CloseTabEvent(self, event: CloseTabEvent) -> None:
 		"""Handle tab closure - update focus if needed."""
+		if self._initial_target_id:
+			raise RuntimeError(
+				f'Browser session is locked to Chrome target {self._initial_target_id}; refusing to close tabs'
+			)
 		try:
 			# Dispatch tab closed event
 			await self.event_bus.dispatch(TabClosedEvent(target_id=event.target_id))
@@ -1184,6 +1196,9 @@ class BrowserSession(BaseModel):
 		current_target_id = self.agent_focus_target_id
 
 		# If the closed tab was the current one, find a new target
+		if current_target_id == event.target_id and self._initial_target_id:
+			self.agent_focus_target_id = None
+			return
 		if current_target_id == event.target_id:
 			await self.event_bus.dispatch(SwitchTabEvent(target_id=None))
 
@@ -1283,6 +1298,10 @@ class BrowserSession(BaseModel):
 
 	async def new_page(self, url: str | None = None) -> 'Page':
 		"""Create a new page (tab)."""
+		if self._initial_target_id:
+			raise RuntimeError(
+				f'Browser session is locked to Chrome target {self._initial_target_id}; refusing to create a new tab'
+			)
 		from cdp_use.cdp.target.commands import CreateTargetParameters
 
 		params: CreateTargetParameters = {'url': url or 'about:blank'}
@@ -1320,6 +1339,8 @@ class BrowserSession(BaseModel):
 		from browser_use.actor.page import Page as PageActor
 
 		page_targets = self.session_manager.get_all_page_targets() if self.session_manager else []
+		if self._initial_target_id:
+			page_targets = [target for target in page_targets if target.target_id == self._initial_target_id]
 
 		targets = []
 		for target in page_targets:
@@ -1345,7 +1366,10 @@ class BrowserSession(BaseModel):
 		"""
 		if not self.session_manager:
 			return []
-		return self.session_manager.get_all_page_targets()
+		page_targets = self.session_manager.get_all_page_targets()
+		if self._initial_target_id:
+			return [target for target in page_targets if target.target_id == self._initial_target_id]
+		return page_targets
 
 	async def close_page(self, page: 'Union[Page, str]') -> None:
 		"""Close a page by Page object or target ID."""
@@ -1358,6 +1382,10 @@ class BrowserSession(BaseModel):
 			target_id = page._target_id
 		else:
 			target_id = str(page)
+		if self._initial_target_id:
+			raise RuntimeError(
+				f'Browser session is locked to Chrome target {self._initial_target_id}; refusing to close tabs'
+			)
 
 		params: CloseTargetParameters = {'targetId': target_id}
 		await self.cdp_client.send.Target.closeTarget(params)
@@ -1433,6 +1461,13 @@ class BrowserSession(BaseModel):
 		Raises:
 			ValueError: If target doesn't exist or session is not available.
 		"""
+		if self._initial_target_id:
+			if target_id is None:
+				target_id = self._initial_target_id
+			elif target_id != self._initial_target_id:
+				raise ValueError(
+					f'Browser session is locked to Chrome target {self._initial_target_id}; refusing target {target_id}'
+				)
 		assert self._cdp_client_root is not None, 'Root CDP client not initialized'
 		assert self.session_manager is not None, 'SessionManager not initialized'
 
@@ -1820,6 +1855,18 @@ class BrowserSession(BaseModel):
 			# Get browser targets from SessionManager (source of truth)
 			# SessionManager has already discovered all targets via start_monitoring()
 			page_targets_from_manager = self.session_manager.get_all_page_targets()
+			requested_target_id = self._initial_target_id
+			selected_target = None
+			if requested_target_id:
+				selected_target = next(
+					(target for target in page_targets_from_manager if target.target_id == requested_target_id),
+					None,
+				)
+				if selected_target is None:
+					raise RuntimeError(
+						f'Requested Chrome target {requested_target_id} was not found; refusing to use or create another tab'
+					)
+			initial_targets = [selected_target] if selected_target is not None else page_targets_from_manager
 
 			# Check for chrome://newtab pages and redirect them to about:blank (in parallel)
 			from browser_use.utils import is_new_tab_page
@@ -1837,7 +1884,7 @@ class BrowserSession(BaseModel):
 
 			redirect_tasks = [
 				_redirect_newtab(target)
-				for target in page_targets_from_manager
+				for target in initial_targets
 				if is_new_tab_page(target.url) and target.url != 'about:blank'
 			]
 			if redirect_tasks:
@@ -1845,25 +1892,17 @@ class BrowserSession(BaseModel):
 
 			# Ensure we have at least one page
 			if not page_targets_from_manager:
+				if requested_target_id:
+					raise RuntimeError(
+						f'Requested Chrome target {requested_target_id} was not found; refusing to create a replacement tab'
+					)
 				new_target = await self._cdp_client_root.send.Target.createTarget(params={'url': 'about:blank'})
 				target_id = new_target['targetId']
 				self.logger.debug(f'📄 Created new blank page: {target_id}')
 			else:
-				# If a specific target_id was requested (e.g. Desktop shared-browser tab),
-				# attach to that target instead of defaulting to the first one.
-				requested_target_id = getattr(self, '_initial_target_id', None)
-				if requested_target_id:
-					known_ids = {t.target_id for t in page_targets_from_manager}
-					if requested_target_id in known_ids:
-						target_id = requested_target_id
-						self.logger.debug(f'📄 Attaching to requested target: {target_id}')
-					else:
-						self.logger.warning(
-							f'Requested target_id {requested_target_id} not found among '
-							f'{len(page_targets_from_manager)} discovered targets, '
-							f'falling back to first available target'
-						)
-						target_id = page_targets_from_manager[0].target_id
+				if selected_target is not None:
+					target_id = selected_target.target_id
+					self.logger.debug(f'📄 Attaching to requested target: {target_id}')
 				else:
 					target_id = page_targets_from_manager[0].target_id
 					self.logger.debug(f'📄 Using existing page: {target_id}')
@@ -1894,7 +1933,7 @@ class BrowserSession(BaseModel):
 					self.logger.warning('Target created but title is unknown (may be normal for about:blank)')
 
 			# Dispatch TabCreatedEvent for all initial tabs (so watchdogs can initialize)
-			for idx, target in enumerate(page_targets_from_manager):
+			for idx, target in enumerate(initial_targets):
 				target_url = target.url
 				self.logger.debug(f'Dispatching TabCreatedEvent for initial tab {idx}: {target_url}')
 				self.event_bus.dispatch(TabCreatedEvent(url=target_url, target_id=target.target_id))
@@ -2122,17 +2161,22 @@ class BrowserSession(BaseModel):
 		# 6. Re-discover page targets and restore focus
 		page_targets = self.session_manager.get_all_page_targets()
 
-		# Prefer the old focus target if it still exists
+		# Prefer the selected target if this is an exact-target Desktop session.
 		restored = False
-		if old_focus_target_id:
+		restore_target_id = self._initial_target_id or old_focus_target_id
+		if restore_target_id:
 			for target in page_targets:
-				if target.target_id == old_focus_target_id:
-					await self.get_or_create_cdp_session(old_focus_target_id, focus=True)
+				if target.target_id == restore_target_id:
+					await self.get_or_create_cdp_session(restore_target_id, focus=True)
 					restored = True
-					self.logger.debug(f'🔄 Restored agent focus to previous target {old_focus_target_id[:8]}...')
+					self.logger.debug(f'🔄 Restored agent focus to previous target {restore_target_id[:8]}...')
 					break
 
 		if not restored:
+			if self._initial_target_id:
+				raise RuntimeError(
+					f'Requested Chrome target {self._initial_target_id} disappeared during reconnect; refusing fallback'
+				)
 			if page_targets:
 				fallback_id = page_targets[0].target_id
 				await self.get_or_create_cdp_session(fallback_id, focus=True)
@@ -3192,6 +3236,8 @@ class BrowserSession(BaseModel):
 
 	async def _close_extension_options_pages(self) -> None:
 		"""Close any extension options/welcome pages that have opened."""
+		if self._initial_target_id:
+			return
 		try:
 			# Get all page targets from SessionManager
 			page_targets = self.session_manager.get_all_page_targets()
@@ -3285,6 +3331,10 @@ class BrowserSession(BaseModel):
 
 	async def _cdp_create_new_page(self, url: str = 'about:blank', background: bool = False, new_window: bool = False) -> str:
 		"""Create a new page/tab using CDP Target.createTarget. Returns target ID."""
+		if self._initial_target_id:
+			raise RuntimeError(
+				f'Browser session is locked to Chrome target {self._initial_target_id}; refusing to create a new tab'
+			)
 		# Only include newWindow when True, letting Chrome auto-create window as needed
 		params = CreateTargetParameters(url=url, background=background)
 		if new_window:
@@ -3299,6 +3349,10 @@ class BrowserSession(BaseModel):
 
 	async def _cdp_close_page(self, target_id: TargetID) -> None:
 		"""Close a page/tab using CDP Target.closeTarget."""
+		if self._initial_target_id:
+			raise RuntimeError(
+				f'Browser session is locked to Chrome target {self._initial_target_id}; refusing to close tabs'
+			)
 		await self.cdp_client.send.Target.closeTarget(params={'targetId': target_id})
 
 	async def _cdp_get_cookies(self) -> list[Cookie]:

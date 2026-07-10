@@ -1,15 +1,16 @@
-"""Playwright-based tests for _CLICK_SAVE_BUTTON_JS.
+"""Playwright-based tests for the repeater commit-button finder and click flow.
 
 Spins up a real browser page with mock Oracle-like buttons and runs the
 actual JavaScript to verify it clicks the RIGHT button for each section.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import sync_playwright
 
-from ghosthands.actions.domhand_fill_repeaters import _CLICK_SAVE_BUTTON_JS
+from ghosthands.actions.domhand_fill_repeaters import _FIND_SAVE_BUTTON_JS
 
 # ── Fixtures ──────────────────────────────────────────────────────────
 
@@ -17,7 +18,13 @@ from ghosthands.actions.domhand_fill_repeaters import _CLICK_SAVE_BUTTON_JS
 @pytest.fixture(scope="module")
 def browser():
     with sync_playwright() as p:
-        b = p.chromium.launch(headless=True)
+        launch_options: dict[str, object] = {"headless": True}
+        if not Path(p.chromium.executable_path).exists():
+            cache_roots = [Path.home() / "Library/Caches/ms-playwright", Path.home() / ".cache/ms-playwright"]
+            cached = [path for root in cache_roots if root.exists() for path in root.rglob("chrome-headless-shell")]
+            if cached:
+                launch_options["executable_path"] = str(sorted(cached)[-1])
+        b = p.chromium.launch(**launch_options)
         yield b
         b.close()
 
@@ -56,9 +63,14 @@ def _make_oracle_page(page, buttons: list[str], *, hidden_buttons: list[str] | N
 
 
 def _run_save_js(page, section_hint: str) -> dict:
-    """Run _CLICK_SAVE_BUTTON_JS and return the parsed result."""
-    raw = page.evaluate(_CLICK_SAVE_BUTTON_JS, section_hint)
-    return json.loads(raw) if isinstance(raw, str) else raw
+    """Run the production find-then-locator-click flow."""
+    raw = page.evaluate(_FIND_SAVE_BUTTON_JS, section_hint)
+    result = json.loads(raw) if isinstance(raw, str) else raw
+    result["clicked"] = False
+    if result.get("found"):
+        page.locator('[data-dh-commit-target="true"]').click()
+        result["clicked"] = True
+    return result
 
 
 def _get_clicked_text(page) -> str:
@@ -79,7 +91,7 @@ class TestSkillsCommit:
         assert "skill" in result["text"].lower()
         assert _get_clicked_text(page) == "Add Skill"
 
-    def test_clicks_ADD_SKILL_uppercase(self, page):
+    def test_clicks_add_skill_uppercase(self, page):
         _make_oracle_page(page, ["CANCEL", "ADD SKILL", "ADD EDUCATION", "ADD LANGUAGE"])
         result = _run_save_js(page, "skills")
         assert result["clicked"] is True
@@ -211,18 +223,18 @@ class TestCrossSectionIsolation:
     def test_skills_ignores_add_education_and_add_language(self, page):
         """When filling skills, only 'Add Skill' should be clickable, not others."""
         _make_oracle_page(page, ["Add Education", "Add Language", "SAVE", "Add Skill"])
-        result = _run_save_js(page, "skills")
+        _run_save_js(page, "skills")
         assert _get_clicked_text(page) == "Add Skill"
 
     def test_languages_ignores_add_skill_and_add_education(self, page):
         _make_oracle_page(page, ["Add Skill", "Add Education", "SAVE", "Add Language"])
-        result = _run_save_js(page, "languages")
+        _run_save_js(page, "languages")
         assert _get_clicked_text(page) == "Add Language"
 
     def test_education_ignores_add_skill_and_add_language(self, page):
         """Education should click SAVE, never Add Skill or Add Language."""
         _make_oracle_page(page, ["Add Skill", "Add Language", "SAVE", "Add Education"])
-        result = _run_save_js(page, "education")
+        _run_save_js(page, "education")
         assert _get_clicked_text(page) == "SAVE"
 
     def test_all_add_buttons_present_skills_picks_right_one(self, page):

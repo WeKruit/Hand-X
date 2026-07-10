@@ -136,7 +136,7 @@ class SessionManager:
 				self.browser_session.agent_focus_target_id = None
 
 				# Trigger recovery if not already in progress
-				if not self._recovery_in_progress:
+				if not self._recovery_in_progress and not self.browser_session._initial_target_id:
 					self.logger.warning('[SessionManager] Recovery was not in progress! Triggering now.')
 					self._recovery_task = create_task_with_error_handling(
 						self._recover_agent_focus(target_id),
@@ -610,6 +610,11 @@ class SessionManager:
 		try:
 			if getattr(self.browser_session, '_detaching_keep_alive', False):
 				self.logger.debug('[SessionManager] Skipping focus recovery during keep-alive detach')
+				return
+			if getattr(self.browser_session, '_initial_target_id', None):
+				self.logger.error(
+					f'[SessionManager] Exact Chrome target {self.browser_session._initial_target_id} was lost; refusing focus recovery'
+				)
 				return
 
 			# Prevent concurrent recovery attempts

@@ -51,12 +51,16 @@ class _FakeBrowser:
 
     def __init__(self) -> None:
         self.closed = False
+        self.detached = False
 
     async def close(self) -> None:
         self.closed = True
 
     async def stop(self) -> None:
         self.closed = True
+
+    async def detach_keep_alive(self) -> None:
+        self.detached = True
 
 
 # ---------------------------------------------------------------------------
@@ -318,8 +322,8 @@ class TestListenForCancelReal:
 class TestWaitForReviewCommandReal:
     """Test ``wait_for_review_command`` with real pipes."""
 
-    async def test_complete_review_closes_browser(self):
-        """Sending ``complete_review`` should close the browser and return ``"complete"``."""
+    async def test_complete_review_detaches_without_closing_browser(self):
+        """Completing review detaches the engine while preserving the browser."""
         browser = _FakeBrowser()
         read_file, w = _make_pipe_stdin()
         old_stdin = sys.stdin
@@ -339,13 +343,14 @@ class TestWaitForReviewCommandReal:
                 ),
                 timeout=10.0,
             )
-            assert browser.closed is True
+            assert browser.detached is True
+            assert browser.closed is False
             assert results[0] == "complete"
         finally:
             sys.stdin = old_stdin
 
-    async def test_cancel_closes_browser(self):
-        """Sending ``cancel`` during review should close the browser and return ``"cancel"``."""
+    async def test_cancel_detaches_without_closing_browser(self):
+        """Cancelling review detaches the engine while preserving the browser."""
         browser = _FakeBrowser()
         read_file, w = _make_pipe_stdin()
         old_stdin = sys.stdin
@@ -365,13 +370,14 @@ class TestWaitForReviewCommandReal:
                 ),
                 timeout=10.0,
             )
-            assert browser.closed is True
+            assert browser.detached is True
+            assert browser.closed is False
             assert results[0] == "cancel"
         finally:
             sys.stdin = old_stdin
 
-    async def test_cancel_job_closes_browser(self):
-        """Sending ``cancel_job`` during review should close the browser and return ``"cancel"``."""
+    async def test_cancel_job_detaches_without_closing_browser(self):
+        """Cancelling the job detaches the engine while preserving the browser."""
         browser = _FakeBrowser()
         read_file, w = _make_pipe_stdin()
         old_stdin = sys.stdin
@@ -391,7 +397,8 @@ class TestWaitForReviewCommandReal:
                 ),
                 timeout=10.0,
             )
-            assert browser.closed is True
+            assert browser.detached is True
+            assert browser.closed is False
             assert results[0] == "cancel"
         finally:
             sys.stdin = old_stdin
@@ -420,13 +427,14 @@ class TestWaitForReviewCommandReal:
                 ),
                 timeout=10.0,
             )
-            assert browser.closed is True
+            assert browser.detached is True
+            assert browser.closed is False
             assert results[0] == "complete"
         finally:
             sys.stdin = old_stdin
 
-    async def test_eof_closes_browser(self):
-        """If stdin is closed (Electron died), the browser should be closed and return ``"eof"``."""
+    async def test_eof_detaches_without_closing_browser(self):
+        """If the parent dies, detach the engine and preserve the browser."""
         browser = _FakeBrowser()
         read_file, w = _make_pipe_stdin()
         old_stdin = sys.stdin
@@ -445,7 +453,8 @@ class TestWaitForReviewCommandReal:
                 ),
                 timeout=10.0,
             )
-            assert browser.closed is True
+            assert browser.detached is True
+            assert browser.closed is False
             assert results[0] == "eof"
         finally:
             sys.stdin = old_stdin

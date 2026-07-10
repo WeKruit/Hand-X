@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import io
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from rich.console import Console
 
 from ghosthands.tui import TuiRunState, _render_state, build_engine_argv, parse_jsonl_event
@@ -92,6 +94,39 @@ def test_tui_state_redacts_password_values():
     state.apply_event(event)
 
     assert state.logs[-1] == ("filled", "password: [redacted]")
+
+
+@pytest.mark.asyncio
+async def test_tui_checkbox_prompt_sends_saved_multi_answer(monkeypatch):
+    from argparse import Namespace
+
+    from ghosthands.tui import TuiRunState, _handle_hitl_prompt
+
+    state = TuiRunState(
+        pending_question={
+            "fieldId": "skills",
+            "fieldLabel": "Skills",
+            "fieldType": "checkbox",
+            "options": ["Python", "Go"],
+        }
+    )
+    proc = Namespace(stdin=AsyncMock())
+    sent: list[dict] = []
+    monkeypatch.setattr("ghosthands.tui.Confirm.ask", MagicMock(side_effect=[True, True, True]))
+    monkeypatch.setattr(
+        "ghosthands.tui._send_command", AsyncMock(side_effect=lambda _proc, command: sent.append(command))
+    )
+
+    await _handle_hitl_prompt(proc, state, MagicMock())
+
+    assert sent == [
+        {
+            "type": "save_answer",
+            "field_id": "skills",
+            "field_label": "Skills",
+            "answer": ["Python", "Go"],
+        }
+    ]
 
 
 def test_tui_render_treats_log_messages_as_plain_text():

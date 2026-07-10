@@ -53,6 +53,7 @@ from ghosthands.bridge.profile_adapter import (
     normalize_profile_defaults,
 )
 from ghosthands.bridge.protocol import (
+    activate_hitl,
     listen_for_cancel,
     reset_hitl_state,
     wait_for_review_command,
@@ -81,6 +82,92 @@ logger = structlog.get_logger()
 # Pre-step budget guard: estimated cost of one agent step in USD.
 # If remaining budget is less than this, the agent stops before the next step.
 _STEP_COST_ESTIMATE = 0.10
+
+_REVIEW_SUCCESS_CLAIM_RE = re.compile(r"\b(?:submitted|applied)\b", re.IGNORECASE)
+_REVIEW_NEGATED_CLAIM_RE = re.compile(
+    r"(?:\b(?:not|never)\b|\bwithout(?:\s+being)?\b|\b(?:was|were|is|are|has|have|had|did)n't\b)"
+    r"(?:\s+\w+){0,3}\s*$",
+    re.IGNORECASE,
+)
+_REVIEW_CLAIM_REDACTION = "[forbidden final-submit success claim removed]"
+_REVIEW_INTERNAL_NONFINAL_FORM_RE = re.compile(
+    r"\bsubmitted\s+form\s+for\s+(['\"])(?P<label>[^'\"]+)\1",
+    re.IGNORECASE,
+)
+_REVIEW_PROVEN_NONFINAL_FORM_LABELS = {
+    "next",
+    "continue",
+    "save",
+    "save and continue",
+    "save & continue",
+    "continue to review",
+}
+
+
+def _review_key_tokens(key: Any) -> set[str]:
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(key or ""))
+    return set(re.sub(r"[^a-zA-Z0-9]+", " ", text).lower().split())
+
+
+def _review_key_value_claims_success(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return value > 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        return normalized not in {"", "0", "false", "no", "none", "null", "not submitted", "not applied"}
+    return value is not None and bool(value)
+
+
+def _review_key_reports_success(key: Any, value: Any) -> bool:
+    return bool(_review_key_tokens(key) & {"submitted", "applied"}) and _review_key_value_claims_success(value)
+
+
+def _strip_proven_internal_navigation_claims(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        label = re.sub(r"\s+", " ", match.group("label")).strip().lower()
+        return "advanced form" if label in _REVIEW_PROVEN_NONFINAL_FORM_LABELS else match.group(0)
+
+    return _REVIEW_INTERNAL_NONFINAL_FORM_RE.sub(replace, value)
+
+
+def _review_output_has_forbidden_success_claim(value: Any) -> bool:
+    """Return whether a review-only output value claims submit success."""
+    if isinstance(value, dict):
+        return any(
+            _review_key_reports_success(key, item) or _review_output_has_forbidden_success_claim(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple, set)):
+        return any(_review_output_has_forbidden_success_claim(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    checked_value = _strip_proven_internal_navigation_claims(value)
+    for match in _REVIEW_SUCCESS_CLAIM_RE.finditer(checked_value):
+        if not _REVIEW_NEGATED_CLAIM_RE.search(checked_value[max(0, match.start() - 64) : match.start()]):
+            return True
+    return False
+
+
+def _redact_review_success_claims(value: Any) -> Any:
+    """Remove prohibited success claims before a review-only payload is emitted."""
+    if isinstance(value, dict):
+        redacted = {
+            key: _redact_review_success_claims(item)
+            for key, item in value.items()
+            if not (_review_key_tokens(key) & {"submitted", "applied"})
+        }
+        if len(redacted) != len(value):
+            redacted["finalSubmitClaimRemoved"] = True
+        return redacted
+    if isinstance(value, list):
+        return [_redact_review_success_claims(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_review_success_claims(item) for item in value)
+    if isinstance(value, str) and _review_output_has_forbidden_success_claim(value):
+        return _REVIEW_CLAIM_REDACTION
+    return value
 
 
 def _profile_debug_enabled() -> bool:
@@ -536,6 +623,9 @@ async def _run_workday_auth_preface(
 
     page = await browser_session.get_current_page()
     if page is None:
+        locked_target_id = str(getattr(browser_session, "_initial_target_id", "") or "")
+        if locked_target_id:
+            raise RuntimeError(f"Selected Chrome target {locked_target_id} is unavailable; refusing replacement tab")
         page = await browser_session.new_page(job_url)
     else:
         current = ""
@@ -698,6 +788,12 @@ def parse_args() -> argparse.Namespace:
         help="Connect to an existing browser via CDP URL instead of launching a new one (Desktop-owned browser mode)",
     )
     parser.add_argument(
+        "--cdp-target-id",
+        type=str,
+        default=None,
+        help="Exact Chrome target/tab ID to use with --cdp-url (or GH_TARGET_ID)",
+    )
+    parser.add_argument(
         "--engine",
         choices=["auto", "chromium", "firefox"],
         default="auto",
@@ -707,6 +803,12 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.output_format != "tui" and not args.job_url:
         parser.error("the following arguments are required: --job-url")
+    if args.output_format == "tui" and args.submit_intent == "submit":
+        parser.error("the bundled terminal UI supports review intent only")
+    resolved_cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
+    resolved_target_id = args.cdp_target_id or os.environ.get("GH_TARGET_ID")
+    if bool(resolved_cdp_url) != bool(resolved_target_id):
+        parser.error("--cdp-url and --cdp-target-id must be provided together")
     return args
 
 
@@ -1121,22 +1223,18 @@ async def _cleanup_browser(
 ) -> None:
     """Shut down the browser session with ownership-aware cleanup.
 
-    When the Desktop app owns the browser (CDP mode), we only disconnect
-    from the session via ``stop()`` — the browser process stays alive for
-    the Desktop app to manage.
+    When the Desktop app owns the browser (CDP mode), detach the CDP client
+    without dispatching browser or tab lifecycle events.
 
     When Hand-X launched the browser itself, Desktop/local-worker JSONL mode
     now leaves the browser entirely untouched so the user can keep inspecting
     the failed page. Only standalone human-mode runs should kill it here.
     """
-    if keep_browser_alive:
+    if desktop_owns_browser or keep_browser_alive:
         logger.info("browser.cleanup_detaching_keep_alive")
         await browser.detach_keep_alive()
         return
-    if desktop_owns_browser:
-        await browser.stop()
-    else:
-        await browser.kill()
+    await browser.kill()
 
 
 @dataclass(frozen=True)
@@ -1753,9 +1851,9 @@ def _handle_review_result(
 
     if review_result == "complete":
         emit_run_terminal(
-            termination_status="completed",
+            termination_status="review_complete",
             success=True,
-            message="Application submitted — review completed",
+            message="Review complete; engine detached",
             fields_filled=fields_filled,
             fields_failed=fields_failed,
             job_id=job_id,
@@ -1785,7 +1883,7 @@ def _handle_review_result(
         emit_run_terminal(
             termination_status="review_timeout",
             success=False,
-            message="Review timed out after 30 minutes. The browser window is still open — you can submit manually.",
+            message="Review timed out; the browser tab remains open and the engine detached.",
             fields_filled=fields_filled,
             fields_failed=fields_failed,
             job_id=job_id,
@@ -1869,6 +1967,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         emit_cost,
         emit_error,
         emit_phase,
+        emit_review_ready,
+        emit_run_state,
         emit_status,
     )
 
@@ -1888,6 +1988,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     keep_worker_browser_alive = args.output_format == "jsonl"
     last_phase: str | None = None
     account_created_emitted = False
+    emit_run_state("starting")
 
     def _emit_phase_if_changed(phase: str, detail: str | None = None) -> None:
         nonlocal last_phase
@@ -2045,13 +2146,15 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     # -- Browser ------------------------------------------------------------
     cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
-    cdp_target_id = os.environ.get("GH_TARGET_ID")
+    cdp_target_id = getattr(args, "cdp_target_id", None) or os.environ.get("GH_TARGET_ID")
+    if bool(cdp_url) != bool(cdp_target_id):
+        raise ValueError("--cdp-url and --cdp-target-id must be provided together")
     desktop_owns_browser = cdp_url is not None
 
     if cdp_url:
         # Desktop-owned browser: connect to existing browser via CDP URL.
         # Do not launch a new browser; the browser is always headful (visible to user).
-        # If GH_TARGET_ID is set, attach to that specific tab (shared-browser mode).
+        # Attach to the exact target selected by the VALET host.
         # Explicit headless=False + no_viewport=True prevents detect_display_configuration()
         # from incorrectly assuming headless mode (get_display_size() returns None in
         # Electron-spawned subprocesses) and setting a 1920x1080 viewport override via CDP,
@@ -2115,6 +2218,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             cost_summary = summarize_history_cost(ag.history, ag.browser_session)
             last_cost_summary = cost_summary
             hist_payload = build_agent_history_payload(ag.history, sensitive_data)
+            if app_settings.submit_intent != "submit":
+                hist_payload = _redact_review_success_claims(hist_payload)
             jt.update_runtime_snapshot(
                 cost_summary,
                 step_count=max(n_hist, int(step)),
@@ -2123,6 +2228,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         goal = ""
         if ag.state.last_model_output:
             goal = ag.state.last_model_output.next_goal or ""
+        if app_settings.submit_intent != "submit":
+            goal = _redact_review_success_claims(goal)
         phase = infer_phase_from_goal(goal)
         if phase:
             _emit_phase_if_changed(phase, detail=goal or None)
@@ -2192,6 +2299,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         cost_summary = summarize_history_cost(ag.history, ag.browser_session)
         last_cost_summary = cost_summary
         hist_payload = build_agent_history_payload(ag.history, sensitive_data)
+        if app_settings.submit_intent != "submit":
+            hist_payload = _redact_review_success_claims(hist_payload)
         jt.update_runtime_snapshot(
             cost_summary,
             step_count=len(ag.history.history or []),
@@ -2316,8 +2425,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
         logger.warning("startup.browser_ready", cdp_url=bool(browser.cdp_url))
+        active_target_id = str(getattr(browser, "agent_focus_target_id", None) or "")
+        if cdp_target_id and active_target_id != cdp_target_id:
+            raise RuntimeError(
+                f"Browser attached to target {active_target_id or '<none>'}, expected {cdp_target_id}"
+            )
         if browser.cdp_url:
-            emit_browser_ready(browser.cdp_url)
+            emit_browser_ready(browser.cdp_url, target_id=active_target_id)
+            emit_run_state("running", job_id=job_id, target_id=active_target_id)
         else:
             logger.warning("cli.browser_ready_missing_cdp_url")
             emit_status(
@@ -2381,9 +2496,17 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 directly_open_url=directly_open_url,
             )
 
+            await install_same_tab_guard(agent)
+            await install_final_submit_guard(
+                agent,
+                allow_submit=app_settings.submit_intent == "submit",
+            )
             reset_hitl_state()
+            activate_hitl()
             cancel_requested = asyncio.Event()
-            cancel_task = asyncio.create_task(listen_for_cancel(agent, cancel_requested))
+            cancel_task = asyncio.create_task(
+                listen_for_cancel(agent, cancel_requested, job_id=job_id)
+            )
             try:
                 _emit_phase_if_changed("Navigating to application")
                 logger.warning("startup.agent_run_starting", max_steps=args.max_steps)
@@ -2479,6 +2602,9 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 **runtime_learning_payload,
             }
             cancel_rd["agentHistory"] = build_agent_history_payload(history, sensitive_data)
+            if app_settings.submit_intent != "submit" and _review_output_has_forbidden_success_claim(cancel_rd):
+                cancel_rd = _redact_review_success_claims(cancel_rd)
+                cancel_rd["blocker"] = "guard breach: final-submission confirmation detected in review mode"
             jt.emit_run_terminal(
                 termination_status="cancelled",
                 success=False,
@@ -2509,10 +2635,10 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             if blocker is None:
                 blocker = final_result
         if app_settings.submit_intent != "submit" and final_result:
-            final_lower = final_result.lower()
-            if "application submitted" in final_lower or "submitted successfully" in final_lower:
-                blocker = "guard breach: application was submitted despite submit_intent=review"
+            if _review_output_has_forbidden_success_claim(final_result):
+                blocker = "guard breach: final-submission confirmation detected in review mode"
                 success = False
+                final_result = "Final-submission confirmation detected; review-only contract breached"
 
         result_data = {
             "success": success,
@@ -2543,6 +2669,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         result_data.update(runtime_learning_payload)
         result_data["agentHistory"] = build_agent_history_payload(history, sensitive_data)
 
+        if app_settings.submit_intent != "submit" and _review_output_has_forbidden_success_claim(result_data):
+            blocker = "guard breach: final-submission confirmation detected in review mode"
+            success = False
+            result_data = _redact_review_success_claims(result_data)
+            result_data["success"] = False
+            result_data["blocker"] = blocker
+            result_data["finalResult"] = "Final-submission confirmation detected; review-only contract breached"
+
         if success:
             # I-02/U-01: emit status (not done) before review so the terminal
             # event is only sent once, after the user has actually reviewed.
@@ -2567,8 +2701,35 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             with contextlib.suppress(Exception):
                 review_page_url = await browser.get_current_page_url()
 
+            emit_review_ready(
+                cdp_url=review_cdp_url or "",
+                target_id=active_target_id,
+                page_url=review_page_url,
+                cost_summary=cost_summary,
+            )
+            if desktop_owns_browser:
+                jt.emit_run_terminal(
+                    termination_status="review_ready",
+                    success=True,
+                    message="Application ready for review; engine detached",
+                    fields_filled=filled_count,
+                    fields_failed=failed_count,
+                    job_id=job_id,
+                    lease_id=lease_id,
+                    result_data=result_data,
+                    cost_summary=cost_summary,
+                    total_cost_usd=total_cost,
+                )
+                await _cleanup_browser(
+                    browser,
+                    desktop_owns_browser,
+                    keep_browser_alive=True,
+                )
+                return
+
             emit_awaiting_review(
                 cdp_url=review_cdp_url,
+                target_id=active_target_id,
                 page_url=review_page_url,
             )
             review_result = await wait_for_review_command(browser, job_id, lease_id)
@@ -2825,6 +2986,9 @@ async def run_agent_human(args: argparse.Namespace) -> None:
 
     # -- Browser ------------------------------------------------------------
     cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
+    cdp_target_id = getattr(args, "cdp_target_id", None) or os.environ.get("GH_TARGET_ID")
+    if bool(cdp_url) != bool(cdp_target_id):
+        raise ValueError("--cdp-url and --cdp-target-id must be provided together")
     desktop_owns_browser = cdp_url is not None
 
     if cdp_url:
@@ -2833,8 +2997,12 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         browser_profile = BrowserProfile(
             keep_alive=True, allowed_domains=allowed_domains, headless=False, no_viewport=True
         )
-        browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
-        print(f"Connecting to Desktop-owned browser via CDP: {cdp_url}")
+        browser = BrowserSession(
+            browser_profile=browser_profile,
+            cdp_url=cdp_url,
+            target_id=cdp_target_id,
+        )
+        print(f"Connecting to Desktop-owned browser target {cdp_target_id} via CDP: {cdp_url}")
     else:
         browser_profile = BrowserProfile(
             headless=args.headless,
@@ -2875,6 +3043,10 @@ async def run_agent_human(args: argparse.Namespace) -> None:
 
     print("Starting browser...")
     await asyncio.wait_for(browser.start(), timeout=60)
+    if cdp_target_id and browser.agent_focus_target_id != cdp_target_id:
+        raise RuntimeError(
+            f"Browser attached to target {browser.agent_focus_target_id or '<none>'}, expected {cdp_target_id}"
+        )
 
     workday_preface_status = "noop"
     workday_preface_message = ""
@@ -2956,6 +3128,11 @@ async def run_agent_human(args: argparse.Namespace) -> None:
                 ]
 
     try:
+        await install_same_tab_guard(agent)
+        await install_final_submit_guard(
+            agent,
+            allow_submit=app_settings.submit_intent == "submit",
+        )
         history = await agent.run(
             max_steps=args.max_steps,
             on_step_start=_on_step_start_human,

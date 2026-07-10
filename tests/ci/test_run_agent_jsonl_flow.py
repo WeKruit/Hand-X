@@ -26,6 +26,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# Load these package modules before installing collection-time stubs so their
+# real parent-package bindings are restored for neighboring test modules.
+import ghosthands.agent.hooks
+import ghosthands.output
+
 # ---------------------------------------------------------------------------
 # Module-level setup: stub ALL the modules run_agent_jsonl imports from.
 # We track which modules we installed so we can restore them later.
@@ -43,6 +48,8 @@ _m_emit_account_created = MagicMock()
 _m_emit_error = MagicMock()
 _m_emit_done = MagicMock()
 _m_emit_awaiting_review = MagicMock()
+_m_emit_review_ready = MagicMock()
+_m_emit_run_state = MagicMock()
 _m_cleanup_browser = AsyncMock()
 
 
@@ -99,6 +106,8 @@ def _reset_mocks() -> None:
         _m_emit_error,
         _m_emit_done,
         _m_emit_awaiting_review,
+        _m_emit_review_ready,
+        _m_emit_run_state,
         _m_cleanup_browser,
     ]:
         m.reset_mock()
@@ -185,7 +194,13 @@ def _stub_all():
     go_jsonl.emit_error = _m_emit_error
     go_jsonl.emit_done = _m_emit_done
     go_jsonl.emit_awaiting_review = _m_emit_awaiting_review
+    go_jsonl.emit_review_ready = _m_emit_review_ready
+    go_jsonl.emit_run_state = _m_emit_run_state
     _install_stub("ghosthands.output.jsonl", go_jsonl)
+
+    go_history = types.ModuleType("ghosthands.output.agent_history_payload")
+    go_history.build_agent_history_payload = MagicMock(return_value=[])
+    _install_stub("ghosthands.output.agent_history_payload", go_history)
 
     go_jt = types.ModuleType("ghosthands.output.jsonl_terminal")
     go_jt.reset = MagicMock()
@@ -261,6 +276,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         "allowed_domains": None,
         "browsers_path": None,
         "cdp_url": None,
+        "cdp_target_id": None,
         "engine": "chromium",
     }
     defaults.update(overrides)
@@ -403,7 +419,7 @@ class TestRunAgentJsonlFlow:
         mock_agent = AsyncMock()
         mock_agent.state = MagicMock(n_steps=3, last_model_output=None, stopped=False)
 
-        async def _fake_listen_for_cancel(agent, cancel_requested):
+        async def _fake_listen_for_cancel(agent, cancel_requested, *, job_id=""):
             cancel_requested.set()
 
         async def _run_that_yields(**kwargs):
@@ -514,11 +530,20 @@ class TestRunAgentJsonlFlow:
         _, kwargs = _m_emit_cost.call_args
         assert kwargs.get("total_usd") == 0.12
 
-    async def test_submit_guard_breach_marks_failure_in_review_mode(self):
+    @pytest.mark.parametrize(
+        "claim",
+        [
+            "Application submitted successfully",
+            "Successfully applied",
+            "Submitted",
+            "The application has been submitted",
+        ],
+    )
+    async def test_submit_guard_breach_marks_failure_in_review_mode(self, claim):
         """A run that reports submission while submit_intent=review must fail."""
         mock_history = _make_mock_history(
             is_done=True,
-            final_result="Application submitted successfully",
+            final_result=claim,
         )
         mock_browser = _make_mock_browser()
 
@@ -535,3 +560,24 @@ class TestRunAgentJsonlFlow:
         kwargs = _m_emit_done.call_args.kwargs
         assert kwargs["success"] is False
         assert "guard breach" in (kwargs.get("message") or "").lower()
+
+    async def test_submit_guard_breach_in_agent_history_is_removed_from_output(self):
+        mock_history = _make_mock_history(is_done=True, final_result="Application ready for review")
+        mock_browser = _make_mock_browser()
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(return_value=mock_history)
+        mock_agent.state = MagicMock(n_steps=9, last_model_output=None, stopped=False)
+
+        with _apply_stubs_and_patches(mock_browser, mock_agent):
+            history_payload = sys.modules["ghosthands.output.agent_history_payload"].build_agent_history_payload
+            history_payload.return_value = [{"result": "Successfully applied"}]
+            with pytest.raises(SystemExit) as exc_info:
+                await run_agent_jsonl(_make_args())
+
+        assert exc_info.value.code == 1
+        _m_emit_awaiting_review.assert_not_called()
+        result_data = _m_emit_done.call_args.kwargs["result_data"]
+        assert "guard breach" in _m_emit_done.call_args.kwargs["message"].lower()
+        encoded = str(result_data).lower()
+        assert "successfully applied" not in encoded
+        assert "application submitted" not in encoded

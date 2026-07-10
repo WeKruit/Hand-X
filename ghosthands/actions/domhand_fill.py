@@ -323,6 +323,63 @@ PRE_LLM_OPTION_ENRICHMENT_SETTLE_MATCHES = 2
 MAX_CONDITIONAL_PASSES = 3
 DEFAULT_HITL_TIMEOUT_SECONDS = int(os.getenv("GH_OPEN_QUESTION_TIMEOUT_SECONDS", "5400"))
 
+
+async def _resolve_required_human_answer(
+    field: FormField,
+    proposed: ResolvedFieldValue | None,
+) -> ResolvedFieldValue | None:
+    """Ask the active JSONL host when a required field has no grounded answer."""
+    unresolved = (
+        proposed is None
+        or not proposed.value
+        or proposed.answer_mode == "best_effort_guess"
+        or "[NEEDS_USER_INPUT]" in proposed.value.upper()
+    )
+    if not field.required or not unresolved:
+        return proposed
+
+    from ghosthands.bridge.protocol import (
+        consume_field_answer_save,
+        get_field_answer,
+        is_hitl_available,
+        wait_for_run_resume,
+    )
+
+    if not is_hitl_available():
+        return None
+
+    from ghosthands.output.jsonl import emit_needs_answer, emit_run_state
+
+    label = _preferred_field_label(field)
+    emit_needs_answer(
+        field_id=field.field_id,
+        label=label,
+        field_type=field.field_type or "text",
+        options=list(field.options or field.choices),
+        required=True,
+        section=field.section or "",
+    )
+    answer = await get_field_answer(
+        field.field_id,
+        timeout=DEFAULT_HITL_TIMEOUT_SECONDS,
+        field_label=label,
+    )
+    save_answer = consume_field_answer_save(field.field_id, field_label=label)
+    if not await wait_for_run_resume():
+        return None
+    emit_run_state("running", message="Input received")
+    if answer is None or answer == "":
+        return None
+    coerced = _coerce_answer_to_field(field, answer)
+    if not coerced:
+        return None
+    return _resolved_field_value(
+        coerced,
+        source="human",
+        answer_mode="human_saved" if save_answer else "human_supplied",
+        confidence=1.0,
+    )
+
 # Selector for all interactive form elements (matches GH formFiller.ts).
 INTERACTIVE_SELECTOR = ", ".join(
     [
@@ -2941,6 +2998,10 @@ async def _stagehand_observe_cross_reference(
 
 async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSession) -> ActionResult:
     """Fill all visible form fields using fast DOM manipulation."""
+    from ghosthands.bridge.protocol import wait_for_run_resume
+
+    if not await wait_for_run_resume():
+        return ActionResult(error="Run cancelled while paused")
     # If previous fill was killed by timeout, note what it did.
     # This prefix goes into the ActionResult so the agent knows fields are likely done.
     _prev = getattr(browser_session, "_gh_fill_partial", None)
@@ -3133,6 +3194,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
     browser_session._gh_fill_partial = _partial
 
     for round_num in range(1, MAX_FILL_ROUNDS + 1):
+        if not await wait_for_run_resume():
+            return ActionResult(error="Run cancelled while paused")
         logger.info(f"DomHand fill round {round_num}/{MAX_FILL_ROUNDS}")
 
         try:
@@ -3914,6 +3977,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                         confidence=0.95,
                     ),
                 )
+                if not await wait_for_run_resume():
+                    return ActionResult(error="Run cancelled while paused")
                 success, field_error, failure_reason, fc, settled_value = await _attempt_domhand_fill_with_retry_cap(
                     page,
                     host=page_host,
@@ -3999,6 +4064,7 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
             if resolved_value and "[NEEDS_USER_INPUT]" in resolved_value.value:
                 _rejection_reason = "needs_user_input"
                 resolved_value = None
+            resolved_value = await _resolve_required_human_answer(f, resolved_value)
             if not resolved_value or not resolved_value.value:
                 if not _rejection_reason:
                     _rejection_reason = "resolve_returned_none"
@@ -4043,6 +4109,8 @@ async def domhand_fill(params: DomHandFillParams, browser_session: BrowserSessio
                 fields_skipped.add(key)
                 continue
             matched_answer = resolved_value.value
+            if not await wait_for_run_resume():
+                return ActionResult(error="Run cancelled while paused")
             success, field_error, failure_reason, fc, settled_value = await _attempt_domhand_fill_with_retry_cap(
                 page,
                 host=page_host,

@@ -765,13 +765,43 @@ _CLICK_SINGLE_RADIO_JS = r"""(ffId, text) => {
 	return JSON.stringify({clicked: false});
 }"""
 
-_CLICK_CHECKBOX_GROUP_JS = r"""(ffId) => {
+_CLICK_CHECKBOX_GROUP_JS = r"""(ffId, desiredValue) => {
 	var ff = window.__ff;
 	var el = ff ? ff.byId(ffId) : null;
 	if (!el) return JSON.stringify({clicked: false});
 	var group = ff.closestCrossRoot(el, '.checkbox-group, [role="group"]') || el;
 	var cbs = Array.from(group.querySelectorAll('input[type="checkbox"], [role="checkbox"]'));
 	if (cbs.length === 0) return JSON.stringify({clicked: false});
+	var normalize = function(s) { return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); };
+	var requested = String(desiredValue || '').split(',').map(normalize).filter(Boolean);
+	var booleanRequest = requested.length === 1 && ['true', 'checked', 'yes', 'on', '1'].includes(requested[0]);
+	if (requested.length && !booleanRequest) {
+		var getLabel = function(cb) {
+			var aria = cb.getAttribute('aria-label');
+			if (aria && aria.trim()) return aria.trim();
+			if (cb.id) {
+				var linked = ff.queryOne('label[for="' + CSS.escape(cb.id) + '"]');
+				if (linked) return linked.textContent || '';
+			}
+			var wrapped = cb.closest('label');
+			return wrapped ? wrapped.textContent || '' : cb.value || '';
+		};
+		var controls = new Map();
+		for (var r = 0; r < requested.length; r++) {
+			for (var c = 0; c < cbs.length; c++) {
+				var labels = [normalize(getLabel(cbs[c])), normalize(cbs[c].value)];
+				if (labels.includes(requested[r])) { controls.set(requested[r], cbs[c]); break; }
+			}
+		}
+		if (controls.size !== requested.length) return JSON.stringify({clicked: false, matchedCount: controls.size});
+		var selected = new Set(Array.from(controls.values()));
+		var changed = 0;
+		for (var j = 0; j < cbs.length; j++) {
+			var checked = cbs[j].checked || cbs[j].getAttribute('aria-checked') === 'true';
+			if (checked !== selected.has(cbs[j])) { cbs[j].click(); changed += 1; }
+		}
+		return JSON.stringify({clicked: true, alreadyChecked: changed === 0, matchedCount: controls.size});
+	}
 	for (var i = 0; i < cbs.length; i++) {
 		if (cbs[i].checked || cbs[i].getAttribute('aria-checked') === 'true') return JSON.stringify({clicked: true, alreadyChecked: true});
 	}
