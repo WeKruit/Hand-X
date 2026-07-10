@@ -692,6 +692,10 @@ async def _fill_form(
     # processing on upload that can freeze the headless renderer; doing it AFTER the text fields
     # means a wedge can't cost us the rest of the form. Stable sort keeps every other field's order.
     fields_file_last = sorted(fields, key=lambda f: 1 if getattr(f, "source", "") == "file" else 0)
+    # DISCOVERED-FIELD REGISTRY (cross-field-bleed boundary): hand the engine every discovered
+    # field's dom id so sibling searches can refuse an "empty sibling" that is really another
+    # QUESTION's input (replit 017 / airwallex 042: '+44'/essay-half typed into the next field).
+    oa.PAGE_FIELD_IDS = {str(f.name) for f in fields if getattr(f, "name", None)}
     # the FORM's url, captured BEFORE any fill click can navigate away (samsara mega3/28: a
     # mid-fill click drifted to /company/belonging, so complete()'s entry snapshot already held
     # the wrong page and its drift guard saw no difference).
@@ -739,8 +743,86 @@ async def _fill_form(
             row.outcome = oa.ESCALATE  # pixels said blank and the recommit failed -> honest
         return str(out2)
 
+    # JS snippets for the skipped-blank pollution sweep — locate by the DISCOVERY id/name (structural
+    # identity, never label text); clear mirrors _SET_VALUE_JS (native setter + React tracker poke).
+    _READ_BY_NAME_JS = (
+        "(n) => { const el = document.getElementById(n) || document.getElementsByName(n)[0];"
+        " if (!el) return null;"
+        " return String(el.value != null ? el.value : (el.textContent || '')); }"
+    )
+    _CLEAR_BY_NAME_JS = (
+        "(n) => { const el = document.getElementById(n) || document.getElementsByName(n)[0];"
+        " if (!el) return null;"
+        " const tag = (el.tagName || '').toUpperCase();"
+        " const proto = tag === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;"
+        " const desc = Object.getOwnPropertyDescriptor(proto, 'value');"
+        " if (desc && desc.set) { desc.set.call(el, ''); } else { el.value = ''; }"
+        " try { const tk = el._valueTracker; if (tk) tk.setValue('x'); } catch (e) {}"
+        " el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));"
+        " el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));"
+        " return String(el.value || ''); }"
+    )
+    _SWEEP_TEXTY = {"", "text", "textarea", "email", "tel", "url", "number", "search"}
+
+    async def _pollution_sweep(where: str) -> None:
+        """Skipped-BLANK fields are the bleed's blind spot: the engine never wrote them, so their
+        read-back must be EMPTY — any content is a stray from another field's actuation (composite
+        split into a false 'sibling', focus-steal mid-keystrokes), invisible to every committed-field
+        verdict (replit 017 '+44'/essay-half, airwallex 042 Middle Name '+1'). Read each one by its
+        discovery id, CLEAR non-empty strays (native setter via CDP), and push every DONE field whose
+        committed value CONTAINS the stray (data-value cross-check, never label matching) back through
+        the repair machinery — its own content may be the diverted half. Fail-closed: a stray that
+        survives the clear demotes the row to ESCALATE; nothing is ever silently blessed."""
+        from oa_cdp_action import _alnum_fold as _fold
+
+        for row in per_field:
+            if row.outcome != oa.SKIP or "blank->SKIP" not in str(row.trace or ""):
+                continue
+            if str(row.type or "").lower() not in _SWEEP_TEXTY:
+                continue
+            nm = str(row.name or "")
+            if not nm or nm in _committed_nodes:
+                continue  # a recorded composite-sibling/widget write — that content is OURS and legit
+            got = None
+            with contextlib.suppress(Exception):
+                got = await page.evaluate(_READ_BY_NAME_JS, nm)
+            if got is None or not str(got).strip():
+                continue
+            stray = str(got).strip()
+            print(f"   [pollution:{where}] skipped-blank '{str(row.label)[:40]}' holds {stray[:40]!r} -> clear")
+            cleared = None
+            with contextlib.suppress(Exception):
+                cleared = await page.evaluate(_CLEAR_BY_NAME_JS, nm)
+            entry: dict[str, Any] = {
+                "where": where, "label": str(row.label)[:60], "stray": stray[:80], "cleared": str(cleared) == "",
+            }
+            result.setdefault("pollution", []).append(entry)
+            if isinstance(row.trace, list):
+                row.trace.append(f"pollution@{where}:{stray[:24]!r}->" + ("cleared" if str(cleared) == "" else "STUCK"))
+            if str(cleared) != "":
+                row.outcome = oa.ESCALATE  # garbage we cannot remove — never fail-open
+                continue
+            sf = _fold(stray)
+            if not sf:
+                continue
+            for src in per_field:
+                if src is row or src.outcome != oa.DONE:
+                    continue
+                if sf not in _fold(str(src.committed or "")):
+                    continue
+                cur_v = None
+                with contextlib.suppress(Exception):
+                    cur_v = await page.evaluate(_READ_BY_NAME_JS, str(src.name or ""))
+                # the source's own paint no longer carries its committed value -> the commit was
+                # (partly) diverted into the stray we just cleared: full repair re-run.
+                if cur_v is None or _fold(str(src.committed or "")) not in _fold(str(cur_v)):
+                    entry.setdefault("source_reverify", []).append(str(src.label)[:40])
+                    print(f"   [pollution:{where}] source '{str(src.label)[:40]}' lost its value -> recommit")
+                    await _ckpt_repair(src)
+
     async def _visual_checkpoint(trigger: str) -> None:
         """Flush the pending committed batch through ONE vision_audit call; repair contradictions."""
+        await _pollution_sweep(trigger)  # DOM-only, deterministic — runs even when the VLM cadence is off
         batch = list(_ckpt_pending)
         _ckpt_pending.clear()
         if not batch or _ckpt_every <= 0:
@@ -1057,6 +1139,7 @@ async def _fill_form(
                 with contextlib.suppress(Exception):
                     mapped.update(await eng.map_fields(_oal.ResilientLLM(llm), _mrows, profile or {}, title))
             fields.extend(fresh)  # the required-field gates + denominator must see the new step's fields
+            oa.PAGE_FIELD_IDS = {str(f2.name) for f2 in fields if getattr(f2, "name", None)}
             result["fields_total"] = len(fields)
             await _fill_pass(sorted(fresh, key=lambda f2: 1 if getattr(f2, "source", "") == "file" else 0))
             await _visual_checkpoint("page-exhausted")
@@ -1306,6 +1389,13 @@ async def _fill_form(
                     result["completeness"].setdefault("missing_required", []).extend(_suspects)
             with contextlib.suppress(Exception):
                 page = await session.must_get_current_page()
+
+        # FINAL POLLUTION SWEEP: complete()'s retry pass re-runs commits (a re-split / re-type can
+        # bleed again AFTER the last checkpoint — replit 006/013: '+44' landed in the last remaining
+        # empty input during the repair pass). One more skipped-blank sweep so the end-state screen,
+        # the hard gate, and the vision gate all see the cleaned form. DOM-only, deterministic.
+        with contextlib.suppress(Exception):
+            await _pollution_sweep("final")
 
         # ============================================================================
         # HARD LEDGER GATE — the un-suppressed, ledger-first veto (mega4 green audit:

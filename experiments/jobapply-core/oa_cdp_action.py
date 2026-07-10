@@ -1996,7 +1996,21 @@ async def cdp_type(session: Any, node: Any, text: str, *, keystrokes: bool = Fal
             await cdp_session.cdp_client.send.DOM.focus(
                 params={"backendNodeId": backend_node_id}, session_id=session_id
             )
-        for ch in str(text):
+        # FOCUS-IDENTITY GUARD (cross-field bleed): trusted key events land on document.activeElement,
+        # NOT on object_id — and the DOM.focus above is best-effort (a detached/re-rendered node fails
+        # silently inside the suppress), so without this check the whole batch types this field's
+        # value into WHOEVER kept focus, i.e. a neighbouring field. Structural identity only: compare
+        # the resolved target object against its root's activeElement. One JS refocus retry, then
+        # abort FAIL-CLOSED (the caller's read-back/verify reports the miss); mid-batch re-checks
+        # catch a widget stealing focus while its dropdown opens.
+        if not await _focused_is_target(cdp_session, session_id, object_id):
+            with contextlib.suppress(Exception):
+                await _call_on(cdp_session, session_id, object_id, "function(){ this.focus(); }")
+            if not await _focused_is_target(cdp_session, session_id, object_id):
+                return False
+        for i, ch in enumerate(str(text)):
+            if i and i % 12 == 0 and not await _focused_is_target(cdp_session, session_id, object_id):
+                return False  # focus stolen mid-batch — stop feeding a stranger, fail-closed
             await _dispatch_char(cdp_session, session_id, ch)
         # HEAD-LOSS fixup: typeahead widgets steal focus/wipe while their dropdown opens on the
         # first keystrokes — the head chars deterministically vanish ('University…' -> 'ersity of
@@ -2020,6 +2034,24 @@ async def cdp_type(session: Any, node: Any, text: str, *, keystrokes: bool = Fal
     # essay needs 10-30s, and the flat 4s guard killed it mid-flight ('text-type-refused' on
     # every long answer). Budget follows the work, still hard-bounded.
     return await _guarded(_do(), timeout=max(CDP_ACTION_TIMEOUT, 2.0 + 0.05 * len(str(text))))
+
+
+# `this` = the resolved target. True iff the target (or one of its descendants — a composite
+# widget's inner editable) is the activeElement of its OWN root (getRootNode covers shadow DOM;
+# per-frame session covers iframes). Structural identity — no labels, no text.
+_FOCUS_IS_TARGET_JS = (
+    "function(){ const r = this.getRootNode ? this.getRootNode() : document;"
+    " const a = (r && r.activeElement) || document.activeElement;"
+    " return this === a || !!(a && this.contains && this.contains(a)); }"
+)
+
+
+async def _focused_is_target(cdp_session: Any, session_id: Any, object_id: str) -> bool:
+    """Does the page's focus sit on the resolved target node (or inside it)? Errors -> False
+    (fail-closed: if we cannot PROVE the keystrokes will land on the target, we do not type)."""
+    with contextlib.suppress(Exception):
+        return (await _call_on(cdp_session, session_id, object_id, _FOCUS_IS_TARGET_JS)) is True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -2258,7 +2290,10 @@ async def _selftest() -> int:
     chk("click_xy used the given coords", all(p == (120, 240) for p in xy), xy)
 
     # --- cdp_type keystrokes: clear (set_value '') -> focus -> per-char keyDown/char/keyUp ---
-    fs6 = _FakeSession(call_value="")
+    # the focus-identity probe must answer True (focus IS on the target) for the happy path.
+    fs6 = _FakeSession(
+        call_value=lambda p: True if "activeElement" in p["functionDeclaration"] else ""
+    )
     ok6 = await cdp_type(fs6, node, "ab", keystrokes=True, clear=True)
     ms6 = _methods(fs6.send)
     chk("type(keystrokes) -> True", ok6 is True, ok6)
@@ -2272,6 +2307,29 @@ async def _selftest() -> int:
         c[1].get("text") for c in fs6.send.calls if c[0] == "Input.dispatchKeyEvent" and c[1].get("type") == "char"
     ]
     chk("type char events carry the chars", char_texts == ["a", "b"], char_texts)
+
+    # --- cdp_type keystrokes REFUSED when focus sits elsewhere (cross-field bleed guard) ---
+    # the probe answers False both before and after the JS refocus retry -> ZERO chars may be
+    # dispatched (they would land in ANOTHER field) and the call must fail-closed.
+    fs6b = _FakeSession(
+        call_value=lambda p: False if "activeElement" in p["functionDeclaration"] else ""
+    )
+    ok6b = await cdp_type(fs6b, node, "ab", keystrokes=True, clear=True)
+    chk("type(keystrokes) -> False when focus is NOT the target", ok6b is False, ok6b)
+    chk(
+        "focus-mismatch dispatched ZERO key events",
+        "Input.dispatchKeyEvent" not in _methods(fs6b.send),
+        _methods(fs6b.send),
+    )
+    chk(
+        "focus-mismatch attempted a JS refocus first",
+        any(
+            "this.focus()" in (c[1].get("functionDeclaration") or "")
+            for c in fs6b.send.calls
+            if c[0] == "Runtime.callFunctionOn"
+        ),
+        "",
+    )
 
     # --- cdp_type plain (keystrokes=False) routes to cdp_set_value (no key events) ---
     fs7 = _FakeSession(call_value=lambda p: p["arguments"][0]["value"])

@@ -56,6 +56,13 @@ UNVERIFIED = "UNVERIFIED"  # committed but the vision layer could not confirm it
 NEEDS_HUMAN = "NEEDS_HUMAN"  # a human must answer (voice/audio/media answer field) — never text-filled
 Outcome = str
 
+# DISCOVERED-FIELD REGISTRY (cross-field-bleed boundary): every discovered field's dom id/name for
+# the CURRENT page, set by the runner (oa_singlepage) right after discovery and refreshed when the
+# flow lane extends the field list. Pure STRUCTURAL identity — lets sibling searches recognize "this
+# empty input is another QUESTION the page already knows about", never label text. Empty set (unit
+# fakes, exotic callers) degrades to the historical unguarded behavior.
+PAGE_FIELD_IDS: set[str] = set()
+
 # PRODUCTION TIMEOUT POLICY (do not "fix" this into a process kill): when a REQUIRED field overruns
 # its per-field budget (FIELD_DEADLINE / STEP_CAP), the guard returns ESCALATE so the field is handed
 # to the agent of last resort and the rest of the form keeps filling — the engine NEVER kills the
@@ -3080,6 +3087,14 @@ async def _split_composite_to_sibling(session: Any, ctx: Ctx) -> Outcome | None:
     if sib is not None:
         await act.type_text(session, sib, secondary, clear=True)
         b = ((await read_dom_value(session, sib)) or "").strip()
+        # register the sibling write (same mechanism as the dial-widget "__widget__" record below):
+        # the sibling may ALSO be a discovered field whose own row is blank->SKIP (Ext. / Maximum /
+        # line 2) — the skipped-blank pollution sweep must know its content is OURS, not a stray.
+        if b and ctx.committed_nodes is not None:
+            _sat = getattr(sib, "attributes", None) or {}
+            _sid = str(_sat.get("id") or _sat.get("name") or "")
+            if _sid:
+                ctx.committed_nodes[_sid] = "__sibling__"
     else:
         # no text sibling -> the secondary maps to a sibling SELECTOR. Climb from the primary input
         # (by stable id, stale-proof) to the field container and commit it there. Two selector kinds:
@@ -3254,13 +3269,33 @@ async def _find_revealed_input(session: Any, ctx: "Ctx") -> Any | None:
     if node is None:
         return None
     own = getattr(node, "backend_node_id", None)
+
+    # CROSS-FIELD BOUNDARY (replit 017 / airwallex 042 bleed): on a flat one-section form the 5th/6th
+    # parent IS the whole section, and "the first empty text input in it" is simply the next
+    # unanswered QUESTION (Middle Name / Replit Profile URL), not this field's sibling box — the
+    # composite split then types its secondary ('+44', an essay half) into a stranger. Identity is
+    # STRUCTURAL: an input whose id/name is a discovered field (PAGE_FIELD_IDS) belongs to a question;
+    # an ancestor holding a THIRD question's control spans multiple questions, so nothing found there
+    # (or higher) can be trusted as THIS field's sibling. The legit shapes survive: Min/Max, Ext.,
+    # line-2 share their question card with the primary, so no third field sits in that container.
+    def _field_id_of(n: Any) -> str:
+        at = getattr(n, "attributes", None) or {}
+        for k in ("id", "name"):
+            v = str(at.get(k) or "")
+            if v and v in PAGE_FIELD_IDS:
+                return v
+        return ""
+
+    own_fid = _field_id_of(node) or ref
     cur = node
     for _ in range(6):
         parent = getattr(cur, "parent_node", None)
         if parent is None:
             break
         cur = parent
-        for n in perc._controls_in(cur):
+        cand = None
+        controls = perc._controls_in(cur)
+        for n in controls:
             if getattr(n, "backend_node_id", None) == own:
                 continue
             if perc._is_descendant(n, node):  # skip the committed combobox's OWN inner input
@@ -3279,7 +3314,18 @@ async def _find_revealed_input(session: Any, ctx: "Ctx") -> Any | None:
             with contextlib.suppress(Exception):
                 existing = ((await read_dom_value(session, n)) or "").strip()
             if not existing:
-                return n
+                cand = n
+                break
+        cand_fid = _field_id_of(cand) if cand is not None else ""
+        crossed = any(
+            (fid := _field_id_of(n)) and fid not in (own_fid, cand_fid) for n in controls
+        )
+        if crossed:
+            if cand is not None and hasattr(ctx, "trace"):
+                ctx.trace.append("reveal-sibling:crossed-field-boundary->none")
+            return None
+        if cand is not None:
+            return cand
     return None
 
 

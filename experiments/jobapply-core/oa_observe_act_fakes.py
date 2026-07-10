@@ -660,6 +660,8 @@ class _FakeCdpActionSession:
                 if self._bnid in self._owner._on_type:  # a value-set on a search box mounts its delta
                     self._owner._mount(self._owner._on_type[self._bnid])
             return text  # cdp_set_value success = echo == text
+        if "activeElement" in fn:  # _FOCUS_IS_TARGET_JS — the fake world has no focus thief:
+            return True  # DOM.focus always lands, so the guard's probe answers True
         if "this.click()" in fn:  # _JS_CLICK_JS — option-cell click commit (box-less fallback)
             self._record_click()
             self._owner._any_write = True
