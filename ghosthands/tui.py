@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
@@ -29,6 +29,13 @@ class TuiEvent(BaseModel):
 
     event: str
     timestamp: int | float | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_event_name(cls, value: Any) -> Any:
+        if isinstance(value, dict) and not value.get("event") and value.get("type"):
+            value = {**value, "event": value["type"]}
+        return value
 
     @property
     def data(self) -> dict[str, Any]:
@@ -56,6 +63,8 @@ class TuiRunState:
     lease_id: str = ""
     sync_status: str = "Local run"
     awaiting_review: bool = False
+    review_ready: bool = False
+    pending_question: dict[str, Any] | None = None
     done: bool = False
     success: bool | None = None
     message: str = ""
@@ -127,6 +136,36 @@ class TuiRunState:
             self.cdp_url = str(data.get("cdpUrl") or "")
             self.status = "Browser ready"
             self.add_log("browser", "Browser ready for automation")
+            return
+
+        if kind == "needs_answer":
+            questions = data.get("questions")
+            question = questions[0] if isinstance(questions, list) and questions else data.get("field")
+            if isinstance(question, dict):
+                self.pending_question = question
+                self.phase = "Input required"
+                label = str(question.get("fieldLabel") or question.get("label") or "Field input")
+                self.status = str(data.get("message") or label)
+                self.add_log("input", label)
+            return
+
+        if kind == "paused":
+            self.status = str(data.get("message") or "Paused")
+            self.add_log("control", self.status)
+            return
+
+        if kind == "resumed":
+            self.status = str(data.get("message") or "Resumed")
+            self.add_log("control", self.status)
+            return
+
+        if kind == "review_ready":
+            self.review_ready = True
+            self.phase = "Review"
+            self.status = str(data.get("message") or "Application ready for review")
+            self.cdp_url = str(data.get("cdpUrl") or self.cdp_url)
+            self.page_url = str(data.get("pageUrl") or self.page_url)
+            self.add_log("review", self.status)
             return
 
         if kind == "account_created":
@@ -221,12 +260,13 @@ def build_engine_argv(args: argparse.Namespace, executable: Sequence[str] | None
     add_option("--model", args.model)
     add_option("--max-steps", args.max_steps)
     add_option("--max-budget", args.max_budget)
-    add_option("--submit-intent", args.submit_intent)
+    add_option("--submit-intent", "review")
     add_option("--proxy-url", args.proxy_url)
     add_option("--runtime-grant", args.runtime_grant)
     add_option("--allowed-domains", args.allowed_domains)
     add_option("--browsers-path", args.browsers_path)
     add_option("--cdp-url", args.cdp_url)
+    add_option("--cdp-target-id", getattr(args, "cdp_target_id", None))
     add_option("--engine", getattr(args, "engine", None))
     if args.headless:
         argv.append("--headless")
@@ -265,9 +305,17 @@ async def run_tui(args: argparse.Namespace) -> None:
     try:
         while proc.returncode is None:
             with Live(_render_state(state), console=console, refresh_per_second=4) as live:
-                while proc.returncode is None and not (state.awaiting_review and not review_command_sent):
+                while proc.returncode is None and not (
+                    state.pending_question or (state.awaiting_review and not review_command_sent)
+                ):
                     live.update(_render_state(state))
                     await asyncio.sleep(0.25)
+
+            if state.pending_question:
+                await _handle_hitl_prompt(proc, state, console)
+                state.pending_question = None
+                state.status = "Input sent; automation resuming"
+                continue
 
             if state.awaiting_review and not review_command_sent:
                 await _handle_review_prompt(proc, state, console)
@@ -305,8 +353,9 @@ def _collect_tui_args(args: argparse.Namespace, console: Console) -> argparse.Na
     if (missing_core or not has_profile_source) and not sys.stdin.isatty():
         raise SystemExit("TUI mode needs an interactive terminal when job/profile inputs are missing.")
 
+    values["submit_intent"] = "review"
+
     if not sys.stdin.isatty():
-        values["submit_intent"] = values.get("submit_intent") or "review"
         values["output_format"] = "tui"
         return argparse.Namespace(**values)
 
@@ -342,9 +391,6 @@ def _collect_tui_args(args: argparse.Namespace, console: Console) -> argparse.Na
     values["max_budget"] = float(Prompt.ask("Max budget USD", default=str(values.get("max_budget") or 0.5)))
     values["headless"] = Confirm.ask("Run browser headless?", default=bool(values.get("headless")))
 
-    if not values.get("submit_intent"):
-        values["submit_intent"] = Prompt.ask("Final submit mode", choices=["review", "submit"], default="review")
-
     _validate_path(values.get("resume"), "Resume")
     if values.get("profile") and str(values["profile"]).startswith("@"):
         _validate_path(str(values["profile"])[1:], "Profile")
@@ -366,7 +412,7 @@ def _intro_panel(args: argparse.Namespace) -> Panel:
     table.add_row("Job", str(args.job_url))
     table.add_row("Profile", _profile_source_label(args))
     table.add_row("Resume", str(args.resume or "none"))
-    table.add_row("Mode", str(args.submit_intent or "review"))
+    table.add_row("Mode", "review")
     table.add_row("Browser", "headless" if args.headless else "visible")
     table.add_row("Sync", _sync_source_label(args))
     return Panel(table, title="Hand-X Terminal", border_style="cyan")
@@ -438,9 +484,43 @@ async def _handle_review_prompt(
     console: Console,
 ) -> None:
     console.print(_review_panel(state))
-    complete = Confirm.ask("Mark review complete and close the browser?", default=False)
+    complete = Confirm.ask("Mark review complete and detach the engine?", default=False)
     command = {"type": "complete_review"} if complete else {"type": "cancel_job"}
     await _send_command(proc, command)
+
+
+async def _handle_hitl_prompt(
+    proc: asyncio.subprocess.Process,
+    state: TuiRunState,
+    console: Console,
+) -> None:
+    question = state.pending_question or {}
+    field_id = str(question.get("fieldId") or question.get("id") or "")
+    field_label = str(question.get("fieldLabel") or question.get("label") or field_id)
+    options = question.get("options")
+    console.print(f"\n[bold]{field_label}[/bold]")
+    if isinstance(options, list) and options:
+        skip_choice = "<skip>"
+        choices = [str(option) for option in options]
+        selected = Prompt.ask("Answer", choices=[*choices, skip_choice], default=choices[0])
+        answer = "" if selected == skip_choice else selected.strip()
+    else:
+        answer = Prompt.ask("Answer (leave blank to skip)", default="").strip()
+    if answer:
+        await _send_command(
+            proc,
+            {
+                "type": "answer_field",
+                "field_id": field_id,
+                "field_label": field_label,
+                "answer": answer,
+            },
+        )
+    else:
+        await _send_command(
+            proc,
+            {"type": "skip_field", "field_id": field_id, "field_label": field_label},
+        )
 
 
 async def _send_command(proc: asyncio.subprocess.Process, command: dict[str, Any]) -> None:

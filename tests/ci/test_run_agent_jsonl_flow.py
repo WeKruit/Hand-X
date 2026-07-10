@@ -26,6 +26,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# Load these package modules before installing collection-time stubs so their
+# real parent-package bindings are restored for neighboring test modules.
+import ghosthands.agent.hooks
+import ghosthands.output
+
 # ---------------------------------------------------------------------------
 # Module-level setup: stub ALL the modules run_agent_jsonl imports from.
 # We track which modules we installed so we can restore them later.
@@ -43,6 +48,8 @@ _m_emit_account_created = MagicMock()
 _m_emit_error = MagicMock()
 _m_emit_done = MagicMock()
 _m_emit_awaiting_review = MagicMock()
+_m_emit_review_ready = MagicMock()
+_m_emit_run_state = MagicMock()
 _m_cleanup_browser = AsyncMock()
 
 
@@ -99,6 +106,8 @@ def _reset_mocks() -> None:
         _m_emit_error,
         _m_emit_done,
         _m_emit_awaiting_review,
+        _m_emit_review_ready,
+        _m_emit_run_state,
         _m_cleanup_browser,
     ]:
         m.reset_mock()
@@ -185,7 +194,13 @@ def _stub_all():
     go_jsonl.emit_error = _m_emit_error
     go_jsonl.emit_done = _m_emit_done
     go_jsonl.emit_awaiting_review = _m_emit_awaiting_review
+    go_jsonl.emit_review_ready = _m_emit_review_ready
+    go_jsonl.emit_run_state = _m_emit_run_state
     _install_stub("ghosthands.output.jsonl", go_jsonl)
+
+    go_history = types.ModuleType("ghosthands.output.agent_history_payload")
+    go_history.build_agent_history_payload = MagicMock(return_value=[])
+    _install_stub("ghosthands.output.agent_history_payload", go_history)
 
     go_jt = types.ModuleType("ghosthands.output.jsonl_terminal")
     go_jt.reset = MagicMock()
@@ -261,6 +276,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         "allowed_domains": None,
         "browsers_path": None,
         "cdp_url": None,
+        "cdp_target_id": None,
         "engine": "chromium",
     }
     defaults.update(overrides)
@@ -403,7 +419,7 @@ class TestRunAgentJsonlFlow:
         mock_agent = AsyncMock()
         mock_agent.state = MagicMock(n_steps=3, last_model_output=None, stopped=False)
 
-        async def _fake_listen_for_cancel(agent, cancel_requested):
+        async def _fake_listen_for_cancel(agent, cancel_requested, *, job_id=""):
             cancel_requested.set()
 
         async def _run_that_yields(**kwargs):

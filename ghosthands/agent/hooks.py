@@ -186,6 +186,19 @@ _FINAL_SUBMIT_GUARD_JS = r"""(() => {
 		}
 	}
 
+	function looksLikeApplicationForm(form) {
+		if (!form || !form.getAttribute) return false;
+		const identity = normalize([
+			form.id,
+			form.getAttribute('name'),
+			form.getAttribute('class'),
+			form.getAttribute('aria-label'),
+			form.getAttribute('data-automation-id'),
+			form.getAttribute('action'),
+		].filter(Boolean).join(' '));
+		return /(?:job|candidate)?\s*application|application\s*form|jobapplication/.test(identity);
+	}
+
 	function recordBlock(el) {
 		const text = normalize(getText(el));
 		window.__ghFinalSubmitGuardState = {
@@ -217,11 +230,13 @@ _FINAL_SUBMIT_GUARD_JS = r"""(() => {
 			text === 'next' ||
 			text === 'continue' ||
 			text.includes('continue to review') ||
-			text.includes('apply with resume') ||
-			text === 'apply'
+			text.includes('apply with resume')
 		) {
 			return false;
 		}
+		const applicationFormAction = looksLikeApplicationForm(form) && (
+			text === 'apply' || text === 'apply now' || text === 'finish'
+		);
 
 		return (
 			text === 'submit' ||
@@ -230,7 +245,8 @@ _FINAL_SUBMIT_GUARD_JS = r"""(() => {
 			text.includes('finish and submit') ||
 			text.includes('complete application') ||
 			text.includes('confirm and submit') ||
-			text.includes('send application')
+			text.includes('send application') ||
+			applicationFormAction
 		);
 	}
 
@@ -239,9 +255,9 @@ _FINAL_SUBMIT_GUARD_JS = r"""(() => {
 		if (candidate && looksLikeFinalSubmit(candidate)) return candidate.closest('button, input[type="submit"], input[type="button"], [role="button"]');
 		try {
 			const controls = Array.from(form.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'));
-			return controls.find(looksLikeFinalSubmit) || null;
+			return controls.find(looksLikeFinalSubmit) || (looksLikeApplicationForm(form) ? form : null);
 		} catch (e) {
-			return null;
+			return looksLikeApplicationForm(form) ? form : null;
 		}
 	}
 
@@ -346,35 +362,22 @@ async def install_same_tab_guard(agent: "Agent") -> None:
 
 
 async def install_final_submit_guard(agent: "Agent", *, allow_submit: bool) -> None:
-	"""Install a runtime guard that blocks final application submission by default."""
+	"""Install the review-mode submit guard, failing before automation if it cannot be installed."""
 	if allow_submit:
 		return
-	try:
-		browser_session = getattr(agent, "browser_session", None)
-		if browser_session is None:
-			return
+	browser_session = getattr(agent, "browser_session", None)
+	if browser_session is None:
+		raise RuntimeError("Review mode requires an active browser session for the final-submit guard")
 
-		session_key = id(browser_session)
-		if session_key not in _FINAL_SUBMIT_GUARD_INSTALLED:
-			try:
-				await browser_session._cdp_add_init_script(_FINAL_SUBMIT_GUARD_JS)
-				_FINAL_SUBMIT_GUARD_INSTALLED.add(session_key)
-			except Exception as exc:
-				logger.debug("step.final_submit_guard_init_failed", extra={"error": str(exc)})
+	session_key = id(browser_session)
+	if session_key not in _FINAL_SUBMIT_GUARD_INSTALLED:
+		await browser_session._cdp_add_init_script(_FINAL_SUBMIT_GUARD_JS)
+		_FINAL_SUBMIT_GUARD_INSTALLED.add(session_key)
 
-		pages = []
-		try:
-			pages = list(await browser_session.get_pages())
-		except Exception:
-			pages = []
-		if not pages:
-			page = await browser_session.get_current_page()
-			if page:
-				pages = [page]
-		for page in pages:
-			await page.evaluate(_FINAL_SUBMIT_GUARD_JS)
-	except Exception as exc:
-		logger.debug("step.final_submit_guard_apply_failed", extra={"error": str(exc)})
+	page = await browser_session.get_current_page()
+	if page is None:
+		raise RuntimeError("Review mode could not install the final-submit guard on the selected target")
+	await page.evaluate(_FINAL_SUBMIT_GUARD_JS)
 
 
 async def consume_blocked_final_submit(agent: "Agent") -> dict[str, Any] | None:

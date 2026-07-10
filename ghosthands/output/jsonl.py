@@ -14,6 +14,7 @@ library imports to capture the real stdout fd.  After installation:
 from __future__ import annotations
 
 import json
+import math
 import sys
 import threading
 import time
@@ -58,10 +59,40 @@ def _get_output() -> IO[str]:
 
 # ── Core emitter ──────────────────────────────────────────────────────
 _emit_lock = threading.Lock()
+_state_lock = threading.Lock()
 _pipe_broken = False
+_event_version = 0
+_last_timestamp_ms = 0
+_run_status = "running"
+_max_total_usd = 0.0
+_max_prompt_tokens = 0
+_max_completion_tokens = 0
 
-_emit_lock = threading.Lock()
-_pipe_broken = False
+
+def _set_run_status(status: str) -> None:
+    global _run_status
+    with _state_lock:
+        _run_status = status
+
+
+def _get_run_status() -> str:
+    with _state_lock:
+        return _run_status
+
+
+def reset_event_state() -> None:
+    """Reset per-process ordering and cumulative cost state before a run."""
+    global _event_version, _last_timestamp_ms, _max_completion_tokens
+    global _max_prompt_tokens, _max_total_usd, _pipe_broken, _run_status
+    with _emit_lock:
+        _event_version = 0
+        _last_timestamp_ms = 0
+        _pipe_broken = False
+    with _state_lock:
+        _run_status = "running"
+        _max_total_usd = 0.0
+        _max_prompt_tokens = 0
+        _max_completion_tokens = 0
 
 
 def emit_event(event_type: str, **kwargs: Any) -> None:
@@ -71,7 +102,7 @@ def emit_event(event_type: str, **kwargs: Any) -> None:
     passed through as keyword arguments -- ``None`` values are omitted
     to keep the wire format compact.
     """
-    global _pipe_broken
+    global _event_version, _last_timestamp_ms, _pipe_broken
     if _pipe_broken:
         if event_type in ("done", "error"):
             print(
@@ -80,16 +111,23 @@ def emit_event(event_type: str, **kwargs: Any) -> None:
             )
         return
 
-    event: dict[str, Any] = {
-        "event": event_type,
-        "timestamp": int(time.time() * 1000),
-    }
-    for key, value in kwargs.items():
-        if value is not None:
-            event[key] = value
-
-    line = json.dumps(event, separators=(",", ":")) + "\n"
     with _emit_lock:
+        _event_version += 1
+        _last_timestamp_ms = max(_last_timestamp_ms + 1, int(time.time() * 1000))
+        event: dict[str, Any] = {
+            "type": event_type,
+            "event": event_type,
+            "version": _event_version,
+            "sequence": _event_version,
+            "timestamp": _last_timestamp_ms,
+        }
+        for key, value in kwargs.items():
+            if key in {"type", "event", "version", "sequence", "timestamp"}:
+                continue
+            if value is not None:
+                event[key] = value
+
+        line = json.dumps(event, separators=(",", ":")) + "\n"
         try:
             out = _get_output()
             out.write(line)
@@ -113,6 +151,7 @@ def emit_status(
     emit_event(
         "status",
         message=message,
+        status=_get_run_status(),
         step=step,
         maxSteps=max_steps,
         jobId=job_id or None,
@@ -121,7 +160,7 @@ def emit_status(
 
 def emit_phase(phase: str, detail: str | None = None) -> None:
     """Emit a high-level progress phase for user display."""
-    emit_event("phase", phase=phase, detail=detail)
+    emit_event("phase", status=_get_run_status(), phase=phase, detail=detail)
 
 
 def emit_field_filled(
@@ -141,6 +180,7 @@ def emit_field_filled(
     """Emit after a form field is successfully filled."""
     emit_event(
         "field_filled",
+        status=_get_run_status(),
         field=field,
         value=value,
         method=method,
@@ -160,7 +200,7 @@ def emit_field_failed(
     reason: str,
 ) -> None:
     """Emit when a field fill attempt fails."""
-    emit_event("field_failed", field=field, reason=reason)
+    emit_event("field_failed", status=_get_run_status(), field=field, reason=reason)
 
 
 def emit_progress(
@@ -170,7 +210,13 @@ def emit_progress(
     description: str = "",
 ) -> None:
     """Emit a progress snapshot."""
-    emit_event("progress", step=step, maxSteps=max_steps, description=description)
+    emit_event(
+        "progress",
+        status=_get_run_status(),
+        step=step,
+        maxSteps=max_steps,
+        description=description,
+    )
 
 
 def emit_done(
@@ -186,6 +232,7 @@ def emit_done(
     """Emit when the job is complete (success or failure)."""
     emit_event(
         "done",
+        status=_get_run_status(),
         success=success,
         message=message,
         fields_filled=fields_filled,
@@ -221,18 +268,174 @@ def emit_cost(
     cost_summary: dict[str, Any] | None = None,
 ) -> None:
     """Emit a cost snapshot (cumulative LLM spend)."""
+    global _max_completion_tokens, _max_prompt_tokens, _max_total_usd
+    with _state_lock:
+        _max_total_usd = max(_max_total_usd, float(total_usd or 0.0))
+        _max_prompt_tokens = max(_max_prompt_tokens, int(prompt_tokens or 0))
+        _max_completion_tokens = max(_max_completion_tokens, int(completion_tokens or 0))
+        cumulative_usd = round(_max_total_usd, 6)
+        cumulative_prompt_tokens = _max_prompt_tokens
+        cumulative_completion_tokens = _max_completion_tokens
+
+    summary = dict(cost_summary or {})
+    summary["actualCostCents"] = max(
+        int(summary.get("actualCostCents") or 0),
+        math.ceil(cumulative_usd * 100),
+    )
+    summary["total_tracked_cost_usd"] = max(
+        float(summary.get("total_tracked_cost_usd") or 0.0),
+        cumulative_usd,
+    )
     emit_event(
         "cost",
-        total_usd=round(total_usd, 6),
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        cost_summary=cost_summary,
+        status=_get_run_status(),
+        total_usd=cumulative_usd,
+        prompt_tokens=cumulative_prompt_tokens,
+        completion_tokens=cumulative_completion_tokens,
+        cost_summary=summary,
+        costSummary=summary,
     )
 
 
-def emit_browser_ready(cdp_url: str) -> None:
-    """Emit browser_ready event with CDP WebSocket URL."""
-    emit_event("browser_ready", cdpUrl=cdp_url)
+def emit_browser_ready(
+    cdp_url: str,
+    *,
+    target_id: str | None = None,
+    page_url: str | None = None,
+) -> None:
+    """Emit the browser endpoint and exact target selected for this run."""
+    emit_event(
+        "browser_ready",
+        status=_get_run_status(),
+        cdpUrl=cdp_url,
+        targetId=target_id,
+        pageUrl=page_url,
+    )
+
+
+def emit_run_state(
+    state: str,
+    *,
+    message: str | None = None,
+    job_id: str = "",
+    target_id: str | None = None,
+) -> None:
+    """Emit an explicit VALET run-state transition."""
+    status = {
+        "paused": "waiting_human",
+        "waiting_human": "waiting_human",
+        "review_ready": "review_ready",
+        "cancelled": "cancelled",
+        "budget_reached": "budget_reached",
+        "failed_retryable": "failed_retryable",
+        "failed_terminal": "failed_terminal",
+    }.get(state, "running")
+    _set_run_status(status)
+    emit_event(
+        "run_state",
+        status=status,
+        state=state,
+        message=message,
+        jobId=job_id or None,
+        targetId=target_id,
+    )
+
+
+def emit_paused(*, job_id: str = "", target_id: str | None = None) -> None:
+    """Emit the acknowledgement for ``pause_job``."""
+    _set_run_status("waiting_human")
+    emit_event(
+        "paused",
+        status="waiting_human",
+        state="paused",
+        paused=True,
+        jobId=job_id or None,
+        targetId=target_id,
+    )
+
+
+def emit_resumed(*, job_id: str = "", target_id: str | None = None) -> None:
+    """Emit the acknowledgement for ``resume_job``."""
+    _set_run_status("running")
+    emit_event(
+        "resumed",
+        status="running",
+        state="running",
+        paused=False,
+        jobId=job_id or None,
+        targetId=target_id,
+    )
+
+
+def emit_needs_answer(
+    *,
+    field_id: str,
+    label: str,
+    field_type: str,
+    options: list[str],
+    required: bool,
+    section: str,
+    job_id: str = "",
+) -> None:
+    """Emit one Go-compatible HITL question."""
+    question = {
+        "fieldId": field_id,
+        "fieldLabel": label,
+        "fieldType": field_type,
+        "options": list(options),
+        "required": bool(required),
+        "section": section,
+    }
+    _set_run_status("waiting_human")
+    emit_event(
+        "needs_answer",
+        status="waiting_human",
+        message=f"Input required: {label}",
+        jobId=job_id or None,
+        waiting_human=True,
+        questions=[question],
+        field={
+            "id": field_id,
+            "label": label,
+            "type": field_type,
+            "options": list(options),
+            "required": bool(required),
+            "section": section,
+        },
+    )
+
+
+def emit_review_ready(
+    *,
+    cdp_url: str,
+    target_id: str,
+    page_url: str | None = None,
+    message: str = "Application ready for review",
+    cost_summary: dict[str, Any] | None = None,
+) -> None:
+    """Emit the terminal presubmit checkpoint without claiming submission."""
+    if not cdp_url.strip():
+        raise ValueError("review_ready requires an explicit cdp_url")
+    if not target_id.strip():
+        raise ValueError("review_ready requires an explicit target_id")
+    summary = dict(cost_summary or {})
+    if summary:
+        total_usd = float(summary.get("total_tracked_cost_usd") or 0.0)
+        summary["actualCostCents"] = max(
+            int(summary.get("actualCostCents") or 0),
+            math.ceil(total_usd * 100),
+        )
+    _set_run_status("review_ready")
+    emit_event(
+        "review_ready",
+        status="review_ready",
+        message=message,
+        cdpUrl=cdp_url,
+        targetId=target_id,
+        pageUrl=page_url,
+        review_ready=True,
+        costSummary=summary or None,
+    )
 
 
 def emit_account_created(
@@ -269,13 +472,22 @@ def emit_account_created(
 def emit_awaiting_review(
     message: str = (
         "We've filled out your application. Please review the form in the browser "
-        "window, verify all fields are correct, then click Submit in the app."
+        "window, verify all fields are correct, then mark review complete."
     ),
     cdp_url: str | None = None,
+    target_id: str | None = None,
     page_url: str | None = None,
 ) -> None:
     """Emit awaiting_review event when browser is open for user review."""
-    emit_event("awaiting_review", message=message, cdpUrl=cdp_url, pageUrl=page_url)
+    _set_run_status("review_ready")
+    emit_event(
+        "awaiting_review",
+        status="review_ready",
+        message=message,
+        cdpUrl=cdp_url,
+        targetId=target_id,
+        pageUrl=page_url,
+    )
 
 
 # ── Protocol handshake ───────────────────────────────────────────────
@@ -285,6 +497,7 @@ PROTOCOL_VERSION = 1
 
 def emit_handshake() -> None:
     """Emit protocol version handshake as the first JSONL event."""
+    reset_event_state()
     emit_event("handshake", protocol_version=PROTOCOL_VERSION, min_desktop_version="0.1.0")
 
 

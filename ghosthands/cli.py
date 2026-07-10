@@ -53,6 +53,7 @@ from ghosthands.bridge.profile_adapter import (
     normalize_profile_defaults,
 )
 from ghosthands.bridge.protocol import (
+    activate_hitl,
     listen_for_cancel,
     reset_hitl_state,
     wait_for_review_command,
@@ -698,6 +699,12 @@ def parse_args() -> argparse.Namespace:
         help="Connect to an existing browser via CDP URL instead of launching a new one (Desktop-owned browser mode)",
     )
     parser.add_argument(
+        "--cdp-target-id",
+        type=str,
+        default=None,
+        help="Exact Chrome target/tab ID to use with --cdp-url (or GH_TARGET_ID)",
+    )
+    parser.add_argument(
         "--engine",
         choices=["auto", "chromium", "firefox"],
         default="auto",
@@ -707,6 +714,12 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.output_format != "tui" and not args.job_url:
         parser.error("the following arguments are required: --job-url")
+    if args.output_format == "tui" and args.submit_intent == "submit":
+        parser.error("the bundled terminal UI supports review intent only")
+    resolved_cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
+    resolved_target_id = args.cdp_target_id or os.environ.get("GH_TARGET_ID")
+    if bool(resolved_cdp_url) != bool(resolved_target_id):
+        parser.error("--cdp-url and --cdp-target-id must be provided together")
     return args
 
 
@@ -1121,22 +1134,18 @@ async def _cleanup_browser(
 ) -> None:
     """Shut down the browser session with ownership-aware cleanup.
 
-    When the Desktop app owns the browser (CDP mode), we only disconnect
-    from the session via ``stop()`` — the browser process stays alive for
-    the Desktop app to manage.
+    When the Desktop app owns the browser (CDP mode), detach the CDP client
+    without dispatching browser or tab lifecycle events.
 
     When Hand-X launched the browser itself, Desktop/local-worker JSONL mode
     now leaves the browser entirely untouched so the user can keep inspecting
     the failed page. Only standalone human-mode runs should kill it here.
     """
-    if keep_browser_alive:
+    if desktop_owns_browser or keep_browser_alive:
         logger.info("browser.cleanup_detaching_keep_alive")
         await browser.detach_keep_alive()
         return
-    if desktop_owns_browser:
-        await browser.stop()
-    else:
-        await browser.kill()
+    await browser.kill()
 
 
 @dataclass(frozen=True)
@@ -1753,9 +1762,9 @@ def _handle_review_result(
 
     if review_result == "complete":
         emit_run_terminal(
-            termination_status="completed",
+            termination_status="review_complete",
             success=True,
-            message="Application submitted — review completed",
+            message="Review complete; engine detached",
             fields_filled=fields_filled,
             fields_failed=fields_failed,
             job_id=job_id,
@@ -1785,7 +1794,7 @@ def _handle_review_result(
         emit_run_terminal(
             termination_status="review_timeout",
             success=False,
-            message="Review timed out after 30 minutes. The browser window is still open — you can submit manually.",
+            message="Review timed out; the browser tab remains open and the engine detached.",
             fields_filled=fields_filled,
             fields_failed=fields_failed,
             job_id=job_id,
@@ -1869,6 +1878,8 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         emit_cost,
         emit_error,
         emit_phase,
+        emit_review_ready,
+        emit_run_state,
         emit_status,
     )
 
@@ -1888,6 +1899,7 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
     keep_worker_browser_alive = args.output_format == "jsonl"
     last_phase: str | None = None
     account_created_emitted = False
+    emit_run_state("starting")
 
     def _emit_phase_if_changed(phase: str, detail: str | None = None) -> None:
         nonlocal last_phase
@@ -2045,13 +2057,15 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
 
     # -- Browser ------------------------------------------------------------
     cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
-    cdp_target_id = os.environ.get("GH_TARGET_ID")
+    cdp_target_id = getattr(args, "cdp_target_id", None) or os.environ.get("GH_TARGET_ID")
+    if bool(cdp_url) != bool(cdp_target_id):
+        raise ValueError("--cdp-url and --cdp-target-id must be provided together")
     desktop_owns_browser = cdp_url is not None
 
     if cdp_url:
         # Desktop-owned browser: connect to existing browser via CDP URL.
         # Do not launch a new browser; the browser is always headful (visible to user).
-        # If GH_TARGET_ID is set, attach to that specific tab (shared-browser mode).
+        # Attach to the exact target selected by the VALET host.
         # Explicit headless=False + no_viewport=True prevents detect_display_configuration()
         # from incorrectly assuming headless mode (get_display_size() returns None in
         # Electron-spawned subprocesses) and setting a 1920x1080 viewport override via CDP,
@@ -2316,8 +2330,14 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
         logger.warning("startup.browser_ready", cdp_url=bool(browser.cdp_url))
+        active_target_id = str(getattr(browser, "agent_focus_target_id", None) or "")
+        if cdp_target_id and active_target_id != cdp_target_id:
+            raise RuntimeError(
+                f"Browser attached to target {active_target_id or '<none>'}, expected {cdp_target_id}"
+            )
         if browser.cdp_url:
-            emit_browser_ready(browser.cdp_url)
+            emit_browser_ready(browser.cdp_url, target_id=active_target_id)
+            emit_run_state("running", job_id=job_id, target_id=active_target_id)
         else:
             logger.warning("cli.browser_ready_missing_cdp_url")
             emit_status(
@@ -2381,9 +2401,17 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
                 directly_open_url=directly_open_url,
             )
 
+            await install_same_tab_guard(agent)
+            await install_final_submit_guard(
+                agent,
+                allow_submit=app_settings.submit_intent == "submit",
+            )
             reset_hitl_state()
+            activate_hitl()
             cancel_requested = asyncio.Event()
-            cancel_task = asyncio.create_task(listen_for_cancel(agent, cancel_requested))
+            cancel_task = asyncio.create_task(
+                listen_for_cancel(agent, cancel_requested, job_id=job_id)
+            )
             try:
                 _emit_phase_if_changed("Navigating to application")
                 logger.warning("startup.agent_run_starting", max_steps=args.max_steps)
@@ -2511,8 +2539,9 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
         if app_settings.submit_intent != "submit" and final_result:
             final_lower = final_result.lower()
             if "application submitted" in final_lower or "submitted successfully" in final_lower:
-                blocker = "guard breach: application was submitted despite submit_intent=review"
+                blocker = "guard breach: final-submission confirmation detected in review mode"
                 success = False
+                final_result = "Final-submission confirmation detected; review-only contract breached"
 
         result_data = {
             "success": success,
@@ -2567,8 +2596,35 @@ async def run_agent_jsonl(args: argparse.Namespace) -> None:
             with contextlib.suppress(Exception):
                 review_page_url = await browser.get_current_page_url()
 
+            emit_review_ready(
+                cdp_url=review_cdp_url or "",
+                target_id=active_target_id,
+                page_url=review_page_url,
+                cost_summary=cost_summary,
+            )
+            if desktop_owns_browser:
+                jt.emit_run_terminal(
+                    termination_status="review_ready",
+                    success=True,
+                    message="Application ready for review; engine detached",
+                    fields_filled=filled_count,
+                    fields_failed=failed_count,
+                    job_id=job_id,
+                    lease_id=lease_id,
+                    result_data=result_data,
+                    cost_summary=cost_summary,
+                    total_cost_usd=total_cost,
+                )
+                await _cleanup_browser(
+                    browser,
+                    desktop_owns_browser,
+                    keep_browser_alive=True,
+                )
+                return
+
             emit_awaiting_review(
                 cdp_url=review_cdp_url,
+                target_id=active_target_id,
                 page_url=review_page_url,
             )
             review_result = await wait_for_review_command(browser, job_id, lease_id)
@@ -2825,6 +2881,9 @@ async def run_agent_human(args: argparse.Namespace) -> None:
 
     # -- Browser ------------------------------------------------------------
     cdp_url = args.cdp_url or os.environ.get("GH_CDP_URL")
+    cdp_target_id = getattr(args, "cdp_target_id", None) or os.environ.get("GH_TARGET_ID")
+    if bool(cdp_url) != bool(cdp_target_id):
+        raise ValueError("--cdp-url and --cdp-target-id must be provided together")
     desktop_owns_browser = cdp_url is not None
 
     if cdp_url:
@@ -2833,8 +2892,12 @@ async def run_agent_human(args: argparse.Namespace) -> None:
         browser_profile = BrowserProfile(
             keep_alive=True, allowed_domains=allowed_domains, headless=False, no_viewport=True
         )
-        browser = BrowserSession(browser_profile=browser_profile, cdp_url=cdp_url)
-        print(f"Connecting to Desktop-owned browser via CDP: {cdp_url}")
+        browser = BrowserSession(
+            browser_profile=browser_profile,
+            cdp_url=cdp_url,
+            target_id=cdp_target_id,
+        )
+        print(f"Connecting to Desktop-owned browser target {cdp_target_id} via CDP: {cdp_url}")
     else:
         browser_profile = BrowserProfile(
             headless=args.headless,
@@ -2875,6 +2938,10 @@ async def run_agent_human(args: argparse.Namespace) -> None:
 
     print("Starting browser...")
     await asyncio.wait_for(browser.start(), timeout=60)
+    if cdp_target_id and browser.agent_focus_target_id != cdp_target_id:
+        raise RuntimeError(
+            f"Browser attached to target {browser.agent_focus_target_id or '<none>'}, expected {cdp_target_id}"
+        )
 
     workday_preface_status = "noop"
     workday_preface_message = ""
@@ -2956,6 +3023,11 @@ async def run_agent_human(args: argparse.Namespace) -> None:
                 ]
 
     try:
+        await install_same_tab_guard(agent)
+        await install_final_submit_guard(
+            agent,
+            allow_submit=app_settings.submit_intent == "submit",
+        )
         history = await agent.run(
             max_steps=args.max_steps,
             on_step_start=_on_step_start_human,

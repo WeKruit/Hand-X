@@ -23,6 +23,17 @@ import pytest
 # Module-level setup: mock heavy imports before loading ghosthands.cli
 # ---------------------------------------------------------------------------
 
+_CLI_IMPORT_STUBS: set[str] = set()
+
+
+def _install_import_stub(name: str, module: types.ModuleType) -> types.ModuleType:
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    sys.modules[name] = module
+    _CLI_IMPORT_STUBS.add(name)
+    return module
+
 
 def _ensure_cli_importable():
     """Install lightweight mocks for browser-use dependency chain.
@@ -44,22 +55,22 @@ def _ensure_cli_importable():
         "browser_use.tools.service": types.ModuleType("browser_use.tools.service"),
     }
     for name, mod in stubs.items():
-        sys.modules.setdefault(name, mod)
+        _install_import_stub(name, mod)
 
     # Mock ghosthands.agent and its submodules to prevent cascading imports
     if "ghosthands.agent" not in sys.modules:
         mock_agent = types.ModuleType("ghosthands.agent")
-        sys.modules["ghosthands.agent"] = mock_agent
+        _install_import_stub("ghosthands.agent", mock_agent)
     else:
         mock_agent = sys.modules["ghosthands.agent"]
     if "ghosthands.agent.factory" not in sys.modules:
         mock_factory = types.ModuleType("ghosthands.agent.factory")
-        sys.modules["ghosthands.agent.factory"] = mock_factory
+        _install_import_stub("ghosthands.agent.factory", mock_factory)
     else:
         mock_factory = sys.modules["ghosthands.agent.factory"]
     if "ghosthands.agent.prompts" not in sys.modules:
         mock_prompts = types.ModuleType("ghosthands.agent.prompts")
-        sys.modules["ghosthands.agent.prompts"] = mock_prompts
+        _install_import_stub("ghosthands.agent.prompts", mock_prompts)
     else:
         mock_prompts = sys.modules["ghosthands.agent.prompts"]
     if "ghosthands.agent.hooks" not in sys.modules:
@@ -68,7 +79,7 @@ def _ensure_cli_importable():
         hooks_any.install_same_tab_guard = AsyncMock()
         hooks_any.install_final_submit_guard = AsyncMock()
         hooks_any.consume_blocked_final_submit = AsyncMock(return_value=None)
-        sys.modules["ghosthands.agent.hooks"] = mock_hooks
+        _install_import_stub("ghosthands.agent.hooks", mock_hooks)
     else:
         mock_hooks = sys.modules["ghosthands.agent.hooks"]
 
@@ -81,6 +92,19 @@ def _ensure_cli_importable():
 _ensure_cli_importable()
 
 from ghosthands.cli import parse_args  # noqa: E402
+
+
+def _restore_cli_import_stubs() -> None:
+    removed = {name: sys.modules.pop(name, None) for name in sorted(_CLI_IMPORT_STUBS, reverse=True)}
+    for parent_name, child_name in (("ghosthands", "agent"), ("browser_use", "agent"), ("browser_use", "browser")):
+        parent = sys.modules.get(parent_name)
+        child = getattr(parent, child_name, None) if parent is not None else None
+        if child is not None and getattr(child, "__name__", "") in removed:
+            delattr(parent, child_name)
+    _CLI_IMPORT_STUBS.clear()
+
+
+_restore_cli_import_stubs()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -369,17 +393,32 @@ class TestDesktopBridgeArgs:
         args = _parse(["--job-url", "https://example.com"])
         assert args.cdp_url is None
 
-    def test_cdp_url_set(self):
-        """--cdp-url stores the provided CDP URL."""
+    def test_cdp_url_and_target_set(self):
+        """Desktop CDP connection requires and stores the exact target ID."""
         args = _parse(
             [
                 "--job-url",
                 "https://example.com",
                 "--cdp-url",
                 "ws://127.0.0.1:9222/devtools/browser/abc",
+                "--cdp-target-id",
+                "target-123",
             ]
         )
         assert args.cdp_url == "ws://127.0.0.1:9222/devtools/browser/abc"
+        assert args.cdp_target_id == "target-123"
+
+    def test_cdp_url_without_target_rejected(self):
+        """A browser endpoint alone must not select an arbitrary tab."""
+        with pytest.raises(SystemExit):
+            _parse(
+                [
+                    "--job-url",
+                    "https://example.com",
+                    "--cdp-url",
+                    "ws://127.0.0.1:9222/devtools/browser/abc",
+                ]
+            )
 
     def test_engine_default_auto(self):
         """--engine defaults to auto."""

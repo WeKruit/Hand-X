@@ -20,6 +20,33 @@ import structlog
 
 logger = structlog.get_logger()
 
+_COMMAND_TYPES = frozenset(
+    {
+        "answer_field",
+        "skip_field",
+        "pause_job",
+        "resume_job",
+        "cancel",
+        "cancel_job",
+        "complete_review",
+    }
+)
+
+
+def parse_bridge_command(line: str) -> dict[str, Any] | None:
+    """Parse one supported JSON object from the VALET stdin channel."""
+    try:
+        command = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(command, dict) or command.get("type") not in _COMMAND_TYPES:
+        return None
+    if command["type"] in {"answer_field", "skip_field"} and not (
+        str(command.get("field_id") or "").strip() or str(command.get("field_label") or "").strip()
+    ):
+        return None
+    return command
+
 stdin_lock = asyncio.Lock()
 stdin_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=1,
@@ -98,6 +125,8 @@ _hitl_lock = asyncio.Lock()
 # get_field_answer() calls wake up immediately instead of blocking 300s.
 # Must be cleared at run start via reset_hitl_state().
 _cancel_event = asyncio.Event()
+_run_resume_event = asyncio.Event()
+_run_resume_event.set()
 
 
 _hitl_available = False  # Set True when listen_for_cancel starts (JSONL/Desktop mode)
@@ -109,11 +138,62 @@ def reset_hitl_state() -> None:
     Must be called at the start of each job to prevent cancel/answer
     leakage from previous runs in the same process.
     """
-    global _hitl_available
+    global _cancel_event, _hitl_available, _run_resume_event
     _pending_answers.clear()
     _answer_events.clear()
-    _cancel_event.clear()
+    _cancel_event = asyncio.Event()
+    _run_resume_event = asyncio.Event()
+    _run_resume_event.set()
     _hitl_available = False
+
+
+def activate_hitl() -> None:
+    """Mark stdin HITL active before the listener task is scheduled."""
+    global _hitl_available
+    _hitl_available = True
+
+
+async def wait_for_run_resume() -> bool:
+    """Wait at a browser-action boundary until resumed or cancelled."""
+    if _cancel_event.is_set():
+        return False
+    if not _hitl_available:
+        return True
+    await _run_resume_event.wait()
+    return not _cancel_event.is_set()
+
+
+def _pause_agent(agent: Any) -> None:
+    pause = getattr(agent, "pause", None)
+    if callable(pause):
+        pause()
+    agent.state.paused = True
+    pause_event = getattr(agent, "_external_pause_event", None)
+    if isinstance(pause_event, asyncio.Event):
+        pause_event.clear()
+    _run_resume_event.clear()
+
+
+def _resume_agent(agent: Any) -> None:
+    resume = getattr(agent, "resume", None)
+    if callable(resume):
+        resume()
+    agent.state.paused = False
+    pause_event = getattr(agent, "_external_pause_event", None)
+    if isinstance(pause_event, asyncio.Event):
+        pause_event.set()
+    _run_resume_event.set()
+
+
+def _stop_agent(agent: Any) -> None:
+    stop = getattr(agent, "stop", None)
+    if callable(stop):
+        stop()
+    agent.state.stopped = True
+    pause_event = getattr(agent, "_external_pause_event", None)
+    if isinstance(pause_event, asyncio.Event):
+        pause_event.set()
+    _run_resume_event.set()
 
 
 def is_hitl_available() -> bool:
@@ -236,9 +316,13 @@ async def get_field_answer(
 async def listen_for_cancel(
     agent: Any,  # noqa: ANN401
     cancel_requested: asyncio.Event | None = None,
+    *,
+    job_id: str = "",
 ) -> None:
     """Read stdin concurrently during agent run for cancel and answer commands."""
     global _hitl_available
+    from ghosthands.output.jsonl import emit_paused, emit_resumed, emit_run_state
+
     _hitl_available = True
     while not agent.state.stopped:
         try:
@@ -246,6 +330,7 @@ async def listen_for_cancel(
         except TimeoutError:
             continue
         except asyncio.CancelledError:
+            _hitl_available = False
             raise
         except Exception:
             await asyncio.sleep(0.1)
@@ -257,20 +342,15 @@ async def listen_for_cancel(
             _cancel_event.set()  # M13: wake any pending HITL waits
             if cancel_requested is not None:
                 cancel_requested.set()
-            agent.state.stopped = True
+            _stop_agent(agent)
             break
 
         line = line.strip()
         if not line:
             continue
 
-        try:
-            cmd = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        # S-12: ignore valid JSON that isn't an object (e.g. [], "str", 1)
-        if not isinstance(cmd, dict):
+        cmd = parse_bridge_command(line)
+        if cmd is None:
             continue
 
         cmd_type = cmd.get("type")
@@ -279,8 +359,20 @@ async def listen_for_cancel(
             _cancel_event.set()  # M13: wake any pending HITL waits
             if cancel_requested is not None:
                 cancel_requested.set()
-            agent.state.stopped = True
+            _stop_agent(agent)
             break
+        elif cmd_type == "pause_job":
+            if not bool(getattr(agent.state, "paused", False)):
+                _pause_agent(agent)
+                target_id = getattr(getattr(agent, "browser_session", None), "agent_focus_target_id", None)
+                emit_paused(job_id=job_id, target_id=target_id)
+                emit_run_state("paused", job_id=job_id, target_id=target_id)
+        elif cmd_type == "resume_job":
+            if bool(getattr(agent.state, "paused", False)):
+                _resume_agent(agent)
+                target_id = getattr(getattr(agent, "browser_session", None), "agent_focus_target_id", None)
+                emit_resumed(job_id=job_id, target_id=target_id)
+                emit_run_state("running", job_id=job_id, target_id=target_id)
         elif cmd_type == "answer_field":
             field_id = cmd.get("field_id", "")
             field_label = cmd.get("field_label", "")
@@ -288,23 +380,28 @@ async def listen_for_cancel(
             key = field_id or field_label
             if key:
                 logger.info("answer_field_received", field_id=field_id, field_label=field_label)
-                put_field_answer(key, answer)
+                put_field_answer(field_id, answer, field_label=field_label)
+                if not bool(getattr(agent.state, "paused", False)):
+                    emit_run_state("running", message="Input received", job_id=job_id)
         elif cmd_type == "skip_field":
             field_id = cmd.get("field_id", "")
             field_label = cmd.get("field_label", "")
             key = field_id or field_label
             if key:
                 logger.info("skip_field_received", field_id=field_id, field_label=field_label)
-                put_field_answer(key, "")
+                put_field_answer(field_id, "", field_label=field_label)
+                if not bool(getattr(agent.state, "paused", False)):
+                    emit_run_state("running", message="Field skipped", job_id=job_id)
+    _hitl_available = False
 
 
 async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> str:
     """Wait for a command from Electron on stdin.
 
     Expected commands:
-    - {"type": "complete_review"} -- user approved, close browser
-    - {"type": "cancel_job"}     -- user cancelled, close browser
-    - {"type": "cancel"}         -- user cancelled, close browser
+    - {"type": "complete_review"} -- user approved, detach engine
+    - {"type": "cancel_job"}     -- user cancelled, detach engine
+    - {"type": "cancel"}         -- user cancelled, detach engine
 
     Times out after 24 hours if no command is received.
 
@@ -316,7 +413,7 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> s
     The CLI is responsible for emitting the terminal ``done`` event once
     this function returns a review outcome.
     """
-    from ghosthands.output.jsonl import emit_error, emit_status
+    from ghosthands.output.jsonl import emit_error, emit_paused, emit_resumed, emit_run_state, emit_status
 
     review_timeout_seconds = 24 * 60 * 60  # 24 hours — users may come back next day
     warning_before_seconds = 60 * 60  # Warn 1 hour before timeout.
@@ -331,7 +428,7 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> s
 
             if not warning_emitted and remaining <= warning_before_seconds and remaining > 0:
                 emit_status(
-                    "Your review session will expire in about 1 hour. Please submit or cancel soon.",
+                    "Your review session will expire in about 1 hour. Please mark review complete or cancel soon.",
                     job_id=job_id,
                 )
                 warning_emitted = True
@@ -339,7 +436,7 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> s
             if remaining <= 0:
                 logger.warning("review_timeout_exceeded", timeout_seconds=review_timeout_seconds)
                 emit_error(
-                    "Review session expired — please submit or cancel your application",
+                    "Review session expired; the engine detached and the browser tab remains open",
                     fatal=True,
                     job_id=job_id,
                 )
@@ -359,20 +456,15 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> s
             if not line:
                 continue
 
-            try:
-                cmd = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            # S-12: ignore valid JSON that isn't an object (e.g. [], "str", 1)
-            if not isinstance(cmd, dict):
+            cmd = parse_bridge_command(line)
+            if cmd is None:
                 continue
 
             cmd_type = cmd.get("type", "")
 
             if cmd_type == "complete_review":
                 logger.info("review_completed", job_id=job_id, lease_id=lease_id)
-                emit_status("Review complete -- closing browser", job_id=job_id)
+                emit_status("Review complete -- detaching engine", job_id=job_id)
                 result = "complete"
                 break
             elif cmd_type in {"cancel", "cancel_job"}:
@@ -380,6 +472,14 @@ async def wait_for_review_command(browser: Any, job_id: str, lease_id: str) -> s
                 emit_status("Review cancelled by user", job_id=job_id)
                 result = "cancel"
                 break
+            elif cmd_type == "pause_job":
+                target_id = getattr(browser, "agent_focus_target_id", None)
+                emit_paused(job_id=job_id, target_id=target_id)
+                emit_run_state("paused", job_id=job_id, target_id=target_id)
+            elif cmd_type == "resume_job":
+                target_id = getattr(browser, "agent_focus_target_id", None)
+                emit_resumed(job_id=job_id, target_id=target_id)
+                emit_run_state("review_ready", job_id=job_id, target_id=target_id)
     except (EOFError, KeyboardInterrupt):
         pass
     finally:

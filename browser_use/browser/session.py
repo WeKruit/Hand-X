@@ -1820,6 +1820,18 @@ class BrowserSession(BaseModel):
 			# Get browser targets from SessionManager (source of truth)
 			# SessionManager has already discovered all targets via start_monitoring()
 			page_targets_from_manager = self.session_manager.get_all_page_targets()
+			requested_target_id = self._initial_target_id
+			selected_target = None
+			if requested_target_id:
+				selected_target = next(
+					(target for target in page_targets_from_manager if target.target_id == requested_target_id),
+					None,
+				)
+				if selected_target is None:
+					raise RuntimeError(
+						f'Requested Chrome target {requested_target_id} was not found; refusing to use or create another tab'
+					)
+			initial_targets = [selected_target] if selected_target is not None else page_targets_from_manager
 
 			# Check for chrome://newtab pages and redirect them to about:blank (in parallel)
 			from browser_use.utils import is_new_tab_page
@@ -1837,7 +1849,7 @@ class BrowserSession(BaseModel):
 
 			redirect_tasks = [
 				_redirect_newtab(target)
-				for target in page_targets_from_manager
+				for target in initial_targets
 				if is_new_tab_page(target.url) and target.url != 'about:blank'
 			]
 			if redirect_tasks:
@@ -1845,25 +1857,17 @@ class BrowserSession(BaseModel):
 
 			# Ensure we have at least one page
 			if not page_targets_from_manager:
+				if requested_target_id:
+					raise RuntimeError(
+						f'Requested Chrome target {requested_target_id} was not found; refusing to create a replacement tab'
+					)
 				new_target = await self._cdp_client_root.send.Target.createTarget(params={'url': 'about:blank'})
 				target_id = new_target['targetId']
 				self.logger.debug(f'📄 Created new blank page: {target_id}')
 			else:
-				# If a specific target_id was requested (e.g. Desktop shared-browser tab),
-				# attach to that target instead of defaulting to the first one.
-				requested_target_id = getattr(self, '_initial_target_id', None)
-				if requested_target_id:
-					known_ids = {t.target_id for t in page_targets_from_manager}
-					if requested_target_id in known_ids:
-						target_id = requested_target_id
-						self.logger.debug(f'📄 Attaching to requested target: {target_id}')
-					else:
-						self.logger.warning(
-							f'Requested target_id {requested_target_id} not found among '
-							f'{len(page_targets_from_manager)} discovered targets, '
-							f'falling back to first available target'
-						)
-						target_id = page_targets_from_manager[0].target_id
+				if selected_target is not None:
+					target_id = selected_target.target_id
+					self.logger.debug(f'📄 Attaching to requested target: {target_id}')
 				else:
 					target_id = page_targets_from_manager[0].target_id
 					self.logger.debug(f'📄 Using existing page: {target_id}')
@@ -1894,7 +1898,7 @@ class BrowserSession(BaseModel):
 					self.logger.warning('Target created but title is unknown (may be normal for about:blank)')
 
 			# Dispatch TabCreatedEvent for all initial tabs (so watchdogs can initialize)
-			for idx, target in enumerate(page_targets_from_manager):
+			for idx, target in enumerate(initial_targets):
 				target_url = target.url
 				self.logger.debug(f'Dispatching TabCreatedEvent for initial tab {idx}: {target_url}')
 				self.event_bus.dispatch(TabCreatedEvent(url=target_url, target_id=target.target_id))

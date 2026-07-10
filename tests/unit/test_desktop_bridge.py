@@ -146,7 +146,7 @@ class TestEmitAwaitingReview:
         events = _capture_jsonl_output(emit_awaiting_review)
         assert events[0]["message"] == (
             "We've filled out your application. Please review the form in the browser "
-            "window, verify all fields are correct, then click Submit in the app."
+            "window, verify all fields are correct, then mark review complete."
         )
 
     def test_custom_message_is_emitted(self):
@@ -2026,7 +2026,7 @@ class TestWaitForReviewCommand:
     complete_review, cancel, and timeout scenarios."""
 
     @pytest.mark.asyncio
-    async def test_complete_review_closes_browser(self):
+    async def test_complete_review_detaches_without_closing_browser(self):
         from ghosthands.bridge.protocol import wait_for_review_command
 
         browser = AsyncMock()
@@ -2039,10 +2039,11 @@ class TestWaitForReviewCommand:
             result = await wait_for_review_command(browser, "j1", "l1")
 
         assert result == "complete"
-        browser.stop.assert_called_once()
+        browser.detach_keep_alive.assert_awaited_once()
+        browser.stop.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_cancel_during_review_closes_browser(self):
+    async def test_cancel_during_review_detaches_without_closing_browser(self):
         from ghosthands.bridge.protocol import wait_for_review_command
 
         browser = AsyncMock()
@@ -2055,11 +2056,12 @@ class TestWaitForReviewCommand:
             result = await wait_for_review_command(browser, "j1", "l1")
 
         assert result == "cancel"
-        browser.stop.assert_called_once()
+        browser.detach_keep_alive.assert_awaited_once()
+        browser.stop.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_eof_during_review_closes_browser(self):
-        """EOF (Electron crashed) should cleanly close browser."""
+    async def test_eof_during_review_preserves_browser(self):
+        """EOF (Desktop crashed) detaches while preserving the selected tab."""
         from ghosthands.bridge.protocol import wait_for_review_command
 
         browser = AsyncMock()
@@ -2071,7 +2073,8 @@ class TestWaitForReviewCommand:
             result = await wait_for_review_command(browser, "j1", "l1")
 
         assert result == "eof"
-        browser.stop.assert_called_once()
+        browser.detach_keep_alive.assert_awaited_once()
+        browser.stop.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_ignores_unknown_commands_during_review(self):
@@ -2092,7 +2095,8 @@ class TestWaitForReviewCommand:
             result = await wait_for_review_command(browser, "j1", "l1")
 
         assert result == "complete"
-        browser.stop.assert_called_once()
+        browser.detach_keep_alive.assert_awaited_once()
+        browser.stop.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_timeout_emits_warning_before_fatal_error(self):
@@ -2116,18 +2120,19 @@ class TestWaitForReviewCommand:
 
         assert result == "timeout"
         emit_status.assert_any_call(
-            "Your review session will expire in about 1 hour. Please submit or cancel soon.",
+            "Your review session will expire in about 1 hour. Please mark review complete or cancel soon.",
             job_id="j1",
         )
         emit_error.assert_called_once_with(
-            "Review session expired — please submit or cancel your application",
+            "Review session expired; the engine detached and the browser tab remains open",
             fatal=True,
             job_id="j1",
         )
-        browser.stop.assert_called_once()
+        browser.detach_keep_alive.assert_awaited_once()
+        browser.stop.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_no_warning_if_submitted_before_timeout(self):
+    async def test_no_warning_if_review_completed_before_timeout(self):
         from ghosthands.bridge.protocol import wait_for_review_command
 
         browser = AsyncMock()
@@ -2147,11 +2152,12 @@ class TestWaitForReviewCommand:
             result = await wait_for_review_command(browser, "j1", "l1")
 
         assert result == "complete"
-        emit_status.assert_any_call("Review complete -- closing browser", job_id="j1")
-        assert ("Your review session will expire in 5 minutes. Please submit or cancel soon.",) not in [
+        emit_status.assert_any_call("Review complete -- detaching engine", job_id="j1")
+        assert ("Your review session will expire in about 1 hour. Please mark review complete or cancel soon.",) not in [
             call.args for call in emit_status.call_args_list
         ]
-        browser.stop.assert_called_once()
+        browser.detach_keep_alive.assert_awaited_once()
+        browser.stop.assert_not_called()
 
 
 class TestReviewOutcomeHandling:
@@ -2179,7 +2185,7 @@ class TestReviewOutcomeHandling:
         emit_terminal.assert_called_once_with(
             termination_status="review_timeout",
             success=False,
-            message="Review timed out after 30 minutes. The browser window is still open — you can submit manually.",
+            message="Review timed out; the browser tab remains open and the engine detached.",
             fields_filled=8,
             fields_failed=2,
             job_id="job-1",
