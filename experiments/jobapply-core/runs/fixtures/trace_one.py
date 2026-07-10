@@ -12,7 +12,6 @@ h=lambda *a,**k: http.server.SimpleHTTPRequestHandler(*a,directory=str(d),**k)
 httpd=http.server.HTTPServer(("127.0.0.1",port),h); threading.Thread(target=httpd.serve_forever,daemon=True).start()
 env=dict(os.environ); env.update(OA_NO_SANDBOX="1",OA_PAINTED_DUMP="1",OA_VISION_GATE="0",OA_COMPLETE_AGENT="0",
     OA_FIXTURE_VALUES=str(d/"f.values.json"),OA_PROC_CAP_S="120",PYTHONUNBUFFERED="1")
-env.update({k:str(v) for k,v in (fx.get("env") or {}).items()})  # per-fixture overrides (same as ISO)
 cmd=[str(ROOT/".venv/bin/python"),str(ROOT/"oa_singlepage.py"),"--url",f"http://127.0.0.1:{port}/f.html",
      "--generic","--profile",str(HERE/"zoo_profile.json"),"--json",str(d/"r.json"),"--screenshot",str(d/"f.png")]
 r=subprocess.run(cmd,cwd=str(ROOT),env=env,text=True,capture_output=True,timeout=180)

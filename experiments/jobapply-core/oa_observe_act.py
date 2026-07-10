@@ -2774,25 +2774,6 @@ async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
         texts = [t for t in texts if not re.match(r"^\s*no (options?|results?|matches?)\b", t, re.I)]
         ctx.trace.append(f"search '{q}' -> {len(texts)} opts")
         if not texts:
-            # VISIBLE-ROW rung FIRST (1password 199: the portal rows are painted but delta-blind, and
-            # the budget-gated set-of-marks below was already VLM-starved by earlier verify spends —
-            # 'visual-commit-budget' — so the field fell to text-typing and wiped). cdp_pick_option_
-            # visually reads the [role=option] rows hugging THIS control with live coords and clicks
-            # by trusted coordinate. Exact match first; else ONE text-LLM pick (identity + meaning,
-            # plausibility-vetoed) — a TEXT call, not the starved VLM budget. Falls through untouched
-            # when no row matches.
-            async def _row_pick(v: str, opts: list[str]) -> str | None:
-                c = _identity_pick(v, opts) or await brain.pick_option(v, opts, llm=ctx.llm, label=ctx.label)
-                return c if (c and await _chosen_plausible(ctx, c)) else None
-
-            with contextlib.suppress(Exception):
-                _got = await cdpa.cdp_pick_option_visually(session, ctx.node, ctx.value, pick=_row_pick)
-                if _got:
-                    ctx.committed_text = _got
-                    ctx.trace.append(f"s4-visible-row:{_got[:20]}")
-                    if ctx.nature == "MULTI":
-                        return await _s_multi_loop(session, ctx)
-                    return await _s_cascade(session, ctx)
             # VISUAL FALLBACK (geocomplete): we typed the city prefix and the suggestion list IS
             # rendered, but react-select painted it into a portal the delta never captured. SEE the
             # suggestions: mark the newly-rendered visible rows + VLM-pick the one matching ctx.value +

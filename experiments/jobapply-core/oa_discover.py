@@ -263,19 +263,6 @@ _ENUM_JS = r"""
       }
       p = p.parentElement;
     }
-    // WIRED PAIR (structural identity, the >=400-char consent-clause hole): when the question
-    // clause alone overflows the ancestor cap above (airwallex AI-Policy: a 500-char label makes
-    // EVERY ancestor's innerText >400 -> fall through to the uuid fallback -> mapper-blind field ->
-    // the VLM invents a heading phantom that mislocates = the live grey-pill family), the label
-    // element explicitly wired to this control by attribute IDENTITY — label[for == el.id] or
-    // label[for == el.name] (ashby wires for=<uuid> to <input name=<same uuid>> with NO id) — is
-    // the in-DOM handle. Attribute equality only, no text matching.
-    for (const key of [el.id, el.name]) {
-      if (!key) continue;
-      const l = document.querySelector('label[for="' + CSS.escape(key) + '"]');
-      const t = l ? clean(l.innerText) : '';
-      if (t.length > 1) return t.slice(0, 400);
-    }
     return fallback;
   };
   // ARIA DISCLOSURE SELECT (duolingo mega4/18-23 false-greens: the whole screener column of
@@ -487,10 +474,6 @@ async def discover_fields_visual(session: Any, dom_fields: list[eng.FormField]) 
             m = re.search(r"\[.*\]", raw, re.S)
         rows = json.loads(m.group(0)) if m else []
         seen = {_lnorm(f.label) for f in dom_fields} | {_lnorm(f.name) for f in dom_fields}
-        # OPTION-AS-FIELD dedup (identity): the VLM lists a rendered OPTION row ('Yes' / a pill /
-        # a radio option) as its own input — but that text is already an OPTION of a discovered dom
-        # field, not a question. Deterministic set-membership vs the dom fields' own option texts.
-        opt_texts = {_lnorm(o) for f in dom_fields for o in (getattr(f, "options", None) or []) if o}
         # token sets of DOM labels for overlap dedup — the DOM combobox (now discoverable via the
         # width-gate fix) and the VLM twin describe the SAME question in different words; a stale
         # twin false-DONEs committing the label as its value (robinhood). Exact/containment missed
@@ -507,11 +490,6 @@ async def discover_fields_visual(session: Any, dom_fields: list[eng.FormField]) 
             # skip anything the DOM enum already carries (containment both ways — labels get
             # truncated/decorated differently between the two readers)
             if any(k in s or s in k for s in seen if len(s) >= 4):
-                continue
-            label_toks = {_lnorm(w) for w in label.split()} - {""}
-            if k in opt_texts or (opt_texts and label_toks and label_toks <= opt_texts):
-                # an OPTION of an existing dom field — or the option ROW itself ('Yes No', every word
-                # an option) — not a question (option-as-field / row-as-field). Identity set-algebra.
                 continue
             # token-overlap dedup: a VLM label sharing >=60% of its words with a DOM field's label
             # is the SAME question (drop the twin, keep the DOM field the engine can actually fill)
