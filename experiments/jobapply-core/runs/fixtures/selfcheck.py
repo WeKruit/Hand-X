@@ -83,6 +83,18 @@ def _actuate_js(expected: str) -> str:
 }""" % ex
 
 
+# AUTHOR-SUPPLIED actuation: a fixture whose winning move the generic actuator can't produce (a
+# mousedown-committed portal option, a deliberate NOOP on a restraint fixture) carries data-actuate =
+# JS statements over `f` (the [data-actuate] node). Runs INSTEAD of the generic actuator; a custom
+# actuation that still can't reach `expected` is a real fixture defect -> FAIL, never SKIP.
+_CUSTOM_ACTUATE_JS = r"""() => {
+  const el = document.querySelector('[data-actuate]');
+  if(!el) return '__nocustom';
+  try { (new Function('f', el.getAttribute('data-actuate')))(el); return 'custom'; }
+  catch(e){ return '__acterr:'+String(e); }
+}"""
+
+
 # Run the fixture's OWN data-read and return its painted value (or an error marker). The read is a JS
 # expression over `f` (the field element) — evaluate it EXACTLY as oa_singlepage does: bind f = the
 # [data-read] node (which is the .field[data-kind] element). Bare `eval` left f undefined -> ReferenceError.
@@ -138,8 +150,11 @@ async def main() -> int:
                 await session.navigate_to(url)
                 await asyncio.sleep(0.3)
                 page = await session.must_get_current_page()
-                act = str(await page.evaluate(_actuate_js(exp)))
-                await asyncio.sleep(0.7)  # next-tick paint (fixtures defer up to ~400ms)
+                act = str(await page.evaluate(_CUSTOM_ACTUATE_JS))
+                if act == "__nocustom":
+                    act = str(await page.evaluate(_actuate_js(exp)))
+                # custom actuations may stage async steps (type -> latency -> option click) — give them room
+                await asyncio.sleep(2.5 if act == "custom" else 0.7)  # next-tick paint (fixtures defer up to ~400ms)
                 painted = str(await page.evaluate(_READ_JS))
             ok = _norm(painted) == _norm(exp) or (exp and _norm(exp) in _norm(painted))
             # FAIL only on HIGH confidence: the actuator found + clicked the EXACT option whose own
@@ -151,6 +166,8 @@ async def main() -> int:
             single = "|" not in exp
             if ok:
                 verdict = "PASS"
+            elif act == "custom" or act.startswith("__acterr"):
+                verdict = "FAIL"  # author-specified winning move must win; if it can't, the fixture is broken
             elif act == "click" and single and _painted_read_gates_on_js_state(f["html"]):
                 verdict = "FAIL"
             else:

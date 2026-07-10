@@ -50,6 +50,9 @@ def _free_port():
 def main():
     _combined = HERE / "all_fixtures.json"
     fixtures = json.load(open(_combined if _combined.exists() else HERE / "harsh_fixtures.json"))
+    _only = set(sys.argv[1:])  # optional kind filter: run_playground_iso.py <kind> [<kind>...]
+    if _only:
+        fixtures = [f for f in fixtures if f.get("kind") in _only]
     # write one html + one values file per fixture
     for i, fx in enumerate(fixtures):
         fid = f"{i:02d}_{fx['kind']}"
@@ -67,7 +70,12 @@ def main():
         out = ISO / f"{fid}.result.json"
         env = dict(os.environ)
         env.update(OA_NO_SANDBOX="1", OA_PAINTED_DUMP="1", OA_VISION_GATE="0", OA_COMPLETE_AGENT="0",
+                   # OA_VISUAL_EVERY=0: the DOM oracle is the playground's deterministic truth; the
+                   # live-default visual checkpoint stays OFF here. Checkpoint/flow fixtures opt back
+                   # in via their own "env" (below) — they are the ones whose oracle NEEDS the cadence.
+                   OA_VISUAL_EVERY="0",
                    OA_FIXTURE_VALUES=str(ISO / f"{fid}.values.json"), OA_PROC_CAP_S="120", PYTHONUNBUFFERED="1")
+        env.update({k: str(v) for k, v in (fx.get("env") or {}).items()})  # per-fixture overrides
         cmd = [str(ROOT / ".venv/bin/python"), str(ROOT / "oa_singlepage.py"),
                "--url", f"http://127.0.0.1:{port}/{fid}.html", "--generic",
                "--profile", str(HERE / "zoo_profile.json"), "--json", str(out),
