@@ -876,6 +876,37 @@ async def map_fields(
         for f in _blank_req[:5]:
             with contextlib.suppress(Exception):
                 q = (getattr(f, "label", "") or f.name)[:300]
+                # REQUIRED FREE-TEXT GENERATION (F3 mapper gap — sierra 038 'What is your average
+                # deal size?'): an OPEN text control (no options; text/textarea/number/search kind)
+                # that is required and unanswered must be ANSWERED from profile + job context — the
+                # tight ask below is options-oriented and its SKIP escape leaves the box blank, which
+                # on a required control is a guaranteed incomplete (blank->SKIP -> run demoted).
+                # Scope is CONTROL KIND + required flag only (structural, never label keywords); the
+                # LLM judges applicability (a conditional follow-up whose premise fails may still
+                # reply SKIP -> the field stays blank and the verdict layer demotes honestly —
+                # never fail-open). email/tel/url/date stay out: those are typed data channels a
+                # model must not invent.
+                _kind_f = str(getattr(f, "type", "") or "").lower()
+                if not getattr(f, "options", None) and _kind_f in ("text", "textarea", "number", "search"):
+                    _jd2 = str(job_context or "")[:2000]
+                    gmsg = (
+                        "You are filling a job application AS the candidate below. This question is "
+                        "REQUIRED and has no direct answer in the profile — write a truthful, "
+                        "plausible answer grounded in the profile (concise: 1-3 sentences of prose, "
+                        f"or a bare value if the question asks for one). The control is type="
+                        f"{_kind_f!r}; a 'number' control accepts ONLY digits (no currency symbols, "
+                        "commas or words). Only if the question is a conditional follow-up premised "
+                        "on a prior answer that does not hold for this candidate, reply SKIP.\n"
+                        f"Candidate profile JSON: {json.dumps(profile, ensure_ascii=False)[:2500]}\n"
+                        + (f"Job context: {_jd2}\n" if _jd2 else "")
+                        + f"Question: {q}\nReply ONLY the answer text."
+                    )
+                    r = await llm.ainvoke([UserMessage(content=gmsg)])
+                    v = str(getattr(r, "completion", r) or "").strip().strip('"').strip()
+                    print(f"  [focused-gen] '{q[:40]}' ({_kind_f}) -> {v[:50]!r}")
+                    if v and v.upper() != "SKIP" and len(v) <= 1500:
+                        out[f.name] = FieldFill(name=f.name, value=v, why="FOCUSED required-freetext generation")
+                    continue
                 opts = f"\nOptions: {list(getattr(f, 'options', None) or [])[:12]}" if getattr(f, "options", None) else ""
                 msg = (
                     f"Candidate facts: {_facts}\nRequired application question: {q}{opts}\n"

@@ -758,22 +758,22 @@ def _is_consent_checkbox(ctx: Ctx) -> bool:
     return any(t in low for t in _CONSENT_TOKENS)
 
 
-# Toggle the field's real checkbox ON directly (bare arrow -- actor.page.evaluate calls (fn)() with no
+# Toggle the field's real checkbox ON (bare arrow -- actor.page.evaluate calls (fn)() with no
 # args; the name is embedded as a JSON literal). Targets the box by name/id, else the LONE required
-# checkbox on the page; fires input+change so a submit-gate un-blocks. Returns .checked.
+# checkbox on the page. ACTIVATION CLICK, never a .checked mutation: a framework-controlled box
+# (ashby renders the check svg BEFORE the input — no CSS sibling selector can paint it off :checked)
+# only repaints through the framework's own click handler; .checked=true + dispatched input/change
+# leaves it visually grey (sierra 038/046 pixels). 'yes'/'no' string sentinel — evaluate returns a
+# SERIALIZED value and bool('false') is True (the documented bool(evaluate) trap).
 _CONSENT_CHECK_JS = r"""() => {
   const NAME = __NAME__;
   const boxes = [...document.querySelectorAll('input[type=checkbox]')];
   let el = null;
   if (NAME) el = boxes.find(b => b.name === NAME || b.id === NAME);
   if (!el) { const req = boxes.filter(b => b.required); if (req.length === 1) el = req[0]; }
-  if (!el) return false;
-  if (!el.checked) {
-    try { el.checked = true; } catch(_) {}
-    el.dispatchEvent(new Event('input', {bubbles:true}));
-    el.dispatchEvent(new Event('change', {bubbles:true}));
-  }
-  return !!el.checked;
+  if (!el) return 'no';
+  if (!el.checked) el.click();
+  return el.checked ? 'yes' : 'no';
 }"""
 
 
@@ -785,7 +785,7 @@ async def _commit_consent_checkbox(session: Any, ctx: Ctx) -> Outcome | None:
         page = await session.must_get_current_page()
         name = str(getattr(getattr(ctx, "field_obj", None), "name", "") or "")
         ok = await page.evaluate(_CONSENT_CHECK_JS.replace("__NAME__", _json.dumps(name)))
-        if ok:
+        if str(ok).strip().lower() == "yes":  # sentinel compare — never bool(evaluate)
             ctx.committed_text = "Yes"
             ctx.trace.append("consent-check")
             return DONE

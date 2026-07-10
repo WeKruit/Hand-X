@@ -1765,7 +1765,9 @@ async def _fill_form(
                 _comp["safety_net_failed"] = _net
                 print(f"   [SAFETY NET] {len(_net)} required unfilled -> NOT complete: {_net[:4]}")
     result.update(
-        status="FILLED",
+        # never clobber an earlier honest demotion (the login/captcha NOT_REACHED lane sets
+        # NEEDS_HUMAN before this update — the old unconditional "FILLED" erased it).
+        status=("NEEDS_HUMAN" if result.get("status") == "NEEDS_HUMAN" else "FILLED"),
         cost=usage.total_cost,
         secs=secs,
         vision_heartbeat=_oal.get_vlm_heartbeat(),  # every VLM chain stage: provider+latency+outcome
@@ -1813,6 +1815,67 @@ async def _fill_form(
     # ------------------------------------------------------------------ #
     _nh_rows = [str(r.label) for r in per_field if r.outcome == oa.NEEDS_HUMAN]
     comp = result.get("completeness")
+    # ------------------------------------------------------------------ #
+    # F3 FIELD-FAILURE AGGREGATION (sierra 038/046): the run status must SEE the per-field ledger —
+    # a field-level failure the engine ITSELF recorded can never ship under status=FILLED. Two
+    # ledger-proven classes demote the run to NEEDS_HUMAN, computed here self-sufficiently (the
+    # hard gate/safety net live inside the generic completeness branch, which the NOT_REACHED
+    # lane bypasses):
+    #   (a) FAILED COMMIT — the engine attempted a non-empty value and the row still terminated
+    #       SKIP/ESCALATE (recommit-EMPTY/commit-cap, checkpoint still-blank, ...): its OWN
+    #       verification proved the control is not holding the value. Required-agnostic —
+    #       structural ledger facts (outcome + committed) only, never trace-text matching.
+    #   (b) REQUIRED-UNFILLED — a required row (discovery's aria-required/required-attr/star
+    #       marker, or a star on the ledger label) ended ESCALATE, or SKIP that is neither a
+    #       twin-dedup nor an inapplicable conditional premise (same exemptions as the hard gate).
+    # A row is EXEMPT when another row with the same label verified DONE (sibling/retry healed it)
+    # or when it never rendered. Downgrade-only: this can remove a green, never manufacture one.
+    # ------------------------------------------------------------------ #
+    import re as _f3re
+
+    def _f3norm(s: Any) -> str:
+        return " ".join(str(s or "").split()).lower().strip(" *:✱")
+
+    # heal evidence must be CURRENT per_field state only. complete()'s committed_by_label is NOT a
+    # heal source here: it snapshots rows that were DONE at complete()-time, and the END vision gate
+    # demotes some of those to ESCALATE afterwards — excusing a row by its own stale DONE record is
+    # exactly the fail-open this layer exists to kill (live 038: two vision-gate-demoted EEO
+    # multi-selects escaped the first cut this way). Retry-healed rows are already flipped to DONE
+    # in per_field by the ledger-reconciliation pass, so the first set covers them.
+    _f3_healed = {_f3norm(r.label) for r in per_field if r.outcome == oa.DONE and str(r.committed or "").strip()}
+    _f3_req = {str(f.name) for f in (fields or []) if getattr(f, "required", False)}
+    _failed_fields: list[dict[str, str]] = []
+    for r in per_field:
+        tr = str(r.trace or "")
+        if r.outcome not in (oa.SKIP, oa.ESCALATE) or "not-rendered" in tr or _f3norm(r.label) in _f3_healed:
+            continue
+        _lab = str(r.label or "")
+        _star = ("*" in _lab or "✱" in _lab) and "indicates a required" not in _lab.lower()
+        _is_req = str(r.name) in _f3_req or _star
+        _benign_skip = r.outcome == oa.SKIP and (
+            "twin-label-already-done" in tr
+            or "premise" in tr.lower()
+            or bool(_f3re.match(
+                r"^(if so|if yes|if no\b|if not|if you|if applicable|if the|if selected|si oui|si vous|after the|based on|given your|as indicated)\b",
+                _f3norm(r.label),
+            ))
+        )
+        if _benign_skip:
+            continue
+        if str(r.committed or "").strip():
+            _failed_fields.append({
+                "label": _lab[:80], "outcome": str(r.outcome),
+                "why": "failed-commit", "intended": str(r.committed)[:40],
+            })
+        elif _is_req:
+            _failed_fields.append({"label": _lab[:80], "outcome": str(r.outcome), "why": "required-unfilled"})
+    # union in the generic-branch gates' findings (they see heals/labels this scan may not)
+    if isinstance(comp, dict):
+        for _gx in [str(x) for x in (comp.get("ledger_gate_failed") or [])] + [str(x) for x in (comp.get("safety_net_failed") or [])]:
+            if not any(_ff["label"][:40] and _ff["label"][:40] in _gx for _ff in _failed_fields):
+                _failed_fields.append({"label": _gx[:80], "outcome": "", "why": "required-unfilled"})
+    if _failed_fields:
+        result["failed_fields"] = _failed_fields
     if isinstance(comp, dict):
         # D-ii: strip not_rendered rows' labels out of missing_required (they were never on screen)
         _nr_labels = {
@@ -1831,18 +1894,28 @@ async def _fill_form(
                 # NOTE: exclusion only edits the list — it never flips complete back to True.
                 comp["not_rendered_excluded"] = [m for m in comp["missing_required"] if m not in _kept]
                 comp["missing_required"] = _kept
-        if result.get("blocker") or _nh_rows:
+        if result.get("blocker") or _nh_rows or _failed_fields:
             comp["complete"] = False
             comp["verdict"] = "NEEDS_HUMAN"
             if _nh_rows:
                 comp["needs_human_fields"] = _nh_rows
+            if _failed_fields:
+                comp["failed_fields"] = _failed_fields
+                comp.setdefault("missing_required", [])
+                for _ff in _failed_fields:
+                    _tag = f"{_ff['label'][:55]} [{_ff['outcome'] or _ff['why']}]"
+                    if _tag not in comp["missing_required"]:
+                        comp["missing_required"].append(_tag)
             result["status"] = "NEEDS_HUMAN"
-            print(f"   [verdict] NEEDS_HUMAN (blocker={result.get('blocker')!r}, media fields={_nh_rows[:3]})")
+            print(
+                f"   [verdict] NEEDS_HUMAN (blocker={result.get('blocker')!r}, media fields={_nh_rows[:3]},"
+                f" failed fields={[_ff['label'][:40] for _ff in _failed_fields][:4]})"
+            )
         elif comp.get("vision_dead"):
             comp["verdict"] = "UNVERIFIED"
         else:
             comp["verdict"] = "COMPLETE" if comp.get("complete") else "INCOMPLETE"
-    elif result.get("blocker") or _nh_rows:
+    elif result.get("blocker") or _nh_rows or _failed_fields:
         result["status"] = "NEEDS_HUMAN"
 
     # NB: browser teardown is owned by run_single_page_oa's finally (the bulletproof path) — we

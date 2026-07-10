@@ -360,7 +360,13 @@ _ENUM_JS = r"""
       // box has no name but a wired id) — the grouping key `g` collapses to the literal 'check' for a
       // nameless box, which no locate tier / painted-state cross-check can re-find (sierra 372 consent:
       // committed .checked yet the vision gate re-read it BLANK and could not confirm -> false-RED).
-      push(v.el.name || v.el.id || g, groupLabel(v.el, g) || v.opts[0] || g, 'checkbox', 'select', ['Yes', 'No'], v.el.required);
+      // REQUIRED via grpReq — the SAME structural detector the radio/multi groups use (required/
+      // aria-required attr, star in label, required-marker element in the question card). The bare
+      // el.required test missed ashby's consent card whose only marker is a required-class on the
+      // question <label> (sierra 038/046 F3: consent silently optional -> its blank/failed commit
+      // never reached the required gates and the run verdict).
+      const loneLab = groupLabel(v.el, g) || v.opts[0] || g;
+      push(v.el.name || v.el.id || g, loneLab, 'checkbox', 'select', ['Yes', 'No'], grpReq(v.el, loneLab));
       continue;
     }
     const clab = groupLabel(v.el, g, v.opts);
