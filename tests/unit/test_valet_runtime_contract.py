@@ -111,6 +111,39 @@ async def test_selected_chrome_target_is_the_only_visible_or_switchable_page() -
 
 
 @pytest.mark.asyncio
+async def test_selected_chrome_target_loss_never_recovers_to_another_tab() -> None:
+    from browser_use.browser.session_manager import SessionManager
+
+    cdp_client = AsyncMock()
+    cdp_client.send = MagicMock()
+    cdp_client.send.Target = MagicMock()
+    cdp_client.send.Target.activateTarget = AsyncMock()
+    browser = SimpleNamespace(
+        logger=MagicMock(),
+        _initial_target_id="target-a",
+        _detaching_keep_alive=False,
+        _cdp_client_root=cdp_client,
+        _cdp_create_new_page=AsyncMock(),
+        agent_focus_target_id=None,
+        event_bus=MagicMock(),
+    )
+    manager = SessionManager(browser)
+    manager._targets["target-b"] = SimpleNamespace(
+        target_id="target-b",
+        target_type="page",
+        url="https://mail.example.com",
+    )
+    manager._target_sessions["target-b"] = {"session-b"}
+    manager._sessions["session-b"] = SimpleNamespace(target_id="target-b")
+
+    await manager._recover_agent_focus("target-a")
+
+    assert browser.agent_focus_target_id is None
+    cdp_client.send.Target.activateTarget.assert_not_awaited()
+    browser._cdp_create_new_page.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_workday_preface_refuses_to_replace_missing_selected_target() -> None:
     from ghosthands.cli import _run_workday_auth_preface
 
@@ -407,6 +440,59 @@ def test_review_mode_allows_non_submission_copy(safe_text: str) -> None:
     assert _review_output_has_forbidden_success_claim(safe_text) is False
 
 
+def test_review_mode_detects_success_claims_in_normalized_keys() -> None:
+    from ghosthands.cli import _redact_review_success_claims, _review_output_has_forbidden_success_claim
+
+    payload = {
+        "submitted": True,
+        "nested": {"applicationSubmitted": True, "applied_successfully": True},
+    }
+
+    assert _review_output_has_forbidden_success_claim(payload) is True
+    redacted = _redact_review_success_claims(payload)
+    encoded = json.dumps(redacted).lower()
+    assert "submitted" not in encoded
+    assert "applied" not in encoded
+
+
+def test_review_mode_allows_internal_next_form_navigation() -> None:
+    from ghosthands.cli import _review_output_has_forbidden_success_claim
+
+    assert _review_output_has_forbidden_success_claim(
+        "DomHand click: submitted form for 'Next'. Page navigated to https://example.com/step-2."
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_same_tab_guard_init_failure_aborts_run() -> None:
+    hooks = importlib.import_module("ghosthands.agent.hooks")
+
+    browser = MagicMock()
+    browser._cdp_add_init_script = AsyncMock(side_effect=RuntimeError("CDP rejected same-tab script"))
+    browser.get_pages = AsyncMock()
+    hooks._SAME_TAB_GUARD_INSTALLED.discard(id(browser))
+
+    with pytest.raises(RuntimeError, match="CDP rejected same-tab script"):
+        await hooks.install_same_tab_guard(SimpleNamespace(browser_session=browser))
+
+    browser.get_pages.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_same_tab_guard_current_page_failure_aborts_run() -> None:
+    hooks = importlib.import_module("ghosthands.agent.hooks")
+
+    page = MagicMock()
+    page.evaluate = AsyncMock(side_effect=RuntimeError("page rejected same-tab script"))
+    browser = MagicMock()
+    browser._cdp_add_init_script = AsyncMock()
+    browser.get_pages = AsyncMock(return_value=[page])
+    hooks._SAME_TAB_GUARD_INSTALLED.discard(id(browser))
+
+    with pytest.raises(RuntimeError, match="page rejected same-tab script"):
+        await hooks.install_same_tab_guard(SimpleNamespace(browser_session=browser))
+
+
 def test_multi_checkbox_answer_preserves_every_exact_choice() -> None:
     from ghosthands.actions.views import FormField
     from ghosthands.dom.fill_label_match import _coerce_answer_to_field
@@ -450,6 +536,19 @@ async def test_review_guard_current_page_failure_is_fatal() -> None:
 
     with pytest.raises(RuntimeError, match="page rejected script"):
         await hooks.install_final_submit_guard(SimpleNamespace(browser_session=browser), allow_submit=False)
+
+
+@pytest.mark.asyncio
+async def test_review_guard_block_state_read_failure_is_fatal() -> None:
+    hooks = importlib.import_module("ghosthands.agent.hooks")
+
+    page = MagicMock()
+    page.evaluate = AsyncMock(side_effect=RuntimeError("page rejected guard-state read"))
+    browser = MagicMock()
+    browser.get_current_page = AsyncMock(return_value=page)
+
+    with pytest.raises(RuntimeError, match="page rejected guard-state read"):
+        await hooks.consume_blocked_final_submit(SimpleNamespace(browser_session=browser))
 
 
 def test_completed_review_result_never_claims_submitted_or_applied() -> None:

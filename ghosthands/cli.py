@@ -90,18 +90,62 @@ _REVIEW_NEGATED_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 _REVIEW_CLAIM_REDACTION = "[forbidden final-submit success claim removed]"
+_REVIEW_INTERNAL_NONFINAL_FORM_RE = re.compile(
+    r"\bsubmitted\s+form\s+for\s+(['\"])(?P<label>[^'\"]+)\1",
+    re.IGNORECASE,
+)
+_REVIEW_PROVEN_NONFINAL_FORM_LABELS = {
+    "next",
+    "continue",
+    "save",
+    "save and continue",
+    "save & continue",
+    "continue to review",
+}
+
+
+def _review_key_tokens(key: Any) -> set[str]:
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(key or ""))
+    return set(re.sub(r"[^a-zA-Z0-9]+", " ", text).lower().split())
+
+
+def _review_key_value_claims_success(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return value > 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        return normalized not in {"", "0", "false", "no", "none", "null", "not submitted", "not applied"}
+    return value is not None and bool(value)
+
+
+def _review_key_reports_success(key: Any, value: Any) -> bool:
+    return bool(_review_key_tokens(key) & {"submitted", "applied"}) and _review_key_value_claims_success(value)
+
+
+def _strip_proven_internal_navigation_claims(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        label = re.sub(r"\s+", " ", match.group("label")).strip().lower()
+        return "advanced form" if label in _REVIEW_PROVEN_NONFINAL_FORM_LABELS else match.group(0)
+
+    return _REVIEW_INTERNAL_NONFINAL_FORM_RE.sub(replace, value)
 
 
 def _review_output_has_forbidden_success_claim(value: Any) -> bool:
     """Return whether a review-only output value claims submit success."""
     if isinstance(value, dict):
-        return any(_review_output_has_forbidden_success_claim(item) for item in value.values())
+        return any(
+            _review_key_reports_success(key, item) or _review_output_has_forbidden_success_claim(item)
+            for key, item in value.items()
+        )
     if isinstance(value, (list, tuple, set)):
         return any(_review_output_has_forbidden_success_claim(item) for item in value)
     if not isinstance(value, str):
         return False
-    for match in _REVIEW_SUCCESS_CLAIM_RE.finditer(value):
-        if not _REVIEW_NEGATED_CLAIM_RE.search(value[max(0, match.start() - 64) : match.start()]):
+    checked_value = _strip_proven_internal_navigation_claims(value)
+    for match in _REVIEW_SUCCESS_CLAIM_RE.finditer(checked_value):
+        if not _REVIEW_NEGATED_CLAIM_RE.search(checked_value[max(0, match.start() - 64) : match.start()]):
             return True
     return False
 
@@ -109,7 +153,14 @@ def _review_output_has_forbidden_success_claim(value: Any) -> bool:
 def _redact_review_success_claims(value: Any) -> Any:
     """Remove prohibited success claims before a review-only payload is emitted."""
     if isinstance(value, dict):
-        return {key: _redact_review_success_claims(item) for key, item in value.items()}
+        redacted = {
+            key: _redact_review_success_claims(item)
+            for key, item in value.items()
+            if not (_review_key_tokens(key) & {"submitted", "applied"})
+        }
+        if len(redacted) != len(value):
+            redacted["finalSubmitClaimRemoved"] = True
+        return redacted
     if isinstance(value, list):
         return [_redact_review_success_claims(item) for item in value]
     if isinstance(value, tuple):

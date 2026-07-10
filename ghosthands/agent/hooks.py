@@ -19,6 +19,7 @@ These hooks are used to:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -38,7 +39,7 @@ logger = logging.getLogger(__name__)
 _SAME_TAB_GUARD_INSTALLED: set[int] = set()
 _FINAL_SUBMIT_GUARD_INSTALLED: set[int] = set()
 
-_SAME_TAB_GUARD_JS = r"""(() => {
+_SAME_TAB_GUARD_JS = r"""() => {
 	if (window.__ghSameTabGuardInstalled) {
 		try {
 			document.querySelectorAll('a[target], area[target], form[target]').forEach((el) => el.removeAttribute('target'));
@@ -148,9 +149,9 @@ _SAME_TAB_GUARD_JS = r"""(() => {
 	}
 
 	stripTargets(document);
-})();"""
+}"""
 
-_FINAL_SUBMIT_GUARD_JS = r"""(() => {
+_FINAL_SUBMIT_GUARD_JS = r"""() => {
 	if (window.__ghFinalSubmitGuardInstalled) return;
 	window.__ghFinalSubmitGuardInstalled = true;
 	window.__ghFinalSubmitGuardState = window.__ghFinalSubmitGuardState || { blocked: false, label: "", text: "", count: 0 };
@@ -202,21 +203,42 @@ _FINAL_SUBMIT_GUARD_JS = r"""(() => {
 		return el && el.closest ? el.closest('button, input[type="submit"], input[type="button"], [role="button"]') : null;
 	}
 
-	function isAllowedNonFinalControl(el) {
+	function isProvenNonFinalControl(el) {
 		const control = controlFor(el);
 		if (!control) return false;
 		const text = normalize(getText(control));
 		const form = control.form || (control.closest ? control.closest('form') : null);
-		if (hasPasswordField(form)) return true;
-		return (
+		if (
 			text === 'next' ||
 			text === 'continue' ||
 			text === 'save' ||
+			text === 'done' ||
+			text === 'ok' ||
 			text === 'save and continue' ||
 			text === 'save & continue' ||
 			text === 'continue to review' ||
 			text === 'apply with resume' ||
-			text === 'autofill with resume'
+			text === 'autofill with resume' ||
+			text === 'back' ||
+			text === 'previous' ||
+			text === 'cancel' ||
+			text === 'close' ||
+			text === 'edit' ||
+			text.startsWith('add ') ||
+			text.startsWith('upload ') ||
+			text.startsWith('attach ') ||
+			text.startsWith('select ') ||
+			text.startsWith('choose ') ||
+			text.startsWith('remove ')
+		) {
+			return true;
+		}
+		return hasPasswordField(form) && (
+			text === 'sign in' ||
+			text === 'log in' ||
+			text === 'login' ||
+			text === 'create account' ||
+			text === 'register'
 		);
 	}
 
@@ -227,35 +249,17 @@ _FINAL_SUBMIT_GUARD_JS = r"""(() => {
 		if (String(control.getAttribute && control.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return false;
 
 		const form = control.form || (control.closest ? control.closest('form') : null);
-		if (hasPasswordField(form)) return false;
-		if (isAllowedNonFinalControl(control)) return false;
-
-		const text = normalize(getText(control));
-		const explicitFinalLabel = (
-			text === 'submit' ||
-			text === 'apply' ||
-			text === 'apply now' ||
-			text === 'finish' ||
-			text.includes('submit application') ||
-			text.includes('review and submit') ||
-			text.includes('finish and submit') ||
-			text.includes('complete application') ||
-			text.includes('confirm and submit') ||
-			text.includes('send application')
-		);
-		if (explicitFinalLabel) return true;
-		if (!form) return false;
-		return control.matches('button:not([type]), button[type="submit"], input[type="submit"]');
+		if (isProvenNonFinalControl(control)) return false;
+		return true;
 	}
 
 	function shouldBlockFormSubmit(form, candidate) {
-		if (hasPasswordField(form)) return false;
-		if (candidate && isAllowedNonFinalControl(candidate)) return false;
+		if (candidate && isProvenNonFinalControl(candidate)) return false;
 		if (candidate) return controlFor(candidate) || form;
 		try {
 			const controls = Array.from(form.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'));
 			const submitControls = controls.filter((control) => control.matches('button:not([type]), button[type="submit"], input[type="submit"]'));
-			if (submitControls.length === 1 && isAllowedNonFinalControl(submitControls[0])) return false;
+			if (submitControls.length === 1 && isProvenNonFinalControl(submitControls[0])) return false;
 			return submitControls.find(looksLikeFinalSubmit) || form;
 		} catch (e) {
 			return form;
@@ -312,9 +316,9 @@ _FINAL_SUBMIT_GUARD_JS = r"""(() => {
 		}
 		return nativeSubmit.call(this);
 	};
-})();"""
+}"""
 
-_READ_AND_CLEAR_FINAL_SUBMIT_BLOCK_JS = r"""(() => {
+_READ_AND_CLEAR_FINAL_SUBMIT_BLOCK_JS = r"""() => {
 	const state = window.__ghFinalSubmitGuardState || null;
 	if (!state || !state.blocked) return null;
 	window.__ghFinalSubmitGuardState = {
@@ -324,42 +328,29 @@ _READ_AND_CLEAR_FINAL_SUBMIT_BLOCK_JS = r"""(() => {
 		count: Number(state.count || 0),
 	};
 	return state;
-})();"""
+}"""
 
 
 async def install_same_tab_guard(agent: "Agent") -> None:
-	"""Prevent sites from opening new tabs during job-application flows.
+	"""Install the same-tab guard and abort if target confinement cannot be enforced."""
+	browser_session = getattr(agent, "browser_session", None)
+	if browser_session is None:
+		raise RuntimeError("Same-tab confinement requires an active browser session")
 
-	This is best-effort:
-	- installs a CDP init script once per browser session so future documents inherit it
-	- reapplies the script on the current page every step to catch already-loaded DOM
-	"""
-	try:
-		browser_session = getattr(agent, "browser_session", None)
-		if browser_session is None:
-			return
+	session_key = id(browser_session)
+	if session_key not in _SAME_TAB_GUARD_INSTALLED:
+		await browser_session._cdp_add_init_script(f"({_SAME_TAB_GUARD_JS})()")
+		_SAME_TAB_GUARD_INSTALLED.add(session_key)
 
-		session_key = id(browser_session)
-		if session_key not in _SAME_TAB_GUARD_INSTALLED:
-			try:
-				await browser_session._cdp_add_init_script(_SAME_TAB_GUARD_JS)
-				_SAME_TAB_GUARD_INSTALLED.add(session_key)
-			except Exception as exc:
-				logger.debug("step.same_tab_guard_init_failed", extra={"error": str(exc)})
-
-		pages = []
-		try:
-			pages = list(await browser_session.get_pages())
-		except Exception:
-			pages = []
-		if not pages:
-			page = await browser_session.get_current_page()
-			if page:
-				pages = [page]
-		for page in pages:
-			await page.evaluate(_SAME_TAB_GUARD_JS)
-	except Exception as exc:
-		logger.debug("step.same_tab_guard_apply_failed", extra={"error": str(exc)})
+	pages = list(await browser_session.get_pages())
+	if not pages:
+		page = await browser_session.get_current_page()
+		if page:
+			pages = [page]
+	if not pages:
+		raise RuntimeError("Same-tab confinement could not find the selected browser target")
+	for page in pages:
+		await page.evaluate(_SAME_TAB_GUARD_JS)
 
 
 async def install_final_submit_guard(agent: "Agent", *, allow_submit: bool) -> None:
@@ -372,7 +363,7 @@ async def install_final_submit_guard(agent: "Agent", *, allow_submit: bool) -> N
 
 	session_key = id(browser_session)
 	if session_key not in _FINAL_SUBMIT_GUARD_INSTALLED:
-		await browser_session._cdp_add_init_script(_FINAL_SUBMIT_GUARD_JS)
+		await browser_session._cdp_add_init_script(f"({_FINAL_SUBMIT_GUARD_JS})()")
 		_FINAL_SUBMIT_GUARD_INSTALLED.add(session_key)
 
 	page = await browser_session.get_current_page()
@@ -383,17 +374,23 @@ async def install_final_submit_guard(agent: "Agent", *, allow_submit: bool) -> N
 
 async def consume_blocked_final_submit(agent: "Agent") -> dict[str, Any] | None:
 	"""Return and clear the latest blocked final-submit attempt, if any."""
-	try:
-		browser_session = getattr(agent, "browser_session", None)
-		if browser_session is None:
-			return None
-		page = await browser_session.get_current_page()
-		if page is None:
-			return None
-		state = await page.evaluate(_READ_AND_CLEAR_FINAL_SUBMIT_BLOCK_JS)
-		return state if isinstance(state, dict) else None
-	except Exception:
+	browser_session = getattr(agent, "browser_session", None)
+	if browser_session is None:
+		raise RuntimeError("Review mode lost its browser session while checking the final-submit guard")
+	page = await browser_session.get_current_page()
+	if page is None:
+		raise RuntimeError("Review mode lost its selected target while checking the final-submit guard")
+	state = await page.evaluate(_READ_AND_CLEAR_FINAL_SUBMIT_BLOCK_JS)
+	if isinstance(state, str):
+		try:
+			state = json.loads(state)
+		except json.JSONDecodeError as exc:
+			raise RuntimeError("Final-submit guard returned an invalid block state") from exc
+	if state is None:
 		return None
+	if not isinstance(state, dict):
+		raise RuntimeError("Final-submit guard returned an invalid block state")
+	return state
 
 PHASE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"upload.*resume|resume.*upload|attach.*resume", re.IGNORECASE), "Uploading resume"),

@@ -140,6 +140,38 @@ async def test_same_tab_guard_forces_target_blank_navigation_into_current_tab(br
 	assert len(await browser_session.get_tabs()) == baseline_tabs
 
 
+@pytest.mark.asyncio
+async def test_review_guard_blocks_unknown_finalizer_through_browser_session(browser_session, base_url):
+	"""Exercise guard install and block-state reads through Browser Use's actor Page."""
+	from types import SimpleNamespace
+
+	from ghosthands.agent.hooks import consume_blocked_final_submit, install_final_submit_guard
+
+	await browser_session.navigate_to(f'{base_url}/background-tab-test')
+	page = await browser_session.get_current_page()
+	assert page is not None
+	await page.evaluate(
+		"""() => {
+			window.applicationSubmits = 0;
+			const finalizer = document.createElement('div');
+			finalizer.id = 'finalize';
+			finalizer.setAttribute('role', 'button');
+			finalizer.textContent = 'Finalize';
+			finalizer.addEventListener('click', () => { window.applicationSubmits += 1; });
+			document.body.appendChild(finalizer);
+		}"""
+	)
+	agent = SimpleNamespace(browser_session=browser_session)
+	await install_final_submit_guard(agent, allow_submit=False)
+
+	await page.evaluate("() => document.getElementById('finalize').click()")
+	blocked = await consume_blocked_final_submit(agent)
+
+	assert blocked is not None
+	assert blocked['blocked'] is True
+	assert await page.evaluate('() => window.applicationSubmits') == '0'
+
+
 class TestMultiTabOperations:
 	"""Test multi-tab creation, switching, and closing."""
 

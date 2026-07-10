@@ -8,6 +8,7 @@ Supported sections: Education, Work Experience, Skills, Languages, Licenses.
 """
 
 import asyncio
+import contextlib
 import json
 import structlog
 import os
@@ -196,6 +197,7 @@ _FIND_SAVE_BUTTON_JS = r"""
         // Same pattern as domhand_expand's tagAndReturn.
         btn.setAttribute('data-dh-commit-target', 'true');
         btn.scrollIntoView({block: 'center', behavior: 'instant'});
+        diag.phase = phase;
         return JSON.stringify(Object.assign({
             found: true,
             text: btn.textContent.trim(),
@@ -235,18 +237,6 @@ _FIND_SAVE_BUTTON_JS = r"""
 
     var pageBtns = document.querySelectorAll('button, [role="button"]');
 
-    if (sectionCommitPattern) {
-        for (const btn of pageBtns) {
-            const text = (btn.textContent || '').trim();
-            if (sectionCommitPattern.test(text)) {
-                var s = getComputedStyle(btn);
-                if (s.display !== 'none' && s.visibility !== 'hidden') {
-                    return tagAndReturn(btn, 'oracle_section_commit', {oracle_commit: true});
-                }
-            }
-        }
-    }
-
     if (preferSave) {
         for (const btn of pageBtns) {
             const text = (btn.textContent || '').trim().toLowerCase();
@@ -254,6 +244,18 @@ _FIND_SAVE_BUTTON_JS = r"""
                 var s = getComputedStyle(btn);
                 if (s.display !== 'none' && s.visibility !== 'hidden') {
                     return tagAndReturn(btn, 'oracle_save');
+                }
+            }
+        }
+    }
+
+    if (sectionCommitPattern && !preferSave) {
+        for (const btn of pageBtns) {
+            const text = (btn.textContent || '').trim();
+            if (sectionCommitPattern.test(text)) {
+                var s = getComputedStyle(btn);
+                if (s.display !== 'none' && s.visibility !== 'hidden') {
+                    return tagAndReturn(btn, 'oracle_section_commit', {oracle_commit: true});
                 }
             }
         }

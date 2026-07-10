@@ -53,6 +53,34 @@ async def test_review_guard_blocks_all_submit_mechanisms_but_allows_next_navigat
 
 
 @pytest.mark.asyncio
+async def test_review_guard_blocks_unknown_javascript_finalizer() -> None:
+    async with async_playwright() as playwright:
+        launch_options: dict[str, object] = {"headless": True}
+        if not Path(playwright.chromium.executable_path).exists():
+            cache_roots = [Path.home() / "Library/Caches/ms-playwright", Path.home() / ".cache/ms-playwright"]
+            cached = [path for root in cache_roots if root.exists() for path in root.rglob("chrome-headless-shell")]
+            if cached:
+                launch_options["executable_path"] = str(sorted(cached)[-1])
+        browser = await playwright.chromium.launch(**launch_options)
+        page = await browser.new_page()
+        await page.set_content(
+            """
+            <div id="finalize" role="button" tabindex="0"
+                 onclick="window.applicationSubmits += 1">Finalize</div>
+            <script>window.applicationSubmits = 0;</script>
+            """
+        )
+        await page.evaluate(_FINAL_SUBMIT_GUARD_JS)
+
+        await page.click("#finalize")
+        blocked = await page.evaluate(_READ_AND_CLEAR_FINAL_SUBMIT_BLOCK_JS)
+
+        assert blocked["blocked"] is True
+        assert await page.evaluate("window.applicationSubmits") == 0
+        await browser.close()
+
+
+@pytest.mark.asyncio
 async def test_checkbox_group_script_selects_every_requested_answer() -> None:
     async with async_playwright() as playwright:
         launch_options: dict[str, object] = {"headless": True}
