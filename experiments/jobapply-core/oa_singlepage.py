@@ -548,7 +548,26 @@ async def _choice_painted_active(session: Any, group_name: str, want: str) -> bo
             return False
         opts = await _cdpa.cdp_read_choice_options(session, anchor, group_name=group_name)
         hit = oa._match_option(want, opts)
-        return bool(hit and hit.get("active"))
+        if hit is not None:
+            # an option MEANS the value -> its painted state is authoritative (pills / radios / named
+            # checkbox groups). Never fall through to a pill MIRROR's .checked (decoupled from paint).
+            return bool(hit.get("active"))
+        # value is not among the option labels -> a LONE consent/acknowledge checkbox whose own label is
+        # the clause, not the affirmative value. Resolve the ref as that element and read its REAL
+        # .checked (a styled opacity:0 consent box the VLM misreads as blank IS checked; sierra 372).
+        # Structural guard: a checkbox sitting beside option BUTTONS is a pill mirror, not a lone box.
+        page = await session.must_get_current_page()
+        checked = await page.evaluate(
+            "() => { const R = %s;"
+            " const el = document.getElementById(R) || document.getElementsByName(R)[0];"
+            " if (!(el && el.matches && el.matches('input[type=checkbox],input[type=radio]'))) return false;"
+            " const grp = el.closest('fieldset,[role=group],[role=radiogroup]') || el.parentElement;"
+            " const pillBtns = grp && [...grp.querySelectorAll('button,[role=button]')]"
+            "   .some(b => (b.getAttribute('type')||'').toLowerCase() !== 'submit');"
+            " return pillBtns ? false : !!el.checked; }"
+            % json.dumps(group_name)
+        )
+        return str(checked).strip().lower() == "true"  # page.evaluate returns a JSON string
     return False
 
 
@@ -1363,6 +1382,14 @@ async def _fill_form(
                             continue
                         _rend = str(_v.get("rendered", "")).strip().upper()
                         if not _v.get("match") and _rend in _BLANK:
+                            # DOM PAINTED CROSS-CHECK (P3-C): the VLM can misread a styled opacity:0
+                            # control (sierra 372 consent box) as blank though it is genuinely committed
+                            # in the DOM -> a false-RED that demotes a correct fill. Confirm the real
+                            # painted/checked state before escalating (same read _repaint_choice trusts).
+                            if await _choice_painted_active(session, str(getattr(_r, "name", "") or ""), str(_r.committed or _r.value)):
+                                if isinstance(_r.trace, list):
+                                    _r.trace.append("vision-gate:dom-painted->keep")
+                                continue
                             _r.outcome = oa.ESCALATE
                             if isinstance(_r.trace, list):
                                 _r.trace.append("vision-gate:blank-on-screen")

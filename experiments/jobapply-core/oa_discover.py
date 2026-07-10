@@ -356,7 +356,11 @@ _ENUM_JS = r"""
       // consent boxes invisible to discovery while the audit flagged them (teamtailor
       // candidate[consent_given]). Label: group label, else the box's own text, else the name
       // attr (the consent sentence often exceeds labFor's length cap).
-      push(g, groupLabel(v.el, g) || v.opts[0] || g, 'checkbox', 'select', ['Yes', 'No'], v.el.required);
+      // NAME = a RESOLVABLE dom-ref: prefer the box's own name, else its id (ashby's styled consent
+      // box has no name but a wired id) — the grouping key `g` collapses to the literal 'check' for a
+      // nameless box, which no locate tier / painted-state cross-check can re-find (sierra 372 consent:
+      // committed .checked yet the vision gate re-read it BLANK and could not confirm -> false-RED).
+      push(v.el.name || v.el.id || g, groupLabel(v.el, g) || v.opts[0] || g, 'checkbox', 'select', ['Yes', 'No'], v.el.required);
       continue;
     }
     const clab = groupLabel(v.el, g, v.opts);

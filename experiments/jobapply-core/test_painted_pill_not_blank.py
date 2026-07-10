@@ -74,6 +74,25 @@ async def main() -> int:
             print("FAIL: blank group read as painted -> would wrongly SUPPRESS a real escalate"); ok = False
         if painted is not True:
             print("FAIL: painted pill read as blank -> checkpoint would false-RED ESCALATE it"); ok = False
+
+        # --- P3-C: a styled opacity:0 CONSENT checkbox (no group name, resolved by id) committed .checked
+        # must read painted so the end vision-gate does not false-RED it (sierra 372). ---
+        cons = next((f for f in fx if f["kind"] == "radio_plus_required_consent"), None)
+        if cons is not None:
+            (d / "radio_plus_required_consent.html").write_text(SHELL + cons["html"])
+            await sess.navigate_to(f"http://127.0.0.1:{port}/radio_plus_required_consent.html")
+            await asyncio.sleep(0.5)
+            page = await sess.must_get_current_page()
+            cid = await page.evaluate("() => { const c=document.querySelector('input[type=checkbox]'); return c ? (c.id||c.name||'') : ''; }")
+            unchecked = await osp._choice_painted_active(sess, cid, "Yes")
+            await page.evaluate("() => { const c=document.querySelector('input[type=checkbox]'); const L=c.id?document.querySelector('label[for=\"'+c.id+'\"]'):null; (L||c).click(); }")
+            await asyncio.sleep(0.3)
+            checked = await osp._choice_painted_active(sess, cid, "Yes")
+            print(f"consent id={cid[:24]!r}  unchecked_active={unchecked}  checked_active={checked}")
+            if unchecked is not False:
+                print("FAIL: unchecked consent read as checked"); ok = False
+            if checked is not True:
+                print("FAIL: checked consent read as blank -> end vision-gate would false-RED ESCALATE it"); ok = False
     finally:
         with contextlib.suppress(Exception):
             await sess.kill()
