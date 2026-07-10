@@ -941,7 +941,9 @@ function(){
     if(el.matches && el.matches('input')){
       const L=(el.labels&&el.labels[0])||el.closest('label');
       if(L){ t = norm(L.innerText)||t; const lr=L.getBoundingClientRect(); if(lr.width>2&&lr.height>2) box=lr; }
-      if(!t) t = norm(el.getAttribute('aria-label')||el.value);
+      // a GENERIC value ('on'/'true'/'1' — the browser default a render-mirror checkbox carries) is
+      // NOT an option label; leaving t empty drops the mirror so it is not counted as an active option.
+      if(!t){ const v=norm(el.getAttribute('aria-label')||el.value); if(!['on','true','1','checked'].includes(v.toLowerCase())) t=v; }
     }
     if(!t || t.length>80) continue;
     if(box.width<2 || box.height<2) continue;

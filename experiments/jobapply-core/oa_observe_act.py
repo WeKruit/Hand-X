@@ -1766,6 +1766,12 @@ async def _repaint_choice(session: Any, ctx: Ctx) -> bool:
         return True  # the value is not among these controls -> nothing to confirm
     if tgt.get("active"):
         return True  # already really painted
+    if any(o.get("active") for o in opts):
+        # SOME option in the group is painted-selected (just not the one we matched) — that is a
+        # read/match mismatch or a WRONG-value commit, NOT a blank group. Re-clicking here risks
+        # toggling a correct selection OFF; leave it to the verify/revalue path. Only repair a
+        # genuinely BLANK group (nothing selected), which is the false-green this exists for.
+        return True
     await cdpa.cdp_click_xy(session, ctx.node, int(tgt["x"]), int(tgt["y"]))
     await asyncio.sleep(0.35)
     tgt2 = _match_option(want, await cdpa.cdp_read_choice_options(session, card))
