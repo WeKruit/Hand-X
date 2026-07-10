@@ -2558,18 +2558,13 @@ async def _typeahead_committed_survives_blur(session: Any, ctx: Ctx) -> bool:
     """A typeahead's DOM read-back reads the TYPED text pre-blur, so a value that was only typed
     (no option row clicked) verifies CORRECT — then the portal DISCARDS it on blur (geocomplete
     wipe-on-blur / menu-left-open) and the painted field is BLANK. Confirm the value SURVIVES a real
-    blur. The control's OWN .value discriminates: EMPTY means the value is either a committed
-    selection rendered elsewhere (react-select single-value -> survives) or nothing at all (an S4
-    echo that already cleared -> not committed) — the container-scan read tells them apart. NON-EMPTY
-    means the value sits in the input, so BLUR it, settle, re-read: gone/placeholder == an
-    uncommitted echo -> False; still there == a real commit -> True."""
-    from oa_dom_value import read_dom_value
-
+    blur. Only a POSITIVE wipe recommits: read the control's OWN .value — EMPTY means the value is
+    not a typed-into-input echo we can test (a committed react-select single-value, or an already
+    cleared input) so assume it survives; NON-EMPTY means the value sits in the input, so BLUR it,
+    settle, re-read: gone == an uncommitted echo -> False; still there == a real commit -> True."""
     raw = await cdpa.cdp_raw_value(session, ctx.node)
     if not raw:
-        # value not in the input: a real react-select selection renders a single-value/chip the
-        # container scan finds (survives); a cleared/never-committed typeahead reads back "".
-        return bool((await read_dom_value(session, ctx.node) or "").strip())
+        return True  # not a typed-into-input echo — no positive wipe to act on (fail-safe)
     await cdpa.cdp_blur(session, ctx.node)
     await asyncio.sleep(_SETTLE_STATIC_S)
     # read the RAW .value post-blur (NOT read_dom_value: its combobox menu-open guard returns "" for
@@ -3339,11 +3334,14 @@ async def _s_verify(session: Any, ctx: Ctx) -> Outcome:
     # location). Confirm the value SURVIVES a real blur first; if it wipes, the typed text was never
     # committed -> re-commit by CLICKING a real option ROW (fresh, by coordinate). Fires once per
     # field (the recommit returns terminally; it never re-enters _s_verify).
-    if _is_typeahead_editable(ctx) and not ctx.typeahead_checked:
-        ctx.typeahead_checked = True
-        if not await _typeahead_committed_survives_blur(session, ctx):
-            ctx.trace.append("typeahead-echo-not-committed")
-            return await _recommit_typeahead_row(session, ctx)
+    if (
+        _is_typeahead_editable(ctx)
+        and not ctx.typeahead_checked
+        and not await _typeahead_committed_survives_blur(session, ctx)
+    ):
+        ctx.typeahead_checked = True  # consume the one recommit attempt only when a wipe was seen
+        ctx.trace.append("typeahead-echo-not-committed")
+        return await _recommit_typeahead_row(session, ctx)
     verdict = await _verify_field(session, ctx, key=ctx.label)
     ctx.trace.append(f"verdict:{verdict}")
     if verdict == "CORRECT":
@@ -3399,6 +3397,13 @@ async def _observed_already_correct(session: Any, ctx: Ctx, *, stage: str) -> bo
 async def _s_recommit(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.guard():
         return ESCALATE if ctx.required else SKIP
+    # TYPEAHEAD EMPTY-PATH: a location typeahead reaches EMPTY when its typed query was discarded
+    # (the S4 loop committed menu chrome / the input already cleared). Re-commit via a real option-row
+    # click BEFORE the generic re-click or the observe-look — the open menu's typed text would read as
+    # correct to a re-verify. One attempt (shared with the pre-verify guard via typeahead_checked).
+    if _is_typeahead_editable(ctx) and not ctx.typeahead_checked:
+        ctx.typeahead_checked = True
+        return await _recommit_typeahead_row(session, ctx)
     # fresh pixels FIRST: a false-EMPTY (desynced DOM) must not trigger a duplicate commit
     # (a re-click on an already-selected pill/checkbox TOGGLES IT OFF — destructive).
     if await _observed_already_correct(session, ctx, stage=f"recommit#{ctx.commit_tries + 1}"):
