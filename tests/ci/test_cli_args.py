@@ -11,16 +11,18 @@ patch sys.argv for each test.
 
 from __future__ import annotations
 
+import argparse
 import sys
 import types
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Module-level setup: mock heavy imports before loading ghosthands.cli
 # ---------------------------------------------------------------------------
+
 
 def _ensure_cli_importable():
     """Install lightweight mocks for browser-use dependency chain.
@@ -62,30 +64,32 @@ def _ensure_cli_importable():
         mock_prompts = sys.modules["ghosthands.agent.prompts"]
     if "ghosthands.agent.hooks" not in sys.modules:
         mock_hooks = types.ModuleType("ghosthands.agent.hooks")
-        mock_hooks.install_same_tab_guard = AsyncMock()
-        mock_hooks.install_final_submit_guard = AsyncMock()
-        mock_hooks.consume_blocked_final_submit = AsyncMock(return_value=None)
+        hooks_any = cast(Any, mock_hooks)
+        hooks_any.install_same_tab_guard = AsyncMock()
+        hooks_any.install_final_submit_guard = AsyncMock()
+        hooks_any.consume_blocked_final_submit = AsyncMock(return_value=None)
         sys.modules["ghosthands.agent.hooks"] = mock_hooks
     else:
         mock_hooks = sys.modules["ghosthands.agent.hooks"]
 
-    setattr(mock_agent, "factory", mock_factory)
-    setattr(mock_agent, "prompts", mock_prompts)
-    setattr(mock_agent, "hooks", mock_hooks)
+    agent_any = cast(Any, mock_agent)
+    agent_any.factory = mock_factory
+    agent_any.prompts = mock_prompts
+    agent_any.hooks = mock_hooks
 
 
 _ensure_cli_importable()
 
 from ghosthands.cli import parse_args  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _parse(argv: list[str]) -> object:
+
+def _parse(argv: list[str]) -> argparse.Namespace:
     """Run parse_args() with a synthetic sys.argv."""
-    with patch.object(sys, "argv", ["hand-x"] + argv):
+    with patch.object(sys, "argv", ["hand-x", *argv]):
         return parse_args()
 
 
@@ -155,26 +159,38 @@ class TestProfileArgs:
 
     def test_profile_inline_json(self):
         """--profile accepts an inline JSON string."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--profile", '{"name": "Jane Doe"}',
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--profile",
+                '{"name": "Jane Doe"}',
+            ]
+        )
         assert args.profile == '{"name": "Jane Doe"}'
 
     def test_profile_at_filepath(self):
         """--profile accepts @filepath syntax (string is passed through as-is)."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--profile", "@/tmp/profile.json",
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--profile",
+                "@/tmp/profile.json",
+            ]
+        )
         assert args.profile == "@/tmp/profile.json"
 
     def test_test_data_path(self):
         """--test-data stores a file path string."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--test-data", "examples/sample.json",
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--test-data",
+                "examples/sample.json",
+            ]
+        )
         assert args.test_data == "examples/sample.json"
 
     def test_profile_default_none(self):
@@ -265,6 +281,11 @@ class TestOutputFormat:
         args = _parse(["--job-url", "https://example.com", "--output-format", "human"])
         assert args.output_format == "human"
 
+    def test_output_format_tui(self):
+        """--output-format accepts 'tui'."""
+        args = _parse(["--output-format", "tui"])
+        assert args.output_format == "tui"
+
     def test_output_format_jsonl_explicit(self):
         """--output-format accepts explicit 'jsonl'."""
         args = _parse(["--job-url", "https://example.com", "--output-format", "jsonl"])
@@ -307,10 +328,14 @@ class TestProxyArgs:
 
     def test_proxy_url_set(self):
         """--proxy-url stores the provided URL."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--proxy-url", "https://valet.example.com/api/v1/local-workers/anthropic",
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--proxy-url",
+                "https://valet.example.com/api/v1/local-workers/anthropic",
+            ]
+        )
         assert args.proxy_url == "https://valet.example.com/api/v1/local-workers/anthropic"
 
     def test_runtime_grant_default_none(self):
@@ -320,10 +345,14 @@ class TestProxyArgs:
 
     def test_runtime_grant_set(self):
         """--runtime-grant stores the provided token."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--runtime-grant", "lwrg_v1_abc123",
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--runtime-grant",
+                "lwrg_v1_abc123",
+            ]
+        )
         assert args.runtime_grant == "lwrg_v1_abc123"
 
 
@@ -342,10 +371,14 @@ class TestDesktopBridgeArgs:
 
     def test_cdp_url_set(self):
         """--cdp-url stores the provided CDP URL."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--cdp-url", "ws://127.0.0.1:9222/devtools/browser/abc",
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--cdp-url",
+                "ws://127.0.0.1:9222/devtools/browser/abc",
+            ]
+        )
         assert args.cdp_url == "ws://127.0.0.1:9222/devtools/browser/abc"
 
     def test_engine_default_auto(self):
@@ -355,27 +388,39 @@ class TestDesktopBridgeArgs:
 
     def test_engine_chromium(self):
         """--engine accepts chromium."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--engine", "chromium",
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--engine",
+                "chromium",
+            ]
+        )
         assert args.engine == "chromium"
 
     def test_engine_firefox(self):
         """--engine accepts firefox."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--engine", "firefox",
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--engine",
+                "firefox",
+            ]
+        )
         assert args.engine == "firefox"
 
     def test_engine_invalid_rejected(self):
         """--engine rejects invalid values."""
         with pytest.raises(SystemExit):
-            _parse([
-                "--job-url", "https://example.com",
-                "--engine", "webkit",
-            ])
+            _parse(
+                [
+                    "--job-url",
+                    "https://example.com",
+                    "--engine",
+                    "webkit",
+                ]
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -393,10 +438,14 @@ class TestPathArgs:
 
     def test_resume_set(self):
         """--resume stores the provided file path."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--resume", "/tmp/resume.pdf",
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--resume",
+                "/tmp/resume.pdf",
+            ]
+        )
         assert args.resume == "/tmp/resume.pdf"
 
     def test_browsers_path_default_none(self):
@@ -406,10 +455,14 @@ class TestPathArgs:
 
     def test_browsers_path_set(self):
         """--browsers-path stores the provided path."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--browsers-path", "/opt/playwright/browsers",
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--browsers-path",
+                "/opt/playwright/browsers",
+            ]
+        )
         assert args.browsers_path == "/opt/playwright/browsers"
 
 
@@ -428,10 +481,14 @@ class TestMiscArgs:
 
     def test_model_set(self):
         """--model stores the provided model name."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--model", "claude-sonnet-4-20250514",
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--model",
+                "claude-sonnet-4-20250514",
+            ]
+        )
         assert args.model == "claude-sonnet-4-20250514"
 
     def test_job_id_default_empty(self):
@@ -441,10 +498,14 @@ class TestMiscArgs:
 
     def test_job_id_set(self):
         """--job-id stores the provided value."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--job-id", "job-abc-123",
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--job-id",
+                "job-abc-123",
+            ]
+        )
         assert args.job_id == "job-abc-123"
 
     def test_lease_id_default_empty(self):
@@ -454,10 +515,14 @@ class TestMiscArgs:
 
     def test_lease_id_set(self):
         """--lease-id stores the provided value."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--lease-id", "lease-xyz",
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--lease-id",
+                "lease-xyz",
+            ]
+        )
         assert args.lease_id == "lease-xyz"
 
 
@@ -480,6 +545,18 @@ class TestApplySubcommand:
         assert args.job_url == "https://example.com"
 
 
+class TestTuiSubcommand:
+    """Tests for the terminal UI command alias."""
+
+    def test_tui_subcommand_sets_output_format(self):
+        args = _parse(["tui"])
+        assert args.output_format == "tui"
+
+    def test_terminal_subcommand_sets_output_format(self):
+        args = _parse(["terminal"])
+        assert args.output_format == "tui"
+
+
 # ---------------------------------------------------------------------------
 # Documenting gaps for future streams
 # ---------------------------------------------------------------------------
@@ -500,26 +577,38 @@ class TestAllowedDomains:
 
     def test_allowed_domains_single(self):
         """--allowed-domains accepts a single domain."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--allowed-domains", "greenhouse.io",
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--allowed-domains",
+                "greenhouse.io",
+            ]
+        )
         assert args.allowed_domains == "greenhouse.io"
 
     def test_allowed_domains_comma_separated(self):
         """--allowed-domains accepts a comma-separated list."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--allowed-domains", "greenhouse.io,lever.co,sso.company.com",
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--allowed-domains",
+                "greenhouse.io,lever.co,sso.company.com",
+            ]
+        )
         assert args.allowed_domains == "greenhouse.io,lever.co,sso.company.com"
 
     def test_allowed_domains_is_string(self):
         """--allowed-domains is stored as a raw string (parsed later in CLI flow)."""
-        args = _parse([
-            "--job-url", "https://example.com",
-            "--allowed-domains", "example.com",
-        ])
+        args = _parse(
+            [
+                "--job-url",
+                "https://example.com",
+                "--allowed-domains",
+                "example.com",
+            ]
+        )
         assert isinstance(args.allowed_domains, str)
 
 
@@ -538,7 +627,10 @@ class TestFutureGaps:
         inside run_agent_jsonl/run_agent_human, but is not exposed as a CLI flag.
         """
         with pytest.raises(SystemExit):
-            _parse([
-                "--job-url", "https://example.com",
-                "--keep-alive",
-            ])
+            _parse(
+                [
+                    "--job-url",
+                    "https://example.com",
+                    "--keep-alive",
+                ]
+            )
