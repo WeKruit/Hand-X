@@ -1549,8 +1549,15 @@ async def complete(
 # Consent-overlay dismissal (a blocker on many sites: cookie/privacy banners intercept
 # focus/pointer events and wipe fills — the workable case). Mechanical dismissal of a known
 # affordance kind, not a semantic form decision.
-# ponytail: curated common-consent handles + generic accept-text; add a VLM read only if
-# failures.jsonl shows a banner this misses.
+# ponytail: stable-id handles for the two dominant consent SDKs (structural identity — keep), then a
+# STRUCTURAL language-agnostic fallback. A consent overlay is a positioned (fixed/sticky/absolute),
+# elevated-z element carrying a button that EITHER occludes a form control (a veil over a field) OR is a
+# bottom-reaching wide bar/modal — click a button, verify the overlay vanished, try the next if not.
+# This catches both a bottom cookie bar AND a field-covering veil, and excludes top navs (don't reach the
+# bottom, don't occlude a field), chat FABs (too small), and in-form buttons (z<100). Skipped a VLM
+# meaning-pick over the button texts (the no-LLM verify-gone loop covers both fixtures); add one only if
+# failures.jsonl shows the loop mis-picking. ponytail: an <a>-only accept (no <button>) is missed — we
+# only click <button> to avoid navigation; add [role=button]/<a> with a nav guard if a live banner needs it.
 # ---------------------------------------------------------------------------
 _DISMISS_JS = r"""() => {
   const sels = ['#onetrust-accept-btn-handler',
@@ -1559,11 +1566,25 @@ _DISMISS_JS = r"""() => {
     '[aria-label*="accept" i]','[data-testid*="accept" i]','[id*="cookie" i] button'];
   for (const s of sels) { const el=document.querySelector(s);
     if (el && el.getBoundingClientRect().width>0) { el.click(); return 'sel:'+s; } }
-  const rx = /^(accept all|accept cookies|accept|agree|i agree|got it|allow all|ok)$/i;
-  const btn = [...document.querySelectorAll('button,[role=button],a')].find(e => {
-    const r=e.getBoundingClientRect(); if(r.width<8||r.height<8) return false;
-    return rx.test((e.innerText||'').trim()); });
-  if (btn) { btn.click(); return 'text:'+(btn.innerText||'').trim().slice(0,24); }
+  // STRUCTURAL fallback (language-agnostic): no text list, so 'Alle akzeptieren' / '同意' dismiss like 'Accept'.
+  const vw=innerWidth, vh=innerHeight;
+  const others=[...document.querySelectorAll('input,textarea,select,[role=combobox],[role=listbox],[contenteditable=true]')];
+  const occludes=(ov,r)=>others.some(e=>{ if(ov.contains(e)) return false; const q=e.getBoundingClientRect();
+    if(q.width<4||q.height<4) return false;
+    return !(q.right<r.left||q.left>r.right||q.bottom<r.top||q.top>r.bottom); });
+  const isOverlay=el=>{ const cs=getComputedStyle(el);
+    if(cs.position!=='fixed'&&cs.position!=='sticky'&&cs.position!=='absolute') return false;
+    if((parseInt(cs.zIndex)||0)<100) return false;
+    const r=el.getBoundingClientRect(); if(r.width<40||r.height<20) return false;
+    return occludes(el,r) || (r.width>=vw*0.5 && r.bottom>=vh-2); };
+  const seen=new Set(), overlays=[];
+  for(const b of document.querySelectorAll('button')){ let el=b.parentElement;
+    while(el&&el!==document.body){ if(isOverlay(el)){ if(!seen.has(el)){seen.add(el);overlays.push(el);} break; } el=el.parentElement; } }
+  const gone=ov=>!document.contains(ov)||ov.getBoundingClientRect().height<2
+    ||getComputedStyle(ov).display==='none'||getComputedStyle(ov).visibility==='hidden';
+  for(const ov of overlays){
+    for(const b of ov.querySelectorAll('button')){ const r=b.getBoundingClientRect(); if(r.width<8||r.height<8) continue;
+      b.click(); if(gone(ov)) return 'struct:'+((b.innerText||'').trim().slice(0,24)); } }
   return '';
 }"""
 
