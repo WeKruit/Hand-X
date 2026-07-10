@@ -1603,7 +1603,14 @@ async def cdp_pick_option_visually(session: Any, node: Any, value: str, pick=Non
         print(f"   [pick_visual] want={value!r} visible={texts[:6]} -> {chosen!r} click={ok}", flush=True)
         return chosen if ok else ""
 
-    return await _guarded(_do())
+    # return the committed TEXT (docstring contract) — NOT _guarded, which coerces to bool and made
+    # callers that do `committed_text = got` / `got[:24]` set/slice a bool (TypeError).
+    try:
+        return await asyncio.wait_for(_do(), timeout=CDP_ACTION_TIMEOUT + 1.0)
+    except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041
+        return ""
+    except Exception:
+        return ""
 
 
 async def cdp_choose_react_select(session: Any, node: Any, value: str, pick=None) -> str:
