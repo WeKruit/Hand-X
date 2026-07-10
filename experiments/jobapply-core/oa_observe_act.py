@@ -215,6 +215,7 @@ class Ctx:
     cascade_depth: int = 0
     scroll_reads: int = 0
     filter_tried: bool = False
+    typeahead_checked: bool = False  # the blur-safety (commit-or-discard) test fired once this field
     multi_done: int = 0
 
     # per-FIELD verify budget (§6.1 oracle fix): DOM read-back is primary + free; the VLM is a
@@ -2540,6 +2541,97 @@ async def _commit_from_options(session: Any, ctx: Ctx, texts: list[str], nodes: 
     return await _s_cascade(session, ctx)
 
 
+# ---- TYPEAHEAD / GEOCOMPLETE blur-safety (commit a real option ROW, never bless the typed echo) ----
+def _is_typeahead_editable(ctx: Ctx) -> bool:
+    """An editable control that filters an OPTION MENU as you type — a react-select / geocomplete /
+    location typeahead — whose typed query is a candidate for the wipe-on-blur echo false-green.
+    Structural gate: keystroke-fillable-or-combobox AND (combobox-shaped OR an option-bearing
+    nature). Includes comboboxes (``_is_plain_text_editable`` vetoes those); excludes a native
+    <select> (not keystroke-fillable) and a plain FREE_TEXT/DATE box (no discard-on-blur menu)."""
+    if not _is_plain_text_editable_or_combo(ctx.node):
+        return False
+    comboish = _node_role(ctx.node) == "combobox" or _node_attr(ctx.node, "aria-autocomplete") not in ("", "none")
+    return comboish or ctx.nature in ("SEARCH", "CLOSED_LIST", "BOOLEAN", "MULTI")
+
+
+async def _typeahead_committed_survives_blur(session: Any, ctx: Ctx) -> bool:
+    """A typeahead's DOM read-back reads the TYPED text pre-blur, so a value that was only typed
+    (no option row clicked) verifies CORRECT — then the portal DISCARDS it on blur (geocomplete
+    wipe-on-blur / menu-left-open) and the painted field is BLANK. Confirm the value SURVIVES a real
+    blur. The control's OWN .value discriminates: EMPTY means the value is either a committed
+    selection rendered elsewhere (react-select single-value -> survives) or nothing at all (an S4
+    echo that already cleared -> not committed) — the container-scan read tells them apart. NON-EMPTY
+    means the value sits in the input, so BLUR it, settle, re-read: gone/placeholder == an
+    uncommitted echo -> False; still there == a real commit -> True."""
+    from oa_dom_value import read_dom_value
+
+    raw = await cdpa.cdp_raw_value(session, ctx.node)
+    if not raw:
+        # value not in the input: a real react-select selection renders a single-value/chip the
+        # container scan finds (survives); a cleared/never-committed typeahead reads back "".
+        return bool((await read_dom_value(session, ctx.node) or "").strip())
+    await cdpa.cdp_blur(session, ctx.node)
+    await asyncio.sleep(_SETTLE_STATIC_S)
+    # read the RAW .value post-blur (NOT read_dom_value: its combobox menu-open guard returns "" for
+    # a still-open aria-expanded input even when .value survived — a real geocomplete keeps .value
+    # after an option-row commit). Empty == the typed query was discarded -> uncommitted echo.
+    cur = (await cdpa.cdp_raw_value(session, ctx.node) or "").strip()
+    return bool(cur)  # empty == the typed query was discarded on blur (uncommitted echo)
+
+
+async def _recommit_typeahead_row(session: Any, ctx: Ctx) -> Outcome:
+    """Re-open the menu (type the value) and CLICK a real option ROW meaning ctx.value — a FRESH node
+    by COORDINATE. Uses the SAME option-scoped extractors the search loop uses (``_option_texts``
+    drops the card/label/chrome the raw candidate scan swept in), then blur-confirms the commit. No
+    row means the value, or the click does not survive blur -> escalate; never bless the typed echo."""
+    ctx.trace.append("S_TYPEAHEAD_RECOMMIT")
+    probe = _city_prefix(ctx.value) or ctx.value
+    before = await perc.get_state(session)
+    typed = await act.type_text(session, ctx.node, probe, clear=True)
+    if not typed:  # a just-blurred typeahead may need a re-focus click before it accepts keystrokes
+        await act.click_node(session, ctx.node)
+        typed = await act.type_text(session, ctx.node, probe, clear=True)
+    if not typed:
+        ctx.trace.append("typeahead-recommit:type-failed")
+        return ESCALATE if ctx.required else SKIP
+    # POLL past the async geocode latency: the option rows land ~1.2-1.4s after the keystroke, but
+    # _settle's coarse reads-cap (3 x 0.30s = 0.9s) returns before then. Re-read the delta until the
+    # option rows mount (or a 3s ceiling) — a geocode is known-async, unlike a click-open menu.
+    cluster: list[perc.DeltaNode] = []
+    texts: list[str] = []
+    _deadline = time.monotonic() + 3.0
+    while time.monotonic() < _deadline:
+        await asyncio.sleep(_POLL_S)
+        after = await perc.get_state(session, previous=before)
+        cluster = perc.delta(before, after)
+        texts = _option_texts(cluster)
+        if texts:
+            break
+    ctx.trace.append(f"typeahead-recommit:{len(texts)} opts:{[t[:16] for t in texts[:3]]}")
+    if not texts:
+        return ESCALATE if ctx.required else SKIP
+    chosen = _identity_pick(ctx.value, texts) or await brain.pick_option(ctx.value, texts, llm=ctx.llm, label=ctx.label)
+    if not chosen or not await _chosen_plausible(ctx, chosen):
+        ctx.trace.append("typeahead-recommit:no-matching-row")
+        return ESCALATE if ctx.required else SKIP
+    node = _node_for_option(cluster, chosen)
+    if node is None or perc.node_center(node) is None:
+        ctx.trace.append("typeahead-recommit:no-node")
+        return ESCALATE if ctx.required else SKIP
+    ok = await act.click_node_center(session, node) or await act.click_node(session, node)
+    if not ok:
+        ctx.trace.append("typeahead-recommit:click-failed")
+        return ESCALATE if ctx.required else SKIP
+    ctx.committed_text = chosen
+    ctx.trace.append(f"typeahead-recommit-click:{chosen[:24]}")
+    await asyncio.sleep(_SETTLE_STATIC_S)
+    if await _typeahead_committed_survives_blur(session, ctx):
+        ctx.trace.append("typeahead-recommit:survives-blur->DONE")
+        return DONE
+    ctx.trace.append("typeahead-recommit:blur-wiped->escalate")
+    return ESCALATE if ctx.required else SKIP
+
+
 # ---- S4_SEARCH (typeahead search-loop, §5) ----
 async def _s4_search(session: Any, ctx: Ctx) -> Outcome:
     if not ctx.guard():
@@ -3240,6 +3332,18 @@ async def _s_verify(session: Any, ctx: Ctx) -> Outcome:
         ctx.trace.append("fast-path-DONE")
         return DONE
 
+    # TYPEAHEAD BLUR-SAFETY (BEFORE the DOM read-back, which reads the pre-blur TYPED echo): a
+    # geocomplete/location typeahead whose value was only typed (never committed via an option-row
+    # click) reads .value = the typed text, so the read-back says CORRECT — then the portal DISCARDS
+    # it on blur and the painted field is BLANK / menu-left-open (artie Location, gridware Current
+    # location). Confirm the value SURVIVES a real blur first; if it wipes, the typed text was never
+    # committed -> re-commit by CLICKING a real option ROW (fresh, by coordinate). Fires once per
+    # field (the recommit returns terminally; it never re-enters _s_verify).
+    if _is_typeahead_editable(ctx) and not ctx.typeahead_checked:
+        ctx.typeahead_checked = True
+        if not await _typeahead_committed_survives_blur(session, ctx):
+            ctx.trace.append("typeahead-echo-not-committed")
+            return await _recommit_typeahead_row(session, ctx)
     verdict = await _verify_field(session, ctx, key=ctx.label)
     ctx.trace.append(f"verdict:{verdict}")
     if verdict == "CORRECT":

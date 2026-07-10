@@ -1764,6 +1764,47 @@ async def cdp_set_range(session: Any, node: Any, value: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# PUBLIC: cdp_blur / cdp_raw_value — the commit-or-discard blur test for typeaheads.
+# --------------------------------------------------------------------------- #
+async def cdp_blur(session: Any, node: Any) -> bool:
+    """Blur the located control the way a tab-away does — native ``.blur()`` + a dispatched
+    blur/focusout. A geocomplete/typeahead whose typed query was never committed via an option-row
+    click WIPES on blur; a real selection survives. Returns True when the blur dispatched."""
+    with contextlib.suppress(Exception):
+        r = await _resolve(session, node)
+        if r is None:
+            return False
+        cdp_session, session_id, object_id = r
+        await _call_on(
+            cdp_session, session_id, object_id,
+            "function(){ try{ this.blur(); }catch(_){}"
+            " try{ this.dispatchEvent(new Event('blur',{bubbles:false}));"
+            " this.dispatchEvent(new FocusEvent('focusout',{bubbles:true})); }catch(_){}"
+            " return true; }",
+        )
+        return True
+    return False
+
+
+async def cdp_raw_value(session: Any, node: Any) -> str:
+    """The control's OWN ``.value`` (the typed text) — NOT the container-scan committed display. A
+    non-empty raw value means the value lives IN the input (a typeahead echo candidate that blur may
+    wipe); empty means it is committed as a selection elsewhere (react-select single-value / native
+    <select>), so there is no blur-wipe risk. Returns '' on any failure / non-value element."""
+    with contextlib.suppress(Exception):
+        r = await _resolve(session, node)
+        if r is None:
+            return ""
+        cdp_session, session_id, object_id = r
+        got = await _call_on(
+            cdp_session, session_id, object_id,
+            "function(){ return (this && this.value != null) ? String(this.value) : ''; }",
+        )
+        return str(got or "").strip()
+    return ""
+
+
+# --------------------------------------------------------------------------- #
 # PUBLIC: cdp_click — trusted Input.dispatchMouseEvent at the node center, JS-click fallback.
 # --------------------------------------------------------------------------- #
 async def cdp_click(session: Any, node: Any) -> bool:
