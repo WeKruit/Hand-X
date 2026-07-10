@@ -919,7 +919,7 @@ async def cdp_choose_option(session: Any, container_node: Any, value: str, group
 # Painted state is the real signal a DOM-echo commit lies about: aria-checked/pressed, data-state,
 # .checked, or an active/selected class token. Used by the choice paint-confirm + trusted-click repair.
 _CHOICE_OPTIONS_JS = r"""
-function(){
+function(groupName){
   const norm = s => (s||'').replace(/\s+/g,' ').trim();
   const active = el => (el.getAttribute && (el.getAttribute('aria-checked')==='true'
       || el.getAttribute('aria-pressed')==='true' || el.getAttribute('data-state')==='checked'
@@ -927,9 +927,16 @@ function(){
     || (el.matches && el.matches('input') && el.checked)
     || /(^|[^a-z])(active|selected|checked|_active_)([^a-z]|$)/i.test(String(el.className||''));
   const OPT = 'button,[role=button],[role=radio],[role=checkbox],[role=option],input[type=radio],input[type=checkbox]';
-  // CLIMB to the option-bearing group: a grouped/spatial locate can bind ctx.node to the bare hidden
-  // input (no option children) — walk up to the container that actually holds the pill buttons.
+  // IDENTITY-SCOPE first (immune to a mislocated ctx.node — live airwallex bound an unrelated
+  // input[role=combobox], not the pill group): if the field's group `name` is known, find that
+  // control document-wide and use ITS enclosing group as the root. Else climb from `this` to the
+  // nearest option-bearing container (a grouped locate can bind the bare hidden input).
   let root = this;
+  if(groupName){
+    const esc = (window.CSS && CSS.escape) ? CSS.escape(groupName) : groupName;
+    const g = document.querySelector('[name="'+esc+'"]');
+    if(g) root = g.closest('fieldset,[role=group],[role=radiogroup]') || g.parentElement || g;
+  }
   for(let i=0;i<4 && root && !(root.querySelector && root.querySelector(OPT)); i++) root = root.parentElement;
   if(!root || !root.querySelectorAll) return '[]';
   const ctrls = [...root.querySelectorAll(OPT)];
@@ -955,16 +962,18 @@ function(){
 """
 
 
-async def cdp_read_choice_options(session: Any, card_node: Any) -> list[dict]:
-    """The card's option controls as ``[{text, x, y, active}]`` — visible text, LIVE viewport-rect
-    center, and painted selected-state. For the choice paint-confirm + trusted-coordinate-click repair
-    (a React pill paints only on a trusted click, not ``.click()``/dispatched events)."""
+async def cdp_read_choice_options(session: Any, card_node: Any, group_name: str = "") -> list[dict]:
+    """The field's option controls as ``[{text, x, y, active}]`` — visible text, LIVE viewport-rect
+    center, and painted selected-state. When ``group_name`` (the field's group ``name``) is given, the
+    group is resolved by that IDENTITY document-wide — immune to a mislocated ``card_node`` (live
+    airwallex bound an unrelated input[role=combobox]); else it climbs from ``card_node`` to the
+    nearest option-bearing container. For the choice paint-confirm + trusted-coordinate-click repair."""
     with contextlib.suppress(Exception):
         r = await _resolve(session, card_node)
         if r is None:
             return []
         cdp_session, session_id, object_id = r
-        raw = await _call_on(cdp_session, session_id, object_id, _CHOICE_OPTIONS_JS)
+        raw = await _call_on(cdp_session, session_id, object_id, _CHOICE_OPTIONS_JS, args=[str(group_name or "")])
         opts = json.loads(raw) if raw else []
         return opts if isinstance(opts, list) else []
     return []

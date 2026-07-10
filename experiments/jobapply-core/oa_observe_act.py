@@ -1754,10 +1754,15 @@ async def _repaint_choice(session: Any, ctx: Ctx) -> bool:
     its live coordinate (isTrusted real mouse — paints React), re-read; still grey -> set-of-marks
     visual click (ambiguous / VLM-live fallback). Returns True when it ends painted (or when there is no
     paint-confirmable control to judge — then the prior commit is trusted, as today)."""
-    card = ctx.card if ctx.card is not None else ctx.node
-    if card is None:
+    # Anchor the option read on ctx.NODE (the located control), NOT ctx.card: a grouped locate's card
+    # can be a whole section wrapping SEVERAL questions, and the reader would then scan every pill on
+    # the page (live airwallex: opts=7 across all questions -> matched a DIFFERENT field's active 'Yes'
+    # -> false confirm). The node climbs to its OWN tight option group (the _yesno_ container).
+    anchor = ctx.node if ctx.node is not None else ctx.card
+    if anchor is None:
         return True
-    opts = await cdpa.cdp_read_choice_options(session, card)
+    gname = str(getattr(ctx.field_obj, "name", "") or "")
+    opts = await cdpa.cdp_read_choice_options(session, anchor, group_name=gname)
     if not opts:
         return True  # no readable option controls here -> not a confirmable pill group
     want = ctx.committed_text or ctx.value
@@ -1767,14 +1772,14 @@ async def _repaint_choice(session: Any, ctx: Ctx) -> bool:
     if tgt.get("active"):
         return True  # already really painted
     if any(o.get("active") for o in opts):
-        # SOME option in the group is painted-selected (just not the one we matched) — that is a
-        # read/match mismatch or a WRONG-value commit, NOT a blank group. Re-clicking here risks
+        # SOME option in this field's group is painted-selected (just not the one we matched) — that is
+        # a read/match mismatch or a WRONG-value commit, NOT a blank group. Re-clicking here risks
         # toggling a correct selection OFF; leave it to the verify/revalue path. Only repair a
         # genuinely BLANK group (nothing selected), which is the false-green this exists for.
         return True
     await cdpa.cdp_click_xy(session, ctx.node, int(tgt["x"]), int(tgt["y"]))
     await asyncio.sleep(0.35)
-    tgt2 = _match_option(want, await cdpa.cdp_read_choice_options(session, card))
+    tgt2 = _match_option(want, await cdpa.cdp_read_choice_options(session, anchor, group_name=gname))
     if tgt2 and tgt2.get("active"):
         ctx.trace.append("choice-repaint:trusted-click")
         return True
