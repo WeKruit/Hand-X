@@ -157,6 +157,15 @@ _ENUM_JS = r"""
       // ONE question = ONE field: the nearest ancestor holding >=2 checkboxes IS the option
       // list; a genuine lone consent box finds no such container and keeps the lone branch.)
       let g = el.name || 'check';
+      // PILL-MIRROR EXEMPTION (arketa 011 merge): a yes-no pill's hidden mirror checkbox sits
+      // beside its own option BUTTONS — it is ONE question's state, never an option in a checkbox
+      // list. Without this, two ADJACENT short-label pill questions merge via the >=2-checkbox
+      // container walk below (their shared section holds both mirrors) and the second question
+      // never becomes a field at all (discovery-miss false-green: missing_required stays empty).
+      // Structural signal only: a non-submit button inside the checkbox's immediate group container.
+      const _pr = el.closest('fieldset,[role=group],[role=radiogroup]') || el.parentElement;
+      const isPillMirror = !!(_pr && _pr.querySelectorAll && [..._pr.querySelectorAll('button,[role=button]')]
+        .some(b => (b.getAttribute('type')||'').toLowerCase() !== 'submit'));
       // a checkbox whose own label is a SENTENCE (a consent/acknowledgement clause) is its own
       // question — twilio mega3/34: two adjacent lone-consent boxes shared a section ancestor
       // and the container grouping merged them into one field, so only one got checked.
@@ -165,7 +174,7 @@ _ENUM_JS = r"""
       // each its own <fieldset><legend>question</legend><input labeled 'Acknowledge'> — both
       // labels short, so only the structural boundary separates them (mega3/34-37).
       const fsBound = el.closest('fieldset,[role=group]');
-      if (ownLab.length <= 60) {
+      if (!isPillMirror && ownLab.length <= 60) {
         let p = el.parentElement, depth = 0;
         while (p && depth < 6) {
           if (fsBound && p !== fsBound && !fsBound.contains(p) && p.contains(fsBound)) break;
