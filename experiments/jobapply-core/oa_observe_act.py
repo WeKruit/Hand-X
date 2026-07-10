@@ -1127,44 +1127,111 @@ async def _s1_locate(session: Any, ctx: Ctx) -> Outcome:
     return await _s2_classify(session, ctx, state)
 
 
+# STRUCTURAL group triage for the domref rescue (bare arrow; ref JSON-baked). Computed style +
+# geometry ONLY — no label/text matching of any kind. `invisible` = the input the USER cannot click:
+# display:none / visibility:hidden / opacity~0 / zero-size / off-canvas. Off-canvas is judged in
+# DOCUMENT coordinates (rect + scroll offset): the sr-only pattern positions at negative document
+# coords, while an element merely scrolled above/below the current viewport keeps positive document
+# coords and stays "visible" (getBoundingClientRect alone is viewport-relative — using it raw made a
+# group ABOVE the current scroll position read as invisible; live vanta re-run caught it).
+# `alt_visible` = the SAME group offers a real clickable: a non-submit button / role option inside the
+# group's tight container, or an input's associated <label>, with a painted box.
+_DOMREF_TRIAGE_JS = r"""() => {
+  const R = __REF__;
+  const els = [document.getElementById(R), ...document.getElementsByName(R)].filter(Boolean);
+  const ins = els.filter(e => e.tagName === 'INPUT' && (e.type === 'radio' || e.type === 'checkbox'));
+  if (!ins.length) return JSON.stringify({kind: ''});
+  const boxed = e => { const r = e.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+  const invisible = e => {
+    const cs = getComputedStyle(e); const r = e.getBoundingClientRect();
+    return cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse'
+      || parseFloat(cs.opacity || '1') < 0.05 || !boxed(e)
+      || (r.right + window.scrollX) < 0 || (r.bottom + window.scrollY) < 0;
+  };
+  const labelOf = e => (e.labels && e.labels[0]) || (e.closest ? e.closest('label') : null);
+  const labVis = ins.some(e => { const L = labelOf(e); return !!(L && boxed(L) && !invisible(L)); });
+  const cont = ins[0].closest('fieldset,[role=group],[role=radiogroup]') || ins[0].parentElement;
+  const btnVis = !!cont && [...cont.querySelectorAll('button,[role=button],[role=radio],[role=checkbox],[role=option]')]
+    .some(b => ((b.getAttribute('type') || '').toLowerCase() !== 'submit') && boxed(b) && !invisible(b));
+  return JSON.stringify({kind: ins[0].type,
+                         inputs_visible: ins.some(e => !invisible(e)),
+                         alt_visible: labVis || btnVis});
+}"""
+
+
 async def _domref_choice_commit(session: Any, ctx: Ctx, state: perc.OAState | None) -> Outcome | None:
     """LAST-RESORT commit for a mapped radio/checkbox group that no locate tier could bind.
 
     Ashby self-ID (EEO) groups style the real ``<input type=radio>`` at opacity:0; the visible-only
     selector_map drops it, so every tier AND scroll-locate return no-control though the value was
-    mapped (~47 EEO rows in the 500-sweep, the biggest lost-field family). But discovery captured the
-    group's ``name`` (dom-ref), and ``cdp_choose_option`` resolves that group document-wide by IDENTITY
-    and ``.click()``s the native input meaning ctx.value, gated on real painted ``.checked`` state
-    (its ``_STILL_CHECKED`` re-read) — so it commits WITHOUT a located node and cannot false-green.
+    mapped (~47 EEO rows in the 500-sweep, the biggest lost-field family). Discovery captured the
+    group's ``name`` (dom-ref), which resolves the group document-wide by IDENTITY.
 
-    Structural gate (title-ignorant — no heading/label text): the dom-ref must resolve to a NATIVE
-    radio/checkbox group. An INDEPENDENT painted read-back confirms the matched option is the active
-    one before we call it DONE. Returns DONE on a painted commit, else None (caller proceeds to
-    no-control unchanged) — a text/select ref, a data-gap (empty value), or a non-painting commit all
-    fall through untouched."""
+    P3-F1 (vanta/replit false-green — ledger DONE 'Yes', final pixels both pills grey): this lane
+    used to blind-commit via ``cdp_choose_option`` and exit DONE straight from S1_LOCATE, skipping
+    S_VERIFY and every visual rung. Now it is TRIAGED STRUCTURALLY (computed style/geometry, no text
+    matching) and every commit terminates through ``_s_verify`` like all other lanes:
+
+      * group inputs genuinely VISIBLE            -> None (the normal lanes own it; never blind-fire)
+      * invisible inputs + visible pill/label     -> the SAME label-anchor click lane S_CHOICE uses
+        (``cdp_choose_button_by_label`` — paints correctly, self-verifies on painted state)
+      * invisible inputs + NO visible clickable   -> identity commit (``cdp_choose_option``) gated on
+        an independent painted read-back
+      * ANY commit                                -> ``return await _s_verify(...)``; a DONE row then
+        also joins the runner's batch visual checkpoint. NEVER ``return DONE`` from S1_LOCATE.
+
+    Returns None on every miss (caller proceeds to scroll-locate / no-control unchanged)."""
     ref = str(getattr(ctx.field_obj, "name", "") or "")
     if not ref or not (ctx.value or "").strip() or ctx.page is None:
         return None
+    tri: dict = {}
     with contextlib.suppress(Exception):
-        kind = await ctx.page.evaluate(
-            "() => { const R = %s;"
-            " const els = [document.getElementById(R), ...document.getElementsByName(R)].filter(Boolean);"
-            " const ins = els.filter(e => e.tagName === 'INPUT' && (e.type === 'radio' || e.type === 'checkbox'));"
-            " return ins.length ? ins[0].type : ''; }" % json.dumps(ref)
-        )
-        if str(kind) not in ("radio", "checkbox"):
-            return None  # not a native radio/checkbox group -> not our case
-    # cdp_choose_option resolves the group by name document-wide; any node only gives it a CDP context.
+        raw = await ctx.page.evaluate(_DOMREF_TRIAGE_JS.replace("__REF__", json.dumps(ref)))
+        tri = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    if str(tri.get("kind") or "") not in ("radio", "checkbox"):
+        return None  # not a native radio/checkbox group -> not our case
+    if tri.get("inputs_visible"):
+        # A genuinely visible input group that locate merely missed (below fold etc.) belongs to the
+        # normal lanes — scroll-locate / label-anchor bind and paint it; a blind identity click here
+        # is the wrong-node/desync false-green family. Honest fall-through.
+        ctx.trace.append("domref-choice:visible-inputs->skip")
+        return None
+    # cdp read/commit primitives resolve the group by name document-wide; any node only gives them a
+    # CDP evaluation context.
     if state is None or not getattr(state, "selector_map", None):
         state = await perc.get_state(session)
     anchor = next(iter(state.selector_map.values()), None)
+    if tri.get("alt_visible"):
+        # Visible pill/label alternative for the invisible-input group (ashby _yesno mirror + button
+        # pills; EEO opacity:0 radios with visible labels): commit through the SAME label-anchor lane
+        # S_CHOICE uses — it clicks the thing a human clicks and self-verifies on the REAL painted
+        # state (pill active class / native .checked), so it paints where the blind mirror/tryButtons
+        # click did not.
+        btn = ""
+        with contextlib.suppress(Exception):
+            btn, _found = await cdpa.cdp_choose_button_by_label(ctx.page, ctx.label, ctx.value)
+        if not btn and anchor is not None:
+            # React paints NEXT-tick and the label-anchor's own 0.3s re-check can miss a slow repaint
+            # (the exact race behind the live false-green). One settled painted re-read decides; a
+            # still-grey group is NEVER re-clicked here (a second click TOGGLES a committed pill off).
+            await asyncio.sleep(0.5)
+            opts = await cdpa.cdp_read_choice_options(session, anchor, group_name=ref)
+            hit = _match_option(ctx.value, opts)
+            if hit is not None and hit.get("active"):
+                btn = str(hit.get("text") or "") or ctx.value
+        if not btn:
+            ctx.trace.append("domref-choice:label-anchor-miss")
+            return None  # honest fall-through -> scroll-locate / no-control
+        ctx.committed_text = btn
+        ctx.trace.append(f"domref-label-anchor:{btn[:20]}")
+        return await _s_verify(session, ctx)
     if anchor is None:
         return None
+    # Invisible inputs AND no visible clickable alternative (true sr-only family): identity commit,
+    # gated on an independent painted read-back (never trust the committer's own word).
     matched = await cdpa.cdp_choose_option(session, anchor, ctx.value, group_name=ref)
     if not matched:
         return None
-    # INDEPENDENT painted read-back (never trust the committer's own word): the matched option must be
-    # the painted-active one in its group. cdp_choose_option already self-verifies; this is belt+braces.
     await asyncio.sleep(0.2)
     opts = await cdpa.cdp_read_choice_options(session, anchor, group_name=ref)
     hit = _match_option(matched, opts) or _match_option(ctx.value, opts)
@@ -1173,7 +1240,9 @@ async def _domref_choice_commit(session: Any, ctx: Ctx, state: perc.OAState | No
         return None
     ctx.committed_text = matched
     ctx.trace.append(f"domref-choice-commit:{matched[:20]}")
-    return DONE
+    # SAME terminal verification as every other lane (S_VERIFY -> DOM read-back/VLM aid; the DONE row
+    # then joins the runner's batch visual checkpoint). No lane exits DONE from S1_LOCATE.
+    return await _s_verify(session, ctx)
 
 
 async def _scroll_locate(session: Any, ctx: Ctx, state: perc.OAState) -> tuple[Any, str, Any, perc.OAState]:
