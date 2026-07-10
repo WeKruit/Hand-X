@@ -2589,36 +2589,41 @@ async def _recommit_typeahead_row(session: Any, ctx: Ctx) -> Outcome:
     if not typed:
         ctx.trace.append("typeahead-recommit:type-failed")
         return ESCALATE if ctx.required else SKIP
-    # POLL past the async geocode latency: the option rows land ~1.2-1.4s after the keystroke, but
-    # _settle's coarse reads-cap (3 x 0.30s = 0.9s) returns before then. Re-read the delta until the
-    # option rows mount (or a 3s ceiling) — a geocode is known-async, unlike a click-open menu.
-    cluster: list[perc.DeltaNode] = []
-    texts: list[str] = []
-    _deadline = time.monotonic() + 3.0
-    while time.monotonic() < _deadline:
-        await asyncio.sleep(_POLL_S)
-        after = await perc.get_state(session, previous=before)
-        cluster = perc.delta(before, after)
+    # wait past the async geocode latency (rows land ~1.2-1.4s after the keystroke; _settle's coarse
+    # reads-cap returns at 0.9s, too early). Then commit the option ROW BY LIVE COORDINATE.
+    await asyncio.sleep(_SETTLE_GEO_S)
+
+    async def _pick(v: str, opts: list[str]) -> str | None:
+        c = _identity_pick(v, opts) or await brain.pick_option(v, opts, llm=ctx.llm, label=ctx.label)
+        return c if (c and await _chosen_plausible(ctx, c)) else None
+
+    # PRIMARY: cdp_pick_option_visually reads the VISIBLE menu rows (ARIA option / [class*=option])
+    # hugging THIS control WITH their live rect coords, proximity-banded so a far Upload-File / neighbor
+    # control drops out, then a TRUSTED cdp_click_xy AT the row — this commits a body-portal row that
+    # has NO serializer box (the live `no-node`). Ownership-blind, no stale delta ref.
+    got = await cdpa.cdp_pick_option_visually(session, ctx.node, ctx.value, pick=_pick)
+    if got:
+        ctx.committed_text = got
+        ctx.trace.append(f"typeahead-recommit-visual:{got[:24]}")
+    else:
+        # FALLBACK (Lever-style in-card menu whose rows are neither role=option nor [class*=option],
+        # e.g. .dropdown-result — those carry a serializer box): match via the delta option scan and
+        # click the node center.
+        cluster = perc.delta(before, await perc.get_state(session, previous=before))
         texts = _option_texts(cluster)
-        if texts:
-            break
-    ctx.trace.append(f"typeahead-recommit:{len(texts)} opts:{[t[:16] for t in texts[:3]]}")
-    if not texts:
-        return ESCALATE if ctx.required else SKIP
-    chosen = _identity_pick(ctx.value, texts) or await brain.pick_option(ctx.value, texts, llm=ctx.llm, label=ctx.label)
-    if not chosen or not await _chosen_plausible(ctx, chosen):
-        ctx.trace.append("typeahead-recommit:no-matching-row")
-        return ESCALATE if ctx.required else SKIP
-    node = _node_for_option(cluster, chosen)
-    if node is None or perc.node_center(node) is None:
-        ctx.trace.append("typeahead-recommit:no-node")
-        return ESCALATE if ctx.required else SKIP
-    ok = await act.click_node_center(session, node) or await act.click_node(session, node)
-    if not ok:
-        ctx.trace.append("typeahead-recommit:click-failed")
-        return ESCALATE if ctx.required else SKIP
-    ctx.committed_text = chosen
-    ctx.trace.append(f"typeahead-recommit-click:{chosen[:24]}")
+        ctx.trace.append(f"typeahead-recommit:{len(texts)} opts:{[t[:16] for t in texts[:3]]}")
+        chosen = await _pick(ctx.value, texts) if texts else None
+        if not chosen:
+            ctx.trace.append("typeahead-recommit:no-matching-row")
+            return ESCALATE if ctx.required else SKIP
+        node = _node_for_option(cluster, chosen)
+        if node is None or perc.node_center(node) is None or not (
+            await act.click_node_center(session, node) or await act.click_node(session, node)
+        ):
+            ctx.trace.append("typeahead-recommit:no-node")
+            return ESCALATE if ctx.required else SKIP
+        ctx.committed_text = chosen
+        ctx.trace.append(f"typeahead-recommit-click:{chosen[:24]}")
     await asyncio.sleep(_SETTLE_STATIC_S)
     if await _typeahead_committed_survives_blur(session, ctx):
         ctx.trace.append("typeahead-recommit:survives-blur->DONE")
