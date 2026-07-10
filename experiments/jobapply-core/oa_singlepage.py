@@ -527,6 +527,31 @@ async def run_single_page_oa(
             shutil.rmtree(user_data_dir, ignore_errors=True)
 
 
+async def _choice_painted_active(session: Any, group_name: str, want: str) -> bool:
+    """True iff the option meaning ``want`` in the radio/checkbox/pill group ``group_name`` is REALLY
+    painted-selected in the DOM — the structural read (aria-checked / .checked / active-class) that
+    ``_repaint_choice`` trusts, group-scoped by identity via ``cdp_read_choice_options``.
+
+    The visual checkpoint's VLM can misjudge a GENUINELY painted pill as blank (replit 008: three
+    active pills read blank -> checkpoint-recheck:still-blank->ESCALATE, a false-RED that demotes a real
+    fill and dings the run verdict). This is the tiebreak: if the DOM says the committed option is
+    painted-active, the vision verdict is wrong, not the fill. Returns False for a non-choice field
+    (no option controls) so a text-input's escalate is unchanged."""
+    if not group_name or not (want or "").strip():
+        return False
+    with contextlib.suppress(Exception):
+        import oa_cdp_action as _cdpa
+
+        state = await oa.perc.get_state(session)
+        anchor = next(iter(state.selector_map.values()), None)
+        if anchor is None:
+            return False
+        opts = await _cdpa.cdp_read_choice_options(session, anchor, group_name=group_name)
+        hit = oa._match_option(want, opts)
+        return bool(hit and hit.get("active"))
+    return False
+
+
 async def _fill_form(
     *,
     session: Any,
@@ -676,9 +701,17 @@ async def _fill_form(
                     )
                     rec["recheck"] = str(v2)[:120]
                     if r.outcome == oa.DONE and not _vv._is_filled(v2) and not _vv._matches(v2):
-                        r.outcome = oa.ESCALATE
-                        if isinstance(r.trace, list):
-                            r.trace.append("checkpoint-recheck:still-blank->ESCALATE")
+                        # DOM PAINTED CROSS-CHECK (P3-E): the VLM (audit + this recheck) can BOTH misread
+                        # a genuinely painted pill/radio as blank (replit 008). Before demoting a
+                        # self-reported DONE, read the group's REAL painted state; if the committed option
+                        # is painted-active in the DOM, the vision verdict is wrong, not the fill -> keep it.
+                        if await _choice_painted_active(session, str(getattr(r, "name", "") or ""), str(r.committed or r.value)):
+                            if isinstance(r.trace, list):
+                                r.trace.append("checkpoint-recheck:dom-painted->keep")
+                        else:
+                            r.outcome = oa.ESCALATE
+                            if isinstance(r.trace, list):
+                                r.trace.append("checkpoint-recheck:still-blank->ESCALATE")
                 entry["repairs"].append(rec)
 
     async def _advance_step() -> bool:
