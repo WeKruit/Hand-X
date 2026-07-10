@@ -414,6 +414,35 @@ async def get_state(session: Any, *, include_screenshot: bool = False, previous:
     return state
 
 
+def arm_cross_origin_iframes(session: Any) -> bool:
+    """Turn ON browser-use's cross-origin (OOPIF) iframe serialization for THIS session so a form
+    embedded in a cross-origin iframe surfaces in get_state's selector_map — each iframe node stamped
+    with its OWN target_id/session_id (browser_use dom/service.py:778-794), so ``cdp_client_for_node``
+    routes committers into the iframe target for free.
+
+    The flag is read at DomService construction (see ``_serialize_direct``: it reads
+    ``profile.cross_origin_iframes``). So we set the profile flag AND drop any already-cached DomService
+    (built with the flag off) + the last-good snapshot, forcing the next get_state to rebuild the service
+    with the flag on — order-independent (works whether or not a get_state already ran).
+
+    Armed NARROWLY by the caller (only when a dominant cross-origin form iframe is detected), never
+    globally: cross-origin serialization pays a per-serialize cost on recaptcha/analytics frames.
+    Returns True when the flag is on for this session."""
+    profile = getattr(session, "browser_profile", None)
+    if profile is None:
+        return False
+    try:
+        if not getattr(profile, "cross_origin_iframes", False):
+            profile.cross_origin_iframes = True
+            wd = getattr(session, "_dom_watchdog", None)
+            if wd is not None:  # drop the flag-off service so the next serialize rebuilds with it on
+                wd._dom_service = None
+            _LAST_GOOD.pop(id(session), None)  # never reuse a pre-arm snapshot missing the iframe nodes
+        return bool(getattr(profile, "cross_origin_iframes", False))
+    except Exception:
+        return False
+
+
 def _gs_record(log_path: str | None, t0: float, kind: str, n: int) -> None:
     """DIAGNOSTIC-ONLY: append one get_state-timing line. No-op unless OA_GETSTATE_LOG is set."""
     if not log_path:

@@ -233,6 +233,40 @@ def _field_dict(
     }
 
 
+# A dominant cross-origin iframe = a large iframe whose src is a DIFFERENT ORIGIN than the top page
+# (structural — no host/ATS-name whitelist). The main-frame _ENUM_JS can't see into it, so the form it
+# holds (coreweave-class GH embed) is invisible to normal discovery. Geometry gate (a genuine form
+# container, not a recaptcha badge / analytics pixel): tall + wide enough to be the primary content.
+_DOMINANT_XORIGIN_IFRAME_JS = (
+    "() => { let po=''; try { po = location.origin; } catch(e) {}"
+    " for (const f of document.querySelectorAll('iframe')) {"
+    "   const src = f.src || ''; if (!/^https?:/i.test(src)) continue;"
+    "   let o=''; try { o = new URL(src).origin; } catch(e) { continue; }"
+    "   if (o === po) continue;"  # same-origin iframes are already descended by the serializer
+    "   const r = f.getBoundingClientRect();"
+    "   if (r.width >= 320 && r.height >= 240 && r.width*r.height >= 120000) return true;"
+    " } return false; }"
+)
+
+
+async def _has_dominant_cross_origin_iframe(page: Any) -> bool:
+    """True when the page hosts a large cross-origin iframe (the embedded-form container case)."""
+    with contextlib.suppress(Exception):
+        return bool(await page.evaluate(_DOMINANT_XORIGIN_IFRAME_JS))
+    return False
+
+
+def _main_frame_has_form(fields: list) -> bool:
+    """True when main-frame discovery already yielded an application form — i.e. ANY control beyond
+    cookie/consent checkboxes. An application form always carries free-text inputs (name/email); a
+    page whose only main-frame controls are consent checkboxes (the coreweave embed case: the real
+    form lives in a cross-origin iframe) yields False. This gates the cross-origin embed path so a
+    NORMAL greenhouse/lever/ashby page (form present in the main frame, plus an incidental recaptcha/
+    analytics iframe) never arms cross-origin serialization — structural (control KIND, not label
+    text)."""
+    return any(getattr(f, "type", "") not in ("checkbox", "multi_select") for f in fields)
+
+
 async def run_single_page_oa(
     *,
     url: str,
@@ -390,6 +424,45 @@ async def run_single_page_oa(
                     page = await session.must_get_current_page()
                 await asyncio.sleep(2.5)
                 fields = await discover_fields(page)
+            # CROSS-ORIGIN EMBEDDED FORM (coreweave-class): the real application form lives in a
+            # cross-origin iframe (OOPIF) the main-frame _ENUM_JS can't see into — outer discovery
+            # finds only page chrome (cookie boxes), never the form. When a DOMINANT cross-origin form
+            # iframe is present, ARM browser-use's cross-origin serialization for THIS session (narrow —
+            # the 499 direct-form pages have no such iframe, so the flag stays off and pays no
+            # per-serialize cost) and discover the iframe's controls from the now-OOPIF-inclusive
+            # get_state. Committers resolve the OOPIF nodes for free (each node carries its iframe target
+            # -> cdp_client_for_node). Runs BEFORE the navigate-away hop below: serializing the iframe in
+            # place is non-destructive and works even when its src is not directly navigable (the coreweave
+            # validityToken case). Populated fields skip the hop; on miss we fall through to it unchanged.
+            result["cross_origin_iframes"] = False
+            # Only when the main frame did NOT already yield a form (consent checkboxes only) AND a
+            # dominant cross-origin iframe is present — the coreweave embed case. This cheap pre-gate
+            # keeps the 499 direct-form pages out of the arm+poll path entirely (a normal greenhouse
+            # page has its form in the main frame + only an incidental small recaptcha iframe).
+            with contextlib.suppress(Exception):
+                if not _main_frame_has_form(fields) and await _has_dominant_cross_origin_iframe(page):
+                    import oa_perception as _perc
+                    from oa_discover import discover_fields_in_frames
+
+                    if _perc.arm_cross_origin_iframes(session):
+                        result["cross_origin_iframes"] = True
+                        _have = {(g.name, g.label) for g in fields}
+                        _added: list = []
+                        # BOUNDED POLL: a cross-origin iframe becomes an OOPIF (separate CDP target the
+                        # serializer can descend) only after its renderer spins up + browser-use
+                        # auto-attaches (~seconds). Re-serialize until its controls surface, capped so a
+                        # frame that never yields controls can't stall the run. Only reached in the rare
+                        # embed case (the 499 direct-form pages never enter this block).
+                        for _ in range(10):
+                            _state = await _perc.get_state(session)
+                            _added = [f for f in await discover_fields_in_frames(session, _state)
+                                      if (f.name, f.label) not in _have]
+                            if _added:
+                                break
+                            await asyncio.sleep(1.0)
+                        if _added:
+                            fields = fields + _added
+                            print(f"[oa:generic] cross-origin iframe: +{len(_added)} embedded form fields")
             if not fields:
                 # GENERIC IFRAME-HOP: the real form is often a CROSS-ORIGIN iframe the main frame
                 # can't see into (comeet.co embed, GH job_app embed). Hop the top-level page to the

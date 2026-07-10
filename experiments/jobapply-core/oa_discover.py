@@ -399,6 +399,18 @@ _ENUM_JS = r"""
 """
 
 
+def _row_to_field(r: dict) -> eng.FormField:
+    """One _ENUM_JS row -> FormField (shared by main-frame and cross-origin-frame discovery)."""
+    return eng.FormField(
+        name=str(r.get("name") or ""),
+        label=str(r.get("label") or ""),
+        type=str(r.get("type") or "text"),
+        source=str(r.get("source") or "input_text"),
+        required=bool(r.get("required")),
+        options=list(r["options"])[:80] if r.get("options") else None,
+    )
+
+
 async def discover_fields(page: Any) -> list[eng.FormField]:
     """Enumerate the live page's fillable controls as FormField rows. [] = nothing found."""
     try:
@@ -407,18 +419,49 @@ async def discover_fields(page: Any) -> list[eng.FormField]:
     except Exception as exc:
         print(f"   [discover] enumeration failed: {exc}")
         return []
+    return [_row_to_field(r) for r in rows]
+
+
+async def discover_fields_in_frames(session: Any, state: Any) -> list[eng.FormField]:
+    """Discover fillable controls inside CROSS-ORIGIN iframe (OOPIF) targets surfaced in ``state``.
+
+    ``discover_fields`` runs ``_ENUM_JS`` via ``page.evaluate`` on the TOP document, which cannot reach
+    into a cross-origin iframe (a separate document/window). Once ``cross_origin_iframes`` is armed,
+    get_state's selector_map carries the iframe's controls, each stamped with its OOPIF target_id (the
+    iframe was serialized from its own target — browser_use dom/service.py). We run the SAME ``_ENUM_JS``
+    inside each such OOPIF execution context (Runtime.evaluate on that frame's CDP session) and return
+    the union of FormFields — IDENTICAL shape to the main-frame path, so downstream map/locate/commit is
+    unchanged (locate re-binds each field by id/name against the armed selector_map; the bound node
+    carries the OOPIF target so ``cdp_client_for_node`` routes committers into the iframe). [] when no
+    cross-origin frame holds controls.
+    """
+    main = getattr(session, "agent_focus_target_id", None)
+    reps: dict[Any, Any] = {}  # one representative node per non-main target (to reach that frame's CDP session)
+    for node in state.selector_map.values():
+        tid = getattr(node, "target_id", None)
+        if tid and tid != main and tid not in reps:
+            reps[tid] = node
     fields: list[eng.FormField] = []
-    for r in rows:
-        fields.append(
-            eng.FormField(
-                name=str(r.get("name") or ""),
-                label=str(r.get("label") or ""),
-                type=str(r.get("type") or "text"),
-                source=str(r.get("source") or "input_text"),
-                required=bool(r.get("required")),
-                options=list(r["options"])[:80] if r.get("options") else None,
+    seen: set[tuple[str, str]] = set()
+    for node in reps.values():
+        raw = None
+        with contextlib.suppress(Exception):
+            cs = await session.cdp_client_for_node(node)  # the OOPIF's CDP session (frame-aware)
+            res = await cs.cdp_client.send.Runtime.evaluate(
+                params={"expression": "(" + _ENUM_JS + ")()", "returnByValue": True, "awaitPromise": True},
+                session_id=cs.session_id,
             )
-        )
+            raw = ((res or {}).get("result") or {}).get("value")
+        rows = []
+        with contextlib.suppress(Exception):
+            rows = json.loads(raw) if raw else []
+        for r in rows:
+            f = _row_to_field(r)
+            key = (f.name, f.label)
+            if key in seen:
+                continue
+            seen.add(key)
+            fields.append(f)
     return fields
 
 

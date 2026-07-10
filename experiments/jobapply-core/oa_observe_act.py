@@ -1621,18 +1621,55 @@ function(n){
                 return got  # card-scoped verdict is authoritative; inconclusive falls through
     with contextlib.suppress(Exception):
         page = await session.must_get_current_page()
-        # VISIBLE filename text only — NOT input.files, which the decoy hidden input also holds
-        # (that is the exact false-positive: a real uploader RENDERS the name, a decoy does not).
-        # STRING SENTINEL, never bool(evaluate): the serialized return made bool("false") True,
-        # so this UI-verify was silently fail-open (same trap as the captcha gate).
-        found = await page.evaluate(
-            "(n) => { const all=[]; const walk=(r)=>{ for(const e of r.querySelectorAll('*')){ all.push(e);"
-            "   if(e.shadowRoot) walk(e.shadowRoot); } }; walk(document);"
-            " for(const e of all){ if(e.childNodes.length && (e.innerText||'').toLowerCase().includes(n)){"
-            "   const r=e.getBoundingClientRect(); if(r.width>0 && r.height>0) return 'yes'; } } return 'no'; }",
-            needle,
-        )
-        return str(found).strip().lower() == "yes"
+        # PAINT-LATENCY RETRY: the widget paints the chip a re-render tick AFTER setFileInputFiles
+        # (live-CDP on the coreweave GH embed: chip at ~1s, verify at ~0s read a REAL upload as 'no'
+        # -> false-negative escalate). Bounded re-look; a chip that never paints still fails fast.
+        # Only the would-be-escalate 'no' case pays the wait.
+        for _attempt in range(4):
+            # VISIBLE filename text only — NOT input.files, which the decoy hidden input also holds
+            # (that is the exact false-positive: a real uploader RENDERS the name, a decoy does not).
+            # STRING SENTINEL, never bool(evaluate): the serialized return made bool("false") True,
+            # so this UI-verify was silently fail-open (same trap as the captcha gate).
+            found = await page.evaluate(
+                "(n) => { const all=[]; const walk=(r)=>{ for(const e of r.querySelectorAll('*')){ all.push(e);"
+                "   if(e.shadowRoot) walk(e.shadowRoot); } }; walk(document);"
+                " for(const e of all){ if(e.childNodes.length && (e.innerText||'').toLowerCase().includes(n)){"
+                "   const r=e.getBoundingClientRect(); if(r.width>0 && r.height>0) return 'yes'; } } return 'no'; }",
+                needle,
+            )
+            if str(found).strip().lower() == "yes":
+                return True
+            # CROSS-ORIGIN IFRAME (coreweave GH embed): the chip renders inside the OOPIF document,
+            # which page.evaluate (main frame) cannot see — the walk above says 'no' for a REAL upload.
+            # Run the SAME visible-text walk in each cross-origin frame present in the serialized state
+            # (one representative node per non-main target -> that frame's CDP session). A page whose
+            # serialized state holds only main-frame nodes no-ops this loop (the direct-form case).
+            state = await perc.get_state(session)
+            main_tid = getattr(session, "agent_focus_target_id", None)
+            seen_targets: set = set()
+            for n in state.selector_map.values():
+                tid = getattr(n, "target_id", None)
+                if not tid or tid == main_tid or tid in seen_targets:
+                    continue
+                seen_targets.add(tid)
+                r2 = await cdpa._resolve(session, n)
+                if r2 is None:
+                    continue
+                cs2, sid2, oid2 = r2
+                got2 = await cdpa._call_on(cs2, sid2, oid2, r"""
+function(n){
+  try{
+    const all=[]; const walk=(r)=>{ for(const e of r.querySelectorAll('*')){ all.push(e);
+      if(e.shadowRoot) walk(e.shadowRoot); } }; walk(this.ownerDocument);
+    for(const e of all){ if(e.childNodes.length && (e.innerText||'').toLowerCase().includes(n)){
+      const r=e.getBoundingClientRect(); if(r.width>0 && r.height>0) return 'yes'; } }
+    return 'no';
+  }catch(e){ return 'no' }
+}""", args=[needle])
+                if str(got2).strip().lower() == "yes":
+                    return True
+            await asyncio.sleep(1.0)
+        return False
     return True  # read failed -> don't punish a likely-good upload
 
 
