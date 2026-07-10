@@ -913,6 +913,61 @@ async def cdp_choose_option(session: Any, container_node: Any, value: str, group
         return ""
 
 
+# Read every option CONTROL in the card (pill button / [role=radio|checkbox|option] / native input)
+# with its visible text, LIVE viewport-rect center, and painted SELECTED state. Bound to `this` = the
+# card container. A visually-hidden styled input uses its <label>'s rect (that is what a human clicks).
+# Painted state is the real signal a DOM-echo commit lies about: aria-checked/pressed, data-state,
+# .checked, or an active/selected class token. Used by the choice paint-confirm + trusted-click repair.
+_CHOICE_OPTIONS_JS = r"""
+function(){
+  const norm = s => (s||'').replace(/\s+/g,' ').trim();
+  const active = el => (el.getAttribute && (el.getAttribute('aria-checked')==='true'
+      || el.getAttribute('aria-pressed')==='true' || el.getAttribute('data-state')==='checked'
+      || el.getAttribute('data-selected')==='true'))
+    || (el.matches && el.matches('input') && el.checked)
+    || /(^|[^a-z])(active|selected|checked|_active_)([^a-z]|$)/i.test(String(el.className||''));
+  const OPT = 'button,[role=button],[role=radio],[role=checkbox],[role=option],input[type=radio],input[type=checkbox]';
+  // CLIMB to the option-bearing group: a grouped/spatial locate can bind ctx.node to the bare hidden
+  // input (no option children) — walk up to the container that actually holds the pill buttons.
+  let root = this;
+  for(let i=0;i<4 && root && !(root.querySelector && root.querySelector(OPT)); i++) root = root.parentElement;
+  if(!root || !root.querySelectorAll) return '[]';
+  const ctrls = [...root.querySelectorAll(OPT)];
+  const out = [], seen = new Set();
+  for(const el of ctrls){
+    const ty=((el.getAttribute&&el.getAttribute('type'))||'').toLowerCase(); if(ty==='submit') continue;
+    let t = norm(el.innerText||el.textContent);
+    let box = el.getBoundingClientRect();
+    if(el.matches && el.matches('input')){
+      const L=(el.labels&&el.labels[0])||el.closest('label');
+      if(L){ t = norm(L.innerText)||t; const lr=L.getBoundingClientRect(); if(lr.width>2&&lr.height>2) box=lr; }
+      if(!t) t = norm(el.getAttribute('aria-label')||el.value);
+    }
+    if(!t || t.length>80) continue;
+    if(box.width<2 || box.height<2) continue;
+    const key = t.toLowerCase(); if(seen.has(key)) continue; seen.add(key);
+    out.push({text:t, x:Math.round(box.left+box.width/2), y:Math.round(box.top+box.height/2), active:!!active(el)});
+  }
+  return JSON.stringify(out);
+}
+"""
+
+
+async def cdp_read_choice_options(session: Any, card_node: Any) -> list[dict]:
+    """The card's option controls as ``[{text, x, y, active}]`` — visible text, LIVE viewport-rect
+    center, and painted selected-state. For the choice paint-confirm + trusted-coordinate-click repair
+    (a React pill paints only on a trusted click, not ``.click()``/dispatched events)."""
+    with contextlib.suppress(Exception):
+        r = await _resolve(session, card_node)
+        if r is None:
+            return []
+        cdp_session, session_id, object_id = r
+        raw = await _call_on(cdp_session, session_id, object_id, _CHOICE_OPTIONS_JS)
+        opts = json.loads(raw) if raw else []
+        return opts if isinstance(opts, list) else []
+    return []
+
+
 # JS: within `this` (the card/group container) find a native <select> and set its option matching `want`
 # (text or value, exact then substring) by selectedIndex + fire input/change. Mirrors the proven
 # ats_lever._select_native: browser-use's select_option matches by VALUE via CDP and SILENTLY no-ops on

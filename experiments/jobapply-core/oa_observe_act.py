@@ -1723,6 +1723,63 @@ def _resolve_choice_target(chosen: Any, candidates: list[Any]) -> Any:
     return chosen
 
 
+def _match_option(want: str, opts: list[dict]) -> dict | None:
+    """The option-control dict whose visible text means ``want`` — exact, else a short value as the head
+    word of a long option clause ('No' -> 'No, I require sponsorship'), else identity_pick. This is
+    option-VALUE-vs-option-TEXT matching (the standard commit), NOT a label locate."""
+    nv = " ".join((want or "").split()).lower()
+    if not nv:
+        return None
+    for o in opts:
+        if " ".join(str(o.get("text", "")).split()).lower() == nv:
+            return o
+    if len(nv) <= 5:
+        wb = re.compile(r"^" + re.escape(nv) + r"\b", re.I)
+        for o in opts:
+            ot = " ".join(str(o.get("text", "")).split())
+            if wb.match(ot.lower()) and len(ot) >= len(nv) + 4:
+                return o
+    hit = _identity_pick(want, [str(o.get("text", "")) for o in opts])
+    if hit:
+        return next((o for o in opts if str(o.get("text", "")) == hit), None)
+    return None
+
+
+async def _repaint_choice(session: Any, ctx: Ctx) -> bool:
+    """CONFIRM a self-reported choice commit is REALLY painted-selected; REPAIR if grey. A React pill's
+    DOM-echo (a hidden mirror's .checked / an _active class on the wrong node / a native input its own
+    label reflects) reports success while the visible pill stays grey — because .click()/dispatched
+    events don't paint it, only a TRUSTED click does. Read the card's option controls (text + live
+    coord + painted state): committed option already active -> painted; grey -> TRUSTED cdp_click_xy at
+    its live coordinate (isTrusted real mouse — paints React), re-read; still grey -> set-of-marks
+    visual click (ambiguous / VLM-live fallback). Returns True when it ends painted (or when there is no
+    paint-confirmable control to judge — then the prior commit is trusted, as today)."""
+    card = ctx.card if ctx.card is not None else ctx.node
+    if card is None:
+        return True
+    opts = await cdpa.cdp_read_choice_options(session, card)
+    if not opts:
+        return True  # no readable option controls here -> not a confirmable pill group
+    want = ctx.committed_text or ctx.value
+    tgt = _match_option(want, opts)
+    if tgt is None:
+        return True  # the value is not among these controls -> nothing to confirm
+    if tgt.get("active"):
+        return True  # already really painted
+    await cdpa.cdp_click_xy(session, ctx.node, int(tgt["x"]), int(tgt["y"]))
+    await asyncio.sleep(0.35)
+    tgt2 = _match_option(want, await cdpa.cdp_read_choice_options(session, card))
+    if tgt2 and tgt2.get("active"):
+        ctx.trace.append("choice-repaint:trusted-click")
+        return True
+    cands = _visual_choice_candidates(await perc.get_state(session), ctx)
+    if len(cands) >= 2 and await _visual_commit(session, ctx, cands):
+        ctx.trace.append("choice-repaint:visual")
+        return True
+    ctx.trace.append("choice-repaint:still-grey")
+    return False
+
+
 # ---- S_CHOICE (radio / checkbox; options already on screen) ----
 async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -> Outcome:
     if not ctx.guard():
@@ -1750,7 +1807,9 @@ async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -
                 ctx.trace.append(f"choice-label-anchor:{_btn[:20]}")
                 if _reveal_pending_text(ctx.value, _btn):
                     return await _s_cascade(session, ctx)  # 'Yes' revealed a 'please specify' input, etc.
-                return DONE
+                if await _repaint_choice(session, ctx):
+                    return DONE
+                # painted grey despite the self-verified label-anchor -> fall through to group-read/visual
 
     # FALLBACK — structural DOM-direct (the proven Lever ._click_option, generalised): scan the located
     # container's REAL radio/checkbox inputs, INCLUDING visually-hidden styled ones (Lever hides the real
@@ -1773,7 +1832,9 @@ async def _s_choice(session: Any, ctx: Ctx, state: perc.OAState | None = None) -
                 # reflects, verified by cdp_choose_option's _STILL_CHECKED): trust the matched click.
                 ctx.committed_text = matched
                 ctx.trace.append(f"choice-dom-direct:{matched[:20]}")
-                return DONE
+                if await _repaint_choice(session, ctx):
+                    return DONE
+                # committed on a control that did not paint (hidden mirror) -> fall through to visual
 
     # The group's options are siblings already rendered. SNAPSHOT REUSE: prefer the locate snapshot
     # handed down from classify (the static radio/checkbox group is already in it) — only serialize
@@ -2168,7 +2229,9 @@ async def _s3_open(session: Any, ctx: Ctx) -> Outcome:
                     ctx.trace.append(f"s3-choice-struct:{_opt[:20]}")
                     if _reveal_pending_text(ctx.value, _opt):
                         return await _s_cascade(session, ctx)
-                    return DONE
+                    if await _repaint_choice(session, ctx):
+                        return DONE
+                    # committed structurally but grey on screen -> let S3 continue to the visual paths
     # First try the cheap inspectable read (native/ARIA/custom dropdown_options).
     inspect = await act.read_options(session, ctx.node)
     if inspect:
