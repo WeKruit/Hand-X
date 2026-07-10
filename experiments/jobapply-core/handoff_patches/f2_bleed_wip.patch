@@ -1,0 +1,352 @@
+diff --git a/experiments/jobapply-core/oa_cdp_action.py b/experiments/jobapply-core/oa_cdp_action.py
+index d6a599524..370547dcf 100644
+--- a/experiments/jobapply-core/oa_cdp_action.py
++++ b/experiments/jobapply-core/oa_cdp_action.py
+@@ -1996,7 +1996,21 @@ async def cdp_type(session: Any, node: Any, text: str, *, keystrokes: bool = Fal
+             await cdp_session.cdp_client.send.DOM.focus(
+                 params={"backendNodeId": backend_node_id}, session_id=session_id
+             )
+-        for ch in str(text):
++        # FOCUS-IDENTITY GUARD (cross-field bleed): trusted key events land on document.activeElement,
++        # NOT on object_id — and the DOM.focus above is best-effort (a detached/re-rendered node fails
++        # silently inside the suppress), so without this check the whole batch types this field's
++        # value into WHOEVER kept focus, i.e. a neighbouring field. Structural identity only: compare
++        # the resolved target object against its root's activeElement. One JS refocus retry, then
++        # abort FAIL-CLOSED (the caller's read-back/verify reports the miss); mid-batch re-checks
++        # catch a widget stealing focus while its dropdown opens.
++        if not await _focused_is_target(cdp_session, session_id, object_id):
++            with contextlib.suppress(Exception):
++                await _call_on(cdp_session, session_id, object_id, "function(){ this.focus(); }")
++            if not await _focused_is_target(cdp_session, session_id, object_id):
++                return False
++        for i, ch in enumerate(str(text)):
++            if i and i % 12 == 0 and not await _focused_is_target(cdp_session, session_id, object_id):
++                return False  # focus stolen mid-batch — stop feeding a stranger, fail-closed
+             await _dispatch_char(cdp_session, session_id, ch)
+         # HEAD-LOSS fixup: typeahead widgets steal focus/wipe while their dropdown opens on the
+         # first keystrokes — the head chars deterministically vanish ('University…' -> 'ersity of
+@@ -2022,6 +2036,24 @@ async def cdp_type(session: Any, node: Any, text: str, *, keystrokes: bool = Fal
+     return await _guarded(_do(), timeout=max(CDP_ACTION_TIMEOUT, 2.0 + 0.05 * len(str(text))))
+ 
+ 
++# `this` = the resolved target. True iff the target (or one of its descendants — a composite
++# widget's inner editable) is the activeElement of its OWN root (getRootNode covers shadow DOM;
++# per-frame session covers iframes). Structural identity — no labels, no text.
++_FOCUS_IS_TARGET_JS = (
++    "function(){ const r = this.getRootNode ? this.getRootNode() : document;"
++    " const a = (r && r.activeElement) || document.activeElement;"
++    " return this === a || !!(a && this.contains && this.contains(a)); }"
++)
++
++
++async def _focused_is_target(cdp_session: Any, session_id: Any, object_id: str) -> bool:
++    """Does the page's focus sit on the resolved target node (or inside it)? Errors -> False
++    (fail-closed: if we cannot PROVE the keystrokes will land on the target, we do not type)."""
++    with contextlib.suppress(Exception):
++        return (await _call_on(cdp_session, session_id, object_id, _FOCUS_IS_TARGET_JS)) is True
++    return False
++
++
+ # --------------------------------------------------------------------------- #
+ # Mouse / key dispatch helpers — mirror the watchdog Input.* sequences exactly.
+ # --------------------------------------------------------------------------- #
+@@ -2258,7 +2290,10 @@ async def _selftest() -> int:
+     chk("click_xy used the given coords", all(p == (120, 240) for p in xy), xy)
+ 
+     # --- cdp_type keystrokes: clear (set_value '') -> focus -> per-char keyDown/char/keyUp ---
+-    fs6 = _FakeSession(call_value="")
++    # the focus-identity probe must answer True (focus IS on the target) for the happy path.
++    fs6 = _FakeSession(
++        call_value=lambda p: True if "activeElement" in p["functionDeclaration"] else ""
++    )
+     ok6 = await cdp_type(fs6, node, "ab", keystrokes=True, clear=True)
+     ms6 = _methods(fs6.send)
+     chk("type(keystrokes) -> True", ok6 is True, ok6)
+@@ -2273,6 +2308,29 @@ async def _selftest() -> int:
+     ]
+     chk("type char events carry the chars", char_texts == ["a", "b"], char_texts)
+ 
++    # --- cdp_type keystrokes REFUSED when focus sits elsewhere (cross-field bleed guard) ---
++    # the probe answers False both before and after the JS refocus retry -> ZERO chars may be
++    # dispatched (they would land in ANOTHER field) and the call must fail-closed.
++    fs6b = _FakeSession(
++        call_value=lambda p: False if "activeElement" in p["functionDeclaration"] else ""
++    )
++    ok6b = await cdp_type(fs6b, node, "ab", keystrokes=True, clear=True)
++    chk("type(keystrokes) -> False when focus is NOT the target", ok6b is False, ok6b)
++    chk(
++        "focus-mismatch dispatched ZERO key events",
++        "Input.dispatchKeyEvent" not in _methods(fs6b.send),
++        _methods(fs6b.send),
++    )
++    chk(
++        "focus-mismatch attempted a JS refocus first",
++        any(
++            "this.focus()" in (c[1].get("functionDeclaration") or "")
++            for c in fs6b.send.calls
++            if c[0] == "Runtime.callFunctionOn"
++        ),
++        "",
++    )
++
+     # --- cdp_type plain (keystrokes=False) routes to cdp_set_value (no key events) ---
+     fs7 = _FakeSession(call_value=lambda p: p["arguments"][0]["value"])
+     ok7 = await cdp_type(fs7, node, "plain", keystrokes=False)
+diff --git a/experiments/jobapply-core/oa_observe_act.py b/experiments/jobapply-core/oa_observe_act.py
+index 37b1880f0..78e8d772a 100644
+--- a/experiments/jobapply-core/oa_observe_act.py
++++ b/experiments/jobapply-core/oa_observe_act.py
+@@ -56,6 +56,13 @@ UNVERIFIED = "UNVERIFIED"  # committed but the vision layer could not confirm it
+ NEEDS_HUMAN = "NEEDS_HUMAN"  # a human must answer (voice/audio/media answer field) — never text-filled
+ Outcome = str
+ 
++# DISCOVERED-FIELD REGISTRY (cross-field-bleed boundary): every discovered field's dom id/name for
++# the CURRENT page, set by the runner (oa_singlepage) right after discovery and refreshed when the
++# flow lane extends the field list. Pure STRUCTURAL identity — lets sibling searches recognize "this
++# empty input is another QUESTION the page already knows about", never label text. Empty set (unit
++# fakes, exotic callers) degrades to the historical unguarded behavior.
++PAGE_FIELD_IDS: set[str] = set()
++
+ # PRODUCTION TIMEOUT POLICY (do not "fix" this into a process kill): when a REQUIRED field overruns
+ # its per-field budget (FIELD_DEADLINE / STEP_CAP), the guard returns ESCALATE so the field is handed
+ # to the agent of last resort and the rest of the form keeps filling — the engine NEVER kills the
+@@ -3043,6 +3050,14 @@ async def _split_composite_to_sibling(session: Any, ctx: Ctx) -> Outcome | None:
+     if sib is not None:
+         await act.type_text(session, sib, secondary, clear=True)
+         b = ((await read_dom_value(session, sib)) or "").strip()
++        # register the sibling write (same mechanism as the dial-widget "__widget__" record below):
++        # the sibling may ALSO be a discovered field whose own row is blank->SKIP (Ext. / Maximum /
++        # line 2) — the skipped-blank pollution sweep must know its content is OURS, not a stray.
++        if b and ctx.committed_nodes is not None:
++            _sat = getattr(sib, "attributes", None) or {}
++            _sid = str(_sat.get("id") or _sat.get("name") or "")
++            if _sid:
++                ctx.committed_nodes[_sid] = "__sibling__"
+     else:
+         # no text sibling -> the secondary maps to a sibling SELECTOR. Climb from the primary input
+         # (by stable id, stale-proof) to the field container and commit it there. Two selector kinds:
+@@ -3217,13 +3232,33 @@ async def _find_revealed_input(session: Any, ctx: "Ctx") -> Any | None:
+     if node is None:
+         return None
+     own = getattr(node, "backend_node_id", None)
++
++    # CROSS-FIELD BOUNDARY (replit 017 / airwallex 042 bleed): on a flat one-section form the 5th/6th
++    # parent IS the whole section, and "the first empty text input in it" is simply the next
++    # unanswered QUESTION (Middle Name / Replit Profile URL), not this field's sibling box — the
++    # composite split then types its secondary ('+44', an essay half) into a stranger. Identity is
++    # STRUCTURAL: an input whose id/name is a discovered field (PAGE_FIELD_IDS) belongs to a question;
++    # an ancestor holding a THIRD question's control spans multiple questions, so nothing found there
++    # (or higher) can be trusted as THIS field's sibling. The legit shapes survive: Min/Max, Ext.,
++    # line-2 share their question card with the primary, so no third field sits in that container.
++    def _field_id_of(n: Any) -> str:
++        at = getattr(n, "attributes", None) or {}
++        for k in ("id", "name"):
++            v = str(at.get(k) or "")
++            if v and v in PAGE_FIELD_IDS:
++                return v
++        return ""
++
++    own_fid = _field_id_of(node) or ref
+     cur = node
+     for _ in range(6):
+         parent = getattr(cur, "parent_node", None)
+         if parent is None:
+             break
+         cur = parent
+-        for n in perc._controls_in(cur):
++        cand = None
++        controls = perc._controls_in(cur)
++        for n in controls:
+             if getattr(n, "backend_node_id", None) == own:
+                 continue
+             if perc._is_descendant(n, node):  # skip the committed combobox's OWN inner input
+@@ -3242,7 +3277,18 @@ async def _find_revealed_input(session: Any, ctx: "Ctx") -> Any | None:
+             with contextlib.suppress(Exception):
+                 existing = ((await read_dom_value(session, n)) or "").strip()
+             if not existing:
+-                return n
++                cand = n
++                break
++        cand_fid = _field_id_of(cand) if cand is not None else ""
++        crossed = any(
++            (fid := _field_id_of(n)) and fid not in (own_fid, cand_fid) for n in controls
++        )
++        if crossed:
++            if cand is not None and hasattr(ctx, "trace"):
++                ctx.trace.append("reveal-sibling:crossed-field-boundary->none")
++            return None
++        if cand is not None:
++            return cand
+     return None
+ 
+ 
+diff --git a/experiments/jobapply-core/oa_observe_act_fakes.py b/experiments/jobapply-core/oa_observe_act_fakes.py
+index 51f05a43b..f93ee16b0 100644
+--- a/experiments/jobapply-core/oa_observe_act_fakes.py
++++ b/experiments/jobapply-core/oa_observe_act_fakes.py
+@@ -660,6 +660,8 @@ class _FakeCdpActionSession:
+                 if self._bnid in self._owner._on_type:  # a value-set on a search box mounts its delta
+                     self._owner._mount(self._owner._on_type[self._bnid])
+             return text  # cdp_set_value success = echo == text
++        if "activeElement" in fn:  # _FOCUS_IS_TARGET_JS — the fake world has no focus thief:
++            return True  # DOM.focus always lands, so the guard's probe answers True
+         if "this.click()" in fn:  # _JS_CLICK_JS — option-cell click commit (box-less fallback)
+             self._record_click()
+             self._owner._any_write = True
+diff --git a/experiments/jobapply-core/oa_singlepage.py b/experiments/jobapply-core/oa_singlepage.py
+index c509f4ffa..77ef3d10e 100644
+--- a/experiments/jobapply-core/oa_singlepage.py
++++ b/experiments/jobapply-core/oa_singlepage.py
+@@ -619,6 +619,10 @@ async def _fill_form(
+     # processing on upload that can freeze the headless renderer; doing it AFTER the text fields
+     # means a wedge can't cost us the rest of the form. Stable sort keeps every other field's order.
+     fields_file_last = sorted(fields, key=lambda f: 1 if getattr(f, "source", "") == "file" else 0)
++    # DISCOVERED-FIELD REGISTRY (cross-field-bleed boundary): hand the engine every discovered
++    # field's dom id so sibling searches can refuse an "empty sibling" that is really another
++    # QUESTION's input (replit 017 / airwallex 042: '+44'/essay-half typed into the next field).
++    oa.PAGE_FIELD_IDS = {str(f.name) for f in fields if getattr(f, "name", None)}
+     # the FORM's url, captured BEFORE any fill click can navigate away (samsara mega3/28: a
+     # mid-fill click drifted to /company/belonging, so complete()'s entry snapshot already held
+     # the wrong page and its drift guard saw no difference).
+@@ -666,8 +670,86 @@ async def _fill_form(
+             row.outcome = oa.ESCALATE  # pixels said blank and the recommit failed -> honest
+         return str(out2)
+ 
++    # JS snippets for the skipped-blank pollution sweep — locate by the DISCOVERY id/name (structural
++    # identity, never label text); clear mirrors _SET_VALUE_JS (native setter + React tracker poke).
++    _READ_BY_NAME_JS = (
++        "(n) => { const el = document.getElementById(n) || document.getElementsByName(n)[0];"
++        " if (!el) return null;"
++        " return String(el.value != null ? el.value : (el.textContent || '')); }"
++    )
++    _CLEAR_BY_NAME_JS = (
++        "(n) => { const el = document.getElementById(n) || document.getElementsByName(n)[0];"
++        " if (!el) return null;"
++        " const tag = (el.tagName || '').toUpperCase();"
++        " const proto = tag === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;"
++        " const desc = Object.getOwnPropertyDescriptor(proto, 'value');"
++        " if (desc && desc.set) { desc.set.call(el, ''); } else { el.value = ''; }"
++        " try { const tk = el._valueTracker; if (tk) tk.setValue('x'); } catch (e) {}"
++        " el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));"
++        " el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));"
++        " return String(el.value || ''); }"
++    )
++    _SWEEP_TEXTY = {"", "text", "textarea", "email", "tel", "url", "number", "search"}
++
++    async def _pollution_sweep(where: str) -> None:
++        """Skipped-BLANK fields are the bleed's blind spot: the engine never wrote them, so their
++        read-back must be EMPTY — any content is a stray from another field's actuation (composite
++        split into a false 'sibling', focus-steal mid-keystrokes), invisible to every committed-field
++        verdict (replit 017 '+44'/essay-half, airwallex 042 Middle Name '+1'). Read each one by its
++        discovery id, CLEAR non-empty strays (native setter via CDP), and push every DONE field whose
++        committed value CONTAINS the stray (data-value cross-check, never label matching) back through
++        the repair machinery — its own content may be the diverted half. Fail-closed: a stray that
++        survives the clear demotes the row to ESCALATE; nothing is ever silently blessed."""
++        from oa_cdp_action import _alnum_fold as _fold
++
++        for row in per_field:
++            if row.outcome != oa.SKIP or "blank->SKIP" not in str(row.trace or ""):
++                continue
++            if str(row.type or "").lower() not in _SWEEP_TEXTY:
++                continue
++            nm = str(row.name or "")
++            if not nm or nm in _committed_nodes:
++                continue  # a recorded composite-sibling/widget write — that content is OURS and legit
++            got = None
++            with contextlib.suppress(Exception):
++                got = await page.evaluate(_READ_BY_NAME_JS, nm)
++            if got is None or not str(got).strip():
++                continue
++            stray = str(got).strip()
++            print(f"   [pollution:{where}] skipped-blank '{str(row.label)[:40]}' holds {stray[:40]!r} -> clear")
++            cleared = None
++            with contextlib.suppress(Exception):
++                cleared = await page.evaluate(_CLEAR_BY_NAME_JS, nm)
++            entry: dict[str, Any] = {
++                "where": where, "label": str(row.label)[:60], "stray": stray[:80], "cleared": str(cleared) == "",
++            }
++            result.setdefault("pollution", []).append(entry)
++            if isinstance(row.trace, list):
++                row.trace.append(f"pollution@{where}:{stray[:24]!r}->" + ("cleared" if str(cleared) == "" else "STUCK"))
++            if str(cleared) != "":
++                row.outcome = oa.ESCALATE  # garbage we cannot remove — never fail-open
++                continue
++            sf = _fold(stray)
++            if not sf:
++                continue
++            for src in per_field:
++                if src is row or src.outcome != oa.DONE:
++                    continue
++                if sf not in _fold(str(src.committed or "")):
++                    continue
++                cur_v = None
++                with contextlib.suppress(Exception):
++                    cur_v = await page.evaluate(_READ_BY_NAME_JS, str(src.name or ""))
++                # the source's own paint no longer carries its committed value -> the commit was
++                # (partly) diverted into the stray we just cleared: full repair re-run.
++                if cur_v is None or _fold(str(src.committed or "")) not in _fold(str(cur_v)):
++                    entry.setdefault("source_reverify", []).append(str(src.label)[:40])
++                    print(f"   [pollution:{where}] source '{str(src.label)[:40]}' lost its value -> recommit")
++                    await _ckpt_repair(src)
++
+     async def _visual_checkpoint(trigger: str) -> None:
+         """Flush the pending committed batch through ONE vision_audit call; repair contradictions."""
++        await _pollution_sweep(trigger)  # DOM-only, deterministic — runs even when the VLM cadence is off
+         batch = list(_ckpt_pending)
+         _ckpt_pending.clear()
+         if not batch or _ckpt_every <= 0:
+@@ -984,6 +1066,7 @@ async def _fill_form(
+                 with contextlib.suppress(Exception):
+                     mapped.update(await eng.map_fields(_oal.ResilientLLM(llm), _mrows, profile or {}, title))
+             fields.extend(fresh)  # the required-field gates + denominator must see the new step's fields
++            oa.PAGE_FIELD_IDS = {str(f2.name) for f2 in fields if getattr(f2, "name", None)}
+             result["fields_total"] = len(fields)
+             await _fill_pass(sorted(fresh, key=lambda f2: 1 if getattr(f2, "source", "") == "file" else 0))
+             await _visual_checkpoint("page-exhausted")
+@@ -1234,6 +1317,13 @@ async def _fill_form(
+             with contextlib.suppress(Exception):
+                 page = await session.must_get_current_page()
+ 
++        # FINAL POLLUTION SWEEP: complete()'s retry pass re-runs commits (a re-split / re-type can
++        # bleed again AFTER the last checkpoint — replit 006/013: '+44' landed in the last remaining
++        # empty input during the repair pass). One more skipped-blank sweep so the end-state screen,
++        # the hard gate, and the vision gate all see the cleaned form. DOM-only, deterministic.
++        with contextlib.suppress(Exception):
++            await _pollution_sweep("final")
++
+         # ============================================================================
+         # HARD LEDGER GATE — the un-suppressed, ledger-first veto (mega4 green audit:
+         # 30 of 31 confirmed false-greens had the failure ALREADY RECORDED in the ledger
+diff --git a/experiments/jobapply-core/runs/fixtures/all_fixtures.json b/experiments/jobapply-core/runs/fixtures/all_fixtures.json
+index 7de47e2fa..3acecbc44 100644
+--- a/experiments/jobapply-core/runs/fixtures/all_fixtures.json
++++ b/experiments/jobapply-core/runs/fixtures/all_fixtures.json
+@@ -1491,5 +1491,27 @@
+   "html": "<div class=\"field\" data-kind=\"required_conditional_pill\" data-label=\"If not currently in the Bay Area, are you willing to relocate near our Foster City, CA Office\" data-expected=\"Yes\" data-read=\"([...f.querySelectorAll(&#x27;button&#x27;)].find(b=&gt;/_active_/.test(String(b.className)))||{textContent:&#x27;NONE&#x27;}).textContent.trim()\">\n<div class=\"_fieldEntry_1e3gg_28 ashby-application-form-field-entry\" data-field-path=\"d5f11609-c2b0-4163-9bef-e71d2d29ba36\" data-field-entry-id=\"aba36e12-d286-49cc-9eb4-a3d63fbbe639_d5f11609-c2b0-4163-9bef-e71d2d29ba36\"><label class=\"_heading_f7cvd_52 _required_f7cvd_91 _label_1e3gg_42 ashby-application-form-question-title\" for=\"d5f11609-c2b0-4163-9bef-e71d2d29ba36\">If not currently in the Bay Area, are you willing to relocate near our Foster City, CA Office?</label><div class=\"_container_1svni_28 _yesno_1e3gg_148 \"><button class=\"_container_pjyt6_1 _option_1svni_32 \">Yes</button><button class=\"_container_pjyt6_1 _option_1svni_32 \">No</button><input type=\"checkbox\" class=\"_input_1svni_78\" tabindex=\"-1\" name=\"d5f11609-c2b0-4163-9bef-e71d2d29ba36\"></div></div>\n\n<script>\n// Replicates LIVE-OBSERVED Ashby yes-no pill behavior (probe 2026-07-10 on replit run 008 URL,\n// same component family as arketa/airwallex): clicking a pill <button> paints `_active_1svni_57`\n// on it (clearing the sibling) on the NEXT tick and mirrors Yes->checked/No->unchecked into the\n// hidden checkbox. Dispatched (untrusted) clicks DO paint (probe-verified). Applied to EVERY\n// _yesno_ group in the fixture so both adjacent pill questions behave live-faithfully.\n(() => {\n  document.querySelectorAll('form').forEach(fm => fm.addEventListener('submit', e => e.preventDefault()));\n  for (const yn of document.querySelectorAll('div[class*=\"_yesno_\"]')) {\n    const btns = [...yn.querySelectorAll('button')];\n    const box = yn.querySelector('input[type=checkbox]');\n    btns.forEach((b, i) => b.addEventListener('click', () => {\n      setTimeout(() => {\n        btns.forEach(o => o.classList.remove('_active_1svni_57'));\n        b.classList.add('_active_1svni_57');\n        if (box) box.checked = (i === 0);\n      }, 0);\n    }));\n  }\n})();\n</script>\n</div>",
+   "faithful": true,
+   "review": "MINED from live DOM https://jobs.ashbyhq.com/replit/447a6e11-b06b-4cc5-9203-cd55883f2af4/application (run 008) on 2026-07-10; structure verbatim (sanitized: scripts/handlers/token-values/comments stripped); inline script replicates the live-observed interaction behavior; must be RED vs current engine at mine time."
++ },
++ {
++  "id": "phone-dial-bleed-neighbor",
++  "kind": "phone_dial_bleed_neighbor",
++  "label": "Phone Number",
++  "profile_value": "+44 20 7946 0958",
++  "expected": "CLEAN",
++  "why_hard": "intl dial-code composite split types the +44 into _find_revealed_input's 'sibling' which is really the NEXT QUESTION's empty input (replit 017 / airwallex 042 cross-field bleed); oracle: neighbor URL input must stay EMPTY and phone must keep the FULL dial digits",
++  "html": "<div class=\"field\" data-kind=\"phone_dial_bleed_neighbor\" data-label=\"Phone Number\" data-expected=\"CLEAN\" data-read=\"(function(){var p=((f.querySelector(&quot;input[type=tel]&quot;)||{}).value||&quot;&quot;).replace(/\\D/g,&quot;&quot;);var u=((f.querySelector(&quot;input[id^=dccc0812]&quot;)||{}).value||&quot;&quot;).trim();return (p.indexOf(&quot;442079460958&quot;)&gt;=0&amp;&amp;!u)?&quot;CLEAN&quot;:&quot;POLLUTED phone=&quot;+p+&quot; url=&quot;+u.slice(0,30);})()\" data-actuate=\"var p=f.querySelector(&quot;input[type=tel]&quot;);p.value=&quot;+44 20 7946 0958&quot;;p.dispatchEvent(new Event(&quot;input&quot;,{bubbles:true}));\">\n<div class=\"_fieldEntry_1e3gg_28 ashby-application-form-field-entry\" data-field-path=\"66f031b6-85ae-4b95-831b-2c25f229d0b0\" data-field-entry-id=\"e3c373ac-1f02-46c3-a576-dce36e5693d2_66f031b6-85ae-4b95-831b-2c25f229d0b0\"><label class=\"_heading_f7cvd_52 _required_f7cvd_91 _label_1e3gg_42 ashby-application-form-question-title\" for=\"66f031b6-85ae-4b95-831b-2c25f229d0b0\">Phone Number</label><input placeholder=\"1-415-555-1234...\" name=\"66f031b6-85ae-4b95-831b-2c25f229d0b0\" required=\"\" id=\"66f031b6-85ae-4b95-831b-2c25f229d0b0\" type=\"tel\" class=\"_input_80epu_28 _input_1e3gg_32\" value=\"\"></div>\n<div class=\"_fieldEntry_1e3gg_28 ashby-application-form-field-entry\" data-field-path=\"dccc0812-1c75-4aaa-850e-df9d2a354e40\" data-field-entry-id=\"e3c373ac-1f02-46c3-a576-dce36e5693d2_dccc0812-1c75-4aaa-850e-df9d2a354e40\"><label class=\"_heading_f7cvd_52  _label_1e3gg_42 ashby-application-form-question-title\" for=\"dccc0812-1c75-4aaa-850e-df9d2a354e40\">Replit Profile URL</label><div><input placeholder=\"Type here...\" name=\"dccc0812-1c75-4aaa-850e-df9d2a354e40\" id=\"dccc0812-1c75-4aaa-850e-df9d2a354e40\" type=\"text\" class=\"_input_80epu_28 _input_1e3gg_32\" value=\"\"></div></div>\n<div class=\"_fieldEntry_1e3gg_28 ashby-application-form-field-entry\" data-field-path=\"f51bc122-89c5-4df1-97aa-67437a6d845b\" data-field-entry-id=\"e3c373ac-1f02-46c3-a576-dce36e5693d2_f51bc122-89c5-4df1-97aa-67437a6d845b\"><label class=\"_heading_f7cvd_52  _label_1e3gg_42 ashby-application-form-question-title\" for=\"f51bc122-89c5-4df1-97aa-67437a6d845b\">Github Profile URL</label><div><input placeholder=\"Type here...\" name=\"f51bc122-89c5-4df1-97aa-67437a6d845b\" id=\"f51bc122-89c5-4df1-97aa-67437a6d845b\" type=\"text\" class=\"_input_80epu_28 _input_1e3gg_32\" value=\"\"></div></div>\n</div>",
++  "faithful": true,
++  "review": "MINED from live DOM https://jobs.ashbyhq.com/replit/12737078-74c7-4e63-98a7-5e8da1e9deb1/application on 2026-07-10; structure verbatim (sanitized: scripts/handlers/token-values/comments stripped); inline script replicates the live-observed interaction behavior; must be RED vs current engine at mine time."
++ },
++ {
++  "id": "skipped-blank-pollution-sweep",
++  "kind": "skipped_blank_pollution_sweep",
++  "label": "Phone Number",
++  "profile_value": "+44 20 7946 0958",
++  "expected": "CLEAN",
++  "why_hard": "detection layer: a stray ('+44') lands in a skipped-blank field via an actuation the engine cannot prevent (focus-steal class); the skipped-blank watchlist sweep must read it back, CLEAR it structurally, and never report the form clean with it present",
++  "html": "<div class=\"field\" data-kind=\"skipped_blank_pollution_sweep\" data-label=\"Phone Number\" data-expected=\"CLEAN\" data-read=\"(function(){var p=((f.querySelector(&quot;input[type=tel]&quot;)||{}).value||&quot;&quot;).replace(/\\D/g,&quot;&quot;);var u=((f.querySelector(&quot;input[id^=dccc0812]&quot;)||{}).value||&quot;&quot;).trim();return (p.indexOf(&quot;442079460958&quot;)&gt;=0&amp;&amp;!u)?&quot;CLEAN&quot;:&quot;POLLUTED phone=&quot;+p+&quot; url=&quot;+u.slice(0,30);})()\" data-actuate=\"var p=f.querySelector(&quot;input[type=tel]&quot;);p.value=&quot;+44 20 7946 0958&quot;;p.dispatchEvent(new Event(&quot;input&quot;,{bubbles:true}));var u=f.querySelector(&quot;input[id^=dccc0812]&quot;);setTimeout(function(){u.value=&quot;&quot;;u.dispatchEvent(new Event(&quot;input&quot;,{bubbles:true}));},2000);\">\n<div class=\"_fieldEntry_1e3gg_28 ashby-application-form-field-entry\" data-field-path=\"66f031b6-85ae-4b95-831b-2c25f229d0b0\" data-field-entry-id=\"e3c373ac-1f02-46c3-a576-dce36e5693d2_66f031b6-85ae-4b95-831b-2c25f229d0b0\"><label class=\"_heading_f7cvd_52 _required_f7cvd_91 _label_1e3gg_42 ashby-application-form-question-title\" for=\"66f031b6-85ae-4b95-831b-2c25f229d0b0\">Phone Number</label><input placeholder=\"1-415-555-1234...\" name=\"66f031b6-85ae-4b95-831b-2c25f229d0b0\" required=\"\" id=\"66f031b6-85ae-4b95-831b-2c25f229d0b0\" type=\"tel\" class=\"_input_80epu_28 _input_1e3gg_32\" value=\"\"></div>\n<div class=\"_fieldEntry_1e3gg_28 ashby-application-form-field-entry\" data-field-path=\"dccc0812-1c75-4aaa-850e-df9d2a354e40\" data-field-entry-id=\"e3c373ac-1f02-46c3-a576-dce36e5693d2_dccc0812-1c75-4aaa-850e-df9d2a354e40\"><label class=\"_heading_f7cvd_52  _label_1e3gg_42 ashby-application-form-question-title\" for=\"dccc0812-1c75-4aaa-850e-df9d2a354e40\">Replit Profile URL</label><div><input placeholder=\"Type here...\" name=\"dccc0812-1c75-4aaa-850e-df9d2a354e40\" id=\"dccc0812-1c75-4aaa-850e-df9d2a354e40\" type=\"text\" class=\"_input_80epu_28 _input_1e3gg_32\" value=\"\"></div></div>\n<div class=\"_fieldEntry_1e3gg_28 ashby-application-form-field-entry\" data-field-path=\"f51bc122-89c5-4df1-97aa-67437a6d845b\" data-field-entry-id=\"e3c373ac-1f02-46c3-a576-dce36e5693d2_f51bc122-89c5-4df1-97aa-67437a6d845b\"><label class=\"_heading_f7cvd_52  _label_1e3gg_42 ashby-application-form-question-title\" for=\"f51bc122-89c5-4df1-97aa-67437a6d845b\">Github Profile URL</label><div><input placeholder=\"Type here...\" name=\"f51bc122-89c5-4df1-97aa-67437a6d845b\" id=\"f51bc122-89c5-4df1-97aa-67437a6d845b\" type=\"text\" class=\"_input_80epu_28 _input_1e3gg_32\" value=\"\"></div></div>\n<script>\n(function(){\n  // live-observed stray (replit 006/013/037/045, airwallex 042): a phone dial code lands in a\n  // skipped-blank neighbouring input via an actuation the engine did not intend. Injected here\n  // 1.5s after load so the blank->SKIP field is visibly polluted by the time any sweep runs.\n  setTimeout(function(){\n    var el = document.getElementById('dccc0812-1c75-4aaa-850e-df9d2a354e40');\n    if (el) { el.value = '+44'; el.dispatchEvent(new Event('input', {bubbles: true})); }\n  }, 1500);\n})();\n</script>\n</div>",
++  "faithful": true,
++  "review": "MINED from live DOM https://jobs.ashbyhq.com/replit/12737078-74c7-4e63-98a7-5e8da1e9deb1/application on 2026-07-10; structure verbatim (sanitized: scripts/handlers/token-values/comments stripped); inline script replicates the live-observed interaction behavior; must be RED vs current engine at mine time."
+  }
+ ]
+\ No newline at end of file
