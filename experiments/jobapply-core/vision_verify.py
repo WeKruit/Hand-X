@@ -26,9 +26,10 @@ import os
 from typing import Any
 
 VERIFY_MODEL = os.environ.get("GH_VERIFY_MODEL", "gemini-3.1-flash-lite")
-# Max unique VLM calls per page (reset on navigation). flash-lite low-detail is cheap,
-# but this bounds latency + nudge noise hard. Past it the hook stops spending/intervening.
-VLM_MAX_CALLS = int(os.environ.get("GH_VERIFY_MAX_CALLS", "6"))
+# Max unique VLM calls per page (reset on navigation). flash-lite low-detail is cheap. 铁律 2:
+# visual observation is an UNCONDITIONAL CADENCE — this cap is a RUNAWAY BACKSTOP only (64), never
+# a reason to skip a look; the real limiter is the per-FIELD budget (oa_observe_act.FIELD_VLM_CAP).
+VLM_MAX_CALLS = int(os.environ.get("GH_VERIFY_MAX_CALLS", "64"))
 
 # ---- run-scoped state (one process == one application run) -------------------
 _VCACHE: dict[str, str] = {}  # cache key (url|label) -> raw verdict string

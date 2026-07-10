@@ -77,6 +77,30 @@ OA_SCREENSHOT_TIMEOUT = float(os.environ.get("OA_SCREENSHOT_TIMEOUT", "4.0"))
 # Per-(provider, model, kind) client cache so the fallback client is built once, not per field.
 _CLIENT_CACHE: dict[tuple[str, str, str], Any] = {}
 
+# --------------------------------------------------------------------------- #
+# VISION HEARTBEAT (铁律 2): every VLM chain stage logs provider + latency + outcome into a
+# per-run list the runner exposes in the result JSON — a dead vision layer is OBSERVABLE, never
+# silent. Reset once per run (the runner calls reset_vlm_heartbeat alongside reset_visual_cache).
+# --------------------------------------------------------------------------- #
+VLM_HEARTBEAT: list[dict] = []
+
+
+def reset_vlm_heartbeat() -> None:
+    VLM_HEARTBEAT.clear()
+
+
+def get_vlm_heartbeat() -> list[dict]:
+    return list(VLM_HEARTBEAT)
+
+
+def _beat(provider: str, t0: float, outcome: str) -> None:
+    import time as _time
+
+    with contextlib.suppress(Exception):
+        VLM_HEARTBEAT.append({"provider": provider, "ms": int((_time.monotonic() - t0) * 1000), "outcome": outcome})
+        if len(VLM_HEARTBEAT) > 500:  # runaway backstop only
+            del VLM_HEARTBEAT[:-500]
+
 
 async def bounded_screenshot(session: Any) -> bytes | None:
     """``session.take_screenshot()`` under a HARD ``asyncio.wait_for`` — a stalled CDP screenshot can
@@ -131,7 +155,10 @@ def _build_fallback(kind: str) -> tuple[Any, str]:
             return _cached("google", model, kind, lambda: _mk_google(model, gkey)), "google"
 
     if openai_key:
-        model = (vlm_model or _DEFAULT_OPENAI_VLM) if kind == "vlm" else (text_model or _DEFAULT_OPENAI_TEXT)
+        # VLM fallback routes via OA_OPENAI_VLM_MODEL first (the fleet's named OpenAI vision model),
+        # then the generic OA_FALLBACK_VLM_MODEL/OA_FALLBACK_MODEL, then the default.
+        openai_vlm = os.environ.get("OA_OPENAI_VLM_MODEL") or vlm_model
+        model = (openai_vlm or _DEFAULT_OPENAI_VLM) if kind == "vlm" else (text_model or _DEFAULT_OPENAI_TEXT)
         return _cached("openai", model, kind, lambda: _mk_openai(model, openai_key)), "openai"
     if anthropic_key:
         model = (vlm_model or _DEFAULT_ANTHROPIC_VLM) if kind == "vlm" else (text_model or _DEFAULT_ANTHROPIC_TEXT)
@@ -285,26 +312,48 @@ async def _bounded_invoke(client: Any, messages: Any, output_format: Any, *, who
 # resilient_vlm — same bounded-primary-then-fallback pattern for the VISION call.
 # --------------------------------------------------------------------------- #
 async def resilient_vlm(messages: Any, *, primary: Any = None) -> Any:
-    """Bounded VISION call (a ``UserMessage`` carrying image + prompt). PRIMARY = ``primary`` (the
-    caller's gemini flash-lite vision client) or one built from env; bounded + retried exactly like
-    ``resilient_text``. On a bounded primary timeout/error, fail over to a vision-capable fallback
-    (ChatOpenAI / ChatAnthropic) when keyed. Returns the provider response (``.completion`` holds the
-    text), or ``None`` when bounded-out and no vision fallback key exists (caller -> bounded error
-    sentinel). NEVER an unbounded await."""
+    """Bounded VISION call (a ``UserMessage`` carrying image + prompt) through the FULL provider
+    chain (铁律 2 — the vision cadence must never silently die):
+
+        primary (gemini flash-lite, or OpenAI when OA_PRIMARY=openai)
+          -> on timeout/error: cross-vendor VLM fallback (_build_fallback('vlm'),
+             OpenAI via OA_OPENAI_VLM_MODEL / OA_FALLBACK_VLM_MODEL)
+          -> on timeout/error: ONE more bounded primary retry
+          -> all dead: None  — the caller MUST treat None as UNVERIFIED (fail-closed), never skip.
+
+    Every stage records a heartbeat (provider, latency ms, outcome) into ``VLM_HEARTBEAT`` so a
+    dead vision layer is observable in the run's result JSON. NEVER an unbounded await."""
+    import time as _time
+
     prim = primary if primary is not None else _build_primary_vlm()
+    prim_name = type(prim).__name__ if prim is not None else "none"
     if prim is not None:
-        res = await _bounded_invoke(prim, messages, None, who="gemini(vlm-primary)", timeout=OA_VLM_TIMEOUT)
+        t0 = _time.monotonic()
+        res = await _bounded_invoke(prim, messages, None, who=f"{prim_name}(vlm-primary)", timeout=OA_VLM_TIMEOUT)
+        _beat(f"primary:{prim_name}", t0, "ok" if res is not None else "dead")
         if res is not None:
             return res
 
     fb, name = _build_fallback("vlm")
-    if fb is None:
-        _log("vlm: primary bounded-out, NO vision fallback key -> None")
-        return None
-    res = await _bounded_invoke(fb, messages, None, who=f"{name}(vlm-fallback)", timeout=OA_VLM_TIMEOUT)
-    if res is None:
-        _log(f"vlm: fallback {name} also bounded-out -> None")
-    return res
+    if fb is not None:
+        t0 = _time.monotonic()
+        res = await _bounded_invoke(fb, messages, None, who=f"{name}(vlm-fallback)", timeout=OA_VLM_TIMEOUT)
+        _beat(f"fallback:{name}", t0, "ok" if res is not None else "dead")
+        if res is not None:
+            return res
+    else:
+        _log("vlm: NO vision fallback key configured")
+        _beat("fallback:none", _time.monotonic(), "unconfigured")
+
+    # last rung: ONE more bounded primary attempt (a transient stall/ratelimit may have cleared).
+    if prim is not None:
+        t0 = _time.monotonic()
+        res = await _bounded_invoke(prim, messages, None, who=f"{prim_name}(vlm-final-retry)", timeout=OA_VLM_TIMEOUT)
+        _beat(f"final-retry:{prim_name}", t0, "ok" if res is not None else "dead")
+        if res is not None:
+            return res
+    _log("vlm: WHOLE provider chain dead -> None (caller must mark UNVERIFIED, never skip)")
+    return None
 
 
 def _build_primary_vlm() -> Any | None:
@@ -382,7 +431,7 @@ class _FastLLM:
 
 
 async def _selftest() -> int:
-    global OA_LLM_TIMEOUT
+    global OA_LLM_TIMEOUT, OA_VLM_TIMEOUT
     import sys
 
     from pydantic import BaseModel
@@ -396,8 +445,10 @@ async def _selftest() -> int:
         nature: str
         cardinality: str = "one"
 
-    # shrink the bound so the stall test is fast.
+    # shrink the bounds so the stall tests are fast (the vlm tests were written against the old 5s
+    # default and silently rotted when OA_VLM_TIMEOUT grew to 12s — shrink it explicitly).
     OA_LLM_TIMEOUT = 0.2
+    OA_VLM_TIMEOUT = 0.2
     _CLIENT_CACHE.clear()
 
     # (1) stalled primary + fake 'openai' fallback -> the fallback answers, FAST (bounded, not 60s).
@@ -449,26 +500,65 @@ async def _selftest() -> int:
         (built["n"], healthy.calls),
     )
 
-    # (4) resilient_vlm: stalled vision primary -> vision fallback answers, bounded.
+    # (4) resilient_vlm: stalled vision primary -> vision fallback answers, bounded. Heartbeat
+    # records the dead primary + the answering fallback (the observability 铁律 2 requires).
+    reset_vlm_heartbeat()
     fake_vfb = _FastLLM("vlm-fallback-answer")
     globals()["_build_fallback"] = lambda kind: (fake_vfb, "openai")  # type: ignore[assignment]
     vstall = _StallLLM()
     t0 = _t.monotonic()
     vres = await resilient_vlm([], primary=vstall)
     velapsed = _t.monotonic() - t0
+    hb = get_vlm_heartbeat()
     chk(
         "resilient_vlm: stalled primary -> fallback, bounded",
         vres is not None and vres.completion == "vlm-fallback-answer" and velapsed < 2.0,
         (None if vres is None else vres.completion, round(velapsed, 3)),
     )
+    chk(
+        "heartbeat logs primary dead + fallback ok",
+        len(hb) == 2 and hb[0]["outcome"] == "dead" and hb[1]["outcome"] == "ok" and hb[1]["provider"] == "fallback:openai",
+        hb,
+    )
 
-    # (5) resilient_vlm: no fallback -> None, bounded.
+    # (5) resilient_vlm: no fallback -> ONE final primary retry, then None, bounded (never a hang,
+    # never a silent skip — the None IS the caller's UNVERIFIED signal).
+    reset_vlm_heartbeat()
     globals()["_build_fallback"] = lambda kind: (None, "")  # type: ignore[assignment]
     vstall2 = _StallLLM()
     t0 = _t.monotonic()
     vres2 = await resilient_vlm([], primary=vstall2)
     velapsed2 = _t.monotonic() - t0
+    hb2 = get_vlm_heartbeat()
     chk("resilient_vlm: no fallback -> None, bounded", vres2 is None and velapsed2 < 2.0, (vres2, round(velapsed2, 3)))
+    chk(
+        "chain order: primary -> fallback(unconfigured) -> final-retry, all in heartbeat",
+        [h["provider"].split(":")[0] for h in hb2] == ["primary", "fallback", "final-retry"],
+        hb2,
+    )
+
+    # (5b) fallback DEAD but the final primary retry answers -> chain recovers (the 'one gemini
+    # retry' rung). A primary that stalls twice then answers models a cleared transient rate-limit.
+    class _ThirdTimeLucky:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke(self, messages: Any, output_format: Any = None) -> Any:
+            self.calls += 1
+            if self.calls <= 2:  # the primary stage's OA_LLM_RETRIES+1 attempts stall
+                await asyncio.sleep(60)
+            return _FakeCompletion("primary-final-retry-answer")
+
+    reset_vlm_heartbeat()
+    vdead_fb = _StallLLM()
+    globals()["_build_fallback"] = lambda kind: (vdead_fb, "openai")  # type: ignore[assignment]
+    lucky = _ThirdTimeLucky()
+    vres3 = await resilient_vlm([], primary=lucky)
+    chk(
+        "fallback dead -> final primary retry answers",
+        vres3 is not None and vres3.completion == "primary-final-retry-answer",
+        (None if vres3 is None else vres3.completion, [h["provider"] + ":" + h["outcome"] for h in get_vlm_heartbeat()]),
+    )
 
     globals()["_build_fallback"] = orig_build  # type: ignore[assignment]
 

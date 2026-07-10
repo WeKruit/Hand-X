@@ -466,17 +466,25 @@ async def pick_control_by_vision(
     return candidates[idx]
 
 
-async def vision_audit(png_b64: str, intended: list[tuple[str, str]], *, llm: Any = None) -> list[dict]:
+async def vision_audit(
+    png_b64: str, intended: list[tuple[str, str]], *, llm: Any = None, out_meta: dict | None = None
+) -> list[dict] | None:
     """ABSOLUTE-ACCURACY verifier — read the FILLED form from ONE screenshot and report, per field, the
     value ACTUALLY painted on screen and whether it matches the intended value. This is the VERIFIER that
     looks at PIXELS, wholly independent of the DOM node the committer used — so a locate/commit desync
     (ledger DONE, control blank on screen) is exposed, not hidden. Human's final glance, one VLM call for
-    the whole page.
+    the whole page (also used per-batch by the fill loop's visual checkpoint).
 
     ``intended`` = [(label, intended_value)] for every field we tried to fill. Returns a list aligned to
     it: ``[{label, intended, rendered, match}]`` where ``rendered`` is the on-screen value (or "BLANK" /
-    "OFFSCREEN"). Empty list on ANY VLM failure -> the caller keeps the DOM ledger rather than
-    false-failing every field on a flaky screenshot."""
+    "OFFSCREEN").
+
+    FAIL-CLOSED (铁律 2): returns ``None`` when the WHOLE vision chain is dead or its reply is
+    unparseable — the caller MUST treat None as UNVERIFIED (mark fields unverified / verdict not
+    complete), NEVER as "keep the DOM ledger". ``[]`` only means "nothing was asked" (empty input).
+
+    ``out_meta`` (optional dict) is filled with {"overlay": "<short description>"} when the VLM sees a
+    BLOCKING overlay sitting over the form (captcha / modal / spinner wall) — the NEEDS_HUMAN signal."""
     if not intended or not png_b64:
         return []
     import json as _json
@@ -491,8 +499,10 @@ async def vision_audit(png_b64: str, intended: list[tuple[str, str]], *, llm: An
         f"{lines}\n\n"
         'Reply STRICT JSON: {"fields":[{"i":<index>,"rendered":"<the visible value; use \\"BLANK\\" if '
         'nothing is selected/entered for it; use \\"OFFSCREEN\\" if that field is not visible in the '
-        'image>","match":<true|false>}]}. Set match=true ONLY if the on-screen value means the same as '
-        "the intended value; a BLANK or a different value is match=false."
+        'image>","match":<true|false>}],"overlay":"<if a captcha, verification challenge, modal dialog '
+        "or opaque overlay is SITTING ON TOP of the form blocking interaction, a 3-6 word description "
+        'of it; otherwise an empty string>"}. Set match=true ONLY if the on-screen value means the same '
+        "as the intended value; a BLANK or a different value is match=false."
     )
     try:
         from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
@@ -510,15 +520,18 @@ async def vision_audit(png_b64: str, intended: list[tuple[str, str]], *, llm: An
         msg = prompt
     resp = await _oa_llm.resilient_vlm([msg], primary=(llm or _vv._vlm()))
     if resp is None:
-        return []
+        return None  # WHOLE chain dead -> UNVERIFIED sentinel (fail-closed), never a silent []
     raw = (getattr(resp, "completion", None) or str(resp)).strip()
     m = _re.search(r"\{.*\}", raw, _re.S)
     if not m:
-        return []
+        return None  # provider answered garbage -> the audit did NOT run; UNVERIFIED, not fail-open
     try:
         data = _json.loads(m.group(0))
     except Exception:
-        return []
+        return None
+    if out_meta is not None and isinstance(data, dict):
+        with contextlib.suppress(Exception):
+            out_meta["overlay"] = str(data.get("overlay") or "").strip()
     out: list[dict] = [{} for _ in intended]
     for e in data.get("fields", []) if isinstance(data, dict) else []:
         i = e.get("i")
