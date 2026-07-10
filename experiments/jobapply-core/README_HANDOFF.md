@@ -8,11 +8,11 @@
 ```bash
 # 1. 进引擎工作树（所有代码和数据都在这）
 cd "/Users/adam/Desktop/WeKruit/VALET & GH/Hand-X/.claude/worktrees/observe-act-generic/experiments/jobapply-core"
-git branch --show-current   # 必须是 feat/observe-act-generic；tip ≈ 5544292f9
+git branch --show-current   # 必须是 feat/observe-act-generic；tip ≈ 0acff3d66+
 # 2. 第一件事：抢救 /tmp 下两个易失 worktree 的补丁（重启即丢，见 §9）
 git -C /tmp/wt_f1 diff > /tmp/f1.patch 2>/dev/null; git -C /tmp/wt_f2 diff > /tmp/f2.patch 2>/dev/null
 # 3. 10 分钟 smoke 验证环境是活的：
-python3 runs/fixtures/selfcheck.py | tail -3          # 期望 PASS 不缩（137 fixture 库）
+python3 runs/fixtures/selfcheck.py | tail -3          # 期望 PASS 不缩（138 fixture 库）
 OA_VLM_TIMEOUT=12 python3 oa_singlepage.py --url "https://jobs.lever.co/octoenergy/2346cc3c-4de3-47b0-b0ea-6f086a06e7f5/apply" --generic --profile fixtures/rich_profile.json --resume fixtures/resumes/test_resume.pdf --json /tmp/smoke.json --screenshot /tmp/smoke.png
 # 然后亲眼看 /tmp/smoke.png —— json 说 FILLED 不算数
 # 4. 按 §8（在飞收尸）→ §7（关闭路径）顺序推进
@@ -192,15 +192,14 @@ worktree 若还活着优先用 worktree（有分支和 venv）；死了就 `git 
 - 它上一轮（旧基座）的 gate 全过，代码思路已验证是对的：根因不是 flag（vendored browser_use 默认 True），
   是 `_ENUM_JS` 只在主文档跑；OOPIF 提交靠 browser-use `cdp_client_for_node` 天然可用
 
-### 9d. P3-D consent 去词表 — `Hand-X/.claude/worktrees/agent-abcfe073d01ccc013`
-- ⚠ 快照时卡在**带冲突的合并中途**（`UU ghosthands/actions/domhand_fill_repeaters.py`），且冲突波及
-  `ghosthands/`（§8 禁区，我们不该动）
-- 真正的活 = commit **`4318f924f`**（feat(oa): structural language-agnostic consent dismiss），但基座过期
-- **推荐收法（别去解那个烂合并）**：`git -C <该worktree> merge --abort`，从引擎 tip 开新 worktree，
-  `git cherry-pick 4318f924f`，若 cherry-pick 冲突只保留 `experiments/jobapply-core` 内的改动，
-  然后跑它的 gate：consent fixture RED→GREEN + selfcheck 137 + 确认无静态词表（原 bug：
-  oa_complete.py `_DISMISS_JS` 里 `/^(accept all|accept cookies|...)$/i` 英文正则，修法 = 结构定位
-  overlay + 候选按钮 → 点击 → **验证 overlay 消失**的语言无关循环）
+### 9d. P3-D consent 去词表 — ✅ 已完成并合入（无需收尸）
+- 最终 commit **`0acff3d66`** 已 cherry-pick 进 `feat/observe-act-generic`（原 26c66be71，agent 自行完成了
+  rebase 和全部 gate；coordinator 独立验收：merge-base 链正确、diff 仅 2 文件、静态模式扫描干净、
+  亲跑 fixture 1/1 PASS、合并树 consent 家族 4/5 PASS 0 FAIL）
+- 内容：`oa_complete.py::_DISMISS_JS` 英文 accept 正则 → 结构化 overlay 检测（positioned + z≥100 +
+  遮字段或贴底宽条）+ 逐按钮点击 + **验证消失**循环，语言无关无 LLM；新 fixture
+  `cookie_banner_blocks_submit`（德语底条，第一个按钮是诱饵）
+- fixture 库合并后 **138** 个（union 解冲突）。复刻清单 #9 cookie banner 关闭
 
 ### 9e. F3 verdict 聚合 — 未开工，spec 完整在 §4-F3
 - 两处：run 状态聚合必须看字段级 ESCALATE/required-blank；required 开放题不许 blank-SKIP（LLM 生成或 NEEDS_HUMAN）
