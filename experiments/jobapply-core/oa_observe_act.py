@@ -221,6 +221,7 @@ class Ctx:
     # budgeted AID. verify_used counts EVERY verify call (DOM+VLM); vlm_used counts only VLM aids.
     verify_used: int = 0
     vlm_used: int = 0
+    observe_used: bool = False  # observe-before-repair look fired once this field (bound, uncounted)
 
     # GLOBAL backstops
     steps: int = 0
@@ -784,26 +785,49 @@ async def _commit_consent_checkbox(session: Any, ctx: Ctx) -> Outcome | None:
 
 
 # ---- MEDIA-ANSWER PROBE (restraint class, clipboard 363): a question answered by RECORDING
-# audio/video must NEVER be text-filled — filling it plants garbage a human can't easily undo.
-# Detection is STRUCTURAL ONLY (no label text): the field's own card contains an <audio>/<video>
-# element, an HTML media-capture file input (capture attr), or a file input whose accept contract
-# is audio/*|video/* MIME. The card = nearest ancestor that doesn't already span the whole form.
+# audio/video must NEVER be text-filled. STRUCTURAL + NARROW — it must NEVER net a document/resume
+# UPLOAD (P4 rerun: the old bare `audio,video` match caught an AMBIENT page <video>/<audio> in a
+# resume card's ancestry -> 51 false NEEDS_HUMAN on Resume/CV; a resume upload is a fillable field
+# the engine hands test_resume.pdf, not a human-only recorder). Fires ONLY on a genuine capture
+# control:
+#   * input[type=file][capture]  (camera/mic capture), or
+#   * input[type=file] whose accept is PURELY audio/*|video/*, or
+#   * an EMPTY <audio>/<video> RECORD SINK (no src / no <source>) with NO file input in the card.
+# EXCLUDES any card that carries a document/any-accept file input (a fillable upload, incl. resume)
+# -> that takes the normal INTRINSIC_FILE path. accept-mime + file-input presence are the structural
+# signals; a src'd ambient/promo media element is playback, never a recorder, and never fires.
 _MEDIA_PROBE_JS = r"""() => {
   const el = document.getElementById(__REF__) || document.getElementsByName(__REF__)[0];
-  if (!el) return false;
-  const MEDIA = 'audio,video,input[type=file][capture],input[type=file][accept*="audio/"],input[type=file][accept*="video/"]';
+  if (!el) return 'no';
+  // card = the field's OWN labeled group: walk up only while the parent adds NO other form field.
+  // Stopping before a sibling input keeps a shared/ambient recorder bound to ITS answer field, not
+  // every field on a small form (else one voice prompt blacks out all its siblings -> the same
+  // net-negative class as the resume false-positives).
   let card = el, hops = 0;
-  while (card.parentElement && hops++ < 5) {
+  while (card.parentElement && hops++ < 6) {
     const p = card.parentElement;
-    if (p.querySelectorAll('input,select,textarea').length > 4) break;  // p spans the form, stop
+    const others = [...p.querySelectorAll('input,select,textarea')].filter(x => x !== el && !card.contains(x));
+    if (others.length) break;
     card = p;
   }
-  return !!card.querySelector(MEDIA);
+  const files = [...card.querySelectorAll('input[type=file]')];
+  const avOnly = f => { const a = (f.getAttribute('accept') || '').toLowerCase().trim();
+    return !!a && a.split(',').every(t => { t = t.trim(); return t.startsWith('audio/') || t.startsWith('video/'); }); };
+  const isCapture = f => f.hasAttribute('capture') || avOnly(f);
+  if (files.some(f => !isCapture(f))) return 'no';        // a doc/resume/any upload -> fillable, not media
+  const hasCaptureInput = files.some(isCapture);
+  const recordSink = [...card.querySelectorAll('audio,video')]
+    .some(m => !m.getAttribute('src') && !m.querySelector('source'));  // empty sink = recorder, not playback
+  return (hasCaptureInput || (recordSink && files.length === 0)) ? 'yes' : 'no';
 }"""
 
 
 async def _media_answer_field(session: Any, ctx: Ctx) -> bool:
-    """True when the field's card structurally carries a recorder/media-answer affordance."""
+    """True only when the field's card carries a genuine audio/video RECORDING control. A field that
+    carries a resume payload or is typed as a file input is the fillable INTRINSIC_FILE path — never
+    a media-answer field (the cheap early-out that kills the 51 Resume/CV false positives)."""
+    if ctx.resume or str(getattr(ctx, "kind", "") or "").lower() in ("file", "input_file"):
+        return False
     if ctx.page is None:
         return False
     ref = str(getattr(ctx.field_obj, "name", "") or "")
@@ -811,7 +835,7 @@ async def _media_answer_field(session: Any, ctx: Ctx) -> bool:
         return False
     with contextlib.suppress(Exception):
         got = await ctx.page.evaluate(_MEDIA_PROBE_JS.replace("__REF__", json.dumps(ref)))
-        return str(got).lower() == "true"
+        return str(got).strip().lower() == "yes"
     return False
 
 
@@ -3238,14 +3262,22 @@ async def _observed_already_correct(session: Any, ctx: Ctx, *, stage: str) -> bo
     state) — repairing off it re-clicks toggles OFF or wipes a correct value. If the pixels already
     show the wanted value, the repair is aborted and the field is DONE.
 
-    BUDGET NOTE: this look does NOT consume the per-field VLM AID budget (FIELD_VLM_CAP) — it is
-    a cadence OBSERVATION (铁律 2), and charging it starved the set-of-marks visual COMMIT one
-    rung later (toggle_switch_radix regression: verify-aid 1 + this 1 = cap 2, visual-commit had
-    nothing left). It is naturally bounded by the repair-entry caps (COMMIT_CAP + REVALUE_CAP).
-    False on any failure (repair proceeds exactly as before)."""
+    SCOPE + BUDGET: fires ONLY when the routing verdict came from a DOM read (``verify-src:dom``) —
+    that is the stale/desynced case observe-before-repair exists for; if a VLM aid already looked
+    and reported EMPTY/WRONG, re-looking is pointless (same model, same pixels) and would blow the
+    per-field VLM cap (the stubborn-field selftest) + starve the set-of-marks visual COMMIT one rung
+    later (the toggle_switch_radix regression). Capped at ONE look per field (``observe_used``); does
+    NOT charge FIELD_VLM_CAP. False on any failure (repair proceeds exactly as before)."""
     want = (ctx.committed_text or ctx.value or "").strip()
-    if not want:
+    # ONE free look per field, and never once the per-field VLM budget is spent (a VLM-exhausted
+    # stubborn field must stop looking — the budget selftest). Free = does not increment vlm_used,
+    # so it never starves the set-of-marks visual COMMIT that runs on the same budget one rung later.
+    if not want or ctx.observe_used or ctx.vlm_used >= FIELD_VLM_CAP:
         return False
+    srcs = [t for t in ctx.trace if t.startswith("verify-src:")]
+    if not srcs or srcs[-1] != "verify-src:dom":
+        return False  # the verdict was VLM-sourced (or none): the VLM already looked — don't re-look
+    ctx.observe_used = True
     with contextlib.suppress(Exception):
         # the field was just interacted with, so it is in the viewport the screenshot captures
         import vision_verify as _vv2

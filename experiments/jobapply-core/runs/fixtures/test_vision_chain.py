@@ -215,7 +215,7 @@ BADGE_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
 """
 
 
-def _run_engine(page_html: str, values: dict, out_name: str, extra_env: dict) -> dict | None:
+def _run_engine(page_html: str, values: dict, out_name: str, extra_env: dict, resume: str | None = None) -> dict | None:
     """Serve one page + run oa_singlepage --generic against it (REAL vision cadence on);
     returns the result JSON."""
     d = HERE / "_vision_chain"
@@ -238,6 +238,8 @@ def _run_engine(page_html: str, values: dict, out_name: str, extra_env: dict) ->
     cmd = [str(ROOT / ".venv/bin/python"), str(ROOT / "oa_singlepage.py"),
            "--url", f"http://127.0.0.1:{port}/{out_name}.html", "--generic",
            "--profile", str(HERE / "zoo_profile.json"), "--json", str(out)]
+    if resume:
+        cmd += ["--resume", resume]
     subprocess.run(cmd, cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=240)
     httpd.shutdown()
     return json.loads(out.read_text()) if out.exists() else None
@@ -292,6 +294,90 @@ def stage4_true_overlay_still_needs_human() -> None:
     )
 
 
+# P4-rerun media-probe regression (54 false NEEDS_HUMAN, 51 on Resume/CV): a resume file-upload
+# card whose ANCESTRY contains an AMBIENT page <video> (hero/bg/testimonial — universal on career
+# pages). The 1x1 muted src'd video is exactly what the old bare `audio,video` match false-fired on.
+RESUME_AMBIENT_VIDEO_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
+<style>body{font-family:sans-serif}form{max-width:640px;margin:30px auto}.field{margin:22px 0}label{font-weight:600}</style>
+</head><body><form id=app>
+<video src="data:video/mp4;base64,AAAA" muted style="width:1px;height:1px"></video>
+<div class=field><label for=fn>First name</label><br><input id=fn name=fn type=text></div>
+<div class=field><label for=resume>Resume/CV</label><br>
+  <input id=resume name=resume type=file accept=".pdf,.doc,.docx">
+  <span id=rname></span></div>
+<script>document.getElementById('resume').addEventListener('change', e => {
+  document.getElementById('rname').textContent = (e.target.files[0]||{}).name || ''; });</script>
+</form></body></html>
+"""
+
+# A genuine voice-answer prompt (clipboard 363 class): an EMPTY <audio> record sink + a record
+# button + the text box the engine would WRONGLY text-fill — and crucially NO file upload in the card.
+VOICE_PROMPT_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
+<style>body{font-family:sans-serif}form{max-width:640px;margin:30px auto}.field{margin:22px 0}label{font-weight:600}</style>
+</head><body><form id=app>
+<div class=field><label for=fn>First name</label><br><input id=fn name=fn type=text></div>
+<div class=field><label for=intro>Record a 30-second voice introduction</label>
+  <div class=recorder><audio controls></audio><button type=button>&#9679; Record</button></div>
+  <input id=intro name=intro type=text placeholder="(recording)"></div>
+</form></body></html>
+"""
+
+
+def stage5_resume_upload_not_needs_human() -> None:
+    """P4-rerun acceptance (a): a resume file-upload card with an ambient page <video> in its
+    ancestry, real cadence on -> the resume row must be a FILLABLE upload (outcome DONE), never
+    NEEDS_HUMAN. This is the exact 51-Resume false-positive class, reproduced with the ambient media
+    that the old bare audio,video match caught."""
+    resume = str(ROOT / "fixtures" / "test_resume.pdf")
+    res = _run_engine(RESUME_AMBIENT_VIDEO_HTML, {}, "resume_upload", {}, resume=resume)
+    if res is None:
+        chk("stage5: engine run produced a result JSON", False, "no result")
+        return
+    rows = res.get("results") or []
+    row = next((r for r in rows if "file" in str(r.get("type", "")).lower() or "resume" in str(r.get("name", "")).lower()), None)
+    nh = [r for r in rows if r.get("outcome") == "NEEDS_HUMAN"]
+    chk(
+        "stage5: resume upload + ambient video -> NO field is NEEDS_HUMAN",
+        not nh and res.get("status") != "NEEDS_HUMAN",
+        f"needs_human_rows={[r.get('name') for r in nh]} status={res.get('status')!r}",
+    )
+    chk(
+        "stage5: the resume file field is FILLED (outcome DONE, file uploaded)",
+        row is not None and row.get("outcome") == "DONE",
+        f"resume_row={None if row is None else (row.get('name'), row.get('outcome'), row.get('committed'))}",
+    )
+
+
+def stage6_voice_prompt_still_needs_human() -> None:
+    """P4-rerun acceptance (b): a genuine voice-record prompt (empty audio sink + record button, NO
+    file upload) -> the text box the engine would fill is caught as a media-answer field and routed
+    NEEDS_HUMAN (never text-filled with garbage). The narrowing must not lose the real restraint case."""
+    res = _run_engine(VOICE_PROMPT_HTML, {"record a 30-second voice introduction": "hi"}, "voice_prompt", {})
+    if res is None:
+        chk("stage6: engine run produced a result JSON", False, "no result")
+        return
+    rows = res.get("results") or []
+    media_rows = [r for r in rows if "media-answer-field->NEEDS_HUMAN" in str(r.get("trace") or "")]
+    intro = next((r for r in rows if r.get("name") == "intro"), None)
+    fn = next((r for r in rows if r.get("name") == "fn"), None)
+    chk(
+        "stage6: the voice-answer field 'intro' is NEEDS_HUMAN (structurally caught)",
+        intro is not None and intro.get("outcome") == "NEEDS_HUMAN"
+        and "media-answer-field->NEEDS_HUMAN" in str(intro.get("trace") or ""),
+        f"intro={None if intro is None else (intro.get('outcome'), intro.get('trace'))}",
+    )
+    chk(
+        "stage6: the sibling text field 'fn' is NOT swept in (recorder binds to its own field)",
+        fn is not None and fn.get("outcome") != "NEEDS_HUMAN",
+        f"fn={None if fn is None else fn.get('outcome')} all_media_rows={[r.get('name') for r in media_rows]}",
+    )
+    chk(
+        "stage6: run verdict is NEEDS_HUMAN (real restraint case not lost)",
+        (res.get("completeness") or {}).get("verdict") == "NEEDS_HUMAN" and res.get("status") == "NEEDS_HUMAN",
+        f"verdict={(res.get('completeness') or {}).get('verdict')!r} status={res.get('status')!r}",
+    )
+
+
 def main() -> int:
     _load_dotenv()
     if not os.environ.get("OPENAI_API_KEY") or not os.environ.get("GOOGLE_API_KEY"):
@@ -305,6 +391,10 @@ def main() -> int:
     stage3_ambient_badge_not_needs_human()
     print("=== stage 4: true blocking overlay -> STILL NEEDS_HUMAN (VLM-confirmed) ===")
     stage4_true_overlay_still_needs_human()
+    print("=== stage 5: resume upload + ambient video -> NOT NEEDS_HUMAN (media-probe regression) ===")
+    stage5_resume_upload_not_needs_human()
+    print("=== stage 6: genuine voice-record prompt -> STILL NEEDS_HUMAN (restraint kept) ===")
+    stage6_voice_prompt_still_needs_human()
     ok = all(p for _, p, _ in CHECKS)
     print(f"\n{'>>> ALL PASS' if ok else '>>> SOME FAIL'}  ({len(CHECKS)} checks)")
     return 0 if ok else 1
