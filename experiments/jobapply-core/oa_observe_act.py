@@ -1035,6 +1035,15 @@ async def _s1_locate(session: Any, ctx: Ctx) -> Outcome:
     # avoid. Gate it behind OA_SCROLL_LOCATE=1 until below-fold binding is done from the full DOM
     # (browser-use's trusted click auto-scrolls a node into view, so a below-fold card can be bound
     # WITHOUT a heavy re-serialize). Default-off keeps the engine fast and crash-free.
+    # DOM-REF CHOICE RESCUE (P3-A): a mapped radio/checkbox group whose real <input>s are styled at
+    # opacity:0 (Ashby EEO self-ID) is dropped from the visible-only selector_map, so EVERY locate tier
+    # AND scroll-locate miss it (btns=0) though its value was mapped — the biggest lost-field family.
+    # Discovery still captured the group's `name` (dom-ref); commit by that IDENTITY document-wide,
+    # self-verifying on real painted state (cannot false-green). Runs before the heavy scroll-locate.
+    if node is None:
+        _rescued = await _domref_choice_commit(session, ctx, state)
+        if _rescued is not None:
+            return _rescued
     if node is None and os.environ.get("OA_SCROLL_LOCATE") == "1":
         node, how, card, state = await _scroll_locate(session, ctx, state)
     if node is None:
@@ -1109,6 +1118,55 @@ async def _s1_locate(session: Any, ctx: Ctx) -> Outcome:
             ctx.ambiguous = True
             ctx.trace.append("ambiguous-label")
     return await _s2_classify(session, ctx, state)
+
+
+async def _domref_choice_commit(session: Any, ctx: Ctx, state: perc.OAState | None) -> Outcome | None:
+    """LAST-RESORT commit for a mapped radio/checkbox group that no locate tier could bind.
+
+    Ashby self-ID (EEO) groups style the real ``<input type=radio>`` at opacity:0; the visible-only
+    selector_map drops it, so every tier AND scroll-locate return no-control though the value was
+    mapped (~47 EEO rows in the 500-sweep, the biggest lost-field family). But discovery captured the
+    group's ``name`` (dom-ref), and ``cdp_choose_option`` resolves that group document-wide by IDENTITY
+    and ``.click()``s the native input meaning ctx.value, gated on real painted ``.checked`` state
+    (its ``_STILL_CHECKED`` re-read) — so it commits WITHOUT a located node and cannot false-green.
+
+    Structural gate (title-ignorant — no heading/label text): the dom-ref must resolve to a NATIVE
+    radio/checkbox group. An INDEPENDENT painted read-back confirms the matched option is the active
+    one before we call it DONE. Returns DONE on a painted commit, else None (caller proceeds to
+    no-control unchanged) — a text/select ref, a data-gap (empty value), or a non-painting commit all
+    fall through untouched."""
+    ref = str(getattr(ctx.field_obj, "name", "") or "")
+    if not ref or not (ctx.value or "").strip() or ctx.page is None:
+        return None
+    with contextlib.suppress(Exception):
+        kind = await ctx.page.evaluate(
+            "() => { const R = %s;"
+            " const els = [document.getElementById(R), ...document.getElementsByName(R)].filter(Boolean);"
+            " const ins = els.filter(e => e.tagName === 'INPUT' && (e.type === 'radio' || e.type === 'checkbox'));"
+            " return ins.length ? ins[0].type : ''; }" % json.dumps(ref)
+        )
+        if str(kind) not in ("radio", "checkbox"):
+            return None  # not a native radio/checkbox group -> not our case
+    # cdp_choose_option resolves the group by name document-wide; any node only gives it a CDP context.
+    if state is None or not getattr(state, "selector_map", None):
+        state = await perc.get_state(session)
+    anchor = next(iter(state.selector_map.values()), None)
+    if anchor is None:
+        return None
+    matched = await cdpa.cdp_choose_option(session, anchor, ctx.value, group_name=ref)
+    if not matched:
+        return None
+    # INDEPENDENT painted read-back (never trust the committer's own word): the matched option must be
+    # the painted-active one in its group. cdp_choose_option already self-verifies; this is belt+braces.
+    await asyncio.sleep(0.2)
+    opts = await cdpa.cdp_read_choice_options(session, anchor, group_name=ref)
+    hit = _match_option(matched, opts) or _match_option(ctx.value, opts)
+    if not (hit and hit.get("active")):
+        ctx.trace.append("domref-choice:not-painted")
+        return None
+    ctx.committed_text = matched
+    ctx.trace.append(f"domref-choice-commit:{matched[:20]}")
+    return DONE
 
 
 async def _scroll_locate(session: Any, ctx: Ctx, state: perc.OAState) -> tuple[Any, str, Any, perc.OAState]:
