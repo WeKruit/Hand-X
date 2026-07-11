@@ -20,6 +20,26 @@ OA_VLM_TIMEOUT=12 python3 oa_singlepage.py --url "https://jobs.lever.co/octoener
 
 ---
 
+## 0a. 分支与仓库（新 session 不在本机也能接手）
+
+- repo：`https://github.com/WeKruit/Hand-X`（origin）
+- 战斗分支：`feat/observe-act-generic`，base = `main`（Hand-X 约定：从 main 分，PR 回 main）
+- **已推送到 origin**，tip `2120d0f79`。任何机器都能接手：
+  ```bash
+  git clone https://github.com/WeKruit/Hand-X.git && cd Hand-X
+  git checkout feat/observe-act-generic
+  cd experiments/jobapply-core   # 引擎 + fixtures + runs 全在这
+  ```
+- 本机路径（此 worktree）：`Hand-X/.claude/worktrees/observe-act-generic/experiments/jobapply-core`
+- PR 状态：**无在飞 PR**。此前 #40/#41/#42 三个 PR 已合入 main（引擎骨架 + P0 阶段）；本轮 P1-P5
+  的 43 个 commit 只推了分支，没开新 PR（改动量大，建议 P5+FINAL 收尾后一次性开一个大 PR 回 main，
+  而不是中途开 PR 打断 swarm 节奏）。`main` 本身也在动（tip `55bc3d75`≠上次合并基点 `5856c117`），
+  开 PR 前先 `git merge main` 或 rebase 看有无冲突。
+  开 PR 命令（收尸完成后用）：
+  ```bash
+  gh pr create --base main --head feat/observe-act-generic --title "..." --body "..."
+  ```
+
 ## 0. 一句话现状
 
 - 引擎分支：`feat/observe-act-generic`，tip **`bf2a75c5e`**（P3 五单 + P5-A OFFSCREEN 盲区修复全部合入）
