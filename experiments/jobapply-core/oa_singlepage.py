@@ -34,6 +34,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import shutil
 import signal
 import sys
@@ -642,6 +643,27 @@ async def _choice_painted_active(session: Any, group_name: str, want: str) -> bo
         )
         return str(checked).strip().lower() == "true"  # page.evaluate returns a JSON string
     return False
+
+
+# THE conditional-premise exemption — single shared site (hard gate + safety net + F3 verdict
+# scan; previously three diverging inline copies). A required follow-up ('If so…', 'If yes…',
+# 'Si oui…', 'after the OPT…') is required only when its premise holds; a blank->SKIP on one
+# means the mapper judged the premise false (duolingo mega4/19: 'If so, are you eligible for
+# OPT?' correctly skipped because the candidate needs no sponsorship) — not a real miss.
+# TECH-DEBT (铁律 3 / P5): an enumerated label word-list IS the banned static-pattern class.
+# Kept ONLY as this one consolidated site so P5 can replace it once with meaning-based (LLM)
+# premise applicability. Do NOT copy it anywhere else or extend the list.
+_COND_PREMISE_RE = re.compile(
+    r"^(if so|if yes|if no\b|if not|if you|if applicable|if the|if selected"
+    r"|si oui|si vous|after the|based on|given your|as indicated)\b"
+)
+_COND_BACKREF_RE = re.compile(r"\b(if you (selected|answered|chose|indicated))\b")
+
+
+def _conditional_premise(label: Any) -> bool:
+    """True when ``label`` reads as a follow-up premised on a prior answer (or back-references one)."""
+    low = " ".join(str(label or "").split()).lower().strip(" *:✱")
+    return bool(_COND_PREMISE_RE.match(low) or _COND_BACKREF_RE.search(low))
 
 
 async def _fill_form(
@@ -1407,7 +1429,6 @@ async def _fill_form(
         # ledger records ANY required field as unfilled can NEVER be green.
         # ============================================================================
         if adapter is None and profile is not None and os.environ.get("OA_NO_COMPLETE") != "1":
-            import re
             def _norm(s: Any) -> str:
                 return " ".join(str(s or "").split()).lower().strip(" *:✱")
             comp = result.get("completeness")
@@ -1451,14 +1472,10 @@ async def _fill_form(
                 # only when its premise holds; a blank->SKIP on one means the mapper judged the
                 # premise false (duolingo mega4/19: 'If so, are you eligible for OPT?' correctly
                 # skipped because the candidate needs no sponsorship). Not a real miss.
-                _ll = _norm(r.label)
                 # conditional = starts with a premise reference, OR back-references a prior
                 # answer ('after the OPT…' is premised on being in OPT, itself premised on
                 # needing sponsorship — a chain that is inapplicable when sponsorship=No).
-                _conditional = bool(
-                    re.match(r"^(if so|if yes|if no\b|if not|if you|if applicable|if the|if selected|si oui|si vous|after the|based on|given your|as indicated)\b", _ll)
-                    or re.search(r"\b(if you (selected|answered|chose|indicated))\b", _ll)
-                )
+                _conditional = _conditional_premise(r.label)
                 if "not-rendered" in tr:
                     continue  # D-ii: a field that never had a rendered box is not a fill failure
                 escalated = r.outcome == oa.ESCALATE
@@ -1732,7 +1749,6 @@ async def _fill_form(
     # or non-twin/non-conditional skipped, with no DONE row committing that label, forces
     # complete=False. Belt-and-suspenders on the no-false-green invariant.
     with contextlib.suppress(Exception):
-        import re as _re2
         _comp = result.get("completeness")
         if isinstance(_comp, dict) and _comp.get("complete") and profile is not None:
             def _nrm(s: Any) -> str:
@@ -1748,7 +1764,7 @@ async def _fill_form(
                 _tr = str(r.trace or "")
                 if "not-rendered" in _tr:
                     continue  # D-ii: never on screen -> excluded from missing_required
-                _cnd = bool(_re2.match(r"^(if so|if yes|if no\b|if not|if you|if applicable|if the|if selected|after the|based on|given your|as indicated)\b", _nrm(r.label)))
+                _cnd = _conditional_premise(r.label)
                 _bad = r.outcome == oa.ESCALATE or (
                     r.outcome == oa.SKIP and "twin-label-already-done" not in _tr
                     and "premise" not in _tr.lower() and not _cnd)
@@ -1831,8 +1847,6 @@ async def _fill_form(
     # A row is EXEMPT when another row with the same label verified DONE (sibling/retry healed it)
     # or when it never rendered. Downgrade-only: this can remove a green, never manufacture one.
     # ------------------------------------------------------------------ #
-    import re as _f3re
-
     def _f3norm(s: Any) -> str:
         return " ".join(str(s or "").split()).lower().strip(" *:✱")
 
@@ -1855,10 +1869,7 @@ async def _fill_form(
         _benign_skip = r.outcome == oa.SKIP and (
             "twin-label-already-done" in tr
             or "premise" in tr.lower()
-            or bool(_f3re.match(
-                r"^(if so|if yes|if no\b|if not|if you|if applicable|if the|if selected|si oui|si vous|after the|based on|given your|as indicated)\b",
-                _f3norm(r.label),
-            ))
+            or _conditional_premise(r.label)  # shared exemption — same site the gates use
         )
         if _benign_skip:
             continue
