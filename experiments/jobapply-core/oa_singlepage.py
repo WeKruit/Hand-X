@@ -842,6 +842,80 @@ async def _fill_form(
                     print(f"   [pollution:{where}] source '{str(src.label)[:40]}' lost its value -> recommit")
                     await _ckpt_repair(src)
 
+    async def _ckpt_scroll_to(name: str, *, block: str = "center") -> bool:
+        """Bring a field into view by its DISCOVERY id/name (structural identity, same lookup as
+        _ckpt_repair's readers — never label text). A grouped choice's only NAMED element can be a
+        display:none render-mirror (the ashby _yesno pill family), which scrollIntoView silently
+        no-ops on — climb to the nearest ancestor that HAS a layout box and scroll that card.
+        'yes'/'no' string sentinel + exact compare (evaluate serializes; bool('no') is True)."""
+        got = ""
+        with contextlib.suppress(Exception):
+            got = str(
+                await page.evaluate(
+                    "(n) => { let el = document.getElementById(n) || document.getElementsByName(n)[0];"
+                    " if (!el) return 'no';"
+                    " while (el && !(el.getClientRects && el.getClientRects().length)) el = el.parentElement;"
+                    " if (!el) return 'no';"
+                    " el.scrollIntoView({block: %s}); return 'yes'; }" % json.dumps(block),
+                    name,
+                )
+            )
+        if got.strip().lower() != "yes":
+            return False
+        await asyncio.sleep(0.35)
+        return True
+
+    async def _offscreen_rescue(r: FieldResult, vrow: dict) -> str | None:
+        """A batch field OUTSIDE the checkpoint's single shot (vision_audit rendered=OFFSCREEN, or no
+        verdict row at all) got ZERO pixel verification: the blank-only repair gate rightly refuses to
+        act on OFFSCREEN, so below-fold fields sailed unexamined through every cadence look (vanta 007 /
+        replit 013 EEO pills — the exact hole the domref false-green lived in). Rescue: scroll THIS
+        field into view by its discovery id (structural, like _ckpt_repair) and ask the resilient VLM
+        about it alone (fresh screenshot, uncached). Returns the normalized rendered verdict for the
+        blank-repair gate, or None == honestly UNVERIFIED (recorded on the verdict row + field trace —
+        budget spent / unscrollable / vision dead are ALL fail-closed to UNVERIFIED, never a silent
+        pass-through)."""
+        vrow["offscreen"] = True
+
+        def _unv(why: str) -> None:
+            vrow["rendered"] = "UNVERIFIED"
+            vrow["match"] = False
+            vrow["unverified"] = why
+            if isinstance(r.trace, list):
+                r.trace.append(f"checkpoint:offscreen-unverified:{why}")
+
+        if _vv._VLM_CALLS["n"] >= _vv.VLM_MAX_CALLS:  # uncached visual_check bypasses the runaway backstop — enforce it here
+            _unv("budget")
+            return None
+        if not await _ckpt_scroll_to(str(r.name or "")):
+            _unv("no-scroll")  # not locatable in the main document (OOPIF / rebuilt DOM)
+            return None
+        v2 = ""
+        with contextlib.suppress(Exception):
+            v2 = str(
+                await _vv.visual_check(
+                    session, str(r.label), want=str(r.committed or r.value), key=f"ckpt-off:{r.label}", use_cache=False
+                )
+            )
+        _vv._VLM_CALLS["n"] += 1  # count the spend against the backstop (vision_audit does the same)
+        filled: bool | None = None  # tri-state: True/False = the VLM really SAW the field; None = chain dead/garbage
+        val = ""
+        with contextlib.suppress(Exception):
+            m2 = re.search(r"\{.*\}", v2, re.S)  # protocol parse of the VLM's own JSON reply (same as vision_audit)
+            if m2:
+                d2 = json.loads(m2.group(0))
+                if isinstance(d2.get("filled"), bool):
+                    filled = d2["filled"]
+                val = str(d2.get("value") or "")
+        if filled is None:
+            _unv("vision")
+            return None
+        vrow["rendered"] = (val[:80] or "FILLED") if filled else "BLANK"
+        vrow["match"] = _vv._matches(v2)
+        if isinstance(r.trace, list):
+            r.trace.append("checkpoint:offscreen-rescue:" + ("match" if vrow["match"] else ("rendered" if filled else "blank")))
+        return str(vrow["rendered"]).strip().upper()
+
     async def _visual_checkpoint(trigger: str) -> None:
         """Flush the pending committed batch through ONE vision_audit call; repair contradictions."""
         await _pollution_sweep(trigger)  # DOM-only, deterministic — runs even when the VLM cadence is off
@@ -851,13 +925,7 @@ async def _fill_form(
             return
         entry: dict[str, Any] = {"trigger": trigger, "fields": [str(r.label) for r in batch], "verdicts": [], "repairs": []}
         _checkpoints.append(entry)
-        with contextlib.suppress(Exception):  # bring the batch's first field into view (section shot)
-            await page.evaluate(
-                "(n) => { const el = document.getElementById(n) || document.getElementsByName(n)[0];"
-                " if (el) el.scrollIntoView({block: 'start'}); }",
-                str(batch[0].name),
-            )
-            await asyncio.sleep(0.35)
+        await _ckpt_scroll_to(str(batch[0].name), block="start")  # bring the batch's first field into view (section shot)
         png = await _oal.bounded_screenshot(session)
         intended = [(str(r.label), str(r.committed or r.value)) for r in batch]
         meta: dict = {}
@@ -877,15 +945,25 @@ async def _fill_form(
             print(f"   [checkpoint:{trigger}] VISION DEAD — batch of {len(batch)} recorded UNVERIFIED")
             return
         for r, v in zip(batch, va, strict=False):
-            if not v:
-                continue
-            rend = str(v.get("rendered", "")).strip().upper()
-            entry["verdicts"].append(
-                {"label": str(r.label), "rendered": str(v.get("rendered", ""))[:80], "match": bool(v.get("match"))}
-            )
+            rend = str((v or {}).get("rendered", "")).strip().upper()
+            vrow: dict[str, Any] = {
+                "label": str(r.label),
+                "rendered": str((v or {}).get("rendered", ""))[:80],
+                "match": bool((v or {}).get("match")),
+            }
+            entry["verdicts"].append(vrow)
+            # OFFSCREEN BLIND SPOT: the batch shot is scrolled to batch[0], so any field below the
+            # fold reads OFFSCREEN (vision_audit's own not-in-shot sentinel) — or gets no verdict row
+            # at all — and the blank-only gate below rightly won't touch it: zero pixel verification.
+            # Rescue each such row with its own scroll + fresh per-field look (or an honest UNVERIFIED).
+            if not v or rend == "OFFSCREEN":
+                rend2 = await _offscreen_rescue(r, vrow)
+                if rend2 is None:
+                    continue  # honestly UNVERIFIED — recorded + traced, never silently unexamined
+                rend = rend2
             # repair ONLY the unambiguous contradiction: ledger DONE, pixels BLANK (a semantic
             # disagreement on a rendered value is recorded, not acted on — same rule as the end gate).
-            if not v.get("match") and rend in _blankv:
+            if not vrow["match"] and rend in _blankv:
                 print(
                     f"   [checkpoint:{trigger}] '{str(r.label)[:44]}' BLANK on screen"
                     f" (ledger {str(r.committed)[:24]!r}) -> visual recommit"

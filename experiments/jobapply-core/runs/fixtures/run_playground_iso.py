@@ -102,8 +102,15 @@ def main():
         eng_ok = bool(comp.get("complete")) or (not miss and not vlm)
         onish = any(str(r.get("committed") or "").strip().lower() == "on"
                     for r in (d.get("results") or []))
+        # CHECKPOINT-COVERAGE (third oracle): with the visual cadence ON, every batch verdict row must
+        # end pixel-verified or an HONEST per-row UNVERIFIED — a row still reading OFFSCREEN got neither
+        # (the below-fold blind spot: vanta 007 / replit 013 EEO pills sailed unexamined through every look).
+        ckpt_blind = [str(v.get("label"))[:40]
+                      for c in (d.get("checkpoints") or []) if not c.get("unverified")
+                      for v in (c.get("verdicts") or [])
+                      if str(v.get("rendered", "")).strip().upper() == "OFFSCREEN"]
         meta = {"eng_ok": eng_ok, "miss": miss, "false_red": ok and not eng_ok,
-                "false_green": (not ok) and eng_ok, "onish": onish}
+                "false_green": (not ok) and eng_ok, "onish": onish, "ckpt_blind": ckpt_blind}
         return (fx, got, ok, meta)
 
     indexed = list(enumerate(fixtures))
@@ -141,12 +148,16 @@ def main():
     fred = [(fx, m) for fx, got, ok, m in results if m.get("false_red")]
     fgreen = [(fx, m) for fx, got, ok, m in results if m.get("false_green")]
     onish = [fx for fx, got, ok, m in results if m.get("onish")]
+    ckblind = [(fx, m) for fx, got, ok, m in results if m.get("ckpt_blind")]
     print("=" * 96)
-    print(f"  VERDICT-CONSISTENCY: false-RED {len(fred)}  false-GREEN {len(fgreen)}  committed=='on' {len(onish)}")
+    print(f"  VERDICT-CONSISTENCY: false-RED {len(fred)}  false-GREEN {len(fgreen)}  committed=='on' {len(onish)}"
+          f"  ckpt-OFFSCREEN-blind {len(ckblind)}")
     for fx, m in fred:
         print(f"    [FALSE-RED] {fx['kind']}: DOM correct but engine flags missing={[str(x)[:30] for x in m['miss']][:3]}")
     for fx, m in fgreen:
         print(f"    [FALSE-GREEN] {fx['kind']}: DOM wrong but engine reports COMPLETE")
+    for fx, m in ckblind:
+        print(f"    [CKPT-BLIND] {fx['kind']}: OFFSCREEN rows never pixel-verified: {m['ckpt_blind'][:3]}")
     print("=" * 96)
     return 0 if not fails else 1
 
