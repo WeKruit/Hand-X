@@ -26,8 +26,9 @@ OA_VLM_TIMEOUT=12 python3 oa_singlepage.py --url "https://jobs.lever.co/octoener
 - 工作树：`Hand-X/.claude/worktrees/observe-act-generic/experiments/jobapply-core`
 - 修复前基线：sweep500b 自报 84.1%（460 run），审计后真实 **72.6%**（captcha 踢分母 75.7%）
 - P1+P2 修复后：失败队列 166 行重跑 FILLED 49→**103**；P3 重放 58 行逐字段 **922/1003 = 91.9% DONE**
-- P3 审计（56 行）：**25 真绿 / 15 假绿 / 3 真 NEEDS_HUMAN / 13 NH-残余** → 拆出 F1/F2/F3 三个新家族（见 §4）
-- 正式数字尚未产出 —— 等 F1-F3 落地 + P5 + FINAL 全量 sweep（目标审计后 ≥90%，冲 95）
+- **P3 已关（像素口径）**：五修合体引擎重跑 28 个失败行 → 第二轮对抗审计：**假绿 15→1**、8 真绿、
+  14 诚实降级（geocomplete/captcha/multi，字段清单齐）、5 过度保守（verify 假阴小族，归 P5）。008 补跑同族归队。
+- 正式数字尚未产出 —— 等 P5 + FINAL 全量 sweep（目标审计后 ≥90%，冲 95）。数据：`runs/newats/p3v2/ + audit_p3v2.json`
 
 ## 1. 铁律（用户定的 PRINCIPLES，存了 memory，违反 = 打回）
 
@@ -99,14 +100,14 @@ OA_RUN_TIMEOUT=170       # sweep 每 run 超时
 | # | 任务 | 状态 |
 |---|---|---|
 | 1-4,6 | P0 scorer / P0.5 miner / P1 视觉检查点+供应商链 / P2 视觉提交 / P4 rerun | ✅ 已关（全部截图验收）|
-| 5 | P3 EEO+iframe+banner | 🔶 F1-F3 全落地；28 行重跑进行中（p3v2.tsv）→ 第二轮对抗审计过 = 关 |
+| 5 | P3 EEO+iframe+banner | ✅ 已关：p3v2 重跑+二轮审计 假绿 15→1，具名家族全部像素验证修复 |
 | 9 | P3-B 跨域 iframe | ✅ 已合入 8a7f9038f（rebase 重验 4 gate + 我亲跑 fixture 双 GREEN）|
 | 10 | P3-D consent 去英文词表 | ✅ 已合入 0acff3d66（独立验收过，见 §8d）|
 | 11 | **P3-F1** domref 绕过 verify | ✅ 已合入 836671190（结构化 triage + 全 lane 终结于 S_VERIFY；007/013 亲验 pill 上色）|
 | 12 | **P3-F2** 串值污染 | ✅ 已合入 db864cb39（根因=_split_composite_to_sibling+静态正则过匹配；live 006/017 亲验干净）|
 | 13 | **P3-F3** run verdict 聚合 | ✅ 已合入 00d301025+38106d526（正则豁免臂抽共享 helper 净增 0；038 亲验）|
 | 7 | P5 playground 闭环 | ⬜ 被 5 阻塞：补 7 类 fixture + 全量门禁 + 闭环测试 |
-| 8 | FINAL 全量 fresh sweep + 全量审计 | ⬜ 被 5,11,12,13 阻塞：出正式数（≥90 冲 95）|
+| 8 | FINAL 全量 fresh sweep + 全量审计 | ⬜ 只被 P5(#7) 阻塞：出正式数（≥90 冲 95）|
 
 ## 4. P3 审计拆出的三个家族（新 session 的最高优先级）
 
@@ -127,6 +128,11 @@ OA_RUN_TIMEOUT=170       # sweep 每 run 超时
 anthropic 048 zoom 复审实锤假绿（DOM-verified 'Marcus' 但 420px 输入框零暗像素）= GH render-desync/wipe，归 #15 族。
 
 **NH-残余 13 run**：不是误报 —— 末端 gate 发现 geocomplete/pill 没填好整单降级。F1/F2 修完大半翻绿。
+
+**二轮审计终账（p3v2，五修合体引擎，28 行）**：8 REAL_GREEN / **1 FALSE_GREEN**（airwallex 018 级联追问
+=P5#11 + mapper 答 relatives=Yes 的答案质量问题）/ 14 JUSTIFIED_NH（geocomplete/location ×10 —— mashgin/openai/
+1password/spotify、sierra 人口学 multi ×2、captcha ×3）/ 5 OVER_CONSERVATIVE（verify 假阴：autofill-row ×2、
+GithubURL ×2、电话格式归一化 ×1）。P5 靶单据此更新（任务 #7 描述里有完整清单）。
 
 ## 5. 数据/产物地图
 
